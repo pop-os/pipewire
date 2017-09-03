@@ -66,6 +66,7 @@ Description: libraries for the PipeWire multimedia server - development
 
 Package: libpipewire-0.1-doc
 Section: doc
+Build-Profiles: <!nodoc>
 Architecture: all
 Multi-Arch: foreign
 Depends: ${misc:Depends}
