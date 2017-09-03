@@ -1,0 +1,10 @@
+.tarball-version
+.version
+.*.swp
+ABOUT-NLS
+*~
+*.tar.gz
+*.tar.xz
+*.o
+config.h.meson
+
