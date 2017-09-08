@@ -30,7 +30,7 @@ Build-Depends-Indep: doxygen <!nodoc>,
 Standards-Version: 4.1.0
 Vcs-Git: https://anonscm.debian.org/git/pkg-gnome/pipewire.git
 Vcs-Browser: https://anonscm.debian.org/git/pkg-gnome/pipewire.git
-Homepage: https://github.com/wtay/pipewire
+Homepage: http://pipewire.org/
 
 Package: libpipewire-0.1-0
 Architecture: linux-any
