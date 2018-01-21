@@ -24,13 +24,14 @@ Build-Depends: debhelper (>= 10.3~),
                libx11-dev,
                meson (>= 0.36.0),
                pkg-config (>= 0.22),
+               systemd,
                xmltoman,
 Build-Depends-Indep: doxygen <!nodoc>,
                      graphviz <!nodoc>,
 Standards-Version: 4.1.0
-Vcs-Git: https://anonscm.debian.org/git/pkg-gnome/pipewire.git
-Vcs-Browser: https://anonscm.debian.org/git/pkg-gnome/pipewire.git
-Homepage: http://pipewire.org/
+Vcs-Browser: https://salsa.debian.org/gnome-team/pipewire
+Vcs-Git: https://salsa.debian.org/gnome-team/pipewire.git
+Homepage: https://github.com/wtay/pipewire
 
 Package: libpipewire-0.1-0
 Architecture: linux-any
