@@ -7,7 +7,7 @@ Section: libs
 Priority: optional
 Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
 Uploaders: Jeremy Bicha <jbicha@debian.org>
-Build-Depends: debhelper (>= 10.3~),
+Build-Depends: debhelper (>= 11),
                gnome-pkg-tools,
                libasound2-dev,
                libavcodec-dev,
