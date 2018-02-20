@@ -25,10 +25,10 @@
 #include <errno.h>
 #include <poll.h>
 
-#include <spa/log-impl.h>
-#include <spa/type-map-impl.h>
-#include <spa/monitor.h>
-#include <spa/loop.h>
+#include <spa/support/log-impl.h>
+#include <spa/support/type-map-impl.h>
+#include <spa/support/loop.h>
+#include <spa/monitor/monitor.h>
 
 #include <lib/debug.h>
 
@@ -58,9 +58,9 @@ struct data {
 };
 
 
-static void inspect_item(struct data *data, struct spa_monitor_item *item)
+static void inspect_item(struct data *data, struct spa_pod *item)
 {
-	spa_debug_pod(&item->object.pod);
+	spa_debug_pod(item, 0);
 }
 
 static void on_monitor_event(void *_data, struct spa_event *event)
@@ -69,13 +69,13 @@ static void on_monitor_event(void *_data, struct spa_event *event)
 
 	if (SPA_EVENT_TYPE(event) == data->type.monitor.Added) {
 		fprintf(stderr, "added:\n");
-		inspect_item(data, (struct spa_monitor_item *) event);
+		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
 	} else if (SPA_EVENT_TYPE(event) == data->type.monitor.Removed) {
 		fprintf(stderr, "removed:\n");
-		inspect_item(data, (struct spa_monitor_item *) event);
+		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
 	} else if (SPA_EVENT_TYPE(event) == data->type.monitor.Changed) {
 		fprintf(stderr, "changed:\n");
-		inspect_item(data, (struct spa_monitor_item *) event);
+		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
 	}
 }
 
@@ -87,12 +87,12 @@ static int do_add_source(struct spa_loop *loop, struct spa_source *source)
 	data->n_sources++;
 	data->rebuild_fds = true;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int do_update_source(struct spa_source *source)
 {
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static void do_remove_source(struct spa_source *source)
@@ -112,12 +112,14 @@ static void handle_monitor(struct data *data, struct spa_monitor *monitor)
 	if (monitor->info)
 		spa_debug_dict(monitor->info);
 
-	for (index = 0;; index++) {
-		struct spa_monitor_item *item;
+	for (index = 0;;) {
+		struct spa_pod *item;
+		uint8_t buffer[4096];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
-		if ((res = spa_monitor_enum_items(monitor, &item, index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				printf("spa_monitor_enum_items: got error %d\n", res);
+		if ((res = spa_monitor_enum_items(monitor, &index, &item, &b)) <= 0) {
+			if (res != 0)
+				printf("spa_monitor_enum_items: %s\n", spa_strerror(res));
 			break;
 		}
 		inspect_item(data, item);
@@ -198,22 +200,22 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	for (fidx = 0;; fidx++) {
+	for (fidx = 0;;) {
 		const struct spa_handle_factory *factory;
 		uint32_t iidx;
 
-		if ((res = enum_func(&factory, fidx)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
+		if ((res = enum_func(&factory, &fidx)) <= 0) {
+			if (res != 0)
 				printf("can't enumerate factories: %d\n", res);
 			break;
 		}
 
-		for (iidx = 0;; iidx++) {
+		for (iidx = 0;;) {
 			const struct spa_interface_info *info;
 
 			if ((res =
-			     spa_handle_factory_enum_interface_info(factory, &info, iidx)) < 0) {
-				if (res != SPA_RESULT_ENUM_END)
+			     spa_handle_factory_enum_interface_info(factory, &info, &iidx)) <= 0) {
+				if (res != 0)
 					printf("can't enumerate interfaces: %d\n", res);
 				break;
 			}
@@ -226,14 +228,14 @@ int main(int argc, char *argv[])
 				if ((res =
 				     spa_handle_factory_init(factory, handle, NULL, data.support,
 							     data.n_support)) < 0) {
-					printf("can't make factory instance: %d\n", res);
+					printf("can't make factory instance: %s\n", strerror(res));
 					continue;
 				}
 
 				if ((res =
 				     spa_handle_get_interface(handle, data.type.monitor.Monitor,
 							      &interface)) < 0) {
-					printf("can't get interface: %d\n", res);
+					printf("can't get interface: %s\n", strerror(res));
 					continue;
 				}
 				handle_monitor(&data, interface);

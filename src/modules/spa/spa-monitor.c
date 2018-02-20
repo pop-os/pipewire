@@ -27,9 +27,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
-#include <spa/node.h>
-#include <spa/monitor.h>
-#include <spa/pod-iter.h>
+#include <spa/node/node.h>
+#include <spa/monitor/monitor.h>
+#include <spa/pod/parser.h>
 
 #include <pipewire/log.h>
 #include <pipewire/type.h>
@@ -57,14 +57,13 @@ struct impl {
 	struct spa_list item_list;
 };
 
-static void add_item(struct pw_spa_monitor *this, struct spa_monitor_item *item)
+static void add_item(struct pw_spa_monitor *this, struct spa_pod *item)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 	int res;
 	struct spa_handle *handle;
 	struct monitor_item *mitem;
 	void *node_iface;
-	void *clock_iface;
 	struct pw_properties *props = NULL;
 	const char *name, *id, *klass;
 	struct spa_handle_factory *factory;
@@ -73,30 +72,31 @@ static void add_item(struct pw_spa_monitor *this, struct spa_monitor_item *item)
 	const struct spa_support *support;
 	uint32_t n_support;
 
-	spa_pod_object_query(&item->object,
-			     t->monitor.name, SPA_POD_TYPE_STRING, &name,
-			     t->monitor.id, SPA_POD_TYPE_STRING, &id,
-			     t->monitor.klass, SPA_POD_TYPE_STRING, &klass,
-			     t->monitor.factory, SPA_POD_TYPE_POINTER, &factory,
-			     t->monitor.info, SPA_POD_TYPE_STRUCT, &info, 0);
+	if (spa_pod_object_parse(item,
+			":",t->monitor.name,    "s", &name,
+			":",t->monitor.id,      "s", &id,
+			":",t->monitor.klass,   "s", &klass,
+			":",t->monitor.factory, "p", &factory,
+			":",t->monitor.info,    "T", &info, NULL) < 0)
+		return;
 
 	pw_log_debug("monitor %p: add: \"%s\" (%s)", this, name, id);
 
 	props = pw_properties_new(NULL, NULL);
 
 	if (info) {
-		struct spa_pod_iter it;
+		struct spa_pod_parser prs;
 
-		spa_pod_iter_pod(&it, info);
-		while (true) {
-			const char *key, *val;
-			if (!spa_pod_iter_get
-			    (&it, SPA_POD_TYPE_STRING, &key, SPA_POD_TYPE_STRING, &val, 0))
-				break;
-			pw_properties_set(props, key, val);
+		spa_pod_parser_pod(&prs, info);
+		if (spa_pod_parser_get(&prs, "[", NULL) == 0) {
+			while (true) {
+				const char *key, *val;
+				if (spa_pod_parser_get(&prs, "ss", &key, &val, NULL) < 0)
+					break;
+				pw_properties_set(props, key, val);
+			}
 		}
 	}
-	pw_properties_set(props, "media.class", klass);
 
 	support = pw_core_get_support(impl->core, &n_support);
 
@@ -113,17 +113,13 @@ static void add_item(struct pw_spa_monitor *this, struct spa_monitor_item *item)
 		pw_log_error("can't get NODE interface: %d", res);
 		return;
 	}
-	if ((res = spa_handle_get_interface(handle, t->spa_clock, &clock_iface)) < 0) {
-		pw_log_info("no CLOCK interface: %d", res);
-		clock_iface = NULL;
-	}
-
 
 	mitem = calloc(1, sizeof(struct monitor_item));
 	mitem->id = strdup(id);
 	mitem->handle = handle;
 	mitem->node = pw_spa_node_new(impl->core, NULL, impl->parent, name,
-				      false, node_iface, clock_iface, props, 0);
+				      PW_SPA_NODE_FLAG_ACTIVATE,
+				      node_iface, handle, props, 0);
 
 	spa_list_append(&impl->item_list, &mitem->link);
 }
@@ -151,16 +147,17 @@ void destroy_item(struct monitor_item *mitem)
 	free(mitem);
 }
 
-static void remove_item(struct pw_spa_monitor *this, struct spa_monitor_item *item)
+static void remove_item(struct pw_spa_monitor *this, struct spa_pod *item)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 	struct monitor_item *mitem;
 	const char *name, *id;
 	struct pw_type *t = pw_core_get_type(impl->core);
 
-	spa_pod_object_query(&item->object,
-			     t->monitor.name, SPA_POD_TYPE_STRING, &name,
-			     t->monitor.id, SPA_POD_TYPE_STRING, &id, 0);
+	if (spa_pod_object_parse(item,
+			":",t->monitor.name, "s", &name,
+			":",t->monitor.id,   "s", &id, NULL) < 0)
+		return;
 
 	pw_log_debug("monitor %p: remove: \"%s\" (%s)", this, name, id);
 	mitem = find_item(this, id);
@@ -175,17 +172,18 @@ static void on_monitor_event(void *data, struct spa_event *event)
 	struct pw_type *t = pw_core_get_type(impl->core);
 
 	if (SPA_EVENT_TYPE(event) == t->monitor.Added) {
-		struct spa_monitor_item *item = SPA_POD_CONTENTS(struct spa_event, event);
+		struct spa_pod *item = SPA_POD_CONTENTS(struct spa_event, event);
 		add_item(this, item);
 	} else if (SPA_EVENT_TYPE(event) == t->monitor.Removed) {
-		struct spa_monitor_item *item = SPA_POD_CONTENTS(struct spa_event, event);
+		struct spa_pod *item = SPA_POD_CONTENTS(struct spa_event, event);
 		remove_item(this, item);
 	} else if (SPA_EVENT_TYPE(event) == t->monitor.Changed) {
-		struct spa_monitor_item *item = SPA_POD_CONTENTS(struct spa_event, event);
+		struct spa_pod *item = SPA_POD_CONTENTS(struct spa_event, event);
 		const char *name;
 
-		spa_pod_object_query(&item->object,
-				     t->monitor.name, SPA_POD_TYPE_STRING, &name, 0);
+		if (spa_pod_object_parse(item,
+				":",t->monitor.name, "s", &name, NULL) < 0)
+			return;
 
 		pw_log_debug("monitor %p: changed: \"%s\"", this, name);
 	}
@@ -196,7 +194,7 @@ static void update_monitor(struct pw_core *core, const char *name)
 	const char *monitors;
 	struct spa_dict_item item;
 	const struct pw_properties *props;
-	struct spa_dict dict = SPA_DICT_INIT(1, &item);
+	struct spa_dict dict = SPA_DICT_INIT(&item, 1);
 
 	props = pw_core_get_properties(core);
 
@@ -255,10 +253,10 @@ struct pw_spa_monitor *pw_spa_monitor_load(struct pw_core *core,
 		goto no_symbol;
 	}
 
-	for (index = 0;; index++) {
-		if ((res = enum_func(&factory, index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				pw_log_error("can't enumerate factories: %d", res);
+	for (index = 0;;) {
+		if ((res = enum_func(&factory, &index)) <= 0) {
+			if (res != 0)
+				pw_log_error("can't enumerate factories: %s", spa_strerror(res));
 			goto enum_failed;
 		}
 		if (strcmp(factory->name, factory_name) == 0)
@@ -272,7 +270,6 @@ struct pw_spa_monitor *pw_spa_monitor_load(struct pw_core *core,
 		goto init_failed;
 	}
 	if ((res = spa_handle_get_interface(handle, t->spa_monitor, &iface)) < 0) {
-		free(handle);
 		pw_log_error("can't get MONITOR interface: %d", res);
 		goto interface_failed;
 	}
@@ -297,13 +294,15 @@ struct pw_spa_monitor *pw_spa_monitor_load(struct pw_core *core,
 
 	spa_list_init(&impl->item_list);
 
-	for (index = 0;; index++) {
-		struct spa_monitor_item *item;
+	for (index = 0;;) {
+		struct spa_pod *item;
+		uint8_t buffer[4096];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 		int res;
 
-		if ((res = spa_monitor_enum_items(this->monitor, &item, index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				pw_log_debug("spa_monitor_enum_items: got error %d\n", res);
+		if ((res = spa_monitor_enum_items(this->monitor, &index, &item, &b)) <= 0) {
+			if (res != 0)
+				pw_log_debug("spa_monitor_enum_items: %s\n", spa_strerror(res));
 			break;
 		}
 		add_item(this, item);

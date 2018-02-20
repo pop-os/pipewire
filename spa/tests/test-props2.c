@@ -23,14 +23,12 @@
 #include <unistd.h>
 #include <errno.h>
 
-
-#include <spa/pod.h>
-#include <spa/pod-builder.h>
-#include <spa/pod-iter.h>
-
-#include <spa/type-map-impl.h>
-#include <spa/log-impl.h>
-#include <spa/video/format.h>
+#include <spa/support/log-impl.h>
+#include <spa/support/type-map-impl.h>
+#include <spa/pod/pod.h>
+#include <spa/pod/builder.h>
+#include <spa/pod/parser.h>
+#include <spa/param/video/format.h>
 
 #include <lib/debug.h>
 
@@ -39,10 +37,10 @@ static SPA_TYPE_MAP_IMPL(default_map, 4096);
 int main(int argc, char *argv[])
 {
 	struct spa_pod_builder b = { NULL, };
-	struct spa_pod_frame frame[4];
 	uint8_t buffer[1024];
+	uint32_t ref;
 	struct spa_pod *obj;
-	struct spa_pod_iter i;
+	struct spa_pod_parser prs;
 	struct spa_type_map *map = &default_map.map;
 
 	spa_debug_set_type_map(map);
@@ -50,28 +48,28 @@ int main(int argc, char *argv[])
 	b.data = buffer;
 	b.size = 1024;
 
-	spa_pod_builder_push_object(&b, &frame[0], 0, 0);
+	spa_pod_builder_push_object(&b, 0, 0);
 
 	uint32_t formats[] = { 1, 2 };
-	spa_pod_builder_push_prop(&b, &frame[1], 1, SPA_POD_PROP_RANGE_ENUM);
+	spa_pod_builder_push_prop(&b, 1, SPA_POD_PROP_RANGE_ENUM);
 	spa_pod_builder_int(&b, 1);
 	spa_pod_builder_int(&b, formats[0]);
 	spa_pod_builder_int(&b, formats[1]);
-	spa_pod_builder_pop(&b, &frame[1]);
+	spa_pod_builder_pop(&b);
 
-	spa_pod_builder_push_prop(&b, &frame[1], 2, 0);
+	spa_pod_builder_push_prop(&b, 2, 0);
 	spa_pod_builder_int(&b, 42);
-	spa_pod_builder_pop(&b, &frame[1]);
+	spa_pod_builder_pop(&b);
 
 	struct spa_rectangle sizes[] = { {0, 0}, {1024, 1024} };
-	spa_pod_builder_push_prop(&b, &frame[1],
+	spa_pod_builder_push_prop(&b,
 				  3, SPA_POD_PROP_RANGE_MIN_MAX | SPA_POD_PROP_FLAG_UNSET);
 	spa_pod_builder_rectangle(&b, 320, 240);
 	spa_pod_builder_raw(&b, sizes, sizeof(sizes));
-	spa_pod_builder_pop(&b, &frame[1]);
+	spa_pod_builder_pop(&b);
 
-	spa_pod_builder_push_prop(&b, &frame[1], 4, SPA_POD_PROP_FLAG_READONLY);
-	spa_pod_builder_push_struct(&b, &frame[2]);
+	spa_pod_builder_push_prop(&b, 4, SPA_POD_PROP_FLAG_READONLY);
+	ref = spa_pod_builder_push_struct(&b);
 	spa_pod_builder_int(&b, 4);
 	spa_pod_builder_long(&b, 6000);
 	spa_pod_builder_float(&b, 4.0);
@@ -79,23 +77,22 @@ int main(int argc, char *argv[])
 	spa_pod_builder_string(&b, "test123");
 	spa_pod_builder_rectangle(&b, 320, 240);
 	spa_pod_builder_fraction(&b, 25, 1);
-	spa_pod_builder_push_array(&b, &frame[3]);
+	spa_pod_builder_push_array(&b);
 	spa_pod_builder_int(&b, 4);
 	spa_pod_builder_int(&b, 5);
 	spa_pod_builder_int(&b, 6);
-	spa_pod_builder_pop(&b, &frame[3]);
-	spa_pod_builder_pop(&b, &frame[2]);
-	spa_pod_builder_pop(&b, &frame[1]);
-	spa_pod_builder_pop(&b, &frame[0]);
+	spa_pod_builder_pop(&b);
+	spa_pod_builder_pop(&b);
+	spa_pod_builder_pop(&b);
+	obj = spa_pod_builder_pop(&b);
 
-	obj = SPA_POD_BUILDER_DEREF(&b, frame[0].ref, struct spa_pod);
-	spa_debug_pod(obj);
+	spa_debug_pod(obj, 0);
 
-	struct spa_pod_prop *p = spa_pod_object_find_prop((struct spa_pod_object *) obj, 4);
+	struct spa_pod_prop *p = spa_pod_find_prop(obj, 4);
 	printf("%d %d\n", p->body.key, p->body.flags);
-	spa_debug_pod(&p->body.value);
+	spa_debug_pod(&p->body.value, 0);
 
-	obj = SPA_POD_BUILDER_DEREF(&b, frame[2].ref, struct spa_pod);
+	obj = spa_pod_builder_deref(&b, ref);
 
 	int32_t vi, *pi;
 	int64_t vl;
@@ -105,14 +102,17 @@ int main(int argc, char *argv[])
 	struct spa_rectangle vr;
 	struct spa_fraction vfr;
 	struct spa_pod_array *va;
-	spa_pod_iter_pod(&i, obj);
-	spa_pod_iter_get(&i, SPA_POD_TYPE_INT, &vi,
-			 SPA_POD_TYPE_LONG, &vl,
-			 SPA_POD_TYPE_FLOAT, &vf,
-			 SPA_POD_TYPE_DOUBLE, &vd,
-			 SPA_POD_TYPE_STRING, &vs,
-			 SPA_POD_TYPE_RECTANGLE, &vr,
-			 SPA_POD_TYPE_FRACTION, &vfr, SPA_POD_TYPE_ARRAY, &va, 0);
+	spa_pod_parser_pod(&prs, obj);
+	spa_pod_parser_get(&prs,
+			"["
+			"i", &vi,
+			"l", &vl,
+			"f", &vf,
+			"d", &vd,
+			"s", &vs,
+			"R", &vr,
+			"F", &vfr,
+			"P", &va, 0);
 
 	printf("%u %lu %f %g %s %ux%u %u/%u\n", vi, vl, vf, vd, vs, vr.width, vr.height, vfr.num,
 	       vfr.denom);

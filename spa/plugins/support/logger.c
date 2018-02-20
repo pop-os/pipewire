@@ -24,15 +24,11 @@
 #include <stdio.h>
 #include <sys/eventfd.h>
 
-#include <spa/type-map.h>
-#include <spa/clock.h>
-#include <spa/log.h>
-#include <spa/loop.h>
-#include <spa/node.h>
-#include <spa/param-alloc.h>
-#include <spa/list.h>
-#include <spa/format-builder.h>
-#include <lib/props.h>
+#include <spa/support/type-map.h>
+#include <spa/support/log.h>
+#include <spa/support/loop.h>
+#include <spa/support/plugin.h>
+#include <spa/utils/ringbuffer.h>
 
 #define NAME "logger"
 
@@ -90,8 +86,8 @@ impl_log_logv(struct spa_log *log,
 		uint64_t count = 1;
 
 		spa_ringbuffer_get_write_index(&impl->trace_rb, &index);
-		spa_ringbuffer_write_data(&impl->trace_rb, impl->trace_data,
-					  index & impl->trace_rb.mask, location, size);
+		spa_ringbuffer_write_data(&impl->trace_rb, impl->trace_data, TRACE_BUFFER,
+					  index & (TRACE_BUFFER - 1), location, size);
 		spa_ringbuffer_write_update(&impl->trace_rb, index + size);
 
 		if (write(impl->source.fd, &count, sizeof(uint64_t)) != sizeof(uint64_t))
@@ -128,12 +124,12 @@ static void on_trace_event(struct spa_source *source)
 	while ((avail = spa_ringbuffer_get_read_index(&impl->trace_rb, &index)) > 0) {
 		uint32_t offset, first;
 
-		if (avail > impl->trace_rb.size) {
-			index += avail - impl->trace_rb.size;
-			avail = impl->trace_rb.size;
+		if (avail > TRACE_BUFFER) {
+			index += avail - TRACE_BUFFER;
+			avail = TRACE_BUFFER;
 		}
-		offset = index & impl->trace_rb.mask;
-		first = SPA_MIN(avail, impl->trace_rb.size - offset);
+		offset = index & (TRACE_BUFFER - 1);
+		first = SPA_MIN(avail, TRACE_BUFFER - offset);
 
 		fwrite(impl->trace_data + offset, first, 1, stderr);
 		if (SPA_UNLIKELY(avail > first)) {
@@ -155,24 +151,24 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t interface_id, 
 {
 	struct impl *this;
 
-	spa_return_val_if_fail(handle != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(interface != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+	spa_return_val_if_fail(interface != NULL, -EINVAL);
 
 	this = (struct impl *) handle;
 
 	if (interface_id == this->type.log)
 		*interface = &this->log;
 	else
-		return SPA_RESULT_UNKNOWN_INTERFACE;
+		return -ENOENT;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *this;
 
-	spa_return_val_if_fail(handle != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	this = (struct impl *) handle;
 
@@ -181,7 +177,7 @@ static int impl_clear(struct spa_handle *handle)
 		close(this->source.fd);
 		this->have_source = false;
 	}
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int
@@ -195,8 +191,8 @@ impl_init(const struct spa_handle_factory *factory,
 	uint32_t i;
 	struct spa_loop *loop = NULL;
 
-	spa_return_val_if_fail(factory != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(handle != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	handle->get_interface = impl_get_interface;
 	handle->clear = impl_clear;
@@ -213,7 +209,7 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (this->map == NULL) {
 		spa_log_error(&this->log, "a type-map is needed");
-		return SPA_RESULT_ERROR;
+		return -EINVAL;
 	}
 	init_type(&this->type, this->map);
 
@@ -227,11 +223,11 @@ impl_init(const struct spa_handle_factory *factory,
 		this->have_source = true;
 	}
 
-	spa_ringbuffer_init(&this->trace_rb, TRACE_BUFFER);
+	spa_ringbuffer_init(&this->trace_rb);
 
-	spa_log_info(&this->log, NAME " %p: initialized", this);
+	spa_log_debug(&this->log, NAME " %p: initialized", this);
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static const struct spa_interface_info impl_interfaces[] = {
@@ -241,19 +237,22 @@ static const struct spa_interface_info impl_interfaces[] = {
 static int
 impl_enum_interface_info(const struct spa_handle_factory *factory,
 			 const struct spa_interface_info **info,
-			 uint32_t index)
+			 uint32_t *index)
 {
-	spa_return_val_if_fail(factory != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(info != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(info != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
 
-	switch (index) {
+	switch (*index) {
 	case 0:
-		*info = &impl_interfaces[index];
+		*info = &impl_interfaces[*index];
 		break;
 	default:
-		return SPA_RESULT_ENUM_END;
+		return 0;
 	}
-	return SPA_RESULT_OK;
+	(*index)++;
+
+	return 1;
 }
 
 static const struct spa_handle_factory logger_factory = {
@@ -264,6 +263,8 @@ static const struct spa_handle_factory logger_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
+
+int spa_handle_factory_register(const struct spa_handle_factory *factory);
 
 static void reg(void) __attribute__ ((constructor));
 static void reg(void)

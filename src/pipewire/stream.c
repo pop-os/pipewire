@@ -46,17 +46,18 @@ struct mem_id {
 	uint32_t id;
 	int fd;
 	uint32_t flags;
-	void *ptr;
-	uint32_t offset;
-	uint32_t size;
+	uint32_t ref;
 };
 
 struct buffer_id {
 	struct spa_list link;
 	uint32_t id;
 	bool used;
-	void *buf_ptr;
 	struct spa_buffer *buf;
+	void *ptr;
+	struct pw_map_range map;
+	uint32_t n_mem;
+	struct mem_id **mem;
 };
 
 struct stream {
@@ -64,21 +65,21 @@ struct stream {
 
 	uint32_t type_client_node;
 
-	uint32_t n_possible_formats;
-	struct spa_format **possible_formats;
+	uint32_t n_init_params;
+	struct spa_pod **init_params;
 
 	uint32_t n_params;
-	struct spa_param **params;
+	struct spa_pod **params;
 
-	struct spa_format *format;
+	struct spa_pod *format;
+
 	struct spa_port_info port_info;
 	enum spa_direction direction;
 	uint32_t port_id;
 	uint32_t pending_seq;
 
-	enum pw_stream_mode mode;
+	enum pw_stream_flags flags;
 
-	int rtreadfd;
 	int rtwritefd;
 	struct spa_source *rtsocket_source;
 
@@ -95,8 +96,11 @@ struct stream {
 	struct pw_array buffer_ids;
 	bool in_order;
 
+	bool client_reuse;
+
 	struct spa_list free;
 	bool in_need_buffer;
+	bool in_new_buffer;
 
 	int64_t last_ticks;
 	int32_t last_rate;
@@ -104,12 +108,24 @@ struct stream {
 };
 /** \endcond */
 
-static void clear_memid(struct mem_id *mid)
+static void clear_memid(struct stream *impl, struct mem_id *mid)
 {
-	if (mid->ptr != NULL)
-		munmap(mid->ptr, mid->size + mid->offset);
-	mid->ptr = NULL;
-	close(mid->fd);
+	if (mid->fd != -1) {
+		bool has_ref = false;
+		int fd;
+
+		fd = mid->fd;
+		mid->fd = -1;
+
+		pw_array_for_each(mid, &impl->mem_ids) {
+			if (mid->fd == fd) {
+				has_ref = true;
+				break;
+			}
+		}
+		if (!has_ref)
+			close(fd);
+	}
 }
 
 static void clear_mems(struct pw_stream *stream)
@@ -118,7 +134,7 @@ static void clear_mems(struct pw_stream *stream)
 	struct mem_id *mid;
 
 	pw_array_for_each(mid, &impl->mem_ids)
-	    clear_memid(mid);
+		clear_memid(impl, mid);
 	impl->mem_ids.size = 0;
 }
 
@@ -131,6 +147,10 @@ static void clear_buffers(struct pw_stream *stream)
 
 	pw_array_for_each(bid, &impl->buffer_ids) {
 		spa_hook_list_call(&stream->listener_list, struct pw_stream_events, remove_buffer, bid->id);
+		if (bid->ptr != NULL)
+			if (munmap(bid->ptr, bid->map.size) < 0)
+				pw_log_warn("failed to unmap buffer: %m");
+		bid->ptr = NULL;
 		free(bid->buf);
 		bid->buf = NULL;
 		bid->used = false;
@@ -186,6 +206,7 @@ struct pw_stream *pw_stream_new(struct pw_remote *remote,
 {
 	struct stream *impl;
 	struct pw_stream *this;
+	const char *str;
 
 	impl = calloc(1, sizeof(struct stream));
 	if (impl == NULL)
@@ -207,6 +228,10 @@ struct pw_stream *pw_stream_new(struct pw_remote *remote,
 	this->remote = remote;
 	this->name = strdup(name);
 	impl->type_client_node = spa_type_map_get_id(remote->core->type.map, PW_TYPE_INTERFACE__ClientNode);
+	impl->rtwritefd = -1;
+
+	str = pw_properties_get(props, "pipewire.client.reuse");
+	impl->client_reuse = str && pw_properties_parse_bool(str);
 
 	spa_hook_list_init(&this->listener_list);
 
@@ -219,7 +244,7 @@ struct pw_stream *pw_stream_new(struct pw_remote *remote,
 	impl->pending_seq = SPA_ID_INVALID;
 	spa_list_init(&impl->free);
 
-	spa_list_insert(&remote->stream_list, &this->link);
+	spa_list_append(&remote->stream_list, &this->link);
 
 	return this;
 
@@ -255,7 +280,7 @@ void pw_stream_add_listener(struct pw_stream *stream,
 
 static int
 do_remove_sources(struct spa_loop *loop,
-                  bool async, uint32_t seq, size_t size, const void *data, void *user_data)
+                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
@@ -268,7 +293,11 @@ do_remove_sources(struct spa_loop *loop,
 		pw_loop_destroy_source(stream->remote->core->data_loop, impl->timeout_source);
 		impl->timeout_source = NULL;
 	}
-        return SPA_RESULT_OK;
+	if (impl->rtwritefd != -1) {
+		close(impl->rtwritefd);
+		impl->rtwritefd = -1;
+	}
+	return 0;
 }
 
 static void unhandle_socket(struct pw_stream *stream)
@@ -276,31 +305,32 @@ static void unhandle_socket(struct pw_stream *stream)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
         pw_loop_invoke(stream->remote->core->data_loop,
-                       do_remove_sources, 1, 0, NULL, true, impl);
+                       do_remove_sources, 1, NULL, 0, true, impl);
 }
 
 static void
-set_possible_formats(struct pw_stream *stream,
-		     int n_possible_formats, const struct spa_format **possible_formats)
+set_init_params(struct pw_stream *stream,
+		     int n_init_params,
+		     const struct spa_pod **init_params)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int i;
 
-	if (impl->possible_formats) {
-		for (i = 0; i < impl->n_possible_formats; i++)
-			free(impl->possible_formats[i]);
-		free(impl->possible_formats);
-		impl->possible_formats = NULL;
+	if (impl->init_params) {
+		for (i = 0; i < impl->n_init_params; i++)
+			free(impl->init_params[i]);
+		free(impl->init_params);
+		impl->init_params = NULL;
 	}
-	impl->n_possible_formats = n_possible_formats;
-	if (n_possible_formats > 0) {
-		impl->possible_formats = malloc(n_possible_formats * sizeof(struct spa_format *));
-		for (i = 0; i < n_possible_formats; i++)
-			impl->possible_formats[i] = spa_format_copy(possible_formats[i]);
+	impl->n_init_params = n_init_params;
+	if (n_init_params > 0) {
+		impl->init_params = malloc(n_init_params * sizeof(struct spa_pod *));
+		for (i = 0; i < n_init_params; i++)
+			impl->init_params[i] = pw_spa_pod_copy(init_params[i]);
 	}
 }
 
-static void set_params(struct pw_stream *stream, int n_params, struct spa_param **params)
+static void set_params(struct pw_stream *stream, int n_params, struct spa_pod **params)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int i;
@@ -313,9 +343,9 @@ static void set_params(struct pw_stream *stream, int n_params, struct spa_param 
 	}
 	impl->n_params = n_params;
 	if (n_params > 0) {
-		impl->params = malloc(n_params * sizeof(struct spa_param *));
+		impl->params = malloc(n_params * sizeof(struct spa_pod *));
 		for (i = 0; i < n_params; i++)
-			impl->params[i] = spa_param_copy(params[i]);
+			impl->params[i] = pw_spa_pod_copy(params[i]);
 	}
 }
 
@@ -334,7 +364,7 @@ void pw_stream_destroy(struct pw_stream *stream)
 
 	spa_list_remove(&stream->link);
 
-	set_possible_formats(stream, 0, NULL);
+	set_init_params(stream, 0, NULL);
 	set_params(stream, 0, NULL);
 
 	if (impl->format)
@@ -355,8 +385,6 @@ void pw_stream_destroy(struct pw_stream *stream)
 	if (stream->name)
 		free(stream->name);
 
-	close(impl->rtwritefd);
-
 	free(impl);
 }
 
@@ -371,35 +399,48 @@ static void add_node_update(struct pw_stream *stream, uint32_t change_mask)
 		max_output_ports = impl->direction == SPA_DIRECTION_OUTPUT ? 1 : 0;
 
 	pw_client_node_proxy_update(impl->node_proxy,
-				    change_mask, max_input_ports, max_output_ports, NULL);
+				    change_mask, max_input_ports, max_output_ports,
+				    0, NULL);
 }
 
 static void add_port_update(struct pw_stream *stream, uint32_t change_mask)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	uint32_t n_params;
+	struct spa_pod **params;
+	int i, j;
 
+	n_params = impl->n_params + impl->n_init_params;
+	if (impl->format)
+		n_params += 1;
+
+	params = alloca(n_params * sizeof(struct spa_pod *));
+
+	j = 0;
+	for (i = 0; i < impl->n_init_params; i++)
+		params[j++] = impl->init_params[i];
+	if (impl->format)
+		params[j++] = impl->format;
+	for (i = 0; i < impl->n_params; i++)
+		params[j++] = impl->params[i];
 
 	pw_client_node_proxy_port_update(impl->node_proxy,
 					 impl->direction,
 					 impl->port_id,
 					 change_mask,
-					 impl->n_possible_formats,
-					 (const struct spa_format **) impl->possible_formats,
-					 impl->format,
-					 impl->n_params,
-					 (const struct spa_param **) impl->params, &impl->port_info);
+					 n_params,
+					 (const struct spa_pod **) params,
+					 &impl->port_info);
 }
 
 static inline void send_need_input(struct pw_stream *stream)
 {
-#if 0
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	uint64_t cmd = 1;
 
 	pw_client_node_transport_add_message(impl->trans,
 			       &PW_CLIENT_NODE_MESSAGE_INIT(PW_CLIENT_NODE_MESSAGE_NEED_INPUT));
 	write(impl->rtwritefd, &cmd, 8);
-#endif
 }
 
 static inline void send_have_output(struct pw_stream *stream)
@@ -409,6 +450,16 @@ static inline void send_have_output(struct pw_stream *stream)
 
 	pw_client_node_transport_add_message(impl->trans,
 			       &PW_CLIENT_NODE_MESSAGE_INIT(PW_CLIENT_NODE_MESSAGE_HAVE_OUTPUT));
+	write(impl->rtwritefd, &cmd, 8);
+}
+
+static inline void send_reuse_buffer(struct pw_stream *stream, uint32_t id)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	uint64_t cmd = 1;
+
+	pw_client_node_transport_add_message(impl->trans, (struct pw_client_node_message*)
+			       &PW_CLIENT_NODE_MESSAGE_PORT_REUSE_BUFFER_INIT(impl->port_id, id));
 	write(impl->rtwritefd, &cmd, 8);
 }
 
@@ -439,9 +490,13 @@ static void do_node_init(struct pw_stream *stream)
 			PW_CLIENT_NODE_UPDATE_MAX_OUTPUTS);
 
 	impl->port_info.flags = SPA_PORT_INFO_FLAG_CAN_USE_BUFFERS;
-	add_port_update(stream, PW_CLIENT_NODE_PORT_UPDATE_POSSIBLE_FORMATS |
-			PW_CLIENT_NODE_PORT_UPDATE_INFO);
-	add_async_complete(stream, 0, SPA_RESULT_OK);
+
+	add_port_update(stream, PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
+				PW_CLIENT_NODE_PORT_UPDATE_INFO);
+
+	add_async_complete(stream, 0, 0);
+	if (!(impl->flags & PW_STREAM_FLAG_INACTIVE))
+		pw_client_node_proxy_set_active(impl->node_proxy, true);
 }
 
 static void on_timeout(void *data, uint64_t expirations)
@@ -487,8 +542,10 @@ static inline void reuse_buffer(struct pw_stream *stream, uint32_t id)
 	if ((bid = find_buffer(stream, id)) && bid->used) {
 		pw_log_trace("stream %p: reuse buffer %u", stream, id);
 		bid->used = false;
-		spa_list_insert(impl->free.prev, &bid->link);
+		spa_list_append(&impl->free, &bid->link);
+		impl->in_new_buffer = true;
 		spa_hook_list_call(&stream->listener_list, struct pw_stream_events, new_buffer, id);
+		impl->in_new_buffer = false;
 	}
 }
 
@@ -496,27 +553,46 @@ static void handle_rtnode_message(struct pw_stream *stream, struct pw_client_nod
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
-	if (PW_CLIENT_NODE_MESSAGE_TYPE(message) == PW_CLIENT_NODE_MESSAGE_PROCESS_INPUT) {
+	switch (PW_CLIENT_NODE_MESSAGE_TYPE(message)) {
+	case PW_CLIENT_NODE_MESSAGE_PROCESS_INPUT:
+	{
 		int i;
 
 		for (i = 0; i < impl->trans->area->n_input_ports; i++) {
-			struct spa_port_io *input = &impl->trans->inputs[i];
+			struct spa_io_buffers *input = &impl->trans->inputs[i];
+			struct buffer_id *bid;
+			uint32_t buffer_id;
+
+			buffer_id = input->buffer_id;
 
 			pw_log_trace("stream %p: process input %d %d", stream, input->status,
-				     input->buffer_id);
-			if (input->buffer_id == SPA_ID_INVALID)
+				     buffer_id);
+
+			if ((bid = find_buffer(stream, buffer_id)) == NULL)
 				continue;
 
-			spa_hook_list_call(&stream->listener_list, struct pw_stream_events,
-					 new_buffer, input->buffer_id);
-			input->buffer_id = SPA_ID_INVALID;
+			if (impl->client_reuse)
+				input->buffer_id = SPA_ID_INVALID;
+
+			if (input->status == SPA_STATUS_HAVE_BUFFER) {
+				bid->used = true;
+				impl->in_new_buffer = true;
+				spa_hook_list_call(&stream->listener_list, struct pw_stream_events,
+					 new_buffer, buffer_id);
+				impl->in_new_buffer = false;
+			}
+
+			input->status = SPA_STATUS_NEED_BUFFER;
 		}
 		send_need_input(stream);
-	} else if (PW_CLIENT_NODE_MESSAGE_TYPE(message) == PW_CLIENT_NODE_MESSAGE_PROCESS_OUTPUT) {
+		break;
+	}
+	case PW_CLIENT_NODE_MESSAGE_PROCESS_OUTPUT:
+	{
 		int i;
 
 		for (i = 0; i < impl->trans->area->n_output_ports; i++) {
-			struct spa_port_io *output = &impl->trans->outputs[i];
+			struct spa_io_buffers *output = &impl->trans->outputs[i];
 
 			if (output->buffer_id == SPA_ID_INVALID)
 				continue;
@@ -528,9 +604,12 @@ static void handle_rtnode_message(struct pw_stream *stream, struct pw_client_nod
 		impl->in_need_buffer = true;
 		spa_hook_list_call(&stream->listener_list, struct pw_stream_events, need_buffer);
 		impl->in_need_buffer = false;
-	} else if (PW_CLIENT_NODE_MESSAGE_TYPE(message) == PW_CLIENT_NODE_MESSAGE_REUSE_BUFFER) {
-		struct pw_client_node_message_reuse_buffer *p =
-		    (struct pw_client_node_message_reuse_buffer *) message;
+		break;
+	}
+	case PW_CLIENT_NODE_MESSAGE_PORT_REUSE_BUFFER:
+	{
+		struct pw_client_node_message_port_reuse_buffer *p =
+		    (struct pw_client_node_message_port_reuse_buffer *) message;
 
 		if (p->body.port_id.value != impl->port_id)
 			return;
@@ -538,8 +617,11 @@ static void handle_rtnode_message(struct pw_stream *stream, struct pw_client_nod
 			return;
 
 		reuse_buffer(stream, p->body.buffer_id.value);
-	} else {
+		break;
+	}
+	default:
 		pw_log_warn("unexpected node message %d", PW_CLIENT_NODE_MESSAGE_TYPE(message));
+		break;
 	}
 }
 
@@ -559,9 +641,10 @@ on_rtsocket_condition(void *data, int fd, enum spa_io mask)
 		struct pw_client_node_message message;
 		uint64_t cmd;
 
-		read(impl->rtreadfd, &cmd, 8);
+		if (read(fd, &cmd, sizeof(uint64_t)) != sizeof(uint64_t))
+			pw_log_warn("stream %p: read failed %m", impl);
 
-		while (pw_client_node_transport_next_message(impl->trans, &message) == SPA_RESULT_OK) {
+		while (pw_client_node_transport_next_message(impl->trans, &message) == 1) {
 			struct pw_client_node_message *msg = alloca(SPA_POD_SIZE(&message));
 			pw_client_node_transport_parse_message(impl->trans, msg);
 			handle_rtnode_message(stream, msg);
@@ -574,28 +657,41 @@ static void handle_socket(struct pw_stream *stream, int rtreadfd, int rtwritefd)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	struct timespec interval;
 
-	impl->rtreadfd = rtreadfd;
 	impl->rtwritefd = rtwritefd;
 	impl->rtsocket_source = pw_loop_add_io(stream->remote->core->data_loop,
-					       impl->rtreadfd,
+					       rtreadfd,
 					       SPA_IO_ERR | SPA_IO_HUP,
 					       true, on_rtsocket_condition, stream);
 
-	impl->timeout_source = pw_loop_add_timer(stream->remote->core->main_loop, on_timeout, stream);
-	interval.tv_sec = 0;
-	interval.tv_nsec = 100000000;
-	pw_loop_update_timer(stream->remote->core->main_loop, impl->timeout_source, NULL, &interval, false);
+	if (impl->flags & PW_STREAM_FLAG_CLOCK_UPDATE) {
+		impl->timeout_source = pw_loop_add_timer(stream->remote->core->main_loop, on_timeout, stream);
+		interval.tv_sec = 0;
+		interval.tv_nsec = 100000000;
+		pw_loop_update_timer(stream->remote->core->main_loop, impl->timeout_source, NULL, &interval, false);
+	}
 	return;
 }
 
-static bool
-handle_node_command(struct pw_stream *stream, uint32_t seq, const struct spa_command *command)
+static void
+client_node_set_param(void *data, uint32_t seq, uint32_t id, uint32_t flags,
+		      const struct spa_pod *param)
 {
-	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	pw_log_warn("set param not implemented");
+}
+
+static void client_node_event(void *data, const struct spa_event *event)
+{
+	pw_log_warn("unhandled node event %d", SPA_EVENT_TYPE(event));
+}
+
+static void client_node_command(void *data, uint32_t seq, const struct spa_command *command)
+{
+	struct stream *impl = data;
+	struct pw_stream *stream = &impl->this;
 	struct pw_remote *remote = stream->remote;
 
 	if (SPA_COMMAND_TYPE(command) == remote->core->type.command_node.Pause) {
-		add_async_complete(stream, seq, SPA_RESULT_OK);
+		add_async_complete(stream, seq, 0);
 
 		if (stream->state == PW_STREAM_STATE_STREAMING) {
 			pw_log_debug("stream %p: pause %d", stream, seq);
@@ -606,17 +702,22 @@ handle_node_command(struct pw_stream *stream, uint32_t seq, const struct spa_com
 			stream_set_state(stream, PW_STREAM_STATE_PAUSED, NULL);
 		}
 	} else if (SPA_COMMAND_TYPE(command) == remote->core->type.command_node.Start) {
-		add_async_complete(stream, seq, SPA_RESULT_OK);
+		add_async_complete(stream, seq, 0);
 
 		if (stream->state == PW_STREAM_STATE_PAUSED) {
+			int i;
+
 			pw_log_debug("stream %p: start %d %d", stream, seq, impl->direction);
 
 			pw_loop_update_io(stream->remote->core->data_loop,
 					  impl->rtsocket_source,
 					  SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP);
 
-			if (impl->direction == SPA_DIRECTION_INPUT)
+			if (impl->direction == SPA_DIRECTION_INPUT) {
+				for (i = 0; i < impl->trans->area->max_input_ports; i++)
+					impl->trans->inputs[i].status = SPA_STATUS_NEED_BUFFER;
 				send_need_input(stream);
+			}
 			else {
 				impl->in_need_buffer = true;
 				spa_hook_list_call(&stream->listener_list, struct pw_stream_events,
@@ -629,9 +730,9 @@ handle_node_command(struct pw_stream *stream, uint32_t seq, const struct spa_com
 		struct spa_command_node_clock_update *cu = (__typeof__(cu)) command;
 
 		if (cu->body.flags.value & SPA_COMMAND_NODE_CLOCK_UPDATE_FLAG_LIVE) {
-			pw_properties_set(stream->properties, "pipewire.latency.is-live", "1");
+			pw_properties_set(stream->properties, PW_STREAM_PROP_IS_LIVE, "1");
 			pw_properties_setf(stream->properties,
-					   "pipewire.latency.min", "%" PRId64,
+					   PW_STREAM_PROP_LATENCY_MIN, "%" PRId64,
 					   cu->body.latency.value);
 		}
 		impl->last_ticks = cu->body.ticks.value;
@@ -639,20 +740,8 @@ handle_node_command(struct pw_stream *stream, uint32_t seq, const struct spa_com
 		impl->last_monotonic = cu->body.monotonic_time.value;
 	} else {
 		pw_log_warn("unhandled node command %d", SPA_COMMAND_TYPE(command));
-		add_async_complete(stream, seq, SPA_RESULT_NOT_IMPLEMENTED);
+		add_async_complete(stream, seq, -ENOTSUP);
 	}
-	return true;
-}
-
-static void
-client_node_set_props(void *data, uint32_t seq, const struct spa_props *props)
-{
-	pw_log_warn("set property not implemented");
-}
-
-static void client_node_event(void *data, const struct spa_event *event)
-{
-	pw_log_warn("unhandled node event %d", SPA_EVENT_TYPE(event));
 }
 
 static void
@@ -668,45 +757,48 @@ client_node_remove_port(void *data, uint32_t seq, enum spa_direction direction, 
 }
 
 static void
-client_node_set_format(void *data,
-		       uint32_t seq,
-		       enum spa_direction direction,
-		       uint32_t port_id, uint32_t flags, const struct spa_format *format)
+client_node_port_set_param(void *data,
+			   uint32_t seq,
+			   enum spa_direction direction, uint32_t port_id,
+			   uint32_t id, uint32_t flags,
+			   const struct spa_pod *param)
 {
 	struct stream *impl = data;
 	struct pw_stream *stream = &impl->this;
+	struct pw_type *t = &stream->remote->core->type;
 
-	pw_log_debug("stream %p: format changed %d", stream, seq);
+	if (id == t->param.idFormat) {
+		pw_log_debug("stream %p: format changed %d", stream, seq);
 
-	if (impl->format)
-		free(impl->format);
-	impl->format = format ? spa_format_copy(format) : NULL;
-	impl->pending_seq = seq;
+		if (impl->format)
+			free(impl->format);
 
-	spa_hook_list_call(&stream->listener_list, struct pw_stream_events, format_changed, impl->format);
+		if (spa_pod_is_object_type(param, t->spa_format)) {
+			impl->format = pw_spa_pod_copy(param);
+			((struct spa_pod_object*)impl->format)->body.id = id;
+		}
+		else
+			impl->format = NULL;
 
-	if (format)
-		stream_set_state(stream, PW_STREAM_STATE_READY, NULL);
+		impl->pending_seq = seq;
+
+		spa_hook_list_call(&stream->listener_list,
+					struct pw_stream_events,
+					format_changed, impl->format);
+
+		if (impl->format)
+			stream_set_state(stream, PW_STREAM_STATE_READY, NULL);
+		else
+			stream_set_state(stream, PW_STREAM_STATE_CONFIGURE, NULL);
+	}
 	else
-		stream_set_state(stream, PW_STREAM_STATE_CONFIGURE, NULL);
-}
-
-static void
-client_node_set_param(void *data,
-		      uint32_t seq,
-		      enum spa_direction direction,
-		      uint32_t port_id,
-		      const struct spa_param *param)
-{
-	pw_log_warn("set param not implemented");
+		pw_log_warn("set param not implemented");
 }
 
 static void
 client_node_add_mem(void *data,
-		    enum spa_direction direction,
-		    uint32_t port_id,
 		    uint32_t mem_id,
-		    uint32_t type, int memfd, uint32_t flags, uint32_t offset, uint32_t size)
+		    uint32_t type, int memfd, uint32_t flags)
 {
 	struct stream *impl = data;
 	struct pw_stream *stream = &impl->this;
@@ -714,33 +806,35 @@ client_node_add_mem(void *data,
 
 	m = find_mem(stream, mem_id);
 	if (m) {
-		pw_log_debug("update mem %u, fd %d, flags %d, off %d, size %d",
-			     mem_id, memfd, flags, offset, size);
-		clear_memid(m);
+		pw_log_debug("update mem %u, fd %d, flags %d",
+			     mem_id, memfd, flags);
+		clear_memid(impl, m);
 	} else {
 		m = pw_array_add(&impl->mem_ids, sizeof(struct mem_id));
-		pw_log_debug("add mem %u, fd %d, flags %d, off %d, size %d",
-			     mem_id, memfd, flags, offset, size);
+		pw_log_debug("add mem %u, fd %d, flags %d",
+			     mem_id, memfd, flags);
 	}
 	m->id = mem_id;
 	m->fd = memfd;
 	m->flags = flags;
-	m->ptr = NULL;
-	m->offset = offset;
-	m->size = size;
 }
 
 static void
-client_node_use_buffers(void *data,
-			uint32_t seq,
-			enum spa_direction direction,
-			uint32_t port_id, uint32_t n_buffers, struct pw_client_node_buffer *buffers)
+client_node_port_use_buffers(void *data,
+			     uint32_t seq,
+			     enum spa_direction direction, uint32_t port_id,
+			     uint32_t n_buffers, struct pw_client_node_buffer *buffers)
 {
 	struct stream *impl = data;
 	struct pw_stream *stream = &impl->this;
+	struct pw_core *core = stream->remote->core;
+	struct pw_type *t = &core->type;
 	struct buffer_id *bid;
 	uint32_t i, j, len;
 	struct spa_buffer *b;
+	int prot;
+
+	prot = PROT_READ | (direction == SPA_DIRECTION_OUTPUT ? PROT_WRITE : 0);
 
 	/* clear previous buffers */
 	clear_buffers(stream);
@@ -754,45 +848,51 @@ client_node_use_buffers(void *data,
 			continue;
 		}
 
-		if (mid->ptr == NULL) {
-			mid->ptr =
-			    mmap(NULL, mid->size + mid->offset, PROT_READ | PROT_WRITE, MAP_SHARED,
-				 mid->fd, 0);
-			if (mid->ptr == MAP_FAILED) {
-				mid->ptr = NULL;
-				pw_log_warn("Failed to mmap memory %d %p: %s", mid->size, mid,
-					    strerror(errno));
-				continue;
-			}
-		}
 		len = pw_array_get_len(&impl->buffer_ids, struct buffer_id);
 		bid = pw_array_add(&impl->buffer_ids, sizeof(struct buffer_id));
 		if (impl->direction == SPA_DIRECTION_OUTPUT) {
 			bid->used = false;
-			spa_list_insert(impl->free.prev, &bid->link);
+			spa_list_append(&impl->free, &bid->link);
 		} else {
 			bid->used = true;
 		}
 
 		b = buffers[i].buffer;
 
-		bid->buf_ptr = SPA_MEMBER(mid->ptr, mid->offset + buffers[i].offset, void);
+		pw_map_range_init(&bid->map, buffers[i].offset, buffers[i].size, core->sc_pagesize);
+
+		bid->ptr = mmap(NULL, bid->map.size, prot, MAP_SHARED, mid->fd, bid->map.offset);
+		if (bid->ptr == MAP_FAILED) {
+			bid->ptr = NULL;
+			pw_log_warn("Failed to mmap memory %d %p: %s", bid->map.size, mid,
+				    strerror(errno));
+			continue;
+		}
+
 		{
 			size_t size;
 
 			size = sizeof(struct spa_buffer);
+			size += sizeof(struct mem_id *);
 			for (j = 0; j < buffers[i].buffer->n_metas; j++)
 				size += sizeof(struct spa_meta);
-			for (j = 0; j < buffers[i].buffer->n_datas; j++)
+			for (j = 0; j < buffers[i].buffer->n_datas; j++) {
 				size += sizeof(struct spa_data);
+				size += sizeof(struct mem_id *);
+			}
 
 			b = bid->buf = malloc(size);
 			memcpy(b, buffers[i].buffer, sizeof(struct spa_buffer));
 
 			b->metas = SPA_MEMBER(b, sizeof(struct spa_buffer), struct spa_meta);
-			b->datas =
-			    SPA_MEMBER(b->metas, sizeof(struct spa_meta) * b->n_metas,
+			b->datas = SPA_MEMBER(b->metas, sizeof(struct spa_meta) * b->n_metas,
 				       struct spa_data);
+			bid->mem = SPA_MEMBER(b->datas, sizeof(struct spa_data) * b->n_datas,
+				       struct mem_id*);
+			bid->n_mem = 0;
+
+			mid->ref++;
+			bid->mem[bid->n_mem++] = mid;
 		}
 		bid->id = b->id;
 
@@ -800,13 +900,14 @@ client_node_use_buffers(void *data,
 			pw_log_warn("unexpected id %u found, expected %u", bid->id, len);
 			impl->in_order = false;
 		}
-		pw_log_debug("add buffer %d %d %u", mid->id, bid->id, buffers[i].offset);
+		pw_log_debug("add buffer %d %d %u %u", mid->id,
+				bid->id, bid->map.offset, bid->map.size);
 
-		offset = 0;
+		offset = bid->map.start;
 		for (j = 0; j < b->n_metas; j++) {
 			struct spa_meta *m = &b->metas[j];
 			memcpy(m, &buffers[i].buffer->metas[j], sizeof(struct spa_meta));
-			m->data = SPA_MEMBER(bid->buf_ptr, offset, void);
+			m->data = SPA_MEMBER(bid->ptr, offset, void);
 			offset += m->size;
 		}
 
@@ -815,17 +916,19 @@ client_node_use_buffers(void *data,
 
 			memcpy(d, &buffers[i].buffer->datas[j], sizeof(struct spa_data));
 			d->chunk =
-			    SPA_MEMBER(bid->buf_ptr, offset + sizeof(struct spa_chunk) * j,
+			    SPA_MEMBER(bid->ptr, offset + sizeof(struct spa_chunk) * j,
 				       struct spa_chunk);
 
-			if (d->type == stream->remote->core->type.data.Id) {
+			if (d->type == t->data.MemFd || d->type == t->data.DmaBuf) {
 				struct mem_id *bmid = find_mem(stream, SPA_PTR_TO_UINT32(d->data));
-				d->type = stream->remote->core->type.data.MemFd;
 				d->data = NULL;
 				d->fd = bmid->fd;
+				bmid->ref++;
+				bid->mem[bid->n_mem++] = bmid;
 				pw_log_debug(" data %d %u -> fd %d", j, bmid->id, bmid->fd);
-			} else if (d->type == stream->remote->core->type.data.MemPtr) {
-				d->data = SPA_MEMBER(bid->buf_ptr, SPA_PTR_TO_INT(d->data), void);
+			} else if (d->type == t->data.MemPtr) {
+				d->data = SPA_MEMBER(bid->ptr,
+						bid->map.start + SPA_PTR_TO_INT(d->data), void);
 				d->fd = -1;
 				pw_log_debug(" data %d %u -> mem %p", j, bid->id, d->data);
 			} else {
@@ -835,7 +938,7 @@ client_node_use_buffers(void *data,
 		spa_hook_list_call(&stream->listener_list, struct pw_stream_events, add_buffer, bid->id);
 	}
 
-	add_async_complete(stream, seq, SPA_RESULT_OK);
+	add_async_complete(stream, seq, 0);
 
 	if (n_buffers)
 		stream_set_state(stream, PW_STREAM_STATE_PAUSED, NULL);
@@ -843,13 +946,6 @@ client_node_use_buffers(void *data,
 		clear_mems(stream);
 		stream_set_state(stream, PW_STREAM_STATE_READY, NULL);
 	}
-}
-
-static void client_node_node_command(void *data, uint32_t seq, const struct spa_command *command)
-{
-	struct stream *impl = data;
-	struct pw_stream *this = &impl->this;
-	handle_node_command(this, seq, command);
 }
 
 static void
@@ -883,16 +979,15 @@ static void client_node_transport(void *data, uint32_t node_id,
 
 static const struct pw_client_node_proxy_events client_node_events = {
 	PW_VERSION_CLIENT_NODE_PROXY_EVENTS,
+	.add_mem = client_node_add_mem,
 	.transport = client_node_transport,
-	.set_props = client_node_set_props,
+	.set_param = client_node_set_param,
 	.event = client_node_event,
+	.command = client_node_command,
 	.add_port = client_node_add_port,
 	.remove_port = client_node_remove_port,
-	.set_format = client_node_set_format,
-	.set_param = client_node_set_param,
-	.add_mem = client_node_add_mem,
-	.use_buffers = client_node_use_buffers,
-	.node_command = client_node_node_command,
+	.port_set_param = client_node_port_set_param,
+	.port_use_buffers = client_node_port_use_buffers,
 	.port_command = client_node_port_command,
 };
 
@@ -913,48 +1008,46 @@ static const struct pw_proxy_events proxy_events = {
 	.destroy = on_node_proxy_destroy,
 };
 
-bool
+int
 pw_stream_connect(struct pw_stream *stream,
 		  enum pw_direction direction,
-		  enum pw_stream_mode mode,
 		  const char *port_path,
 		  enum pw_stream_flags flags,
-		  uint32_t n_possible_formats,
-		  const struct spa_format **possible_formats)
+		  const struct spa_pod **params,
+		  uint32_t n_params)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
 	impl->direction =
 	    direction == PW_DIRECTION_INPUT ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT;
 	impl->port_id = 0;
-	impl->mode = mode;
+	impl->flags = flags;
 
-	set_possible_formats(stream, n_possible_formats, possible_formats);
+	set_init_params(stream, n_params, params);
 
 	stream_set_state(stream, PW_STREAM_STATE_CONNECTING, NULL);
 
 	if (stream->properties == NULL)
 		stream->properties = pw_properties_new(NULL, NULL);
 	if (port_path)
-		pw_properties_set(stream->properties, "pipewire.target.node", port_path);
+		pw_properties_set(stream->properties, PW_NODE_PROP_TARGET_NODE, port_path);
 	if (flags & PW_STREAM_FLAG_AUTOCONNECT)
-		pw_properties_set(stream->properties, "pipewire.autoconnect", "1");
+		pw_properties_set(stream->properties, PW_NODE_PROP_AUTOCONNECT, "1");
 
-	impl->node_proxy = pw_core_proxy_create_node(stream->remote->core_proxy,
-			       "client-node",
+	impl->node_proxy = pw_core_proxy_create_object(stream->remote->core_proxy,
 			       "client-node",
 			       impl->type_client_node,
 			       PW_VERSION_CLIENT_NODE,
 			       &stream->properties->dict, 0);
 	if (impl->node_proxy == NULL)
-		return false;
+		return -ENOMEM;
 
 	pw_client_node_proxy_add_listener(impl->node_proxy, &impl->node_listener, &client_node_events, impl);
 	pw_proxy_add_listener((struct pw_proxy*)impl->node_proxy, &impl->proxy_listener, &proxy_events, impl);
 
 	do_node_init(stream);
 
-	return true;
+	return 0;
 }
 
 uint32_t
@@ -965,7 +1058,9 @@ pw_stream_get_node_id(struct pw_stream *stream)
 
 void
 pw_stream_finish_format(struct pw_stream *stream,
-			int res, struct spa_param **params, uint32_t n_params)
+			int res,
+			struct spa_pod **params,
+			uint32_t n_params)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
@@ -974,8 +1069,7 @@ pw_stream_finish_format(struct pw_stream *stream,
 	set_params(stream, n_params, params);
 
 	if (SPA_RESULT_IS_OK(res)) {
-		add_port_update(stream, (n_params ? PW_CLIENT_NODE_PORT_UPDATE_PARAMS : 0) |
-				PW_CLIENT_NODE_PORT_UPDATE_FORMAT);
+		add_port_update(stream, PW_CLIENT_NODE_PORT_UPDATE_PARAMS);
 
 		if (!impl->format) {
 			clear_buffers(stream);
@@ -987,7 +1081,7 @@ pw_stream_finish_format(struct pw_stream *stream,
 	impl->pending_seq = SPA_ID_INVALID;
 }
 
-void pw_stream_disconnect(struct pw_stream *stream)
+int pw_stream_disconnect(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
@@ -1003,9 +1097,17 @@ void pw_stream_disconnect(struct pw_stream *stream)
 		pw_client_node_transport_destroy(impl->trans);
 		impl->trans = NULL;
 	}
+	return 0;
 }
 
-bool pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
+int pw_stream_set_active(struct pw_stream *stream, bool active)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	pw_client_node_proxy_set_active(impl->node_proxy, active);
+	return 0;
+}
+
+int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int64_t elapsed;
@@ -1018,7 +1120,7 @@ bool pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 	time->ticks = impl->last_ticks + (elapsed * impl->last_rate) / SPA_USEC_PER_SEC;
 	time->rate = impl->last_rate;
 
-	return true;
+	return 0;
 }
 
 uint32_t pw_stream_get_empty_buffer(struct pw_stream *stream)
@@ -1034,24 +1136,29 @@ uint32_t pw_stream_get_empty_buffer(struct pw_stream *stream)
 	return bid->id;
 }
 
-bool pw_stream_recycle_buffer(struct pw_stream *stream, uint32_t id)
+int pw_stream_recycle_buffer(struct pw_stream *stream, uint32_t id)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
-	struct pw_client_node_message_reuse_buffer rb = PW_CLIENT_NODE_MESSAGE_REUSE_BUFFER_INIT
-	    (impl->port_id, id);
 	struct buffer_id *bid;
-	uint64_t cmd = 1;
 
 	if ((bid = find_buffer(stream, id)) == NULL || !bid->used)
-		return false;
+		return -EINVAL;
 
 	bid->used = false;
-	spa_list_insert(impl->free.prev, &bid->link);
+	spa_list_append(&impl->free, &bid->link);
 
-	pw_client_node_transport_add_message(impl->trans, (struct pw_client_node_message *) &rb);
-	write(impl->rtwritefd, &cmd, 8);
+	if (impl->in_new_buffer) {
+		int i;
 
-	return true;
+		for (i = 0; i < impl->trans->area->n_input_ports; i++) {
+			struct spa_io_buffers *input = &impl->trans->inputs[i];
+			input->buffer_id = id;
+		}
+	} else {
+		send_reuse_buffer(stream, id);
+	}
+
+	return 0;
 }
 
 struct spa_buffer *pw_stream_peek_buffer(struct pw_stream *stream, uint32_t id)
@@ -1064,7 +1171,7 @@ struct spa_buffer *pw_stream_peek_buffer(struct pw_stream *stream, uint32_t id)
 	return NULL;
 }
 
-bool pw_stream_send_buffer(struct pw_stream *stream, uint32_t id)
+int pw_stream_send_buffer(struct pw_stream *stream, uint32_t id)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	struct buffer_id *bid;
@@ -1072,14 +1179,14 @@ bool pw_stream_send_buffer(struct pw_stream *stream, uint32_t id)
 	if (impl->trans->outputs[0].buffer_id != SPA_ID_INVALID) {
 		pw_log_debug("can't send %u, pending buffer %u", id,
 			     impl->trans->outputs[0].buffer_id);
-		return false;
+		return -EIO;
 	}
 
 	if ((bid = find_buffer(stream, id)) && !bid->used) {
 		bid->used = true;
 		spa_list_remove(&bid->link);
 		impl->trans->outputs[0].buffer_id = id;
-		impl->trans->outputs[0].status = SPA_RESULT_HAVE_BUFFER;
+		impl->trans->outputs[0].status = SPA_STATUS_HAVE_BUFFER;
 		pw_log_trace("stream %p: send buffer %d", stream, id);
 		if (!impl->in_need_buffer)
 			send_have_output(stream);
@@ -1087,5 +1194,5 @@ bool pw_stream_send_buffer(struct pw_stream *stream, uint32_t id)
 		pw_log_debug("stream %p: output %u was used", stream, id);
 	}
 
-	return true;
+	return 0;
 }

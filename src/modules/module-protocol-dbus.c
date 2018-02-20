@@ -37,7 +37,7 @@
 #include "pipewire/server/client.h"
 #include "pipewire/server/resource.h"
 #include "pipewire/server/link.h"
-#include "pipewire/server/node-factory.h"
+#include "pipewire/server/factory.h"
 #include "pipewire/server/data-loop.h"
 #include "pipewire/server/main-loop.h"
 
@@ -124,7 +124,7 @@ static void *object_new(size_t size,
 	this->skel = skel;
 	this->destroy = destroy;
 
-	spa_list_insert(impl->object_list.prev, &this->link);
+	spa_list_append(&impl->object_list, &this->link);
 
 	if (export)
 		object_export(this);
@@ -231,7 +231,7 @@ static struct client *client_new(struct impl *impl, const char *sender)
 	struct client *this;
 	struct pw_client *client;
 
-	client = pw_client_new(impl->core, NULL, NULL);
+	client = pw_client_new(impl->core, NULL, NULL, 0);
 
 	if ((this = (struct client *) find_object(impl, client))) {
 		pipewire_client1_set_sender(this->parent.iface, sender);
@@ -243,7 +243,7 @@ static struct client *client_new(struct impl *impl, const char *sender)
 							  client_name_appeared_handler,
 							  client_name_vanished_handler, this, NULL);
 
-		spa_list_insert(impl->client_list.prev, &this->link);
+		spa_list_append(&impl->client_list, &this->link);
 	}
 	return this;
 }
@@ -365,10 +365,10 @@ handle_create_client_node(PipeWireDaemon1 * interface,
 	pw_log_debug("protocol-dbus %p: create client-node: %s", impl, sender);
 	props = pw_properties_from_variant(arg_properties);
 
-	target_node = pw_properties_get(props, "pipewire.target.node");
+	target_node = pw_properties_get(props, PW_NODE_PROP_TARGET_NODE);
 	if (target_node) {
 		if (strncmp(target_node, "/org/pipewire/node_", strlen("/org/pipewire/node_")) == 0) {
-			pw_properties_setf(props, "pipewire.target.node", "%s",
+			pw_properties_setf(props, PW_NODE_PROP_TARGET_NODE, "%s",
 					   target_node + strlen("/org/pipewire/node_"));
 		}
 	}
@@ -625,8 +625,8 @@ static void pw_protocol_dbus_destroy(struct impl *impl)
 }
 #endif
 
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	pw_protocol_dbus_new(module->core, NULL);
-	return TRUE;
+	return 0;
 }

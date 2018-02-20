@@ -31,9 +31,9 @@ struct proxy {
 
 /** Create a proxy object with a given id and type
  *
- * \param proxy another proxy object that serves as a factory
- * \param id Id of the new object, SPA_ID_INVALID will choose a new id
+ * \param factory another proxy object that serves as a factory
  * \param type Type of the proxy object
+ * \param user_data_size size of user_data
  * \return A newly allocated proxy object or NULL on failure
  *
  * This function creates a new proxy object with the supplied id and type. The
@@ -68,7 +68,7 @@ struct pw_proxy *pw_proxy_new(struct pw_proxy *factory,
 
 	this->marshal = pw_protocol_get_marshal(remote->conn->protocol, type);
 
-	spa_list_insert(&this->remote->proxy_list, &this->link);
+	spa_list_append(&this->remote->proxy_list, &this->link);
 
 	pw_log_debug("proxy %p: new %u, remote %p, marshal %p", this, this->id, remote, this->marshal);
 

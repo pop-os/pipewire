@@ -21,6 +21,13 @@
 #include "pipewire/main-loop.h"
 #include "pipewire/private.h"
 
+static void do_stop(void *data, uint64_t count)
+{
+	struct pw_main_loop *this = data;
+	pw_log_debug("main-loop %p: do stop", this);
+	this->running = false;
+}
+
 /** Create a new new main loop
  * \return a newly allocated \ref pw_main_loop
  *
@@ -41,6 +48,8 @@ struct pw_main_loop *pw_main_loop_new(struct pw_properties *properties)
 		goto no_loop;
 
 	spa_hook_list_init(&this->listener_list);
+
+        this->event = pw_loop_add_event(this->loop, do_stop, this);
 
 	return this;
 
@@ -87,7 +96,7 @@ struct pw_loop * pw_main_loop_get_loop(struct pw_main_loop *loop)
 void pw_main_loop_quit(struct pw_main_loop *loop)
 {
 	pw_log_debug("main-loop %p: quit", loop);
-	loop->running = false;
+	pw_loop_signal_event(loop->loop, loop->event);
 }
 
 /** Start a main loop

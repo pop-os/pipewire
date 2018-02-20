@@ -24,11 +24,9 @@
 extern "C" {
 #endif
 
-#include <spa/defs.h>
-#include <spa/props.h>
-#include <spa/format.h>
-#include <spa/param-alloc.h>
-#include <spa/node.h>
+#include <spa/utils/defs.h>
+#include <spa/param/param.h>
+#include <spa/node/node.h>
 
 #include <pipewire/introspect.h>
 #include <pipewire/proxy.h>
@@ -37,6 +35,7 @@ struct pw_core_proxy;
 struct pw_registry_proxy;
 struct pw_module_proxy;
 struct pw_node_proxy;
+struct pw_factory_proxy;
 struct pw_client_proxy;
 struct pw_link_proxy;
 
@@ -52,7 +51,7 @@ struct pw_link_proxy;
  * \section page_iface_pw_core_desc Description
  *
  * The core global object.  This is a special singleton object.  It
- * is used for internal Wayland protocol features.
+ * is used for internal PipeWire protocol features.
  * \section page_iface_pw_core API
  */
 
@@ -67,38 +66,69 @@ struct pw_link_proxy;
 
 #define PW_VERSION_CORE				0
 
-#define PW_CORE_PROXY_METHOD_UPDATE_TYPES	0
-#define PW_CORE_PROXY_METHOD_SYNC		1
-#define PW_CORE_PROXY_METHOD_GET_REGISTRY	2
-#define PW_CORE_PROXY_METHOD_CLIENT_UPDATE	3
-#define PW_CORE_PROXY_METHOD_CREATE_NODE	4
-#define PW_CORE_PROXY_METHOD_CREATE_LINK	5
-#define PW_CORE_PROXY_METHOD_NUM		6
+#define PW_CORE_PROXY_METHOD_HELLO		0
+#define PW_CORE_PROXY_METHOD_UPDATE_TYPES	1
+#define PW_CORE_PROXY_METHOD_SYNC		2
+#define PW_CORE_PROXY_METHOD_GET_REGISTRY	3
+#define PW_CORE_PROXY_METHOD_CLIENT_UPDATE	4
+#define PW_CORE_PROXY_METHOD_PERMISSIONS	5
+#define PW_CORE_PROXY_METHOD_CREATE_OBJECT	6
+#define PW_CORE_PROXY_METHOD_NUM		7
+
+/**
+ * Key to update default permissions of globals without specific
+ * permissions. value is "[r][w][x]" */
+#define PW_CORE_PROXY_PERMISSIONS_DEFAULT	"permissions.default"
+
+/**
+ * Key to update specific permissions of a global. If the global
+ * did not have specific permissions, it will first be assigned
+ * the default permissions before it is updated.
+ * Value is "<global-id>:[r][w][x]"*/
+#define PW_CORE_PROXY_PERMISSIONS_GLOBAL	"permissions.global"
+
+/**
+ * Key to update specific permissions of all existing globals.
+ * This is equivalent to using \ref PW_CORE_PROXY_PERMISSIONS_GLOBAL
+ * on each global id individually that did not have specific
+ * permissions.
+ * Value is "[r][w][x]" */
+#define PW_CORE_PROXY_PERMISSIONS_EXISTING	"permissions.existing"
+
+#define PW_LINK_OUTPUT_NODE_ID	"link.output_node.id"
+#define PW_LINK_OUTPUT_PORT_ID	"link.output_port.id"
+#define PW_LINK_INPUT_NODE_ID	"link.input_node.id"
+#define PW_LINK_INPUT_PORT_ID	"link.input_port.id"
 
 /**
  * \struct pw_core_proxy_methods
  * \brief Core methods
  *
  * The core global object. This is a singleton object used for
- * creating new objects in the PipeWire server. It is also used
- * for internal features.
+ * creating new objects in the remote PipeWire intance. It is
+ * also used for internal features.
  */
 struct pw_core_proxy_methods {
 #define PW_VERSION_CORE_PROXY_METHODS	0
 	uint32_t version;
+	/**
+	 * Start a conversation with the server. This will send
+	 * the core info and server types.
+	 */
+	void (*hello) (void *object);
 	/**
 	 * Update the type map
 	 *
 	 * Send a type map update to the PipeWire server. The server uses this
 	 * information to keep a mapping between client types and the server types.
 	 * \param first_id the id of the first type
-	 * \param n_types the number of types
 	 * \param types the types as a string
+	 * \param n_types the number of types
 	 */
 	void (*update_types) (void *object,
 			      uint32_t first_id,
-			      uint32_t n_types,
-			      const char **types);
+			      const char **types,
+			      uint32_t n_types);
 	/**
 	 * Do server roundtrip
 	 *
@@ -124,49 +154,47 @@ struct pw_core_proxy_methods {
 	 */
 	void (*client_update) (void *object, const struct spa_dict *props);
 	/**
-	 * Create a new node on the PipeWire server from a factory.
+	 * Manage the permissions of the global objects
+	 *
+	 * Update the permissions of the global objects using the
+	 * dictionary with properties.
+	 *
+	 * Globals can use the default permissions or can have specific
+	 * permissions assigned to them.
+	 *
+	 * \param id the global id to change
+	 * \param props dictionary with permission properties
+	 */
+	void (*permissions) (void *object, const struct spa_dict *props);
+	/**
+	 * Create a new object on the PipeWire server from a factory.
 	 * Use a \a factory_name of "client-node" to create a
 	 * \ref pw_client_node.
 	 *
 	 * \param factory_name the factory name to use
-	 * \param name the node name
 	 * \param type the interface to bind to
 	 * \param version the version of the interface
 	 * \param props extra properties
 	 * \param new_id the client proxy id
 	 */
-	void (*create_node) (void *object,
-			     const char *factory_name,
-			     const char *name,
-			     uint32_t type,
-			     uint32_t version,
-			     const struct spa_dict *props,
-			     uint32_t new_id);
-	/**
-	 * Create a new link between two node ports
-	 *
-	 * \param output_node_id the global id of the output node
-	 * \param output_port_id the id of the output port
-	 * \param input_node_id the global id of the input node
-	 * \param input_port_id the id of the input port
-	 * \param filter an optional format filter
-	 * \param props optional properties
-	 * \param new_id the client proxy id
-	 */
-	void (*create_link) (void *object,
-			     uint32_t output_node_id,
-			     uint32_t output_port_id,
-			     uint32_t input_node_id,
-			     uint32_t input_port_id,
-			     const struct spa_format *filter,
-			     const struct spa_dict *props,
-			     uint32_t new_id);
+	void (*create_object) (void *object,
+			       const char *factory_name,
+			       uint32_t type,
+			       uint32_t version,
+			       const struct spa_dict *props,
+			       uint32_t new_id);
 };
 
 static inline void
-pw_core_proxy_update_types(struct pw_core_proxy *core, uint32_t first_id, uint32_t n_types, const char **types)
+pw_core_proxy_hello(struct pw_core_proxy *core)
 {
-	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, update_types, first_id, n_types, types);
+	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, hello);
+}
+
+static inline void
+pw_core_proxy_update_types(struct pw_core_proxy *core, uint32_t first_id, const char **types, uint32_t n_types)
+{
+	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, update_types, first_id, types, n_types);
 }
 
 static inline void
@@ -189,38 +217,25 @@ pw_core_proxy_client_update(struct pw_core_proxy *core, const struct spa_dict *p
 	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, client_update, props);
 }
 
+static inline void
+pw_core_proxy_permissions(struct pw_core_proxy *core, const struct spa_dict *props)
+{
+	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, permissions, props);
+}
+
 static inline void *
-pw_core_proxy_create_node(struct pw_core_proxy *core,
-			  const char *factory_name,
-                          const char *name,
-                          uint32_t type,
-                          uint32_t version,
-                          const struct spa_dict *props,
-			  size_t user_data_size)
+pw_core_proxy_create_object(struct pw_core_proxy *core,
+			    const char *factory_name,
+			    uint32_t type,
+			    uint32_t version,
+			    const struct spa_dict *props,
+			    size_t user_data_size)
 {
 	struct pw_proxy *p = pw_proxy_new((struct pw_proxy*)core, type, user_data_size);
-	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, create_node, factory_name,
-			name, type, version, props, pw_proxy_get_id(p));
+	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, create_object, factory_name,
+			type, version, props, pw_proxy_get_id(p));
 	return p;
 }
-
-static inline struct pw_link_proxy *
-pw_core_proxy_create_link(struct pw_core_proxy *core,
-			  uint32_t type,
-			  uint32_t output_node_id,
-                          uint32_t output_port_id,
-                          uint32_t input_node_id,
-                          uint32_t input_port_id,
-                          const struct spa_format *filter,
-                          const struct spa_dict *prop,
-			  size_t user_data_size)
-{
-	struct pw_proxy *p = pw_proxy_new((struct pw_proxy*)core, type, user_data_size);
-	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, create_link, output_node_id, output_port_id,
-			input_node_id, input_port_id, filter, prop, pw_proxy_get_id(p));
-	return (struct pw_link_proxy*) p;
-}
-
 
 #define PW_CORE_PROXY_EVENT_UPDATE_TYPES 0
 #define PW_CORE_PROXY_EVENT_DONE         1
@@ -242,13 +257,13 @@ struct pw_core_proxy_events {
 	 * Send a type map update to the client. The client uses this
 	 * information to keep a mapping between server types and the client types.
 	 * \param first_id the id of the first type
-	 * \param n_types the number of types
 	 * \param types the types as a string
+	 * \param n_types the number of \a types
 	 */
 	void (*update_types) (void *object,
 			      uint32_t first_id,
-			      uint32_t n_types,
-			      const char **types);
+			      const char **types,
+			      uint32_t n_types);
 	/**
 	 * Emit a done event
 	 *
@@ -308,6 +323,37 @@ pw_core_proxy_add_listener(struct pw_core_proxy *core,
 
 #define PW_VERSION_REGISTRY			0
 
+/** \page page_registry Registry
+ *
+ * \section page_registry_overview Overview
+ *
+ * The registry object is a singleton object that keeps track of
+ * global objects on the PipeWire instance. See also \ref page_global.
+ *
+ * Global objects typically represent an actual object in PipeWire
+ * (for example, a module or node) or they are singleton
+ * objects such as the core.
+ *
+ * When a client creates a registry object, the registry object
+ * will emit a global event for each global currently in the
+ * registry.  Globals come and go as a result of device hotplugs or
+ * reconfiguration or other events, and the registry will send out
+ * global and global_remove events to keep the client up to date
+ * with the changes.  To mark the end of the initial burst of
+ * events, the client can use the pw_core.sync methosd immediately
+ * after calling pw_core.get_registry.
+ *
+ * A client can bind to a global object by using the bind
+ * request.  This creates a client-side proxy that lets the object
+ * emit events to the client and lets the client invoke methods on
+ * the object. See \ref page_proxy
+ *
+ * Clients can also change the permissions of the global objects that
+ * it can see. This is interesting when you want to configure a
+ * pipewire session before handing it to another application. You
+ * can, for example, hide certain existing or new objects or limit
+ * the access permissions on an object.
+ */
 #define PW_REGISTRY_PROXY_METHOD_BIND		0
 #define PW_REGISTRY_PROXY_METHOD_NUM		1
 
@@ -361,9 +407,11 @@ struct pw_registry_proxy_events {
 	 * \param permissions the permissions of the object
 	 * \param type the type of the interface
 	 * \param version the version of the interface
+	 * \param props extra properties of the global
 	 */
 	void (*global) (void *object, uint32_t id, uint32_t parent_id,
-			uint32_t permissions, uint32_t type, uint32_t version);
+			uint32_t permissions, uint32_t type, uint32_t version,
+			const struct spa_dict *props);
 	/**
 	 * Notify of a global object removal
 	 *
@@ -444,6 +492,35 @@ pw_node_proxy_add_listener(struct pw_node_proxy *node,
 }
 
 #define pw_node_resource_info(r,...) pw_resource_notify(r,struct pw_node_proxy_events,info,__VA_ARGS__)
+
+#define PW_VERSION_FACTORY			0
+
+#define PW_FACTORY_PROXY_EVENT_INFO		0
+#define PW_FACTORY_PROXY_EVENT_NUM		1
+
+/** Factory events */
+struct pw_factory_proxy_events {
+#define PW_VERSION_FACTORY_PROXY_EVENTS	0
+	uint32_t version;
+	/**
+	 * Notify factory info
+	 *
+	 * \param info info about the factory
+	 */
+	void (*info) (void *object, struct pw_factory_info *info);
+};
+
+/** Factory */
+static inline void
+pw_factory_proxy_add_listener(struct pw_factory_proxy *factory,
+			      struct spa_hook *listener,
+			      const struct pw_factory_proxy_events *events,
+			      void *data)
+{
+	pw_proxy_add_proxy_listener((struct pw_proxy*)factory, listener, events, data);
+}
+
+#define pw_factory_resource_info(r,...) pw_resource_notify(r,struct pw_factory_proxy_events,info,__VA_ARGS__)
 
 #define PW_VERSION_CLIENT			0
 

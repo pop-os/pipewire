@@ -22,8 +22,10 @@
 #include <errno.h>
 #include <sys/eventfd.h>
 
-#include <spa/format-utils.h>
-#include <spa/loop.h>
+#include <spa/support/loop.h>
+#include <spa/pod/parser.h>
+
+#include <lib/pod.h>
 
 #include "debug.h"
 
@@ -37,12 +39,12 @@ void spa_debug_set_type_map(const struct spa_type_map *m)
 int spa_debug_port_info(const struct spa_port_info *info)
 {
 	if (info == NULL)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+		return -EINVAL;
 
 	fprintf(stderr, "struct spa_port_info %p:\n", info);
 	fprintf(stderr, " flags: \t%08x\n", info->flags);
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 int spa_debug_buffer(const struct spa_buffer *buffer)
@@ -50,7 +52,7 @@ int spa_debug_buffer(const struct spa_buffer *buffer)
 	int i;
 
 	if (buffer == NULL)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+		return -EINVAL;
 
 	fprintf(stderr, "spa_buffer %p:\n", buffer);
 	fprintf(stderr, " id:      %08X\n", buffer->id);
@@ -70,12 +72,6 @@ int spa_debug_buffer(const struct spa_buffer *buffer)
 			fprintf(stderr, "      seq:        %u\n", h->seq);
 			fprintf(stderr, "      pts:        %" PRIi64 "\n", h->pts);
 			fprintf(stderr, "      dts_offset: %" PRIi64 "\n", h->dts_offset);
-		} else if (!strcmp(type_name, SPA_TYPE_META__Pointer)) {
-			struct spa_meta_pointer *h = m->data;
-			fprintf(stderr, "    struct spa_meta_pointer:\n");
-			fprintf(stderr, "      type:       %s\n",
-				spa_type_map_get_type(map, h->type));
-			fprintf(stderr, "      ptr:        %p\n", h->ptr);
 		} else if (!strcmp(type_name, SPA_TYPE_META__VideoCrop)) {
 			struct spa_meta_video_crop *h = m->data;
 			fprintf(stderr, "    struct spa_meta_video_crop:\n");
@@ -83,20 +79,6 @@ int spa_debug_buffer(const struct spa_buffer *buffer)
 			fprintf(stderr, "      y:      %d\n", h->y);
 			fprintf(stderr, "      width:  %d\n", h->width);
 			fprintf(stderr, "      height: %d\n", h->height);
-		} else if (!strcmp(type_name, SPA_TYPE_META__Ringbuffer)) {
-			struct spa_meta_ringbuffer *h = m->data;
-			fprintf(stderr, "    struct spa_meta_ringbuffer:\n");
-			fprintf(stderr, "      readindex:   %d\n", h->ringbuffer.readindex);
-			fprintf(stderr, "      writeindex:  %d\n", h->ringbuffer.writeindex);
-			fprintf(stderr, "      size:        %d\n", h->ringbuffer.size);
-			fprintf(stderr, "      mask:        %d\n", h->ringbuffer.mask);
-		} else if (!strcmp(type_name, SPA_TYPE_META__Shared)) {
-			struct spa_meta_shared *h = m->data;
-			fprintf(stderr, "    struct spa_meta_shared:\n");
-			fprintf(stderr, "      flags:  %d\n", h->flags);
-			fprintf(stderr, "      fd:     %d\n", h->fd);
-			fprintf(stderr, "      offset: %d\n", h->offset);
-			fprintf(stderr, "      size:   %d\n", h->size);
 		} else {
 			fprintf(stderr, "    Unknown:\n");
 			spa_debug_dump_mem(m->data, m->size);
@@ -117,7 +99,7 @@ int spa_debug_buffer(const struct spa_buffer *buffer)
 		fprintf(stderr, "    size:   %u\n", d->chunk->size);
 		fprintf(stderr, "    stride: %d\n", d->chunk->stride);
 	}
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 int spa_debug_dump_mem(const void *mem, size_t size)
@@ -126,50 +108,39 @@ int spa_debug_dump_mem(const void *mem, size_t size)
 	int i;
 
 	if (mem == NULL)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+		return -EINVAL;
 
 	for (i = 0; i < size; i++) {
 		if (i % 16 == 0)
-			printf("%p: ", &t[i]);
-		printf("%02x ", t[i]);
+			fprintf(stderr,"%p: ", &t[i]);
+		fprintf(stderr,"%02x ", t[i]);
 		if (i % 16 == 15 || i == size - 1)
-			printf("\n");
+			fprintf(stderr,"\n");
 	}
-	return SPA_RESULT_OK;
-}
-
-int spa_debug_props(const struct spa_props *props)
-{
-	spa_debug_pod(&props->object.pod);
-	return SPA_RESULT_OK;
-}
-
-int spa_debug_param(const struct spa_param *param)
-{
-	spa_debug_pod(&param->object.pod);
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static const char *pod_type_names[] = {
-	"invalid",
-	"none",
-	"bool",
-	"id",
-	"int",
-	"long",
-	"float",
-	"double",
-	"string",
-	"bytes",
-	"pointer",
-	"rectangle",
-	"fraction",
-	"bitmask",
-	"array",
-	"struct",
-	"object",
-	"prop",
-	"pod"
+	[SPA_POD_TYPE_INVALID] = "invalid",
+	[SPA_POD_TYPE_NONE] = "none",
+	[SPA_POD_TYPE_BOOL] = "bool",
+	[SPA_POD_TYPE_ID] = "id",
+	[SPA_POD_TYPE_INT] = "int",
+	[SPA_POD_TYPE_LONG] = "long",
+	[SPA_POD_TYPE_FLOAT] = "float",
+	[SPA_POD_TYPE_DOUBLE] = "double",
+	[SPA_POD_TYPE_STRING] = "string",
+	[SPA_POD_TYPE_BYTES] = "bytes",
+	[SPA_POD_TYPE_RECTANGLE] = "rectangle",
+	[SPA_POD_TYPE_FRACTION] = "fraction",
+	[SPA_POD_TYPE_BITMAP] = "bitmap",
+	[SPA_POD_TYPE_ARRAY] = "array",
+	[SPA_POD_TYPE_STRUCT] = "struct",
+	[SPA_POD_TYPE_OBJECT] = "object",
+	[SPA_POD_TYPE_POINTER] = "pointer",
+	[SPA_POD_TYPE_FD] = "fd",
+	[SPA_POD_TYPE_PROP] = "prop",
+	[SPA_POD_TYPE_POD] = "pod"
 };
 
 static void
@@ -177,54 +148,57 @@ print_pod_value(uint32_t size, uint32_t type, void *body, int prefix)
 {
 	switch (type) {
 	case SPA_POD_TYPE_BOOL:
-		printf("%-*sBool %d\n", prefix, "", *(int32_t *) body);
+		fprintf(stderr,"%-*sBool %d\n", prefix, "", *(int32_t *) body);
 		break;
 	case SPA_POD_TYPE_ID:
-		printf("%-*sId %d %s\n", prefix, "", *(int32_t *) body,
+		fprintf(stderr,"%-*sId %d %s\n", prefix, "", *(int32_t *) body,
 		       spa_type_map_get_type(map, *(int32_t *) body));
 		break;
 	case SPA_POD_TYPE_INT:
-		printf("%-*sInt %d\n", prefix, "", *(int32_t *) body);
+		fprintf(stderr,"%-*sInt %d\n", prefix, "", *(int32_t *) body);
 		break;
 	case SPA_POD_TYPE_LONG:
-		printf("%-*sLong %" PRIi64 "\n", prefix, "", *(int64_t *) body);
+		fprintf(stderr,"%-*sLong %" PRIi64 "\n", prefix, "", *(int64_t *) body);
 		break;
 	case SPA_POD_TYPE_FLOAT:
-		printf("%-*sFloat %f\n", prefix, "", *(float *) body);
+		fprintf(stderr,"%-*sFloat %f\n", prefix, "", *(float *) body);
 		break;
 	case SPA_POD_TYPE_DOUBLE:
-		printf("%-*sDouble %f\n", prefix, "", *(double *) body);
+		fprintf(stderr,"%-*sDouble %f\n", prefix, "", *(double *) body);
 		break;
 	case SPA_POD_TYPE_STRING:
-		printf("%-*sString \"%s\"\n", prefix, "", (char *) body);
+		fprintf(stderr,"%-*sString \"%s\"\n", prefix, "", (char *) body);
+		break;
+	case SPA_POD_TYPE_FD:
+		fprintf(stderr,"%-*sFd %d\n", prefix, "", *(int *) body);
 		break;
 	case SPA_POD_TYPE_POINTER:
 	{
 		struct spa_pod_pointer_body *b = body;
-		printf("%-*sPointer %s %p\n", prefix, "",
-		       spa_type_map_get_type(map, b->type), b->value);
+		fprintf(stderr,"%-*sPointer %s %p\n", prefix, "",
+		       map ? spa_type_map_get_type(map, b->type) : "*no map*", b->value);
 		break;
 	}
 	case SPA_POD_TYPE_RECTANGLE:
 	{
 		struct spa_rectangle *r = body;
-		printf("%-*sRectangle %dx%d\n", prefix, "", r->width, r->height);
+		fprintf(stderr,"%-*sRectangle %dx%d\n", prefix, "", r->width, r->height);
 		break;
 	}
 	case SPA_POD_TYPE_FRACTION:
 	{
 		struct spa_fraction *f = body;
-		printf("%-*sFraction %d/%d\n", prefix, "", f->num, f->denom);
+		fprintf(stderr,"%-*sFraction %d/%d\n", prefix, "", f->num, f->denom);
 		break;
 	}
-	case SPA_POD_TYPE_BITMASK:
-		printf("%-*sBitmask\n", prefix, "");
+	case SPA_POD_TYPE_BITMAP:
+		fprintf(stderr,"%-*sBitmap\n", prefix, "");
 		break;
 	case SPA_POD_TYPE_ARRAY:
 	{
 		struct spa_pod_array_body *b = body;
 		void *p;
-		printf("%-*sArray: child.size %d, child.type %d\n", prefix, "",
+		fprintf(stderr,"%-*sArray: child.size %d, child.type %d\n", prefix, "",
 		       b->child.size, b->child.type);
 
 		SPA_POD_ARRAY_BODY_FOREACH(b, size, p)
@@ -234,7 +208,7 @@ print_pod_value(uint32_t size, uint32_t type, void *body, int prefix)
 	case SPA_POD_TYPE_STRUCT:
 	{
 		struct spa_pod *b = body, *p;
-		printf("%-*sStruct: size %d\n", prefix, "", size);
+		fprintf(stderr,"%-*sStruct: size %d\n", prefix, "", size);
 		SPA_POD_FOREACH(b, size, p)
 			print_pod_value(p->size, p->type, SPA_POD_BODY(p), prefix + 2);
 		break;
@@ -244,8 +218,9 @@ print_pod_value(uint32_t size, uint32_t type, void *body, int prefix)
 		struct spa_pod_object_body *b = body;
 		struct spa_pod *p;
 
-		printf("%-*sObject: size %d, id %d, type %s\n", prefix, "", size, b->id,
-		       spa_type_map_get_type(map, b->type));
+		fprintf(stderr,"%-*sObject: size %d, id %s, type %s\n", prefix, "", size,
+		       map ? spa_type_map_get_type(map, b->id) : "*no map*",
+		       map ? spa_type_map_get_type(map, b->type) : "*no map*");
 		SPA_POD_OBJECT_BODY_FOREACH(b, size, p)
 			print_pod_value(p->size, p->type, SPA_POD_BODY(p), prefix + 2);
 		break;
@@ -256,42 +231,70 @@ print_pod_value(uint32_t size, uint32_t type, void *body, int prefix)
 		void *alt;
 		int i;
 
-		printf("%-*sProp: key %s, flags %d\n", prefix, "",
-		       spa_type_map_get_type(map, b->key), b->flags);
+		fprintf(stderr,"%-*sProp: key %s, flags %d\n", prefix, "",
+		       map ? spa_type_map_get_type(map, b->key) : "*no map*", b->flags);
 		if (b->flags & SPA_POD_PROP_FLAG_UNSET)
-			printf("%-*sUnset (Default):\n", prefix + 2, "");
+			fprintf(stderr,"%-*sUnset (Default):\n", prefix + 2, "");
 		else
-			printf("%-*sValue: size %u\n", prefix + 2, "", b->value.size);
+			fprintf(stderr,"%-*sValue: size %u\n", prefix + 2, "", b->value.size);
 		print_pod_value(b->value.size, b->value.type, SPA_POD_BODY(&b->value),
 				prefix + 4);
 
 		i = 0;
-		SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt) {
-			if (i == 0)
-				printf("%-*sAlternatives:\n", prefix + 2, "");
-			print_pod_value(b->value.size, b->value.type, alt, prefix + 4);
-			i++;
+		switch (b->flags & SPA_POD_PROP_RANGE_MASK) {
+		case SPA_POD_PROP_RANGE_NONE:
+			break;
+		case SPA_POD_PROP_RANGE_MIN_MAX:
+			SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt) {
+				if (i == 0)
+					fprintf(stderr,"%-*sMin: ", prefix + 2, "");
+				else if (i == 1)
+					fprintf(stderr,"%-*sMax: ", prefix + 2, "");
+				else
+					break;
+				print_pod_value(b->value.size, b->value.type, alt, 0);
+				i++;
+			}
+			break;
+		case SPA_POD_PROP_RANGE_STEP:
+			SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt) {
+				if (i == 0)
+					fprintf(stderr,"%-*sMin:  ", prefix + 2, "");
+				else if (i == 1)
+					fprintf(stderr,"%-*sMax:  ", prefix + 2, "");
+				else if (i == 2)
+					fprintf(stderr,"%-*sStep: ", prefix + 2, "");
+				else
+					break;
+				print_pod_value(b->value.size, b->value.type, alt, 0);
+				i++;
+			}
+			break;
+		case SPA_POD_PROP_RANGE_ENUM:
+			SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt) {
+				if (i == 0)
+					fprintf(stderr,"%-*sEnum:\n", prefix + 2, "");
+				print_pod_value(b->value.size, b->value.type, alt, prefix + 4);
+				i++;
+			}
+			break;
+		case SPA_POD_PROP_RANGE_FLAGS:
+			break;
 		}
 		break;
 	}
 	case SPA_POD_TYPE_BYTES:
-		printf("%-*sBytes\n", prefix, "");
+		fprintf(stderr,"%-*sBytes\n", prefix, "");
 		spa_debug_dump_mem(body, size);
 		break;
 	case SPA_POD_TYPE_NONE:
-		printf("%-*sNone\n", prefix, "");
+		fprintf(stderr,"%-*sNone\n", prefix, "");
 		spa_debug_dump_mem(body, size);
 		break;
 	default:
-		printf("unhandled POD type %d\n", type);
+		fprintf(stderr,"unhandled POD type %d\n", type);
 		break;
 	}
-}
-
-int spa_debug_pod(const struct spa_pod *pod)
-{
-	print_pod_value(pod->size, pod->type, SPA_POD_BODY(pod), 0);
-	return SPA_RESULT_OK;
 }
 
 static void
@@ -303,7 +306,7 @@ print_format_value(uint32_t size, uint32_t type, void *body)
 		break;
 	case SPA_POD_TYPE_ID:
 	{
-		const char *str = spa_type_map_get_type(map, *(int32_t *) body);
+		const char *str = map ? spa_type_map_get_type(map, *(int32_t *) body) : NULL;
 		if (str) {
 			const char *h = rindex(str, ':');
 			if (h)
@@ -341,8 +344,8 @@ print_format_value(uint32_t size, uint32_t type, void *body)
 		fprintf(stderr, "%" PRIu32 "/%" PRIu32, f->num, f->denom);
 		break;
 	}
-	case SPA_POD_TYPE_BITMASK:
-		fprintf(stderr, "Bitmask");
+	case SPA_POD_TYPE_BITMAP:
+		fprintf(stderr, "Bitmap");
 		break;
 	case SPA_POD_TYPE_BYTES:
 		fprintf(stderr, "Bytes");
@@ -352,19 +355,20 @@ print_format_value(uint32_t size, uint32_t type, void *body)
 	}
 }
 
-int spa_debug_format(const struct spa_format *format)
+static int spa_debug_format(const struct spa_pod *format)
 {
 	int i;
 	const char *media_type;
 	const char *media_subtype;
-	struct spa_pod_prop *prop;
+	struct spa_pod *pod;
 	uint32_t mtype, mstype;
 
-	if (format == NULL)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+	if (format == NULL || SPA_POD_TYPE(format) != SPA_POD_TYPE_OBJECT)
+		return -EINVAL;
 
-	mtype = format->body.media_type.value;
-	mstype = format->body.media_subtype.value;
+	if (spa_pod_object_parse(format, "I", &mtype,
+					 "I", &mstype) < 0)
+		return -EINVAL;
 
 	media_type = spa_type_map_get_type(map, mtype);
 	media_subtype = spa_type_map_get_type(map, mstype);
@@ -372,8 +376,14 @@ int spa_debug_format(const struct spa_format *format)
 	fprintf(stderr, "%-6s %s/%s\n", "", rindex(media_type, ':') + 1,
 		rindex(media_subtype, ':') + 1);
 
-	SPA_FORMAT_FOREACH(format, prop) {
+	SPA_POD_OBJECT_FOREACH((struct spa_pod_object*)format, pod) {
+		struct spa_pod_prop *prop;
 		const char *key;
+
+		if (pod->type != SPA_POD_TYPE_PROP)
+			continue;
+
+		prop = (struct spa_pod_prop *)pod;
 
 		if ((prop->body.flags & SPA_POD_PROP_FLAG_UNSET) &&
 		    (prop->body.flags & SPA_POD_PROP_FLAG_OPTIONAL))
@@ -421,19 +431,32 @@ int spa_debug_format(const struct spa_format *format)
 		}
 		fprintf(stderr, "\n");
 	}
-	return SPA_RESULT_OK;
+	return 0;
 }
+
+int spa_debug_pod(const struct spa_pod *pod, uint32_t flags)
+{
+	int res = 0;
+
+	if (flags & SPA_DEBUG_FLAG_FORMAT)
+		res = spa_debug_format(pod);
+	else
+		print_pod_value(pod->size, pod->type, SPA_POD_BODY(pod), 0);
+
+	return res;
+}
+
 
 int spa_debug_dict(const struct spa_dict *dict)
 {
 	unsigned int i;
 
 	if (dict == NULL)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+		return -EINVAL;
 
 	for (i = 0; i < dict->n_items; i++)
 		fprintf(stderr, "          %s = \"%s\"\n", dict->items[i].key,
 			dict->items[i].value);
 
-	return SPA_RESULT_OK;
+	return 0;
 }

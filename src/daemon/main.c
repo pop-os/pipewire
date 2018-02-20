@@ -43,14 +43,14 @@ int main(int argc, char *argv[])
 
 	/* parse configuration */
 	config = pw_daemon_config_new();
-	if (!pw_daemon_config_load(config, &err)) {
+	if (pw_daemon_config_load(config, &err) < 0) {
 		pw_log_error("failed to parse config: %s", err);
 		free(err);
 		return -1;
 	}
 
-	props = pw_properties_new("pipewire.core.name", "pipewire-0",
-				  "pipewire.daemon", "1", NULL);
+	props = pw_properties_new(PW_CORE_PROP_NAME, "pipewire-0",
+				  PW_CORE_PROP_DAEMON, "1", NULL);
 
 	loop = pw_main_loop_new(props);
 	pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGINT, do_quit, loop);
@@ -58,7 +58,10 @@ int main(int argc, char *argv[])
 
 	core = pw_core_new(pw_main_loop_get_loop(loop), props);
 
-	pw_daemon_config_run_commands(config, core);
+	if (pw_daemon_config_run_commands(config, core) < 0) {
+		pw_log_error("failed to run config commands");
+		return -1;
+	}
 
 	pw_log_info("start main loop");
 	pw_main_loop_run(loop);

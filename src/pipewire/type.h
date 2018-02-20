@@ -24,11 +24,14 @@
 extern "C" {
 #endif
 
-#include <spa/type-map.h>
-#include <spa/event-node.h>
-#include <spa/command-node.h>
-#include <spa/monitor.h>
-#include <spa/param-alloc.h>
+#include <spa/support/type-map.h>
+#include <spa/node/event.h>
+#include <spa/node/command.h>
+#include <spa/monitor/monitor.h>
+#include <spa/param/buffers.h>
+#include <spa/param/meta.h>
+#include <spa/param/io.h>
+#include <spa/node/io.h>
 
 #include <pipewire/map.h>
 
@@ -51,7 +54,7 @@ struct pw_type {
 	uint32_t core;
 	uint32_t registry;
 	uint32_t node;
-	uint32_t node_factory;
+	uint32_t factory;
 	uint32_t link;
 	uint32_t client;
 	uint32_t module;
@@ -63,27 +66,19 @@ struct pw_type {
 	uint32_t spa_format;
 	uint32_t spa_props;
 
+	struct spa_type_io io;
+	struct spa_type_param param;
 	struct spa_type_meta meta;
 	struct spa_type_data data;
 	struct spa_type_event_node event_node;
 	struct spa_type_command_node command_node;
 	struct spa_type_monitor monitor;
-	struct spa_type_param_alloc_buffers param_alloc_buffers;
-	struct spa_type_param_alloc_meta_enable param_alloc_meta_enable;
-	struct spa_type_param_alloc_video_padding param_alloc_video_padding;
+	struct spa_type_param_buffers param_buffers;
+	struct spa_type_param_meta param_meta;
+	struct spa_type_param_io param_io;
 };
 
-void
-pw_type_init(struct pw_type *type);
-
-bool
-pw_pod_remap_data(uint32_t type, void *body, uint32_t size, struct pw_map *types);
-
-static inline bool
-pw_pod_remap(struct spa_pod *pod, struct pw_map *types)
-{
-	return pw_pod_remap_data(pod->type, SPA_POD_BODY(pod), pod->size, types);
-}
+int pw_type_init(struct pw_type *type);
 
 #ifdef __cplusplus
 }

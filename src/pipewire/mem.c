@@ -21,6 +21,8 @@
 #define _GNU_SOURCE
 #endif
 
+#include "config.h"
+
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -31,9 +33,12 @@
 #include <stdlib.h>
 #include <sys/syscall.h>
 
+#include <spa/utils/list.h>
+
 #include <pipewire/log.h>
 #include <pipewire/mem.h>
 
+#ifndef HAVE_MEMFD_CREATE
 /*
  * No glibc wrappers exist for memfd_create(2), so provide our own.
  *
@@ -46,6 +51,7 @@ static inline int memfd_create(const char *name, unsigned int flags)
 {
 	return syscall(SYS_memfd_create, name, flags);
 }
+#endif
 
 /* memfd_create(2) flags */
 
@@ -73,8 +79,14 @@ static inline int memfd_create(const char *name, unsigned int flags)
 #define F_SEAL_WRITE    0x0008	/* prevent writes */
 #endif
 
+struct memblock {
+	struct pw_memblock mem;
+	struct spa_list link;
+};
 
-#undef USE_MEMFD
+static struct spa_list _memblocks = SPA_LIST_INIT(&_memblocks);
+
+#define USE_MEMFD
 
 /** Map a memblock
  * \param mem a memblock
@@ -84,7 +96,7 @@ static inline int memfd_create(const char *name, unsigned int flags)
 int pw_memblock_map(struct pw_memblock *mem)
 {
 	if (mem->ptr != NULL)
-		return SPA_RESULT_OK;
+		return 0;
 
 	if (mem->flags & PW_MEMBLOCK_FLAG_MAP_READWRITE) {
 		int prot = 0;
@@ -101,14 +113,14 @@ int pw_memblock_map(struct pw_memblock *mem)
 			    mmap(NULL, mem->size << 1, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1,
 				 0);
 			if (mem->ptr == MAP_FAILED)
-				return SPA_RESULT_NO_MEMORY;
+				return -errno;
 
 			ptr =
 			    mmap(mem->ptr, mem->size, prot, MAP_FIXED | MAP_SHARED, mem->fd,
 				 mem->offset);
 			if (ptr != mem->ptr) {
 				munmap(mem->ptr, mem->size << 1);
-				return SPA_RESULT_NO_MEMORY;
+				return -ENOMEM;
 			}
 
 			ptr =
@@ -116,17 +128,17 @@ int pw_memblock_map(struct pw_memblock *mem)
 				 mem->fd, mem->offset);
 			if (ptr != mem->ptr + mem->size) {
 				munmap(mem->ptr, mem->size << 1);
-				return SPA_RESULT_NO_MEMORY;
+				return -ENOMEM;
 			}
 		} else {
 			mem->ptr = mmap(NULL, mem->size, prot, MAP_SHARED, mem->fd, 0);
 			if (mem->ptr == MAP_FAILED)
-				return SPA_RESULT_NO_MEMORY;
+				return -ENOMEM;
 		}
 	} else {
 		mem->ptr = NULL;
 	}
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 /** Create a new memblock
@@ -136,67 +148,96 @@ int pw_memblock_map(struct pw_memblock *mem)
  * \return 0 on success, < 0 on error
  * \memberof pw_memblock
  */
-int pw_memblock_alloc(enum pw_memblock_flags flags, size_t size, struct pw_memblock *mem)
+int pw_memblock_alloc(enum pw_memblock_flags flags, size_t size, struct pw_memblock **mem)
 {
+	struct memblock tmp, *p;
+	struct pw_memblock *m;
 	bool use_fd;
 
-	if (mem == NULL || size == 0)
-		return SPA_RESULT_INVALID_ARGUMENTS;
+	if (mem == NULL)
+		return -EINVAL;
 
-	mem->offset = 0;
-	mem->flags = flags;
-	mem->size = size;
-	mem->ptr = NULL;
+	m = &tmp.mem;
+	m->offset = 0;
+	m->flags = flags;
+	m->size = size;
+	m->ptr = NULL;
 
 	use_fd = ! !(flags & (PW_MEMBLOCK_FLAG_MAP_TWICE | PW_MEMBLOCK_FLAG_WITH_FD));
 
 	if (use_fd) {
 #ifdef USE_MEMFD
-		mem->fd = memfd_create("pipewire-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
-		if (mem->fd == -1) {
+		m->fd = memfd_create("pipewire-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+		if (m->fd == -1) {
 			pw_log_error("Failed to create memfd: %s\n", strerror(errno));
-			return SPA_RESULT_ERRNO;
+			return -errno;
 		}
 #else
 		char filename[] = "/dev/shm/pipewire-tmpfile.XXXXXX";
-		mem->fd = mkostemp(filename, O_CLOEXEC);
-		if (mem->fd == -1) {
+		m->fd = mkostemp(filename, O_CLOEXEC);
+		if (m->fd == -1) {
 			pw_log_error("Failed to create temporary file: %s\n", strerror(errno));
-			return SPA_RESULT_ERRNO;
+			return -errno;
 		}
 		unlink(filename);
 #endif
 
-		if (ftruncate(mem->fd, size) < 0) {
+		if (ftruncate(m->fd, size) < 0) {
 			pw_log_warn("Failed to truncate temporary file: %s", strerror(errno));
-			close(mem->fd);
-			return SPA_RESULT_ERRNO;
+			close(m->fd);
+			return -errno;
 		}
 #ifdef USE_MEMFD
 		if (flags & PW_MEMBLOCK_FLAG_SEAL) {
 			unsigned int seals = F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
-			if (fcntl(mem->fd, F_ADD_SEALS, seals) == -1) {
+			if (fcntl(m->fd, F_ADD_SEALS, seals) == -1) {
 				pw_log_warn("Failed to add seals: %s", strerror(errno));
 			}
 		}
 #endif
-		if (pw_memblock_map(mem) != SPA_RESULT_OK)
+		if (pw_memblock_map(m) != 0)
 			goto mmap_failed;
 	} else {
-		mem->ptr = malloc(size);
-		if (mem->ptr == NULL)
-			return SPA_RESULT_NO_MEMORY;
-		mem->fd = -1;
+		if (size > 0) {
+			m->ptr = malloc(size);
+			if (m->ptr == NULL)
+				return -ENOMEM;
+		}
+		m->fd = -1;
 	}
-	if (!(flags & PW_MEMBLOCK_FLAG_WITH_FD) && mem->fd != -1) {
-		close(mem->fd);
-		mem->fd = -1;
+	if (!(flags & PW_MEMBLOCK_FLAG_WITH_FD) && m->fd != -1) {
+		close(m->fd);
+		m->fd = -1;
 	}
-	return SPA_RESULT_OK;
+
+	p = calloc(1, sizeof(struct memblock));
+	*p = tmp;
+	spa_list_prepend(&_memblocks, &p->link);
+	*mem = &p->mem;
+
+	return 0;
 
       mmap_failed:
-	close(mem->fd);
-	return SPA_RESULT_NO_MEMORY;
+	close(m->fd);
+	return -ENOMEM;
+}
+
+int
+pw_memblock_import(enum pw_memblock_flags flags,
+		   int fd, off_t offset, size_t size,
+		   struct pw_memblock **mem)
+{
+	int res;
+
+	if ((res = pw_memblock_alloc(0, 0, mem)) < 0)
+		return res;
+
+	(*mem)->flags = flags;
+	(*mem)->fd = fd;
+	(*mem)->offset = offset;
+	(*mem)->size = size;
+
+	return pw_memblock_map(*mem);
 }
 
 /** Free a memblock
@@ -205,6 +246,8 @@ int pw_memblock_alloc(enum pw_memblock_flags flags, size_t size, struct pw_membl
  */
 void pw_memblock_free(struct pw_memblock *mem)
 {
+	struct memblock *m = (struct memblock *)mem;
+
 	if (mem == NULL)
 		return;
 
@@ -216,6 +259,17 @@ void pw_memblock_free(struct pw_memblock *mem)
 	} else {
 		free(mem->ptr);
 	}
-	mem->ptr = NULL;
-	mem->fd = -1;
+	spa_list_remove(&m->link);
+	free(mem);
+}
+
+struct pw_memblock * pw_memblock_find(const void *ptr)
+{
+	struct memblock *m;
+
+	spa_list_for_each(m, &_memblocks, link) {
+		if (ptr >= m->mem.ptr && ptr < m->mem.ptr + m->mem.size)
+			return &m->mem;
+	}
+	return NULL;
 }

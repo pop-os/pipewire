@@ -17,6 +17,8 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <errno.h>
+
 typedef enum {
 	GRAY = 0,
 	YELLOW,
@@ -135,21 +137,21 @@ static int drawing_data_init(DrawingData * dd, struct impl *this, char *data)
 
 	if ((format->media_type != this->type.media_type.video) ||
 	    (format->media_subtype != this->type.media_subtype.raw))
-		return SPA_RESULT_NOT_IMPLEMENTED;
+		return -ENOTSUP;
 
 	if (format->info.raw.format == this->type.video_format.RGB) {
 		dd->draw_pixel = draw_pixel_rgb;
 	} else if (format->info.raw.format == this->type.video_format.UYVY) {
 		dd->draw_pixel = draw_pixel_uyvy;
 	} else
-		return SPA_RESULT_NOT_IMPLEMENTED;
+		return -ENOTSUP;
 
 	dd->line = data;
 	dd->width = size->width;
 	dd->height = size->height;
 	dd->stride = this->stride;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static inline void draw_pixels(DrawingData * dd, int offset, Color color, int length)
@@ -260,21 +262,21 @@ static int draw(struct impl *this, char *data)
 {
 	DrawingData dd;
 	int res;
-	uint32_t pattern;
 
 	init_colors();
 
-	res = drawing_data_init(&dd, this, data);
-	if (res != SPA_RESULT_OK)
+	if ((res = drawing_data_init(&dd, this, data)) < 0)
 		return res;
 
-	pattern = this->props.pattern;
-	if (pattern == this->type.pattern_smpte_snow)
+	switch (this->props.pattern) {
+	case PATTERN_SMPTE_SNOW:
 		draw_smpte_snow(&dd);
-	else if (pattern == this->type.pattern_snow)
+		break;
+	case PATTERN_SNOW:
 		draw_snow(&dd);
-	else
-		return SPA_RESULT_NOT_IMPLEMENTED;
-
-	return SPA_RESULT_OK;
+		break;
+	default:
+		return -ENOTSUP;
+	}
+	return 0;
 }

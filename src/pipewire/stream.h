@@ -41,8 +41,8 @@ extern "C" {
  * choose a port for you.
  *
  * For more complicated nodes such as filters or ports with multiple
- * inputs and/or outputs you will need to manage the \ref pw_client_node proxy
- * yourself.
+ * inputs and/or outputs you will need to create a pw_node yourself and
+ * export it with \ref pw_remote_export.
  *
  * \section sec_create Create
  *
@@ -51,7 +51,7 @@ extern "C" {
  * pw_fill_stream_properties() to get a basic set of properties for the
  * stream.
  *
- * Once the stream is created, the state_changed signal should be used to
+ * Once the stream is created, the state_changed event should be used to
  * track the state of the stream.
  *
  * \section sec_connect Connect
@@ -88,7 +88,7 @@ extern "C" {
  * PW_STREAM_STATE_CONFIGURE state. In this state the format will be
  * negotiated by the PipeWire server.
  *
- * Once the format has been selected, the format_changed signal is
+ * Once the format has been selected, the format_changed event is
  * emited with the configured format as a parameter.
  *
  * The client should now prepare itself to deal with the format and
@@ -106,7 +106,7 @@ extern "C" {
  * notify the stream of the buffers that will be used to exchange data
  * between client and server.
  *
- * With the add_buffer signal, a stream will be notified of a new buffer
+ * With the add_buffer event, a stream will be notified of a new buffer
  * that can be used for data transport.
  *
  * Afer the buffers are negotiated, the stream will transition to the
@@ -124,7 +124,7 @@ extern "C" {
  *
  * \subsection ssec_consume Consume data
  *
- * The new_buffer signal is emited for each new buffer can can be
+ * The new_buffer event is emited for each new buffer can can be
  * consumed.
  *
  * \ref pw_stream_peek_buffer() should be used to get the data and metadata
@@ -135,7 +135,7 @@ extern "C" {
  *
  * \subsection ssec_produce Produce data
  *
- * The need_buffer signal is emited when PipeWire needs a new buffer for this
+ * The need_buffer event is emited when PipeWire needs a new buffer for this
  * stream.
  *
  * \ref pw_stream_get_empty_buffer() gives the id of an empty buffer.
@@ -144,7 +144,7 @@ extern "C" {
  *
  * To send the filled buffer, use \ref pw_stream_send_buffer().
  *
- * The new_buffer signal is emited when PipeWire no longer uses the buffer
+ * The new_buffer event is emited when PipeWire no longer uses the buffer
  * and it can be safely reused.
  *
  * \section sec_stream_disconnect Disconnect
@@ -158,12 +158,12 @@ extern "C" {
  * The stream object provides a convenient way to send and
  * receive data streams from/to PipeWire.
  *
- * See also \ref page_streams and \ref page_client_api
+ * See also \ref page_streams and \ref page_core_api
  */
 struct pw_stream;
 
-#include <spa/buffer.h>
-#include <spa/format.h>
+#include <spa/buffer/buffer.h>
+#include <spa/param/param.h>
 
 #include <pipewire/remote.h>
 
@@ -179,6 +179,7 @@ enum pw_stream_state {
 	PW_STREAM_STATE_STREAMING = 5		/**< streaming */
 };
 
+/** Events for a stream */
 struct pw_stream_events {
 #define PW_VERSION_STREAM_EVENTS	0
 	uint32_t version;
@@ -188,9 +189,9 @@ struct pw_stream_events {
 	void (*state_changed) (void *data, enum pw_stream_state old,
 				enum pw_stream_state state, const char *error);
 	/** when the format changed. The listener should call
-	 * pw_stream_finish_format() from within this callbaclk or later to complete
-	 * the format negotiation */
-	void (*format_changed) (void *data, struct spa_format *format);
+	 * pw_stream_finish_format() from within this callback or later to complete
+	 * the format negotiation and start the buffer negotiation. */
+	void (*format_changed) (void *data, struct spa_pod *format);
 
         /** when a new buffer was created for this stream */
         void (*add_buffer) (void *data, uint32_t id);
@@ -208,17 +209,12 @@ const char * pw_stream_state_as_string(enum pw_stream_state state);
 
 /** \enum pw_stream_flags Extra flags that can be used in \ref pw_stream_connect() \memberof pw_stream */
 enum pw_stream_flags {
-	PW_STREAM_FLAG_NONE = 0,		/**< no flags */
-	PW_STREAM_FLAG_AUTOCONNECT = (1 << 0),	/**< try to automatically connect
-						  *  this stream */
-	PW_STREAM_FLAG_CLOCK_UPDATE = (1 << 1),	/**< request periodic clock updates for
-						  *  this stream */
-};
-
-/** \enum pw_stream_mode The method for transfering data for a stream \memberof pw_stream */
-enum pw_stream_mode {
-	PW_STREAM_MODE_BUFFER = 0,	/**< data is placed in buffers */
-	PW_STREAM_MODE_RINGBUFFER = 1,	/**< a ringbuffer is used to exchange data */
+	PW_STREAM_FLAG_NONE = 0,			/**< no flags */
+	PW_STREAM_FLAG_AUTOCONNECT	= (1 << 0),	/**< try to automatically connect
+							  *  this stream */
+	PW_STREAM_FLAG_CLOCK_UPDATE	= (1 << 1),	/**< request periodic clock updates for
+							  *  this stream */
+	PW_STREAM_FLAG_INACTIVE		= (1 << 2),	/**< start the stream inactive */
 };
 
 /** A time structure \memberof pw_stream */
@@ -247,23 +243,31 @@ enum pw_stream_state pw_stream_get_state(struct pw_stream *stream, const char **
 
 const char *pw_stream_get_name(struct pw_stream *stream);
 
+/** Indicates that the stream is live, boolean default false */
+#define PW_STREAM_PROP_IS_LIVE		"pipewire.latency.is-live"
+/** The minimum latency of the stream, int, default 0 */
+#define PW_STREAM_PROP_LATENCY_MIN	"pipewire.latency.min"
+/** The maximum latency of the stream, int default MAXINT */
+#define PW_STREAM_PROP_LATENCY_MAX	"pipewire.latency.max"
+
 const struct pw_properties *pw_stream_get_properties(struct pw_stream *stream);
 
 /** Connect a stream for input or output on \a port_path. \memberof pw_stream
- * \return true on success.
+ * \return 0 on success < 0 on error.
  *
  * When \a mode is \ref PW_STREAM_MODE_BUFFER, you should connect to the new-buffer
- * signal and use pw_stream_peek_buffer() to get the latest metadata and
+ * event and use pw_stream_peek_buffer() to get the latest metadata and
  * data. */
-bool
+int
 pw_stream_connect(struct pw_stream *stream,		/**< a \ref pw_stream */
 		  enum pw_direction direction,		/**< the stream direction */
-		  enum pw_stream_mode mode,		/**< a \ref pw_stream_mode */
 		  const char *port_path,		/**< the port path to connect to or NULL
 							  *  to let the server choose a port */
 		  enum pw_stream_flags flags,		/**< stream flags */
-		  uint32_t n_possible_formats,		/**< number of items in \a possible_formats */
-		  const struct spa_format **possible_formats	/**< an array with possible accepted formats */);
+		  const struct spa_pod **params,	/**< an array with params. The params
+							  *  should ideally contain supported
+							  *  formats. */
+		  uint32_t n_params			/**< number of items in \a params */);
 
 /** Get the node ID of the stream. \memberof pw_stream
  * \return node ID. */
@@ -271,7 +275,7 @@ uint32_t
 pw_stream_get_node_id(struct pw_stream *stream);
 
 /** Disconnect \a stream \memberof pw_stream */
-void pw_stream_disconnect(struct pw_stream *stream);
+int pw_stream_disconnect(struct pw_stream *stream);
 
 /** Complete the negotiation process with result code \a res \memberof pw_stream
  *
@@ -282,11 +286,16 @@ void pw_stream_disconnect(struct pw_stream *stream);
 void
 pw_stream_finish_format(struct pw_stream *stream,	/**< a \ref pw_stream */
 			int res,			/**< a result code */
-			struct spa_param **params,	/**< an array of pointers to \ref spa_param */
+			struct spa_pod **params,	/**< an array of params. The params should
+							  *  ideally contain parameters for doing
+							  *  buffer allocation. */
 			uint32_t n_params		/**< number of elements in \a params */);
 
+/** Activate or deactivate the stream \memberof pw_stream */
+int pw_stream_set_active(struct pw_stream *stream, bool active);
+
 /** Query the time on the stream \memberof pw_stream */
-bool pw_stream_get_time(struct pw_stream *stream, struct pw_time *time);
+int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time);
 
 /** Get the id of an empty buffer that can be filled \memberof pw_stream
  * \return the id of an empty buffer or \ref SPA_ID_INVALID when no buffer is
@@ -294,9 +303,9 @@ bool pw_stream_get_time(struct pw_stream *stream, struct pw_time *time);
 uint32_t pw_stream_get_empty_buffer(struct pw_stream *stream);
 
 /** Recycle the buffer with \a id \memberof pw_stream
- * \return true on success, false when \a id is invalid or not a used buffer
+ * \return 0 on success, < 0 when \a id is invalid or not a used buffer
  * Let the PipeWire server know that it can reuse the buffer with \a id. */
-bool pw_stream_recycle_buffer(struct pw_stream *stream, uint32_t id);
+int pw_stream_recycle_buffer(struct pw_stream *stream, uint32_t id);
 
 /** Get the buffer with \a id from \a stream \memberof pw_stream
  * \return a \ref spa_buffer or NULL when there is no buffer
@@ -306,11 +315,11 @@ struct spa_buffer *
 pw_stream_peek_buffer(struct pw_stream *stream, uint32_t id);
 
 /** Send a buffer with \a id to \a stream \memberof pw_stream
- * \return true when \a id was handled, false on error
+ * \return 0 when \a id was handled, < 0 on error
  *
  * For provider or playback streams, this function should be called whenever
  * there is a new buffer available. */
-bool pw_stream_send_buffer(struct pw_stream *stream, uint32_t id);
+int pw_stream_send_buffer(struct pw_stream *stream, uint32_t id);
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,5 @@
 project('pipewire', 'c',
-  version : '0.1.4',
+  version : '0.1.8',
   meson_version : '>= 0.36.0',
   default_options : [ 'warning_level=1',
                       'c_std=gnu99',
@@ -117,6 +117,10 @@ if cc.has_function('mkstemp', prefix : '#include <stdlib.h>')
   cdata.set('HAVE_MKSTEMP', 1)
 endif
 
+if cc.has_function('memfd_create', prefix : '#include <sys/mman.h>', args : [ '-D_GNU_SOURCE' ])
+  cdata.set('HAVE_MEMFD_CREATE', 1)
+endif
+
 configure_file(input : 'config.h.meson',
   output : 'config.h',
   configuration : cdata)
@@ -137,36 +141,41 @@ configure_file(input : 'Makefile.in',
   configuration : makedata)
 
 # Find dependencies
-glib_dep = dependency('glib-2.0', version : '>=2.32.0')
-gobject_dep = dependency('gobject-2.0')
-gmodule_dep = dependency('gmodule-2.0')
-gio_dep = [dependency('gio-2.0'), dependency('gio-unix-2.0')]
-jack_dep = dependency('jack', required : false)
-mathlib = cc.find_library('m', required : false)
-rt_lib = cc.find_library('rt', required : false) # clock_gettime
-dl_lib = cc.find_library('dl', required : false)
+mathlib = cc.find_library('m', required : true)
+rt_lib = cc.find_library('rt', required : true) # clock_gettime
+dl_lib = cc.find_library('dl', required : true)
 pthread_lib = cc.find_library('pthread', required : true)
 dbus_dep = dependency('dbus-1')
-gst_dep = [dependency('gstreamer-1.0'),
-           dependency('gstreamer-plugins-base-1.0'),
-           dependency('gstreamer-video-1.0'),
-           dependency('gstreamer-audio-1.0'),
-           dependency('gstreamer-allocators-1.0'),]
+
+#optional dependencies
+jack_dep = dependency('jack', version : '>= 1.9.10', required : false)
+
+if get_option('enable_gstreamer')
+  glib_dep = dependency('glib-2.0', version : '>=2.32.0')
+  gobject_dep = dependency('gobject-2.0')
+  gmodule_dep = dependency('gmodule-2.0')
+  gio_dep = [dependency('gio-2.0'), dependency('gio-unix-2.0')]
+  gst_dep = [dependency('gstreamer-1.0'),
+             dependency('gstreamer-plugins-base-1.0'),
+             dependency('gstreamer-video-1.0'),
+             dependency('gstreamer-audio-1.0'),
+             dependency('gstreamer-allocators-1.0'),]
+endif
 
 subdir('spa')
 subdir('src')
 subdir('pkgconfig')
 
-doxygen = find_program('doxygen', required: false)
-if doxygen.found()
-  subdir('doc')
-else
-  message('Documentation disabled without doxygen')
+if get_option('enable_docs')
+  doxygen = find_program('doxygen')
+  if doxygen.found()
+    subdir('doc')
+  endif
 endif
 
-xmltoman = find_program('xmltoman', required: false)
-if xmltoman.found()
-  subdir('man')
-else
-  message('Man page disabled without xmltoman')
+if get_option('enable_man')
+  xmltoman = find_program('xmltoman')
+  if xmltoman.found()
+    subdir('man')
+  endif
 endif

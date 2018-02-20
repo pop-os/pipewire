@@ -40,12 +40,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <gio/gunixfdmessage.h>
 #include <gst/net/gstnetclientclock.h>
 #include <gst/allocators/gstfdmemory.h>
 #include <gst/video/video.h>
-
-#include <spa/buffer.h>
 
 #include "gstpipewireclock.h"
 
@@ -63,6 +60,7 @@ enum
   PROP_CLIENT_NAME,
   PROP_STREAM_PROPERTIES,
   PROP_ALWAYS_COPY,
+  PROP_FD,
 };
 
 
@@ -118,6 +116,10 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->always_copy = g_value_get_boolean (value);
       break;
 
+    case PROP_FD:
+      pwsrc->fd = g_value_get_int (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -145,6 +147,10 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
 
     case PROP_ALWAYS_COPY:
       g_value_set_boolean (value, pwsrc->always_copy);
+      break;
+
+    case PROP_FD:
+      g_value_set_int (value, pwsrc->fd);
       break;
 
     default:
@@ -267,6 +273,15 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                          G_PARAM_READWRITE |
                                                          G_PARAM_STATIC_STRINGS));
 
+   g_object_class_install_property (gobject_class,
+                                    PROP_FD,
+                                    g_param_spec_int ("fd",
+                                                      "Fd",
+                                                      "The fd to connect with",
+                                                      -1, G_MAXINT, -1,
+                                                      G_PARAM_READWRITE |
+                                                      G_PARAM_STATIC_STRINGS));
+
   gstelement_class->provide_clock = gst_pipewire_src_provide_clock;
   gstelement_class->change_state = gst_pipewire_src_change_state;
 
@@ -301,6 +316,7 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   GST_OBJECT_FLAG_SET (src, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 
   src->always_copy = DEFAULT_ALWAYS_COPY;
+  src->fd = -1;
 
   g_queue_init (&src->queue);
 
@@ -387,12 +403,12 @@ on_add_buffer (void *_data, guint id)
     if (d->type == t->data.MemFd || d->type == t->data.DmaBuf) {
       gmem = gst_fd_allocator_alloc (pwsrc->fd_allocator, dup (d->fd),
                 d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_NONE);
-      gst_memory_resize (gmem, d->chunk->offset + d->mapoffset, d->chunk->size);
+      gst_memory_resize (gmem, d->mapoffset, d->maxsize);
       data.offset = d->mapoffset;
     }
     else if (d->type == t->data.MemPtr) {
-      gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, d->chunk->offset + d->mapoffset,
-                d->chunk->size, NULL, NULL);
+      gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, 0,
+                d->maxsize, NULL, NULL);
       data.offset = 0;
     }
     if (gmem)
@@ -468,8 +484,9 @@ on_new_buffer (void *_data,
   for (i = 0; i < data->buf->n_datas; i++) {
     struct spa_data *d = &data->buf->datas[i];
     GstMemory *mem = gst_buffer_peek_memory (buf, i);
-    mem->offset = d->chunk->offset + data->offset;
-    mem->size = d->chunk->size;
+    mem->offset = SPA_MIN(d->chunk->offset, d->maxsize);
+    mem->size = SPA_MIN(d->chunk->size, d->maxsize - mem->offset);
+    mem->offset += data->offset;
   }
 
   if (pwsrc->always_copy)
@@ -515,13 +532,13 @@ parse_stream_properties (GstPipeWireSrc *pwsrc, const struct pw_properties *prop
   gboolean is_live;
 
   GST_OBJECT_LOCK (pwsrc);
-  var = pw_properties_get (props, "pipewire.latency.is-live");
-  is_live = pwsrc->is_live = var ? (atoi (var) == 1) : FALSE;
+  var = pw_properties_get (props, PW_STREAM_PROP_IS_LIVE);
+  is_live = pwsrc->is_live = var ? pw_properties_parse_bool(var) : FALSE;
 
-  var = pw_properties_get (props, "pipewire.latency.min");
+  var = pw_properties_get (props, PW_STREAM_PROP_LATENCY_MIN);
   pwsrc->min_latency = var ? (GstClockTime) atoi (var) : 0;
 
-  var = pw_properties_get (props, "pipewire.latency.max");
+  var = pw_properties_get (props, PW_STREAM_PROP_LATENCY_MAX);
   pwsrc->max_latency = var ? (GstClockTime) atoi (var) : GST_CLOCK_TIME_NONE;
   GST_OBJECT_UNLOCK (pwsrc);
 
@@ -636,7 +653,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "have common caps: %" GST_PTR_FORMAT, caps);
 
   /* open a connection with these caps */
-  possible = gst_caps_to_format_all (caps, pwsrc->type->map);
+  possible = gst_caps_to_format_all (caps, pwsrc->type->param.idEnumFormat, pwsrc->type->map);
   gst_caps_unref (caps);
 
   /* first disconnect */
@@ -663,11 +680,10 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s", pwsrc->path);
   pw_stream_connect (pwsrc->stream,
                      PW_DIRECTION_INPUT,
-                     PW_STREAM_MODE_BUFFER,
                      pwsrc->path,
-                     PW_STREAM_FLAG_AUTOCONNECT,
-                     possible->len,
-                     (const struct spa_format **)possible->pdata);
+                     PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_CLOCK_UPDATE,
+                     (const struct spa_pod **)possible->pdata,
+                     possible->len);
   g_ptr_array_free (possible, TRUE);
 
   while (TRUE) {
@@ -726,15 +742,11 @@ connect_error:
   }
 }
 
-#define PROP(f,key,type,...)                                                    \
-          SPA_POD_PROP (f,key,0,type,1,__VA_ARGS__)
-#define PROP_U_MM(f,key,type,...)                                               \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_FLAG_UNSET |                         \
-                              SPA_POD_PROP_RANGE_MIN_MAX,type,3,__VA_ARGS__)
+#define SPA_PROP_RANGE(min,max)	2,min,max
 
 static void
-on_format_changed (void              *data,
-                   struct spa_format *format)
+on_format_changed (void           *data,
+                   struct spa_pod *format)
 {
   GstPipeWireSrc *pwsrc = data;
   GstCaps *caps;
@@ -744,7 +756,7 @@ on_format_changed (void              *data,
 
   if (format == NULL) {
     GST_DEBUG_OBJECT (pwsrc, "clear format");
-    pw_stream_finish_format (pwsrc->stream, SPA_RESULT_OK, NULL, 0);
+    pw_stream_finish_format (pwsrc->stream, 0, NULL, 0);
     return;
   }
 
@@ -754,29 +766,28 @@ on_format_changed (void              *data,
   gst_caps_unref (caps);
 
   if (res) {
-    struct spa_param *params[2];
+    struct spa_pod *params[2];
     struct spa_pod_builder b = { NULL };
     uint8_t buffer[512];
-    struct spa_pod_frame f[2];
 
     spa_pod_builder_init (&b, buffer, sizeof (buffer));
-    spa_pod_builder_object (&b, &f[0], 0, t->param_alloc_buffers.Buffers,
-      PROP_U_MM (&f[1], t->param_alloc_buffers.size,    SPA_POD_TYPE_INT, 0, 0, INT32_MAX),
-      PROP_U_MM (&f[1], t->param_alloc_buffers.stride,  SPA_POD_TYPE_INT, 0, 0, INT32_MAX),
-      PROP_U_MM (&f[1], t->param_alloc_buffers.buffers, SPA_POD_TYPE_INT, 16, 0, INT32_MAX),
-      PROP    (&f[1], t->param_alloc_buffers.align,   SPA_POD_TYPE_INT, 16));
-    params[0] = SPA_POD_BUILDER_DEREF (&b, f[0].ref, struct spa_param);
+    params[0] = spa_pod_builder_object (&b,
+	t->param.idBuffers, t->param_buffers.Buffers,
+	":", t->param_buffers.size,    "ir", 0,  SPA_PROP_RANGE(0, INT32_MAX),
+	":", t->param_buffers.stride,  "ir", 0,  SPA_PROP_RANGE(0, INT32_MAX),
+	":", t->param_buffers.buffers, "ir", 16, SPA_PROP_RANGE(1, INT32_MAX),
+	":", t->param_buffers.align,   "i", 16);
 
-    spa_pod_builder_object (&b, &f[0], 0, t->param_alloc_meta_enable.MetaEnable,
-        PROP    (&f[1], t->param_alloc_meta_enable.type, SPA_POD_TYPE_ID, t->meta.Header),
-        PROP    (&f[1], t->param_alloc_meta_enable.size, SPA_POD_TYPE_INT, sizeof (struct spa_meta_header)));
-    params[1] = SPA_POD_BUILDER_DEREF (&b, f[0].ref, struct spa_param);
+    params[1] = spa_pod_builder_object (&b,
+	t->param.idMeta, t->param_meta.Meta,
+        ":", t->param_meta.type, "I", t->meta.Header,
+        ":", t->param_meta.size, "i", sizeof (struct spa_meta_header));
 
     GST_DEBUG_OBJECT (pwsrc, "doing finish format");
-    pw_stream_finish_format (pwsrc->stream, SPA_RESULT_OK, params, 2);
+    pw_stream_finish_format (pwsrc->stream, 0, params, 2);
   } else {
     GST_WARNING_OBJECT (pwsrc, "finish format with error");
-    pw_stream_finish_format (pwsrc->stream, SPA_RESULT_INVALID_MEDIA_TYPE, NULL, 0);
+    pw_stream_finish_format (pwsrc->stream, -EINVAL, NULL, 0);
   }
 }
 
@@ -936,6 +947,8 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
   GST_BUFFER_PTS (*buffer) = pts;
   GST_BUFFER_DTS (*buffer) = dts;
 
+  buffer_recycle (GST_MINI_OBJECT_CAST (*buffer));
+
   return GST_FLOW_OK;
 
 not_negotiated:
@@ -1028,11 +1041,11 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
   struct pw_properties *props;
   const char *error = NULL;
 
-  if (pw_thread_loop_start (pwsrc->main_loop) != SPA_RESULT_OK)
+  if (pw_thread_loop_start (pwsrc->main_loop) < 0)
     goto mainloop_failed;
 
   pw_thread_loop_lock (pwsrc->main_loop);
-  if ((pwsrc->remote = pw_remote_new (pwsrc->core, NULL)) == NULL)
+  if ((pwsrc->remote = pw_remote_new (pwsrc->core, NULL, 0)) == NULL)
     goto no_remote;
 
   pw_remote_add_listener (pwsrc->remote,

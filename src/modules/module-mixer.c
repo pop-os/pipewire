@@ -37,11 +37,19 @@ struct impl {
 	struct pw_core *core;
 	struct pw_type *t;
 	struct pw_module *module;
+	struct spa_hook core_listener;
 	struct spa_hook module_listener;
 	struct pw_properties *properties;
 
 	void *hnd;
 	const struct spa_handle_factory *factory;
+
+	struct spa_list node_list;
+};
+
+struct node_data {
+	struct spa_list link;
+	struct pw_node *node;
 };
 
 static const struct spa_handle_factory *find_factory(struct impl *impl)
@@ -67,10 +75,10 @@ static const struct spa_handle_factory *find_factory(struct impl *impl)
 		goto no_symbol;
 	}
 
-	for (index = 0;; index++) {
-		if ((res = enum_func(&factory, index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				pw_log_error("can't enumerate factories: %d", res);
+	for (index = 0;;) {
+		if ((res = enum_func(&factory, &index)) <= 0) {
+			if (res != 0)
+				pw_log_error("can't enumerate factories: %s", spa_strerror(res));
 			goto enum_failed;
 		}
 		if (strcmp(factory->name, "audiomixer") == 0)
@@ -94,10 +102,10 @@ static struct pw_node *make_node(struct impl *impl)
 	int res;
 	void *iface;
 	struct spa_node *spa_node;
-	struct spa_clock *spa_clock;
 	struct pw_node *node;
 	const struct spa_support *support;
 	uint32_t n_support;
+	struct node_data *nd;
 
 	support = pw_core_get_support(impl->core, &n_support);
 
@@ -114,13 +122,13 @@ static struct pw_node *make_node(struct impl *impl)
 	}
 	spa_node = iface;
 
-	if ((res = spa_handle_get_interface(handle, impl->t->spa_clock, &iface)) < 0) {
-		iface = NULL;
-	}
-	spa_clock = iface;
-
 	node = pw_spa_node_new(impl->core, NULL, pw_module_get_global(impl->module),
-			       "audiomixer", false, spa_node, spa_clock, NULL, 0);
+			       "audiomixer", PW_SPA_NODE_FLAG_ACTIVATE, spa_node, handle, NULL,
+			       sizeof(struct node_data));
+
+	nd = pw_spa_node_get_user_data(node);
+	nd->node = node;
+	spa_list_append(&impl->node_list, &nd->link);
 
 	return node;
 
@@ -131,7 +139,7 @@ static struct pw_node *make_node(struct impl *impl)
 	return NULL;
 }
 
-static bool on_global(void *data, struct pw_global *global)
+static int on_global(void *data, struct pw_global *global)
 {
 	struct impl *impl = data;
 	struct pw_node *n, *node;
@@ -142,36 +150,46 @@ static bool on_global(void *data, struct pw_global *global)
 	struct pw_link *link;
 
 	if (pw_global_get_type(global) != impl->t->node)
-		return true;
+		return 0;
 
 	n = pw_global_get_object(global);
 
 	properties = pw_node_get_properties(n);
 	if ((str = pw_properties_get(properties, "media.class")) == NULL)
-		return true;
+		return 0;
 
 	if (strcmp(str, "Audio/Sink") != 0)
-		return true;
+		return 0;
 
 	if ((ip = pw_node_get_free_port(n, PW_DIRECTION_INPUT)) == NULL)
-		return true;
+		return 0;
 
 	node = make_node(impl);
 	op = pw_node_get_free_port(node, PW_DIRECTION_OUTPUT);
 	if (op == NULL)
-		return true;
+		return 0;
 
-	link = pw_link_new(impl->core, pw_module_get_global(impl->module), op, ip, NULL, NULL, &error, 0);
-	pw_link_inc_idle(link);
+	link = pw_link_new(impl->core,
+			   op,
+			   ip,
+			   NULL,
+			   pw_properties_new(PW_LINK_PROP_PASSIVE, "true", NULL),
+			   &error, 0);
+	pw_link_register(link, NULL, pw_module_get_global(impl->module), NULL);
 
-	return true;
+	return 0;
 }
 
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
+	struct node_data *nd, *t;
 
 	spa_hook_remove(&impl->module_listener);
+	spa_hook_remove(&impl->core_listener);
+
+	spa_list_for_each_safe(nd, t, &impl->node_list, link)
+		pw_node_destroy(nd->node);
 
 	if (impl->properties)
 		pw_properties_free(impl->properties);
@@ -184,12 +202,26 @@ static const struct pw_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static bool module_init(struct pw_module *module, struct pw_properties *properties)
+static void
+core_global_added(void *data, struct pw_global *global)
+{
+	on_global(data, global);
+}
+
+static const struct pw_core_events core_events = {
+	PW_VERSION_CORE_EVENTS,
+        .global_added = core_global_added,
+};
+
+static int module_init(struct pw_module *module, struct pw_properties *properties)
 {
 	struct pw_core *core = pw_module_get_core(module);
 	struct impl *impl;
 
 	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL)
+		return -ENOMEM;
+
 	pw_log_debug("module %p: new", impl);
 
 	impl->core = core;
@@ -199,14 +231,17 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 
 	impl->factory = find_factory(impl);
 
+	spa_list_init(&impl->node_list);
+
 	pw_core_for_each_global(core, on_global, impl);
 
+	pw_core_add_listener(core, &impl->core_listener, &core_events, impl);
 	pw_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
-	return true;
+	return 0;
 }
 
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);
 }

@@ -28,6 +28,8 @@
 #include "pipewire/link.h"
 #include "pipewire/log.h"
 #include "pipewire/module.h"
+#include "pipewire/control.h"
+#include "pipewire/private.h"
 
 struct impl {
 	struct pw_core *core;
@@ -118,11 +120,12 @@ link_state_changed(void *data, enum pw_link_state old, enum pw_link_state state,
 	switch (state) {
 	case PW_LINK_STATE_ERROR:
 	{
-		struct pw_resource *owner = pw_node_get_owner(info->node);
+		struct pw_global *global = pw_node_get_global(info->node);
+		struct pw_client *owner = pw_global_get_owner(global);
 
 		pw_log_debug("module %p: link %p: state error: %s", impl, link, error);
 		if (owner)
-			pw_resource_error(owner, SPA_RESULT_ERROR, error);
+			pw_resource_error(pw_client_get_core_resource(owner), -ENODEV, error);
 
 		break;
 	}
@@ -138,6 +141,23 @@ link_state_changed(void *data, enum pw_link_state old, enum pw_link_state state,
 	case PW_LINK_STATE_RUNNING:
 		break;
 	}
+}
+
+static void try_link_controls(struct impl *impl, struct pw_port *port, struct pw_port *target)
+{
+	struct pw_control *cin, *cout;
+	int res;
+
+	spa_list_for_each(cout, &port->control_list[SPA_DIRECTION_OUTPUT], port_link) {
+		spa_list_for_each(cin, &target->control_list[SPA_DIRECTION_INPUT], port_link) {
+			pw_log_debug("controls %d <-> %d", cin->id, cout->id);
+			if (cin->id == cout->id) {
+				if ((res = pw_control_link(cout, cin)) < 0)
+					pw_log_error("failed to link controls: %s", spa_strerror(res));
+			}
+		}
+	}
+
 }
 
 static void
@@ -168,12 +188,12 @@ static void try_link_port(struct pw_node *node, struct pw_port *port, struct nod
 
 	props = pw_node_get_properties(node);
 
-	str = pw_properties_get(props, "pipewire.target.node");
+	str = pw_properties_get(props, PW_NODE_PROP_TARGET_NODE);
 	if (str != NULL)
 		path_id = atoi(str);
 	else {
-		str = pw_properties_get(props, "pipewire.autoconnect");
-		if (str == NULL || atoi(str) == 0) {
+		str = pw_properties_get(props, PW_NODE_PROP_AUTOCONNECT);
+		if (str == NULL || !pw_properties_parse_bool(str)) {
 			pw_log_debug("module %p: node does not need autoconnect", impl);
 			return;
 		}
@@ -193,7 +213,6 @@ static void try_link_port(struct pw_node *node, struct pw_port *port, struct nod
 	}
 
 	link = pw_link_new(impl->core,
-			   pw_module_get_global(impl->module),
 			   port, target,
 			   NULL, NULL,
 			   &error,
@@ -207,17 +226,19 @@ static void try_link_port(struct pw_node *node, struct pw_port *port, struct nod
 	pw_link_add_listener(link, &ld->link_listener, &link_events, ld);
 
 	spa_list_append(&info->links, &ld->l);
+	pw_link_register(link, NULL, pw_module_get_global(impl->module), NULL);
 
-	pw_link_activate(link);
+	try_link_controls(impl, port, target);
 
 	return;
 
       error:
 	pw_log_error("module %p: can't link node '%s'", impl, error);
 	{
-		struct pw_resource *owner = pw_node_get_owner(info->node);
+		struct pw_global *global = pw_node_get_global(info->node);
+		struct pw_client *owner = pw_global_get_owner(global);
 		if (owner)
-			pw_resource_error(owner, SPA_RESULT_ERROR, error);
+			pw_resource_error(pw_client_get_core_resource(owner), -EINVAL, error);
 	}
 	free(error);
 	return;
@@ -233,10 +254,10 @@ static void node_port_removed(void *data, struct pw_port *port)
 {
 }
 
-static bool on_node_port_added(void *data, struct pw_port *port)
+static int on_node_port_added(void *data, struct pw_port *port)
 {
 	node_port_added(data, port);
-	return true;
+	return 0;
 }
 
 static void on_node_created(struct pw_node *node, struct node_info *info)
@@ -318,12 +339,12 @@ static void module_destroy(void *data)
 	free(impl);
 }
 
-const struct pw_module_events module_events = {
+static const struct pw_module_events module_events = {
 	PW_VERSION_MODULE_EVENTS,
         .destroy = module_destroy,
 };
 
-const struct pw_core_events core_events = {
+static const struct pw_core_events core_events = {
 	PW_VERSION_CORE_EVENTS,
         .global_added = core_global_added,
         .global_removed = core_global_removed,
@@ -338,12 +359,15 @@ const struct pw_core_events core_events = {
  *
  * Returns: a new #struct impl
  */
-static bool module_init(struct pw_module *module, struct pw_properties *properties)
+static int module_init(struct pw_module *module, struct pw_properties *properties)
 {
 	struct pw_core *core = pw_module_get_core(module);
 	struct impl *impl;
 
 	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL)
+		return -ENOMEM;
+
 	pw_log_debug("module %p: new", impl);
 
 	impl->core = core;
@@ -356,10 +380,10 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 	pw_core_add_listener(core, &impl->core_listener, &core_events, impl);
 	pw_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
-	return impl;
+	return 0;
 }
 
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);
 }

@@ -25,7 +25,7 @@
 extern "C" {
 #endif
 
-#include <spa/hook.h>
+#include <spa/utils/hook.h>
 
 #include <pipewire/core.h>
 
@@ -44,39 +44,54 @@ struct pw_module;
  *
  * \param module A \ref pw_module
  * \param args Arguments to the module
- * \return true on success, false otherwise
+ * \return 0 on success, < 0 otherwise with an errno style error
  *
  * A module should provide an init function with this signature. This function
  * will be called when a module is loaded.
  *
  * \memberof pw_module
  */
-typedef bool (*pw_module_init_func_t) (struct pw_module *module, char *args);
+typedef int (*pw_module_init_func_t) (struct pw_module *module, const char *args);
 
+/** Module events added with \ref pw_module_add_listener */
 struct pw_module_events {
 #define PW_VERSION_MODULE_EVENTS	0
 	uint32_t version;
 
+	/** The module is destroyed */
 	void (*destroy) (void *data);
 };
 
-struct pw_module *
-pw_module_load(struct pw_core *core, const char *name, const char *args);
+/** The name of the module */
+#define PW_MODULE_PROP_NAME	"pipewire.module.name"
 
+struct pw_module *
+pw_module_load(struct pw_core *core,
+	       const char *name,		/**< name of the module */
+	       const char *args			/**< arguments of the module */,
+	       struct pw_client *owner,		/**< optional owner */
+	       struct pw_global *parent,	/**< parent global */
+	       struct pw_properties *properties	/**< extra global properties */);
+
+/** Get the core of a module */
 struct pw_core * pw_module_get_core(struct pw_module *module);
 
+/** Get the global of a module */
 struct pw_global * pw_module_get_global(struct pw_module *module);
 
+/** Get the module info */
 const struct pw_module_info *pw_module_get_info(struct pw_module *module);
 
+/** Add an event listener to a module */
 void pw_module_add_listener(struct pw_module *module,
 			    struct spa_hook *listener,
 			    const struct pw_module_events *events,
 			    void *data);
 
-void
-pw_module_destroy(struct pw_module *module);
+/** Destroy a module */
+void pw_module_destroy(struct pw_module *module);
 
+/** Find a module by filename */
 struct pw_module *
 pw_core_find_module(struct pw_core *core, const char *filename);
 

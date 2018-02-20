@@ -17,33 +17,36 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <errno.h>
 #include <stdio.h>
 
-#include <spa/plugin.h>
-#include <spa/node.h>
+#include <spa/support/plugin.h>
 
 #define MAX_FACTORIES	16
 
 static const struct spa_handle_factory *factories[MAX_FACTORIES];
 static int n_factories;
 
-void
-spa_handle_factory_register(const struct spa_handle_factory *factory)
+int spa_handle_factory_register(const struct spa_handle_factory *factory)
 {
 	if (n_factories < MAX_FACTORIES)
 		factories[n_factories++] = factory;
-	else
+	else {
 		fprintf(stderr, "too many factories\n");
+		return -ENOMEM;
+	}
+	return 0;
 }
 
 int
-spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t index)
+spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
 {
-	spa_return_val_if_fail(factory != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
 
-	if (index >= n_factories)
-		return SPA_RESULT_ENUM_END;
+	if (*index >= n_factories)
+		return 0;
 
-	*factory = factories[index];
-	return SPA_RESULT_OK;
+	*factory = factories[(*index)++];
+	return 1;
 }

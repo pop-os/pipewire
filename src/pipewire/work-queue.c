@@ -17,6 +17,7 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -58,7 +59,7 @@ static void process_work_queue(void *data, uint64_t count)
 			continue;
 		}
 
-		if (item->res == SPA_RESULT_WAIT_SYNC &&
+		if (item->res == -EBUSY &&
 		    item != spa_list_first(&this->work_list, struct work_item, link)) {
 			pw_log_debug("work-queue %p: %d sync item %p not head", this,
 				     this->n_queued, item->obj);
@@ -73,7 +74,7 @@ static void process_work_queue(void *data, uint64_t count)
 				     this->n_queued, item->obj, item->seq, item->res);
 			item->func(item->obj, item->data, item->res, item->id);
 		}
-		spa_list_insert(this->free_list.prev, &item->link);
+		spa_list_append(&this->free_list, &item->link);
 	}
 }
 
@@ -158,7 +159,7 @@ pw_work_queue_add(struct pw_work_queue *queue, void *obj, int res, pw_work_func_
 		item->seq = SPA_RESULT_ASYNC_SEQ(res);
 		item->res = res;
 		pw_log_debug("work-queue %p: defer async %d for object %p", queue, item->seq, obj);
-	} else if (res == SPA_RESULT_WAIT_SYNC) {
+	} else if (res == -EBUSY) {
 		pw_log_debug("work-queue %p: wait sync object %p", queue, obj);
 		item->seq = SPA_ID_INVALID;
 		item->res = res;
@@ -169,7 +170,7 @@ pw_work_queue_add(struct pw_work_queue *queue, void *obj, int res, pw_work_func_
 		have_work = true;
 		pw_log_debug("work-queue %p: defer object %p", queue, obj);
 	}
-	spa_list_insert(queue->work_list.prev, &item->link);
+	spa_list_append(&queue->work_list, &item->link);
 	queue->n_queued++;
 
 	if (have_work)
@@ -185,7 +186,7 @@ pw_work_queue_add(struct pw_work_queue *queue, void *obj, int res, pw_work_func_
  *
  * \memberof pw_work_queue
  */
-void pw_work_queue_cancel(struct pw_work_queue *queue, void *obj, uint32_t id)
+int pw_work_queue_cancel(struct pw_work_queue *queue, void *obj, uint32_t id)
 {
 	bool have_work = false;
 	struct work_item *item;
@@ -199,19 +200,24 @@ void pw_work_queue_cancel(struct pw_work_queue *queue, void *obj, uint32_t id)
 			have_work = true;
 		}
 	}
-	if (have_work)
-		pw_loop_signal_event(queue->loop, queue->wakeup);
+	if (!have_work) {
+		pw_log_debug("work-queue %p: no defered found for object %p", queue, obj);
+		return -EINVAL;
+	}
+
+	pw_loop_signal_event(queue->loop, queue->wakeup);
+	return 0;
 }
 
 /** Complete a work item
  * \param queue the work queue
  * \param obj the owner object
  * \param seq the sequence number that completed
- * \param res the result of the completed work
+ * \param res 0 if the item was found, < 0 on error
  *
  * \memberof pw_work_queue
  */
-bool pw_work_queue_complete(struct pw_work_queue *queue, void *obj, uint32_t seq, int res)
+int pw_work_queue_complete(struct pw_work_queue *queue, void *obj, uint32_t seq, int res)
 {
 	struct work_item *item;
 	bool have_work = false;
@@ -227,8 +233,9 @@ bool pw_work_queue_complete(struct pw_work_queue *queue, void *obj, uint32_t seq
 	}
 	if (!have_work) {
 		pw_log_debug("work-queue %p: no defered %d found for object %p", queue, seq, obj);
-	} else {
-		pw_loop_signal_event(queue->loop, queue->wakeup);
+		return -EINVAL;
 	}
-	return have_work;
+
+	pw_loop_signal_event(queue->loop, queue->wakeup);
+	return 0;
 }

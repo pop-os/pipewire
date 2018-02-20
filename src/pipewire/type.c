@@ -19,30 +19,30 @@
 
 #include <string.h>
 
-#include "spa/defs.h"
-#include "spa/clock.h"
-#include "spa/type-map.h"
-#include "spa/monitor.h"
+#include <spa/support/type-map.h>
+#include <spa/utils/defs.h>
+#include <spa/clock/clock.h>
+#include <spa/param/format.h>
+#include <spa/param/props.h>
+#include <spa/monitor/monitor.h>
 
 #include "pipewire/pipewire.h"
 #include "pipewire/type.h"
 #include "pipewire/module.h"
-
-#include "pipewire/node-factory.h"
 
 
 /** Initializes the type system
  * \param type a type structure
  * \memberof pw_type
  */
-void pw_type_init(struct pw_type *type)
+int pw_type_init(struct pw_type *type)
 {
 	type->map = pw_get_support_interface(SPA_TYPE__TypeMap);
 
 	type->core = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Core);
 	type->registry = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Registry);
 	type->node = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Node);
-	type->node_factory = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__NodeFactory);
+	type->factory = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Factory);
 	type->link = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Link);
 	type->client = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Client);
 	type->module = spa_type_map_get_id(type->map, PW_TYPE_INTERFACE__Module);
@@ -54,71 +54,15 @@ void pw_type_init(struct pw_type *type)
 	type->spa_format = spa_type_map_get_id(type->map, SPA_TYPE__Format);
 	type->spa_props = spa_type_map_get_id(type->map, SPA_TYPE__Props);
 
+	spa_type_io_map(type->map, &type->io);
+	spa_type_param_map(type->map, &type->param);
 	spa_type_meta_map(type->map, &type->meta);
 	spa_type_data_map(type->map, &type->data);
 	spa_type_event_node_map(type->map, &type->event_node);
 	spa_type_command_node_map(type->map, &type->command_node);
 	spa_type_monitor_map(type->map, &type->monitor);
-	spa_type_param_alloc_buffers_map(type->map, &type->param_alloc_buffers);
-	spa_type_param_alloc_meta_enable_map(type->map, &type->param_alloc_meta_enable);
-	spa_type_param_alloc_video_padding_map(type->map, &type->param_alloc_video_padding);
-}
-
-bool pw_pod_remap_data(uint32_t type, void *body, uint32_t size, struct pw_map *types)
-{
-	void *t;
-	switch (type) {
-	case SPA_POD_TYPE_ID:
-		if ((t = pw_map_lookup(types, *(int32_t *) body)) == NULL)
-			return false;
-		*(int32_t *) body = PW_MAP_PTR_TO_ID(t);
-		break;
-
-	case SPA_POD_TYPE_PROP:
-	{
-		struct spa_pod_prop_body *b = body;
-
-		if ((t = pw_map_lookup(types, b->key)) == NULL)
-			return false;
-		b->key = PW_MAP_PTR_TO_ID(t);
-
-		if (b->value.type == SPA_POD_TYPE_ID) {
-			void *alt;
-			if (!pw_pod_remap_data
-			    (b->value.type, SPA_POD_BODY(&b->value), b->value.size, types))
-				return false;
-
-			SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt)
-				if (!pw_pod_remap_data(b->value.type, alt, b->value.size, types))
-					return false;
-		}
-		break;
-	}
-	case SPA_POD_TYPE_OBJECT:
-	{
-		struct spa_pod_object_body *b = body;
-		struct spa_pod *p;
-
-		if ((t = pw_map_lookup(types, b->type)) == NULL)
-			return false;
-		b->type = PW_MAP_PTR_TO_ID(t);
-
-		SPA_POD_OBJECT_BODY_FOREACH(b, size, p)
-			if (!pw_pod_remap_data(p->type, SPA_POD_BODY(p), p->size, types))
-				return false;
-		break;
-	}
-	case SPA_POD_TYPE_STRUCT:
-	{
-		struct spa_pod *b = body, *p;
-
-		SPA_POD_FOREACH(b, size, p)
-			if (!pw_pod_remap_data(p->type, SPA_POD_BODY(p), p->size, types))
-				return false;
-		break;
-	}
-	default:
-		break;
-	}
-	return true;
+	spa_type_param_buffers_map(type->map, &type->param_buffers);
+	spa_type_param_meta_map(type->map, &type->param_meta);
+	spa_type_param_io_map(type->map, &type->param_io);
+	return 0;
 }

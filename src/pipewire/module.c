@@ -123,19 +123,19 @@ module_bind_func(struct pw_global *global,
 
 	pw_log_debug("module %p: bound to %d", this, resource->id);
 
-	spa_list_insert(this->resource_list.prev, &resource->link);
+	spa_list_append(&this->resource_list, &resource->link);
 
 	this->info.change_mask = ~0;
 	pw_module_resource_info(resource, &this->info);
 	this->info.change_mask = 0;
 
-	return SPA_RESULT_OK;
+	return 0;
 
       no_mem:
 	pw_log_error("can't create module resource");
 	pw_core_resource_error(client->core_resource,
-			       client->core_resource->id, SPA_RESULT_NO_MEMORY, "no memory");
-	return SPA_RESULT_NO_MEMORY;
+			       client->core_resource->id, -ENOMEM, "no memory");
+	return -ENOMEM;
 }
 
 struct pw_module * pw_core_find_module(struct pw_core *core, const char *filename)
@@ -158,13 +158,19 @@ struct pw_module * pw_core_find_module(struct pw_core *core, const char *filenam
  *
  * \memberof pw_module
  */
-struct pw_module *pw_module_load(struct pw_core *core, const char *name, const char *args)
+struct pw_module *
+pw_module_load(struct pw_core *core,
+	       const char *name, const char *args,
+	       struct pw_client *owner,
+	       struct pw_global *parent,
+	       struct pw_properties *properties)
 {
 	struct pw_module *this;
 	struct impl *impl;
 	void *hnd;
 	char *filename = NULL;
 	const char *module_dir;
+	int res;
 	pw_module_init_func_t init_func;
 
 	module_dir = getenv("PIPEWIRE_MODULE_DIR");
@@ -204,6 +210,11 @@ struct pw_module *pw_module_load(struct pw_core *core, const char *name, const c
 	if (impl == NULL)
 		goto no_mem;
 
+	if (properties == NULL)
+		properties = pw_properties_new(NULL, NULL);
+	if (properties == NULL)
+		goto no_mem;
+
 	impl->hnd = hnd;
 
 	this = &impl->this;
@@ -217,12 +228,22 @@ struct pw_module *pw_module_load(struct pw_core *core, const char *name, const c
 	this->info.args = args ? strdup(args) : NULL;
 	this->info.props = NULL;
 
-	spa_list_append(&core->module_list, &this->link);
-	this->global = pw_core_add_global(core, NULL, core->global,
-					  core->type.module, PW_VERSION_MODULE,
-					  module_bind_func, this);
+	pw_properties_set(properties, PW_MODULE_PROP_NAME, name);
 
-	if (!init_func(this, (char *) args))
+	spa_list_append(&core->module_list, &this->link);
+
+	this->global = pw_global_new(core,
+				     core->type.module, PW_VERSION_MODULE,
+				     properties,
+				     module_bind_func, this);
+
+	if (this->global == NULL)
+		goto no_global;
+
+	pw_global_register(this->global, owner, parent);
+	this->info.id = this->global->id;
+
+	if ((res = init_func(this, args)) < 0)
 		goto init_failed;
 
 	pw_log_debug("loaded module: %s", this->info.name);
@@ -238,12 +259,16 @@ struct pw_module *pw_module_load(struct pw_core *core, const char *name, const c
 	return NULL;
       no_mem:
       no_pw_module:
-	pw_log_error("\"%s\" is not a pipewire module", filename);
+	pw_log_error("\"%s\": is not a pipewire module", filename);
 	dlclose(hnd);
 	free(filename);
 	return NULL;
+      no_global:
+	pw_log_error("\"%s\": failed to create global", filename);
+	pw_module_destroy(this);
+	return NULL;
       init_failed:
-	pw_log_error("\"%s\" failed to initialize", filename);
+	pw_log_error("\"%s\": failed to initialize: %s", filename, spa_strerror(res));
 	pw_module_destroy(this);
 	return NULL;
 }
@@ -271,7 +296,8 @@ void pw_module_destroy(struct pw_module *module)
 		free((char *) module->info.args);
 
 	spa_list_remove(&module->link);
-	pw_global_destroy(module->global);
+	if (module->global)
+		pw_global_destroy(module->global);
 	dlclose(impl->hnd);
 	free(impl);
 }

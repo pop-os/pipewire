@@ -28,6 +28,9 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 
+#include <spa/param/props.h>
+#include <spa/pod/parser.h>
+
 #include "config.h"
 
 #include "pipewire/pipewire.h"
@@ -41,7 +44,7 @@
 #include "pipewire/resource.h"
 #include "pipewire/private.h"
 #include "pipewire/link.h"
-#include "pipewire/node-factory.h"
+#include "pipewire/factory.h"
 #include "pipewire/data-loop.h"
 #include "pipewire/main-loop.h"
 
@@ -57,8 +60,6 @@
 
 int segment_num = 0;
 
-typedef bool(*demarshal_func_t) (void *object, void *data, size_t size);
-
 struct socket {
 	int fd;
 	struct sockaddr_un addr;
@@ -70,6 +71,8 @@ struct socket {
 };
 
 struct impl {
+	uint32_t prop_min_latency;
+
 	struct pw_core *core;
 	struct pw_type *t;
 	struct pw_module *module;
@@ -82,6 +85,7 @@ struct impl {
 	struct spa_list socket_list;
 	struct spa_list client_list;
 	struct spa_list link_list;
+	struct spa_list node_list;
 
 	struct spa_loop_control_hooks hooks;
 
@@ -318,21 +322,21 @@ handle_register_port(struct client *client)
 	return 0;
 }
 
-static int do_add_node(struct spa_loop *loop, bool async, uint32_t seq, size_t size, const void *data,
+static int do_add_node(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size,
 		     void *user_data)
 {
 	struct jack_client *jc = user_data;
 	struct impl *impl = jc->data;
 	spa_list_append(&impl->rt.nodes, &jc->node->graph_link);
-	return SPA_RESULT_OK;
+	return 0;
 }
 
-static int do_remove_node(struct spa_loop *loop, bool async, uint32_t seq, size_t size, const void *data,
+static int do_remove_node(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size,
 		     void *user_data)
 {
 	struct jack_client *jc = user_data;
 	spa_list_remove(&jc->node->graph_link);
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int
@@ -374,7 +378,7 @@ handle_activate_client(struct client *client)
 		jc->realtime = is_real_time;
 		if (is_real_time)
 			pw_loop_invoke(jc->node->node->data_loop,
-				do_add_node, 0, 0, NULL, false, jc);
+				do_add_node, 0, NULL, 0, false, jc);
 	}
 
 	for (i = 0; (i < PORT_NUM_FOR_CLIENT) && (input_ports[i] != EMPTY); i++)
@@ -401,7 +405,7 @@ static int client_deactivate(struct impl *impl, int ref_num)
 		jc->activated = false;
 		if (jc->realtime)
 			pw_loop_invoke(jc->node->node->data_loop,
-					do_remove_node, 0, 0, NULL, false, jc);
+					do_remove_node, 0, NULL, 0, false, jc);
 	}
 
 	conn = jack_graph_manager_next_start(mgr);
@@ -796,7 +800,6 @@ handle_connect_name_ports(struct client *client)
 	pw_log_debug("protocol-jack %p: connected ports %p %p", impl, out_port, in_port);
 
 	link = pw_link_new(impl->core,
-			   pw_module_get_global(impl->module),
 			   out_port->port,
 			   in_port->port,
 			   NULL,
@@ -810,7 +813,7 @@ handle_connect_name_ports(struct client *client)
 	ld->in_port = in_port;
 	spa_list_append(&impl->link_list, &ld->link_link);
 	pw_link_add_listener(link, &ld->link_listener, &link_events, ld);
-	pw_link_activate(link);
+	pw_link_register(link, NULL, pw_module_get_global(impl->module), NULL);
 
 	notify_clients(impl, jack_notify_PortConnectCallback, false, "", src_id, dst_id);
 
@@ -989,7 +992,7 @@ connection_data(void *data, int fd, enum spa_io mask)
 	struct client *client = data;
 
 	if (mask & (SPA_IO_ERR | SPA_IO_HUP)) {
-		pw_log_error("protocol-native %p: got connection error", client->impl);
+		pw_log_error("jack %p: got connection error", client->impl);
 		client_killed(client);
 		return;
 	}
@@ -1034,17 +1037,11 @@ static struct client *client_new(struct impl *impl, int fd)
 		ucredp = &ucred;
 	}
 
-	properties = pw_properties_new("pipewire.protocol", "protocol-jack", NULL);
+	properties = pw_properties_new(PW_CLIENT_PROP_PROTOCOL, "protocol-jack", NULL);
 	if (properties == NULL)
 		goto no_props;
 
-	if (ucredp) {
-		pw_properties_setf(properties, "application.process.id", "%d", ucredp->pid);
-		pw_properties_setf(properties, "application.process.userid", "%d", ucredp->uid);
-	}
-
-        client = pw_client_new(impl->core, pw_module_get_global(impl->module),
-			       ucredp, properties, sizeof(struct client));
+        client = pw_client_new(impl->core, ucredp, properties, sizeof(struct client));
 	if (client == NULL)
 		goto no_client;
 
@@ -1059,9 +1056,11 @@ static struct client *client_new(struct impl *impl, int fd)
 		goto no_source;
 
 	spa_list_init(&this->jack_clients);
-	spa_list_insert(impl->client_list.prev, &this->link);
+	spa_list_append(&impl->client_list, &this->link);
 
 	pw_client_add_listener(client, &this->client_listener, &client_events, this);
+
+	pw_client_register(client, NULL, pw_module_get_global(impl->module), NULL);
 
 	pw_log_debug("module-jack %p: added new client", impl);
 
@@ -1077,8 +1076,8 @@ static struct client *client_new(struct impl *impl, int fd)
 static int do_graph_order_changed(struct spa_loop *loop,
 		     bool async,
 		     uint32_t seq,
-		     size_t size,
 		     const void *data,
+		     size_t size,
 		     void *user_data)
 {
 	struct impl *impl = user_data;
@@ -1101,7 +1100,7 @@ static int do_graph_order_changed(struct spa_loop *loop,
 	}
 
 	notify_clients(impl, jack_notify_GraphOrderCallback, false, "", 0, 0);
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static void jack_node_pull(void *data)
@@ -1117,14 +1116,14 @@ static void jack_node_pull(void *data)
 	jack_graph_manager_try_switch(mgr, &res);
 	if (res) {
 		pw_loop_invoke(pw_core_get_main_loop(impl->core),
-                       do_graph_order_changed, 0, 0, NULL, false, impl);
+                       do_graph_order_changed, 0, NULL, 0, false, impl);
 	}
 
 	/* mix all input */
 	spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link) {
 		if ((pp = p->peer) == NULL || ((pn = pp->node) == NULL))
 			continue;
-		pn->state = pn->callbacks->process_input(pn->callbacks_data);
+		pn->state = spa_node_process_input(pn->implementation);
 	}
 }
 
@@ -1154,7 +1153,7 @@ static void jack_node_push(void *data)
 	spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link) {
 		if ((pp = p->peer) == NULL || ((pn = pp->node) == NULL))
 			continue;
-		pn->state = pn->callbacks->process_output(pn->callbacks_data);
+		pn->state = spa_node_process_output(pn->implementation);
 	}
 
 	spa_list_for_each(node, &impl->rt.nodes, graph_link) {
@@ -1163,25 +1162,25 @@ static void jack_node_push(void *data)
 		spa_list_for_each(p, &n->ports[SPA_DIRECTION_OUTPUT], link) {
 			if ((pp = p->peer) == NULL || ((pn = pp->node) == NULL))
 				continue;
-			pn->state = pn->callbacks->process_output(pn->callbacks_data);
+			pn->state = spa_node_process_output(pn->implementation);
 		}
-		n->state = n->callbacks->process_output(n->callbacks_data);
+		n->state = spa_node_process_output(n->implementation);
 
 		/* mix inputs */
 		spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link) {
 			if ((pp = p->peer) == NULL || ((pn = pp->node) == NULL))
 				continue;
-			pn->state = pn->callbacks->process_output(pn->callbacks_data);
-			pn->state = pn->callbacks->process_input(pn->callbacks_data);
+			pn->state = spa_node_process_output(pn->implementation);
+			pn->state = spa_node_process_input(pn->implementation);
 		}
 
-		n->state = n->callbacks->process_input(n->callbacks_data);
+		n->state = spa_node_process_input(n->implementation);
 
 		/* tee outputs */
 		spa_list_for_each(p, &n->ports[SPA_DIRECTION_OUTPUT], link) {
 			if ((pp = p->peer) == NULL || ((pn = pp->node) == NULL))
 				continue;
-			pn->state = pn->callbacks->process_input(pn->callbacks_data);
+			pn->state = spa_node_process_input(pn->implementation);
 		}
 	}
 
@@ -1241,6 +1240,8 @@ make_audio_client(struct impl *impl)
 	server->audio_ref_num = ref_num;
 	server->audio_node = node;
 
+	spa_list_append(&impl->node_list, &jc->link);
+
 	pw_log_debug("module-jack %p: Added audio driver %d", impl, ref_num);
 
 	return 0;
@@ -1278,45 +1279,69 @@ make_freewheel_client(struct impl *impl)
 	server->freewheel_ref_num = ref_num;
 	pw_log_debug("module-jack %p: Added freewheel driver %d", impl, ref_num);
 
+	spa_list_append(&impl->node_list, &jc->link);
+
 	return 0;
 }
 
-static bool on_global(void *data, struct pw_global *global)
-
+static int on_global(void *data, struct pw_global *global)
 {
 	struct impl *impl = data;
 	struct pw_node *node;
 	const struct pw_properties *properties;
 	const char *str;
+	char *error;
 	struct pw_port *in_port, *out_port;
+	uint32_t index = 0;
+	uint8_t buf[2048];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+	struct spa_pod *props;
 
 	if (pw_global_get_type(global) != impl->t->node)
-		return true;
+		return 0;
 
 	node = pw_global_get_object(global);
 
 	properties = pw_node_get_properties(node);
 	if ((str = pw_properties_get(properties, "media.class")) == NULL)
-		return true;
+		return 0;
 
 	if (strcmp(str, "Audio/Sink") != 0)
-		return true;
+		return 0;
 
 	out_port = pw_node_get_free_port(impl->server.audio_node->node, PW_DIRECTION_OUTPUT);
 	in_port = pw_node_get_free_port(node, PW_DIRECTION_INPUT);
 	if (out_port == NULL || in_port == NULL)
-		return true;
+		return 0;
 
-	impl->sink_link = pw_link_new(impl->core, pw_module_get_global(impl->module),
+	impl->sink_link = pw_link_new(impl->core,
 		    out_port,
 		    in_port,
 		    NULL,
-		    NULL,
-		    NULL,
+		    pw_properties_new(PW_LINK_PROP_PASSIVE, "true", NULL),
+		    &error,
 		    0);
-	pw_link_inc_idle(impl->sink_link);
+	if (impl->sink_link == NULL) {
+		pw_log_warn("can't link ports: %s", error);
+		free(error);
+		return 0;
+	}
 
-	return false;
+	if (spa_node_enum_params(node->node, impl->t->param.idProps, &index, NULL, &props, &b) == 1) {
+		int min_latency = -1;
+
+		spa_pod_object_parse(props,
+			":", impl->prop_min_latency, "?i", &min_latency, NULL);
+
+		if (min_latency != -1)
+			jack_engine_control_set_buffer_size(impl->server.engine_control, min_latency);
+	}
+	pw_log_debug("module-jack %p: using buffer_size %d", impl,
+			impl->server.engine_control->buffer_size);
+
+	pw_link_register(impl->sink_link, NULL, pw_module_get_global(impl->module), NULL);
+
+	return 1;
 }
 
 static bool init_nodes(struct impl *impl)
@@ -1405,7 +1430,7 @@ static bool add_socket(struct impl *impl, struct socket *s)
 	if (s->source == NULL)
 		return false;
 
-	spa_list_insert(impl->socket_list.prev, &s->link);
+	spa_list_append(&impl->socket_list, &s->link);
 
 	return true;
 }
@@ -1456,11 +1481,15 @@ static void module_destroy(void *data)
 {
 	struct impl *impl = data;
 	struct link *ld, *t;
+	struct jack_client *jc, *tc;
 
 	spa_hook_remove(&impl->module_listener);
 
 	spa_list_for_each_safe(ld, t, &impl->link_list, link_link)
 		pw_link_destroy(ld->link);
+
+	spa_list_for_each_safe(jc, tc, &impl->node_list, link)
+		pw_jack_node_destroy(jc->node);
 
 	if (impl->properties)
 		pw_properties_free(impl->properties);
@@ -1473,7 +1502,7 @@ static const struct pw_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static bool module_init(struct pw_module *module, struct pw_properties *properties)
+static int module_init(struct pw_module *module, struct pw_properties *properties)
 {
 	struct pw_core *core = pw_module_get_core(module);
 	struct impl *impl;
@@ -1481,16 +1510,21 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 	bool promiscuous;
 
 	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL)
+		return -ENOMEM;
+
 	pw_log_debug("protocol-jack %p: new", impl);
 
 	impl->core = core;
 	impl->t = pw_core_get_type(core);
 	impl->module = module;
 	impl->properties = properties;
+	impl->prop_min_latency = spa_type_map_get_id(impl->t->map, SPA_TYPE_PROPS__minLatency);
 
 	spa_list_init(&impl->socket_list);
 	spa_list_init(&impl->client_list);
 	spa_list_init(&impl->link_list);
+	spa_list_init(&impl->node_list);
 	spa_list_init(&impl->rt.nodes);
 
 	str = NULL;
@@ -1514,14 +1548,14 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 
 	pw_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
-	return true;
+	return 0;
 
       error:
 	free(impl);
-	return false;
+	return -ENOMEM;
 }
 
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);
 }

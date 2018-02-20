@@ -1000,6 +1000,25 @@ jack_engine_control_reset_rolling_usecs(struct jack_engine_control *ctrl)
     ctrl->rolling_interval = floor((JACK_ENGINE_ROLLING_INTERVAL * 1000.f) / ctrl->period_usecs);
 }
 
+static inline uint64_t calc_computation(jack_nframes_t buffer_size)
+{
+	if (buffer_size < 128)
+		return 500;
+	else if (buffer_size < 256)
+		return 300;
+	else
+		return 100;
+}
+
+static inline void
+jack_engine_control_set_buffer_size(struct jack_engine_control *ctrl, jack_nframes_t buffer_size)
+{
+	ctrl->buffer_size = buffer_size;
+	ctrl->period_usecs = 1000000.f / ctrl->sample_rate * ctrl->buffer_size;
+	ctrl->period = ctrl->constraint = ctrl->period_usecs * 1000;
+	ctrl->computation = calc_computation(ctrl->buffer_size) * 1000;
+}
+
 static inline struct jack_engine_control *
 jack_engine_control_alloc(const char* name)
 {
@@ -1014,11 +1033,9 @@ jack_engine_control_alloc(const char* name)
         ctrl = (struct jack_engine_control *)jack_shm_addr(&info);
         ctrl->info = info;
 
-	ctrl->buffer_size = 128;
         ctrl->sample_rate = 48000;
 	ctrl->sync_mode = false;
 	ctrl->temporary = false;
-	ctrl->period_usecs = 1000000.f / ctrl->sample_rate * ctrl->buffer_size;
 	ctrl->timeout_usecs = 0;
 	ctrl->max_delayed_usecs = 0.f;
 	ctrl->xrun_delayed_usecs = 0.f;
@@ -1040,9 +1057,7 @@ jack_engine_control_alloc(const char* name)
 	jack_engine_control_reset_rolling_usecs(ctrl);
 	ctrl->CPU_load = 0.f;
 
-	ctrl->period = 0;
-	ctrl->computation = 0;
-	ctrl->constraint = 0;
+	jack_engine_control_set_buffer_size(ctrl, 128);
 
 	return ctrl;
 }

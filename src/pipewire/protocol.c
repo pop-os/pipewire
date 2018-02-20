@@ -17,9 +17,12 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <errno.h>
+
 #include <pipewire/protocol.h>
 #include <pipewire/private.h>
 
+/** \cond */
 struct impl {
 	struct pw_protocol this;
 };
@@ -29,6 +32,7 @@ struct marshal {
 	const struct pw_protocol_marshal *marshal;
 	uint32_t type;
 };
+/** \endcond */
 
 struct pw_protocol *pw_protocol_new(struct pw_core *core,
 				    const char *name,
@@ -37,6 +41,9 @@ struct pw_protocol *pw_protocol_new(struct pw_core *core,
 	struct pw_protocol *protocol;
 
 	protocol = calloc(1, sizeof(struct impl) + user_data_size);
+	if (protocol == NULL)
+		return NULL;
+
 	protocol->core = core;
 	protocol->name = strdup(name);
 
@@ -48,7 +55,7 @@ struct pw_protocol *pw_protocol_new(struct pw_core *core,
 	if (user_data_size > 0)
 		protocol->user_data = SPA_MEMBER(protocol, sizeof(struct impl), void);
 
-	spa_list_insert(core->protocol_list.prev, &protocol->link);
+	spa_list_append(&core->protocol_list, &protocol->link);
 
 	pw_log_info("protocol %p: Created protocol %s", protocol, name);
 
@@ -106,20 +113,25 @@ void pw_protocol_add_listener(struct pw_protocol *protocol,
 	spa_hook_list_append(&protocol->listener_list, listener, events, data);
 }
 
-void
+int
 pw_protocol_add_marshal(struct pw_protocol *protocol,
 			const struct pw_protocol_marshal *marshal)
 {
 	struct marshal *impl;
 
 	impl = calloc(1, sizeof(struct marshal));
+	if (impl == NULL)
+		return -ENOMEM;
+
 	impl->marshal = marshal;
 	impl->type = spa_type_map_get_id (protocol->core->type.map, marshal->type);
 
-	spa_list_insert(protocol->marshal_list.prev, &impl->link);
+	spa_list_append(&protocol->marshal_list, &impl->link);
 
 	pw_log_info("Add marshal %s:%d to protocol %s", marshal->type, marshal->version,
 			protocol->name);
+
+	return 0;
 }
 
 const struct pw_protocol_marshal *

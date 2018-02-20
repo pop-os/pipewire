@@ -17,6 +17,7 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -25,10 +26,11 @@
 
 #include <libudev.h>
 
-#include <spa/log.h>
-#include <spa/type-map.h>
-#include <spa/loop.h>
-#include <spa/monitor.h>
+#include <spa/support/log.h>
+#include <spa/support/type-map.h>
+#include <spa/support/loop.h>
+#include <spa/monitor/monitor.h>
+
 #include <lib/debug.h>
 
 #define NAME "v4l2-monitor"
@@ -36,7 +38,6 @@
 extern const struct spa_handle_factory spa_v4l2_source_factory;
 
 struct item {
-	struct spa_monitor_item *item;
 	struct udev_device *udevice;
 };
 
@@ -68,7 +69,6 @@ struct impl {
 	struct udev_enumerate *enumerate;
 	uint32_t index;
 	struct udev_list_entry *devices;
-	uint8_t item_buffer[4096];
 
 	struct item uitem;
 
@@ -78,18 +78,20 @@ struct impl {
 static int impl_udev_open(struct impl *this)
 {
 	if (this->udev != NULL)
-		return SPA_RESULT_OK;
+		return 0;
 
 	this->udev = udev_new();
+	if (this->udev == NULL)
+		return -ENOMEM;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
-static void fill_item(struct impl *this, struct item *item, struct udev_device *udevice)
+static void fill_item(struct impl *this, struct item *item, struct udev_device *udevice,
+		struct spa_pod **result, struct spa_pod_builder *builder)
 {
 	const char *str, *name;
-	struct spa_pod_builder b = { NULL, };
-	struct spa_pod_frame f[3];
+	struct type *t = &this->type;
 
 	if (item->udevice)
 		udev_device_unref(item->udevice);
@@ -110,61 +112,43 @@ static void fill_item(struct impl *this, struct item *item, struct udev_device *
 	if (!(name && *name))
 		name = "Unknown";
 
-	spa_pod_builder_init(&b, this->item_buffer, sizeof(this->item_buffer));
+	spa_pod_builder_add(builder,
+		"<", 0, t->monitor.MonitorItem,
+		":", t->monitor.id,      "s", udev_device_get_syspath(item->udevice),
+		":", t->monitor.flags,   "i", 0,
+		":", t->monitor.state,   "i", SPA_MONITOR_ITEM_STATE_AVAILABLE,
+		":", t->monitor.name,    "s", name,
+		":", t->monitor.klass,   "s", "Video/Source",
+		":", t->monitor.factory, "p", t->handle_factory, &spa_v4l2_source_factory,
+		":", t->monitor.info,    "[",
+		NULL);
 
-	spa_pod_builder_push_object(&b, &f[0], 0, this->type.monitor.MonitorItem);
-
-	spa_pod_builder_add(&b,
-		SPA_POD_PROP(&f[1], this->type.monitor.id, 0, SPA_POD_TYPE_STRING, 1,
-			udev_device_get_syspath(item->udevice)),
-		SPA_POD_PROP(&f[1], this->type.monitor.flags, 0, SPA_POD_TYPE_INT, 1,
-			0),
-		SPA_POD_PROP(&f[1], this->type.monitor.state, 0, SPA_POD_TYPE_INT, 1,
-			SPA_MONITOR_ITEM_STATE_AVAILABLE),
-		SPA_POD_PROP(&f[1], this->type.monitor.name, 0, SPA_POD_TYPE_STRING, 1,
-			name),
-		SPA_POD_PROP(&f[1], this->type.monitor.klass, 0, SPA_POD_TYPE_STRING, 1,
-			"Video/Source"),
-		SPA_POD_PROP(&f[1], this->type.monitor.factory, 0, SPA_POD_TYPE_POINTER, 1,
-			this->type.handle_factory, &spa_v4l2_source_factory),
-		0);
-	spa_pod_builder_add(&b,
-			    SPA_POD_TYPE_PROP, &f[1], this->type.monitor.info, 0,
-			    SPA_POD_TYPE_STRUCT, 1, &f[2], 0);
-
-
-	spa_pod_builder_add(&b,
-			    SPA_POD_TYPE_STRING, "udev-probed", SPA_POD_TYPE_STRING, "1",
-			    SPA_POD_TYPE_STRING, "device.api", SPA_POD_TYPE_STRING, "v4l2",
-			    SPA_POD_TYPE_STRING, "device.path", SPA_POD_TYPE_STRING,
-			    udev_device_get_devnode(item->udevice), 0);
+	spa_pod_builder_add(builder,
+		    "s", "udev-probed", "s", "1",
+		    "s", "device.api",  "s", "v4l2",
+		    "s", "device.path", "s", udev_device_get_devnode(item->udevice),
+		    NULL);
 
 	str = udev_device_get_property_value(item->udevice, "ID_PATH");
 	if (!(str && *str))
 		str = udev_device_get_syspath(item->udevice);
 	if (str && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.bus_path", SPA_POD_TYPE_STRING,
-				str, 0);
+		spa_pod_builder_add(builder, "s", "device.bus_path", "s", str, 0);
 	}
 	if ((str = udev_device_get_syspath(item->udevice)) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "sysfs.path", SPA_POD_TYPE_STRING,
-				str, 0);
+		spa_pod_builder_add(builder, "s", "sysfs.path", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "ID_ID")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "udev.id", SPA_POD_TYPE_STRING,
-				str, 0);
+		spa_pod_builder_add(builder, "s", "udev.id", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "ID_BUS")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.bus", SPA_POD_TYPE_STRING,
-				str, 0);
+		spa_pod_builder_add(builder, "s", "device.bus", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "SUBSYSTEM")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.subsystem",
-				    SPA_POD_TYPE_STRING, str, 0);
+		spa_pod_builder_add(builder, "s", "device.subsystem", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "ID_VENDOR_ID")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.vendor.id",
-				    SPA_POD_TYPE_STRING, str, 0);
+		spa_pod_builder_add(builder, "s", "device.vendor.id", "s", str, 0);
 	}
 	str = udev_device_get_property_value(item->udevice, "ID_VENDOR_FROM_DATABASE");
 	if (!(str && *str)) {
@@ -174,29 +158,20 @@ static void fill_item(struct impl *this, struct item *item, struct udev_device *
 		}
 	}
 	if (str && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.vendor.name",
-				    SPA_POD_TYPE_STRING, str, 0);
+		spa_pod_builder_add(builder, "s", "device.vendor.name", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "ID_MODEL_ID")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.product.id",
-				    SPA_POD_TYPE_STRING, str, 0);
+		spa_pod_builder_add(builder, "s", "device.product.id", "s", str, 0);
 	}
-	spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.product.name", SPA_POD_TYPE_STRING,
-			    name, 0);
+	spa_pod_builder_add(builder, "s", "device.product.name", "s", name, 0);
 	if ((str = udev_device_get_property_value(item->udevice, "ID_SERIAL")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.serial", SPA_POD_TYPE_STRING,
-				    str, 0);
+		spa_pod_builder_add(builder, "s", "device.serial", "s", str, 0);
 	}
 	if ((str = udev_device_get_property_value(item->udevice, "ID_V4L_CAPABILITIES")) && *str) {
-		spa_pod_builder_add(&b, SPA_POD_TYPE_STRING, "device.capabilities",
-				    SPA_POD_TYPE_STRING, str, 0);
+		spa_pod_builder_add(builder, "s", "device.capabilities", "s", str, 0);
 	}
 
-	spa_pod_builder_add(&b, -SPA_POD_TYPE_STRUCT, &f[2], -SPA_POD_TYPE_PROP, &f[1], 0);
-
-	spa_pod_builder_pop(&b, &f[0]);
-
-	item->item = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_monitor_item);
+	*result = spa_pod_builder_add(builder, "]>", NULL);
 }
 
 static void impl_on_fd_events(struct spa_source *source)
@@ -207,11 +182,10 @@ static void impl_on_fd_events(struct spa_source *source)
 	const char *action;
 	uint32_t type;
 	struct spa_pod_builder b = { NULL, };
-	struct spa_pod_frame f[1];
 	uint8_t buffer[4096];
+	struct spa_pod *item;
 
 	dev = udev_monitor_receive_device(this->umonitor);
-	fill_item(this, &this->uitem, dev);
 	if (dev == NULL)
 		return;
 
@@ -228,9 +202,9 @@ static void impl_on_fd_events(struct spa_source *source)
 		return;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_pod_builder_object(&b, &f[0], 0, type, SPA_POD_TYPE_POD, this->uitem.item);
+	event = spa_pod_builder_object(&b, 0, type);
+	fill_item(this, &this->uitem, dev, &item, &b);
 
-	event = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_event);
 	this->callbacks->event(this->callbacks_data, event);
 }
 
@@ -242,7 +216,7 @@ impl_monitor_set_callbacks(struct spa_monitor *monitor,
 	int res;
 	struct impl *this;
 
-	spa_return_val_if_fail(monitor != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(monitor != NULL, -EINVAL);
 
 	this = SPA_CONTAINER_OF(monitor, struct impl, monitor);
 
@@ -256,7 +230,7 @@ impl_monitor_set_callbacks(struct spa_monitor *monitor,
 			udev_monitor_unref(this->umonitor);
 		this->umonitor = udev_monitor_new_from_netlink(this->udev, "udev");
 		if (this->umonitor == NULL)
-			return SPA_RESULT_ERROR;
+			return -ENOMEM;
 
 		udev_monitor_filter_add_match_subsystem_devtype(this->umonitor,
 								"video4linux", NULL);
@@ -272,25 +246,27 @@ impl_monitor_set_callbacks(struct spa_monitor *monitor,
 		spa_loop_remove_source(this->main_loop, &this->source);
 	}
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int
-impl_monitor_enum_items(struct spa_monitor *monitor, struct spa_monitor_item **item, uint32_t index)
+impl_monitor_enum_items(struct spa_monitor *monitor, uint32_t *index,
+			struct spa_pod **item, struct spa_pod_builder *builder)
 {
 	int res;
 	struct impl *this;
 	struct udev_device *dev;
 
-	spa_return_val_if_fail(monitor != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(item != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(monitor != NULL, -EINVAL);
+	spa_return_val_if_fail(item != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
 
 	this = SPA_CONTAINER_OF(monitor, struct impl, monitor);
 
 	if ((res = impl_udev_open(this)) < 0)
 		return res;
 
-	if (index == 0) {
+	if (*index == 0) {
 		if (this->enumerate)
 			udev_enumerate_unref(this->enumerate);
 		this->enumerate = udev_enumerate_new(this->udev);
@@ -301,27 +277,26 @@ impl_monitor_enum_items(struct spa_monitor *monitor, struct spa_monitor_item **i
 		this->devices = udev_enumerate_get_list_entry(this->enumerate);
 		this->index = 0;
 	}
-	while (index > this->index && this->devices) {
+	while (*index > this->index && this->devices) {
 		this->devices = udev_list_entry_get_next(this->devices);
 		this->index++;
 	}
 	if (this->devices == NULL) {
-		fill_item(this, &this->uitem, NULL);
-		return SPA_RESULT_ENUM_END;
+		fill_item(this, &this->uitem, NULL, item, builder);
+		return 0;
 	}
 
 	dev = udev_device_new_from_syspath(this->udev, udev_list_entry_get_name(this->devices));
 
-	fill_item(this, &this->uitem, dev);
+	fill_item(this, &this->uitem, dev, item, builder);
 	if (dev == NULL)
-		return SPA_RESULT_ENUM_END;
-
-	*item = this->uitem.item;
+		return 0;
 
 	this->devices = udev_list_entry_get_next(this->devices);
 	this->index++;
+	(*index)++;
 
-	return SPA_RESULT_OK;
+	return 1;
 }
 
 static const struct spa_monitor impl_monitor = {
@@ -335,17 +310,17 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t interface_id, 
 {
 	struct impl *this;
 
-	spa_return_val_if_fail(handle != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(interface != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+	spa_return_val_if_fail(interface != NULL, -EINVAL);
 
 	this = (struct impl *) handle;
 
 	if (interface_id == this->type.monitor.Monitor)
 		*interface = &this->monitor;
 	else
-		return SPA_RESULT_UNKNOWN_INTERFACE;
+		return -ENOENT;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int impl_clear(struct spa_handle *handle)
@@ -359,7 +334,7 @@ static int impl_clear(struct spa_handle *handle)
 	if (this->udev)
 		udev_unref(this->udev);
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int
@@ -372,8 +347,8 @@ impl_init(const struct spa_handle_factory *factory,
 	struct impl *this;
 	uint32_t i;
 
-	spa_return_val_if_fail(factory != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(handle != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	handle->get_interface = impl_get_interface;
 	handle->clear = impl_clear;
@@ -390,17 +365,17 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (this->map == NULL) {
 		spa_log_error(this->log, "a type-map is needed");
-		return SPA_RESULT_ERROR;
+		return -EINVAL;
 	}
 	if (this->main_loop == NULL) {
 		spa_log_error(this->log, "a main-loop is needed");
-		return SPA_RESULT_ERROR;
+		return -EINVAL;
 	}
 	init_type(&this->type, this->map);
 
 	this->monitor = impl_monitor;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static const struct spa_interface_info impl_interfaces[] = {
@@ -410,17 +385,18 @@ static const struct spa_interface_info impl_interfaces[] = {
 static int
 impl_enum_interface_info(const struct spa_handle_factory *factory,
 			 const struct spa_interface_info **info,
-			 uint32_t index)
+			 uint32_t *index)
 {
-	spa_return_val_if_fail(factory != NULL, SPA_RESULT_INVALID_ARGUMENTS);
-	spa_return_val_if_fail(info != NULL, SPA_RESULT_INVALID_ARGUMENTS);
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(info != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
 
-	if (index < 0 || index >= SPA_N_ELEMENTS(impl_interfaces))
-		return SPA_RESULT_ENUM_END;
+	if (*index >= SPA_N_ELEMENTS(impl_interfaces))
+		return 0;
 
-	*info = &impl_interfaces[index];
+	*info = &impl_interfaces[(*index)++];
 
-	return SPA_RESULT_OK;
+	return 1;
 }
 
 const struct spa_handle_factory spa_v4l2_monitor_factory = {

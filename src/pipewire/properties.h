@@ -24,7 +24,7 @@
 //extern "C" {
 #endif
 
-#include <spa/dict.h>
+#include <spa/utils/dict.h>
 
 /** \class pw_properties
  *
@@ -55,10 +55,10 @@ pw_properties_merge(const struct pw_properties *oldprops,
 void
 pw_properties_free(struct pw_properties *properties);
 
-void
+int
 pw_properties_set(struct pw_properties *properties, const char *key, const char *value);
 
-void
+int
 pw_properties_setf(struct pw_properties *properties,
 		   const char *key, const char *format, ...) SPA_PRINTF_FUNC(3, 4);
 const char *
@@ -66,6 +66,30 @@ pw_properties_get(const struct pw_properties *properties, const char *key);
 
 const char *
 pw_properties_iterate(const struct pw_properties *properties, void **state);
+
+static inline bool pw_properties_parse_bool(const char *value) {
+	return (strcmp(value, "true") == 0 || atoi(value) == 1);
+}
+
+static inline int pw_properties_parse_int(const char *value) {
+	return strtol(value, NULL, 0);
+}
+
+static inline int64_t pw_properties_parse_int64(const char *value) {
+	return strtoll(value, NULL, 0);
+}
+
+static inline uint64_t pw_properties_parse_uint64(const char *value) {
+	return strtoull(value, NULL, 0);
+}
+
+static inline float pw_properties_parse_float(const char *value) {
+	return strtof(value, NULL);
+}
+
+static inline double pw_properties_parse_double(const char *value) {
+	return strtod(value, NULL);
+}
 
 #ifdef __cplusplus
 }
