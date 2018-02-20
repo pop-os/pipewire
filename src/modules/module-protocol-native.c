@@ -27,6 +27,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 
+#include <spa/pod/iter.h>
+
 #include "config.h"
 
 #include "pipewire/pipewire.h"
@@ -39,7 +41,7 @@
 #include "pipewire/client.h"
 #include "pipewire/resource.h"
 #include "pipewire/link.h"
-#include "pipewire/node-factory.h"
+#include "pipewire/factory.h"
 #include "pipewire/data-loop.h"
 #include "pipewire/main-loop.h"
 
@@ -65,8 +67,7 @@ struct protocol_data {
 struct client {
 	struct pw_protocol_client this;
 
-	int fd;
-
+	struct pw_properties *properties;
 	struct spa_source *source;
 
         struct pw_protocol_native_connection *connection;
@@ -80,7 +81,6 @@ struct client {
 struct server {
 	struct pw_protocol_server this;
 
-	int fd;
 	int fd_lock;
 	struct sockaddr_un addr;
 	char lock_addr[UNIX_PATH_MAX + LOCK_SUFFIXLEN];
@@ -93,11 +93,75 @@ struct server {
 struct client_data {
 	struct pw_client *client;
 	struct spa_hook client_listener;
-	int fd;
 	struct spa_source *source;
 	struct pw_protocol_native_connection *connection;
 	bool busy;
 };
+
+static bool pod_remap_data(uint32_t type, void *body, uint32_t size, struct pw_map *types)
+{
+	void *t;
+
+	switch (type) {
+	case SPA_POD_TYPE_ID:
+		if ((t = pw_map_lookup(types, *(int32_t *) body)) == NULL)
+			return false;
+		*(int32_t *) body = PW_MAP_PTR_TO_ID(t);
+		break;
+
+	case SPA_POD_TYPE_PROP:
+	{
+		struct spa_pod_prop_body *b = body;
+
+		if ((t = pw_map_lookup(types, b->key)) == NULL)
+			return false;
+		b->key = PW_MAP_PTR_TO_ID(t);
+
+		if (b->value.type == SPA_POD_TYPE_ID) {
+			void *alt;
+			if (!pod_remap_data
+			    (b->value.type, SPA_POD_BODY(&b->value), b->value.size, types))
+				return false;
+
+			SPA_POD_PROP_ALTERNATIVE_FOREACH(b, size, alt)
+				if (!pod_remap_data(b->value.type, alt, b->value.size, types))
+					return false;
+		}
+		break;
+	}
+	case SPA_POD_TYPE_OBJECT:
+	{
+		struct spa_pod_object_body *b = body;
+		struct spa_pod *p;
+
+		if ((t = pw_map_lookup(types, b->id)) != NULL)
+			b->id = PW_MAP_PTR_TO_ID(t);
+		else
+			b->id = SPA_ID_INVALID;
+
+		if ((t = pw_map_lookup(types, b->type)) == NULL)
+			return false;
+		b->type = PW_MAP_PTR_TO_ID(t);
+
+		SPA_POD_OBJECT_BODY_FOREACH(b, size, p)
+			if (!pod_remap_data(p->type, SPA_POD_BODY(p), p->size, types))
+				return false;
+		break;
+	}
+	case SPA_POD_TYPE_STRUCT:
+	{
+		struct spa_pod *b = body, *p;
+
+		SPA_POD_FOREACH(b, size, p)
+			if (!pod_remap_data(p->type, SPA_POD_BODY(p), p->size, types))
+				return false;
+		break;
+	}
+	default:
+		break;
+	}
+	return true;
+}
 
 static void
 process_messages(struct client_data *data)
@@ -123,7 +187,7 @@ process_messages(struct client_data *data)
 		pw_log_trace("protocol-native %p: got message %d from %u", client->protocol,
 			     opcode, id);
 
-		resource = pw_client_get_resource(client, id);
+		resource = pw_client_find_resource(client, id);
 		if (resource == NULL) {
 			pw_log_error("protocol-native %p: unknown resource %u",
 				     client->protocol, id);
@@ -152,10 +216,10 @@ process_messages(struct client_data *data)
 		}
 
 		if (demarshal[opcode].flags & PW_PROTOCOL_NATIVE_REMAP)
-			if (!pw_pod_remap_data(SPA_POD_TYPE_STRUCT, message, size, &client->types))
+			if (!pod_remap_data(SPA_POD_TYPE_STRUCT, message, size, &client->types))
 				goto invalid_message;
 
-		if (!demarshal[opcode].func (resource, message, size))
+		if (demarshal[opcode].func(resource, message, size) < 0)
 			goto invalid_message;
 	}
 	return;
@@ -217,7 +281,6 @@ static void client_free(void *data)
 	spa_list_remove(&client->protocol_link);
 
 	pw_protocol_native_connection_destroy(this->connection);
-	close(this->fd);
 }
 
 static const struct pw_client_events client_events = {
@@ -235,6 +298,7 @@ static struct pw_client *client_new(struct server *s, int fd)
 	socklen_t len;
 	struct ucred ucred, *ucredp;
 	struct pw_core *core = protocol->core;
+	struct pw_properties *props;
 
 	len = sizeof(ucred);
 	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
@@ -244,20 +308,21 @@ static struct pw_client *client_new(struct server *s, int fd)
 		ucredp = &ucred;
 	}
 
+	props = pw_properties_new(PW_CLIENT_PROP_PROTOCOL, "protocol-native", NULL);
+	if (props == NULL)
+		goto no_props;
+
 	client = pw_client_new(protocol->core,
-			       pw_module_get_global(pd->module),
 			       ucredp,
-			       NULL,
+			       props,
 			       sizeof(struct client_data));
 	if (client == NULL)
 		goto no_client;
 
 	this = pw_client_get_user_data(client);
 	this->client = client;
-	this->fd = fd;
 	this->source = pw_loop_add_io(pw_core_get_main_loop(core),
-				      this->fd,
-				      SPA_IO_ERR | SPA_IO_HUP, false, connection_data, this);
+				      fd, SPA_IO_ERR | SPA_IO_HUP, true, connection_data, this);
 	if (this->source == NULL)
 		goto no_source;
 
@@ -269,6 +334,7 @@ static struct pw_client *client_new(struct server *s, int fd)
 	spa_list_append(&s->this.client_list, &client->protocol_link);
 
 	pw_client_add_listener(client, &this->client_listener, &client_events, this);
+	pw_client_register(client, NULL, pw_module_get_global(pd->module), NULL);
 
 	pw_global_bind(pw_core_get_global(core), client, PW_PERM_RWX, PW_VERSION_CORE, 0);
 
@@ -279,6 +345,7 @@ static struct pw_client *client_new(struct server *s, int fd)
       no_source:
 	pw_client_destroy(client);
       no_client:
+      no_props:
 	return NULL;
 }
 
@@ -376,38 +443,45 @@ socket_data(void *data, int fd, enum spa_io mask)
 static bool add_socket(struct pw_protocol *protocol, struct server *s)
 {
 	socklen_t size;
+	int fd;
 
-	if ((s->fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0)
-		return false;
+	if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0)
+		goto error;
 
 	size = offsetof(struct sockaddr_un, sun_path) + strlen(s->addr.sun_path);
-	if (bind(s->fd, (struct sockaddr *) &s->addr, size) < 0) {
+	if (bind(fd, (struct sockaddr *) &s->addr, size) < 0) {
 		pw_log_error("bind() failed with error: %m");
-		return false;
+		goto error_close;
 	}
 
-	if (listen(s->fd, 128) < 0) {
+	if (listen(fd, 128) < 0) {
 		pw_log_error("listen() failed with error: %m");
-		return false;
+		goto error_close;
 	}
 
 	s->loop = pw_core_get_main_loop(protocol->core);
-	s->source = pw_loop_add_io(s->loop, s->fd, SPA_IO_IN, false, socket_data, s);
+	s->source = pw_loop_add_io(s->loop, fd, SPA_IO_IN, true, socket_data, s);
 	if (s->source == NULL)
-		return false;
+		goto error_close;
 
 	return true;
+
+      error_close:
+	close(fd);
+      error:
+	return false;
+
 }
 
 static const char *
-get_name(const struct pw_properties *properties)
+get_remote(const struct pw_properties *properties)
 {
 	const char *name = NULL;
 
 	if (properties)
-		name = pw_properties_get(properties, "pipewire.core.name");
+		name = pw_properties_get(properties, PW_REMOTE_PROP_REMOTE_NAME);
 	if (name == NULL)
-		name = getenv("PIPEWIRE_CORE");
+		name = getenv("PIPEWIRE_REMOTE");
 	if (name == NULL)
 		name = "pipewire-0";
 	return name;
@@ -415,6 +489,7 @@ get_name(const struct pw_properties *properties)
 
 static int impl_connect(struct pw_protocol_client *client)
 {
+	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
 	struct sockaddr_un addr;
 	socklen_t size;
 	const char *runtime_dir, *name = NULL;
@@ -425,7 +500,7 @@ static int impl_connect(struct pw_protocol_client *client)
 		return -1;
         }
 
-	name = get_name(NULL);
+	name = get_remote(impl->properties);
 
         if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0)
                 return -1;
@@ -452,6 +527,20 @@ static int impl_connect(struct pw_protocol_client *client)
         return -1;
 }
 
+static int impl_steal_fd(struct pw_protocol_client *client)
+{
+	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
+	int fd;
+
+	if (impl->source == NULL)
+		return -EIO;
+
+	fd = dup(impl->source->fd);
+
+	pw_protocol_client_disconnect(client);
+
+	return fd;
+}
 
 static void
 on_remote_data(void *data, int fd, enum spa_io mask)
@@ -483,7 +572,7 @@ on_remote_data(void *data, int fd, enum spa_io mask)
 
                         pw_log_trace("protocol-native %p: got message %d from %u", this, opcode, id);
 
-                        proxy = pw_remote_get_proxy(this, id);
+                        proxy = pw_remote_find_proxy(this, id);
 
                         if (proxy == NULL) {
                                 pw_log_error("protocol-native %p: could not find proxy %u", this, id);
@@ -505,14 +594,14 @@ on_remote_data(void *data, int fd, enum spa_io mask)
 			}
 
 			if (demarshal[opcode].flags & PW_PROTOCOL_NATIVE_REMAP) {
-				if (!pw_pod_remap_data(SPA_POD_TYPE_STRUCT, message, size, &this->types)) {
+				if (!pod_remap_data(SPA_POD_TYPE_STRUCT, message, size, &this->types)) {
                                         pw_log_error
                                             ("protocol-native %p: invalid message received %u for %u", this,
                                              opcode, id);
 					continue;
 				}
 			}
-			if (!demarshal[opcode].func(proxy, message, size)) {
+			if (demarshal[opcode].func(proxy, message, size) < 0) {
 				pw_log_error ("protocol-native %p: invalid message received %u for %u", this,
 					opcode, id);
 				continue;
@@ -552,6 +641,8 @@ static int impl_connect_fd(struct pw_protocol_client *client, int fd)
 	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
 	struct pw_remote *remote = client->remote;
 
+	impl->disconnecting = false;
+
 	impl->connection = pw_protocol_native_connection_new(fd);
 	if (impl->connection == NULL)
                 goto error_close;
@@ -561,11 +652,10 @@ static int impl_connect_fd(struct pw_protocol_client *client, int fd)
 						   &conn_events,
 						   impl);
 
-        impl->fd = fd;
         impl->source = pw_loop_add_io(remote->core->main_loop,
                                       fd,
                                       SPA_IO_IN | SPA_IO_HUP | SPA_IO_ERR,
-                                      false, on_remote_data, impl);
+                                      true, on_remote_data, impl);
 
 	return 0;
 
@@ -588,10 +678,6 @@ static void impl_disconnect(struct pw_protocol_client *client)
 	if (impl->connection)
                 pw_protocol_native_connection_destroy(impl->connection);
 	impl->connection = NULL;
-
-	if (impl->fd != -1)
-                close(impl->fd);
-	impl->fd = -1;
 }
 
 static void impl_destroy(struct pw_protocol_client *client)
@@ -599,7 +685,12 @@ static void impl_destroy(struct pw_protocol_client *client)
 	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
 	struct pw_remote *remote = client->remote;
 
+	impl_disconnect(client);
+
 	pw_loop_destroy_source(remote->core->main_loop, impl->flush_event);
+
+	if (impl->properties)
+		pw_properties_free(impl->properties);
 
 	spa_list_remove(&client->link);
 	free(impl);
@@ -620,12 +711,14 @@ impl_new_client(struct pw_protocol *protocol,
 	this->protocol = protocol;
 	this->remote = remote;
 
+	impl->properties = properties ? pw_properties_copy(properties) : NULL;
+
 	this->connect = impl_connect;
+	this->steal_fd = impl_steal_fd;
 	this->connect_fd = impl_connect_fd;
 	this->disconnect = impl_disconnect;
 	this->destroy = impl_destroy;
 
-	impl->fd = -1;
 	impl->flush_event = pw_loop_add_event(remote->core->main_loop, do_flush_event, impl);
 
 	spa_list_append(&protocol->client_list, &this->link);
@@ -647,11 +740,9 @@ static void destroy_server(struct pw_protocol_server *server)
 		pw_loop_destroy_source(s->loop, s->source);
 	if (s->addr.sun_path[0])
 		unlink(s->addr.sun_path);
-	if (s->fd >= 0)
-		close(s->fd);
 	if (s->lock_addr[0])
 		unlink(s->lock_addr);
-	if (s->fd_lock >= 0)
+	if (s->fd_lock != 1)
 		close(s->fd_lock);
 	free(s);
 }
@@ -674,6 +765,20 @@ static const struct spa_loop_control_hooks impl_hooks = {
 	.before = on_before_hook,
 };
 
+static const char *
+get_name(const struct pw_properties *properties)
+{
+	const char *name = NULL;
+
+	if (properties)
+		name = pw_properties_get(properties, PW_CORE_PROP_NAME);
+	if (name == NULL)
+		name = getenv("PIPEWIRE_CORE");
+	if (name == NULL)
+		name = "pipewire-0";
+	return name;
+}
+
 static struct pw_protocol_server *
 impl_add_server(struct pw_protocol *protocol,
                 struct pw_core *core,
@@ -686,13 +791,14 @@ impl_add_server(struct pw_protocol *protocol,
 	if ((s = calloc(1, sizeof(struct server))) == NULL)
 		return NULL;
 
-	s->fd = -1;
 	s->fd_lock = -1;
 
 	this = &s->this;
 	this->protocol = protocol;
 	spa_list_init(&this->client_list);
 	this->destroy = destroy_server;
+
+	spa_list_append(&protocol->server_list, &this->link);
 
 	name = get_name(pw_core_get_properties(core));
 
@@ -705,11 +811,9 @@ impl_add_server(struct pw_protocol *protocol,
 	if (!add_socket(protocol, s))
 		goto error;
 
-	spa_list_append(&protocol->server_list, &this->link);
-
 	pw_loop_add_hook(pw_core_get_main_loop(core), &s->hook, &impl_hooks, s);
 
-	pw_log_info("protocol-native %p: Added server %p", protocol, this);
+	pw_log_info("protocol-native %p: Added server %p %s", protocol, this, name);
 
 	return this;
 
@@ -804,7 +908,7 @@ static const struct pw_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static bool module_init(struct pw_module *module, struct pw_properties *properties)
+static int module_init(struct pw_module *module, struct pw_properties *properties)
 {
 	struct pw_core *core = pw_module_get_core(module);
 	struct pw_protocol *this;
@@ -812,11 +916,11 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 	struct protocol_data *d;
 
 	if (pw_core_find_protocol(core, PW_TYPE_PROTOCOL__Native) != NULL)
-		return true;
+		return 0;
 
 	this = pw_protocol_new(core, PW_TYPE_PROTOCOL__Native, sizeof(struct protocol_data));
 	if (this == NULL)
-		return false;
+		return -ENOMEM;
 
 	this->implementation = &protocol_impl;
 	this->extension = &protocol_ext_impl;
@@ -830,17 +934,20 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 	d->module = module;
 	d->properties = properties;
 
-	if ((val = pw_properties_get(pw_core_get_properties(core), "pipewire.daemon"))) {
-		if (atoi(val) == 1)
-			impl_add_server(this, core, properties);
+	val = getenv("PIPEWIRE_DAEMON");
+	if (val == NULL)
+		val = pw_properties_get(pw_core_get_properties(core), PW_CORE_PROP_DAEMON);
+	if (val && pw_properties_parse_bool(val)) {
+		if (impl_add_server(this, core, properties) == NULL)
+			return -ENOMEM;
 	}
 
 	pw_module_add_listener(module, &d->module_listener, &module_events, d);
 
-	return true;
+	return 0;
 }
 
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);
 }

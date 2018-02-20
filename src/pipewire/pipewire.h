@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#include <spa/plugin.h>
+#include <spa/support/plugin.h>
 
 #include <pipewire/client.h>
 #include <pipewire/core.h>
@@ -35,7 +35,7 @@ extern "C" {
 #include <pipewire/loop.h>
 #include <pipewire/main-loop.h>
 #include <pipewire/module.h>
-#include <pipewire/node-factory.h>
+#include <pipewire/factory.h>
 #include <pipewire/node.h>
 #include <pipewire/port.h>
 #include <pipewire/properties.h>
@@ -51,12 +51,12 @@ extern "C" {
  *
  * \section sec_intro Introduction
  *
- * This document describes the API for the PipeWire multimedia server.
+ * This document describes the API for the PipeWire multimedia framework.
  * The API consists of two parts:
  *
- * \li The client side API (See \subpage page_client_api)
- * \li The server side API and tools to build new modules (See
- * \subpage page_server_api)
+ * \li The core API and tools to build new modules (See
+ * \subpage page_core_api)
+ * \li The remote API (See \subpage page_remote_api)
  *
  * \section sec_errors Error reporting
  *
@@ -131,6 +131,8 @@ pw_direction_reverse(enum pw_direction direction);
 
 void *
 pw_get_support_interface(const char *type);
+
+void *pw_get_spa_dbus(struct pw_loop *loop);
 
 const struct spa_handle_factory *
 pw_get_support_factory(const char *factory_name);

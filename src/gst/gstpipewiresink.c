@@ -39,11 +39,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <gio/gunixfdmessage.h>
 #include <gst/allocators/gstfdmemory.h>
-#include <gst/video/video.h>
-
-#include <spa/buffer.h>
 
 #include "gstpipewireformat.h"
 
@@ -60,7 +56,8 @@ enum
   PROP_PATH,
   PROP_CLIENT_NAME,
   PROP_STREAM_PROPERTIES,
-  PROP_MODE
+  PROP_MODE,
+  PROP_FD
 };
 
 GType
@@ -195,6 +192,15 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
                                                         G_PARAM_READWRITE |
                                                         G_PARAM_STATIC_STRINGS));
 
+   g_object_class_install_property (gobject_class,
+                                    PROP_FD,
+                                    g_param_spec_int ("fd",
+                                                      "Fd",
+                                                      "The fd to connect with",
+                                                      -1, G_MAXINT, -1,
+                                                      G_PARAM_READWRITE |
+                                                      G_PARAM_STATIC_STRINGS));
+
   gstelement_class->change_state = gst_pipewire_sink_change_state;
 
   gst_element_class_set_static_metadata (gstelement_class,
@@ -217,21 +223,8 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
   process_mem_data_quark = g_quark_from_static_string ("GstPipeWireSinkProcessMemQuark");
 }
 
+#define PROP_RANGE(min,max)	2,min,max
 
-#define PROP(f,key,type,...)                                                    \
-          SPA_POD_PROP (f,key,0,type,1,__VA_ARGS__)
-#define PROP_R(f,key,type,...)                                                  \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_FLAG_READONLY,type,1,__VA_ARGS__)
-#define PROP_MM(f,key,type,...)                                                 \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_RANGE_MIN_MAX,type,3,__VA_ARGS__)
-#define PROP_U_MM(f,key,type,...)                                               \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_FLAG_UNSET |                         \
-                              SPA_POD_PROP_RANGE_MIN_MAX,type,3,__VA_ARGS__)
-#define PROP_EN(f,key,type,n,...)                                               \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_RANGE_ENUM,type,n,__VA_ARGS__)
-#define PROP_U_EN(f,key,type,n,...)                                             \
-          SPA_POD_PROP (f,key,SPA_POD_PROP_FLAG_UNSET |                         \
-                              SPA_POD_PROP_RANGE_ENUM,type,n,__VA_ARGS__)
 static void
 pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
 {
@@ -241,49 +234,39 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
   guint size;
   guint min_buffers;
   guint max_buffers;
-  struct spa_param *port_params[3];
+  struct spa_pod *port_params[2];
   struct spa_pod_builder b = { NULL };
   uint8_t buffer[1024];
-  struct spa_pod_frame f[2];
 
   config = gst_buffer_pool_get_config (GST_BUFFER_POOL (pool));
   gst_buffer_pool_config_get_params (config, &caps, &size, &min_buffers, &max_buffers);
 
   spa_pod_builder_init (&b, buffer, sizeof (buffer));
-  spa_pod_builder_push_object (&b, &f[0], 0, t->param_alloc_buffers.Buffers);
+  spa_pod_builder_push_object (&b, t->param.idBuffers, t->param_buffers.Buffers);
   if (size == 0)
     spa_pod_builder_add (&b,
-        PROP_U_MM (&f[1], t->param_alloc_buffers.size, SPA_POD_TYPE_INT, 0, 0, INT32_MAX), 0);
+        ":", t->param_buffers.size, "iru", 0, PROP_RANGE(0, INT32_MAX), NULL);
   else
     spa_pod_builder_add (&b,
-        PROP_MM (&f[1], t->param_alloc_buffers.size, SPA_POD_TYPE_INT, size, size, INT32_MAX), 0);
+        ":", t->param_buffers.size, "ir", size, PROP_RANGE(size, INT32_MAX), NULL);
 
   spa_pod_builder_add (&b,
-      PROP_MM (&f[1], t->param_alloc_buffers.stride,  SPA_POD_TYPE_INT, 0, 0, INT32_MAX),
-      PROP_U_MM (&f[1], t->param_alloc_buffers.buffers, SPA_POD_TYPE_INT, min_buffers, min_buffers, max_buffers ? max_buffers : INT32_MAX),
-      PROP    (&f[1], t->param_alloc_buffers.align,   SPA_POD_TYPE_INT, 16),
-      0);
-  spa_pod_builder_pop (&b, &f[0]);
-  port_params[0] = SPA_POD_BUILDER_DEREF (&b, f[0].ref, struct spa_param);
+      ":", t->param_buffers.stride,  "ir", 0, PROP_RANGE(0, INT32_MAX),
+      ":", t->param_buffers.buffers, "iru", min_buffers,
+						PROP_RANGE(min_buffers,
+							       max_buffers ? max_buffers : INT32_MAX),
+      ":", t->param_buffers.align,   "i", 16,
+      NULL);
+  port_params[0] = spa_pod_builder_pop (&b);
 
-  spa_pod_builder_object (&b, &f[0], 0, t->param_alloc_meta_enable.MetaEnable,
-      PROP    (&f[1], t->param_alloc_meta_enable.type, SPA_POD_TYPE_ID, t->meta.Header),
-      PROP    (&f[1], t->param_alloc_meta_enable.size, SPA_POD_TYPE_INT, sizeof (struct spa_meta_header)));
-  port_params[1] = SPA_POD_BUILDER_DEREF (&b, f[0].ref, struct spa_param);
+  port_params[1] = spa_pod_builder_object (&b,
+      t->param.idMeta, t->param_meta.Meta,
+      ":", t->param_meta.type, "I", t->meta.Header,
+      ":", t->param_meta.size, "i", sizeof (struct spa_meta_header));
 
-  spa_pod_builder_object (&b, &f[0], 0, t->param_alloc_meta_enable.MetaEnable,
-      PROP    (&f[1], t->param_alloc_meta_enable.type, SPA_POD_TYPE_ID, t->meta.Ringbuffer),
-      PROP    (&f[1], t->param_alloc_meta_enable.size, SPA_POD_TYPE_INT, sizeof (struct spa_meta_ringbuffer)),
-      PROP    (&f[1], t->param_alloc_meta_enable.ringbufferSize,   SPA_POD_TYPE_INT,
-                                                                   size * SPA_MAX (4,
-                                                                          SPA_MAX (min_buffers, max_buffers))),
-      PROP    (&f[1], t->param_alloc_meta_enable.ringbufferStride, SPA_POD_TYPE_INT, 0),
-      PROP    (&f[1], t->param_alloc_meta_enable.ringbufferBlocks, SPA_POD_TYPE_INT, 1),
-      PROP    (&f[1], t->param_alloc_meta_enable.ringbufferAlign,  SPA_POD_TYPE_INT, 16));
-  port_params[2] = SPA_POD_BUILDER_DEREF (&b, f[0].ref, struct spa_param);
 
   pw_thread_loop_lock (sink->main_loop);
-  pw_stream_finish_format (sink->stream, SPA_RESULT_OK, port_params, 2);
+  pw_stream_finish_format (sink->stream, 0, port_params, 2);
   pw_thread_loop_unlock (sink->main_loop);
 }
 
@@ -294,6 +277,7 @@ gst_pipewire_sink_init (GstPipeWireSink * sink)
   sink->pool =  gst_pipewire_pool_new ();
   sink->client_name = pw_get_client_name();
   sink->mode = DEFAULT_PROP_MODE;
+  sink->fd = -1;
 
   g_signal_connect (sink->pool, "activated", G_CALLBACK (pool_activated), sink);
 
@@ -380,6 +364,10 @@ gst_pipewire_sink_set_property (GObject * object, guint prop_id,
       pwsink->mode = g_value_get_enum (value);
       break;
 
+    case PROP_FD:
+      pwsink->fd = g_value_get_int (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -407,6 +395,10 @@ gst_pipewire_sink_get_property (GObject * object, guint prop_id,
 
     case PROP_MODE:
       g_value_set_enum (value, pwsink->mode);
+      break;
+
+    case PROP_FD:
+      g_value_set_int (value, pwsink->fd);
       break;
 
     default:
@@ -466,12 +458,12 @@ on_add_buffer (void     *_data,
         d->type == t->data.DmaBuf) {
       gmem = gst_fd_allocator_alloc (pwsink->allocator, dup (d->fd),
                 d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_NONE);
-      gst_memory_resize (gmem, d->chunk->offset + d->mapoffset, d->chunk->size);
+      gst_memory_resize (gmem, d->mapoffset, d->maxsize);
       data.offset = d->mapoffset;
     }
     else if (d->type == t->data.MemPtr) {
-      gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, d->chunk->offset,
-                                     d->chunk->size, NULL, NULL);
+      gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, 0,
+                                     d->maxsize, NULL, NULL);
       data.offset = 0;
     }
     if (gmem)
@@ -598,7 +590,7 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
 }
 
 static void
-on_format_changed (void *data, struct spa_format *format)
+on_format_changed (void *data, struct spa_pod *format)
 {
   GstPipeWireSink *pwsink = data;
 
@@ -614,10 +606,12 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   enum pw_stream_state state;
   const char *error = NULL;
   gboolean res = FALSE;
+  struct pw_type *t;
 
   pwsink = GST_PIPEWIRE_SINK (bsink);
+  t = pwsink->type;
 
-  possible = gst_caps_to_format_all (caps, pwsink->type->map);
+  possible = gst_caps_to_format_all (caps, t->param.idEnumFormat, t->map);
 
   pw_thread_loop_lock (pwsink->main_loop);
   state = pw_stream_get_state (pwsink->stream, &error);
@@ -633,11 +627,10 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 
     pw_stream_connect (pwsink->stream,
                           PW_DIRECTION_OUTPUT,
-                          PW_STREAM_MODE_BUFFER,
                           pwsink->path,
                           flags,
-                          possible->len,
-                          (const struct spa_format **) possible->pdata);
+                          (const struct spa_pod **) possible->pdata,
+                          possible->len);
 
     while (TRUE) {
       state = pw_stream_get_state (pwsink->stream, &error);
@@ -822,17 +815,20 @@ gst_pipewire_sink_open (GstPipeWireSink * pwsink)
 {
   const char *error = NULL;
 
-  if (pw_thread_loop_start (pwsink->main_loop) != SPA_RESULT_OK)
+  if (pw_thread_loop_start (pwsink->main_loop) < 0)
     goto mainloop_error;
 
   pw_thread_loop_lock (pwsink->main_loop);
-  pwsink->remote = pw_remote_new (pwsink->core, NULL);
+  pwsink->remote = pw_remote_new (pwsink->core, NULL, 0);
 
   pw_remote_add_listener (pwsink->remote,
 			  &pwsink->remote_listener,
 			  &remote_events, pwsink);
 
-  pw_remote_connect (pwsink->remote);
+  if (pwsink->fd == -1)
+    pw_remote_connect (pwsink->remote);
+  else
+    pw_remote_connect_fd (pwsink->remote, pwsink->fd);
 
   while (TRUE) {
     enum pw_remote_state state = pw_remote_get_state (pwsink->remote, &error);

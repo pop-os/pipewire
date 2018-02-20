@@ -22,11 +22,10 @@
 #include <time.h>
 #include <sys/mman.h>
 
-#include <spa/type-map.h>
-#include <spa/format-utils.h>
-#include <spa/video/format-utils.h>
-#include <spa/format-builder.h>
-#include <spa/props.h>
+#include <spa/support/type-map.h>
+#include <spa/param/format-utils.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/param/props.h>
 #include <spa/lib/debug.h>
 
 #include <pipewire/pipewire.h>
@@ -34,6 +33,7 @@
 struct type {
 	uint32_t format;
 	uint32_t props;
+	struct spa_type_param param;
 	struct spa_type_meta meta;
 	struct spa_type_data data;
 	struct spa_type_media_type media_type;
@@ -46,6 +46,7 @@ static inline void init_type(struct type *type, struct spa_type_map *map)
 {
 	type->format = spa_type_map_get_id(map, SPA_TYPE__Format);
 	type->props = spa_type_map_get_id(map, SPA_TYPE__Props);
+	spa_type_param_map(map, &type->param);
 	spa_type_meta_map(map, &type->meta);
 	spa_type_data_map(map, &type->data);
 	spa_type_media_type_map(map, &type->media_type);
@@ -59,8 +60,7 @@ static inline void init_type(struct type *type, struct spa_type_map *map)
 struct data {
 	struct type type;
 
-	bool running;
-	struct pw_loop *loop;
+	struct pw_main_loop *loop;
 	struct spa_source *timer;
 
 	struct pw_core *core;
@@ -74,7 +74,6 @@ struct data {
 	struct spa_video_info_raw format;
 	int32_t stride;
 
-	uint8_t params_buffer[1024];
 	int counter;
 	uint32_t seq;
 };
@@ -133,6 +132,8 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	if (map)
 		munmap(map, buf->datas[0].maxsize + buf->datas[0].mapoffset);
 
+	buf->datas[0].chunk->size = buf->datas[0].maxsize;
+
 	pw_stream_send_buffer(data->stream, id);
 }
 
@@ -145,7 +146,7 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 
 	switch (state) {
 	case PW_STREAM_STATE_PAUSED:
-		pw_loop_update_timer(data->loop, data->timer, NULL, NULL, false);
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop), data->timer, NULL, NULL, false);
 		break;
 
 	case PW_STREAM_STATE_STREAMING:
@@ -157,7 +158,7 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		interval.tv_sec = 0;
 		interval.tv_nsec = 40 * SPA_NSEC_PER_MSEC;
 
-		pw_loop_update_timer(data->loop, data->timer, &timeout, &interval, false);
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop), data->timer, &timeout, &interval, false);
 		break;
 	}
 	default:
@@ -165,51 +166,38 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 	}
 }
 
-#define PROP(f,key,type,...)							\
-	SPA_POD_PROP (f,key,0,type,1,__VA_ARGS__)
-#define PROP_U_MM(f,key,type,...)						\
-	SPA_POD_PROP (f,key,SPA_POD_PROP_FLAG_UNSET |				\
-			SPA_POD_PROP_RANGE_MIN_MAX,type,3,__VA_ARGS__)
-
 static void
-on_stream_format_changed(void *_data, struct spa_format *format)
+on_stream_format_changed(void *_data, struct spa_pod *format)
 {
 	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
 	struct pw_type *t = data->t;
-	struct spa_pod_builder b = { NULL };
-	struct spa_pod_frame f[2];
-	struct spa_param *params[2];
+	uint8_t params_buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
+	struct spa_pod *params[2];
 
 	if (format == NULL) {
-		pw_stream_finish_format(stream, SPA_RESULT_OK, NULL, 0);
+		pw_stream_finish_format(stream, 0, NULL, 0);
 		return;
 	}
 	spa_format_video_raw_parse(format, &data->format, &data->type.format_video);
 
 	data->stride = SPA_ROUND_UP_N(data->format.size.width * BPP, 4);
 
-	spa_pod_builder_init(&b, data->params_buffer, sizeof(data->params_buffer));
-	spa_pod_builder_object(&b, &f[0], 0, t->param_alloc_buffers.Buffers,
-		PROP(&f[1], t->param_alloc_buffers.size, SPA_POD_TYPE_INT,
-			data->stride * data->format.size.height),
-		PROP(&f[1], t->param_alloc_buffers.stride, SPA_POD_TYPE_INT,
-			data->stride),
-		PROP_U_MM(&f[1], t->param_alloc_buffers.buffers, SPA_POD_TYPE_INT,
-			32,
-			2, 32),
-		PROP(&f[1], t->param_alloc_buffers.align, SPA_POD_TYPE_INT,
-			16));
-	params[0] = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_param);
+	params[0] = spa_pod_builder_object(&b,
+		t->param.idBuffers, t->param_buffers.Buffers,
+		":", t->param_buffers.size,    "i", data->stride * data->format.size.height,
+		":", t->param_buffers.stride,  "i", data->stride,
+		":", t->param_buffers.buffers, "iru", 2,
+								2, 1, 32,
+		":", t->param_buffers.align,   "i", 16);
 
-	spa_pod_builder_object(&b, &f[0], 0, t->param_alloc_meta_enable.MetaEnable,
-		PROP(&f[1], t->param_alloc_meta_enable.type, SPA_POD_TYPE_ID,
-			t->meta.Header),
-		PROP(&f[1], t->param_alloc_meta_enable.size, SPA_POD_TYPE_INT,
-			sizeof(struct spa_meta_header)));
-	params[1] = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_param);
+	params[1] = spa_pod_builder_object(&b,
+		t->param.idMeta, t->param_meta.Meta,
+		":", t->param_meta.type, "I", t->meta.Header,
+		":", t->param_meta.size, "i", sizeof(struct spa_meta_header));
 
-	pw_stream_finish_format(stream, SPA_RESULT_OK, params, 2);
+	pw_stream_finish_format(stream, 0, params, 2);
 }
 
 static const struct pw_stream_events stream_events = {
@@ -226,32 +214,29 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 	switch (state) {
 	case PW_REMOTE_STATE_ERROR:
 		printf("remote error: %s\n", error);
-		data->running = false;
+		pw_main_loop_quit(data->loop);
 		break;
 
 	case PW_REMOTE_STATE_CONNECTED:
 	{
-		const struct spa_format *formats[1];
+		const struct spa_pod *params[1];
 		uint8_t buffer[1024];
 		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-		struct spa_pod_frame f[2];
 
 		printf("remote state: \"%s\"\n",
 		       pw_remote_state_as_string(state));
 
 		data->stream = pw_stream_new(remote, "video-src", NULL);
 
-		spa_pod_builder_format(&b, &f[0], data->type.format,
-			data->type.media_type.video,
-			data->type.media_subtype.raw,
-			PROP(&f[1], data->type.format_video.format, SPA_POD_TYPE_ID,
-				data->type.video_format.RGB),
-			PROP_U_MM(&f[1], data->type.format_video.size, SPA_POD_TYPE_RECTANGLE,
-				320, 240,
-				1, 1, 4096, 4096),
-			PROP(&f[1], data->type.format_video.framerate, SPA_POD_TYPE_FRACTION,
-				25, 1));
-		formats[0] = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_format);
+		params[0] = spa_pod_builder_object(&b,
+			data->type.param.idEnumFormat, data->type.format,
+			"I", data->type.media_type.video,
+			"I", data->type.media_subtype.raw,
+			":", data->type.format_video.format,    "I", data->type.video_format.RGB,
+			":", data->type.format_video.size,      "Rru", &SPA_RECTANGLE(320, 240),
+									2, &SPA_RECTANGLE(1, 1),
+									   &SPA_RECTANGLE(4096, 4096),
+			":", data->type.format_video.framerate, "F", &SPA_FRACTION(25, 1));
 
 		pw_stream_add_listener(data->stream,
 				       &data->stream_listener,
@@ -260,8 +245,8 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 
 		pw_stream_connect(data->stream,
 				  PW_DIRECTION_OUTPUT,
-				  PW_STREAM_MODE_BUFFER,
-				  NULL, PW_STREAM_FLAG_NONE, 1, formats);
+				  NULL, PW_STREAM_FLAG_NONE,
+				  params, 1);
 		break;
 	}
 	default:
@@ -281,29 +266,23 @@ int main(int argc, char *argv[])
 
 	pw_init(&argc, &argv);
 
-	data.loop = pw_loop_new(NULL);
-	data.running = true;
-	data.core = pw_core_new(data.loop, NULL);
+	data.loop = pw_main_loop_new(NULL);
+	data.core = pw_core_new(pw_main_loop_get_loop(data.loop), NULL);
 	data.t = pw_core_get_type(data.core);
-	data.remote = pw_remote_new(data.core, NULL);
+	data.remote = pw_remote_new(data.core, NULL, 0);
 
 	init_type(&data.type, data.t->map);
 
-	data.timer = pw_loop_add_timer(data.loop, on_timeout, &data);
+	data.timer = pw_loop_add_timer(pw_main_loop_get_loop(data.loop), on_timeout, &data);
 
 	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
 
 	pw_remote_connect(data.remote);
 
-	pw_loop_enter(data.loop);
-	while (data.running) {
-		pw_loop_iterate(data.loop, -1);
-	}
-	pw_loop_leave(data.loop);
+	pw_main_loop_run(data.loop);
 
-	pw_remote_destroy(data.remote);
 	pw_core_destroy(data.core);
-	pw_loop_destroy(data.loop);
+	pw_main_loop_destroy(data.loop);
 
 	return 0;
 }

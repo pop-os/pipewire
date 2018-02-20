@@ -2,10 +2,12 @@ manpage_conf = configuration_data()
 manpage_conf.set('PACKAGE_NAME', meson.project_name())
 manpage_conf.set('PACKAGE_VERSION', meson.project_version())
 manpage_conf.set('PACKAGE_URL', 'http://pipewire.org')
+manpage_conf.set('PACKAGE_BUGREPORT', 'https://github.com/PipeWire/pipewire/issues')
 manpage_conf.set('top_srcdir', meson.source_root())
 manpage_conf.set('top_builddir', meson.build_root())
 
 manpages = ['pipewire.1',
+	    'pipewire-cli.1',
 	    'pipewire-monitor.1' ]
 
 foreach m : manpages

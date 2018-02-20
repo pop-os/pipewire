@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#include <spa/list.h>
+#include <spa/utils/list.h>
 
 struct pw_protocol;
 
@@ -42,12 +42,14 @@ struct pw_protocol_client {
 	struct pw_remote *remote;	/**< the associated remote */
 
 	int (*connect) (struct pw_protocol_client *client);
+	int (*steal_fd) (struct pw_protocol_client *client);
 	int (*connect_fd) (struct pw_protocol_client *client, int fd);
 	void (*disconnect) (struct pw_protocol_client *client);
 	void (*destroy) (struct pw_protocol_client *client);
 };
 
 #define pw_protocol_client_connect(c)		((c)->connect(c))
+#define pw_protocol_client_steal_fd(c)		((c)->steal_fd(c))
 #define pw_protocol_client_connect_fd(c,fd)	((c)->connect_fd(c,fd))
 #define pw_protocol_client_disconnect(c)	((c)->disconnect(c))
 #define pw_protocol_client_destroy(c)		((c)->destroy(c))
@@ -66,12 +68,12 @@ struct pw_protocol_server {
 struct pw_protocol_marshal {
         const char *type;               /**< interface type */
 	uint32_t version;               /**< version */
-	uint32_t n_methods;             /**< number of methods in the interface */
 	const void *method_marshal;
 	const void *method_demarshal;
-        uint32_t n_events;              /**< number of events in the interface */
+	uint32_t n_methods;             /**< number of methods in the interface */
 	const void *event_marshal;
 	const void *event_demarshal;
+        uint32_t n_events;              /**< number of events in the interface */
 };
 
 struct pw_protocol_implementaton {
@@ -119,8 +121,8 @@ void pw_protocol_add_listener(struct pw_protocol *protocol,
  *
  * \brief Manages protocols and their implementation
  */
-void pw_protocol_add_marshal(struct pw_protocol *protocol,
-			      const struct pw_protocol_marshal *marshal);
+int pw_protocol_add_marshal(struct pw_protocol *protocol,
+			    const struct pw_protocol_marshal *marshal);
 
 const struct pw_protocol_marshal *
 pw_protocol_get_marshal(struct pw_protocol *protocol, uint32_t type);

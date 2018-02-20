@@ -17,17 +17,21 @@
  * Boston, MA 02110-1301, USA.
  */
 
+#include <error.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <dlfcn.h>
 
-#include <spa/type-map-impl.h>
-#include <spa/clock.h>
-#include <spa/log-impl.h>
-#include <spa/node.h>
-#include <spa/loop.h>
+#include <spa/support/type-map-impl.h>
+#include <spa/support/log-impl.h>
+#include <spa/support/loop.h>
+#include <spa/clock/clock.h>
+#include <spa/node/node.h>
+#include <spa/pod/parser.h>
+#include <spa/param/param.h>
+#include <spa/param/format.h>
 
 #include <lib/debug.h>
 
@@ -37,6 +41,8 @@ static SPA_LOG_IMPL(default_log);
 struct type {
 	uint32_t node;
 	uint32_t clock;
+	uint32_t format;
+	struct spa_type_param param;
 };
 
 struct data {
@@ -50,35 +56,91 @@ struct data {
 };
 
 static void
-inspect_port(struct data *data, struct spa_node *node, enum spa_direction direction,
-	     uint32_t port_id)
+inspect_node_params(struct data *data, struct spa_node *node)
 {
 	int res;
-	struct spa_format *format;
-	uint32_t index;
+	uint32_t idx1, idx2;
 
-	for (index = 0;; index++) {
-		if ((res =
-		     spa_node_port_enum_formats(node, direction, port_id, &format, NULL,
-						index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				printf("got error %d\n", res);
+	for (idx1 = 0;;) {
+		uint32_t buffer[4096];
+		struct spa_pod_builder b = { 0 };
+		struct spa_pod *param;
+		uint32_t id;
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		if ((res = spa_node_enum_params(node,
+						data->type.param.idList, &idx1,
+						NULL, &param, &b)) <= 0) {
+			if (res != 0)
+				error(0, -res, "enum_params");
 			break;
 		}
-		if (format)
-			spa_debug_format(format);
+
+		spa_pod_object_parse(param,
+				":", data->type.param.listId, "I", &id,
+				NULL);
+
+		printf("enumerating: %s:\n", spa_type_map_get_type(data->map, id));
+		for (idx2 = 0;;) {
+			uint32_t flags = 0;
+
+			spa_pod_builder_init(&b, buffer, sizeof(buffer));
+			if ((res = spa_node_enum_params(node,
+							id, &idx2,
+							NULL, &param, &b)) <= 0) {
+				if (res != 0)
+					error(0, -res, "enum_params %d", id);
+				break;
+			}
+			spa_debug_pod(param, flags);
+		}
 	}
+}
 
+static void
+inspect_port_params(struct data *data, struct spa_node *node,
+		    enum spa_direction direction, uint32_t port_id)
+{
+	int res;
+	uint32_t idx1, idx2;
 
-	for (index = 0;; index++) {
-		struct spa_param *param;
+	for (idx1 = 0;;) {
+		uint32_t buffer[4096];
+		struct spa_pod_builder b = { 0 };
+		struct spa_pod *param;
+		uint32_t id;
 
-		if ((res = spa_node_port_enum_params(node, direction, port_id, index, &param)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				printf("port_enum_params error: %d\n", res);
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		if ((res = spa_node_port_enum_params(node,
+						     direction, port_id,
+						     data->type.param.idList, &idx1,
+						     NULL, &param, &b)) <= 0) {
+			if (res != 0)
+				error(0, -res, "port_enum_params");
 			break;
 		}
-		spa_debug_param(param);
+		spa_pod_object_parse(param,
+				":", data->type.param.listId, "I", &id,
+				NULL);
+
+		printf("enumerating: %s:\n", spa_type_map_get_type(data->map, id));
+		for (idx2 = 0;;) {
+			uint32_t flags = 0;
+
+			spa_pod_builder_init(&b, buffer, sizeof(buffer));
+			if ((res = spa_node_port_enum_params(node,
+							     direction, port_id,
+							     id, &idx2,
+							     NULL, &param, &b)) <= 0) {
+				if (res != 0)
+					error(0, -res, "port_enum_params");
+				break;
+			}
+
+			if (spa_pod_is_object_type(param, data->type.format))
+				flags |= SPA_DEBUG_FLAG_FORMAT;
+			spa_debug_pod(param, flags);
+		}
 	}
 }
 
@@ -87,12 +149,14 @@ static void inspect_node(struct data *data, struct spa_node *node)
 	int res;
 	uint32_t i, n_input, max_input, n_output, max_output;
 	uint32_t *in_ports, *out_ports;
-	struct spa_props *props;
 
-	if ((res = spa_node_get_props(node, &props)) < 0)
-		printf("can't get properties: %d\n", res);
+	printf("node info:\n");
+	if (node->info)
+		spa_debug_dict(node->info);
 	else
-		spa_debug_props(props);
+		printf("  none\n");
+
+	inspect_node_params(data, node);
 
 	if ((res = spa_node_get_n_ports(node, &n_input, &max_input, &n_output, &max_output)) < 0) {
 		printf("can't get n_ports: %d\n", res);
@@ -105,17 +169,17 @@ static void inspect_node(struct data *data, struct spa_node *node)
 	in_ports = alloca(n_input * sizeof(uint32_t));
 	out_ports = alloca(n_output * sizeof(uint32_t));
 
-	if ((res = spa_node_get_port_ids(node, n_input, in_ports, n_output, out_ports)) < 0)
+	if ((res = spa_node_get_port_ids(node, in_ports, n_input, out_ports, n_output)) < 0)
 		printf("can't get port ids: %d\n", res);
 
 	for (i = 0; i < n_input; i++) {
 		printf(" input port: %08x\n", in_ports[i]);
-		inspect_port(data, node, SPA_DIRECTION_INPUT, in_ports[i]);
+		inspect_port_params(data, node, SPA_DIRECTION_INPUT, in_ports[i]);
 	}
 
 	for (i = 0; i < n_output; i++) {
 		printf(" output port: %08x\n", out_ports[i]);
-		inspect_port(data, node, SPA_DIRECTION_OUTPUT, out_ports[i]);
+		inspect_port_params(data, node, SPA_DIRECTION_OUTPUT, out_ports[i]);
 	}
 
 }
@@ -125,7 +189,8 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 	int res;
 	struct spa_handle *handle;
 	void *interface;
-	uint32_t index = 0;
+	const struct spa_interface_info *info;
+	uint32_t index;
 
 	printf("factory name:\t\t'%s'\n", factory->name);
 	printf("factory info:\n");
@@ -134,6 +199,17 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 	else
 		printf("  none\n");
 
+	printf("factory interfaces:\n");
+	for (index = 0;;) {
+		if ((res = spa_handle_factory_enum_interface_info(factory, &info, &index)) <= 0) {
+			if (res == 0)
+				break;
+			else
+				error(0, -res, "spa_handle_factory_enum_interface_info");
+		}
+		printf(" interface: '%s'\n", info->type);
+	}
+
 	handle = calloc(1, factory->size);
 	if ((res =
 	     spa_handle_factory_init(factory, handle, NULL, data->support, data->n_support)) < 0) {
@@ -141,25 +217,26 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 		return;
 	}
 
-	printf("factory interfaces:\n");
+	printf("factory instance:\n");
 
-	while (true) {
-		const struct spa_interface_info *info;
+	for (index = 0;;) {
 		uint32_t interface_id;
 
-		if ((res = spa_handle_factory_enum_interface_info(factory, &info, index)) < 0) {
-			if (res == SPA_RESULT_ENUM_END)
+		if ((res = spa_handle_factory_enum_interface_info(factory, &info, &index)) <= 0) {
+			if (res == 0)
 				break;
 			else
-				printf("can't enumerate interfaces: %d\n", res);
+				error(0, -res, "spa_handle_factory_enum_interface_info");
 		}
-		index++;
 		printf(" interface: '%s'\n", info->type);
 
-		interface_id = spa_type_map_get_id(data->map, info->type);
+		if (strcmp(info->type, SPA_TYPE__TypeMap) == 0)
+			interface_id = 0;
+		else
+			interface_id = spa_type_map_get_id(data->map, info->type);
 
 		if ((res = spa_handle_get_interface(handle, interface_id, &interface)) < 0) {
-			printf("can't get interface: %d\n", res);
+			printf("can't get interface: %d %d\n", interface_id, res);
 			continue;
 		}
 
@@ -172,12 +249,12 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 
 static int do_add_source(struct spa_loop *loop, struct spa_source *source)
 {
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int do_update_source(struct spa_source *source)
 {
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static void do_remove_source(struct spa_source *source)
@@ -186,11 +263,12 @@ static void do_remove_source(struct spa_source *source)
 
 int main(int argc, char *argv[])
 {
-	struct data data;
+	struct data data = { 0 };
 	int res;
 	void *handle;
 	spa_handle_factory_enum_func_t enum_func;
-	uint32_t index = 0;
+	uint32_t index;
+	const char *str;
 
 	if (argc < 2) {
 		printf("usage: %s <plugin.so>\n", argv[0]);
@@ -203,6 +281,9 @@ int main(int argc, char *argv[])
 	data.loop.add_source = do_add_source;
 	data.loop.update_source = do_update_source;
 	data.loop.remove_source = do_remove_source;
+
+	if ((str = getenv("SPA_DEBUG")))
+		data.log->level = atoi(str);
 
 	spa_debug_set_type_map(data.map);
 
@@ -218,6 +299,8 @@ int main(int argc, char *argv[])
 
 	data.type.node = spa_type_map_get_id(data.map, SPA_TYPE__Node);
 	data.type.clock = spa_type_map_get_id(data.map, SPA_TYPE__Clock);
+	data.type.format = spa_type_map_get_id(data.map, SPA_TYPE__Format);
+	spa_type_param_map(data.map, &data.type.param);
 
 	if ((handle = dlopen(argv[1], RTLD_NOW)) == NULL) {
 		printf("can't load %s\n", argv[1]);
@@ -228,17 +311,15 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	while (true) {
+	for (index = 0;;) {
 		const struct spa_handle_factory *factory;
 
-		if ((res = enum_func(&factory, index)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				printf("can't enumerate factories: %d\n", res);
+		if ((res = enum_func(&factory, &index)) <= 0) {
+			if (res != 0)
+				error(0, -res, "enum_func");
 			break;
 		}
 		inspect_factory(&data, factory);
-		index++;
 	}
-
 	return 0;
 }

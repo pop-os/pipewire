@@ -198,7 +198,7 @@ new_node (GstPipeWireDeviceProvider *self, const struct pw_node_info *info, uint
   GstCaps *caps = NULL;
   GstStructure *props;
   const gchar *klass = NULL;
-  struct spa_dict_item *item;
+  const struct spa_dict_item *item;
   GstPipeWireDeviceType type;
   int i;
   struct pw_type *t = self->type;
@@ -207,16 +207,20 @@ new_node (GstPipeWireDeviceProvider *self, const struct pw_node_info *info, uint
   if (info->max_input_ports > 0 && info->max_output_ports == 0) {
     type = GST_PIPEWIRE_DEVICE_TYPE_SINK;
 
-    for (i = 0; i < info->n_input_formats; i++) {
-      GstCaps *c1 = gst_caps_from_format (info->input_formats[i], t->map);
+    for (i = 0; i < info->n_input_params; i++) {
+      if (!spa_pod_is_object_id(info->input_params[i], t->param.idEnumFormat))
+	      continue;
+      GstCaps *c1 = gst_caps_from_format (info->input_params[i], t->map);
       if (c1)
         gst_caps_append (caps, c1);
     }
   }
   else if (info->max_output_ports > 0 && info->max_input_ports == 0) {
     type = GST_PIPEWIRE_DEVICE_TYPE_SOURCE;
-    for (i = 0; i < info->n_output_formats; i++) {
-      GstCaps *c1 = gst_caps_from_format (info->output_formats[i], t->map);
+    for (i = 0; i < info->n_output_params; i++) {
+      if (!spa_pod_is_object_id(info->output_params[i], t->param.idEnumFormat))
+	      continue;
+      GstCaps *c1 = gst_caps_from_format (info->output_params[i], t->map);
       if (c1)
         gst_caps_append (caps, c1);
     }
@@ -321,7 +325,8 @@ on_state_changed (void *data, enum pw_remote_state old, enum pw_remote_state sta
       GST_ERROR_OBJECT (self, "remote error: %s", error);
       break;
   }
-  pw_thread_loop_signal (self->main_loop, FALSE);
+  if (self->main_loop)
+    pw_thread_loop_signal (self->main_loop, FALSE);
 }
 
 
@@ -361,7 +366,8 @@ static const struct pw_node_proxy_events node_events = {
 
 
 static void registry_event_global(void *data, uint32_t id, uint32_t parent_id, uint32_t permissions,
-				  uint32_t type, uint32_t version)
+				  uint32_t type, uint32_t version,
+				  const struct spa_dict *props)
 {
   struct registry_data *rd = data;
   GstPipeWireDeviceProvider *self = rd->self;
@@ -437,7 +443,7 @@ gst_pipewire_device_provider_probe (GstDeviceProvider * provider)
 
   t = pw_core_get_type(c);
 
-  if (!(r = pw_remote_new (c, NULL)))
+  if (!(r = pw_remote_new (c, NULL, 0)))
     goto failed;
 
   pw_remote_add_listener(r, &listener, &remote_events, self);
@@ -520,14 +526,14 @@ gst_pipewire_device_provider_start (GstDeviceProvider * provider)
   }
   self->type = pw_core_get_type (self->core);
 
-  if (pw_thread_loop_start (self->main_loop) != SPA_RESULT_OK) {
+  if (pw_thread_loop_start (self->main_loop) < 0) {
     GST_ERROR_OBJECT (self, "Could not start PipeWire mainloop");
     goto failed_start;
   }
 
   pw_thread_loop_lock (self->main_loop);
 
-  if (!(self->remote = pw_remote_new (self->core, NULL))) {
+  if (!(self->remote = pw_remote_new (self->core, NULL, 0))) {
     GST_ERROR_OBJECT (self, "Failed to create remote");
     goto failed_remote;
   }

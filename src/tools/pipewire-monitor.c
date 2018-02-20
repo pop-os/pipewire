@@ -18,6 +18,7 @@
  */
 
 #include <stdio.h>
+#include <signal.h>
 
 #include <spa/lib/debug.h>
 
@@ -26,8 +27,7 @@
 #include <pipewire/type.h>
 
 struct data {
-	bool running;
-	struct pw_loop *loop;
+	struct pw_main_loop *loop;
 	struct pw_core *core;
 
 	struct pw_remote *remote;
@@ -40,6 +40,7 @@ struct data {
 };
 
 struct proxy_data {
+	struct data *data;
 	struct pw_proxy *proxy;
 	uint32_t id;
 	uint32_t parent_id;
@@ -52,16 +53,21 @@ struct proxy_data {
 	struct spa_hook proxy_proxy_listener;
 };
 
-static void print_properties(struct spa_dict *props, char mark)
+static void print_properties(const struct spa_dict *props, char mark)
 {
-	struct spa_dict_item *item;
-
-	if (props == NULL)
-		return;
+	const struct spa_dict_item *item;
 
 	printf("%c\tproperties:\n", mark);
+	if (props == NULL || props->n_items == 0) {
+		printf("\t\tnone\n");
+		return;
+	}
+
 	spa_dict_for_each(item, props) {
-		printf("%c\t\t%s = \"%s\"\n", mark, item->key, item->value);
+		if (item->value)
+			printf("%c\t\t%s = \"%s\"\n", mark, item->key, item->value);
+		else
+			printf("%c\t\t%s = (null)\n", mark, item->key);
 	}
 }
 
@@ -84,8 +90,7 @@ static void on_info_changed(void *data, const struct pw_core_info *info)
 
 static void module_event_info(void *object, struct pw_module_info *info)
 {
-        struct pw_proxy *proxy = object;
-        struct proxy_data *data = pw_proxy_get_user_data(proxy);
+        struct proxy_data *data = object;
 	bool print_all, print_mark;
 
 	print_all = true;
@@ -121,9 +126,9 @@ static const struct pw_module_proxy_events module_events = {
 
 static void node_event_info(void *object, struct pw_node_info *info)
 {
-        struct pw_proxy *proxy = object;
-        struct proxy_data *data = pw_proxy_get_user_data(proxy);
+        struct proxy_data *data = object;
 	bool print_all, print_mark;
+	struct pw_type *t = pw_core_get_type(data->data->core);
 
 	print_all = true;
         if (data->info == NULL) {
@@ -148,14 +153,22 @@ static void node_event_info(void *object, struct pw_node_info *info)
 
 		printf("%c\tname: \"%s\"\n", MARK_CHANGE(0), info->name);
 		printf("%c\tinput ports: %u/%u\n", MARK_CHANGE(1), info->n_input_ports, info->max_input_ports);
-		printf("%c\tinput formats:\n", MARK_CHANGE(2));
-		for (i = 0; i < info->n_input_formats; i++)
-			spa_debug_format(info->input_formats[i]);
+		printf("%c\tinput params:\n", MARK_CHANGE(2));
+		for (i = 0; i < info->n_input_params; i++) {
+			uint32_t flags = 0;
+			if (spa_pod_is_object_type(info->input_params[i], t->spa_format))
+				flags |= SPA_DEBUG_FLAG_FORMAT;
+			spa_debug_pod(info->input_params[i], flags);
+		}
 
 		printf("%c\toutput ports: %u/%u\n", MARK_CHANGE(3), info->n_output_ports, info->max_output_ports);
-		printf("%c\toutput formats:\n", MARK_CHANGE(4));
-		for (i = 0; i < info->n_output_formats; i++)
-			spa_debug_format(info->output_formats[i]);
+		printf("%c\toutput params:\n", MARK_CHANGE(4));
+		for (i = 0; i < info->n_output_params; i++) {
+			uint32_t flags = 0;
+			if (spa_pod_is_object_type(info->output_params[i], t->spa_format))
+				flags |= SPA_DEBUG_FLAG_FORMAT;
+			spa_debug_pod(info->output_params[i], flags);
+		}
 
 		printf("%c\tstate: \"%s\"", MARK_CHANGE(5), pw_node_state_as_string(info->state));
 		if (info->state == PW_NODE_STATE_ERROR && info->error)
@@ -171,10 +184,45 @@ static const struct pw_node_proxy_events node_events = {
         .info = node_event_info
 };
 
+static void factory_event_info(void *object, struct pw_factory_info *info)
+{
+        struct proxy_data *data = object;
+	struct pw_type *t = pw_core_get_type(data->data->core);
+	bool print_all, print_mark;
+
+	print_all = true;
+        if (data->info == NULL) {
+		printf("added:\n");
+		print_mark = false;
+	}
+        else {
+		printf("changed:\n");
+		print_mark = true;
+	}
+
+        info = data->info = pw_factory_info_update(data->info, info);
+
+	printf("\tid: %d\n", data->id);
+	printf("\tparent_id: %d\n", data->parent_id);
+	printf("\tpermissions: %c%c%c\n", data->permissions & PW_PERM_R ? 'r' : '-',
+					  data->permissions & PW_PERM_W ? 'w' : '-',
+					  data->permissions & PW_PERM_X ? 'x' : '-');
+	printf("\ttype: %s (version %d)\n", PW_TYPE_INTERFACE__Factory, data->version);
+	printf("\tname: \"%s\"\n", info->name);
+	printf("\tobject-type: %s/%d\n", spa_type_map_get_type(t->map, info->type), info->version);
+	if (print_all) {
+		print_properties(info->props, MARK_CHANGE(0));
+	}
+}
+
+static const struct pw_factory_proxy_events factory_events = {
+	PW_VERSION_FACTORY_PROXY_EVENTS,
+        .info = factory_event_info
+};
+
 static void client_event_info(void *object, struct pw_client_info *info)
 {
-        struct pw_proxy *proxy = object;
-        struct proxy_data *data = pw_proxy_get_user_data(proxy);
+        struct proxy_data *data = object;
 	bool print_all, print_mark;
 
 	print_all = true;
@@ -207,8 +255,7 @@ static const struct pw_client_proxy_events client_events = {
 
 static void link_event_info(void *object, struct pw_link_info *info)
 {
-        struct pw_proxy *proxy = object;
-        struct proxy_data *data = pw_proxy_get_user_data(proxy);
+        struct proxy_data *data = object;
 	bool print_all, print_mark;
 
 	print_all = true;
@@ -236,9 +283,9 @@ static void link_event_info(void *object, struct pw_link_info *info)
 		printf("%c\tinput-port-id: %u\n", MARK_CHANGE(1), info->input_port_id);
 		printf("%c\tformat:\n", MARK_CHANGE(2));
 		if (info->format)
-			spa_debug_format(info->format);
+			spa_debug_pod(info->format, SPA_DEBUG_FLAG_FORMAT);
 		else
-			printf("\t  none\n");
+			printf("\t\tnone\n");
 		print_properties(info->props, MARK_CHANGE(3));
 	}
 }
@@ -267,7 +314,8 @@ static const struct pw_proxy_events proxy_events = {
 };
 
 static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
-				  uint32_t permissions, uint32_t type, uint32_t version)
+				  uint32_t permissions, uint32_t type, uint32_t version,
+				  const struct spa_dict *props)
 {
         struct data *d = data;
         struct pw_proxy *proxy;
@@ -288,6 +336,11 @@ static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
 		client_version = PW_VERSION_MODULE;
 		destroy = (pw_destroy_t) pw_module_info_free;
 	}
+	else if (type == t->factory) {
+		events = &factory_events;
+		client_version = PW_VERSION_FACTORY;
+		destroy = (pw_destroy_t) pw_factory_info_free;
+	}
 	else if (type == t->client) {
 		events = &client_events;
 		client_version = PW_VERSION_CLIENT;
@@ -306,6 +359,7 @@ static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
 						  permissions & PW_PERM_W ? 'w' : '-',
 						  permissions & PW_PERM_X ? 'x' : '-');
 		printf("\ttype: %s (version %d)\n", spa_type_map_get_type(t->map, type), version);
+		print_properties(props, ' ');
 		return;
 	}
 
@@ -316,6 +370,7 @@ static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
                 goto no_mem;
 
 	pd = pw_proxy_get_user_data(proxy);
+	pd->data = d;
 	pd->proxy = proxy;
 	pd->id = id;
 	pd->parent_id = parent_id;
@@ -353,7 +408,7 @@ static void on_state_changed(void *_data, enum pw_remote_state old,
 	switch (state) {
 	case PW_REMOTE_STATE_ERROR:
 		printf("remote error: %s\n", error);
-		data->running = false;
+		pw_main_loop_quit(data->loop);
 		break;
 
 	case PW_REMOTE_STATE_CONNECTED:
@@ -380,28 +435,48 @@ static const struct pw_remote_events remote_events = {
 	.state_changed = on_state_changed,
 };
 
+static void do_quit(void *data, int signal_number)
+{
+	struct data *d = data;
+	pw_main_loop_quit(d->loop);
+}
+
 int main(int argc, char *argv[])
 {
 	struct data data = { 0 };
+	struct pw_loop *l;
+	struct pw_properties *props = NULL;
 
 	pw_init(&argc, &argv);
 
-	data.loop = pw_loop_new(NULL);
-	data.running = true;
-	data.core = pw_core_new(data.loop, NULL);
-	data.remote = pw_remote_new(data.core, NULL);
+	data.loop = pw_main_loop_new(NULL);
+	if (data.loop == NULL)
+		return -1;
+
+	l = pw_main_loop_get_loop(data.loop);
+	pw_loop_add_signal(l, SIGINT, do_quit, &data);
+	pw_loop_add_signal(l, SIGTERM, do_quit, &data);
+
+	data.core = pw_core_new(l, NULL);
+	if (data.core == NULL)
+		return -1;
+
+	if (argc > 1)
+		props = pw_properties_new(PW_REMOTE_PROP_REMOTE_NAME, argv[1], NULL);
+
+	data.remote = pw_remote_new(data.core, props, 0);
+	if (data.remote == NULL)
+		return -1;
 
 	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
-	pw_remote_connect(data.remote);
+	if (pw_remote_connect(data.remote) < 0)
+		return -1;
 
-	pw_loop_enter(data.loop);
-	while (data.running) {
-		pw_loop_iterate(data.loop, -1);
-	}
-	pw_loop_leave(data.loop);
+	pw_main_loop_run(data.loop);
 
 	pw_remote_destroy(data.remote);
-	pw_loop_destroy(data.loop);
+	pw_core_destroy(data.core);
+	pw_main_loop_destroy(data.loop);
 
 	return 0;
 }

@@ -1,9 +1,9 @@
-pipewire_sources = [
+pipewire_daemon_sources = [
   'main.c',
   'daemon-config.c',
 ]
 
-pipewire_headers = [
+pipewire_daemon_headers = [
   'daemon-config.h',
 ]
 
@@ -23,11 +23,15 @@ configure_file(input : 'pipewire.conf.in',
 
 
 executable('pipewire',
-  pipewire_sources,
+  pipewire_daemon_sources,
   install: true,
   c_args : pipewire_c_args,
   include_directories : [configinc, spa_inc],
   dependencies : [pipewire_dep],
 )
 
-subdir('systemd')
+systemd = dependency('systemd', required: false)
+
+if systemd.found()
+  subdir('systemd')
+endif

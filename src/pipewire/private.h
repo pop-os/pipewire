@@ -24,17 +24,30 @@
 extern "C" {
 #endif
 
-#include <spa/graph.h>
-
 #include <sys/socket.h>
+
 
 #include "pipewire/mem.h"
 #include "pipewire/pipewire.h"
 #include "pipewire/introspect.h"
 
+#ifndef spa_debug
+#define spa_debug pw_log_trace
+#endif
+
+#include <spa/graph/graph.h>
+
+struct pw_command;
+
+typedef int (*pw_command_func_t) (struct pw_command *command, struct pw_core *core, char **err);
+
+/** \cond */
 struct pw_command {
+	uint32_t id;		/**< id of command */
 	struct spa_list link;	/**< link in list of commands */
-	const char *name;	/**< command name */
+        pw_command_func_t func;
+        char **args;
+        int n_args;
 };
 
 struct pw_protocol {
@@ -59,6 +72,9 @@ struct pw_client {
 	struct pw_core *core;		/**< core object */
 	struct spa_list link;		/**< link in core object client list */
 	struct pw_global *global;	/**< global object created for this client */
+
+	pw_permission_func_t permission_func;	/**< get permissions of an object */
+	void *permission_data;			/**< data passed to permission function */
 
 	struct pw_properties *properties;	/**< Client properties */
 
@@ -93,6 +109,8 @@ struct pw_global {
 	uint32_t id;			/**< server id of the object */
 	struct pw_global *parent;	/**< parent global */
 
+	struct pw_properties *properties;	/**< properties of the global */
+
 	uint32_t type;			/**< type of interface */
 	uint32_t version;		/**< version of interface */
 	pw_bind_func_t bind;		/**< function to bind to the interface */
@@ -122,8 +140,9 @@ struct pw_core {
 	struct spa_list global_list;		/**< list of globals */
 	struct spa_list client_list;		/**< list of clients */
 	struct spa_list node_list;		/**< list of nodes */
-	struct spa_list node_factory_list;	/**< list of node factories */
+	struct spa_list factory_list;		/**< list of factories */
 	struct spa_list link_list;		/**< list of links */
+	struct spa_list control_list[2];	/**< list of controls, indexed by direction */
 
 	struct spa_hook_list listener_list;
 
@@ -131,8 +150,10 @@ struct pw_core {
 	struct pw_loop *data_loop;	/**< data loop for data passing */
         struct pw_data_loop *data_loop_impl;
 
-	struct spa_support support[4];	/**< support for spa plugins */
+	struct spa_support support[16];	/**< support for spa plugins */
 	uint32_t n_support;		/**< number of support items */
+
+	long sc_pagesize;
 
 	struct {
 		struct spa_graph graph;
@@ -154,6 +175,7 @@ struct pw_main_loop {
         struct pw_loop *loop;
 
 	struct spa_hook_list listener_list;
+        struct spa_source *event;
 
         bool running;
 };
@@ -171,7 +193,7 @@ struct pw_link {
 
 	struct spa_list resource_list;	/**< list of bound resources */
 
-	struct spa_port_io io;		/**< link io area */
+	struct spa_io_buffers io;	/**< link io area */
 
 	struct pw_port *output;		/**< output port */
 	struct spa_list output_link;	/**< link in output port links */
@@ -179,6 +201,11 @@ struct pw_link {
 	struct spa_list input_link;	/**< link in input port links */
 
 	struct spa_hook_list listener_list;
+
+	void *buffer_owner;
+	struct pw_memblock *buffer_mem;
+	struct spa_buffer **buffers;
+	uint32_t n_buffers;
 
 	struct {
 		struct spa_graph_port out_port;
@@ -207,19 +234,16 @@ struct pw_node {
 	struct spa_list link;		/**< link in core node_list */
 	struct pw_global *global;	/**< global for this node */
 
-	struct pw_resource *owner;		/**< owner resource if any */
 	struct pw_properties *properties;	/**< properties of the node */
 
 	struct pw_node_info info;		/**< introspectable node info */
 
+	bool active;			/**< if the node is active */
 	bool live;			/**< if the node is live */
 	struct spa_clock *clock;	/**< handle to SPA clock if any */
+	struct spa_node *node;		/**< SPA node implementation */
 
 	struct spa_list resource_list;	/**< list of resources for this node */
-
-	/** Implementation of core node functions */
-	const struct pw_node_implementation *implementation;
-	void *implementation_data;
 
 	struct spa_list input_ports;		/**< list of input ports */
 	struct pw_map input_port_map;		/**< map from port_id to port */
@@ -251,31 +275,31 @@ struct pw_port {
 	enum pw_direction direction;	/**< port direction */
 	uint32_t port_id;		/**< port id */
 	struct pw_properties *properties;
+	const struct spa_port_info *info;
 
 	enum pw_port_state state;	/**< state of the port */
 
-	const struct pw_port_implementation *implementation;
-	void *implementation_data;
-
-	struct spa_port_io io;		/**< io area of the port */
+	struct spa_io_buffers io;	/**< io area of the port */
 
 	bool allocated;			/**< if buffers are allocated */
-	struct pw_memblock buffer_mem;	/**< allocated buffer memory */
+	struct pw_memblock *buffer_mem;	/**< allocated buffer memory */
 	struct spa_buffer **buffers;	/**< port buffers */
 	uint32_t n_buffers;		/**< number of port buffers */
 
 	struct spa_list links;		/**< list of \ref pw_link */
 
+	struct spa_list control_list[2];	/**< list of \ref pw_control indexed by direction */
+
 	struct spa_hook_list listener_list;
 
-	void *mix;			/**< optional port buffer mix/split */
+	struct spa_node *mix;		/**< optional port buffer mix/split */
 
 	struct {
 		struct spa_graph *graph;
-		struct spa_graph_port port;
-		struct spa_graph_port mix_port;
-		struct spa_graph_node mix_node;
-	} rt;				/**< data only accessed from the data thread */
+		struct spa_graph_port port;	/**< this graph port, linked to mix_port */
+		struct spa_graph_port mix_port;	/**< port from the mixer */
+		struct spa_graph_node mix_node;	/**< mixer node */
+	} rt;					/**< data only accessed from the data thread */
 
         void *user_data;                /**< extra user data */
 };
@@ -340,6 +364,8 @@ struct pw_remote {
 	char *error;
 
 	struct spa_hook_list listener_list;
+
+	void *user_data;			/**< extra user data */
 };
 
 
@@ -358,18 +384,137 @@ struct pw_stream {
 	struct spa_hook_list listener_list;
 };
 
-struct pw_node_factory {
+struct pw_factory {
 	struct pw_core *core;		/**< the core */
 	struct spa_list link;		/**< link in core node_factory_list */
 	struct pw_global *global;	/**< global for this factory */
 
-	const char *name;		/**< the factory name */
+	struct pw_factory_info info;	/**< introspectable factory info */
+	struct pw_properties *properties;	/**< properties of the factory */
 
-	const struct pw_node_factory_implementation *implementation;
+	struct spa_hook_list listener_list;	/**< event listeners */
+
+	const struct pw_factory_implementation *implementation;
 	void *implementation_data;
+
+	struct spa_list resource_list;	/**< The list of resources of this factory */
 
 	void *user_data;
 };
+
+struct pw_control {
+	struct spa_list link;		/**< link in core control_list */
+	struct pw_core *core;		/**< the core */
+
+	struct pw_port *port;		/**< owner port or NULL */
+	struct spa_list port_link;	/**< link in port control_list */
+
+	enum spa_direction direction;	/**< the direction */
+	struct spa_pod *param;		/**< control params */
+
+	uint32_t id;
+	int32_t size;
+
+	struct spa_hook_list listener_list;
+
+	void *user_data;
+};
+
+/** Find a good format between 2 ports */
+int pw_core_find_format(struct pw_core *core,
+			struct pw_port *output,
+			struct pw_port *input,
+			struct pw_properties *props,
+			uint32_t n_format_filters,
+			struct spa_pod **format_filters,
+			struct spa_pod **format,
+			struct spa_pod_builder *builder,
+			char **error);
+
+/** Find a ports compatible with \a other_port and the format filters */
+struct pw_port *
+pw_core_find_port(struct pw_core *core,
+		  struct pw_port *other_port,
+		  uint32_t id,
+		  struct pw_properties *props,
+		  uint32_t n_format_filters,
+		  struct spa_pod **format_filters,
+		  char **error);
+
+/** Create a new port \memberof pw_port
+ * \return a newly allocated port */
+struct pw_port *
+pw_port_new(enum pw_direction direction,
+	    uint32_t port_id,
+	    struct pw_properties *properties,
+	    size_t user_data_size);
+
+/** Get the user data of a port, the size of the memory was given \ref in pw_port_new */
+void * pw_port_get_user_data(struct pw_port *port);
+
+/** Add a port to a node \memberof pw_port */
+int pw_port_add(struct pw_port *port, struct pw_node *node);
+
+/** Destroy a port \memberof pw_port */
+void pw_port_destroy(struct pw_port *port);
+
+/** Iterate the params of the given port. The callback should return
+ * 1 to fetch the next item, 0 to stop iteration or <0 on error.
+ * The function returns 0 on success or the error returned by the callback. */
+int pw_port_for_each_param(struct pw_port *port,
+			   uint32_t param_id,
+			   const struct spa_pod *filter,
+			   int (*callback) (void *data, struct spa_pod *param),
+			   void *data);
+
+int pw_port_for_each_filtered_param(struct pw_port *in_port,
+				    struct pw_port *out_port,
+				    uint32_t in_param_id,
+				    uint32_t out_param_id,
+				    int (*callback) (void *data, struct spa_pod *param),
+				    void *data);
+
+/** Set a param on a port \memberof pw_port */
+int pw_port_set_param(struct pw_port *port, uint32_t id, uint32_t flags,
+		      const struct spa_pod *param);
+
+/** Use buffers on a port \memberof pw_port */
+int pw_port_use_buffers(struct pw_port *port, struct spa_buffer **buffers, uint32_t n_buffers);
+
+/** Allocate memory for buffers on a port \memberof pw_port */
+int pw_port_alloc_buffers(struct pw_port *port,
+			  struct spa_pod **params, uint32_t n_params,
+			  struct spa_buffer **buffers, uint32_t *n_buffers);
+
+/** Send a command to a port */
+int pw_port_send_command(struct pw_port *port, bool block, const struct spa_command *command);
+
+/** pause the port */
+int pw_port_pause(struct pw_port *port);
+
+/** Change the state of the node */
+int pw_node_set_state(struct pw_node *node, enum pw_node_state state);
+
+/** Update the state of the node, mostly used by node implementations */
+void pw_node_update_state(struct pw_node *node, enum pw_node_state state, char *error);
+
+/** Activate a link \memberof pw_link
+  * Starts the negotiation of formats and buffers on \a link and then
+  * starts data streaming */
+int pw_link_activate(struct pw_link *link);
+
+/** Deactivate a link \memberof pw_link */
+int pw_link_deactivate(struct pw_link *link);
+
+struct pw_control *
+pw_control_new(struct pw_core *core,
+	       struct pw_port *owner,		/**< can be NULL */
+	       const struct spa_pod *param,	/**< copy is taken */
+	       size_t user_data_size		/**< extra user data */);
+
+void pw_control_destroy(struct pw_control *control);
+
+/** \endcond */
 
 #ifdef __cplusplus
 }

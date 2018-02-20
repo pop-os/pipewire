@@ -24,8 +24,8 @@
 extern "C" {
 #endif
 
-#include <spa/defs.h>
-#include <spa/pod-utils.h>
+#include <spa/utils/defs.h>
+#include <spa/pod/pod.h>
 
 /** \class pw_utils
  *
@@ -53,10 +53,6 @@ pw_spa_pod_copy(const struct spa_pod *pod)
 {
 	return pod ? memcpy(malloc(SPA_POD_SIZE(pod)), pod, SPA_POD_SIZE(pod)) : NULL;
 }
-
-#define spa_format_copy(f)      ((struct spa_format*)pw_spa_pod_copy(&(f)->pod))
-#define spa_props_copy(p)       ((struct spa_prop*)pw_spa_pod_copy(&(p)->object.pod))
-#define spa_param_copy(p)       ((struct spa_param*)pw_spa_pod_copy(&(p)->object.pod))
 
 #ifdef __cplusplus
 } /* extern "C" */

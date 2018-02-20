@@ -24,13 +24,13 @@
 extern "C" {
 #endif
 
-#include <spa/loop.h>
+#include <spa/support/loop.h>
 
 #include <pipewire/properties.h>
 
 /** \class pw_loop
  *
- * PipeWire loop interface provides an implementation of
+ * PipeWire loop object provides an implementation of
  * the spa loop interfaces. It can be used to implement various
  * event loops.
  */

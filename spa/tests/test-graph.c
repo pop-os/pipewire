@@ -26,20 +26,25 @@
 #include <pthread.h>
 #include <poll.h>
 
-#include <spa/node.h>
-#include <spa/log.h>
-#include <spa/log-impl.h>
-#include <spa/loop.h>
-#include <spa/type-map.h>
-#include <spa/type-map-impl.h>
-#include <spa/audio/format-utils.h>
-#include <spa/format-utils.h>
-#include <spa/format-builder.h>
-#include <spa/graph.h>
-#include <spa/graph-scheduler1.h>
+#include <spa/support/log-impl.h>
+#include <spa/support/loop.h>
+#include <spa/support/type-map-impl.h>
+#include <spa/node/node.h>
+#include <spa/node/io.h>
+#include <spa/param/param.h>
+#include <spa/param/props.h>
+#include <spa/param/audio/format-utils.h>
+#include <spa/param/format-utils.h>
 
 static SPA_TYPE_MAP_IMPL(default_map, 4096);
 static SPA_LOG_IMPL(default_log);
+
+#define spa_debug(f,...) spa_log_trace(&default_log.log, f, __VA_ARGS__)
+
+#include <spa/graph/graph.h>
+#include <spa/graph/graph-scheduler6.h>
+
+#include <lib/debug.h>
 
 struct type {
 	uint32_t node;
@@ -50,6 +55,8 @@ struct type {
 	uint32_t props_volume;
 	uint32_t props_min_latency;
 	uint32_t props_live;
+	struct spa_type_io io;
+	struct spa_type_param param;
 	struct spa_type_meta meta;
 	struct spa_type_data data;
 	struct spa_type_media_type media_type;
@@ -70,6 +77,8 @@ static inline void init_type(struct type *type, struct spa_type_map *map)
 	type->props_volume = spa_type_map_get_id(map, SPA_TYPE_PROPS__volume);
 	type->props_min_latency = spa_type_map_get_id(map, SPA_TYPE_PROPS__minLatency);
 	type->props_live = spa_type_map_get_id(map, SPA_TYPE_PROPS__live);
+	spa_type_io_map(map, &type->io);
+	spa_type_param_map(map, &type->param);
 	spa_type_meta_map(map, &type->meta);
 	spa_type_data_map(map, &type->data);
 	spa_type_media_type_map(map, &type->media_type);
@@ -108,14 +117,14 @@ struct data {
 	struct spa_graph_node sink_node;
 
 	struct spa_node *sink;
-	struct spa_port_io volume_sink_io[1];
+	struct spa_io_buffers volume_sink_io[1];
 
 	struct spa_node *volume;
 	struct spa_buffer *volume_buffers[1];
 	struct buffer volume_buffer[1];
 
 	struct spa_node *source;
-	struct spa_port_io source_volume_io[1];
+	struct spa_io_buffers source_volume_io[1];
 	struct spa_buffer *source_buffers[1];
 	struct buffer source_buffer[1];
 
@@ -145,10 +154,10 @@ init_buffer(struct data *data, struct spa_buffer **bufs, struct buffer *ba, int 
 		bufs[i] = &b->buffer;
 
 		b->buffer.id = i;
-		b->buffer.n_metas = 1;
 		b->buffer.metas = b->metas;
-		b->buffer.n_datas = 1;
+		b->buffer.n_metas = 1;
 		b->buffer.datas = b->datas;
+		b->buffer.n_datas = 1;
 
 		b->header.flags = 0;
 		b->header.seq = 0;
@@ -166,7 +175,7 @@ init_buffer(struct data *data, struct spa_buffer **bufs, struct buffer *ba, int 
 		b->datas[0].data = malloc(size);
 		b->datas[0].chunk = &b->chunks[0];
 		b->datas[0].chunk->offset = 0;
-		b->datas[0].chunk->size = size;
+		b->datas[0].chunk->size = 0;
 		b->datas[0].chunk->stride = 0;
 	}
 }
@@ -181,20 +190,20 @@ static int make_node(struct data *data, struct spa_node **node, const char *lib,
 
 	if ((hnd = dlopen(lib, RTLD_NOW)) == NULL) {
 		printf("can't load %s: %s\n", lib, dlerror());
-		return SPA_RESULT_ERROR;
+		return -errno;
 	}
 	if ((enum_func = dlsym(hnd, SPA_HANDLE_FACTORY_ENUM_FUNC_NAME)) == NULL) {
 		printf("can't find enum function\n");
-		return SPA_RESULT_ERROR;
+		return -errno;
 	}
 
-	for (i = 0;; i++) {
+	for (i = 0;;) {
 		const struct spa_handle_factory *factory;
 		void *iface;
 
-		if ((res = enum_func(&factory, i)) < 0) {
-			if (res != SPA_RESULT_ENUM_END)
-				printf("can't enumerate factories: %d\n", res);
+		if ((res = enum_func(&factory, &i)) <= 0) {
+			if (res != 0)
+				printf("can't enumerate factories: %s\n", spa_strerror(res));
 			break;
 		}
 		if (strcmp(factory->name, name))
@@ -212,9 +221,9 @@ static int make_node(struct data *data, struct spa_node **node, const char *lib,
 			return res;
 		}
 		*node = iface;
-		return SPA_RESULT_OK;
+		return 0;
 	}
-	return SPA_RESULT_ERROR;
+	return -EBADF;
 }
 
 static void on_sink_done(void *data, int seq, int res)
@@ -257,12 +266,12 @@ static int do_add_source(struct spa_loop *loop, struct spa_source *source)
 	data->n_sources++;
 	data->rebuild_fds = true;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static int do_update_source(struct spa_source *source)
 {
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static void do_remove_source(struct spa_source *source)
@@ -271,17 +280,16 @@ static void do_remove_source(struct spa_source *source)
 
 static int
 do_invoke(struct spa_loop *loop,
-	  spa_invoke_func_t func, uint32_t seq, size_t size, const void *data, bool block, void *user_data)
+	  spa_invoke_func_t func, uint32_t seq, const void *data, size_t size, bool block, void *user_data)
 {
-	return func(loop, false, seq, size, data, user_data);
+	return func(loop, false, seq, data, size, user_data);
 }
 
 static int make_nodes(struct data *data, const char *device)
 {
 	int res;
-	struct spa_props *props;
+	struct spa_pod *props;
 	struct spa_pod_builder b = { 0 };
-	struct spa_pod_frame f[2];
 	uint8_t buffer[128];
 
 	if ((res = make_node(data, &data->sink,
@@ -292,14 +300,14 @@ static int make_nodes(struct data *data, const char *device)
 	spa_node_set_callbacks(data->sink, &sink_callbacks, data);
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_pod_builder_props(&b, &f[0], data->type.props,
-		SPA_POD_PROP(&f[1], data->type.props_device, 0, SPA_POD_TYPE_STRING, 1,
-			device ? device : "hw:0"),
-		SPA_POD_PROP(&f[1], data->type.props_min_latency, 0, SPA_POD_TYPE_INT, 1,
-			MIN_LATENCY));
-	props = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_props);
+	props = spa_pod_builder_object(&b,
+		0, data->type.props,
+		":", data->type.props_device,      "s", device ? device : "hw:0",
+		":", data->type.props_min_latency, "i", MIN_LATENCY);
 
-	if ((res = spa_node_set_props(data->sink, props)) < 0)
+	spa_debug_pod(props, 0);
+
+	if ((res = spa_node_set_param(data->sink, data->type.param.idProps, 0, props)) < 0)
 		printf("got set_props error %d\n", res);
 
 	if ((res = make_node(data, &data->volume,
@@ -316,34 +324,43 @@ static int make_nodes(struct data *data, const char *device)
 	}
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_pod_builder_props(&b, &f[0], data->type.props,
-		SPA_POD_PROP(&f[1], data->type.props_freq, 0, SPA_POD_TYPE_DOUBLE, 1,
-			600.0),
-		SPA_POD_PROP(&f[1], data->type.props_volume, 0, SPA_POD_TYPE_DOUBLE, 1,
-			0.5),
-		SPA_POD_PROP(&f[1], data->type.props_live, 0, SPA_POD_TYPE_BOOL, 1,
-			false));
-	props = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_props);
+	props = spa_pod_builder_object(&b,
+		0, data->type.props,
+		":", data->type.props_freq,   "d", 600.0,
+		":", data->type.props_volume, "d", 0.5,
+		":", data->type.props_live,   "b", false);
 
-	if ((res = spa_node_set_props(data->source, props)) < 0)
+	if ((res = spa_node_set_param(data->source, data->type.param.idProps, 0, props)) < 0)
 		printf("got set_props error %d\n", res);
 
-	data->source_volume_io[0] = SPA_PORT_IO_INIT;
-	data->volume_sink_io[0] = SPA_PORT_IO_INIT;
+	data->source_volume_io[0] = SPA_IO_BUFFERS_INIT;
+	data->volume_sink_io[0] = SPA_IO_BUFFERS_INIT;
 
-	spa_node_port_set_io(data->source, SPA_DIRECTION_OUTPUT, 0, &data->source_volume_io[0]);
-	spa_node_port_set_io(data->volume, SPA_DIRECTION_INPUT, 0, &data->source_volume_io[0]);
-	spa_node_port_set_io(data->volume, SPA_DIRECTION_OUTPUT, 0, &data->volume_sink_io[0]);
-	spa_node_port_set_io(data->sink, SPA_DIRECTION_INPUT, 0, &data->volume_sink_io[0]);
+	spa_node_port_set_io(data->source,
+			     SPA_DIRECTION_OUTPUT, 0,
+			     data->type.io.Buffers,
+			     &data->source_volume_io[0], sizeof(data->source_volume_io[0]));
+	spa_node_port_set_io(data->volume,
+			     SPA_DIRECTION_INPUT, 0,
+			     data->type.io.Buffers,
+			     &data->source_volume_io[0], sizeof(data->source_volume_io[0]));
+	spa_node_port_set_io(data->volume,
+			     SPA_DIRECTION_OUTPUT, 0,
+			     data->type.io.Buffers,
+			     &data->volume_sink_io[0], sizeof(data->volume_sink_io[0]));
+	spa_node_port_set_io(data->sink,
+			     SPA_DIRECTION_INPUT, 0,
+			     data->type.io.Buffers,
+			     &data->volume_sink_io[0], sizeof(data->volume_sink_io[0]));
 
 	spa_graph_node_init(&data->source_node);
-	spa_graph_node_set_callbacks(&data->source_node, &spa_graph_node_impl_default, data->source);
+	spa_graph_node_set_implementation(&data->source_node, data->source);
 	spa_graph_node_add(&data->graph, &data->source_node);
 	spa_graph_port_init(&data->source_out, SPA_DIRECTION_OUTPUT, 0, 0, &data->source_volume_io[0]);
 	spa_graph_port_add(&data->source_node, &data->source_out);
 
 	spa_graph_node_init(&data->volume_node);
-	spa_graph_node_set_callbacks(&data->volume_node, &spa_graph_node_impl_default, data->volume);
+	spa_graph_node_set_implementation(&data->volume_node, data->volume);
 	spa_graph_node_add(&data->graph, &data->volume_node);
 	spa_graph_port_init(&data->volume_in, SPA_DIRECTION_INPUT, 0, 0, &data->source_volume_io[0]);
 	spa_graph_port_add(&data->volume_node, &data->volume_in);
@@ -354,7 +371,7 @@ static int make_nodes(struct data *data, const char *device)
 	spa_graph_port_add(&data->volume_node, &data->volume_out);
 
 	spa_graph_node_init(&data->sink_node);
-	spa_graph_node_set_callbacks(&data->sink_node, &spa_graph_node_impl_default, data->sink);
+	spa_graph_node_set_implementation(&data->sink_node, data->sink);
 	spa_graph_node_add(&data->graph, &data->sink_node);
 	spa_graph_port_init(&data->sink_in, SPA_DIRECTION_INPUT, 0, 0, &data->volume_sink_io[0]);
 	spa_graph_port_add(&data->sink_node, &data->sink_in);
@@ -367,36 +384,42 @@ static int make_nodes(struct data *data, const char *device)
 static int negotiate_formats(struct data *data)
 {
 	int res;
-	struct spa_format *format, *filter;
+	struct spa_pod *format, *filter;
 	uint32_t state = 0;
 	struct spa_pod_builder b = { 0 };
-	struct spa_pod_frame f[2];
-	uint8_t buffer[256];
+	uint8_t buffer[4096];
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_pod_builder_format(&b, &f[0], data->type.format,
-		data->type.media_type.audio,
-		data->type.media_subtype.raw,
-		SPA_POD_PROP(&f[1], data->type.format_audio.format, 0, SPA_POD_TYPE_ID, 1,
-			data->type.audio_format.S16),
-		SPA_POD_PROP(&f[1], data->type.format_audio.layout, 0, SPA_POD_TYPE_INT, 1,
-			SPA_AUDIO_LAYOUT_INTERLEAVED),
-		SPA_POD_PROP(&f[1], data->type.format_audio.rate, 0, SPA_POD_TYPE_INT, 1,
-			44100),
-		SPA_POD_PROP(&f[1], data->type.format_audio.channels, 0, SPA_POD_TYPE_INT, 1,
-			2));
-	filter = SPA_POD_BUILDER_DEREF(&b, f[0].ref, struct spa_format);
+	filter = spa_pod_builder_object(&b,
+		0, data->type.format,
+		"I", data->type.media_type.audio,
+		"I", data->type.media_subtype.raw,
+		":", data->type.format_audio.format,   "I", data->type.audio_format.S16,
+		":", data->type.format_audio.layout,   "i", SPA_AUDIO_LAYOUT_INTERLEAVED,
+		":", data->type.format_audio.rate,     "i", 44100,
+		":", data->type.format_audio.channels, "i", 2);
 
-	if ((res =
-	     spa_node_port_enum_formats(data->sink, SPA_DIRECTION_INPUT, 0, &format, filter,
-					state)) < 0)
+	spa_debug_pod(filter, 0);
+
+	spa_log_debug(&default_log.log, "enum_params");
+	if ((res = spa_node_port_enum_params(data->sink,
+					     SPA_DIRECTION_INPUT, 0,
+					     data->type.param.idEnumFormat, &state,
+					     filter, &format, &b)) <= 0)
+		return -EBADF;
+
+	spa_debug_pod(format, 0);
+
+	spa_log_debug(&default_log.log, "sink set_param");
+	if ((res = spa_node_port_set_param(data->sink,
+					   SPA_DIRECTION_INPUT, 0,
+					   data->type.param.idFormat, 0, format)) < 0)
 		return res;
 
-
-	if ((res = spa_node_port_set_format(data->sink, SPA_DIRECTION_INPUT, 0, 0, format)) < 0)
-		return res;
-
-	if ((res = spa_node_port_set_format(data->volume, SPA_DIRECTION_OUTPUT, 0, 0, format)) < 0)
+	spa_log_debug(&default_log.log, "volume set_param");
+	if ((res = spa_node_port_set_param(data->volume,
+					   SPA_DIRECTION_OUTPUT, 0,
+					   data->type.param.idFormat, 0, format)) < 0)
 		return res;
 
 	init_buffer(data, data->volume_buffers, data->volume_buffer, 1, BUFFER_SIZE);
@@ -409,9 +432,13 @@ static int negotiate_formats(struct data *data)
 				       1)) < 0)
 		return res;
 
-	if ((res = spa_node_port_set_format(data->volume, SPA_DIRECTION_INPUT, 0, 0, format)) < 0)
+	if ((res = spa_node_port_set_param(data->volume,
+					   SPA_DIRECTION_INPUT, 0,
+					   data->type.param.idFormat, 0, format)) < 0)
 		return res;
-	if ((res = spa_node_port_set_format(data->source, SPA_DIRECTION_OUTPUT, 0, 0, format)) < 0)
+	if ((res = spa_node_port_set_param(data->source,
+					   SPA_DIRECTION_OUTPUT, 0,
+					   data->type.param.idFormat, 0, format)) < 0)
 		return res;
 
 	init_buffer(data, data->source_buffers, data->source_buffer, 1, BUFFER_SIZE);
@@ -424,7 +451,7 @@ static int negotiate_formats(struct data *data)
 				       1)) < 0)
 		return res;
 
-	return SPA_RESULT_OK;
+	return 0;
 }
 
 static void *loop(void *user_data)
@@ -527,7 +554,6 @@ int main(int argc, char *argv[])
 	int res;
 	const char *str;
 
-
 	spa_graph_init(&data.graph);
 	spa_graph_data_init(&data.graph_data, &data.graph);
 	spa_graph_set_callbacks(&data.graph, &spa_graph_impl_default, &data.graph_data);
@@ -539,6 +565,8 @@ int main(int argc, char *argv[])
 	data.data_loop.update_source = do_update_source;
 	data.data_loop.remove_source = do_remove_source;
 	data.data_loop.invoke = do_invoke;
+
+	spa_debug_set_type_map(data.map);
 
 	if ((str = getenv("SPA_DEBUG")))
 		data.log->level = atoi(str);

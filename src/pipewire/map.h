@@ -26,7 +26,7 @@ extern "C" {
 
 #include <string.h>
 
-#include <spa/defs.h>
+#include <spa/utils/defs.h>
 #include <pipewire/array.h>
 
 /** \class pw_map
@@ -46,7 +46,7 @@ struct pw_map {
 	uint32_t free_list;	/**< the free items */
 };
 
-#define PW_MAP_INIT(extend) { PW_ARRAY_INIT(extend), 0 }
+#define PW_MAP_INIT(extend) (struct pw_map) { PW_ARRAY_INIT(extend), 0 }
 
 #define pw_map_get_size(m)            pw_array_get_len(&(m)->items, union pw_map_item)
 #define pw_map_get_item(m,id)         pw_array_get_unchecked(&(m)->items,id,union pw_map_item)
@@ -132,7 +132,7 @@ static inline bool pw_map_insert_at(struct pw_map *map, uint32_t id, void *data)
 	return true;
 }
 
-/** Remove and item at index
+/** Remove an item at index
  * \param map the map to remove from
  * \param id the index to remove
  * \memberof pw_map
@@ -170,7 +170,7 @@ static inline void pw_map_for_each(struct pw_map *map, void (*func) (void *, voi
 	union pw_map_item *item;
 
 	pw_array_for_each(item, &map->items) {
-		if (item->data && !pw_map_item_is_free(item))
+		if (!pw_map_item_is_free(item))
 			func(item->data, data);
 	}
 }

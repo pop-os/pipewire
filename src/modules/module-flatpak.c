@@ -27,7 +27,7 @@
 
 #include "config.h"
 
-#include <dbus/dbus.h>
+#include <spa/support/dbus.h>
 
 #include "pipewire/core.h"
 #include "pipewire/interfaces.h"
@@ -41,35 +41,41 @@ struct impl {
 	struct pw_type *type;
 	struct pw_properties *properties;
 
+	struct spa_dbus_connection *conn;
 	DBusConnection *bus;
 
 	struct spa_hook core_listener;
 	struct spa_hook module_listener;
 
 	struct spa_list client_list;
-
-	struct spa_source *dispatch_event;
 };
 
+struct resource;
+
 struct client_info {
-	struct impl *impl;
 	struct spa_list link;
+	struct impl *impl;
 	struct pw_client *client;
-	bool is_sandboxed;
-	struct pw_resource *core_resource;
-	struct spa_hook core_override;
-	struct spa_list async_pending;
 	struct spa_hook client_listener;
+	bool is_sandboxed;
+        struct spa_list resources;
+	struct resource *core_resource;
+	struct spa_list async_pending;
+};
+
+struct resource {
+        struct spa_list link;
+	struct client_info *cinfo;
+	struct pw_resource *resource;
+	struct spa_hook override;
 };
 
 struct async_pending {
 	struct spa_list link;
-	struct client_info *info;
+	struct resource *resource;
 	bool handled;
 	char *handle;
-	struct pw_resource *resource;
 	char *factory_name;
-	char *name;
 	uint32_t type;
 	uint32_t version;
 	struct pw_properties *properties;
@@ -90,7 +96,7 @@ static struct client_info *find_client_info(struct impl *impl, struct pw_client 
 static void close_request(struct async_pending *p)
 {
 	DBusMessage *m = NULL;
-	struct impl *impl = p->info->impl;
+	struct impl *impl = p->resource->cinfo->impl;
 
 	pw_log_debug("pending %p: handle %s", p, p->handle);
 
@@ -127,84 +133,79 @@ static void free_pending(struct async_pending *p)
 	spa_list_remove(&p->link);
 	free(p->handle);
 	free(p->factory_name);
-	free(p->name);
 	if (p->properties)
 		pw_properties_free(p->properties);
 	free(p);
 }
 
+static void free_resource(struct resource *r)
+{
+	spa_list_remove(&r->link);
+	free(r);
+}
+
 static void client_info_free(struct client_info *cinfo)
 {
-	struct async_pending *p, *tmp;
+	struct async_pending *p, *tp;
+	struct resource *r, *tr;
 
-	spa_list_for_each_safe(p, tmp, &cinfo->async_pending, link)
+	spa_list_for_each_safe(p, tp, &cinfo->async_pending, link)
 		free_pending(p);
+	spa_list_for_each_safe(r, tr, &cinfo->resources, link)
+		free_resource(r);
 
 	spa_hook_remove(&cinfo->client_listener);
 	spa_list_remove(&cinfo->link);
 	free(cinfo);
 }
 
-static bool client_is_sandboxed(struct pw_client *cl)
+static bool check_sandboxed(struct client_info *cinfo, char **error)
 {
-	char data[2048], *ptr;
-	size_t n, size;
-	const char *state = NULL;
-	const char *current;
-	bool result;
-	int fd;
-	pid_t pid;
+	char root_path[2048];
+	int root_fd, info_fd;
 	const struct ucred *ucred;
+	struct stat stat_buf;
 
-	ucred = pw_client_get_ucred(cl);
+	ucred = pw_client_get_ucred(cinfo->client);
+
+	cinfo->is_sandboxed = true;
 
 	if (ucred) {
 		pw_log_info("client has trusted pid %d", ucred->pid);
 	} else {
+		cinfo->is_sandboxed = false;
 		pw_log_info("no trusted pid found, assuming not sandboxed\n");
+		return true;
+	}
+
+	sprintf(root_path, "/proc/%u/root", ucred->pid);
+	root_fd = openat (AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
+	if (root_fd == -1) {
+		/* Not able to open the root dir shouldn't happen. Probably the app died and
+		 * we're failing due to /proc/$pid not existing. In that case fail instead
+		 * of treating this as privileged. */
+		asprintf(error, "failed to open \"%s\": %m", root_path);
 		return false;
 	}
-
-	pid = ucred->pid;
-
-	sprintf(data, "/proc/%u/cgroup", pid);
-	fd = open(data, O_RDONLY | O_CLOEXEC, 0);
-	if (fd == -1)
+	info_fd = openat (root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
+	close (root_fd);
+	if (info_fd == -1) {
+		if (errno == ENOENT) {
+			pw_log_debug("no .flatpak-info, client on the host");
+			cinfo->is_sandboxed = false;
+			/* No file => on the host */
+			return true;
+		}
+		asprintf(error, "error opening .flatpak-info: %m");
 		return false;
-
-	spa_zero(data);
-	size = sizeof(data);
-	ptr = data;
-
-	while (size > 0) {
-		int r;
-
-		if ((r = read(fd, data, size)) < 0) {
-			if (errno == EINTR)
-				continue;
-			else
-				break;
-		}
-		if (r == 0)
-			break;
-
-		ptr += r;
-		size -= r;
+        }
+	if (fstat (info_fd, &stat_buf) != 0 || !S_ISREG (stat_buf.st_mode)) {
+		/* Some weird fd => failure */
+		close(info_fd);
+		asprintf(error, "error fstat .flatpak-info: %m");
+		return false;
 	}
-	close(fd);
-
-	result = false;
-	while ((current = pw_split_walk(data, "\n", &n, &state)) != NULL) {
-		if (strncmp(current, "1:name=systemd:", strlen("1:name=systemd:")) == 0) {
-			const char *p = strstr(current, "flatpak-");
-			if (p && p - current < n) {
-				pw_log_info("found a flatpak cgroup, assuming sandboxed\n");
-				result = true;
-				break;
-			}
-		}
-	}
-	return result;
+	return true;
 }
 
 static bool
@@ -285,18 +286,17 @@ portal_response(DBusConnection *connection, DBusMessage *msg, void *user_data)
 		pw_log_debug("portal check result: %d", response);
 
 		if (response == 0) {
-			pw_resource_do_parent(cinfo->core_resource,
-					      &cinfo->core_override,
+			pw_resource_do_parent(p->resource->resource,
+					      &p->resource->override,
 					      struct pw_core_proxy_methods,
-					      create_node,
+					      create_object,
 					      p->factory_name,
-					      p->name,
 					      p->type,
 					      p->version,
 					      &p->properties->dict,
 					      p->new_id);
 		} else {
-			pw_resource_error(p->resource, SPA_RESULT_NO_PERMISSION, "not allowed");
+			pw_resource_error(p->resource->resource, -EPERM, "not allowed");
 
 		}
 		free_pending(p);
@@ -308,15 +308,15 @@ portal_response(DBusConnection *connection, DBusMessage *msg, void *user_data)
 }
 
 
-static void do_create_node(void *data,
-			   const char *factory_name,
-			   const char *name,
-			   uint32_t type,
-			   uint32_t version,
-			   const struct spa_dict *props,
-			   uint32_t new_id)
+static void do_create_object(void *data,
+			     const char *factory_name,
+			     uint32_t type,
+			     uint32_t version,
+			     const struct spa_dict *props,
+			     uint32_t new_id)
 {
-	struct client_info *cinfo = data;
+	struct resource *resource = data;
+	struct client_info *cinfo = resource->cinfo;
 	struct impl *impl = cinfo->impl;
 	struct pw_client *client = cinfo->client;
 	DBusMessage *m = NULL, *r = NULL;
@@ -329,12 +329,11 @@ static void do_create_node(void *data,
 	struct async_pending *p;
 
 	if (!cinfo->is_sandboxed) {
-		pw_resource_do_parent(cinfo->core_resource,
-				      &cinfo->core_override,
+		pw_resource_do_parent(resource->resource,
+				      &resource->override,
 				      struct pw_core_proxy_methods,
-				      create_node,
+				      create_object,
 				      factory_name,
-				      name,
 				      type,
 				      version,
 				      props,
@@ -389,19 +388,17 @@ static void do_create_node(void *data,
 	dbus_connection_add_filter(impl->bus, portal_response, cinfo, NULL);
 
 	p = calloc(1, sizeof(struct async_pending));
-	p->info = cinfo;
+	p->resource = resource;
 	p->handle = strdup(handle);
 	p->handled = false;
-	p->resource = cinfo->core_resource;
 	p->factory_name = strdup(factory_name);
-	p->name = strdup(name);
 	p->type = type;
 	p->version = version;
 	p->properties = props ? pw_properties_new_dict(props) : NULL;
 	p->new_id = new_id;
 
 	pw_log_debug("pending %p: handle %s", p, handle);
-	spa_list_insert(cinfo->async_pending.prev, &p->link);
+	spa_list_append(&cinfo->async_pending, &p->link);
 
 	return;
 
@@ -426,43 +423,13 @@ static void do_create_node(void *data,
 	dbus_error_free(&error);
 	goto not_allowed;
       not_allowed:
-	pw_resource_error(cinfo->core_resource, SPA_RESULT_NO_PERMISSION, "not allowed");
+	pw_resource_error(cinfo->core_resource->resource, -EPERM, "not allowed");
 	return;
-}
-
-static void
-do_create_link(void *data,
-	       uint32_t output_node_id,
-	       uint32_t output_port_id,
-	       uint32_t input_node_id,
-	       uint32_t input_port_id,
-	       const struct spa_format *filter,
-	       const struct spa_dict *props,
-	       uint32_t new_id)
-{
-	struct client_info *cinfo = data;
-
-	if (cinfo->is_sandboxed) {
-		pw_resource_error(cinfo->core_resource, SPA_RESULT_NO_PERMISSION, "not allowed");
-		return;
-	}
-	pw_resource_do_parent(cinfo->core_resource,
-			      &cinfo->core_override,
-			      struct pw_core_proxy_methods,
-			      create_link,
-			      output_node_id,
-			      output_port_id,
-			      input_node_id,
-			      input_port_id,
-			      filter,
-			      props,
-			      new_id);
 }
 
 static const struct pw_core_proxy_methods core_override = {
 	PW_VERSION_CORE_PROXY_METHODS,
-	.create_node = do_create_node,
-	.create_link = do_create_link,
+	.create_object = do_create_object,
 };
 
 static void client_resource_impl(void *data, struct pw_resource *resource)
@@ -471,16 +438,25 @@ static void client_resource_impl(void *data, struct pw_resource *resource)
 	struct impl *impl = cinfo->impl;
 
 	if (pw_resource_get_type(resource) == impl->type->core) {
-		cinfo->core_resource = resource;
+		struct resource *r;
+
+		r = calloc(1, sizeof(struct resource));
+		r->cinfo = cinfo;
+		r->resource = resource;
+		spa_list_append(&cinfo->resources, &r->link);
+
+		if (pw_resource_get_id(resource) == 0)
+			cinfo->core_resource = r;
+
 		pw_log_debug("module %p: add core override", impl);
 		pw_resource_add_override(resource,
-					 &cinfo->core_override,
+					 &r->override,
 					 &core_override,
-					 cinfo);
+					 r);
 	}
 }
 
-const struct pw_client_events client_events = {
+static const struct pw_client_events client_events = {
 	PW_VERSION_CLIENT_EVENTS,
 	.resource_impl = client_resource_impl,
 };
@@ -493,16 +469,21 @@ core_global_added(void *data, struct pw_global *global)
 	if (pw_global_get_type(global) == impl->type->client) {
 		struct pw_client *client = pw_global_get_object(global);
 		struct client_info *cinfo;
+		char *error;
 
 		cinfo = calloc(1, sizeof(struct client_info));
 		cinfo->impl = impl;
 		cinfo->client = client;
-		cinfo->is_sandboxed = client_is_sandboxed(client);
+		if (!check_sandboxed(cinfo, &error)) {
+			pw_log_warn("module %p: client %p sandbox check failed: %s", impl, client, error);
+			free(error);
+		}
 		spa_list_init(&cinfo->async_pending);
+		spa_list_init(&cinfo->resources);
 
 		pw_client_add_listener(client, &cinfo->client_listener, &client_events, cinfo);
 
-		spa_list_insert(impl->client_list.prev, &cinfo->link);
+		spa_list_append(&impl->client_list, &cinfo->link);
 
 		pw_log_debug("module %p: client %p added", impl, client);
 	}
@@ -524,193 +505,11 @@ core_global_removed(void *data, struct pw_global *global)
 	}
 }
 
-const struct pw_core_events core_events = {
+static const struct pw_core_events core_events = {
 	PW_VERSION_CORE_EVENTS,
 	.global_added = core_global_added,
 	.global_removed = core_global_removed,
 };
-
-static void dispatch_cb(void *userdata)
-{
-	struct impl *impl = userdata;
-
-	if (dbus_connection_dispatch(impl->bus) == DBUS_DISPATCH_COMPLETE)
-		pw_loop_enable_idle(pw_core_get_main_loop(impl->core), impl->dispatch_event, false);
-}
-
-static void dispatch_status(DBusConnection *conn, DBusDispatchStatus status, void *userdata)
-{
-	struct impl *impl = userdata;
-
-	pw_loop_enable_idle(pw_core_get_main_loop(impl->core),
-			    impl->dispatch_event, status == DBUS_DISPATCH_COMPLETE ? false : true);
-}
-
-static inline enum spa_io dbus_to_io(DBusWatch *watch)
-{
-	enum spa_io mask;
-	unsigned int flags;
-
-	/* no watch flags for disabled watches */
-	if (!dbus_watch_get_enabled(watch))
-		return 0;
-
-	flags = dbus_watch_get_flags(watch);
-	mask = SPA_IO_HUP | SPA_IO_ERR;
-
-	if (flags & DBUS_WATCH_READABLE)
-		mask |= SPA_IO_IN;
-	if (flags & DBUS_WATCH_WRITABLE)
-		mask |= SPA_IO_OUT;
-
-	return mask;
-}
-
-static inline unsigned int io_to_dbus(enum spa_io mask)
-{
-	unsigned int flags = 0;
-
-	if (mask & SPA_IO_IN)
-		flags |= DBUS_WATCH_READABLE;
-	if (mask & SPA_IO_OUT)
-		flags |= DBUS_WATCH_WRITABLE;
-	if (mask & SPA_IO_HUP)
-		flags |= DBUS_WATCH_HANGUP;
-	if (mask & SPA_IO_ERR)
-		flags |= DBUS_WATCH_ERROR;
-	return flags;
-}
-
-static void
-handle_io_event(void *userdata, int fd, enum spa_io mask)
-{
-	DBusWatch *watch = userdata;
-
-	if (!dbus_watch_get_enabled(watch)) {
-		pw_log_warn("Asked to handle disabled watch: %p %i", (void *) watch, fd);
-		return;
-	}
-	dbus_watch_handle(watch, io_to_dbus(mask));
-}
-
-static dbus_bool_t add_watch(DBusWatch *watch, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct spa_source *source;
-
-	pw_log_debug("add watch %p %d", watch, dbus_watch_get_unix_fd(watch));
-
-	/* we dup because dbus tends to add the same fd multiple times and our epoll
-	 * implementation does not like that */
-	source = pw_loop_add_io(pw_core_get_main_loop(impl->core),
-				dup(dbus_watch_get_unix_fd(watch)),
-				dbus_to_io(watch), true, handle_io_event, watch);
-
-	dbus_watch_set_data(watch, source, NULL);
-	return TRUE;
-}
-
-static void remove_watch(DBusWatch *watch, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct spa_source *source;
-
-	if ((source = dbus_watch_get_data(watch)))
-		pw_loop_destroy_source(pw_core_get_main_loop(impl->core), source);
-}
-
-static void toggle_watch(DBusWatch *watch, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct spa_source *source;
-
-	source = dbus_watch_get_data(watch);
-
-	pw_loop_update_io(pw_core_get_main_loop(impl->core), source, dbus_to_io(watch));
-}
-struct timeout_data {
-	struct spa_source *source;
-	struct impl *impl;
-};
-
-static void
-handle_timer_event(void *userdata, uint64_t expirations)
-{
-	DBusTimeout *timeout = userdata;
-	uint64_t t;
-	struct timespec ts;
-	struct timeout_data *data = dbus_timeout_get_data(timeout);
-	struct impl *impl = data->impl;
-
-	if (dbus_timeout_get_enabled(timeout)) {
-		t = dbus_timeout_get_interval(timeout) * SPA_NSEC_PER_MSEC;
-		ts.tv_sec = t / SPA_NSEC_PER_SEC;
-		ts.tv_nsec = t % SPA_NSEC_PER_SEC;
-		pw_loop_update_timer(pw_core_get_main_loop(impl->core),
-				     data->source, &ts, NULL, false);
-		dbus_timeout_handle(timeout);
-	}
-}
-
-static dbus_bool_t add_timeout(DBusTimeout *timeout, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct timespec ts;
-	struct timeout_data *data;
-	uint64_t t;
-
-	if (!dbus_timeout_get_enabled(timeout))
-		return FALSE;
-
-	data = calloc(1, sizeof(struct timeout_data));
-	data->impl = impl;
-	data->source = pw_loop_add_timer(pw_core_get_main_loop(impl->core), handle_timer_event, timeout);
-	dbus_timeout_set_data(timeout, data, NULL);
-
-	t = dbus_timeout_get_interval(timeout) * SPA_NSEC_PER_MSEC;
-	ts.tv_sec = t / SPA_NSEC_PER_SEC;
-	ts.tv_nsec = t % SPA_NSEC_PER_SEC;
-	pw_loop_update_timer(pw_core_get_main_loop(impl->core), data->source, &ts, NULL, false);
-
-	return TRUE;
-}
-
-static void remove_timeout(DBusTimeout *timeout, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct timeout_data *data;
-
-	if ((data = dbus_timeout_get_data(timeout))) {
-		pw_loop_destroy_source(pw_core_get_main_loop(impl->core), data->source);
-		free(data);
-	}
-}
-
-static void toggle_timeout(DBusTimeout *timeout, void *userdata)
-{
-	struct impl *impl = userdata;
-	struct timeout_data *data;
-	struct timespec ts, *tsp;
-
-	data = dbus_timeout_get_data(timeout);
-
-	if (dbus_timeout_get_enabled(timeout)) {
-		uint64_t t = dbus_timeout_get_interval(timeout) * SPA_NSEC_PER_MSEC;
-		ts.tv_sec = t / SPA_NSEC_PER_SEC;
-		ts.tv_nsec = t % SPA_NSEC_PER_SEC;
-		tsp = &ts;
-	} else {
-		tsp = NULL;
-	}
-	pw_loop_update_timer(pw_core_get_main_loop(impl->core), data->source, tsp, NULL, false);
-}
-
-static void wakeup_main(void *userdata)
-{
-	struct impl *impl = userdata;
-
-	pw_loop_enable_idle(pw_core_get_main_loop(impl->core), impl->dispatch_event, true);
-}
 
 static void module_destroy(void *data)
 {
@@ -720,13 +519,10 @@ static void module_destroy(void *data)
 	spa_hook_remove(&impl->core_listener);
 	spa_hook_remove(&impl->module_listener);
 
-	dbus_connection_close(impl->bus);
-	dbus_connection_unref(impl->bus);
+	spa_dbus_connection_destroy(impl->conn);
 
 	spa_list_for_each_safe(info, t, &impl->client_list, link)
 		client_info_free(info);
-
-	pw_loop_destroy_source(pw_core_get_main_loop(impl->core), impl->dispatch_event);
 
 	if (impl->properties)
 		pw_properties_free(impl->properties);
@@ -734,39 +530,43 @@ static void module_destroy(void *data)
 	free(impl);
 }
 
-const struct pw_module_events module_events = {
+static const struct pw_module_events module_events = {
 	PW_VERSION_MODULE_EVENTS,
 	.destroy = module_destroy,
 };
 
-static bool module_init(struct pw_module *module, struct pw_properties *properties)
+static int module_init(struct pw_module *module, struct pw_properties *properties)
 {
 	struct pw_core *core = pw_module_get_core(module);
 	struct impl *impl;
 	DBusError error;
+	struct spa_dbus *dbus;
+	const struct spa_support *support;
+	uint32_t n_support;
 
-	dbus_error_init(&error);
+	support = pw_core_get_support(core, &n_support);
+
+	dbus = spa_support_find(support, n_support, SPA_TYPE__DBus);
+        if (dbus == NULL)
+                return -ENOTSUP;
 
 	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL)
+		return -ENOMEM;
+
 	pw_log_debug("module %p: new", impl);
 
 	impl->core = core;
 	impl->type = pw_core_get_type(core);
 	impl->properties = properties;
 
-	impl->bus = dbus_bus_get_private(DBUS_BUS_SESSION, &error);
-	if (impl->bus == NULL)
+	dbus_error_init(&error);
+
+	impl->conn = spa_dbus_get_connection(dbus, DBUS_BUS_SESSION, &error);
+	if (impl->conn == NULL)
 		goto error;
 
-	impl->dispatch_event = pw_loop_add_idle(pw_core_get_main_loop(core), false, dispatch_cb, impl);
-
-	dbus_connection_set_exit_on_disconnect(impl->bus, false);
-	dbus_connection_set_dispatch_status_function(impl->bus, dispatch_status, impl, NULL);
-	dbus_connection_set_watch_functions(impl->bus, add_watch, remove_watch, toggle_watch, impl,
-					    NULL);
-	dbus_connection_set_timeout_functions(impl->bus, add_timeout, remove_timeout,
-					      toggle_timeout, impl, NULL);
-	dbus_connection_set_wakeup_main_function(impl->bus, wakeup_main, impl, NULL);
+	impl->bus = spa_dbus_connection_get(impl->conn);
 
 	spa_list_init(&impl->client_list);
 
@@ -775,26 +575,16 @@ static bool module_init(struct pw_module *module, struct pw_properties *properti
 
 	pw_core_set_permission_callback(core, do_permission, impl);
 
-	return true;
+	return 0;
 
       error:
+	free(impl);
 	pw_log_error("Failed to connect to system bus: %s", error.message);
 	dbus_error_free(&error);
-	return false;
+	return -ENOMEM;
 }
 
-#if 0
-static void module_destroy(struct impl *impl)
-{
-	pw_log_debug("module %p: destroy", impl);
-
-	dbus_connection_close(impl->bus);
-	dbus_connection_unref(impl->bus);
-	free(impl);
-}
-#endif
-
-bool pipewire__module_init(struct pw_module *module, const char *args)
+int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);
 }

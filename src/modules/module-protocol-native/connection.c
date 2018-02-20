@@ -75,7 +75,7 @@ int pw_protocol_native_connection_get_fd(struct pw_protocol_native_connection *c
 {
 	struct impl *impl = SPA_CONTAINER_OF(conn, struct impl, this);
 
-	if (index < 0 || index >= impl->in.n_fds)
+	if (index >= impl->in.n_fds)
 		return -1;
 
 	return impl->in.fds[index];
@@ -116,7 +116,11 @@ static void *connection_ensure_size(struct pw_protocol_native_connection *conn, 
 	if (buf->buffer_size + size > buf->buffer_maxsize) {
 		buf->buffer_maxsize = SPA_ROUND_UP_N(buf->buffer_size + size, MAX_BUFFER_SIZE);
 		buf->buffer_data = realloc(buf->buffer_data, buf->buffer_maxsize);
-
+		if (buf->buffer_data == NULL) {
+			buf->buffer_maxsize = 0;
+			spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, error, -ENOMEM);
+			return NULL;
+		}
 		pw_log_warn("connection %p: resize buffer to %zd %zd %zd",
 			    conn, buf->buffer_size, size, buf->buffer_maxsize);
 	}
@@ -137,14 +141,14 @@ static bool refill_buffer(struct pw_protocol_native_connection *conn, struct buf
 	msg.msg_iovlen = 1;
 	msg.msg_control = cmsgbuf;
 	msg.msg_controllen = sizeof(cmsgbuf);
-	msg.msg_flags = MSG_CMSG_CLOEXEC;
+	msg.msg_flags = MSG_CMSG_CLOEXEC | MSG_DONTWAIT;
 
 	while (true) {
 		len = recvmsg(conn->fd, &msg, msg.msg_flags);
 		if (len < 0) {
 			if (errno == EINTR)
 				continue;
-			else
+			if (errno != EAGAIN || errno != EWOULDBLOCK)
 				goto recv_error;
 		}
 		break;
@@ -295,7 +299,8 @@ pw_protocol_native_connection_get_next(struct pw_protocol_native_connection *con
 	size -= buf->offset;
 
 	if (size < 8) {
-		connection_ensure_size(conn, buf, 8);
+		if (connection_ensure_size(conn, buf, 8) == NULL)
+			return false;
 		buf->update = true;
 		goto again;
 	}
@@ -308,7 +313,8 @@ pw_protocol_native_connection_get_next(struct pw_protocol_native_connection *con
 	len = p[1] & 0xffffff;
 
 	if (len > size) {
-		connection_ensure_size(conn, buf, len);
+		if (connection_ensure_size(conn, buf, len) == NULL)
+			return false;
 		buf->update = true;
 		goto again;
 	}
@@ -319,10 +325,9 @@ pw_protocol_native_connection_get_next(struct pw_protocol_native_connection *con
 	*dt = buf->data;
 	*sz = buf->size;
 
-
 	if (debug_messages) {
-		printf("<<<<<<<<< in:\n");
-	        spa_debug_pod((struct spa_pod *)data);
+		printf("<<<<<<<<< in: %d %d %zd\n", *dest_id, *opcode, len);
+	        spa_debug_pod((struct spa_pod *)data, 0);
 	}
 
 	return true;
@@ -334,19 +339,19 @@ static inline void *begin_write(struct pw_protocol_native_connection *conn, uint
 	uint32_t *p;
 	struct buffer *buf = &impl->out;
 	/* 4 for dest_id, 1 for opcode, 3 for size and size for payload */
-	p = connection_ensure_size(conn, buf, 8 + size);
+	if ((p = connection_ensure_size(conn, buf, 8 + size)) == NULL)
+		return NULL;
+
 	return p + 2;
 }
 
-static uint32_t write_pod(struct spa_pod_builder *b, uint32_t ref, const void *data, uint32_t size)
+static uint32_t write_pod(struct spa_pod_builder *b, const void *data, uint32_t size)
 {
 	struct impl *impl = SPA_CONTAINER_OF(b, struct impl, builder);
+	uint32_t ref = b->state.offset;
 
-        if (ref == -1)
-                ref = b->offset;
-
-        if (b->size <= b->offset) {
-                b->size = SPA_ROUND_UP_N(b->offset + size, 4096);
+        if (b->size <= ref) {
+                b->size = SPA_ROUND_UP_N(ref + size, 4096);
                 b->data = begin_write(&impl->this, b->size);
         }
         memcpy(b->data + ref, data, size);
@@ -373,12 +378,12 @@ pw_protocol_native_connection_begin_resource(struct pw_protocol_native_connectio
 	                types[i] = spa_type_map_get_type(core->type.map, b);
 
 	        client->n_types += diff;
-		pw_core_resource_update_types(client->core_resource, base, diff, types);
+		pw_core_resource_update_types(client->core_resource, base, types, diff);
 	}
 
 	impl->dest_id = resource->id;
 	impl->opcode = opcode;
-	impl->builder = (struct spa_pod_builder) { NULL, 0, 0, NULL, write_pod };
+	impl->builder = (struct spa_pod_builder) { NULL, 0, write_pod };
 
 	return &impl->builder;
 }
@@ -402,12 +407,12 @@ pw_protocol_native_connection_begin_proxy(struct pw_protocol_native_connection *
 	                types[i] = spa_type_map_get_type(core->type.map, b);
 
 	        remote->n_types += diff;
-	        pw_core_proxy_update_types(remote->core_proxy, base, diff, types);
+	        pw_core_proxy_update_types(remote->core_proxy, base, types, diff);
 	}
 
 	impl->dest_id = proxy->id;
 	impl->opcode = opcode;
-	impl->builder = (struct spa_pod_builder) { NULL, 0, 0, NULL, write_pod };
+	impl->builder = (struct spa_pod_builder) { NULL, 0, write_pod };
 
 	return &impl->builder;
 }
@@ -417,18 +422,20 @@ pw_protocol_native_connection_end(struct pw_protocol_native_connection *conn,
 				  struct spa_pod_builder *builder)
 {
 	struct impl *impl = SPA_CONTAINER_OF(conn, struct impl, this);
-	uint32_t *p, size = builder->offset;
+	uint32_t *p, size = builder->state.offset;
 	struct buffer *buf = &impl->out;
 
-	p = connection_ensure_size(conn, buf, 8 + size);
+	if ((p = connection_ensure_size(conn, buf, 8 + size)) == NULL)
+		return;
+
 	*p++ = impl->dest_id;
 	*p++ = (impl->opcode << 24) | (size & 0xffffff);
 
 	buf->buffer_size += 8 + size;
 
 	if (debug_messages) {
-		printf(">>>>>>>>> out:\n");
-	        spa_debug_pod((struct spa_pod *)p);
+		printf(">>>>>>>>> out: %d %d %d\n", impl->dest_id, impl->opcode, size);
+	        spa_debug_pod((struct spa_pod *)p, 0);
 	}
 	spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, need_flush);
 }
@@ -482,7 +489,7 @@ bool pw_protocol_native_connection_flush(struct pw_protocol_native_connection *c
 	}
 
 	while (true) {
-		len = sendmsg(conn->fd, &msg, MSG_NOSIGNAL);
+		len = sendmsg(conn->fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
 		if (len < 0) {
 			if (errno == EINTR)
 				continue;

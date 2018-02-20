@@ -24,17 +24,15 @@
 extern "C" {
 #endif
 
-#include <spa/defs.h>
-#include <spa/props.h>
-#include <spa/format.h>
-#include <spa/param-alloc.h>
-#include <spa/node.h>
+#include <spa/utils/defs.h>
+#include <spa/param/param.h>
+#include <spa/node/node.h>
 
 #define PW_TYPE_PROTOCOL__Native	PW_TYPE_PROTOCOL_BASE "Native"
 #define PW_TYPE_PROTOCOL_NATIVE_BASE	PW_TYPE_PROTOCOL__Native ":"
 
 struct pw_protocol_native_demarshal {
-	bool (*func) (void *object, void *data, size_t size);
+	int (*func) (void *object, void *data, size_t size);
 
 #define PW_PROTOCOL_NATIVE_REMAP	(1<<0)
 #define PW_PROTOCOL_NATIVE_PERM_W	(1<<1)
