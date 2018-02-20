@@ -1,5 +1,0 @@
-libspa-ffmpeg.so libspa-ffmpeg #MINVER#
- spa_ffmpeg_dec_init@Base 0.1.4
- spa_ffmpeg_enc_init@Base 0.1.4
- spa_handle_factory_enum@Base 0.1.4
-

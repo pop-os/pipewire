@@ -2,3 +2,12 @@ etc/pipewire
 usr/bin
 usr/lib/systemd
 usr/share/man
+usr/lib/*/pipewire-0.1/
+usr/lib/*/spa/alsa
+usr/lib/*/spa/audiomixer
+usr/lib/*/spa/audiotestsrc
+usr/lib/*/spa/support
+usr/lib/*/spa/test
+usr/lib/*/spa/v4l2
+usr/lib/*/spa/videotestsrc
+usr/lib/*/spa/volume

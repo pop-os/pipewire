@@ -1,6 +1,8 @@
 #!/usr/bin/make -f
 -include /usr/share/gnome-pkg-tools/1/rules/gnome-get-source.mk
 
+include /usr/share/dpkg/default.mk
+
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_LDFLAGS_MAINT_APPEND = -Wl,-z,defs -Wl,--as-needed
 
@@ -11,4 +13,7 @@ override_dh_missing:
 	dh_missing --fail-missing
 
 override_dh_makeshlibs:
-	dh_makeshlibs -- -c4
+	dh_makeshlibs \
+		--exclude=/usr/lib/$(DEB_HOST_MULTIARCH)/spa \
+		--exclude=/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.1 \
+		-- -c4
