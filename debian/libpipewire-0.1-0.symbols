@@ -1,20 +1,3 @@
-libgstpipewire.so libpipewire-0.1-0 #MINVER#
- gst_caps_from_format@Base 0.1.4
- gst_caps_to_format@Base 0.1.4
- gst_caps_to_format_all@Base 0.1.4
- gst_pipewire_clock_get_type@Base 0.1.4
- gst_pipewire_clock_new@Base 0.1.4
- gst_pipewire_device_get_type@Base 0.1.4
- gst_pipewire_device_provider_get_type@Base 0.1.4
- gst_pipewire_pool_add_buffer@Base 0.1.4
- gst_pipewire_pool_get_type@Base 0.1.4
- gst_pipewire_pool_new@Base 0.1.4
- gst_pipewire_pool_remove_buffer@Base 0.1.4
- gst_pipewire_sink_get_type@Base 0.1.4
- gst_pipewire_sink_mode_get_type@Base 0.1.4
- gst_pipewire_src_get_type@Base 0.1.4
- gst_plugin_desc@Base 0.1.4
- pipewire_debug@Base 0.1.4
 libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_client_add_listener@Base 0.1.4
  pw_client_destroy@Base 0.1.4
