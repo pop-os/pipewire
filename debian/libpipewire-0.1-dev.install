@@ -1,3 +1,3 @@
-usr/include/*
-usr/lib/*/lib*.so
-usr/lib/*/pkgconfig/*
+usr/include/pipewire
+usr/lib/*/libpipewire*.so
+usr/lib/*/pkgconfig/libpipewire*
