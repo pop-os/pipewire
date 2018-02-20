@@ -82,10 +82,10 @@ Description: libraries for the PipeWire multimedia server - documentation
  .
  This package contains the API reference.
 
-Package: libpipewire-0.1-utils
+Package: pipewire
 Architecture: linux-any
 Depends: ${misc:Depends}
-Description: libraries for the PipeWire multimedia server - utilities
+Description: PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -94,7 +94,7 @@ Description: libraries for the PipeWire multimedia server - utilities
  - Accessing sources of video for consumption.
  - Generating graphs for audio and video processing.
  .
- This package contains utilities.
+ This package contains the server and command-line utilities.
 
 Package: libspa-ffmpeg
 Architecture: linux-any
