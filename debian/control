@@ -29,10 +29,10 @@ Build-Depends: debhelper (>= 11),
                xmltoman,
 Build-Depends-Indep: doxygen <!nodoc>,
                      graphviz <!nodoc>,
-Standards-Version: 4.1.0
+Standards-Version: 4.1.3
 Vcs-Browser: https://salsa.debian.org/gnome-team/pipewire
 Vcs-Git: https://salsa.debian.org/gnome-team/pipewire.git
-Homepage: https://github.com/wtay/pipewire
+Homepage: https://pipewire.org/
 
 Package: libpipewire-0.1-0
 Architecture: linux-any
@@ -43,10 +43,10 @@ Description: libraries for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
 
 Package: libpipewire-0.1-dev
 Section: libdevel
@@ -59,10 +59,10 @@ Description: libraries for the PipeWire multimedia server - development
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the development files.
 
@@ -75,10 +75,10 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package includes the Simple Plugin API library.
 
@@ -93,10 +93,10 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the development files for the Simple Plugin API.
 
@@ -111,24 +111,25 @@ Description: libraries for the PipeWire multimedia server - documentation
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the API reference.
 
 Package: pipewire
 Architecture: linux-any
-Depends: ${misc:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Description: PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the server and command-line utilities.
 
@@ -141,10 +142,10 @@ Description: libraries for the PipeWire multimedia server - ffmpeg plugins
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
+  - Making available sources of video (such as from a capture devices or
    application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the ffmpeg plugins.
 
@@ -157,10 +158,10 @@ Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the GStreamer plugin.
 
@@ -173,9 +174,9 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
- - Making available sources of video (such as from a capture devices or
-   application provided streams) and multiplexing this with clients.
- - Accessing sources of video for consumption.
- - Generating graphs for audio and video processing.
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
  .
  This package contains the bluetooth plugins.

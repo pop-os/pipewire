@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: pipewire
-Source: https://github.com/wtay/pipewire
+Source: https://github.com/PipeWire/pipewire
 
 Files: *
 Copyright: 2015-2017 Wim Taymans <wim.taymans@gmail.com>
@@ -28,7 +28,7 @@ Files: src/gst/gstpipewire.c
        src/gst/gstpipewiresink.h
        src/gst/gstpipewiresrc.c
        src/gst/gstpipewiresrc.h
-Copyright: <2015> Wim Taymans <wim.taymans@gmail.com>
+Copyright: 2015 Wim Taymans <wim.taymans@gmail.com>
 License: LGPL-2+
 
 Files: src/gst/gstpipewiredeviceprovider.*

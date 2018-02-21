@@ -1,3 +1,3 @@
 version=4
-https://github.com/wtay/pipewire/releases \
+https://github.com/PipeWire/pipewire/release \
  .*/archive/?([0-9][0-9\.]*)@ARCHIVE_EXT@
