@@ -1,15 +1,11 @@
 libspa-lib.so.0 libspa-lib-0.1-0 #MINVER#
+ pod_compare@Base 0.1.8
+ pod_filter@Base 0.1.8
  spa_debug_buffer@Base 0.1.4
  spa_debug_dict@Base 0.1.4
  spa_debug_dump_mem@Base 0.1.4
- spa_debug_format@Base 0.1.4
- spa_debug_param@Base 0.1.4
  spa_debug_pod@Base 0.1.4
  spa_debug_port_info@Base 0.1.4
- spa_debug_props@Base 0.1.4
  spa_debug_set_type_map@Base 0.1.4
- spa_format_compare@Base 0.1.4
- spa_format_filter@Base 0.1.4
- spa_props_compare@Base 0.1.4
- spa_props_filter@Base 0.1.4
-
+ spa_pod_compare@Base 0.1.8
+ spa_pod_filter@Base 0.1.8

@@ -1,29 +1,36 @@
 libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_client_add_listener@Base 0.1.4
  pw_client_destroy@Base 0.1.4
+ pw_client_find_resource@Base 0.1.8
  pw_client_get_core@Base 0.1.4
  pw_client_get_core_resource@Base 0.1.4
  pw_client_get_global@Base 0.1.4
  pw_client_get_info@Base 0.1.4
  pw_client_get_properties@Base 0.1.4
- pw_client_get_resource@Base 0.1.4
  pw_client_get_ucred@Base 0.1.4
  pw_client_get_user_data@Base 0.1.4
  pw_client_info_free@Base 0.1.4
  pw_client_info_update@Base 0.1.4
  pw_client_new@Base 0.1.4
+ pw_client_register@Base 0.1.8
  pw_client_set_busy@Base 0.1.4
+ pw_client_update_permissions@Base 0.1.8
  pw_client_update_properties@Base 0.1.4
  pw_command_free@Base 0.1.4
  pw_command_parse@Base 0.1.4
  pw_command_run@Base 0.1.4
- pw_core_add_global@Base 0.1.4
+ pw_control_add_listener@Base 0.1.8
+ pw_control_destroy@Base 0.1.8
+ pw_control_get_port@Base 0.1.8
+ pw_control_link@Base 0.1.8
+ pw_control_new@Base 0.1.8
+ pw_control_unlink@Base 0.1.8
  pw_core_add_listener@Base 0.1.4
  pw_core_destroy@Base 0.1.4
+ pw_core_find_factory@Base 0.1.8
  pw_core_find_format@Base 0.1.4
  pw_core_find_global@Base 0.1.4
  pw_core_find_module@Base 0.1.4
- pw_core_find_node_factory@Base 0.1.4
  pw_core_find_port@Base 0.1.4
  pw_core_find_protocol@Base 0.1.4
  pw_core_for_each_global@Base 0.1.4
@@ -48,6 +55,16 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_debug_is_category_enabled@Base 0.1.4
  pw_direction_as_string@Base 0.1.4
  pw_direction_reverse@Base 0.1.4
+ pw_factory_add_listener@Base 0.1.8
+ pw_factory_create_object@Base 0.1.8
+ pw_factory_destroy@Base 0.1.8
+ pw_factory_get_global@Base 0.1.8
+ pw_factory_get_user_data@Base 0.1.8
+ pw_factory_info_free@Base 0.1.8
+ pw_factory_info_update@Base 0.1.8
+ pw_factory_new@Base 0.1.8
+ pw_factory_register@Base 0.1.8
+ pw_factory_set_implementation@Base 0.1.8
  pw_fill_remote_properties@Base 0.1.4
  pw_fill_stream_properties@Base 0.1.4
  pw_free_strv@Base 0.1.4
@@ -55,6 +72,7 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_get_client_name@Base 0.1.4
  pw_get_host_name@Base 0.1.4
  pw_get_prgname@Base 0.1.4
+ pw_get_spa_dbus@Base 0.1.8
  pw_get_support@Base 0.1.4
  pw_get_support_factory@Base 0.1.4
  pw_get_support_interface@Base 0.1.4
@@ -67,8 +85,11 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_global_get_owner@Base 0.1.4
  pw_global_get_parent@Base 0.1.4
  pw_global_get_permissions@Base 0.1.4
+ pw_global_get_properties@Base 0.1.8
  pw_global_get_type@Base 0.1.4
  pw_global_get_version@Base 0.1.4
+ pw_global_new@Base 0.1.8
+ pw_global_register@Base 0.1.8
  pw_init@Base 0.1.4
  pw_link_activate@Base 0.1.4
  pw_link_add_listener@Base 0.1.4
@@ -81,10 +102,10 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_link_get_input@Base 0.1.4
  pw_link_get_output@Base 0.1.4
  pw_link_get_user_data@Base 0.1.4
- pw_link_inc_idle@Base 0.1.4
  pw_link_info_free@Base 0.1.4
  pw_link_info_update@Base 0.1.4
  pw_link_new@Base 0.1.4
+ pw_link_register@Base 0.1.8
  pw_link_state_as_string@Base 0.1.4
  pw_log_get@Base 0.1.4
  pw_log_level@Base 0.1.4
@@ -101,7 +122,9 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_main_loop_quit@Base 0.1.4
  pw_main_loop_run@Base 0.1.4
  pw_memblock_alloc@Base 0.1.4
+ pw_memblock_find@Base 0.1.8
  pw_memblock_free@Base 0.1.4
+ pw_memblock_import@Base 0.1.8
  pw_memblock_map@Base 0.1.4
  pw_module_add_listener@Base 0.1.4
  pw_module_destroy@Base 0.1.4
@@ -113,49 +136,41 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_module_load@Base 0.1.4
  pw_node_add_listener@Base 0.1.4
  pw_node_destroy@Base 0.1.4
- pw_node_factory_create_node@Base 0.1.4
- pw_node_factory_destroy@Base 0.1.4
- pw_node_factory_export@Base 0.1.4
- pw_node_factory_get_user_data@Base 0.1.4
- pw_node_factory_new@Base 0.1.4
- pw_node_factory_set_implementation@Base 0.1.4
  pw_node_find_port@Base 0.1.4
  pw_node_for_each_port@Base 0.1.4
  pw_node_get_core@Base 0.1.4
  pw_node_get_free_port@Base 0.1.4
+ pw_node_get_free_port_id@Base 0.1.8
  pw_node_get_global@Base 0.1.4
+ pw_node_get_implementation@Base 0.1.8
  pw_node_get_info@Base 0.1.4
- pw_node_get_listeners@Base 0.1.4
- pw_node_get_owner@Base 0.1.4
  pw_node_get_properties@Base 0.1.4
  pw_node_get_user_data@Base 0.1.4
  pw_node_info_free@Base 0.1.4
  pw_node_info_update@Base 0.1.4
+ pw_node_is_active@Base 0.1.8
  pw_node_new@Base 0.1.4
  pw_node_register@Base 0.1.4
+ pw_node_set_active@Base 0.1.8
  pw_node_set_implementation@Base 0.1.4
- pw_node_set_max_ports@Base 0.1.4
  pw_node_set_state@Base 0.1.4
  pw_node_state_as_string@Base 0.1.4
  pw_node_update_properties@Base 0.1.4
  pw_node_update_state@Base 0.1.4
- pw_pod_remap_data@Base 0.1.4
  pw_port_add@Base 0.1.4
  pw_port_add_listener@Base 0.1.4
  pw_port_alloc_buffers@Base 0.1.4
  pw_port_destroy@Base 0.1.4
- pw_port_enum_formats@Base 0.1.4
- pw_port_enum_params@Base 0.1.4
+ pw_port_for_each_filtered_param@Base 0.1.8
+ pw_port_for_each_param@Base 0.1.8
  pw_port_get_direction@Base 0.1.4
- pw_port_get_format@Base 0.1.4
  pw_port_get_id@Base 0.1.4
- pw_port_get_info@Base 0.1.4
  pw_port_get_node@Base 0.1.4
  pw_port_get_properties@Base 0.1.4
  pw_port_get_user_data@Base 0.1.4
  pw_port_new@Base 0.1.4
- pw_port_set_format@Base 0.1.4
- pw_port_set_implementation@Base 0.1.4
+ pw_port_pause@Base 0.1.8
+ pw_port_send_command@Base 0.1.8
  pw_port_set_param@Base 0.1.4
  pw_port_update_properties@Base 0.1.4
  pw_port_use_buffers@Base 0.1.4
@@ -191,13 +206,15 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_remote_destroy@Base 0.1.4
  pw_remote_disconnect@Base 0.1.4
  pw_remote_export@Base 0.1.4
+ pw_remote_find_proxy@Base 0.1.8
  pw_remote_get_core@Base 0.1.4
  pw_remote_get_core_info@Base 0.1.4
  pw_remote_get_core_proxy@Base 0.1.4
- pw_remote_get_proxy@Base 0.1.4
  pw_remote_get_state@Base 0.1.4
+ pw_remote_get_user_data@Base 0.1.8
  pw_remote_new@Base 0.1.4
  pw_remote_state_as_string@Base 0.1.4
+ pw_remote_steal_fd@Base 0.1.8
  pw_remote_update_state@Base 0.1.4
  pw_resource_add_listener@Base 0.1.4
  pw_resource_add_override@Base 0.1.4
@@ -237,6 +254,7 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_stream_peek_buffer@Base 0.1.4
  pw_stream_recycle_buffer@Base 0.1.4
  pw_stream_send_buffer@Base 0.1.4
+ pw_stream_set_active@Base 0.1.8
  pw_stream_state_as_string@Base 0.1.4
  pw_strip@Base 0.1.4
  pw_thread_loop_accept@Base 0.1.4
@@ -257,4 +275,3 @@ libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
  pw_work_queue_complete@Base 0.1.4
  pw_work_queue_destroy@Base 0.1.4
  pw_work_queue_new@Base 0.1.4
-
