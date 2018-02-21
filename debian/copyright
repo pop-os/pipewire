@@ -3,7 +3,29 @@ Upstream-Name: pipewire
 Source: https://github.com/PipeWire/pipewire
 
 Files: *
-Copyright: 2015-2017 Wim Taymans <wim.taymans@gmail.com>
+Copyright: 2015-2017 Wim Taymans
+License: LGPL-2+
+
+Files: git-version-gen
+Copyright: 2007-2008, Free Software Foundation
+License: GPL-3+
+
+Files: spa/plugins/bluez5/a2dp-codecs.c
+Copyright: 2016-2017 Arkadiusz Bokowy
+License: Expat
+
+Files: spa/plugins/bluez5/a2dp-codecs.h
+Copyright: 2004-2010 Marcel Holtmann
+           2006-2010
+License: LGPL-2.1+
+
+Files: spa/plugins/bluez5/rtp.h
+Copyright: 2004-2010 Marcel Holtmann
+License: LGPL-2.1+
+
+Files: spa/plugins/videotestsrc/videotestsrc.c
+Copyright: 2016 Axis Communications AB
+           2016 Wim Taymans
 License: LGPL-2+
 
 Files: src/daemon/daemon-config.*
@@ -11,50 +33,32 @@ Files: src/daemon/daemon-config.*
        src/modules/spa/module-node.c
        src/pipewire/command.*
        src/pipewire/module.*
-Copyright: 2016, Axis Communications <dev-gstreamer@axis.com>
+Copyright: 2016 Axis Communications
 License: LGPL-2+
 
 Files: spa/plugins/support/plugin.c
        spa/plugins/test/plugin.c
        spa/plugins/videotestsrc/draw.c
        spa/plugins/videotestsrc/plugin.c
-       src/pipewire/node-factory.c
-       src/pipewire/node-factory.h
+       src/pipewire/factory.*
 Copyright: 2016, Axis Communications AB
-License: LGPL-2+
-
-Files: src/gst/gstpipewire.c
-       src/gst/gstpipewiresink.c
-       src/gst/gstpipewiresink.h
-       src/gst/gstpipewiresrc.c
-       src/gst/gstpipewiresrc.h
-Copyright: 2015 Wim Taymans <wim.taymans@gmail.com>
 License: LGPL-2+
 
 Files: src/gst/gstpipewiredeviceprovider.*
-Copyright: 2012, Olivier Crete <olivier.crete@collabora.com>
-           2015, Wim Taymans <wim.taymans@gmail.com>
+Copyright: 2012 Olivier Crete
+           2015 Wim Taymans
 License: LGPL-2+
 
 Files: src/modules/module-jack/shm.*
-Copyright: 2001-2003, Paul Davis
-           2005-2012, Grame
+Copyright: 2001-2003 Paul Davis
+           2005-2012 Grame
 License: LGPL-2.1+
 
 Files: src/pipewire/rtkit.c
-Copyright: 2009, Lennart Poettering
-           2010, David Henningsson <diwic@ubuntu.com>
-           2015, Wim Taymans <wim.taymans@gmail.com>
+Copyright: 2009 Lennart Poettering
+           2010 David Henningsson
+           2015 Wim Taymans
 License: Expat and LGPL-2+
-
-Files: spa/plugins/videotestsrc/videotestsrc.c
-Copyright: 2016, Axis Communications AB
-           2016, Wim Taymans <wim.taymans@gmail.com>
-License: LGPL-2+
-
-Files: git-version-gen
-Copyright: 2007-2008, Free Software Foundation
-License: GPL-3+
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
