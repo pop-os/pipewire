@@ -62,7 +62,7 @@ Description: libraries for the PipeWire multimedia server - development
  .
  This package contains the development files.
 
-Package: libspa-lib-0.1-0
+Package: libspa-lib0
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
@@ -78,12 +78,12 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API
  .
  This package includes the Simple Plugin API library.
 
-Package: libspa-lib-0.1-dev
+Package: libspa-lib-dev
 Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
-         libspa-lib-0.1-0 (= ${binary:Version}),
+         libspa-lib0 (= ${binary:Version}),
 Suggests: pipewire-0.1-doc,
 Description: libraries for the PipeWire multimedia server Simple Plugin API - development
  PipeWire is a server and user space API to deal with multimedia
