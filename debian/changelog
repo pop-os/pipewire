@@ -1,6 +1,5 @@
-pipewire (0.1.8-1) UNRELEASED; urgency=medium
+pipewire (0.2.2-1) UNRELEASED; urgency=medium
 
   * Initial release (Closes: #874089)
-  * Update Vcs fields for migration to https://salsa.debian.org/
 
  -- Jeremy Bicha <jbicha@debian.org>  Sun, 21 Jan 2018 10:16:01 -0500
