@@ -51,14 +51,16 @@ struct mem_id {
 	int fd;
 	uint32_t flags;
 	uint32_t ref;
+	struct pw_map_range map;
+	void *ptr;
 };
 
 struct buffer_id {
 	struct spa_list link;
 	uint32_t id;
 	struct spa_buffer *buf;
-	void *ptr;
 	struct pw_map_range map;
+	void *ptr;
 	uint32_t n_mem;
 	struct mem_id **mem;
 };
@@ -186,6 +188,7 @@ static void core_event_remove_id(void *data, uint32_t id)
 		pw_log_debug("remote %p: object remove %u", this, id);
 		pw_proxy_destroy(proxy);
 	}
+	pw_map_remove(&this->objects, id);
 }
 
 static void
@@ -317,6 +320,11 @@ struct pw_core *pw_remote_get_core(struct pw_remote *remote)
 	return remote->core;
 }
 
+const struct pw_properties *pw_remote_get_properties(struct pw_remote *remote)
+{
+	return remote->properties;
+}
+
 void *pw_remote_get_user_data(struct pw_remote *remote)
 {
 	return remote->user_data;
@@ -359,7 +367,7 @@ static int do_connect(struct pw_remote *remote)
       no_proxy:
 	pw_protocol_client_disconnect(remote->conn);
 	pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR, "can't connect: no memory");
-	return -1;
+	return -ENOMEM;
 }
 
 struct pw_core_proxy * pw_remote_get_core_proxy(struct pw_remote *remote)
@@ -377,18 +385,30 @@ struct pw_proxy *pw_remote_find_proxy(struct pw_remote *remote, uint32_t id)
 	return pw_map_lookup(&remote->objects, id);
 }
 
+static void done_connect(void *data, int result)
+{
+	struct pw_remote *remote = data;
+	if (result < 0) {
+		pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR, "can't connect: %s",
+				spa_strerror(result));
+		return;
+	}
+
+	do_connect(remote);
+}
+
 int pw_remote_connect(struct pw_remote *remote)
 {
 	int res;
 
 	pw_remote_update_state(remote, PW_REMOTE_STATE_CONNECTING, NULL);
 
-	if ((res = pw_protocol_client_connect (remote->conn)) < 0) {
-		pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR, "connect failed");
+	if ((res = pw_protocol_client_connect (remote->conn, done_connect, remote)) < 0) {
+		pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR,
+				"connect failed %s", spa_strerror(res));
 		return res;
 	}
-
-	return do_connect(remote);
+	return remote->state == PW_REMOTE_STATE_ERROR ? -EIO : 0;
 }
 
 int pw_remote_connect_fd(struct pw_remote *remote, int fd)
@@ -398,7 +418,8 @@ int pw_remote_connect_fd(struct pw_remote *remote, int fd)
 	pw_remote_update_state(remote, PW_REMOTE_STATE_CONNECTING, NULL);
 
 	if ((res = pw_protocol_client_connect_fd (remote->conn, fd)) < 0) {
-		pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR, "connect_fd failed");
+		pw_remote_update_state(remote, PW_REMOTE_STATE_ERROR,
+				"connect_fd failed %s", spa_strerror(res));
 		return res;
 	}
 
@@ -410,7 +431,7 @@ int pw_remote_steal_fd(struct pw_remote *remote)
 	int fd;
 
 	fd = pw_protocol_client_steal_fd(remote->conn);
-	pw_remote_update_state(remote, PW_REMOTE_STATE_UNCONNECTED, NULL);
+	pw_remote_disconnect(remote);
 
 	return fd;
 }
@@ -546,23 +567,52 @@ static struct mem_id *find_mem(struct pw_array *mem_ids, uint32_t id)
 	return NULL;
 }
 
+static void *mem_map(struct node_data *data, struct mem_id *mid, uint32_t offset, uint32_t size)
+{
+	if (mid->ptr == NULL) {
+		pw_map_range_init(&mid->map, offset, size, data->core->sc_pagesize);
+
+		mid->ptr = mmap(NULL, mid->map.size, PROT_READ|PROT_WRITE,
+				MAP_SHARED, mid->fd, mid->map.offset);
+
+		if (mid->ptr == MAP_FAILED) {
+			pw_log_error("Failed to mmap memory %d %p: %m", size, mid);
+			mid->ptr = NULL;
+			return NULL;
+		}
+	}
+	return SPA_MEMBER(mid->ptr, mid->map.start, void);
+}
+static void mem_unmap(struct node_data *data, struct mem_id *mid)
+{
+	if (mid->ptr != NULL) {
+		if (munmap(mid->ptr, mid->map.size) < 0)
+			pw_log_warn("failed to unmap: %m");
+		mid->ptr = NULL;
+	}
+}
+
 static void clear_memid(struct node_data *data, struct mem_id *mid)
 {
 	if (mid->fd != -1) {
 		bool has_ref = false;
 		int fd;
+		struct mem_id *m;
 
 		fd = mid->fd;
 		mid->fd = -1;
+		mid->id = SPA_ID_INVALID;
 
-		pw_array_for_each(mid, &data->mem_ids) {
-			if (mid->fd == fd) {
+		pw_array_for_each(m, &data->mem_ids) {
+			if (m->fd == fd) {
 				has_ref = true;
 				break;
 			}
 		}
-		if (!has_ref)
+		if (!has_ref) {
+			mem_unmap(data, mid);
 			close(fd);
+		}
 	}
 }
 
@@ -629,18 +679,20 @@ static void client_node_add_mem(void *object,
 
 	m = find_mem(&data->mem_ids, mem_id);
 	if (m) {
-		pw_log_debug("update mem %u, fd %d, flags %d",
+		pw_log_warn("duplicate mem %u, fd %d, flags %d",
 			     mem_id, memfd, flags);
-		clear_memid(data, m);
-	} else {
-		m = pw_array_add(&data->mem_ids, sizeof(struct mem_id));
-		pw_log_debug("add mem %u, fd %d, flags %d",
-			     mem_id, memfd, flags);
+		return;
 	}
+
+	m = pw_array_add(&data->mem_ids, sizeof(struct mem_id));
+	pw_log_debug("add mem %u, fd %d, flags %d", mem_id, memfd, flags);
+
 	m->id = mem_id;
 	m->fd = memfd;
 	m->flags = flags;
 	m->ref = 0;
+	m->map = PW_MAP_RANGE_INIT;
+	m->ptr = NULL;
 }
 
 static void client_node_transport(void *object, uint32_t node_id,
@@ -898,8 +950,6 @@ client_node_port_set_param(void *object,
 		goto done;
 	}
 
-	pw_port_pause(port->port);
-
 	res = pw_port_set_param(port->port, id, flags, param);
 	if (res < 0)
 		goto done;
@@ -918,6 +968,7 @@ static void clear_buffers(struct node_data *data, struct port *port)
 	int i;
 
         pw_log_debug("port %p: clear buffers", port);
+	pw_port_use_buffers(port->port, NULL, 0);
 
         pw_array_for_each(bid, &port->buffer_ids) {
 		if (bid->ptr != NULL) {
@@ -961,8 +1012,6 @@ client_node_port_use_buffers(void *object,
 		goto done;
 	}
 
-	pw_port_pause(port->port);
-
 	prot = PROT_READ | (direction == SPA_DIRECTION_OUTPUT ? PROT_WRITE : 0);
 
 	/* clear previous buffers */
@@ -975,8 +1024,9 @@ client_node_port_use_buffers(void *object,
 
 		struct mem_id *mid = find_mem(&data->mem_ids, buffers[i].mem_id);
 		if (mid == NULL) {
-			pw_log_warn("unknown memory id %u", buffers[i].mem_id);
-			continue;
+			pw_log_error("unknown memory id %u", buffers[i].mem_id);
+			res = -EINVAL;
+			goto cleanup;
 		}
 
 		len = pw_array_get_len(&port->buffer_ids, struct buffer_id);
@@ -987,9 +1037,10 @@ client_node_port_use_buffers(void *object,
 		bid->ptr = mmap(NULL, bid->map.size, prot, MAP_SHARED, mid->fd, bid->map.offset);
 		if (bid->ptr == MAP_FAILED) {
 			bid->ptr = NULL;
-			pw_log_warn("Failed to mmap memory %u %u: %m",
-					bid->map.offset, bid->map.size);
-			continue;
+			pw_log_error("Failed to mmap memory %u %u %u %d: %m",
+				bid->map.offset, bid->map.size, buffers[i].mem_id, mid->fd);
+			res = -errno;
+			goto cleanup;
 		}
 		if (mlock(bid->ptr, bid->map.size) < 0)
 			pw_log_warn("Failed to mlock memory %u %u: %m",
@@ -1046,8 +1097,14 @@ client_node_port_use_buffers(void *object,
 				       struct spa_chunk);
 
 			if (d->type == t->data.MemFd || d->type == t->data.DmaBuf) {
-				struct mem_id *bmid = find_mem(&data->mem_ids,
-						SPA_PTR_TO_UINT32(d->data));
+				uint32_t id = SPA_PTR_TO_UINT32(d->data);
+				struct mem_id *bmid = find_mem(&data->mem_ids, id);
+
+				if (bmid == NULL) {
+					pw_log_error("unknown buffer mem %u", id);
+					res = -EINVAL;
+					goto cleanup;
+				}
 
 				d->data = NULL;
 				d->fd = bmid->fd;
@@ -1070,6 +1127,11 @@ client_node_port_use_buffers(void *object,
 
       done:
 	pw_client_node_proxy_done(data->node_proxy, seq, res);
+	return;
+
+     cleanup:
+	clear_buffers(data, port);
+	goto done;
 
 }
 
@@ -1105,32 +1167,34 @@ client_node_port_set_io(void *object,
 	struct pw_core *core = proxy->remote->core;
 	struct port *port;
 	struct mem_id *mid;
-	struct pw_map_range r;
 	void *ptr;
 
 	port = find_port(data, direction, port_id);
 	if (port == NULL)
 		return;
 
-	mid = find_mem(&data->mem_ids, memid);
-	if (mid == NULL) {
-		pw_log_warn("unknown memory id %u", memid);
-		return;
+	if (memid == SPA_ID_INVALID) {
+		ptr = NULL;
+		size = 0;
 	}
-	pw_map_range_init(&r, offset, size, core->sc_pagesize);
+	else {
+		mid = find_mem(&data->mem_ids, memid);
+		if (mid == NULL) {
+			pw_log_warn("unknown memory id %u", memid);
+			return;
+		}
 
-	ptr = mmap(NULL, r.size, PROT_READ|PROT_WRITE, MAP_SHARED, mid->fd, r.offset);
-	if (ptr == MAP_FAILED) {
-		pw_log_warn("Failed to mmap memory %d %p: %s", size, mid,
-			    strerror(errno));
-		return;
+		if ((ptr = mem_map(data, mid, offset, size)) == NULL)
+			return;
 	}
-	pw_log_debug("port %p: set io %s", port, spa_type_map_get_type(core->type.map, id));
+
+
+	pw_log_debug("port %p: set io %s %p", port, spa_type_map_get_type(core->type.map, id), ptr);
 
 	spa_node_port_set_io(port->port->node->node,
 			     direction, port_id,
 			     id,
-			     SPA_MEMBER(ptr, r.start, void),
+			     ptr,
 			     size);
 }
 

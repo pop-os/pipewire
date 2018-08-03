@@ -65,7 +65,8 @@ static void registry_bind(void *object, uint32_t id,
 	pw_log_debug("global %p: bind global id %d, iface %s to %d", global, id,
 		     spa_type_map_get_type(core->type.map, type), new_id);
 
-	pw_global_bind(global, client, permissions, version, new_id);
+	if (pw_global_bind(global, client, permissions, version, new_id) < 0)
+		goto exit;
 
 	return;
 
@@ -198,7 +199,10 @@ core_create_object(void *object,
 	struct pw_properties *properties;
 
 	factory = pw_core_find_factory(client->core, factory_name);
-	if (factory == NULL)
+	if (factory == NULL || factory->global == NULL)
+		goto no_factory;
+
+	if (!PW_PERM_IS_R(pw_global_get_permissions(factory->global, client)))
 		goto no_factory;
 
 	if (factory->info.type != type)
@@ -244,6 +248,21 @@ core_create_object(void *object,
 	goto done;
 }
 
+static void core_destroy(void *object, uint32_t id)
+{
+	struct pw_resource *resource = object;
+	struct pw_core *this = resource->core;
+	struct pw_global *global;
+
+	pw_log_debug("core %p: destroy %d from resource %p", resource->core, id, resource);
+
+	global = pw_core_find_global(this, id);
+	if (global == NULL)
+		return;
+
+	pw_global_destroy(global);
+}
+
 static void core_update_types(void *object, uint32_t first_id, const char **types, uint32_t n_types)
 {
 	struct pw_resource *resource = object;
@@ -254,7 +273,7 @@ static void core_update_types(void *object, uint32_t first_id, const char **type
 	for (i = 0; i < n_types; i++, first_id++) {
 		uint32_t this_id = spa_type_map_get_id(this->type.map, types[i]);
 		if (!pw_map_insert_at(&client->types, first_id, PW_MAP_ID_TO_PTR(this_id)))
-			pw_log_error("can't add type for client");
+			pw_log_error("can't add type %d->%d for client", first_id, this_id);
 	}
 }
 
@@ -267,6 +286,7 @@ static const struct pw_core_proxy_methods core_methods = {
 	.client_update = core_client_update,
 	.permissions = core_permissions,
 	.create_object = core_create_object,
+	.destroy = core_destroy,
 };
 
 static void core_unbind_func(void *data)
@@ -281,14 +301,15 @@ static const struct pw_resource_events core_resource_events = {
 	.destroy = core_unbind_func,
 };
 
-static int
-core_bind_func(struct pw_global *global,
-	       struct pw_client *client,
-	       uint32_t permissions,
-	       uint32_t version,
-	       uint32_t id)
+static void
+global_bind(void *_data,
+	    struct pw_client *client,
+	    uint32_t permissions,
+	    uint32_t version,
+	    uint32_t id)
 {
-	struct pw_core *this = global->object;
+	struct pw_core *this = _data;
+	struct pw_global *global = this->global;
 	struct pw_resource *resource;
 	struct resource_data *data;
 
@@ -308,13 +329,26 @@ core_bind_func(struct pw_global *global,
 
 	pw_log_debug("core %p: bound to %d", this, resource->id);
 
-
-	return 0;
+	return;
 
       no_mem:
 	pw_log_error("can't create core resource");
-	return -ENOMEM;
+	return;
 }
+
+static void global_destroy(void *object)
+{
+	struct pw_core *core = object;
+	spa_hook_remove(&core->global_listener);
+	core->global = NULL;
+	pw_core_destroy(core);
+}
+
+static const struct pw_global_events global_events = {
+	PW_VERSION_GLOBAL_EVENTS,
+	.destroy = global_destroy,
+	.bind = global_bind,
+};
 
 /** Create a new core object
  *
@@ -410,12 +444,13 @@ struct pw_core *pw_core_new(struct pw_loop *main_loop, struct pw_properties *pro
 					     PW_CORE_PROP_NAME, this->info.name,
 					     PW_CORE_PROP_VERSION, this->info.version,
 					     NULL),
-				     core_bind_func,
 				     this);
-	if (this->global != NULL) {
-		pw_global_register(this->global, NULL, NULL);
-		this->info.id = this->global->id;
-	}
+	if (this->global == NULL)
+		goto no_mem;
+
+	pw_global_add_listener(this->global, &this->global_listener, &global_events, this);
+	pw_global_register(this->global, NULL, NULL);
+	this->info.id = this->global->id;
 
 	return this;
 
@@ -440,6 +475,8 @@ void pw_core_destroy(struct pw_core *core)
 
 	pw_log_debug("core %p: destroy", core);
 	spa_hook_list_call(&core->listener_list, struct pw_core_events, destroy);
+
+	spa_hook_remove(&core->global_listener);
 
 	spa_list_for_each_safe(remote, tr, &core->remote_list, link)
 		pw_remote_destroy(remote);
@@ -481,14 +518,6 @@ void pw_core_add_listener(struct pw_core *core,
 			  void *data)
 {
 	spa_hook_list_append(&core->listener_list, listener, events, data);
-}
-
-void pw_core_set_permission_callback(struct pw_core *core,
-				     pw_permission_func_t callback,
-				     void *data)
-{
-	core->permission_func = callback;
-	core->permission_data = data;
 }
 
 struct pw_type *pw_core_get_type(struct pw_core *core)
@@ -550,15 +579,29 @@ int pw_core_for_each_global(struct pw_core *core,
 	struct pw_global *g, *t;
 	int res;
 
-	spa_list_for_each_safe(g, t, &core->global_list, link)
+	spa_list_for_each_safe(g, t, &core->global_list, link) {
+		if (core->current_client &&
+		    !PW_PERM_IS_R(pw_global_get_permissions(g, core->current_client)))
+			continue;
 		if ((res = callback(data, g)) != 0)
 			return res;
+	}
 	return 0;
 }
 
 struct pw_global *pw_core_find_global(struct pw_core *core, uint32_t id)
 {
-	return pw_map_lookup(&core->globals, id);
+	struct pw_global *global;
+
+	global = pw_map_lookup(&core->globals, id);
+	if (global == NULL)
+		return NULL;
+
+	if (core->current_client &&
+	    !PW_PERM_IS_R(pw_global_get_permissions(global, core->current_client)))
+		return NULL;
+
+	return global;
 }
 
 /** Find a port to link with
@@ -595,6 +638,13 @@ struct pw_port *pw_core_find_port(struct pw_core *core,
 			continue;
 
 		if (other_port->node == n)
+			continue;
+
+		if (core->current_client &&
+		    !PW_PERM_IS_R(pw_global_get_permissions(n->global, core->current_client)))
+			continue;
+
+		if (!n->enabled)
 			continue;
 
 		pw_log_debug("node id \"%d\"", n->global->id);
@@ -774,7 +824,8 @@ int pw_core_find_format(struct pw_core *core,
  *
  * \memberof pw_core
  */
-struct pw_factory *pw_core_find_factory(struct pw_core *core, const char *name)
+struct pw_factory *pw_core_find_factory(struct pw_core *core,
+					const char *name)
 {
 	struct pw_factory *factory;
 

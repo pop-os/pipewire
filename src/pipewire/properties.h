@@ -21,7 +21,7 @@
 #define __PIPEWIRE_PROPERTIES_H__
 
 #ifdef __cplusplus
-//extern "C" {
+extern "C" {
 #endif
 
 #include <spa/utils/dict.h>
@@ -44,6 +44,9 @@ pw_properties_new(const char *key, ...);
 
 struct pw_properties *
 pw_properties_new_dict(const struct spa_dict *dict);
+
+struct pw_properties *
+pw_properties_new_string(const char *args);
 
 struct pw_properties *
 pw_properties_copy(const struct pw_properties *properties);

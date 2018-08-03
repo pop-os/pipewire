@@ -249,9 +249,14 @@ loop_invoke(struct spa_loop *loop,
 
 		if (block) {
 			uint64_t count = 1;
+
+			spa_hook_list_call(&impl->hooks_list, struct spa_loop_control_hooks, before);
+
 			if (read(impl->ack_fd, &count, sizeof(uint64_t)) != sizeof(uint64_t))
 				spa_log_warn(impl->log, NAME " %p: failed to read event fd: %s",
 						impl, strerror(errno));
+
+			spa_hook_list_call(&impl->hooks_list, struct spa_loop_control_hooks, after);
 
 			res = item->res;
 		}
@@ -269,7 +274,6 @@ static void wakeup_func(void *data, uint64_t count)
 {
 	struct impl *impl = data;
 	uint32_t index;
-
 	while (spa_ringbuffer_get_read_index(&impl->buffer, &index) > 0) {
 		struct invoke_item *item =
 		    SPA_MEMBER(impl->buffer_data, index & (DATAS_SIZE - 1), struct invoke_item);
@@ -316,12 +320,20 @@ static void loop_leave(struct spa_loop_control *ctrl)
 	impl->thread = 0;
 }
 
+static void process_destroy(struct impl *impl)
+{
+	struct source_impl *source, *tmp;
+	spa_list_for_each_safe(source, tmp, &impl->destroy_list, link)
+		free(source);
+	spa_list_init(&impl->destroy_list);
+}
+
 static int loop_iterate(struct spa_loop_control *ctrl, int timeout)
 {
 	struct impl *impl = SPA_CONTAINER_OF(ctrl, struct impl, control);
+	struct spa_loop *loop = &impl->loop;
 	struct epoll_event ep[32];
 	int i, nfds, save_errno = 0;
-	struct source_impl *source, *tmp;
 
 	spa_hook_list_call(&impl->hooks_list, struct spa_loop_control_hooks, before);
 
@@ -342,14 +354,10 @@ static int loop_iterate(struct spa_loop_control *ctrl, int timeout)
 	}
 	for (i = 0; i < nfds; i++) {
 		struct spa_source *s = ep[i].data.ptr;
-		if (s->rmask && s->fd != -1) {
+		if (s->rmask && s->fd != -1 && s->loop == loop)
 			s->func(s);
-		}
 	}
-	spa_list_for_each_safe(source, tmp, &impl->destroy_list, link)
-		free(source);
-
-	spa_list_init(&impl->destroy_list);
+	process_destroy(impl);
 
 	return 0;
 }
@@ -610,18 +618,17 @@ static struct spa_source *loop_add_signal(struct spa_loop_utils *utils,
 static void loop_destroy_source(struct spa_source *source)
 {
 	struct source_impl *impl = SPA_CONTAINER_OF(source, struct source_impl, source);
-	struct impl *loop_impl = SPA_CONTAINER_OF(source->loop, struct impl, loop);
 
 	spa_list_remove(&impl->link);
 
-	spa_loop_remove_source(source->loop, source);
+	if (source->loop)
+		spa_loop_remove_source(source->loop, source);
 
 	if (source->fd != -1 && impl->close) {
 		close(source->fd);
 		source->fd = -1;
 	}
-
-	spa_list_insert(&loop_impl->destroy_list, &impl->link);
+	spa_list_insert(&impl->impl->destroy_list, &impl->link);
 }
 
 static const struct spa_loop impl_loop = {
@@ -687,8 +694,8 @@ static int impl_clear(struct spa_handle *handle)
 
 	spa_list_for_each_safe(source, tmp, &impl->source_list, link)
 		loop_destroy_source(&source->source);
-	spa_list_for_each_safe(source, tmp, &impl->destroy_list, link)
-		free(source);
+
+	process_destroy(impl);
 
 	close(impl->ack_fd);
 	close(impl->epoll_fd);
@@ -740,9 +747,9 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_ringbuffer_init(&impl->buffer);
 
 	impl->wakeup = spa_loop_utils_add_event(&impl->utils, wakeup_func, impl);
-	impl->ack_fd = eventfd(0, EFD_CLOEXEC);
+	impl->ack_fd = eventfd(0, EFD_SEMAPHORE | EFD_CLOEXEC);
 
-	spa_log_info(impl->log, NAME " %p: initialized", impl);
+	spa_log_debug(impl->log, NAME " %p: initialized", impl);
 
 	return 0;
 }

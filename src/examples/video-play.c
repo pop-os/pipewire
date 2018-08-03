@@ -32,11 +32,6 @@
 #include <pipewire/pipewire.h>
 
 struct type {
-	uint32_t format;
-	uint32_t props;
-	struct spa_type_param param;
-	struct spa_type_meta meta;
-	struct spa_type_data data;
 	struct spa_type_media_type media_type;
 	struct spa_type_media_subtype media_subtype;
 	struct spa_type_format_video format_video;
@@ -45,11 +40,6 @@ struct type {
 
 static inline void init_type(struct type *type, struct spa_type_map *map)
 {
-	type->format = spa_type_map_get_id(map, SPA_TYPE__Format);
-	type->props = spa_type_map_get_id(map, SPA_TYPE__Props);
-	spa_type_param_map(map, &type->param);
-	spa_type_meta_map(map, &type->meta);
-	spa_type_data_map(map, &type->data);
 	spa_type_media_type_map(map, &type->media_type);
 	spa_type_media_subtype_map(map, &type->media_subtype);
 	spa_type_format_video_map(map, &type->format_video);
@@ -97,36 +87,34 @@ static void handle_events(struct data *data)
 	}
 }
 
-static int
-do_render(struct spa_loop *loop, bool async, uint32_t seq,
-	  const void *_data, size_t size, void *user_data)
+static void
+on_stream_process(void *_data)
 {
-	struct data *data = user_data;
-	struct spa_buffer *buf = ((struct spa_buffer **) _data)[0];
-	uint8_t *map;
+	struct data *data = _data;
+	struct pw_stream *stream = data->stream;
+	struct pw_buffer *buf;
+	struct spa_buffer *b;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
-	int i;
+	uint32_t i;
 	uint8_t *src, *dst;
 
 	handle_events(data);
 
-	if (buf->datas[0].type == data->type.data.MemFd ||
-	    buf->datas[0].type == data->type.data.DmaBuf) {
-		map = mmap(NULL, buf->datas[0].maxsize + buf->datas[0].mapoffset, PROT_READ,
-			   MAP_PRIVATE, buf->datas[0].fd, 0);
-		sdata = SPA_MEMBER(map, buf->datas[0].mapoffset, uint8_t);
-	} else if (buf->datas[0].type == data->type.data.MemPtr) {
-		map = NULL;
-		sdata = buf->datas[0].data;
-	} else
-		return -EINVAL;
+	buf = pw_stream_dequeue_buffer(stream);
+	if (buf == NULL)
+		return;
+
+	b = buf->buffer;
+
+	if ((sdata = b->datas[0].data) == NULL)
+		goto done;
 
 	if (SDL_LockTexture(data->texture, NULL, &ddata, &dstride) < 0) {
 		fprintf(stderr, "Couldn't lock texture: %s\n", SDL_GetError());
-		return -EIO;
+		goto done;
 	}
-	sstride = buf->datas[0].chunk->stride;
+	sstride = b->datas[0].chunk->stride;
 	ostride = SPA_MIN(sstride, dstride);
 
 	src = sdata;
@@ -142,26 +130,8 @@ do_render(struct spa_loop *loop, bool async, uint32_t seq,
 	SDL_RenderCopy(data->renderer, data->texture, NULL, NULL);
 	SDL_RenderPresent(data->renderer);
 
-	if (map)
-		munmap(map, buf->datas[0].maxsize + buf->datas[0].mapoffset);
-
-	return 0;
-}
-
-static void
-on_stream_new_buffer(void *_data, uint32_t id)
-{
-	struct data *data = _data;
-	struct pw_stream *stream = data->stream;
-	struct spa_buffer *buf;
-
-	buf = pw_stream_peek_buffer(stream, id);
-
-	pw_loop_invoke(pw_main_loop_get_loop(data->loop), do_render,
-		       SPA_ID_INVALID, &buf, sizeof(struct spa_buffer *),
-		       true, data);
-
-	pw_stream_recycle_buffer(stream, id);
+      done:
+	pw_stream_queue_buffer(stream, buf);
 }
 
 static void on_stream_state_changed(void *_data, enum pw_stream_state old,
@@ -228,7 +198,7 @@ static struct {
 
 static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (video_formats[i].format == format)
@@ -239,7 +209,7 @@ static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 
 static Uint32 id_to_sdl_format(struct data *data, uint32_t id)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (*SPA_MEMBER(&data->type.video_format, video_formats[i].id, uint32_t) == id)
@@ -249,14 +219,14 @@ static Uint32 id_to_sdl_format(struct data *data, uint32_t id)
 }
 
 static void
-on_stream_format_changed(void *_data, struct spa_pod *format)
+on_stream_format_changed(void *_data, const struct spa_pod *format)
 {
 	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
 	struct pw_type *t = data->t;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	struct spa_pod *params[2];
+	const struct spa_pod *params[2];
 	Uint32 sdl_format;
 	void *d;
 
@@ -285,9 +255,9 @@ on_stream_format_changed(void *_data, struct spa_pod *format)
 		t->param.idBuffers, t->param_buffers.Buffers,
 		":", t->param_buffers.size,    "i", data->stride * data->format.size.height,
 		":", t->param_buffers.stride,  "i", data->stride,
-		":", t->param_buffers.buffers, "iru", 32,
-								2, 2, 32,
-		":", t->param_buffers.align,    "i", 16);
+		":", t->param_buffers.buffers, "iru", 8,
+			SPA_POD_PROP_MIN_MAX(2, 32),
+		":", t->param_buffers.align,   "i", 16);
 
 	params[1] = spa_pod_builder_object(&b,
 		t->param.idMeta, t->param_meta.Meta,
@@ -301,7 +271,7 @@ static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.state_changed = on_stream_state_changed,
 	.format_changed = on_stream_format_changed,
-	.new_buffer = on_stream_new_buffer,
+	.process = on_stream_process,
 };
 
 static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
@@ -321,17 +291,24 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 		uint8_t buffer[1024];
 		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 		SDL_RendererInfo info;
-		int i, c;
+		uint32_t i, c;
 
 		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
 
-		data->stream = pw_stream_new(remote, "video-play",
-				pw_properties_new("pipewire.client.reuse", "1", NULL));
+		data->stream = pw_stream_new(remote,
+				"video-play",
+				pw_properties_new(
+					"pipewire.client.reuse", "1",
+					PW_NODE_PROP_MEDIA, "Video",
+					PW_NODE_PROP_CATEGORY, "Capture",
+					PW_NODE_PROP_ROLE, "Camera",
+					NULL));
+
 
 		SDL_GetRendererInfo(data->renderer, &info);
 
 		spa_pod_builder_push_object(&b,
-					    data->type.param.idEnumFormat, data->type.format);
+					    data->t->param.idEnumFormat, data->t->spa_format);
 		spa_pod_builder_id(&b, data->type.media_type.video);
 		spa_pod_builder_id(&b, data->type.media_subtype.raw);
 
@@ -356,12 +333,12 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 		spa_pod_builder_pop(&b);
 		spa_pod_builder_add(&b,
 			":", data->type.format_video.size,      "Rru", &SPA_RECTANGLE(WIDTH, HEIGHT),
-									2, &SPA_RECTANGLE(1,1),
-									   &SPA_RECTANGLE(info.max_texture_width,
-										          info.max_texture_height),
+				SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(1,1),
+						     &SPA_RECTANGLE(info.max_texture_width,
+								    info.max_texture_height)),
 			":", data->type.format_video.framerate, "Fru", &SPA_FRACTION(25,1),
-									2, &SPA_RECTANGLE(0,1),
-									   &SPA_RECTANGLE(30,1),
+				SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(0,1),
+						     &SPA_RECTANGLE(30,1)),
 			NULL);
 		params[0] = spa_pod_builder_pop(&b);
 
@@ -376,7 +353,9 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 		pw_stream_connect(data->stream,
 				  PW_DIRECTION_INPUT,
 				  data->path,
-				  PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_INACTIVE,
+				  PW_STREAM_FLAG_AUTOCONNECT |
+				  PW_STREAM_FLAG_INACTIVE |
+				  PW_STREAM_FLAG_MAP_BUFFERS,
 				  params, 1);
 		break;
 	}

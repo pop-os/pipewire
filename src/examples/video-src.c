@@ -31,11 +31,6 @@
 #include <pipewire/pipewire.h>
 
 struct type {
-	uint32_t format;
-	uint32_t props;
-	struct spa_type_param param;
-	struct spa_type_meta meta;
-	struct spa_type_data data;
 	struct spa_type_media_type media_type;
 	struct spa_type_media_subtype media_subtype;
 	struct spa_type_format_video format_video;
@@ -44,11 +39,6 @@ struct type {
 
 static inline void init_type(struct type *type, struct spa_type_map *map)
 {
-	type->format = spa_type_map_get_id(map, SPA_TYPE__Format);
-	type->props = spa_type_map_get_id(map, SPA_TYPE__Props);
-	spa_type_param_map(map, &type->param);
-	spa_type_meta_map(map, &type->meta);
-	spa_type_data_map(map, &type->data);
 	spa_type_media_type_map(map, &type->media_type);
 	spa_type_media_subtype_map(map, &type->media_subtype);
 	spa_type_format_video_map(map, &type->format_video);
@@ -81,34 +71,22 @@ struct data {
 static void on_timeout(void *userdata, uint64_t expirations)
 {
 	struct data *data = userdata;
-	uint32_t id;
-	struct spa_buffer *buf;
 	int i, j;
-	uint8_t *p, *map;
+	uint8_t *p;
 	struct spa_meta_header *h;
+	struct pw_buffer *buf;
+	struct spa_buffer *b;
 
-	id = pw_stream_get_empty_buffer(data->stream);
-	if (id == SPA_ID_INVALID)
+	buf = pw_stream_dequeue_buffer(data->stream);
+	if (buf == NULL)
 		return;
 
-	buf = pw_stream_peek_buffer(data->stream, id);
+	b = buf->buffer;
 
-	if (buf->datas[0].type == data->type.data.MemFd) {
-		map =
-		    mmap(NULL, buf->datas[0].maxsize + buf->datas[0].mapoffset,
-			 PROT_READ | PROT_WRITE, MAP_SHARED, buf->datas[0].fd, 0);
-		if (map == MAP_FAILED) {
-			printf("failed to mmap: %s\n", strerror(errno));
-			return;
-		}
-		p = SPA_MEMBER(map, buf->datas[0].mapoffset, uint8_t);
-	} else if (buf->datas[0].type == data->type.data.MemPtr) {
-		map = NULL;
-		p = buf->datas[0].data;
-	} else
-		return;
+	if ((p = b->datas[0].data) == NULL)
+		goto done;
 
-	if ((h = spa_buffer_find_meta(buf, data->type.meta.Header))) {
+	if ((h = spa_buffer_find_meta(b, data->t->meta.Header))) {
 #if 0
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
@@ -125,16 +103,14 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		for (j = 0; j < data->format.size.width * BPP; j++) {
 			p[j] = data->counter + j * i;
 		}
-		p += buf->datas[0].chunk->stride;
+		p += b->datas[0].chunk->stride;
 		data->counter += 13;
 	}
 
-	if (map)
-		munmap(map, buf->datas[0].maxsize + buf->datas[0].mapoffset);
+	b->datas[0].chunk->size = b->datas[0].maxsize;
 
-	buf->datas[0].chunk->size = buf->datas[0].maxsize;
-
-	pw_stream_send_buffer(data->stream, id);
+      done:
+	pw_stream_queue_buffer(data->stream, buf);
 }
 
 static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum pw_stream_state state,
@@ -145,10 +121,6 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 	printf("stream state: \"%s\"\n", pw_stream_state_as_string(state));
 
 	switch (state) {
-	case PW_STREAM_STATE_PAUSED:
-		pw_loop_update_timer(pw_main_loop_get_loop(data->loop), data->timer, NULL, NULL, false);
-		break;
-
 	case PW_STREAM_STATE_STREAMING:
 	{
 		struct timespec timeout, interval;
@@ -158,23 +130,26 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		interval.tv_sec = 0;
 		interval.tv_nsec = 40 * SPA_NSEC_PER_MSEC;
 
-		pw_loop_update_timer(pw_main_loop_get_loop(data->loop), data->timer, &timeout, &interval, false);
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+				data->timer, &timeout, &interval, false);
 		break;
 	}
 	default:
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+				data->timer, NULL, NULL, false);
 		break;
 	}
 }
 
 static void
-on_stream_format_changed(void *_data, struct spa_pod *format)
+on_stream_format_changed(void *_data, const struct spa_pod *format)
 {
 	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
 	struct pw_type *t = data->t;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	struct spa_pod *params[2];
+	const struct spa_pod *params[2];
 
 	if (format == NULL) {
 		pw_stream_finish_format(stream, 0, NULL, 0);
@@ -189,7 +164,7 @@ on_stream_format_changed(void *_data, struct spa_pod *format)
 		":", t->param_buffers.size,    "i", data->stride * data->format.size.height,
 		":", t->param_buffers.stride,  "i", data->stride,
 		":", t->param_buffers.buffers, "iru", 2,
-								2, 1, 32,
+			SPA_POD_PROP_MIN_MAX(1, 32),
 		":", t->param_buffers.align,   "i", 16);
 
 	params[1] = spa_pod_builder_object(&b,
@@ -226,16 +201,23 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 		printf("remote state: \"%s\"\n",
 		       pw_remote_state_as_string(state));
 
-		data->stream = pw_stream_new(remote, "video-src", NULL);
+		data->stream = pw_stream_new(remote,
+				"video-src",
+				pw_properties_new(
+					"media.class", "Video/Source",
+					PW_NODE_PROP_MEDIA, "Video",
+					PW_NODE_PROP_CATEGORY, "Source",
+					PW_NODE_PROP_ROLE, "Screen",
+					NULL));
 
 		params[0] = spa_pod_builder_object(&b,
-			data->type.param.idEnumFormat, data->type.format,
+			data->t->param.idEnumFormat, data->t->spa_format,
 			"I", data->type.media_type.video,
 			"I", data->type.media_subtype.raw,
 			":", data->type.format_video.format,    "I", data->type.video_format.RGB,
 			":", data->type.format_video.size,      "Rru", &SPA_RECTANGLE(320, 240),
-									2, &SPA_RECTANGLE(1, 1),
-									   &SPA_RECTANGLE(4096, 4096),
+				SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(1, 1),
+						     &SPA_RECTANGLE(4096, 4096)),
 			":", data->type.format_video.framerate, "F", &SPA_FRACTION(25, 1));
 
 		pw_stream_add_listener(data->stream,
@@ -245,7 +227,9 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 
 		pw_stream_connect(data->stream,
 				  PW_DIRECTION_OUTPUT,
-				  NULL, PW_STREAM_FLAG_NONE,
+				  NULL,
+				  PW_STREAM_FLAG_DRIVER |
+				  PW_STREAM_FLAG_MAP_BUFFERS,
 				  params, 1);
 		break;
 	}

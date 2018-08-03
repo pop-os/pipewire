@@ -401,15 +401,17 @@ pull_frames(struct state *state,
 			spa_log_trace(state->log, "alsa-util %p: reuse buffer %u", state, b->outbuf->id);
 			state->callbacks->reuse_buffer(state->callbacks_data, 0, b->outbuf->id);
 			state->ready_offset = 0;
+
+			try_pull(state, frames, total_frames, do_pull);
 		}
 		total_frames += n_frames;
 		to_write -= n_frames;
+		offset += n_frames;
 
 		spa_log_trace(state->log, "alsa-util %p: written %lu frames, left %ld",
 				state, total_frames, to_write);
 	}
 
-	try_pull(state, frames, total_frames, do_pull);
 
 	if (total_frames == 0 && do_pull) {
 		total_frames = SPA_MIN(frames, state->threshold);
@@ -571,7 +573,7 @@ static void alsa_on_playback_timeout_event(struct spa_source *source)
 		}
 	}
 	if (!state->alsa_started && total_written > 0) {
-		spa_log_debug(state->log, "snd_pcm_start");
+		spa_log_trace(state->log, "snd_pcm_start");
 		if ((res = snd_pcm_start(state->hndl)) < 0) {
 			spa_log_error(state->log, "snd_pcm_start: %s", snd_strerror(res));
 			return;
@@ -665,7 +667,7 @@ int spa_alsa_start(struct state *state, bool xrun_recover)
 	if (state->started)
 		return 0;
 
-	spa_log_trace(state->log, "alsa %p: start", state);
+	spa_log_debug(state->log, "alsa %p: start", state);
 
 	CHECK(set_swparams(state), "swparams");
 	if (!xrun_recover)
@@ -737,7 +739,7 @@ int spa_alsa_pause(struct state *state, bool xrun_recover)
 	if (!state->started)
 		return 0;
 
-	spa_log_trace(state->log, "alsa %p: pause", state);
+	spa_log_debug(state->log, "alsa %p: pause", state);
 
 	spa_loop_invoke(state->data_loop, do_remove_source, 0, NULL, 0, true, state);
 

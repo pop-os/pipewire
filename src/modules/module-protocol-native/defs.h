@@ -1,5 +1,5 @@
 /* PipeWire
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
+ * Copyright (C) 2018 Wim Taymans <wim.taymans@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -17,12 +17,9 @@
  * Boston, MA 02110-1301, USA.
  */
 
-static inline jack_port_type_id_t
-jack_port_get_type_id(const char *type)
-{
-	if (strcmp(type, JACK_DEFAULT_AUDIO_TYPE) == 0)
-		return 0;
-	else if (strcmp(type, JACK_DEFAULT_MIDI_TYPE) == 0)
-		return 1;
-	return 2;
-}
+int pw_protocol_native_connect_local_socket(struct pw_protocol_client *client,
+					    void (*done_callback) (void *data, int res),
+					    void *data);
+int pw_protocol_native_connect_portal_screencast(struct pw_protocol_client *client,
+					    void (*done_callback) (void *data, int res),
+					    void *data);

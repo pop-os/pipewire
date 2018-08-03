@@ -1,5 +1,5 @@
 project('pipewire', 'c',
-  version : '0.1.8',
+  version : '0.2.2',
   meson_version : '>= 0.36.0',
   default_options : [ 'warning_level=1',
                       'c_std=gnu99',
@@ -17,8 +17,8 @@ else
   pipewire_version_nano = 0
 endif
 
-apiversion = '0.1'
-soversion = 0
+apiversion = '0.2'
+soversion = 1
 libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
 
 prefix = get_option('prefix')
@@ -141,10 +141,10 @@ configure_file(input : 'Makefile.in',
   configuration : makedata)
 
 # Find dependencies
-mathlib = cc.find_library('m', required : true)
-rt_lib = cc.find_library('rt', required : true) # clock_gettime
-dl_lib = cc.find_library('dl', required : true)
-pthread_lib = cc.find_library('pthread', required : true)
+mathlib = cc.find_library('m', required : false)
+rt_lib = cc.find_library('rt', required : false) # clock_gettime
+dl_lib = cc.find_library('dl', required : false)
+pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 
 #optional dependencies
@@ -167,15 +167,19 @@ subdir('src')
 subdir('pkgconfig')
 
 if get_option('enable_docs')
-  doxygen = find_program('doxygen')
+  doxygen = find_program('doxygen', required : false)
   if doxygen.found()
     subdir('doc')
+  else
+    warning('Documentation was enabled, but doxygen is not available')
   endif
 endif
 
 if get_option('enable_man')
-  xmltoman = find_program('xmltoman')
+  xmltoman = find_program('xmltoman', required : false)
   if xmltoman.found()
     subdir('man')
+  else
+    warning('Man page generation was enabled, but xmltoman is not available')
   endif
 endif

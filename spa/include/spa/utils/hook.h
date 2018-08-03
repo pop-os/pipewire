@@ -43,6 +43,7 @@ struct spa_hook {
 	struct spa_list link;
 	const void *funcs;
 	void *data;
+	void *priv[2];	/**< private data for the hook list */
 };
 
 /** Initialize a hook list */
@@ -78,19 +79,31 @@ static inline void spa_hook_remove(struct spa_hook *hook)
 }
 
 /** Call all hooks in a list, starting from the given one and optionally stopping
- * after calling the first non-NULL function */
-#define spa_hook_list_do_call(l,start,type,method,once,...) ({			\
+ * after calling the first non-NULL function, returns the number of methods
+ * called */
+#define spa_hook_list_do_call(l,start,type,method,once,...)			\
+({										\
 	struct spa_hook_list *list = l;						\
 	struct spa_list *s = start ? (struct spa_list *)start : &list->list;	\
-	struct spa_hook *ci, *t;						\
-	spa_list_for_each_safe_next(ci, t, &list->list, s, link) {		\
+	struct spa_hook cursor = { 0, };					\
+	struct spa_hook *ci;							\
+	int count = 0;								\
+	spa_list_prepend(s, &cursor.link);					\
+	for(ci = spa_list_first(&cursor.link, struct spa_hook, link);		\
+	    &ci->link != s;							\
+	    ci = spa_list_next(&cursor, link)) {				\
 		const type *cb = ci->funcs;					\
-		if (cb->method)	{						\
+		spa_list_remove(&ci->link);					\
+		spa_list_append(&cursor.link, &ci->link);			\
+		if (cb && cb->method)	{					\
 			cb->method(ci->data, ## __VA_ARGS__);			\
+			count++;						\
 			if (once)						\
 				break;						\
 		}								\
 	}									\
+	spa_list_remove(&cursor.link);						\
+	count;									\
 })
 
 #define spa_hook_list_call(l,t,m,...)			spa_hook_list_do_call(l,NULL,t,m,false,##__VA_ARGS__)

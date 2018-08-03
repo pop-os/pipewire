@@ -62,6 +62,7 @@ static void pw_spa_node_destroy(void *data)
 
 	pw_log_debug("spa-node %p: destroy", node);
 
+	spa_hook_remove(&impl->node_listener);
 	if (impl->handle) {
 		spa_handle_clear(impl->handle);
 		free(impl->handle);
@@ -75,6 +76,8 @@ static void pw_spa_node_destroy(void *data)
 static void complete_init(struct impl *impl)
 {
         struct pw_node *this = impl->this;
+	if (impl->flags & PW_SPA_NODE_FLAG_DISABLE)
+		pw_node_set_enabled(this, false);
 	pw_node_register(this, impl->owner, impl->parent, NULL);
 	if (impl->flags & PW_SPA_NODE_FLAG_ACTIVATE)
 		pw_node_set_active(this, true);

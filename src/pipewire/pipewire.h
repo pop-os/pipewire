@@ -46,6 +46,7 @@ extern "C" {
 #include <pipewire/thread-loop.h>
 #include <pipewire/type.h>
 #include <pipewire/utils.h>
+#include <pipewire/version.h>
 
 /** \mainpage
  *
@@ -143,4 +144,5 @@ pw_get_support(uint32_t *n_support);
 #ifdef __cplusplus
 }
 #endif
+
 #endif /* __PIPEWIRE_H__ */

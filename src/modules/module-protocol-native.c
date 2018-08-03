@@ -28,6 +28,7 @@
 #include <sys/file.h>
 
 #include <spa/pod/iter.h>
+#include <spa/lib/debug.h>
 
 #include "config.h"
 
@@ -47,10 +48,13 @@
 
 #include "extensions/protocol-native.h"
 #include "modules/module-protocol-native/connection.h"
+#include "modules/module-protocol-native/defs.h"
 
 #ifndef UNIX_PATH_MAX
 #define UNIX_PATH_MAX   108
 #endif
+
+static bool debug_messages = 0;
 
 #define LOCK_SUFFIX     ".lock"
 #define LOCK_SUFFIXLEN  5
@@ -168,20 +172,22 @@ process_messages(struct client_data *data)
 {
 	struct pw_protocol_native_connection *conn = data->connection;
 	struct pw_client *client = data->client;
+	struct pw_core *core = client->core;
 	uint8_t opcode;
-	uint32_t id;
-	uint32_t size;
+	uint32_t id, size;
 	void *message;
 
-	while (pw_protocol_native_connection_get_next(conn, &opcode, &id, &message, &size)) {
+	core->current_client = client;
+
+	/* when the client is busy processing an async action, stop processing messages
+	 * for the client until it finishes the action */
+	while (!data->busy) {
 		struct pw_resource *resource;
 		const struct pw_protocol_native_demarshal *demarshal;
 	        const struct pw_protocol_marshal *marshal;
 		uint32_t permissions;
 
-		/* when the client is busy processing an async action, stop processing messages
-		 * for the client until it finishes the action */
-		if (data->busy)
+		if (!pw_protocol_native_connection_get_next(conn, &opcode, &id, &message, &size))
 			break;
 
 		pw_log_trace("protocol-native %p: got message %d from %u", client->protocol,
@@ -219,21 +225,27 @@ process_messages(struct client_data *data)
 			if (!pod_remap_data(SPA_POD_TYPE_STRUCT, message, size, &client->types))
 				goto invalid_message;
 
+		if (debug_messages) {
+			printf("<<<<<<<<< in: %d %d %d\n", id, opcode, size);
+		        spa_debug_pod((struct spa_pod *)message, 0);
+		}
 		if (demarshal[opcode].func(resource, message, size) < 0)
 			goto invalid_message;
 	}
+      done:
+	core->current_client = NULL;
 	return;
 
       invalid_method:
 	pw_log_error("protocol-native %p: invalid method %u on resource %u",
 		     client->protocol, opcode, id);
 	pw_client_destroy(client);
-	return;
+	goto done;
       invalid_message:
 	pw_log_error("protocol-native %p: invalid message received %u %u",
 		     client->protocol, id, opcode);
 	pw_client_destroy(client);
-	return;
+	goto done;
 }
 
 static void
@@ -334,7 +346,7 @@ static struct pw_client *client_new(struct server *s, int fd)
 	spa_list_append(&s->this.client_list, &client->protocol_link);
 
 	pw_client_add_listener(client, &this->client_listener, &client_events, this);
-	pw_client_register(client, NULL, pw_module_get_global(pd->module), NULL);
+	pw_client_register(client, client, pw_module_get_global(pd->module), NULL);
 
 	pw_global_bind(pw_core_get_global(core), client, PW_PERM_RWX, PW_VERSION_CORE, 0);
 
@@ -473,60 +485,6 @@ static bool add_socket(struct pw_protocol *protocol, struct server *s)
 
 }
 
-static const char *
-get_remote(const struct pw_properties *properties)
-{
-	const char *name = NULL;
-
-	if (properties)
-		name = pw_properties_get(properties, PW_REMOTE_PROP_REMOTE_NAME);
-	if (name == NULL)
-		name = getenv("PIPEWIRE_REMOTE");
-	if (name == NULL)
-		name = "pipewire-0";
-	return name;
-}
-
-static int impl_connect(struct pw_protocol_client *client)
-{
-	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
-	struct sockaddr_un addr;
-	socklen_t size;
-	const char *runtime_dir, *name = NULL;
-	int name_size, fd;
-
-	if ((runtime_dir = getenv("XDG_RUNTIME_DIR")) == NULL) {
-		pw_log_error("connect failed: XDG_RUNTIME_DIR not set in the environment");
-		return -1;
-        }
-
-	name = get_remote(impl->properties);
-
-        if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0)
-                return -1;
-
-        memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_LOCAL;
-        name_size = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/%s", runtime_dir, name) + 1;
-
-        if (name_size > (int) sizeof addr.sun_path) {
-                pw_log_error("socket path \"%s/%s\" plus null terminator exceeds 108 bytes",
-                             runtime_dir, name);
-                goto error_close;
-        };
-
-        size = offsetof(struct sockaddr_un, sun_path) + name_size;
-
-        if (connect(fd, (struct sockaddr *) &addr, size) < 0)
-                goto error_close;
-
-	return pw_protocol_client_connect_fd(client, fd);
-
-      error_close:
-        close(fd);
-        return -1;
-}
-
 static int impl_steal_fd(struct pw_protocol_client *client)
 {
 	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
@@ -554,7 +512,7 @@ on_remote_data(void *data, int fd, enum spa_io mask)
 		pw_log_error("protocol-native %p: got connection error", impl);
 		pw_loop_destroy_source(pw_core_get_main_loop(core), impl->source);
 		impl->source = NULL;
-		pw_remote_update_state(this, PW_REMOTE_STATE_ERROR, "connection error");
+		pw_remote_disconnect(this);
 		return;
         }
 
@@ -600,6 +558,10 @@ on_remote_data(void *data, int fd, enum spa_io mask)
                                              opcode, id);
 					continue;
 				}
+			}
+			if (debug_messages) {
+				printf("<<<<<<<<< in: %d %d %d\n", id, opcode, size);
+			        spa_debug_pod((struct spa_pod *)message, 0);
 			}
 			if (demarshal[opcode].func(proxy, message, size) < 0) {
 				pw_log_error ("protocol-native %p: invalid message received %u for %u", this,
@@ -656,12 +618,14 @@ static int impl_connect_fd(struct pw_protocol_client *client, int fd)
                                       fd,
                                       SPA_IO_IN | SPA_IO_HUP | SPA_IO_ERR,
                                       true, on_remote_data, impl);
+	if (impl->source == NULL)
+		goto error_close;
 
 	return 0;
 
       error_close:
         close(fd);
-        return -1;
+        return -ENOMEM;
 }
 
 static void impl_disconnect(struct pw_protocol_client *client)
@@ -703,6 +667,7 @@ impl_new_client(struct pw_protocol *protocol,
 {
 	struct client *impl;
 	struct pw_protocol_client *this;
+	const char *str = NULL;
 
 	if ((impl = calloc(1, sizeof(struct client))) == NULL)
 		return NULL;
@@ -713,7 +678,16 @@ impl_new_client(struct pw_protocol *protocol,
 
 	impl->properties = properties ? pw_properties_copy(properties) : NULL;
 
-	this->connect = impl_connect;
+	if (properties)
+		str = pw_properties_get(properties, "remote.intention");
+	if (str == NULL)
+		str = "generic";
+
+	if (!strcmp(str, "screencast"))
+		this->connect = pw_protocol_native_connect_portal_screencast;
+	else
+		this->connect = pw_protocol_native_connect_local_socket;
+
 	this->steal_fd = impl_steal_fd;
 	this->connect_fd = impl_connect_fd;
 	this->disconnect = impl_disconnect;
@@ -921,6 +895,8 @@ static int module_init(struct pw_module *module, struct pw_properties *propertie
 	this = pw_protocol_new(core, PW_TYPE_PROTOCOL__Native, sizeof(struct protocol_data));
 	if (this == NULL)
 		return -ENOMEM;
+
+	debug_messages = pw_debug_is_category_enabled("connection");
 
 	this->implementation = &protocol_impl;
 	this->extension = &protocol_ext_impl;

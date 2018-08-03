@@ -89,12 +89,12 @@ static const struct pw_resource_events resource_events = {
 };
 
 
-static int
-client_bind_func(struct pw_global *global,
-		 struct pw_client *client, uint32_t permissions,
+static void
+global_bind(void *_data, struct pw_client *client, uint32_t permissions,
 		 uint32_t version, uint32_t id)
 {
-	struct pw_client *this = global->object;
+	struct pw_client *this = _data;
+	struct pw_global *global = this->global;
 	struct pw_resource *resource;
 	struct resource_data *data;
 
@@ -113,12 +113,12 @@ client_bind_func(struct pw_global *global,
 	pw_client_resource_info(resource, &this->info);
 	this->info.change_mask = 0;
 
-	return 0;
+	return;
 
       no_mem:
 	pw_log_error("can't create client resource");
 	pw_resource_error(client->core_resource, -ENOMEM, "no memory");
-	return -ENOMEM;
+	return;
 }
 
 static void
@@ -201,6 +201,20 @@ struct pw_client *pw_client_new(struct pw_core *core,
 	return this;
 }
 
+static void global_destroy(void *object)
+{
+	struct pw_client *client = object;
+	spa_hook_remove(&client->global_listener);
+	client->global = NULL;
+	pw_client_destroy(client);
+}
+
+static const struct pw_global_events global_events = {
+	PW_VERSION_GLOBAL_EVENTS,
+	.destroy = global_destroy,
+	.bind = global_bind,
+};
+
 int pw_client_register(struct pw_client *client,
 		       struct pw_client *owner,
 		       struct pw_global *parent,
@@ -211,14 +225,16 @@ int pw_client_register(struct pw_client *client,
 	pw_log_debug("client %p: register parent %d", client, parent ? parent->id : SPA_ID_INVALID);
 
 	spa_list_append(&core->client_list, &client->link);
+	client->registered = true;
 
 	client->global = pw_global_new(core,
 				       core->type.client, PW_VERSION_CLIENT,
 				       properties,
-				       client_bind_func, client);
+				       client);
 	if (client->global == NULL)
 		return -ENOMEM;
 
+	pw_global_add_listener(client->global, &client->global_listener, &global_events, client);
 	pw_global_register(client->global, owner, parent);
 	client->info.id = client->global->id;
 
@@ -285,8 +301,11 @@ void pw_client_destroy(struct pw_client *client)
 
 	spa_hook_remove(&impl->core_listener);
 
-	if (client->global) {
+	if (client->registered)
 		spa_list_remove(&client->link);
+
+	if (client->global) {
+		spa_hook_remove(&client->global_listener);
 		pw_global_destroy(client->global);
 	}
 
@@ -426,14 +445,18 @@ int pw_client_update_permissions(struct pw_client *client, const struct spa_dict
 	const char *str;
 	size_t len;
 	struct permissions_update update = { client, 0 };
+	uint32_t permissions_existing, permissions_default;
+
+	permissions_default = impl->permissions_default;
+	permissions_existing = -1;
 
 	for (i = 0; i < dict->n_items; i++) {
 		str = dict->items[i].value;
 
 		if (strcmp(dict->items[i].key, PW_CORE_PROXY_PERMISSIONS_DEFAULT) == 0) {
-			impl->permissions_default &= parse_mask(str);
+			permissions_default &= parse_mask(str);
 			pw_log_debug("client %p: set default permissions to %08x",
-					client, impl->permissions_default);
+					client, permissions_default);
 		}
 		else if (strcmp(dict->items[i].key, PW_CORE_PROXY_PERMISSIONS_GLOBAL) == 0) {
 			struct pw_global *global;
@@ -451,16 +474,28 @@ int pw_client_update_permissions(struct pw_client *client, const struct spa_dict
 				continue;
 			}
 
+			/* apply the specific updates in order. This is ok for now, we could add
+			 * a field to the permission struct later to accumulate the changes
+			 * and apply them out of this loop */
 			update.permissions = parse_mask(str + len);
 			update.only_new = false;
 			do_permissions(&update, global);
 		}
 		else if (strcmp(dict->items[i].key, PW_CORE_PROXY_PERMISSIONS_EXISTING) == 0) {
-			update.permissions = parse_mask(str);
-			update.only_new = true;
-			pw_core_for_each_global(client->core, do_permissions, &update);
+			permissions_existing = parse_mask(str);
+			pw_log_debug("client %p: set existing permissions to %08x",
+					client, permissions_existing);
 		}
 	}
+	/* apply default and existing permissions after specific ones to make the
+	 * permission update look like an atomic unordered set of changes. */
+	if (permissions_existing != -1) {
+		update.permissions = permissions_existing;
+		update.only_new = true;
+		pw_core_for_each_global(client->core, do_permissions, &update);
+	}
+	impl->permissions_default = permissions_default;
+
 	return 0;
 }
 
