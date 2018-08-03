@@ -1,5 +1,5 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
+ * Copyright (C) 2018 Wim Taymans <wim.taymans@gmail.com>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -17,12 +17,22 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#include <jack/jack.h>
-#include <jack/session.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <sys/socket.h>
 
-#include "modules/module-jack/defs.h"
-#include "modules/module-jack/synchro.h"
-#include "modules/module-jack/shm.h"
-#include "modules/module-jack/shared.h"
-#include "modules/module-jack/port.h"
-#include "modules/module-jack/server.h"
+#include <spa/lib/debug.h>
+
+#include <pipewire/pipewire.h>
+#include <pipewire/private.h>
+
+int pw_protocol_native_connect_portal_screencast(struct pw_protocol_client *client,
+					    void (*done_callback) (void *data, int res),
+					    void *data)
+{
+	return -ENOTSUP;
+}

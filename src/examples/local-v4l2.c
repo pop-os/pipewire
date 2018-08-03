@@ -34,10 +34,6 @@
 #include <pipewire/factory.h>
 
 struct type {
-	uint32_t format;
-	uint32_t props;
-	struct spa_type_meta meta;
-	struct spa_type_data data;
 	struct spa_type_media_type media_type;
 	struct spa_type_media_subtype media_subtype;
 	struct spa_type_format_video format_video;
@@ -46,10 +42,6 @@ struct type {
 
 static inline void init_type(struct type *type, struct spa_type_map *map)
 {
-	type->format = spa_type_map_get_id(map, SPA_TYPE__Format);
-	type->props = spa_type_map_get_id(map, SPA_TYPE__Props);
-	spa_type_meta_map(map, &type->meta);
-	spa_type_data_map(map, &type->data);
 	spa_type_media_type_map(map, &type->media_type);
 	spa_type_media_subtype_map(map, &type->media_subtype);
 	spa_type_format_video_map(map, &type->format_video);
@@ -154,7 +146,7 @@ static struct {
 
 static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (video_formats[i].format == format)
@@ -165,7 +157,7 @@ static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 
 static Uint32 id_to_sdl_format(struct data *data, uint32_t id)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (*SPA_MEMBER(&data->type.video_format, video_formats[i].id, uint32_t) == id)
@@ -246,7 +238,7 @@ static int port_enum_formats(struct spa_node *node,
 {
 	struct data *d = SPA_CONTAINER_OF(node, struct data, impl_node);
 	SDL_RendererInfo info;
-	int i, c;
+	uint32_t i, c;
 
 	if (*index != 0)
 		return 0;
@@ -254,7 +246,7 @@ static int port_enum_formats(struct spa_node *node,
 	SDL_GetRendererInfo(d->renderer, &info);
 
 	spa_pod_builder_push_object(builder,
-				    d->t->param.idEnumFormat, d->type.format);
+				    d->t->param.idEnumFormat, d->t->spa_format);
 	spa_pod_builder_id(builder, d->type.media_type.video);
 	spa_pod_builder_id(builder, d->type.media_subtype.raw);
 
@@ -280,12 +272,12 @@ static int port_enum_formats(struct spa_node *node,
 
 	spa_pod_builder_add(builder,
 		":", d->type.format_video.size,      "Rru", &SPA_RECTANGLE(WIDTH, HEIGHT),
-								2, &SPA_RECTANGLE(1,1),
-								   &SPA_RECTANGLE(info.max_texture_width,
-									          info.max_texture_height),
+			SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(1,1),
+					     &SPA_RECTANGLE(info.max_texture_width,
+							    info.max_texture_height)),
 		":", d->type.format_video.framerate, "Fru", &SPA_FRACTION(25,1),
-								2, &SPA_FRACTION(0,1),
-								   &SPA_FRACTION(30,1),
+			SPA_POD_PROP_MIN_MAX(&SPA_FRACTION(0,1),
+					     &SPA_FRACTION(30,1)),
 		NULL);
 	*result = spa_pod_builder_pop(builder);
 
@@ -316,7 +308,7 @@ static int impl_port_enum_params(struct spa_node *node,
 			":", t->param_buffers.size,    "i", d->stride * d->format.size.height,
 			":", t->param_buffers.stride,  "i", d->stride,
 			":", t->param_buffers.buffers, "iru", 2,
-									2, 1, 32,
+				SPA_POD_PROP_MIN_MAX(1, 32),
 			":", t->param_buffers.align,   "i", 16);
 	}
 	else if (id == t->param.idMeta) {
@@ -383,7 +375,8 @@ static int impl_port_use_buffers(struct spa_node *node, enum spa_direction direc
 				 struct spa_buffer **buffers, uint32_t n_buffers)
 {
 	struct data *d = SPA_CONTAINER_OF(node, struct data, impl_node);
-	int i;
+	uint32_t i;
+
 	for (i = 0; i < n_buffers; i++)
 		d->buffers[i] = buffers[i];
 	d->n_buffers = n_buffers;
@@ -398,17 +391,17 @@ static int do_render(struct spa_loop *loop, bool async, uint32_t seq,
 	uint8_t *map;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
-	int i;
+	uint32_t i;
 	uint8_t *src, *dst;
 
 	buf = d->buffers[d->io->buffer_id];
 
-	if (buf->datas[0].type == d->type.data.MemFd ||
-	    buf->datas[0].type == d->type.data.DmaBuf) {
+	if (buf->datas[0].type == d->t->data.MemFd ||
+	    buf->datas[0].type == d->t->data.DmaBuf) {
 		map = mmap(NULL, buf->datas[0].maxsize + buf->datas[0].mapoffset, PROT_READ,
 			   MAP_PRIVATE, buf->datas[0].fd, 0);
 		sdata = SPA_MEMBER(map, buf->datas[0].mapoffset, uint8_t);
-	} else if (buf->datas[0].type == d->type.data.MemPtr) {
+	} else if (buf->datas[0].type == d->t->data.MemPtr) {
 		map = NULL;
 		sdata = buf->datas[0].data;
 	} else

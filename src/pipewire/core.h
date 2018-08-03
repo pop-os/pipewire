@@ -79,11 +79,6 @@ struct pw_core;
 				  *  present in order to call methods that modify the object. */
 #define PW_PERM_RWX	(PW_PERM_R|PW_PERM_W|PW_PERM_X)
 
-/** the permission function. It returns the allowed access permissions for \a global
-  * for \a client */
-typedef uint32_t (*pw_permission_func_t) (struct pw_global *global,
-					  struct pw_client *client, void *data);
-
 #define PW_PERM_IS_R(p) (((p)&PW_PERM_R) == PW_PERM_R)
 #define PW_PERM_IS_W(p) (((p)&PW_PERM_W) == PW_PERM_W)
 #define PW_PERM_IS_X(p) (((p)&PW_PERM_X) == PW_PERM_X)
@@ -128,12 +123,6 @@ void pw_core_add_listener(struct pw_core *core,
 			  const struct pw_core_events *events,
 			  void *data);
 
-/** Set a callback that will be called to check the permissions of a global
-  * object for a client */
-void pw_core_set_permission_callback(struct pw_core *core,
-				     pw_permission_func_t callback,
-				     void *data);
-
 /** Get the type object of a core */
 struct pw_type *pw_core_get_type(struct pw_core *core);
 
@@ -159,16 +148,18 @@ struct pw_loop *pw_core_get_main_loop(struct pw_core *core);
  * 0 to fetch the next item, any other value stops the iteration and returns
  * the value. When all callbacks return 0, this function returns 0 when all
  * globals are iterated. */
-int pw_core_for_each_global(struct pw_core *core,
+int pw_core_for_each_global(struct pw_core *core,	/**< the core */
 			    int (*callback) (void *data, struct pw_global *global),
 			    void *data);
 
 /** Find a core global by id */
-struct pw_global *pw_core_find_global(struct pw_core *core, uint32_t id);
+struct pw_global *pw_core_find_global(struct pw_core *core,	/**< the core */
+				      uint32_t id		/**< the global id */);
 
 /** Find a factory by name */
 struct pw_factory *
-pw_core_find_factory(struct pw_core *core, const char *name);
+pw_core_find_factory(struct pw_core *core	/**< the core */,
+		     const char *name		/**< the factory name */);
 
 #ifdef __cplusplus
 }

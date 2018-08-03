@@ -44,7 +44,7 @@ struct buffer {
 	int fds[MAX_FDS];
 	uint32_t n_fds;
 
-	off_t offset;
+	size_t offset;
 	void *data;
 	size_t size;
 
@@ -150,6 +150,7 @@ static bool refill_buffer(struct pw_protocol_native_connection *conn, struct buf
 				continue;
 			if (errno != EAGAIN || errno != EWOULDBLOCK)
 				goto recv_error;
+			return false;
 		}
 		break;
 	}
@@ -157,6 +158,7 @@ static bool refill_buffer(struct pw_protocol_native_connection *conn, struct buf
 	buf->buffer_size += len;
 
 	/* handle control messages */
+	buf->n_fds = 0;
 	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
 			continue;
@@ -325,11 +327,6 @@ pw_protocol_native_connection_get_next(struct pw_protocol_native_connection *con
 	*dt = buf->data;
 	*sz = buf->size;
 
-	if (debug_messages) {
-		printf("<<<<<<<<< in: %d %d %zd\n", *dest_id, *opcode, len);
-	        spa_debug_pod((struct spa_pod *)data, 0);
-	}
-
 	return true;
 }
 
@@ -412,7 +409,7 @@ pw_protocol_native_connection_begin_proxy(struct pw_protocol_native_connection *
 
 	impl->dest_id = proxy->id;
 	impl->opcode = opcode;
-	impl->builder = (struct spa_pod_builder) { NULL, 0, write_pod };
+	impl->builder = (struct spa_pod_builder) { NULL, 0, write_pod, };
 
 	return &impl->builder;
 }
@@ -457,7 +454,8 @@ bool pw_protocol_native_connection_flush(struct pw_protocol_native_connection *c
 	struct iovec iov[1];
 	struct cmsghdr *cmsg;
 	char cmsgbuf[CMSG_SPACE(MAX_FDS * sizeof(int))];
-	int *cm, i, fds_len;
+	int *cm;
+	uint32_t i, fds_len;
 	struct buffer *buf;
 
 	buf = &impl->out;

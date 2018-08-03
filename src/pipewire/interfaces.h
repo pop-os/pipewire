@@ -35,6 +35,7 @@ struct pw_core_proxy;
 struct pw_registry_proxy;
 struct pw_module_proxy;
 struct pw_node_proxy;
+struct pw_port_proxy;
 struct pw_factory_proxy;
 struct pw_client_proxy;
 struct pw_link_proxy;
@@ -61,6 +62,7 @@ struct pw_link_proxy;
 #define PW_TYPE_INTERFACE__Registry	PW_TYPE_INTERFACE_BASE "Registry"
 #define PW_TYPE_INTERFACE__Module	PW_TYPE_INTERFACE_BASE "Module"
 #define PW_TYPE_INTERFACE__Node		PW_TYPE_INTERFACE_BASE "Node"
+#define PW_TYPE_INTERFACE__Port		PW_TYPE_INTERFACE_BASE "Port"
 #define PW_TYPE_INTERFACE__Client	PW_TYPE_INTERFACE_BASE "Client"
 #define PW_TYPE_INTERFACE__Link		PW_TYPE_INTERFACE_BASE "Link"
 
@@ -73,7 +75,8 @@ struct pw_link_proxy;
 #define PW_CORE_PROXY_METHOD_CLIENT_UPDATE	4
 #define PW_CORE_PROXY_METHOD_PERMISSIONS	5
 #define PW_CORE_PROXY_METHOD_CREATE_OBJECT	6
-#define PW_CORE_PROXY_METHOD_NUM		7
+#define PW_CORE_PROXY_METHOD_DESTROY		7
+#define PW_CORE_PROXY_METHOD_NUM		8
 
 /**
  * Key to update default permissions of globals without specific
@@ -183,6 +186,13 @@ struct pw_core_proxy_methods {
 			       uint32_t version,
 			       const struct spa_dict *props,
 			       uint32_t new_id);
+
+	/**
+	 * Destroy an object id
+	 *
+	 * \param id the object id to destroy
+	 */
+	void (*destroy) (void *object, uint32_t id);
 };
 
 static inline void
@@ -235,6 +245,12 @@ pw_core_proxy_create_object(struct pw_core_proxy *core,
 	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, create_object, factory_name,
 			type, version, props, pw_proxy_get_id(p));
 	return p;
+}
+
+static inline void
+pw_core_proxy_destroy(struct pw_core_proxy *core, uint32_t id)
+{
+	pw_proxy_do((struct pw_proxy*)core, struct pw_core_proxy_methods, destroy, id);
 }
 
 #define PW_CORE_PROXY_EVENT_UPDATE_TYPES 0
@@ -468,7 +484,8 @@ pw_module_proxy_add_listener(struct pw_module_proxy *module,
 #define PW_VERSION_NODE			0
 
 #define PW_NODE_PROXY_EVENT_INFO	0
-#define PW_NODE_PROXY_EVENT_NUM	1
+#define PW_NODE_PROXY_EVENT_PARAM	1
+#define PW_NODE_PROXY_EVENT_NUM		2
 
 /** Node events */
 struct pw_node_proxy_events {
@@ -480,6 +497,19 @@ struct pw_node_proxy_events {
 	 * \param info info about the node
 	 */
 	void (*info) (void *object, struct pw_node_info *info);
+	/**
+	 * Notify a node param
+	 *
+	 * Event emited as a result of the enum_params method.
+	 *
+	 * \param id the param id
+	 * \param index the param index
+	 * \param next the param index of the next param
+	 * \param param the parameter
+	 */
+	void (*param) (void *object,
+		       uint32_t id, uint32_t index, uint32_t next,
+		       const struct spa_pod *param);
 };
 
 static inline void
@@ -492,6 +522,112 @@ pw_node_proxy_add_listener(struct pw_node_proxy *node,
 }
 
 #define pw_node_resource_info(r,...) pw_resource_notify(r,struct pw_node_proxy_events,info,__VA_ARGS__)
+#define pw_node_resource_param(r,...) pw_resource_notify(r,struct pw_node_proxy_events,param,__VA_ARGS__)
+
+#define PW_NODE_PROXY_METHOD_ENUM_PARAMS	0
+#define PW_NODE_PROXY_METHOD_NUM		1
+
+/** Node methods */
+struct pw_node_proxy_methods {
+#define PW_VERSION_NODE_PROXY_METHODS	0
+	uint32_t version;
+	/**
+	 * Enumerate node parameters
+	 *
+	 * Start enumeration of node parameters. For each param, a
+	 * param event will be emited.
+	 *
+	 * \param id the parameter id to enum or SPA_ID_INVALID for all
+	 * \param start the start index or 0 for the first param
+	 * \param num the maximum number of params to retrieve
+	 * \param filter a param filter or NULL
+	 */
+	void (*enum_params) (void *object, uint32_t id, uint32_t start, uint32_t num,
+			const struct spa_pod *filter);
+};
+
+/** Registry */
+static inline void
+pw_node_proxy_enum_params(struct pw_node_proxy *node, uint32_t id, uint32_t index,
+		uint32_t num, const struct spa_pod *filter)
+{
+	pw_proxy_do((struct pw_proxy*)node, struct pw_node_proxy_methods, enum_params,
+			id, index, num, filter);
+}
+
+#define PW_VERSION_PORT			0
+
+#define PW_PORT_PROXY_EVENT_INFO	0
+#define PW_PORT_PROXY_EVENT_PARAM	1
+#define PW_PORT_PROXY_EVENT_NUM		2
+
+/** Port events */
+struct pw_port_proxy_events {
+#define PW_VERSION_PORT_PROXY_EVENTS	0
+	uint32_t version;
+	/**
+	 * Notify port info
+	 *
+	 * \param info info about the port
+	 */
+	void (*info) (void *object, struct pw_port_info *info);
+	/**
+	 * Notify a port param
+	 *
+	 * Event emited as a result of the enum_params method.
+	 *
+	 * \param id the param id
+	 * \param index the param index
+	 * \param next the param index of the next param
+	 * \param param the parameter
+	 */
+	void (*param) (void *object,
+		       uint32_t id, uint32_t index, uint32_t next,
+		       const struct spa_pod *param);
+};
+
+static inline void
+pw_port_proxy_add_listener(struct pw_port_proxy *port,
+			   struct spa_hook *listener,
+			   const struct pw_port_proxy_events *events,
+			   void *data)
+{
+	pw_proxy_add_proxy_listener((struct pw_proxy*)port, listener, events, data);
+}
+
+#define pw_port_resource_info(r,...) pw_resource_notify(r,struct pw_port_proxy_events,info,__VA_ARGS__)
+#define pw_port_resource_param(r,...) pw_resource_notify(r,struct pw_port_proxy_events,param,__VA_ARGS__)
+
+#define PW_PORT_PROXY_METHOD_ENUM_PARAMS	0
+#define PW_PORT_PROXY_METHOD_NUM		1
+
+/** Port methods */
+struct pw_port_proxy_methods {
+#define PW_VERSION_PORT_PROXY_METHODS	0
+	uint32_t version;
+	/**
+	 * Enumerate port parameters
+	 *
+	 * Start enumeration of port parameters. For each param, a
+	 * param event will be emited.
+	 *
+	 * \param id the parameter id to enumerate
+	 * \param start the start index or 0 for the first param
+	 * \param num the maximum number of params to retrieve
+	 * \param filter a param filter or NULL
+	 */
+	void (*enum_params) (void *object, uint32_t id, uint32_t start, uint32_t num,
+			const struct spa_pod *filter);
+};
+
+/** Registry */
+static inline void
+pw_port_proxy_enum_params(struct pw_port_proxy *port, uint32_t id, uint32_t index,
+		uint32_t num, const struct spa_pod *filter)
+{
+	pw_proxy_do((struct pw_proxy*)port, struct pw_port_proxy_methods, enum_params,
+			id, index, num, filter);
+}
 
 #define PW_VERSION_FACTORY			0
 

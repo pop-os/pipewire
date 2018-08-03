@@ -200,30 +200,24 @@ new_node (GstPipeWireDeviceProvider *self, const struct pw_node_info *info, uint
   const gchar *klass = NULL;
   const struct spa_dict_item *item;
   GstPipeWireDeviceType type;
-  int i;
-  struct pw_type *t = self->type;
 
   caps = gst_caps_new_empty ();
+#if 0
+  int i;
+  struct pw_type *t = self->type;
+  for (i = 0; i < info->n_params; i++) {
+    if (!spa_pod_is_object_id(info->params[i], t->param.idEnumFormat))
+      continue;
+    GstCaps *c1 = gst_caps_from_format (info->params[i], t->map);
+    if (c1)
+      gst_caps_append (caps, c1);
+  }
+#endif
+
   if (info->max_input_ports > 0 && info->max_output_ports == 0) {
     type = GST_PIPEWIRE_DEVICE_TYPE_SINK;
-
-    for (i = 0; i < info->n_input_params; i++) {
-      if (!spa_pod_is_object_id(info->input_params[i], t->param.idEnumFormat))
-	      continue;
-      GstCaps *c1 = gst_caps_from_format (info->input_params[i], t->map);
-      if (c1)
-        gst_caps_append (caps, c1);
-    }
-  }
-  else if (info->max_output_ports > 0 && info->max_input_ports == 0) {
+  } else if (info->max_output_ports > 0 && info->max_input_ports == 0) {
     type = GST_PIPEWIRE_DEVICE_TYPE_SOURCE;
-    for (i = 0; i < info->n_output_params; i++) {
-      if (!spa_pod_is_object_id(info->output_params[i], t->param.idEnumFormat))
-	      continue;
-      GstCaps *c1 = gst_caps_from_format (info->output_params[i], t->map);
-      if (c1)
-        gst_caps_append (caps, c1);
-    }
   } else {
     gst_caps_unref(caps);
     return NULL;
@@ -348,7 +342,11 @@ static void node_event_info(void *data, struct pw_node_info *info)
 {
   struct node_data *node_data = data;
   GstPipeWireDeviceProvider *self = node_data->self;
+  GstDeviceProvider *provider = GST_DEVICE_PROVIDER (self);
   GstDevice *dev;
+
+  if (find_device (provider, node_data->id) != NULL)
+    return;
 
   dev = new_node (self, info, node_data->id);
   if (dev) {

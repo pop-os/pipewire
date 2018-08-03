@@ -6,13 +6,13 @@ executable('video-src',
 executable('export-source',
   'export-source.c',
   install: false,
-  dependencies : [pipewire_dep, libm],
+  dependencies : [pipewire_dep, mathlib],
 )
 
 executable('export-spa',
   'export-spa.c',
   install: false,
-  dependencies : [pipewire_dep, libm],
+  dependencies : [pipewire_dep, mathlib],
 )
 
 if sdl_dep.found()
@@ -29,6 +29,6 @@ if sdl_dep.found()
   executable('export-sink',
     'export-sink.c',
     install: false,
-    dependencies : [pipewire_dep, sdl_dep],
+    dependencies : [pipewire_dep, sdl_dep, mathlib],
   )
 endif

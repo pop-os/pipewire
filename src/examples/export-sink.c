@@ -34,11 +34,13 @@
 #include <pipewire/module.h>
 #include <pipewire/factory.h>
 
+#define M_PI_M2 ( M_PI + M_PI )
+
+#define MAX_BUFFERS	16
+
 struct type {
-	uint32_t format;
-	uint32_t props;
-	struct spa_type_meta meta;
-	struct spa_type_data data;
+	uint32_t prop_param;
+	uint32_t io_prop_param;
 	struct spa_type_media_type media_type;
 	struct spa_type_media_subtype media_subtype;
 	struct spa_type_format_video format_video;
@@ -47,14 +49,23 @@ struct type {
 
 static inline void init_type(struct type *type, struct spa_type_map *map)
 {
-	type->format = spa_type_map_get_id(map, SPA_TYPE__Format);
-	type->props = spa_type_map_get_id(map, SPA_TYPE__Props);
-	spa_type_meta_map(map, &type->meta);
-	spa_type_data_map(map, &type->data);
+	type->prop_param = spa_type_map_get_id(map, SPA_TYPE_PROPS__contrast);
+	type->io_prop_param = spa_type_map_get_id(map, SPA_TYPE_IO_PROP_BASE "contrast");
 	spa_type_media_type_map(map, &type->media_type);
 	spa_type_media_subtype_map(map, &type->media_subtype);
 	spa_type_format_video_map(map, &type->format_video);
 	spa_type_video_format_map(map, &type->video_format);
+}
+
+#define DEFAULT_PARAM 0.1
+
+struct props {
+	double param;
+};
+
+static void reset_props(struct props *props)
+{
+	props->param = DEFAULT_PARAM;
 }
 
 #define WIDTH   640
@@ -63,6 +74,7 @@ static inline void init_type(struct type *type, struct spa_type_map *map)
 
 struct data {
 	struct type type;
+	struct props props;
 
 	const char *path;
 
@@ -85,6 +97,8 @@ struct data {
 	const struct spa_node_callbacks *callbacks;
 	void *callbacks_data;
 	struct spa_io_buffers *io;
+	struct spa_pod_double *ctrl_param;
+	double param_accum;
 
 	uint8_t buffer[1024];
 
@@ -93,8 +107,8 @@ struct data {
 
 	struct spa_param *params[2];
 
-	struct spa_buffer *buffers[32];
-	int n_buffers;
+	struct spa_buffer *buffers[MAX_BUFFERS];
+	uint32_t n_buffers;
 };
 
 static void handle_events(struct data *data)
@@ -159,7 +173,7 @@ static struct {
 
 static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (video_formats[i].format == format)
@@ -170,13 +184,24 @@ static uint32_t sdl_format_to_id(struct data *data, Uint32 format)
 
 static Uint32 id_to_sdl_format(struct data *data, uint32_t id)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < SPA_N_ELEMENTS(video_formats); i++) {
 		if (*SPA_MEMBER(&data->type.video_format, video_formats[i].id, uint32_t) == id)
 			return video_formats[i].format;
 	}
 	return SDL_PIXELFORMAT_UNKNOWN;
+}
+
+static void update_param(struct data *data)
+{
+	if (data->ctrl_param == NULL)
+		return;
+
+        data->ctrl_param->value = (sin(data->param_accum) * 127.0) + 127.0;
+        data->param_accum += M_PI_M2 / 30.0;
+        if (data->param_accum >= M_PI_M2)
+                data->param_accum -= M_PI_M2;
 }
 
 static int impl_send_command(struct spa_node *node, const struct spa_command *command)
@@ -223,6 +248,12 @@ static int impl_port_set_io(struct spa_node *node,
 
 	if (id == d->t->io.Buffers)
 		d->io = data;
+	else if (id == d->type.io_prop_param) {
+		if (data && size >= sizeof(struct spa_pod_double))
+			d->ctrl_param = data;
+		else
+			d->ctrl_param = NULL;
+	}
 	else
 		return -ENOENT;
 
@@ -252,7 +283,7 @@ static int port_enum_formats(struct spa_node *node,
 {
 	struct data *d = SPA_CONTAINER_OF(node, struct data, impl_node);
 	SDL_RendererInfo info;
-	int i, c;
+	uint32_t i, c;
 
 	if (*index != 0)
 		return 0;
@@ -260,7 +291,7 @@ static int port_enum_formats(struct spa_node *node,
 	SDL_GetRendererInfo(d->renderer, &info);
 
 	spa_pod_builder_push_object(builder,
-				    d->t->param.idEnumFormat, d->type.format);
+				    d->t->param.idEnumFormat, d->t->spa_format);
 	spa_pod_builder_id(builder, d->type.media_type.video);
 	spa_pod_builder_id(builder, d->type.media_subtype.raw);
 
@@ -285,12 +316,12 @@ static int port_enum_formats(struct spa_node *node,
 	spa_pod_builder_pop(builder);
 	spa_pod_builder_add(builder,
 		":", d->type.format_video.size,      "Rru", &SPA_RECTANGLE(WIDTH, HEIGHT),
-								2, &SPA_RECTANGLE(1,1),
-								   &SPA_RECTANGLE(info.max_texture_width,
-										  info.max_texture_height),
+			SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(1,1),
+					     &SPA_RECTANGLE(info.max_texture_width,
+							    info.max_texture_height)),
 		":", d->type.format_video.framerate, "Fru", &SPA_FRACTION(25,1),
-								2, &SPA_FRACTION(0,1),
-								   &SPA_FRACTION(30,1),
+			SPA_POD_PROP_MIN_MAX(&SPA_FRACTION(0,1),
+					     &SPA_FRACTION(30,1)),
 		NULL);
 	*result = spa_pod_builder_pop(builder);
 
@@ -312,7 +343,7 @@ static int port_get_format(struct spa_node *node,
 		return 0;
 
 	*result = spa_pod_builder_object(builder,
-		d->t->param.idFormat, d->type.format,
+		d->t->param.idFormat, d->t->spa_format,
 		"I", d->type.media_type.video,
 		"I", d->type.media_subtype.raw,
 		":", d->type.format_video.format,    "I", d->format.format,
@@ -339,7 +370,8 @@ static int impl_port_enum_params(struct spa_node *node,
 		uint32_t list[] = { t->param.idEnumFormat,
 				    t->param.idFormat,
 				    t->param.idBuffers,
-				    t->param.idMeta };
+				    t->param.idMeta,
+				    t->param_io.idPropsOut };
 
 		if (*index < SPA_N_ELEMENTS(list))
 			param = spa_pod_builder_object(builder,
@@ -362,8 +394,8 @@ static int impl_port_enum_params(struct spa_node *node,
 			id, t->param_buffers.Buffers,
 			":", t->param_buffers.size,    "i", d->stride * d->format.size.height,
 			":", t->param_buffers.stride,  "i", d->stride,
-			":", t->param_buffers.buffers, "iru", 32,
-									2, 2, 32,
+			":", t->param_buffers.buffers, "iru", 2,
+				SPA_POD_PROP_MIN_MAX(2, MAX_BUFFERS),
 			":", t->param_buffers.align,   "i", 16);
 	}
 	else if (id == t->param.idMeta) {
@@ -374,6 +406,23 @@ static int impl_port_enum_params(struct spa_node *node,
 			id, t->param_meta.Meta,
 			":", t->param_meta.type, "I", t->meta.Header,
 			":", t->param_meta.size, "i", sizeof(struct spa_meta_header));
+	}
+	else if (id == t->param_io.idPropsOut) {
+		struct props *p = &d->props;
+
+		switch (*index) {
+		case 0:
+			param = spa_pod_builder_object(builder,
+				id, t->param_io.Prop,
+				":", t->param_io.id, "I", d->type.io_prop_param,
+				":", t->param_io.size, "i", sizeof(struct spa_pod_double),
+				":", t->param.propId, "I", d->type.prop_param,
+				":", t->param.propType, "dru", p->param,
+					SPA_POD_PROP_MIN_MAX(0.0, 10.0));
+			break;
+		default:
+			return 0;
+		}
 	}
 	else
 		return -ENOENT;
@@ -434,7 +483,8 @@ static int impl_port_use_buffers(struct spa_node *node, enum spa_direction direc
 				 struct spa_buffer **buffers, uint32_t n_buffers)
 {
 	struct data *d = SPA_CONTAINER_OF(node, struct data, impl_node);
-	int i;
+	uint32_t i;
+
 	for (i = 0; i < n_buffers; i++)
 		d->buffers[i] = buffers[i];
 	d->n_buffers = n_buffers;
@@ -445,29 +495,21 @@ static int do_render(struct spa_loop *loop, bool async, uint32_t seq,
 		     const void *_data, size_t size, void *user_data)
 {
 	struct data *d = user_data;
-	struct spa_buffer *buf;
+	const struct spa_buffer *buf = *(struct spa_buffer**)_data;
 	uint8_t *map;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
-	int i;
+	uint32_t i;
 	uint8_t *src, *dst;
 
 	handle_events(d);
 
-	if (d->io->status != SPA_STATUS_HAVE_BUFFER)
-		return 0;
-
-	if (d->io->buffer_id > d->n_buffers)
-		return 0;
-
-	buf = d->buffers[d->io->buffer_id];
-
-	if (buf->datas[0].type == d->type.data.MemFd ||
-	    buf->datas[0].type == d->type.data.DmaBuf) {
+	if (buf->datas[0].type == d->t->data.MemFd ||
+	    buf->datas[0].type == d->t->data.DmaBuf) {
 		map = mmap(NULL, buf->datas[0].maxsize + buf->datas[0].mapoffset, PROT_READ,
 			   MAP_PRIVATE, buf->datas[0].fd, 0);
 		sdata = SPA_MEMBER(map, buf->datas[0].mapoffset, uint8_t);
-	} else if (buf->datas[0].type == d->type.data.MemPtr) {
+	} else if (buf->datas[0].type == d->t->data.MemPtr) {
 		map = NULL;
 		sdata = buf->datas[0].data;
 	} else
@@ -502,11 +544,23 @@ static int do_render(struct spa_loop *loop, bool async, uint32_t seq,
 static int impl_node_process_input(struct spa_node *node)
 {
 	struct data *d = SPA_CONTAINER_OF(node, struct data, impl_node);
+	struct spa_buffer *buf;
 	int res;
 
+	if (d->io->status != SPA_STATUS_HAVE_BUFFER)
+		return SPA_STATUS_NEED_BUFFER;
+
+	if (d->io->buffer_id >= d->n_buffers)
+		return SPA_STATUS_NEED_BUFFER;
+
+	buf = d->buffers[d->io->buffer_id];
+
 	if ((res = pw_loop_invoke(pw_main_loop_get_loop(d->loop), do_render,
-				  SPA_ID_INVALID, NULL, 0, true, d)) < 0)
+				  SPA_ID_INVALID, &buf, sizeof(struct spa_buffer *),
+				  false, d)) < 0)
 		return res;
+
+	update_param(d);
 
 	return d->io->status = SPA_STATUS_NEED_BUFFER;
 }
@@ -532,6 +586,9 @@ static void make_node(struct data *data)
 	props = pw_properties_new(PW_NODE_PROP_AUTOCONNECT, "1", NULL);
 	if (data->path)
 		pw_properties_set(props, PW_NODE_PROP_TARGET_NODE, data->path);
+	pw_properties_set(props, PW_NODE_PROP_MEDIA, "Video");
+	pw_properties_set(props, PW_NODE_PROP_CATEGORY, "Capture");
+	pw_properties_set(props, PW_NODE_PROP_ROLE, "Camera");
 
 	data->node = pw_node_new(data->core, "SDL-sink", props, 0);
 	data->impl_node = impl_node;
@@ -554,22 +611,21 @@ static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remo
 
 	case PW_REMOTE_STATE_CONNECTED:
 	{
-		struct spa_dict_item items[3];
+		struct spa_dict_item items[5];
+		int i = 0;
 
+		/* set specific permissions on all existing objects without permissions */
+		items[i++] = SPA_DICT_ITEM_INIT(PW_CORE_PROXY_PERMISSIONS_EXISTING, "r--");
+		/* set default permission for new objects and objects without
+		 * specific permissions */
+		items[i++] = SPA_DICT_ITEM_INIT(PW_CORE_PROXY_PERMISSIONS_DEFAULT, "---");
 		/* an example, set specific permissions on one object, this is the
 		 * core object, we already have a binding to it that is not affected
 		 * by the removal of X permissions, only future bindings. */
-		items[0].key = PW_CORE_PROXY_PERMISSIONS_GLOBAL;
-		items[0].value = "0:rw-";
-		/* set specific permissions on all existing objects without permissions */
-		items[1].key = PW_CORE_PROXY_PERMISSIONS_EXISTING;
-		items[1].value = "r--";
-		/* set default permission for new objects and objects without
-		 * specific permissions */
-		items[2].key = PW_CORE_PROXY_PERMISSIONS_DEFAULT;
-		items[2].value = "---";
+		items[i++] = SPA_DICT_ITEM_INIT(PW_CORE_PROXY_PERMISSIONS_GLOBAL, "0:rw-");
+
 		pw_core_proxy_permissions(pw_remote_get_core_proxy(data->remote),
-					  &SPA_DICT_INIT(items, SPA_N_ELEMENTS(items)));
+					  &SPA_DICT_INIT(items, i));
 
 		make_node(data);
 		break;
@@ -598,6 +654,7 @@ int main(int argc, char *argv[])
 	data.path = argc > 1 ? argv[1] : NULL;
 
 	init_type(&data.type, data.t->map);
+	reset_props(&data.props);
 
 	spa_debug_set_type_map(data.t->map);
 

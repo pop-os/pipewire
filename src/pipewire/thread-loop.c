@@ -18,6 +18,7 @@
  */
 
 #include <pthread.h>
+#include <sys/time.h>
 
 #include "pipewire.h"
 #include "thread-loop.h"
@@ -88,6 +89,7 @@ struct pw_thread_loop *pw_thread_loop_new(struct pw_loop *loop,
 {
 	struct pw_thread_loop *this;
 	pthread_mutexattr_t attr;
+	pthread_condattr_t cattr;
 
 	this = calloc(1, sizeof(struct pw_thread_loop));
 	if (this == NULL)
@@ -105,8 +107,10 @@ struct pw_thread_loop *pw_thread_loop_new(struct pw_loop *loop,
 	pthread_mutexattr_init(&attr);
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutex_init(&this->lock, &attr);
-	pthread_cond_init(&this->cond, NULL);
-	pthread_cond_init(&this->accept_cond, NULL);
+	pthread_condattr_init(&cattr);
+	pthread_condattr_setclock(&cattr, CLOCK_REALTIME);
+	pthread_cond_init(&this->cond, &cattr);
+	pthread_cond_init(&this->accept_cond, &cattr);
 
 	this->event = pw_loop_add_event(this->loop, do_stop, this);
 
@@ -264,6 +268,30 @@ void pw_thread_loop_wait(struct pw_thread_loop *loop)
 	loop->n_waiting++;
 	pthread_cond_wait(&loop->cond, &loop->lock);
 	loop->n_waiting--;
+}
+
+/** Wait for the loop thread to call \ref pw_thread_loop_signal()
+ *  or time out.
+ *
+ * \param loop a \ref pw_thread_loop to signal
+ * \param wait_max_sec the maximum number of seconds to wait for a \ref pw_thread_loop_signal()
+ * \return 0 on success or ETIMEDOUT on timeout
+ *
+ * \memberof pw_thread_loop
+ */
+int pw_thread_loop_timed_wait(struct pw_thread_loop *loop, int wait_max_sec)
+{
+	struct timespec timeout;
+	int ret = 0;
+
+	clock_gettime(CLOCK_REALTIME, &timeout);
+
+	timeout.tv_sec += wait_max_sec;
+
+	loop->n_waiting++;
+	ret = pthread_cond_timedwait(&loop->cond, &loop->lock, &timeout);
+	loop->n_waiting--;
+	return ret;
 }
 
 /** Signal the loop thread waiting for accept with \ref pw_thread_loop_signal()

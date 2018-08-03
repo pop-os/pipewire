@@ -68,6 +68,8 @@ struct pw_node_events {
 	void (*info_changed) (void *data, struct pw_node_info *info);
 	/** the node active state changed */
 	void (*active_changed) (void *data, bool active);
+	/** the node enabled state changed */
+	void (*enabled_changed) (void *data, bool enabled);
 
 	/** a new state is requested on the node */
 	void (*state_request) (void *data, enum pw_node_state state);
@@ -89,6 +91,15 @@ struct pw_node_events {
 	void (*reuse_buffer) (void *data, uint32_t port_id, uint32_t buffer_id);
 };
 
+/** Media type of the node, Audio, Video, Midi */
+#define PW_NODE_PROP_MEDIA		"pipewire.media"
+/** Category: Playback, Capture, Duplex, Sink, Source */
+#define PW_NODE_PROP_CATEGORY		"pipewire.category"
+/** Role: Movie, Music, Camera, Screen, Communication, Game, Notification, DSP,
+ *        Production, Accessibility, Test */
+#define PW_NODE_PROP_ROLE		"pipewire.role"
+/** exclusive access to device */
+#define PW_NODE_PROP_EXCLUSIVE		"pipewire.exclusive"
 /** Automatically connect this node to a compatible node */
 #define PW_NODE_PROP_AUTOCONNECT	"pipewire.autoconnect"
 /** Try to connect the node to this node id */
@@ -148,6 +159,14 @@ int pw_node_for_each_port(struct pw_node *node,
 			  int (*callback) (void *data, struct pw_port *port),
 			  void *data);
 
+int pw_node_for_each_param(struct pw_node *node,
+			   uint32_t param_id,
+			   uint32_t index, uint32_t max,
+			   const struct spa_pod *filter,
+			   int (*callback) (void *data,
+					    uint32_t id, uint32_t index, uint32_t next,
+					    struct spa_pod *param),
+			   void *data);
 
 /** Find the port with direction and port_id or NULL when not found */
 struct pw_port *
@@ -164,8 +183,14 @@ struct pw_port * pw_node_get_free_port(struct pw_node *node, enum pw_direction d
   * nodes and start data transport */
 int pw_node_set_active(struct pw_node *node, bool active);
 
-/** Check is a node is active */
+/** Check if a node is active */
 bool pw_node_is_active(struct pw_node *node);
+
+/** Set a node enabled. The node will be able to be activated */
+int pw_node_set_enabled(struct pw_node *node, bool enabled);
+
+/** Check if a node is enabled */
+bool pw_node_is_enabled(struct pw_node *node);
 
 #ifdef __cplusplus
 }

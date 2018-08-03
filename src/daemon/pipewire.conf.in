@@ -1,4 +1,5 @@
 #load-module libpipewire-module-protocol-dbus
+load-module libpipewire-module-rtkit
 load-module libpipewire-module-protocol-native
 load-module libpipewire-module-suspend-on-idle
 #load-module libpipewire-module-spa-monitor alsa/libspa-alsa alsa-monitor alsa
@@ -9,4 +10,6 @@ load-module libpipewire-module-autolink
 #load-module libpipewire-module-mixer
 load-module libpipewire-module-client-node
 load-module libpipewire-module-flatpak
+#load-module libpipewire-module-audio-dsp
+#load-module libpipewire-module-link-factory
 #load-module libpipewire-module-jack

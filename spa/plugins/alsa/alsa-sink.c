@@ -106,7 +106,7 @@ static int impl_node_enum_params(struct spa_node *node,
 				":", t->param.propId,   "I", t->prop_min_latency,
 				":", t->param.propName, "s", "The minimum latency",
 				":", t->param.propType, "ir", p->min_latency,
-							2, 1, INT32_MAX);
+					SPA_POD_PROP_MIN_MAX(1, INT32_MAX));
 			break;
 		case 4:
 			param = spa_pod_builder_object(&b,
@@ -114,7 +114,7 @@ static int impl_node_enum_params(struct spa_node *node,
 				":", t->param.propId,   "I", t->prop_max_latency,
 				":", t->param.propName, "s", "The maximum latency",
 				":", t->param.propType, "ir", p->max_latency,
-							2, 1, INT32_MAX);
+					SPA_POD_PROP_MIN_MAX(1, INT32_MAX));
 			break;
 		default:
 			return 0;
@@ -350,12 +350,13 @@ impl_node_port_enum_params(struct spa_node *node,
 
 		param = spa_pod_builder_object(&b,
 			id, t->param_buffers.Buffers,
-			":", t->param_buffers.size,    "iru", this->props.max_latency * this->frame_size,
-							2, this->props.min_latency * this->frame_size,
-							   INT32_MAX,
+			":", t->param_buffers.size,    "iru", this->props.max_latency *
+							      this->frame_size,
+				SPA_POD_PROP_MIN_MAX(this->props.min_latency * this->frame_size,
+						     INT32_MAX),
 			":", t->param_buffers.stride,  "i", 0,
 			":", t->param_buffers.buffers, "ir", 1,
-								2, 1, MAX_BUFFERS,
+				SPA_POD_PROP_MIN_MAX(1, MAX_BUFFERS),
 			":", t->param_buffers.align,   "i", 16);
 	}
 	else if (id == t->param.idMeta) {
@@ -430,7 +431,6 @@ static int port_set_format(struct spa_node *node,
 	}
 
 	if (this->have_format) {
-		this->info.flags = SPA_PORT_INFO_FLAG_CAN_USE_BUFFERS | SPA_PORT_INFO_FLAG_LIVE;
 		this->info.rate = this->rate;
 	}
 
@@ -703,7 +703,10 @@ impl_init(const struct spa_handle_factory *factory,
 	this->stream = SND_PCM_STREAM_PLAYBACK;
 	reset_props(&this->props);
 
-	this->info.flags = SPA_PORT_INFO_FLAG_CAN_USE_BUFFERS;
+	this->info.flags = SPA_PORT_INFO_FLAG_CAN_USE_BUFFERS |
+			   SPA_PORT_INFO_FLAG_LIVE |
+			   SPA_PORT_INFO_FLAG_PHYSICAL |
+			   SPA_PORT_INFO_FLAG_TERMINAL;
 
 	spa_list_init(&this->ready);
 
