@@ -49,12 +49,7 @@ Copyright: 2012 Olivier Crete
            2015 Wim Taymans
 License: LGPL-2+
 
-Files: src/modules/module-jack/shm.*
-Copyright: 2001-2003 Paul Davis
-           2005-2012 Grame
-License: LGPL-2.1+
-
-Files: src/pipewire/rtkit.c
+Files: src/modules/module-rtkit.c
 Copyright: 2009 Lennart Poettering
            2010 David Henningsson
            2015 Wim Taymans
