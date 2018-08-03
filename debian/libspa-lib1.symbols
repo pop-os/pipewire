@@ -1,4 +1,4 @@
-libspa-lib.so.0 libspa-lib0 #MINVER#
+libspa-lib.so.1 libspa-lib1 #MINVER#
  pod_compare@Base 0.1.8
  pod_filter@Base 0.1.8
  spa_debug_buffer@Base 0.1.4

@@ -1,4 +1,4 @@
-libpipewire-0.1.so.0 libpipewire-0.1-0 #MINVER#
+libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_client_add_listener@Base 0.1.4
  pw_client_destroy@Base 0.1.4
  pw_client_find_resource@Base 0.1.8
