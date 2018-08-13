@@ -1,5 +1,5 @@
-pipewire (0.2.2-1) UNRELEASED; urgency=medium
+pipewire (0.2.2-1) unstable; urgency=medium
 
   * Initial release (Closes: #874089)
 
- -- Jeremy Bicha <jbicha@debian.org>  Sun, 21 Jan 2018 10:16:01 -0500
+ -- Jeremy Bicha <jbicha@debian.org>  Mon, 13 Aug 2018 11:17:57 -0400
