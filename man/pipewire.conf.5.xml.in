@@ -19,38 +19,40 @@ You should have received a copy of the GNU Lesser General Public
 License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
 -->
 
-<manpage name="pipewire" section="1" desc="The PipeWire media server">
+<manpage name="pipewire.conf" section="5" desc="The PipeWire server configuration file">
 
   <synopsis>
-    <cmd>pipewire [<arg>options</arg>]</cmd>
+    <p><file>@PIPEWIRE_CONFIG_DIR@/pipewire.conf</file></p>
   </synopsis>
 
   <description>
     <p>PipeWire is a service that allows access to multimedia devices
     and allows media sharing between applications. </p>
+
+    <p>On startup, the daemon reads a configuration file to configure
+    itself. It executes a series of commands listed in the config
+    file.</p>
+
+    <p>The config file in the default location is used but the
+    environment variable PIPEWIRE_CONFIG_FILE can be used to specify
+    an alternative config file.</p>
   </description>
 
-  <options>
+  <section name="General Commands">
 
     <option>
-      <p><opt>-h | --help</opt></p>
-
-      <optdesc><p>Show help.</p></optdesc>
+      <p><opt>help</opt></p>
+      <optdesc><p>Show a quick help on the commands available.</p></optdesc>
     </option>
+  </section>
 
+  <section name="Module Management">
     <option>
-      <p><opt>-v | --version</opt></p>
-
-      <optdesc><p>Show version information.</p></optdesc>
+      <p><opt>load-module</opt> <arg>name</arg> [<arg>arguments...</arg>]</p>
+      <optdesc><p>Load a module specified by its name and arguments. For most
+      modules it is OK to be loaded more than once.</p></optdesc>
     </option>
-
-    <option>
-      <p><opt>-n | --name</opt></p>
-
-      <optdesc><p>Set the daemon name (Default pipewire-1).</p></optdesc>
-    </option>
-
-  </options>
+  </section>
 
   <section name="Authors">
     <p>The PipeWire Developers &lt;@PACKAGE_BUGREPORT@&gt;; PipeWire is available from <url href="@PACKAGE_URL@"/></p>
@@ -58,6 +60,7 @@ License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
 
   <section name="See also">
     <p>
+      <manref name="pipewire" section="1"/>,
       <manref name="pipewire-monitor" section="1"/>,
     </p>
   </section>

@@ -1,5 +1,6 @@
 #project('spa', 'c')
 
+
 alsa_dep = dependency('alsa')
 v4l2_dep = dependency('libv4l2')
 x11_dep = dependency('x11', required : false)
@@ -18,10 +19,8 @@ threads_dep = dependency('threads')
 #mathlib = cc.find_library('m', required : false)
 
 spa_inc = include_directories('include')
-spa_libinc = include_directories('.')
 
 subdir('include')
-subdir('lib')
 subdir('plugins')
 subdir('tools')
 subdir('tests')

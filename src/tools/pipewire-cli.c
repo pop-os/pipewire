@@ -25,7 +25,8 @@
 #include <signal.h>
 #include <string.h>
 
-#include <spa/lib/debug.h>
+#include <spa/debug/pod.h>
+#include <spa/debug/format.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/command.h>
@@ -258,13 +259,13 @@ static void on_sync_reply(void *_data, uint32_t seq)
 	}
 }
 
-static void print_global(void *obj, void *data)
+static int print_global(void *obj, void *data)
 {
 	struct global *global = obj;
 	struct pw_type *t;
 
 	if (global == NULL)
-		return;
+		return 0;
 
 	t = global->rd->data->t;
 
@@ -274,6 +275,7 @@ static void print_global(void *obj, void *data)
 	if (global->properties)
 		print_properties(&global->properties->dict, ' ', false);
 
+	return 0;
 }
 
 static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
@@ -302,17 +304,18 @@ static void registry_event_global(void *data, uint32_t id, uint32_t parent_id,
 	pw_map_insert_at(&rd->globals, id, global);
 }
 
-static void destroy_global(void *obj, void *data)
+static int destroy_global(void *obj, void *data)
 {
 	struct global *global = obj;
 
 	if (global == NULL)
-		return;
+		return 0;
 
 	pw_map_remove(&global->rd->globals, global->id);
 	if (global->properties)
 		pw_properties_free(global->properties);
 	free(global);
+	return 0;
 }
 
 static void registry_event_global_remove(void *data, uint32_t id)
@@ -596,7 +599,7 @@ static void info_link(struct proxy_data *pd)
 	fprintf(stdout, "%c\tinput-port-id: %u\n", MARK_CHANGE(1), info->input_port_id);
 	fprintf(stdout, "%c\tformat:\n", MARK_CHANGE(2));
 	if (info->format)
-		spa_debug_pod(info->format, SPA_DEBUG_FLAG_FORMAT);
+		spa_debug_format(2, pd->rd->data->t->map, info->format);
 	else
 		fprintf(stdout, "\t\tnone\n");
 	print_properties(info->props, MARK_CHANGE(3), true);
@@ -666,14 +669,14 @@ static void node_event_param(void *object, uint32_t id, uint32_t index, uint32_t
         struct proxy_data *data = object;
 	struct remote_data *rd = data->rd;
 	struct pw_type *t = rd->data->t;
-	uint32_t flags = 0;
 
 	fprintf(stdout, "remote %d node %d param %d index %d\n",
 			rd->id, data->global->id, id, index);
 
 	if (spa_pod_is_object_type(param, t->spa_format))
-		flags |= SPA_DEBUG_FLAG_FORMAT;
-	spa_debug_pod(param, flags);
+		spa_debug_format(2, t->map, param);
+	else
+		spa_debug_pod(2, t->map, param);
 }
 
 static const struct pw_node_proxy_events node_events = {
@@ -704,14 +707,14 @@ static void port_event_param(void *object, uint32_t id, uint32_t index, uint32_t
         struct proxy_data *data = object;
 	struct remote_data *rd = data->rd;
 	struct pw_type *t = rd->data->t;
-	uint32_t flags = 0;
 
 	fprintf(stdout, "remote %d port %d param %d index %d\n",
 			rd->id, data->global->id, id, index);
 
 	if (spa_pod_is_object_type(param, t->spa_format))
-		flags |= SPA_DEBUG_FLAG_FORMAT;
-	spa_debug_pod(param, flags);
+		spa_debug_format(2, t->map, param);
+	else
+		spa_debug_pod(2, t->map, param);
 }
 
 static const struct pw_port_proxy_events port_events = {
@@ -901,18 +904,19 @@ static bool do_global_info(struct global *global, char **error)
 	}
 	return true;
 }
-static void do_global_info_all(void *obj, void *data)
+static int do_global_info_all(void *obj, void *data)
 {
 	struct global *global = obj;
 	char *error;
 
 	if (global == NULL)
-		return;
+		return 0;
 
 	if (!do_global_info(global, &error)) {
 		fprintf(stderr, "info: %s\n", error);
 		free(error);
 	}
+	return 0;
 }
 
 static bool do_info(struct data *data, const char *cmd, char *args, char **error)

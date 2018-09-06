@@ -25,7 +25,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 
-#include <spa/lib/debug.h>
+#include <spa/debug/pod.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/private.h>
@@ -59,6 +59,8 @@ struct impl {
 	uint32_t dest_id;
 	uint8_t opcode;
 	struct spa_pod_builder builder;
+
+	struct pw_core *core;
 };
 
 /** \endcond */
@@ -118,7 +120,7 @@ static void *connection_ensure_size(struct pw_protocol_native_connection *conn, 
 		buf->buffer_data = realloc(buf->buffer_data, buf->buffer_maxsize);
 		if (buf->buffer_data == NULL) {
 			buf->buffer_maxsize = 0;
-			spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, error, -ENOMEM);
+			spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, error, 0, -ENOMEM);
 			return NULL;
 		}
 		pw_log_warn("connection %p: resize buffer to %zd %zd %zd",
@@ -193,7 +195,7 @@ static void clear_buffer(struct buffer *buf)
  *
  * \memberof pw_protocol_native_connection
  */
-struct pw_protocol_native_connection *pw_protocol_native_connection_new(int fd)
+struct pw_protocol_native_connection *pw_protocol_native_connection_new(struct pw_core *core, int fd)
 {
 	struct impl *impl;
 	struct pw_protocol_native_connection *this;
@@ -216,6 +218,7 @@ struct pw_protocol_native_connection *pw_protocol_native_connection_new(int fd)
 	impl->in.buffer_data = malloc(MAX_BUFFER_SIZE);
 	impl->in.buffer_maxsize = MAX_BUFFER_SIZE;
 	impl->in.update = true;
+	impl->core = core;
 
 	if (impl->out.buffer_data == NULL || impl->in.buffer_data == NULL)
 		goto no_mem;
@@ -241,7 +244,7 @@ void pw_protocol_native_connection_destroy(struct pw_protocol_native_connection 
 
 	pw_log_debug("connection %p: destroy", conn);
 
-	spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, destroy);
+	spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, destroy, 0);
 
 	free(impl->out.buffer_data);
 	free(impl->in.buffer_data);
@@ -432,9 +435,10 @@ pw_protocol_native_connection_end(struct pw_protocol_native_connection *conn,
 
 	if (debug_messages) {
 		printf(">>>>>>>>> out: %d %d %d\n", impl->dest_id, impl->opcode, size);
-	        spa_debug_pod((struct spa_pod *)p, 0);
+	        spa_debug_pod(0, impl->core->type.map, (struct spa_pod *)p);
 	}
-	spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, need_flush);
+	spa_hook_list_call(&conn->listener_list,
+			struct pw_protocol_native_connection_events, need_flush, 0);
 }
 
 /** Flush the connection object

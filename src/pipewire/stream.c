@@ -25,7 +25,6 @@
 #include <time.h>
 
 #include "spa/utils/ringbuffer.h"
-#include "spa/lib/debug.h"
 
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
@@ -33,7 +32,6 @@
 #include "pipewire/array.h"
 #include "pipewire/stream.h"
 #include "pipewire/utils.h"
-#include "pipewire/stream.h"
 #include "extensions/client-node.h"
 
 /** \cond */
@@ -116,9 +114,7 @@ struct stream {
 	struct buffer buffers[MAX_BUFFERS];
 	int n_buffers;
 
-	int64_t last_ticks;
-	int32_t last_rate;
-	int64_t last_monotonic;
+	struct pw_time last_time;
 };
 /** \endcond */
 
@@ -238,8 +234,7 @@ static void clear_buffers(struct pw_stream *stream)
 	for (i = 0; i < impl->n_buffers; i++) {
 		b = &impl->buffers[i];
 
-		spa_hook_list_call(&stream->listener_list, struct pw_stream_events,
-				remove_buffer, &b->buffer);
+		pw_stream_events_remove_buffer(stream, &b->buffer);
 
 		if (SPA_FLAG_CHECK(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->buffer.buffer->n_datas; j++) {
@@ -318,8 +313,7 @@ static bool stream_set_state(struct pw_stream *stream, enum pw_stream_state stat
 			     pw_stream_state_as_string(state), stream->error);
 
 		stream->state = state;
-		spa_hook_list_call(&stream->listener_list, struct pw_stream_events, state_changed,
-				old, state, error);
+		pw_stream_events_state_changed(stream, old, state, error);
 	}
 	return res;
 }
@@ -339,7 +333,7 @@ do_call_process(struct spa_loop *loop,
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
 	impl->in_process = true;
-	spa_hook_list_call(&stream->listener_list, struct pw_stream_events, process);
+	pw_stream_events_process(stream);
 	impl->in_process = false;
 	return 0;
 }
@@ -472,10 +466,6 @@ do_remove_sources(struct spa_loop *loop,
 		pw_loop_destroy_source(stream->remote->core->data_loop, impl->rtsocket_source);
 		impl->rtsocket_source = NULL;
 	}
-	if (impl->timeout_source) {
-		pw_loop_destroy_source(stream->remote->core->data_loop, impl->timeout_source);
-		impl->timeout_source = NULL;
-	}
 	if (impl->rtwritefd != -1) {
 		close(impl->rtwritefd);
 		impl->rtwritefd = -1;
@@ -487,6 +477,10 @@ static void unhandle_socket(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 
+	if (impl->timeout_source) {
+		pw_loop_destroy_source(stream->remote->core->main_loop, impl->timeout_source);
+		impl->timeout_source = NULL;
+	}
         pw_loop_invoke(stream->remote->core->data_loop,
                        do_remove_sources, 1, NULL, 0, true, impl);
 }
@@ -538,7 +532,7 @@ void pw_stream_destroy(struct pw_stream *stream)
 
 	pw_log_debug("stream %p: destroy", stream);
 
-	spa_hook_list_call(&stream->listener_list, struct pw_stream_events, destroy);
+	pw_stream_events_destroy(stream);
 
 	if (impl->node_proxy)
 		spa_hook_remove(&impl->proxy_listener);
@@ -672,7 +666,6 @@ static void do_node_init(struct pw_stream *stream)
 		pw_client_node_proxy_set_active(impl->node_proxy, true);
 }
 
-#if 0
 static void add_request_clock_update(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
@@ -690,7 +683,6 @@ static void on_timeout(void *data, uint64_t expirations)
 	struct pw_stream *stream = data;
 	add_request_clock_update(stream);
 }
-#endif
 
 static inline void reuse_buffer(struct pw_stream *stream, uint32_t id)
 {
@@ -851,6 +843,7 @@ on_rtsocket_condition(void *data, int fd, enum spa_io mask)
 static void handle_socket(struct pw_stream *stream, int rtreadfd, int rtwritefd)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	struct timespec interval;
 
 	impl->rtwritefd = rtwritefd;
 	impl->rtsocket_source = pw_loop_add_io(stream->remote->core->data_loop,
@@ -858,13 +851,10 @@ static void handle_socket(struct pw_stream *stream, int rtreadfd, int rtwritefd)
 					       SPA_IO_ERR | SPA_IO_HUP,
 					       true, on_rtsocket_condition, stream);
 
-#if 0
-	struct timespec interval;
 	impl->timeout_source = pw_loop_add_timer(stream->remote->core->main_loop, on_timeout, stream);
 	interval.tv_sec = 0;
 	interval.tv_nsec = 100000000;
 	pw_loop_update_timer(stream->remote->core->main_loop, impl->timeout_source, NULL, &interval, false);
-#endif
 
 	return;
 }
@@ -929,9 +919,13 @@ static void client_node_command(void *data, uint32_t seq, const struct spa_comma
 					   PW_STREAM_PROP_LATENCY_MIN, "%" PRId64,
 					   cu->body.latency.value);
 		}
-		impl->last_ticks = cu->body.ticks.value;
-		impl->last_rate = cu->body.rate.value;
-		impl->last_monotonic = cu->body.monotonic_time.value;
+		impl->last_time.now = cu->body.monotonic_time.value;
+		impl->last_time.ticks = cu->body.ticks.value;
+		impl->last_time.rate.num = 1;
+		impl->last_time.rate.denom = cu->body.rate.value;
+		impl->last_time.delay = 0;
+		pw_log_debug("clock update %ld %d %ld", impl->last_time.ticks,
+				impl->last_time.rate.denom, impl->last_time.now);
 	} else {
 		pw_log_warn("unhandled node command %d", SPA_COMMAND_TYPE(command));
 		add_async_complete(stream, seq, -ENOTSUP);
@@ -978,9 +972,7 @@ client_node_port_set_param(void *data,
 
 		impl->pending_seq = seq;
 
-		count = spa_hook_list_call(&stream->listener_list,
-				   struct pw_stream_events,
-				   format_changed, impl->format);
+		count = pw_stream_events_format_changed(stream, impl->format);
 
 		if (count == 0)
 			pw_stream_finish_format(stream, 0, NULL, 0);
@@ -1136,8 +1128,7 @@ client_node_port_use_buffers(void *data,
 		if (impl->direction == SPA_DIRECTION_OUTPUT)
 			push_queue(impl, &impl->dequeue, bid);
 
-		spa_hook_list_call(&stream->listener_list, struct pw_stream_events,
-				add_buffer, &bid->buffer);
+		pw_stream_events_add_buffer(stream, &bid->buffer);
 	}
 
 	add_async_complete(stream, seq, 0);
@@ -1371,23 +1362,18 @@ static inline int64_t get_queue_size(struct queue *queue)
 int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
-	int64_t elapsed;
-	struct timespec ts;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	time->now = SPA_TIMESPEC_TO_TIME(&ts);
-	elapsed = (time->now - impl->last_monotonic) / 1000;
+	if (impl->last_time.rate.denom == 0)
+		return -EAGAIN;
 
-	time->ticks = impl->last_ticks + (elapsed * impl->last_rate) / SPA_USEC_PER_SEC;
-	time->rate.num = impl->last_rate;
-	time->rate.denom = 1;
-	time->delay = 0;
+	*time = impl->last_time;
 	if (impl->direction == SPA_DIRECTION_INPUT)
 		time->queued = get_queue_size(&impl->dequeue);
 	else
 		time->queued = get_queue_size(&impl->queue);
 
-	pw_log_trace("%ld %d/%d %ld", time->ticks, time->rate.num, time->rate.denom, time->queued);
+	pw_log_trace("stream %p: %ld %d/%d %ld", stream,
+			time->ticks, time->rate.num, time->rate.denom, time->queued);
 
 	return 0;
 }

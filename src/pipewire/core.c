@@ -21,10 +21,10 @@
 #include <time.h>
 #include <stdio.h>
 
-#define spa_debug pw_log_trace
+#include <pipewire/log.h>
 
-#include <spa/lib/debug.h>
 #include <spa/support/dbus.h>
+#include <spa/debug/format.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/private.h>
@@ -33,6 +33,8 @@
 #include <pipewire/core.h>
 #include <pipewire/data-loop.h>
 
+#undef spa_debug
+#define spa_debug pw_log_trace
 #include <spa/graph/graph-scheduler6.h>
 
 /** \cond */
@@ -389,8 +391,6 @@ struct pw_core *pw_core_new(struct pw_loop *main_loop, struct pw_properties *pro
 	spa_graph_init(&this->rt.graph);
 	spa_graph_set_callbacks(&this->rt.graph, &spa_graph_impl_default, NULL);
 
-	spa_debug_set_type_map(this->type.map);
-
 	this->support[0] = SPA_SUPPORT_INIT(SPA_TYPE__TypeMap, this->type.map);
 	this->support[1] = SPA_SUPPORT_INIT(SPA_TYPE_LOOP__DataLoop, this->data_loop->loop);
 	this->support[2] = SPA_SUPPORT_INIT(SPA_TYPE_LOOP__MainLoop, this->main_loop->loop);
@@ -427,7 +427,7 @@ struct pw_core *pw_core_new(struct pw_loop *main_loop, struct pw_properties *pro
 	this->info.change_mask = 0;
 	this->info.user_name = pw_get_user_name();
 	this->info.host_name = pw_get_host_name();
-	this->info.version = SPA_STRINGIFY(PW_VERSION_CORE);
+	this->info.version = pw_get_library_version();
 	srandom(time(NULL));
 	this->info.cookie = random();
 	this->info.props = &properties->dict;
@@ -474,7 +474,7 @@ void pw_core_destroy(struct pw_core *core)
 	struct pw_node *node, *tn;
 
 	pw_log_debug("core %p: destroy", core);
-	spa_hook_list_call(&core->listener_list, struct pw_core_events, destroy);
+	pw_core_events_destroy(core);
 
 	spa_hook_remove(&core->global_listener);
 
@@ -490,7 +490,7 @@ void pw_core_destroy(struct pw_core *core)
 	spa_list_for_each_safe(global, t, &core->global_list, link)
 		pw_global_destroy(global);
 
-	spa_hook_list_call(&core->listener_list, struct pw_core_events, free);
+	pw_core_events_free(core);
 
 	pw_data_loop_destroy(core->data_loop_impl);
 
@@ -561,8 +561,7 @@ int pw_core_update_properties(struct pw_core *core, const struct spa_dict *dict)
 	core->info.change_mask = PW_CORE_CHANGE_MASK_PROPS;
 	core->info.props = &core->properties->dict;
 
-	spa_hook_list_call(&core->listener_list, struct pw_core_events,
-			info_changed, &core->info);
+	pw_core_events_info_changed(core, &core->info);
 
 	spa_list_for_each(resource, &core->resource_list, link)
 		pw_core_resource_info(resource, &core->info);
@@ -784,7 +783,7 @@ int pw_core_find_format(struct pw_core *core,
 		}
 		pw_log_debug("enum output %d with filter: %p", oidx, filter);
 		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-			spa_debug_pod(filter, SPA_DEBUG_FLAG_FORMAT);
+			spa_debug_format(2, core->type.map, filter);
 
 		if ((res = spa_node_port_enum_params(output->node->node,
 						     output->direction, output->port_id,
@@ -800,7 +799,7 @@ int pw_core_find_format(struct pw_core *core,
 
 		pw_log_debug("Got filtered:");
 		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-			spa_debug_pod(*format, SPA_DEBUG_FLAG_FORMAT);
+			spa_debug_format(2, core->type.map, *format);
 	} else {
 		res = -EBADF;
 		asprintf(error, "error node state");
