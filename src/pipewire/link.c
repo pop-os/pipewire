@@ -22,16 +22,19 @@
 #include <stdio.h>
 
 #include <spa/pod/parser.h>
+#include <spa/pod/compare.h>
 #include <spa/param/param.h>
 
-#include <spa/lib/debug.h>
-#include <spa/lib/pod.h>
-
-#include "pipewire.h"
 #include "private.h"
+#include "pipewire.h"
 #include "interfaces.h"
 #include "link.h"
 #include "work-queue.h"
+
+#undef spa_debug
+#include <spa/debug/node.h>
+#include <spa/debug/pod.h>
+#include <spa/debug/format.h>
 
 #define MAX_BUFFERS     16
 
@@ -71,7 +74,7 @@ static void pw_link_update_state(struct pw_link *link, enum pw_link_state state,
 			free(link->error);
 		link->error = error;
 
-		spa_hook_list_call(&link->listener_list, struct pw_link_events, state_changed, old, state, error);
+		pw_link_events_state_changed(link, old, state, error);
 	}
 }
 
@@ -186,7 +189,7 @@ static int do_negotiate(struct pw_link *this, uint32_t in_state, uint32_t out_st
 
 	pw_log_debug("link %p: doing set format %p", this, format);
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-		spa_debug_pod(format, SPA_DEBUG_FLAG_FORMAT);
+		spa_debug_format(2, t->map, format);
 
 	if (out_state == PW_PORT_STATE_CONFIGURE) {
 		pw_log_debug("link %p: doing set format on output", this);
@@ -220,8 +223,7 @@ static int do_negotiate(struct pw_link *this, uint32_t in_state, uint32_t out_st
 	if (changed) {
 		this->info.change_mask |= PW_LINK_CHANGE_MASK_FORMAT;
 
-		spa_hook_list_call(&this->listener_list, struct pw_link_events,
-				info_changed, &this->info);
+		pw_link_events_info_changed(this, &this->info);
 
 		spa_list_for_each(resource, &this->resource_list, link)
 			pw_link_resource_info(resource, &this->info);
@@ -459,7 +461,7 @@ param_filter(struct pw_link *this,
 		}
 
 		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG) && iparam != NULL)
-			spa_debug_pod(iparam, 0);
+			spa_debug_pod(2, this->core->type.map, iparam);
 
 		for (oidx = 0;;) {
 			pw_log_debug("oparam %d", oidx);
@@ -470,7 +472,7 @@ param_filter(struct pw_link *this,
 			}
 
 			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-				spa_debug_pod(oparam, 0);
+				spa_debug_pod(2, this->core->type.map, oparam);
 
 			num++;
 		}
@@ -555,8 +557,8 @@ static int do_allocation(struct pw_link *this, uint32_t in_state, uint32_t out_s
 	}
 
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG)) {
-		spa_debug_port_info(oinfo);
-		spa_debug_port_info(iinfo);
+		spa_debug_port_info(2, oinfo);
+		spa_debug_port_info(2, iinfo);
 	}
 	if (output->allocation.n_buffers) {
 		out_flags = 0;
@@ -593,7 +595,7 @@ static int do_allocation(struct pw_link *this, uint32_t in_state, uint32_t out_s
 			spa_pod_fixate(params[i]);
 			pw_log_debug("fixated param %d:", i);
 			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-				spa_debug_pod(params[i], 0);
+				spa_debug_pod(2, this->core->type.map, params[i]);
 			offset += SPA_ROUND_UP_N(SPA_POD_SIZE(params[i]), 8);
 		}
 
@@ -876,7 +878,7 @@ static void input_remove(struct pw_link *this, struct pw_port *port)
 	pw_map_remove(&port->mix_port_map, this->rt.in_port.port_id);
 
 	spa_list_remove(&this->input_link);
-	spa_hook_list_call(&this->input->listener_list, struct pw_port_events, link_removed, this);
+	pw_port_events_link_removed(this->input, this);
 
 	clear_port_buffers(this, port);
 	this->input = NULL;
@@ -905,7 +907,7 @@ static void output_remove(struct pw_link *this, struct pw_port *port)
 	pw_map_remove(&port->mix_port_map, this->rt.out_port.port_id);
 
 	spa_list_remove(&this->output_link);
-	spa_hook_list_call(&this->output->listener_list, struct pw_port_events, link_removed, this);
+	pw_port_events_link_removed(this->output, this);
 
 	clear_port_buffers(this, port);
 	this->output = NULL;
@@ -913,7 +915,7 @@ static void output_remove(struct pw_link *this, struct pw_port *port)
 
 static void on_port_destroy(struct pw_link *this, struct pw_port *port)
 {
-	spa_hook_list_call(&this->listener_list, struct pw_link_events, port_unlinked, port);
+	pw_link_events_port_unlinked(this, port);
 
 	pw_link_update_state(this, PW_LINK_STATE_UNLINKED, NULL);
 	pw_link_destroy(this);
@@ -1191,8 +1193,8 @@ struct pw_link *pw_link_new(struct pw_core *core,
 	pw_loop_invoke(input_node->data_loop, do_add_link,
 		       SPA_ID_INVALID, &input, sizeof(struct pw_port *), false, this);
 
-	spa_hook_list_call(&output->listener_list, struct pw_port_events, link_added, this);
-	spa_hook_list_call(&input->listener_list, struct pw_port_events, link_added, this);
+	spa_hook_list_call(&output->listener_list, struct pw_port_events, link_added, 0, this);
+	spa_hook_list_call(&input->listener_list, struct pw_port_events, link_added, 0, this);
 
 	return this;
 
@@ -1279,7 +1281,7 @@ void pw_link_destroy(struct pw_link *link)
 	struct pw_resource *resource, *tmp;
 
 	pw_log_debug("link %p: destroy", impl);
-	spa_hook_list_call(&link->listener_list, struct pw_link_events, destroy);
+	pw_link_events_destroy(link);
 
 	pw_link_deactivate(link);
 
@@ -1299,7 +1301,7 @@ void pw_link_destroy(struct pw_link *link)
 	    pw_resource_destroy(resource);
 
 	pw_log_debug("link %p: free", impl);
-	spa_hook_list_call(&link->listener_list, struct pw_link_events, free);
+	pw_link_events_free(link);
 
 	pw_work_queue_destroy(impl->work);
 

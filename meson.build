@@ -1,5 +1,5 @@
 project('pipewire', 'c',
-  version : '0.2.2',
+  version : '0.2.3',
   meson_version : '>= 0.36.0',
   default_options : [ 'warning_level=1',
                       'c_std=gnu99',
@@ -17,6 +17,7 @@ else
   pipewire_version_nano = 0
 endif
 
+spaversion = '0.1'
 apiversion = '0.2'
 soversion = 1
 libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
@@ -28,7 +29,9 @@ pipewire_libdir = join_paths(prefix, get_option('libdir'))
 pipewire_localedir = join_paths(prefix, get_option('localedir'))
 pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
 
-modules_install_dir = join_paths(get_option('libdir'), 'pipewire-@0@'.format(apiversion))
+pipewire_configdir = join_paths(pipewire_sysconfdir, 'pipewire')
+modules_install_dir = join_paths(pipewire_libdir, 'pipewire-@0@'.format(apiversion))
+spa_plugindir = join_paths(pipewire_libdir, 'spa')
 
 gnome = import('gnome')
 
@@ -54,10 +57,10 @@ cdata.set('PACKAGE_STRING', '"PipeWire @0@"'.format(pipewire_version))
 cdata.set('PACKAGE_TARNAME', '"pipewire"')
 cdata.set('PACKAGE_URL', '"http://pipewire.org"')
 cdata.set('PACKAGE_VERSION', '"@0@"'.format(pipewire_version))
-cdata.set('MODULEDIR', '"@0@/pipewire-@1@"'.format(pipewire_libdir,apiversion))
-cdata.set('PIPEWIRE_CONFIG_DIR', '"@0@/pipewire"'.format(pipewire_sysconfdir))
+cdata.set('MODULEDIR', '"@0@"'.format(modules_install_dir))
+cdata.set('PIPEWIRE_CONFIG_DIR', '"@0@"'.format(pipewire_configdir))
 cdata.set('VERSION', '"@0@"'.format(pipewire_version))
-cdata.set('PLUGINDIR', '"@0@/spa"'.format(pipewire_libdir))
+cdata.set('PLUGINDIR', '"@0@"'.format(spa_plugindir))
 # FIXME: --with-memory-alignment],[8,N,malloc,pagesize (default is 32)]) option
 cdata.set('MEMORY_ALIGNMENT_MALLOC', 1)
 
@@ -147,10 +150,7 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 
-#optional dependencies
-jack_dep = dependency('jack', version : '>= 1.9.10', required : false)
-
-if get_option('enable_gstreamer')
+if get_option('gstreamer')
   glib_dep = dependency('glib-2.0', version : '>=2.32.0')
   gobject_dep = dependency('gobject-2.0')
   gmodule_dep = dependency('gmodule-2.0')
@@ -166,7 +166,7 @@ subdir('spa')
 subdir('src')
 subdir('pkgconfig')
 
-if get_option('enable_docs')
+if get_option('docs')
   doxygen = find_program('doxygen', required : false)
   if doxygen.found()
     subdir('doc')
@@ -175,7 +175,7 @@ if get_option('enable_docs')
   endif
 endif
 
-if get_option('enable_man')
+if get_option('man')
   xmltoman = find_program('xmltoman', required : false)
   if xmltoman.found()
     subdir('man')
