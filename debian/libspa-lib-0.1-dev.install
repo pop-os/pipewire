@@ -1,3 +1,2 @@
 usr/include/spa
-usr/lib/*/libspa-lib*.so
 usr/lib/*/pkgconfig/libspa*
