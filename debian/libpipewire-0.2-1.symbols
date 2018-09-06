@@ -30,7 +30,6 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_core_find_factory@Base 0.1.8
  pw_core_find_format@Base 0.1.4
  pw_core_find_global@Base 0.1.4
- pw_core_find_module@Base 0.1.4
  pw_core_find_port@Base 0.1.4
  pw_core_find_protocol@Base 0.1.4
  pw_core_for_each_global@Base 0.1.4
@@ -225,7 +224,6 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_remote_new@Base 0.1.4
  pw_remote_state_as_string@Base 0.1.4
  pw_remote_steal_fd@Base 0.1.8
- pw_remote_update_state@Base 0.1.4
  pw_resource_add_listener@Base 0.1.4
  pw_resource_add_override@Base 0.1.4
  pw_resource_destroy@Base 0.1.4
@@ -281,3 +279,4 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_work_queue_complete@Base 0.1.4
  pw_work_queue_destroy@Base 0.1.4
  pw_work_queue_new@Base 0.1.4
+ spa_debug_port_info@Base 0.2.3
