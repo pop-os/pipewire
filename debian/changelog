@@ -1,8 +1,13 @@
-pipewire (0.2.3-1) UNRELEASED; urgency=medium
+pipewire (0.2.3-1) unstable; urgency=medium
 
   * New upstream release
+  * Drop make-spa-lib-version.patch: Applied in new release
+  * debian/rules: Update configure options
+  * libspa-lib-0.1-1 has been dropped in this release
+  * debian/libpipewire-0.2-1.symbols: Update
+  * Cherry-pick 7 commits since last release
 
- -- Jeremy Bicha <jbicha@debian.org>  Wed, 05 Sep 2018 20:41:37 -0400
+ -- Jeremy Bicha <jbicha@debian.org>  Wed, 19 Sep 2018 19:48:19 -0400
 
 pipewire (0.2.2-1) unstable; urgency=medium
 
