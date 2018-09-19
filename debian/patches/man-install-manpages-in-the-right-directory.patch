@@ -1,0 +1,47 @@
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Thu, 30 Aug 2018 14:49:08 +0200
+Subject: man: install manpages in the right directory
+
+---
+ man/meson.build | 21 ++++++++++++---------
+ 1 file changed, 12 insertions(+), 9 deletions(-)
+
+diff --git a/man/meson.build b/man/meson.build
+index 1d7045b..6c6d13d 100644
+--- a/man/meson.build
++++ b/man/meson.build
+@@ -7,22 +7,25 @@ manpage_conf.set('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
+ manpage_conf.set('top_srcdir', meson.source_root())
+ manpage_conf.set('top_builddir', meson.build_root())
+ 
+-manpages = ['pipewire.1',
+-	    'pipewire.conf.5',
+-	    'pipewire-cli.1',
+-	    'pipewire-monitor.1' ]
++manpages = [
++  [ 'pipewire', '1' ],
++  [ 'pipewire.conf', '5' ],
++  [ 'pipewire-cli', '1' ],
++  [ 'pipewire-monitor', '1' ]
++]
+ 
+ foreach m : manpages
+-  infile = m + '.xml.in'
+-  outfile = m + '.xml'
++  file = m.get(0) + '.' + m.get(1)
++  infile = file + '.xml.in'
++  outfile = file + '.xml'
+   xml = configure_file(input : infile,
+ 		       output : outfile,
+ 		       configuration : manpage_conf)
+-  custom_target(m + '.target',
+-		output : m,
++  custom_target(file + '.target',
++		output : file,
+ 		input : xml,
+ 		command : [xmltoman, '@INPUT@'],
+ 		capture : true,
+ 		install : true,
+-		install_dir : join_paths(get_option('mandir'), 'man1'))
++		install_dir : join_paths(get_option('mandir'), 'man', m.get(1)))
+ endforeach

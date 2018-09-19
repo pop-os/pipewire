@@ -1,0 +1,20 @@
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Wed, 19 Sep 2018 16:06:29 +0200
+Subject: man: fix man page install path
+
+Fixes #85
+---
+ man/meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/man/meson.build b/man/meson.build
+index 6c6d13d..ffa3321 100644
+--- a/man/meson.build
++++ b/man/meson.build
+@@ -27,5 +27,5 @@ foreach m : manpages
+ 		command : [xmltoman, '@INPUT@'],
+ 		capture : true,
+ 		install : true,
+-		install_dir : join_paths(get_option('mandir'), 'man', m.get(1)))
++		install_dir : join_paths(get_option('mandir'), 'man' + m.get(1)))
+ endforeach
