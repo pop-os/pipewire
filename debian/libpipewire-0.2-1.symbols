@@ -208,6 +208,7 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_proxy_get_proxy_listeners@Base 0.1.4
  pw_proxy_get_user_data@Base 0.1.4
  pw_proxy_new@Base 0.1.4
+ pw_release_spa_dbus@Base 0.2.3-1~
  pw_remote_add_listener@Base 0.1.4
  pw_remote_connect@Base 0.1.4
  pw_remote_connect_fd@Base 0.1.4
