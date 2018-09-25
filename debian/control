@@ -49,6 +49,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          libpipewire-0.2-1 (= ${binary:Version}),
+         libspa-lib-0.1-dev (= ${binary:Version}),
 Suggests: pipewire-0.2-doc,
 Description: libraries for the PipeWire multimedia server - development
  PipeWire is a server and user space API to deal with multimedia
