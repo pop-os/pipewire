@@ -56,9 +56,12 @@ struct client_info {
 	struct spa_list link;
 	struct impl *impl;
 	struct pw_client *client;
+	struct spa_hook client_listener;
         struct spa_list resources;
 	struct spa_list async_pending;
+	bool checked;
 	bool camera_allowed;
+	bool sandboxed;
 };
 
 struct async_pending {
@@ -128,6 +131,7 @@ static void client_info_free(struct client_info *cinfo)
 	spa_list_for_each_safe(p, tp, &cinfo->async_pending, link)
 		free_pending(p);
 
+	spa_hook_remove(&cinfo->client_listener);
 	spa_list_remove(&cinfo->link);
 	free(cinfo);
 }
@@ -279,6 +283,7 @@ portal_response(DBusConnection *connection, DBusMessage *msg, void *user_data)
 			cinfo->camera_allowed = false;
 			pw_log_debug("camera access not allowed");
 		}
+		cinfo->checked = true;
 		pw_core_for_each_global(cinfo->impl->core, set_global_permissions, cinfo);
 
 		free_pending(p);
@@ -380,6 +385,32 @@ static void do_portal_check(struct client_info *cinfo)
 	return;
 }
 
+static void client_info_changed(void *data, struct pw_client_info *info)
+{
+	struct client_info *cinfo = data;
+	const char *str;
+
+	if (info->props == NULL)
+		return;
+
+	if ((str = spa_dict_lookup(info->props, "pipewire.access")) == NULL)
+		return;
+
+	if (strcmp(str, "flatpak") != 0)
+		return;
+
+	if (cinfo->checked)
+		return;
+
+	pw_log_debug("module %p: client %p set to flatpak access", cinfo->impl, cinfo->client);
+	do_portal_check(cinfo);
+}
+
+static const struct pw_client_events client_events = {
+	PW_VERSION_CLIENT_EVENTS,
+	.info_changed = client_info_changed
+};
+
 static void
 core_global_added(void *data, struct pw_global *global)
 {
@@ -390,11 +421,21 @@ core_global_added(void *data, struct pw_global *global)
 	if (pw_global_get_type(global) == impl->type->client) {
 		struct pw_client *client = pw_global_get_object(global);
 
+		/* clients are placed in a list and we do a portal check when needed */
+		cinfo = calloc(1, sizeof(struct client_info));
+		cinfo->impl = impl;
+		cinfo->client = client;
+		spa_list_init(&cinfo->async_pending);
+		pw_client_add_listener(client, &cinfo->client_listener, &client_events, cinfo);
+
+		spa_list_append(&impl->client_list, &cinfo->link);
+
 		res = check_sandboxed(client);
 		if (res == 0) {
 			pw_log_debug("module %p: non sandboxed client %p", impl, client);
 			return;
 		}
+		cinfo->sandboxed = true;
 
 		if (res < 0) {
 			pw_log_warn("module %p: client %p sandbox check failed: %s",
@@ -404,20 +445,13 @@ core_global_added(void *data, struct pw_global *global)
 			pw_log_debug("module %p: sandboxed client %p added", impl, client);
 		}
 
-		/* sandboxed clients are placed in a list and we do a portal check */
-		cinfo = calloc(1, sizeof(struct client_info));
-		cinfo->impl = impl;
-		cinfo->client = client;
-
-		spa_list_init(&cinfo->async_pending);
-
-		spa_list_append(&impl->client_list, &cinfo->link);
-
 		do_portal_check(cinfo);
 	}
 	else {
-		spa_list_for_each(cinfo, &impl->client_list, link)
-			set_global_permissions(cinfo, global);
+		spa_list_for_each(cinfo, &impl->client_list, link) {
+			if (cinfo->sandboxed)
+				set_global_permissions(cinfo, global);
+		}
 	}
 }
 

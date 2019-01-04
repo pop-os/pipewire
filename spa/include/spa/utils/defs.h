@@ -52,10 +52,21 @@ enum spa_direction {
 };
 
 #define SPA_RECTANGLE(width,height) (struct spa_rectangle){ width, height }
-
 struct spa_rectangle {
 	uint32_t width;
 	uint32_t height;
+};
+
+#define SPA_POINT(x,y) (struct spa_point){ x, y }
+struct spa_point {
+	int32_t x;
+	int32_t y;
+};
+
+#define SPA_REGION(x,y,width,height) (struct spa_region){ SPA_POINT(x,y), SPA_RECTANGLE(width,height) }
+struct spa_region {
+	struct spa_point position;
+	struct spa_rectangle size;
 };
 
 #define SPA_FRACTION(num,denom) (struct spa_fraction){ num, denom }
@@ -68,25 +79,25 @@ struct spa_fraction {
 
 #define SPA_MIN(a,b)		\
 ({				\
-	typeof(a) _a = (a);	\
-	typeof(b) _b = (b);	\
+	__typeof__(a) _a = (a);	\
+	__typeof__(b) _b = (b);	\
 	_a < _b ? _a : _b;	\
 })
 #define SPA_MAX(a,b)		\
 ({				\
-	typeof(a) _a = (a);	\
-	typeof(b) _b = (b);	\
+	__typeof__(a) _a = (a);	\
+	__typeof__(b) _b = (b);	\
 	_a > _b ? _a : _b;	\
 })
 #define SPA_CLAMP(v,low,high)				\
 ({							\
-	typeof(v) _v = (v);				\
-	typeof(low) _low = (low);			\
-	typeof(high) _high = (high);			\
+	__typeof__(v) _v = (v);				\
+	__typeof__(low) _low = (low);			\
+	__typeof__(high) _high = (high);		\
 	_v > _high ? _high : ( _v < _low ? _low : _v);	\
 })
 
-#define SPA_MEMBER(b,o,t) ((t*)((uint8_t*)(b) + (o)))
+#define SPA_MEMBER(b,o,t) ((t*)((uint8_t*)(b) + (int)(o)))
 
 #define SPA_CONTAINER_OF(p,t,m) (t*)((uint8_t*)p - offsetof (t,m))
 

@@ -13,12 +13,11 @@ pipewire_c_args = [
   '-DG_LOG_DOMAIN=g_log_domain_pipewire',
 ]
 
-conf_config = configuration_data()
 conf_install_dir = join_paths(get_option('sysconfdir'), 'pipewire')
 
 configure_file(input : 'pipewire.conf.in',
                output : 'pipewire.conf',
-               configuration : conf_config,
+               copy : true,
                install_dir : conf_install_dir)
 
 
@@ -30,11 +29,6 @@ executable('pipewire',
   dependencies : [pipewire_dep],
 )
 
-if get_option('systemd')
-  systemd = dependency('systemd', required: false)
-  if systemd.found()
-    subdir('systemd')
-  else
-    warning('Systemd integration was enabled, but systemd is not available')
-  endif
+if get_option('systemd') and systemd.found()
+  subdir('systemd')
 endif

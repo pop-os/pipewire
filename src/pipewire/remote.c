@@ -124,8 +124,7 @@ pw_remote_update_state(struct pw_remote *remote, enum pw_remote_state state, con
 	enum pw_remote_state old = remote->state;
 
 	if (old != state) {
-		if (remote->error)
-			free(remote->error);
+		free(remote->error);
 
 		if (fmt) {
 			va_list varargs;
@@ -180,11 +179,10 @@ static void core_event_remove_id(void *data, uint32_t id)
 	struct pw_remote *this = data;
 	struct pw_proxy *proxy;
 
-	proxy = pw_map_lookup(&this->objects, id);
-	if (proxy) {
-		pw_log_debug("remote %p: object remove %u", this, id);
+	pw_log_debug("remote %p: object remove %u", this, id);
+	if ((proxy = pw_map_lookup(&this->objects, id)) != NULL)
 		pw_proxy_destroy(proxy);
-	}
+
 	pw_map_remove(&this->objects, id);
 }
 
@@ -306,8 +304,9 @@ void pw_remote_destroy(struct pw_remote *remote)
 
 	spa_list_remove(&remote->link);
 
-	if (remote->properties)
-		pw_properties_free(remote->properties);
+	pw_log_debug("remote %p: free", remote);
+	pw_properties_free(remote->properties);
+
 	free(remote->error);
 	free(impl);
 }
@@ -442,18 +441,18 @@ int pw_remote_disconnect(struct pw_remote *remote)
 	spa_list_for_each_safe(stream, s2, &remote->stream_list, link)
 		pw_stream_disconnect(stream);
 
-	pw_protocol_client_disconnect (remote->conn);
-
 	spa_list_for_each_safe(proxy, t2, &remote->proxy_list, link)
 		pw_proxy_destroy(proxy);
 	remote->core_proxy = NULL;
+
+	pw_protocol_client_disconnect (remote->conn);
 
 	pw_map_clear(&remote->objects);
 	pw_map_clear(&remote->types);
 	remote->n_types = 0;
 
 	if (remote->info) {
-		pw_core_info_free (remote->info);
+		pw_core_info_free(remote->info);
 		remote->info = NULL;
 	}
         pw_remote_update_state(remote, PW_REMOTE_STATE_UNCONNECTED, NULL);

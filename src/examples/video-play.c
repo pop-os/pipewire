@@ -36,6 +36,7 @@ struct type {
 	struct spa_type_media_subtype media_subtype;
 	struct spa_type_format_video format_video;
 	struct spa_type_video_format video_format;
+	uint32_t meta_cursor;
 };
 
 static inline void init_type(struct type *type, struct spa_type_map *map)
@@ -44,6 +45,7 @@ static inline void init_type(struct type *type, struct spa_type_map *map)
 	spa_type_media_subtype_map(map, &type->media_subtype);
 	spa_type_format_video_map(map, &type->format_video);
 	spa_type_video_format_map(map, &type->video_format);
+	type->meta_cursor = spa_type_map_get_id(map, SPA_TYPE_META__Cursor);
 }
 
 #define WIDTH   640
@@ -58,6 +60,7 @@ struct data {
 	SDL_Renderer *renderer;
 	SDL_Window *window;
 	SDL_Texture *texture;
+	SDL_Texture *cursor;
 
 	struct pw_main_loop *loop;
 
@@ -73,7 +76,11 @@ struct data {
 	int32_t stride;
 
 	int counter;
+	SDL_Rect rect;
+	SDL_Rect cursor_rect;
 };
+
+static Uint32 id_to_sdl_format(struct data *data, uint32_t id);
 
 static void handle_events(struct data *data)
 {
@@ -96,8 +103,11 @@ on_stream_process(void *_data)
 	struct spa_buffer *b;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
+	struct spa_meta_video_crop *mc;
+	struct spa_meta_cursor *mcs;
 	uint32_t i;
 	uint8_t *src, *dst;
+	bool render_cursor = false;
 
 	handle_events(data);
 
@@ -114,6 +124,53 @@ on_stream_process(void *_data)
 		fprintf(stderr, "Couldn't lock texture: %s\n", SDL_GetError());
 		goto done;
 	}
+	if ((mc = spa_buffer_find_meta(b, data->t->meta.VideoCrop))) {
+		data->rect.x = mc->x;
+		data->rect.y = mc->y;
+		data->rect.w = mc->width;
+		data->rect.h = mc->height;
+	}
+	if ((mcs = spa_buffer_find_meta(b, data->type.meta_cursor)) &&
+	    spa_meta_cursor_is_valid(mcs)) {
+		struct spa_meta_bitmap *mb;
+		void *cdata;
+		int cstride;
+
+		data->cursor_rect.x = mcs->position.x;
+		data->cursor_rect.y = mcs->position.y;
+
+		mb = SPA_MEMBER(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
+		data->cursor_rect.w = mb->size.width;
+		data->cursor_rect.h = mb->size.height;
+
+		if (data->cursor == NULL) {
+			data->cursor = SDL_CreateTexture(data->renderer,
+						 id_to_sdl_format(data, mb->format),
+						 SDL_TEXTUREACCESS_STREAMING,
+						 mb->size.width, mb->size.height);
+			SDL_SetTextureBlendMode(data->cursor, SDL_BLENDMODE_BLEND);
+		}
+
+
+		if (SDL_LockTexture(data->cursor, NULL, &cdata, &cstride) < 0) {
+			fprintf(stderr, "Couldn't lock cursor texture: %s\n", SDL_GetError());
+			goto done;
+		}
+
+		src = SPA_MEMBER(mb, mb->offset, uint8_t);
+		dst = cdata;
+		ostride = SPA_MIN(cstride, mb->stride);
+
+		for (i = 0; i < mb->size.height; i++) {
+			memcpy(dst, src, ostride);
+			dst += cstride;
+			src += mb->stride;
+		}
+		SDL_UnlockTexture(data->cursor);
+
+		render_cursor = true;
+	}
+
 	sstride = b->datas[0].chunk->stride;
 	ostride = SPA_MIN(sstride, dstride);
 
@@ -127,7 +184,10 @@ on_stream_process(void *_data)
 	SDL_UnlockTexture(data->texture);
 
 	SDL_RenderClear(data->renderer);
-	SDL_RenderCopy(data->renderer, data->texture, NULL, NULL);
+	SDL_RenderCopy(data->renderer, data->texture, &data->rect, NULL);
+	if (render_cursor) {
+		SDL_RenderCopy(data->renderer, data->cursor, NULL, &data->cursor_rect);
+	}
 	SDL_RenderPresent(data->renderer);
 
       done:
@@ -226,7 +286,7 @@ on_stream_format_changed(void *_data, const struct spa_pod *format)
 	struct pw_type *t = data->t;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	const struct spa_pod *params[2];
+	const struct spa_pod *params[4];
 	Uint32 sdl_format;
 	void *d;
 
@@ -254,6 +314,11 @@ on_stream_format_changed(void *_data, const struct spa_pod *format)
 	SDL_LockTexture(data->texture, NULL, &d, &data->stride);
 	SDL_UnlockTexture(data->texture);
 
+	data->rect.x = 0;
+	data->rect.y = 0;
+	data->rect.w = data->format.size.width;
+	data->rect.h = data->format.size.height;
+
 	params[0] = spa_pod_builder_object(&b,
 		t->param.idBuffers, t->param_buffers.Buffers,
 		":", t->param_buffers.size,    "i", data->stride * data->format.size.height,
@@ -266,8 +331,20 @@ on_stream_format_changed(void *_data, const struct spa_pod *format)
 		t->param.idMeta, t->param_meta.Meta,
 		":", t->param_meta.type, "I", t->meta.Header,
 		":", t->param_meta.size, "i", sizeof(struct spa_meta_header));
+	params[2] = spa_pod_builder_object(&b,
+		t->param.idMeta, t->param_meta.Meta,
+		":", t->param_meta.type, "I", t->meta.VideoCrop,
+		":", t->param_meta.size, "i", sizeof(struct spa_meta_video_crop));
+#define CURSOR_META_SIZE(w,h)	(sizeof(struct spa_meta_cursor) + \
+				 sizeof(struct spa_meta_bitmap) + w * h * 4)
+	params[3] = spa_pod_builder_object(&b,
+		t->param.idMeta, t->param_meta.Meta,
+		":", t->param_meta.type, "I", data->type.meta_cursor,
+		":", t->param_meta.size, "iru", CURSOR_META_SIZE(64,64),
+			SPA_POD_PROP_MIN_MAX(CURSOR_META_SIZE(1,1),
+					     CURSOR_META_SIZE(256,256)));
 
-	pw_stream_finish_format(stream, 0, params, 2);
+	pw_stream_finish_format(stream, 0, params, 4);
 }
 
 static const struct pw_stream_events stream_events = {
@@ -448,6 +525,12 @@ int main(int argc, char *argv[])
 
 	pw_core_destroy(data.core);
 	pw_main_loop_destroy(data.loop);
+
+	SDL_DestroyTexture(data.texture);
+	if (data.cursor)
+		SDL_DestroyTexture(data.cursor);
+	SDL_DestroyRenderer(data.renderer);
+	SDL_DestroyWindow(data.window);
 
 	return 0;
 }
