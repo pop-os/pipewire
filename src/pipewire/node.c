@@ -477,15 +477,19 @@ const struct pw_properties *pw_node_get_properties(struct pw_node *node)
 int pw_node_update_properties(struct pw_node *node, const struct spa_dict *dict)
 {
 	struct pw_resource *resource;
-	uint32_t i;
+	uint32_t i, changed = 0;
 
 	for (i = 0; i < dict->n_items; i++)
-		pw_properties_set(node->properties, dict->items[i].key, dict->items[i].value);
+		changed += pw_properties_set(node->properties, dict->items[i].key, dict->items[i].value);
+
+	pw_log_debug("node %p: updated %d properties", node, changed);
+
+	if (!changed)
+		return 0;
 
 	check_properties(node);
 
 	node->info.props = &node->properties->dict;
-
 	node->info.change_mask |= PW_NODE_CHANGE_MASK_PROPS;
 	pw_node_events_info_changed(node, &node->info);
 
@@ -494,7 +498,7 @@ int pw_node_update_properties(struct pw_node *node, const struct spa_dict *dict)
 
 	node->info.change_mask = 0;
 
-	return 0;
+	return changed;
 }
 
 static void node_done(void *data, int seq, int res)
@@ -650,8 +654,7 @@ void pw_node_destroy(struct pw_node *node)
 	pw_map_clear(&node->input_port_map);
 	pw_map_clear(&node->output_port_map);
 
-	if (node->properties)
-		pw_properties_free(node->properties);
+	pw_properties_free(node->properties);
 
 	clear_info(node);
 
@@ -918,8 +921,7 @@ void pw_node_update_state(struct pw_node *node, enum pw_node_state state, char *
 		pw_log_debug("node %p: update state from %s -> %s", node,
 			     pw_node_state_as_string(old), pw_node_state_as_string(state));
 
-		if (node->info.error)
-			free((char*)node->info.error);
+		free((char*)node->info.error);
 		node->info.error = error;
 		node->info.state = state;
 

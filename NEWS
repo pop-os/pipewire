@@ -1,16 +1,11 @@
-PipeWire 0.2.3
+PipeWire 0.2.5
 
-- Fix deviceprovider caps introspection
-- Refcounting fixes in pipewiresrc
-- Remove clock interpolation from stream
-- Improve clock in gstreamer elements
-- Remove spalib
-- Fix crash with pw_map
-- Add version number to hook list
-- Improve driver mode in gstreamer elements
-- add daemon options
-- add man pages
+- build fixes for systemd
+- Add cursor and bitmap metadata. This can be used to send a cursor
+  sprite with the video stream.
+- permissions were set too strict for non-flatpak clients
+- Fix crash in loop caused by thread unsafe hook emission
+- Add more error checking for thread-loop
+- Small cleanups and bugfixes
 
-Work is ongoing in the work branch that features a completely new
-scheduling method that will enable audio support. Some of these
-API changes are backported in this branch.
+This is mostly a bugfix release.
