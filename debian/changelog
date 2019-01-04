@@ -1,9 +1,12 @@
-pipewire (0.2.3-4) UNRELEASED; urgency=medium
+pipewire (0.2.5-1) UNRELEASED; urgency=medium
 
   [ Laurent Bigonville ]
   * debian/libpipewire-0.2-1.symbols: Add the Build-Depends-Package annotation
   * debian/control: Set Section to net for the main pipewire package
     (Closes: #908524)
+
+  [ Jeremy Bicha ]
+  * New upstream release
 
  -- Jeremy Bicha <jbicha@debian.org>  Fri, 04 Jan 2019 13:46:05 -0500
 
