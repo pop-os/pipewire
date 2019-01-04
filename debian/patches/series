@@ -1,7 +1,0 @@
-man-install-manpages-in-the-right-directory.patch
-Fix-memory-leak-in-pw_properties_set.patch
-meson-Use-pkgconfig.generate.patch
-Fix-build-with-clang.patch
-stream-improve-cleanup.patch
-pipewire-fix-leak-of-dbus-interface.patch
-man-fix-man-page-install-path.patch
