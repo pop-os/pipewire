@@ -192,6 +192,7 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_properties_new_string@Base 0.2.2
  pw_properties_set@Base 0.1.4
  pw_properties_setf@Base 0.1.4
+ pw_properties_setva@Base 0.2.5
  pw_protocol_add_listener@Base 0.1.4
  pw_protocol_add_marshal@Base 0.1.4
  pw_protocol_destroy@Base 0.1.4
