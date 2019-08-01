@@ -103,6 +103,7 @@ struct node_data {
 
 /** \endcond */
 
+SPA_EXPORT
 const char *pw_remote_state_as_string(enum pw_remote_state state)
 {
 	switch (state) {
@@ -180,9 +181,11 @@ static void core_event_remove_id(void *data, uint32_t id)
 	struct pw_proxy *proxy;
 
 	pw_log_debug("remote %p: object remove %u", this, id);
-	if ((proxy = pw_map_lookup(&this->objects, id)) != NULL)
-		pw_proxy_destroy(proxy);
-
+	if ((proxy = pw_map_lookup(&this->objects, id)) == NULL) {
+		pw_log_warn("remote %p: asked to remove unknown object id %u", this, id);
+		return;
+	}
+	pw_proxy_destroy(proxy);
 	pw_map_remove(&this->objects, id);
 }
 
@@ -208,6 +211,7 @@ static const struct pw_core_proxy_events core_proxy_events = {
 	.info = core_event_info,
 };
 
+SPA_EXPORT
 struct pw_remote *pw_remote_new(struct pw_core *core,
 				struct pw_properties *properties,
 				size_t user_data_size)
@@ -286,10 +290,11 @@ struct pw_remote *pw_remote_new(struct pw_core *core,
 	return NULL;
 }
 
+SPA_EXPORT
 void pw_remote_destroy(struct pw_remote *remote)
 {
 	struct remote *impl = SPA_CONTAINER_OF(remote, struct remote, this);
-	struct pw_stream *stream, *s2;
+	struct pw_stream *stream;
 
 	pw_log_debug("remote %p: destroy", remote);
 	pw_remote_events_destroy(remote);
@@ -297,7 +302,7 @@ void pw_remote_destroy(struct pw_remote *remote)
 	if (remote->state != PW_REMOTE_STATE_UNCONNECTED)
 		pw_remote_disconnect(remote);
 
-	spa_list_for_each_safe(stream, s2, &remote->stream_list, link)
+	spa_list_consume(stream, &remote->stream_list, link)
 		pw_stream_destroy(stream);
 
 	pw_protocol_client_destroy (remote->conn);
@@ -311,21 +316,25 @@ void pw_remote_destroy(struct pw_remote *remote)
 	free(impl);
 }
 
+SPA_EXPORT
 struct pw_core *pw_remote_get_core(struct pw_remote *remote)
 {
 	return remote->core;
 }
 
+SPA_EXPORT
 const struct pw_properties *pw_remote_get_properties(struct pw_remote *remote)
 {
 	return remote->properties;
 }
 
+SPA_EXPORT
 void *pw_remote_get_user_data(struct pw_remote *remote)
 {
 	return remote->user_data;
 }
 
+SPA_EXPORT
 enum pw_remote_state pw_remote_get_state(struct pw_remote *remote, const char **error)
 {
 	if (error)
@@ -333,6 +342,7 @@ enum pw_remote_state pw_remote_get_state(struct pw_remote *remote, const char **
 	return remote->state;
 }
 
+SPA_EXPORT
 void pw_remote_add_listener(struct pw_remote *remote,
 			    struct spa_hook *listener,
 			    const struct pw_remote_events *events,
@@ -366,16 +376,19 @@ static int do_connect(struct pw_remote *remote)
 	return -ENOMEM;
 }
 
+SPA_EXPORT
 struct pw_core_proxy * pw_remote_get_core_proxy(struct pw_remote *remote)
 {
 	return remote->core_proxy;
 }
 
+SPA_EXPORT
 const struct pw_core_info *pw_remote_get_core_info(struct pw_remote *remote)
 {
 	return remote->info;
 }
 
+SPA_EXPORT
 struct pw_proxy *pw_remote_find_proxy(struct pw_remote *remote, uint32_t id)
 {
 	return pw_map_lookup(&remote->objects, id);
@@ -393,6 +406,7 @@ static void done_connect(void *data, int result)
 	do_connect(remote);
 }
 
+SPA_EXPORT
 int pw_remote_connect(struct pw_remote *remote)
 {
 	int res;
@@ -407,6 +421,7 @@ int pw_remote_connect(struct pw_remote *remote)
 	return remote->state == PW_REMOTE_STATE_ERROR ? -EIO : 0;
 }
 
+SPA_EXPORT
 int pw_remote_connect_fd(struct pw_remote *remote, int fd)
 {
 	int res;
@@ -422,6 +437,7 @@ int pw_remote_connect_fd(struct pw_remote *remote, int fd)
 	return do_connect(remote);
 }
 
+SPA_EXPORT
 int pw_remote_steal_fd(struct pw_remote *remote)
 {
 	int fd;
@@ -432,16 +448,17 @@ int pw_remote_steal_fd(struct pw_remote *remote)
 	return fd;
 }
 
+SPA_EXPORT
 int pw_remote_disconnect(struct pw_remote *remote)
 {
-	struct pw_proxy *proxy, *t2;
+	struct pw_proxy *proxy;
 	struct pw_stream *stream, *s2;
 
 	pw_log_debug("remote %p: disconnect", remote);
 	spa_list_for_each_safe(stream, s2, &remote->stream_list, link)
 		pw_stream_disconnect(stream);
 
-	spa_list_for_each_safe(proxy, t2, &remote->proxy_list, link)
+	spa_list_consume(proxy, &remote->proxy_list, link)
 		pw_proxy_destroy(proxy);
 	remote->core_proxy = NULL;
 
@@ -784,7 +801,7 @@ static void add_port_update(struct pw_proxy *proxy, struct pw_port *port, uint32
 
 			spa_pod_builder_init(&b, buf, sizeof(buf));
                         if (spa_node_port_enum_params(port->node->node,
-						      port->direction, port->port_id,
+						      port->spa_direction, port->port_id,
 						      data->t->param.idList, &idx1,
 						      NULL, &param, &b) <= 0)
                                 break;
@@ -795,7 +812,7 @@ static void add_port_update(struct pw_proxy *proxy, struct pw_port *port, uint32
 			for (idx2 = 0;; n_params++) {
 				spa_pod_builder_init(&b, buf, sizeof(buf));
 	                        if (spa_node_port_enum_params(port->node->node,
-							      port->direction, port->port_id,
+							      port->spa_direction, port->port_id,
 							      id, &idx2,
 							      NULL, &param, &b) <= 0)
 	                                break;
@@ -806,13 +823,13 @@ static void add_port_update(struct pw_proxy *proxy, struct pw_port *port, uint32
                 }
 	}
 	if (change_mask & PW_CLIENT_NODE_PORT_UPDATE_INFO) {
-		spa_node_port_get_info(port->node->node, port->direction, port->port_id, &port_info);
+		spa_node_port_get_info(port->node->node, port->spa_direction, port->port_id, &port_info);
 		pi = * port_info;
 		pi.flags &= ~SPA_PORT_INFO_FLAG_CAN_ALLOC_BUFFERS;
 	}
 
         pw_client_node_proxy_port_update(data->node_proxy,
-                                         port->direction,
+                                         port->spa_direction,
                                          port->port_id,
                                          change_mask,
                                          n_params,
@@ -1318,6 +1335,7 @@ static const struct spa_node node_impl = {
 	.port_reuse_buffer = impl_port_reuse_buffer,
 };
 
+SPA_EXPORT
 struct pw_proxy *pw_remote_export(struct pw_remote *remote,
 				  struct pw_node *node)
 {

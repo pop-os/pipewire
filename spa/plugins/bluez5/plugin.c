@@ -22,32 +22,21 @@
 
 #include <spa/support/plugin.h>
 
-#define MAX_FACTORIES   16
+extern const struct spa_handle_factory spa_bluez5_monitor_factory;
 
-static const struct spa_handle_factory *factories[MAX_FACTORIES];
-static int n_factories;
-
-int spa_handle_factory_register(const struct spa_handle_factory *factory)
-{
-        if (n_factories >= MAX_FACTORIES) {
-                fprintf(stderr, "too many factories\n");
-		return -ENOMEM;
-	}
-
-	factories[n_factories++] = factory;
-	return 0;
-}
-
-int
+SPA_EXPORT int
 spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
 {
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(index != NULL, -EINVAL);
 
-	if (*index >= n_factories)
+	switch (*index) {
+	case 0:
+		*factory = &spa_bluez5_monitor_factory;
+		break;
+	default:
 		return 0;
-
-	*factory = factories[(*index)++];
-
+	}
+	(*index)++;
 	return 1;
 }

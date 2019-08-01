@@ -51,8 +51,10 @@ struct impl {
 
 	struct spa_hook input_port_listener;
 	struct spa_hook input_node_listener;
+	struct spa_hook input_global_listener;
 	struct spa_hook output_port_listener;
 	struct spa_hook output_node_listener;
+	struct spa_hook output_global_listener;
 };
 
 struct resource_data {
@@ -146,7 +148,7 @@ static int do_negotiate(struct pw_link *this, uint32_t in_state, uint32_t out_st
 
 	if (out_state > PW_PORT_STATE_CONFIGURE && output->node->info.state == PW_NODE_STATE_IDLE) {
 		if ((res = spa_node_port_enum_params(output->node->node,
-						     output->direction, output->port_id,
+						     output->spa_direction, output->port_id,
 						     t->param.idFormat, &index,
 						     NULL, &current, &b)) <= 0) {
 			if (res == 0)
@@ -167,7 +169,7 @@ static int do_negotiate(struct pw_link *this, uint32_t in_state, uint32_t out_st
 	}
 	if (in_state > PW_PORT_STATE_CONFIGURE && input->node->info.state == PW_NODE_STATE_IDLE) {
 		if ((res = spa_node_port_enum_params(input->node->node,
-						     input->direction, input->port_id,
+						     input->spa_direction, input->port_id,
 						     t->param.idFormat, &index,
 						     NULL, &current, &b)) <= 0) {
 			if (res == 0)
@@ -447,7 +449,7 @@ param_filter(struct pw_link *this,
 	        spa_pod_builder_init(&ib, ibuf, sizeof(ibuf));
 		pw_log_debug("iparam %d", iidx);
 		if ((res = spa_node_port_enum_params(in_port->node->node,
-						     in_port->direction, in_port->port_id,
+						     in_port->spa_direction, in_port->port_id,
 						     id, &iidx, NULL, &iparam, &ib)) < 0)
 			break;
 
@@ -462,7 +464,7 @@ param_filter(struct pw_link *this,
 
 		for (oidx = 0;;) {
 			pw_log_debug("oparam %d", oidx);
-			if (spa_node_port_enum_params(out_port->node->node, out_port->direction,
+			if (spa_node_port_enum_params(out_port->node->node, out_port->spa_direction,
 						      out_port->port_id, id, &oidx,
 						      iparam, &oparam, result) <= 0) {
 				break;
@@ -500,12 +502,12 @@ static int do_allocation(struct pw_link *this, uint32_t in_state, uint32_t out_s
 
 	pw_log_debug("link %p: doing alloc buffers %p %p", this, output->node, input->node);
 	/* find out what's possible */
-	if ((res = spa_node_port_get_info(output->node->node, output->direction, output->port_id,
+	if ((res = spa_node_port_get_info(output->node->node, output->spa_direction, output->port_id,
 					  &oinfo)) < 0) {
 		asprintf(&error, "error get output port info: %d", res);
 		goto error;
 	}
-	if ((res = spa_node_port_get_info(input->node->node, input->direction, input->port_id,
+	if ((res = spa_node_port_get_info(input->node->node, input->spa_direction, input->port_id,
 					  &iinfo)) < 0) {
 		asprintf(&error, "error get input port info: %d", res);
 		goto error;
@@ -868,6 +870,7 @@ static void input_remove(struct pw_link *this, struct pw_port *port)
 	pw_log_debug("link %p: remove input port %p", this, port);
 	spa_hook_remove(&impl->input_port_listener);
 	spa_hook_remove(&impl->input_node_listener);
+	spa_hook_remove(&impl->input_global_listener);
 
 	pw_loop_invoke(port->node->data_loop,
 		       do_remove_input, 1, NULL, 0, true, this);
@@ -897,6 +900,7 @@ static void output_remove(struct pw_link *this, struct pw_port *port)
 	pw_log_debug("link %p: remove output port %p", this, port);
 	spa_hook_remove(&impl->output_port_listener);
 	spa_hook_remove(&impl->output_node_listener);
+	spa_hook_remove(&impl->output_global_listener);
 
 	pw_loop_invoke(port->node->data_loop,
 		       do_remove_output, 1, NULL, 0, true, this);
@@ -1086,6 +1090,45 @@ static const struct pw_node_events output_node_events = {
 	.async_complete = output_node_async_complete,
 };
 
+static int
+check_permission(struct pw_core *core,
+		 struct pw_port *output,
+		 struct pw_port *input,
+		 struct pw_properties *properties)
+{
+	struct pw_node *input_node, *output_node;
+	struct pw_client *client;
+
+	input_node = input->node;
+	output_node = output->node;
+
+	if ((client = output_node->global->owner) != NULL &&
+	    !PW_PERM_IS_R(pw_global_get_permissions(input_node->global, client)))
+		return -EPERM;
+
+	if ((client = input_node->global->owner) != NULL &&
+	    !PW_PERM_IS_R(pw_global_get_permissions(output_node->global, client)))
+		return -EPERM;
+
+	return 0;
+}
+
+static void global_permissions_changed(void *data,
+		struct pw_client *client, uint32_t old, uint32_t new)
+{
+	struct pw_link *this = data;
+
+	if (check_permission(this->core, this->output, this->input, this->properties) < 0)
+		pw_link_destroy(this);
+}
+
+
+static const struct pw_global_events global_node_events = {
+	PW_VERSION_GLOBAL_EVENTS,
+	.permissions_changed = global_permissions_changed,
+};
+
+SPA_EXPORT
 struct pw_link *pw_link_new(struct pw_core *core,
 			    struct pw_port *output,
 			    struct pw_port *input,
@@ -1103,6 +1146,9 @@ struct pw_link *pw_link_new(struct pw_core *core,
 
 	if (pw_link_find(output, input))
 		goto link_exists;
+
+	if (check_permission(core, output, input, properties) < 0)
+		goto link_not_allowed;
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
@@ -1140,8 +1186,10 @@ struct pw_link *pw_link_new(struct pw_core *core,
 
 	pw_port_add_listener(input, &impl->input_port_listener, &input_port_events, impl);
 	pw_node_add_listener(input_node, &impl->input_node_listener, &input_node_events, impl);
+	pw_global_add_listener(input_node->global, &impl->input_global_listener, &global_node_events, impl);
 	pw_port_add_listener(output, &impl->output_port_listener, &output_port_events, impl);
 	pw_node_add_listener(output_node, &impl->output_node_listener, &output_node_events, impl);
+	pw_global_add_listener(output_node->global, &impl->output_global_listener, &global_node_events, impl);
 
 	input_node->live = output_node->live;
 	if (output_node->clock)
@@ -1170,12 +1218,12 @@ struct pw_link *pw_link_new(struct pw_core *core,
 		     input_node, input->port_id, this->rt.in_port.port_id);
 
 	spa_graph_port_init(&this->rt.out_port,
-			    PW_DIRECTION_OUTPUT,
+			    SPA_DIRECTION_OUTPUT,
 			    this->rt.out_port.port_id,
 			    SPA_GRAPH_PORT_FLAG_DISABLED,
 			    &this->io);
 	spa_graph_port_init(&this->rt.in_port,
-			    PW_DIRECTION_INPUT,
+			    SPA_DIRECTION_INPUT,
 			    this->rt.in_port.port_id,
 			    SPA_GRAPH_PORT_FLAG_DISABLED,
 			    &this->io);
@@ -1201,6 +1249,9 @@ struct pw_link *pw_link_new(struct pw_core *core,
       link_exists:
 	asprintf(error, "link already exists");
 	return NULL;
+      link_not_allowed:
+	asprintf(error, "link not allowed");
+	return NULL;
       no_mem:
 	asprintf(error, "no memory");
 	return NULL;
@@ -1220,6 +1271,7 @@ static const struct pw_global_events global_events = {
 	.bind = global_bind,
 };
 
+SPA_EXPORT
 int pw_link_register(struct pw_link *link,
 		     struct pw_client *owner,
 		     struct pw_global *parent,
@@ -1227,6 +1279,9 @@ int pw_link_register(struct pw_link *link,
 {
 	struct pw_core *core = link->core;
 	struct pw_node *input_node, *output_node;
+
+	if (link->registered)
+		return -EEXIST;
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);
@@ -1272,10 +1327,11 @@ int pw_link_register(struct pw_link *link,
 	return 0;
 }
 
+SPA_EXPORT
 void pw_link_destroy(struct pw_link *link)
 {
 	struct impl *impl = SPA_CONTAINER_OF(link, struct impl, this);
-	struct pw_resource *resource, *tmp;
+	struct pw_resource *resource;
 
 	pw_log_debug("link %p: destroy", impl);
 	pw_link_events_destroy(link);
@@ -1292,13 +1348,13 @@ void pw_link_destroy(struct pw_link *link)
 
 	output_remove(link, link->output);
 
+	spa_list_consume(resource, &link->resource_list, link)
+		pw_resource_destroy(resource);
+
 	if (link->global) {
 		spa_hook_remove(&link->global_listener);
 		pw_global_destroy(link->global);
 	}
-
-	spa_list_for_each_safe(resource, tmp, &link->resource_list, link)
-	    pw_resource_destroy(resource);
 
 	pw_log_debug("link %p: free", impl);
 	pw_link_events_free(link);
@@ -1312,6 +1368,7 @@ void pw_link_destroy(struct pw_link *link)
 	free(impl);
 }
 
+SPA_EXPORT
 void pw_link_add_listener(struct pw_link *link,
 			  struct spa_hook *listener,
 			  const struct pw_link_events *events,
@@ -1321,6 +1378,7 @@ void pw_link_add_listener(struct pw_link *link,
 	spa_hook_list_append(&link->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 struct pw_link *pw_link_find(struct pw_port *output_port, struct pw_port *input_port)
 {
 	struct pw_link *pl;
@@ -1332,31 +1390,37 @@ struct pw_link *pw_link_find(struct pw_port *output_port, struct pw_port *input_
 	return NULL;
 }
 
+SPA_EXPORT
 struct pw_core *pw_link_get_core(struct pw_link *link)
 {
 	return link->core;
 }
 
+SPA_EXPORT
 void *pw_link_get_user_data(struct pw_link *link)
 {
 	return link->user_data;
 }
 
+SPA_EXPORT
 const struct pw_link_info *pw_link_get_info(struct pw_link *link)
 {
 	return &link->info;
 }
 
+SPA_EXPORT
 struct pw_global *pw_link_get_global(struct pw_link *link)
 {
 	return link->global;
 }
 
+SPA_EXPORT
 struct pw_port *pw_link_get_output(struct pw_link *link)
 {
 	return link->output;
 }
 
+SPA_EXPORT
 struct pw_port *pw_link_get_input(struct pw_link *link)
 {
 	return link->input;

@@ -686,13 +686,13 @@ static int impl_get_interface(struct spa_handle *handle, uint32_t interface_id, 
 static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *impl;
-	struct source_impl *source, *tmp;
+	struct source_impl *source;
 
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	impl = (struct impl *) handle;
 
-	spa_list_for_each_safe(source, tmp, &impl->source_list, link)
+	spa_list_consume(source, &impl->source_list, link)
 		loop_destroy_source(&source->source);
 
 	process_destroy(impl);
@@ -776,7 +776,7 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 	return 1;
 }
 
-static const struct spa_handle_factory loop_factory = {
+const struct spa_handle_factory spa_support_loop_factory = {
 	SPA_VERSION_HANDLE_FACTORY,
 	NAME,
 	NULL,
@@ -784,11 +784,3 @@ static const struct spa_handle_factory loop_factory = {
 	impl_init,
 	impl_enum_interface_info
 };
-
-int spa_handle_factory_register(const struct spa_handle_factory *factory);
-
-static void reg(void) __attribute__ ((constructor));
-static void reg(void)
-{
-	spa_handle_factory_register(&loop_factory);
-}

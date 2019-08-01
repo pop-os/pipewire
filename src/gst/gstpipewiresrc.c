@@ -409,6 +409,9 @@ on_process (void *_data)
 
   GST_LOG_OBJECT (pwsrc, "got new buffer %p", buf);
 
+  GST_BUFFER_PTS (buf) = GST_CLOCK_TIME_NONE;
+  GST_BUFFER_DTS (buf) = GST_CLOCK_TIME_NONE;
+
   h = data->header;
   if (h) {
     GST_INFO ("pts %" G_GUINT64_FORMAT ", dts_offset %"G_GUINT64_FORMAT, h->pts, h->dts_offset);
@@ -996,7 +999,10 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
 			  &pwsrc->remote_listener,
 			  &remote_events, pwsrc);
 
-  pw_remote_connect (pwsrc->remote);
+  if (pwsrc->fd == -1)
+    pw_remote_connect (pwsrc->remote);
+  else
+    pw_remote_connect_fd (pwsrc->remote, pwsrc->fd);
 
   while (TRUE) {
     enum pw_remote_state state = pw_remote_get_state(pwsrc->remote, &error);

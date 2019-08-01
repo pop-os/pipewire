@@ -313,24 +313,32 @@ static struct pw_client *client_new(struct server *s, int fd)
 	struct pw_protocol *protocol = s->this.protocol;
 	struct protocol_data *pd = protocol->user_data;
 	socklen_t len;
-	struct ucred ucred, *ucredp;
+	struct ucred ucred;
 	struct pw_core *core = protocol->core;
 	struct pw_properties *props;
-
-	len = sizeof(ucred);
-	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
-		pw_log_error("no peercred: %m");
-		ucredp = NULL;
-	} else {
-		ucredp = &ucred;
-	}
+	char buffer[1024];
 
 	props = pw_properties_new(PW_CLIENT_PROP_PROTOCOL, "protocol-native", NULL);
 	if (props == NULL)
 		goto no_props;
 
+	len = sizeof(ucred);
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
+		pw_log_error("no peercred: %m");
+	} else {
+		pw_properties_setf(props, PW_CLIENT_PROP_UCRED_PID, "%d", ucred.pid);
+		pw_properties_setf(props, PW_CLIENT_PROP_UCRED_UID, "%d", ucred.uid);
+		pw_properties_setf(props, PW_CLIENT_PROP_UCRED_GID, "%d", ucred.gid);
+	}
+
+	len = sizeof(buffer);
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERSEC, buffer, &len) < 0) {
+		pw_log_error("no peersec: %m");
+	} else {
+		pw_properties_setf(props, PW_CLIENT_PROP_SEC_LABEL, "%s", buffer);
+	}
+
 	client = pw_client_new(protocol->core,
-			       ucredp,
 			       props,
 			       sizeof(struct client_data));
 	if (client == NULL)
@@ -716,11 +724,11 @@ impl_new_client(struct pw_protocol *protocol,
 static void destroy_server(struct pw_protocol_server *server)
 {
 	struct server *s = SPA_CONTAINER_OF(server, struct server, this);
-	struct pw_client *client, *tmp;
+	struct pw_client *client;
 
 	spa_list_remove(&server->link);
 
-	spa_list_for_each_safe(client, tmp, &server->client_list, protocol_link)
+	spa_list_consume(client, &server->client_list, protocol_link)
 		pw_client_destroy(client);
 
 	if (s->source)
@@ -936,6 +944,7 @@ static int module_init(struct pw_module *module, struct pw_properties *propertie
 	return 0;
 }
 
+SPA_EXPORT
 int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);

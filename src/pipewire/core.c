@@ -102,13 +102,25 @@ static const struct pw_resource_events resource_events = {
 	.destroy = destroy_registry_resource
 };
 
+static int destroy_resource(void *object, void *data)
+{
+	struct pw_resource *resource = object;
+	if (resource && resource != resource->client->core_resource) {
+		resource->removed = true;
+		pw_resource_destroy(resource);
+	}
+	return 0;
+}
+
 static void core_hello(void *object)
 {
 	struct pw_resource *resource = object;
+	struct pw_client *client = resource->client;
 	struct pw_core *this = resource->core;
 
-	pw_log_debug("core %p: hello from source %p", this, resource);
-	resource->client->n_types = 0;
+	pw_log_debug("core %p: hello from resource %p", this, resource);
+	client->n_types = 0;
+	pw_map_for_each(&client->objects, destroy_resource, client);
 
 	this->info.change_mask = PW_CORE_CHANGE_MASK_ALL;
 	pw_core_resource_info(resource, &this->info);
@@ -117,7 +129,8 @@ static void core_hello(void *object)
 static void core_client_update(void *object, const struct spa_dict *props)
 {
 	struct pw_resource *resource = object;
-	pw_client_update_properties(resource->client, props);
+	struct pw_client *client = resource->client;
+	pw_client_update_properties(client, props);
 }
 
 static void core_permissions(void *object, const struct spa_dict *props)
@@ -360,6 +373,7 @@ static const struct pw_global_events global_events = {
  *
  * \memberof pw_core
  */
+SPA_EXPORT
 struct pw_core *pw_core_new(struct pw_loop *main_loop, struct pw_properties *properties)
 {
 	struct pw_core *this;
@@ -468,30 +482,40 @@ struct pw_core *pw_core_new(struct pw_loop *main_loop, struct pw_properties *pro
  *
  * \memberof pw_core
  */
+SPA_EXPORT
 void pw_core_destroy(struct pw_core *core)
 {
-	struct pw_global *global, *t;
-	struct pw_module *module, *tm;
-	struct pw_remote *remote, *tr;
-	struct pw_node *node, *tn;
+	struct pw_global *global;
+	struct pw_module *module;
+	struct pw_remote *remote;
+	struct pw_resource *resource;
+	struct pw_node *node;
 
 	pw_log_debug("core %p: destroy", core);
 	pw_core_events_destroy(core);
 
 	spa_hook_remove(&core->global_listener);
 
-	spa_list_for_each_safe(remote, tr, &core->remote_list, link)
+	spa_list_consume(remote, &core->remote_list, link)
 		pw_remote_destroy(remote);
 
-	spa_list_for_each_safe(module, tm, &core->module_list, link)
+	spa_list_consume(module, &core->module_list, link)
 		pw_module_destroy(module);
 
-	spa_list_for_each_safe(node, tn, &core->node_list, link)
+	spa_list_consume(node, &core->node_list, link)
 		pw_node_destroy(node);
 
-	spa_list_for_each_safe(global, t, &core->global_list, link)
-		pw_global_destroy(global);
+	spa_list_consume(resource, &core->registry_resource_list, link)
+		pw_resource_destroy(resource);
 
+	spa_list_consume(resource, &core->resource_list, link)
+		pw_resource_destroy(resource);
+
+	spa_list_consume(global, &core->global_list, link)
+		pw_global_destroy(global);
+	pw_map_clear(&core->globals);
+
+	pw_log_debug("core %p: free", core);
 	pw_core_events_free(core);
 
 	pw_data_loop_destroy(core->data_loop_impl);
@@ -500,22 +524,22 @@ void pw_core_destroy(struct pw_core *core)
 
 	pw_properties_free(core->properties);
 
-	pw_map_clear(&core->globals);
-
-	pw_log_debug("core %p: free", core);
 	free(core);
 }
 
+SPA_EXPORT
 const struct pw_core_info *pw_core_get_info(struct pw_core *core)
 {
 	return &core->info;
 }
 
+SPA_EXPORT
 struct pw_global *pw_core_get_global(struct pw_core *core)
 {
 	return core->global;
 }
 
+SPA_EXPORT
 void pw_core_add_listener(struct pw_core *core,
 			  struct spa_hook *listener,
 			  const struct pw_core_events *events,
@@ -524,22 +548,26 @@ void pw_core_add_listener(struct pw_core *core,
 	spa_hook_list_append(&core->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 struct pw_type *pw_core_get_type(struct pw_core *core)
 {
 	return &core->type;
 }
 
+SPA_EXPORT
 const struct spa_support *pw_core_get_support(struct pw_core *core, uint32_t *n_support)
 {
 	*n_support = core->n_support;
 	return core->support;
 }
 
+SPA_EXPORT
 struct pw_loop *pw_core_get_main_loop(struct pw_core *core)
 {
 	return core->main_loop;
 }
 
+SPA_EXPORT
 const struct pw_properties *pw_core_get_properties(struct pw_core *core)
 {
 	return core->properties;
@@ -554,6 +582,7 @@ const struct pw_properties *pw_core_get_properties(struct pw_core *core)
  *
  * \memberof pw_core
  */
+SPA_EXPORT
 int pw_core_update_properties(struct pw_core *core, const struct spa_dict *dict)
 {
 	struct pw_resource *resource;
@@ -580,6 +609,7 @@ int pw_core_update_properties(struct pw_core *core, const struct spa_dict *dict)
 	return changed;
 }
 
+SPA_EXPORT
 int pw_core_for_each_global(struct pw_core *core,
 			    int (*callback) (void *data, struct pw_global *global),
 			    void *data)
@@ -597,6 +627,7 @@ int pw_core_for_each_global(struct pw_core *core,
 	return 0;
 }
 
+SPA_EXPORT
 struct pw_global *pw_core_find_global(struct pw_core *core, uint32_t id)
 {
 	struct pw_global *global;
@@ -662,9 +693,7 @@ struct pw_port *pw_core_find_port(struct pw_core *core,
 				pw_log_debug("id \"%u\" matches node %p", id, n);
 
 				best =
-				    pw_node_get_free_port(n,
-							  pw_direction_reverse(other_port->
-									       direction));
+				    pw_node_get_free_port(n, pw_direction_reverse(other_port->direction));
 				if (best)
 					break;
 			}
@@ -737,6 +766,9 @@ int pw_core_find_format(struct pw_core *core,
 	int res;
 	uint32_t iidx = 0, oidx = 0;
 	struct pw_type *t = &core->type;
+	struct spa_pod_builder fb = { 0 };
+	uint8_t fbuf[4096];
+	struct spa_pod *filter;
 
 	out_state = output->state;
 	in_state = input->state;
@@ -750,37 +782,52 @@ int pw_core_find_format(struct pw_core *core,
 		in_state = PW_PORT_STATE_CONFIGURE;
 
 	if (in_state == PW_PORT_STATE_CONFIGURE && out_state > PW_PORT_STATE_CONFIGURE) {
-		/* only input needs format */
+		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
 		if ((res = spa_node_port_enum_params(output->node->node,
-						     output->direction, output->port_id,
+						     output->spa_direction, output->port_id,
 						     t->param.idFormat, &oidx,
-						     NULL, format, builder)) <= 0) {
-			if (res == 0)
-				res = -EBADF;
+						     NULL, &filter, &fb)) <= 0) {
 			asprintf(error, "error get output format: %s", spa_strerror(res));
 			goto error;
 		}
-	} else if (out_state == PW_PORT_STATE_CONFIGURE && in_state > PW_PORT_STATE_CONFIGURE) {
-		/* only output needs format */
+		pw_log_debug("Got output %d format:", oidx);
+		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+			spa_debug_format(2, core->type.map, filter);
+
 		if ((res = spa_node_port_enum_params(input->node->node,
-						     input->direction, input->port_id,
+						     input->spa_direction, input->port_id,
+						     t->param.idEnumFormat, &iidx,
+						     filter, format, builder)) <= 0) {
+			asprintf(error, "error input enum formats: %d", res);
+			goto error;
+		}
+	} else if (out_state == PW_PORT_STATE_CONFIGURE && in_state > PW_PORT_STATE_CONFIGURE) {
+		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
+		if ((res = spa_node_port_enum_params(input->node->node,
+						     input->spa_direction, input->port_id,
 						     t->param.idFormat, &iidx,
-						     NULL, format, builder)) <= 0) {
-			if (res == 0)
-				res = -EBADF;
+						     NULL, &filter, &fb)) <= 0) {
 			asprintf(error, "error get input format: %s", spa_strerror(res));
 			goto error;
 		}
+		pw_log_debug("Got input %d format:", iidx);
+		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+			spa_debug_format(2, core->type.map, filter);
+
+		if ((res = spa_node_port_enum_params(output->node->node,
+						     output->spa_direction, output->port_id,
+						     t->param.idEnumFormat, &oidx,
+						     filter, format, builder)) <= 0) {
+			asprintf(error, "error output enum formats: %d", res);
+			goto error;
+		}
 	} else if (in_state == PW_PORT_STATE_CONFIGURE && out_state == PW_PORT_STATE_CONFIGURE) {
-		struct spa_pod_builder fb = { 0 };
-		uint8_t fbuf[4096];
-		struct spa_pod *filter;
 	      again:
 		/* both ports need a format */
 		pw_log_debug("core %p: do enum input %d", core, iidx);
 		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
 		if ((res = spa_node_port_enum_params(input->node->node,
-						     input->direction, input->port_id,
+						     input->spa_direction, input->port_id,
 						     t->param.idEnumFormat, &iidx,
 						     NULL, &filter, &fb)) <= 0) {
 			if (res == 0 && iidx == 0) {
@@ -795,7 +842,7 @@ int pw_core_find_format(struct pw_core *core,
 			spa_debug_format(2, core->type.map, filter);
 
 		if ((res = spa_node_port_enum_params(output->node->node,
-						     output->direction, output->port_id,
+						     output->spa_direction, output->port_id,
 						     t->param.idEnumFormat, &oidx,
 						     filter, format, builder)) <= 0) {
 			if (res == 0) {
@@ -832,6 +879,7 @@ int pw_core_find_format(struct pw_core *core,
  *
  * \memberof pw_core
  */
+SPA_EXPORT
 struct pw_factory *pw_core_find_factory(struct pw_core *core,
 					const char *name)
 {
