@@ -1,3 +1,9 @@
+pipewire (0.2.7-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Jeremy Bicha <jbicha@debian.org>  Fri, 01 Nov 2019 21:28:52 -0400
+
 pipewire (0.2.5-1) unstable; urgency=medium
 
   [ Jeremy Bicha ]
