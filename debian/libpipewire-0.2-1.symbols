@@ -8,7 +8,6 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_client_get_global@Base 0.1.4
  pw_client_get_info@Base 0.1.4
  pw_client_get_properties@Base 0.1.4
- pw_client_get_ucred@Base 0.1.4
  pw_client_get_user_data@Base 0.1.4
  pw_client_info_free@Base 0.1.4
  pw_client_info_update@Base 0.1.4
@@ -276,6 +275,7 @@ libpipewire-0.2.so.1 libpipewire-0.2-1 #MINVER#
  pw_thread_loop_timed_wait@Base 0.2.2
  pw_thread_loop_unlock@Base 0.1.4
  pw_thread_loop_wait@Base 0.1.4
+ pw_type_get@Base 0.2.7
  pw_type_init@Base 0.1.4
  pw_work_queue_add@Base 0.1.4
  pw_work_queue_cancel@Base 0.1.4
