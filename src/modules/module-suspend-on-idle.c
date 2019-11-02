@@ -156,9 +156,9 @@ core_global_removed(void *data, struct pw_global *global)
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
-	struct node_info *info, *t;
+	struct node_info *info;
 
-	spa_list_for_each_safe(info, t, &impl->node_list, link)
+	spa_list_consume(info, &impl->node_list, link)
 		node_info_free(info);
 
 	spa_hook_remove(&impl->core_listener);
@@ -212,6 +212,7 @@ static int module_init(struct pw_module *module, struct pw_properties *propertie
 	return 0;
 }
 
+SPA_EXPORT
 int pipewire__module_init(struct pw_module *module, const char *args)
 {
 	return module_init(module, NULL);

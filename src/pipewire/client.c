@@ -105,7 +105,7 @@ global_bind(void *_data, struct pw_client *client, uint32_t permissions,
 	data = pw_resource_get_user_data(resource);
 	pw_resource_add_listener(resource, &data->resource_listener, &resource_events, resource);
 
-	pw_log_debug("client %p: bound to %d", this, resource->id);
+	pw_log_debug("client %p: bound to %p %d", this, resource, resource->id);
 
 	spa_list_append(&this->resource_list, &resource->link);
 
@@ -148,8 +148,8 @@ static const struct pw_core_events core_events = {
  *
  * \memberof pw_client
  */
+SPA_EXPORT
 struct pw_client *pw_client_new(struct pw_core *core,
-				struct ucred *ucred,
 				struct pw_properties *properties,
 				size_t user_data_size)
 {
@@ -164,19 +164,11 @@ struct pw_client *pw_client_new(struct pw_core *core,
 	pw_log_debug("client %p: new", this);
 
 	this->core = core;
-	if ((this->ucred_valid = (ucred != NULL)))
-		this->ucred = *ucred;
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);
 	if (properties == NULL)
 		return NULL;
-
-	if (ucred) {
-		pw_properties_setf(properties, PW_CLIENT_PROP_UCRED_PID, "%d", ucred->pid);
-		pw_properties_setf(properties, PW_CLIENT_PROP_UCRED_UID, "%d", ucred->uid);
-		pw_properties_setf(properties, PW_CLIENT_PROP_UCRED_GID, "%d", ucred->gid);
-	}
 
 	pw_array_init(&impl->permissions, 1024);
 
@@ -215,12 +207,16 @@ static const struct pw_global_events global_events = {
 	.bind = global_bind,
 };
 
+SPA_EXPORT
 int pw_client_register(struct pw_client *client,
 		       struct pw_client *owner,
 		       struct pw_global *parent,
 		       struct pw_properties *properties)
 {
 	struct pw_core *core = client->core;
+
+	if (client->registered)
+		return -EEXIST;
 
 	pw_log_debug("client %p: register parent %d", client, parent ? parent->id : SPA_ID_INVALID);
 
@@ -241,39 +237,37 @@ int pw_client_register(struct pw_client *client,
 	return 0;
 }
 
+SPA_EXPORT
 struct pw_core *pw_client_get_core(struct pw_client *client)
 {
 	return client->core;
 }
 
+SPA_EXPORT
 struct pw_resource *pw_client_get_core_resource(struct pw_client *client)
 {
 	return client->core_resource;
 }
 
+SPA_EXPORT
 struct pw_resource *pw_client_find_resource(struct pw_client *client, uint32_t id)
 {
 	return pw_map_lookup(&client->objects, id);
 }
 
+SPA_EXPORT
 struct pw_global *pw_client_get_global(struct pw_client *client)
 {
 	return client->global;
 }
 
+SPA_EXPORT
 const struct pw_properties *pw_client_get_properties(struct pw_client *client)
 {
 	return client->properties;
 }
 
-const struct ucred *pw_client_get_ucred(struct pw_client *client)
-{
-	if (!client->ucred_valid)
-		return NULL;
-
-	return &client->ucred;
-}
-
+SPA_EXPORT
 void *pw_client_get_user_data(struct pw_client *client)
 {
 	return client->user_data;
@@ -293,9 +287,10 @@ static int destroy_resource(void *object, void *data)
  *
  * \memberof pw_client
  */
+SPA_EXPORT
 void pw_client_destroy(struct pw_client *client)
 {
-	struct pw_resource *resource, *tmp;
+	struct pw_resource *resource;
 	struct impl *impl = SPA_CONTAINER_OF(client, struct impl, this);
 
 	pw_log_debug("client %p: destroy", client);
@@ -306,18 +301,18 @@ void pw_client_destroy(struct pw_client *client)
 	if (client->registered)
 		spa_list_remove(&client->link);
 
+	pw_map_for_each(&client->objects, destroy_resource, client);
+
+	spa_list_consume(resource, &client->resource_list, link)
+		pw_resource_destroy(resource);
+
 	if (client->global) {
 		spa_hook_remove(&client->global_listener);
 		pw_global_destroy(client->global);
 	}
 
-	spa_list_for_each_safe(resource, tmp, &client->resource_list, link)
-		pw_resource_destroy(resource);
-
-	pw_map_for_each(&client->objects, destroy_resource, client);
-
-	pw_client_events_free(client);
 	pw_log_debug("client %p: free", impl);
+	pw_client_events_free(client);
 
 	pw_map_clear(&client->objects);
 	pw_map_clear(&client->types);
@@ -328,6 +323,7 @@ void pw_client_destroy(struct pw_client *client)
 	free(impl);
 }
 
+SPA_EXPORT
 void pw_client_add_listener(struct pw_client *client,
 			    struct spa_hook *listener,
 			    const struct pw_client_events *events,
@@ -336,6 +332,7 @@ void pw_client_add_listener(struct pw_client *client,
 	spa_hook_list_append(&client->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 const struct pw_client_info *pw_client_get_info(struct pw_client *client)
 {
 	return &client->info;
@@ -352,14 +349,24 @@ const struct pw_client_info *pw_client_get_info(struct pw_client *client)
  *
  * \memberof pw_client
  */
+SPA_EXPORT
 int pw_client_update_properties(struct pw_client *client, const struct spa_dict *dict)
 {
 	struct pw_resource *resource;
 	uint32_t i, changed = 0;
 
-	for (i = 0; i < dict->n_items; i++)
-		changed += pw_properties_set(client->properties,
-				  dict->items[i].key, dict->items[i].value);
+	for (i = 0; i < dict->n_items; i++) {
+		const char *key = dict->items[i].key, *old, *val = dict->items[i].value;
+
+		if (strstr(key, "pipewire.") == key &&
+		    (old = pw_properties_get(client->properties, key)) != NULL &&
+		    (val == NULL || strcmp(old, val))) {
+			pw_log_warn("client %p: refused update of key %s from %s to %s",
+					client, key, old, val);
+			continue;
+		}
+		changed += pw_properties_set(client->properties, key, val);
+	}
 
 	pw_log_debug("client %p: updated %d properties", client, changed);
 
@@ -391,6 +398,7 @@ static int do_permissions(void *data, struct pw_global *global)
 	struct impl *impl = SPA_CONTAINER_OF(client, struct impl, this);
 	struct permission *p;
 	size_t len, i;
+	uint32_t old;
 
 	len = pw_array_get_len(&impl->permissions, struct permission);
 	if (len <= global->id) {
@@ -406,12 +414,16 @@ static int do_permissions(void *data, struct pw_global *global)
 
 	p = pw_array_get_unchecked(&impl->permissions, global->id, struct permission);
 	if (p->permissions == -1)
-		p->permissions = impl->permissions_default;
+		old = p->permissions = impl->permissions_default;
 	else if (update->only_new)
 		return 0;
 
+	old = p->permissions;
 	p->permissions &= update->permissions;
-	pw_log_debug("client %p: set global %d permissions to %08x", client, global->id, p->permissions);
+	pw_log_debug("client %p: change global %d permissions %08x -> %08x",
+			client, global->id, old, p->permissions);
+
+	pw_global_events_permissions_changed(global, client, old, p->permissions);
 
 	return 0;
 }
@@ -436,6 +448,7 @@ static uint32_t parse_mask(const char *str)
 	return mask;
 }
 
+SPA_EXPORT
 int pw_client_update_permissions(struct pw_client *client, const struct spa_dict *dict)
 {
 	struct impl *impl = SPA_CONTAINER_OF(client, struct impl, this);
@@ -497,6 +510,7 @@ int pw_client_update_permissions(struct pw_client *client, const struct spa_dict
 	return 0;
 }
 
+SPA_EXPORT
 void pw_client_set_busy(struct pw_client *client, bool busy)
 {
 	if (client->busy != busy) {

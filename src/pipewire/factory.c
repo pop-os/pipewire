@@ -27,6 +27,7 @@ struct resource_data {
 	struct spa_hook resource_listener;
 };
 
+SPA_EXPORT
 struct pw_factory *pw_factory_new(struct pw_core *core,
 				  const char *name,
 				  uint32_t type,
@@ -55,18 +56,25 @@ struct pw_factory *pw_factory_new(struct pw_core *core,
 	return this;
 }
 
+SPA_EXPORT
 void pw_factory_destroy(struct pw_factory *factory)
 {
+	struct pw_resource *resource;
+
 	pw_log_debug("factory %p: destroy", factory);
 	pw_factory_events_destroy(factory);
 
 	if (factory->registered)
 		spa_list_remove(&factory->link);
 
+	spa_list_consume(resource, &factory->resource_list, link)
+		pw_resource_destroy(resource);
+
 	if (factory->global) {
 		spa_hook_remove(&factory->global_listener);
 		pw_global_destroy(factory->global);
 	}
+
 	free((char *)factory->info.name);
 	if (factory->properties)
 		pw_properties_free(factory->properties);
@@ -132,12 +140,16 @@ static const struct pw_global_events global_events = {
 	.bind = global_bind,
 };
 
+SPA_EXPORT
 int pw_factory_register(struct pw_factory *factory,
 			 struct pw_client *owner,
 			 struct pw_global *parent,
 			 struct pw_properties *properties)
 {
 	struct pw_core *core = factory->core;
+
+	if (factory->registered)
+		return -EEXIST;
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);
@@ -167,16 +179,19 @@ int pw_factory_register(struct pw_factory *factory,
 	return 0;
 }
 
+SPA_EXPORT
 void *pw_factory_get_user_data(struct pw_factory *factory)
 {
 	return factory->user_data;
 }
 
+SPA_EXPORT
 struct pw_global *pw_factory_get_global(struct pw_factory *factory)
 {
 	return factory->global;
 }
 
+SPA_EXPORT
 void pw_factory_add_listener(struct pw_factory *factory,
 			     struct spa_hook *listener,
 			     const struct pw_factory_events *events,
@@ -185,6 +200,7 @@ void pw_factory_add_listener(struct pw_factory *factory,
 	spa_hook_list_append(&factory->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 void pw_factory_set_implementation(struct pw_factory *factory,
 				   const struct pw_factory_implementation *implementation,
 				   void *data)
@@ -193,6 +209,7 @@ void pw_factory_set_implementation(struct pw_factory *factory,
 	factory->implementation_data = data;
 }
 
+SPA_EXPORT
 void *pw_factory_create_object(struct pw_factory *factory,
 			       struct pw_resource *resource,
 			       uint32_t type,
