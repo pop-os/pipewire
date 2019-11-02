@@ -1215,7 +1215,7 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	init_type(&this->type, this->map);
 
-	this->dbus_connection = spa_dbus_get_connection(this->dbus, DBUS_BUS_SYSTEM);
+	this->dbus_connection = spa_dbus_get_connection(this->dbus, SPA_DBUS_TYPE_SYSTEM);
 	if (this->dbus_connection == NULL) {
 		spa_log_error(this->log, "no dbus connection");
 		return -EIO;
@@ -1252,7 +1252,7 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 	return 1;
 }
 
-static const struct spa_handle_factory spa_bluez5_monitor_factory = {
+const struct spa_handle_factory spa_bluez5_monitor_factory = {
 	SPA_VERSION_MONITOR,
 	NAME,
 	NULL,
@@ -1260,11 +1260,3 @@ static const struct spa_handle_factory spa_bluez5_monitor_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
-
-int spa_handle_factory_register(const struct spa_handle_factory *factory);
-
-static void reg(void) __attribute__ ((constructor));
-static void reg(void)
-{
-	spa_handle_factory_register(&spa_bluez5_monitor_factory);
-}

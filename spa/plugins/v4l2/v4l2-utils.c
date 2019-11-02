@@ -80,6 +80,8 @@ static int spa_v4l2_open(struct impl *this)
 	if (xioctl(port->fd, VIDIOC_QUERYCAP, &port->cap) < 0) {
 		err = errno;
 		spa_log_error(port->log, "QUERYCAP: %m");
+		close(port->fd);
+		port->fd = -1;
 		return -err;
 	}
 
@@ -87,6 +89,8 @@ static int spa_v4l2_open(struct impl *this)
 	    ((port->cap.capabilities & V4L2_CAP_DEVICE_CAPS) &&
 	     (port->cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) == 0)) {
 		spa_log_error(port->log, "v4l2: %s is no video capture device", props->device);
+		close(port->fd);
+		port->fd = -1;
 		return -ENODEV;
 	}
 
@@ -326,8 +330,8 @@ static const struct format_info format_info[] = {
 
 	/* compressed formats */
 	{V4L2_PIX_FMT_MJPEG, FORMAT_ENCODED, VIDEO, MJPG},
-	{V4L2_PIX_FMT_JPEG, FORMAT_ENCODED, IMAGE, JPEG},
-	{V4L2_PIX_FMT_PJPG, FORMAT_UNKNOWN, VIDEO, RAW},
+	{V4L2_PIX_FMT_JPEG, FORMAT_ENCODED, VIDEO, MJPG},
+	{V4L2_PIX_FMT_PJPG, FORMAT_ENCODED, VIDEO, MJPG},
 	{V4L2_PIX_FMT_DV, FORMAT_ENCODED, VIDEO, DV},
 	{V4L2_PIX_FMT_MPEG, FORMAT_ENCODED, VIDEO, MPEGTS},
 	{V4L2_PIX_FMT_H264, FORMAT_ENCODED, VIDEO, H264},
@@ -688,15 +692,15 @@ spa_v4l2_enum_format(struct impl *this,
 	spa_pod_builder_push_object(builder, t->param.idEnumFormat, t->format);
 	spa_pod_builder_add(builder,
 			"I", media_type,
-			"I", media_subtype, 0);
+			"I", media_subtype, NULL);
 
 	if (media_subtype == t->media_subtype.raw) {
 		spa_pod_builder_add(builder,
-			":", t->format_video.format, "I", video_format, 0);
+			":", t->format_video.format, "I", video_format, NULL);
 	}
 	spa_pod_builder_add(builder,
 		":", t->format_video.size, "R", &SPA_RECTANGLE(port->frmsize.discrete.width,
-							       port->frmsize.discrete.height), 0);
+							       port->frmsize.discrete.height), NULL);
 
 	prop = spa_pod_builder_deref(builder,
 			spa_pod_builder_push_prop(builder, t->format_video.framerate,

@@ -74,6 +74,14 @@ static void do_stop(void *data, uint64_t count)
 	this->running = false;
 }
 
+#define CHECK(expression,label)						\
+do {									\
+	if ((errno = expression) != 0) {				\
+		pw_log_error(#expression ": %s", strerror(errno));	\
+		goto label;						\
+	}								\
+} while(false);
+
 /** Create a new \ref pw_thread_loop
  *
  * \param loop the loop to wrap
@@ -88,6 +96,7 @@ static void do_stop(void *data, uint64_t count)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 struct pw_thread_loop *pw_thread_loop_new(struct pw_loop *loop,
 					  const char *name)
 {
@@ -97,7 +106,7 @@ struct pw_thread_loop *pw_thread_loop_new(struct pw_loop *loop,
 
 	this = calloc(1, sizeof(struct pw_thread_loop));
 	if (this == NULL)
-		goto error1;
+		goto no_mem;
 
 	pw_log_debug("thread-loop %p: new", this);
 
@@ -106,55 +115,57 @@ struct pw_thread_loop *pw_thread_loop_new(struct pw_loop *loop,
 
 	spa_hook_list_init(&this->listener_list);
 
-	pthread_mutexattr_init(&attr);
-	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-	if ((errno = pthread_mutex_init(&this->lock, &attr)) != 0)
-		goto error2;
+	CHECK(pthread_mutexattr_init(&attr), clean_this);
+	CHECK(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE), clean_this);
+	CHECK(pthread_mutex_init(&this->lock, &attr), clean_this);
 
-	pthread_condattr_init(&cattr);
-	pthread_condattr_setclock(&cattr, CLOCK_REALTIME);
-	if ((errno = pthread_cond_init(&this->cond, &cattr)) != 0)
-		goto error3;
-	if ((errno = pthread_cond_init(&this->accept_cond, &cattr)) != 0)
-		goto error4;
+	CHECK(pthread_condattr_init(&cattr), clean_lock);
+	CHECK(pthread_condattr_setclock(&cattr, CLOCK_REALTIME), clean_lock);
+
+	CHECK(pthread_cond_init(&this->cond, &cattr), clean_lock);
+	CHECK(pthread_cond_init(&this->accept_cond, &cattr), clean_cond);
 
 	if ((this->event = pw_loop_add_event(this->loop, do_stop, this)) == NULL)
-		goto error5;
+		goto clean_acceptcond;
 
 	pw_loop_add_hook(loop, &this->hook, &impl_hooks, this);
 
 	return this;
 
-      error5:
+      clean_acceptcond:
 	pthread_cond_destroy(&this->accept_cond);
-      error4:
+      clean_cond:
 	pthread_cond_destroy(&this->cond);
-      error3:
+      clean_lock:
 	pthread_mutex_destroy(&this->lock);
-      error2:
+      clean_this:
 	free(this->name);
 	free(this);
-      error1:
+      no_mem:
 	return NULL;
 }
 
 /** Destroy a threaded loop \memberof pw_thread_loop */
+SPA_EXPORT
 void pw_thread_loop_destroy(struct pw_thread_loop *loop)
 {
 	pw_thread_loop_events_destroy(loop);
 
 	pw_thread_loop_stop(loop);
 
-	free(loop->name);
-	pthread_mutex_destroy(&loop->lock);
-	pthread_cond_destroy(&loop->cond);
-	pthread_cond_destroy(&loop->accept_cond);
-
 	spa_hook_remove(&loop->hook);
 
+	pw_loop_destroy_source(loop->loop, loop->event);
+
+	pthread_cond_destroy(&loop->accept_cond);
+	pthread_cond_destroy(&loop->cond);
+	pthread_mutex_destroy(&loop->lock);
+
+	free(loop->name);
 	free(loop);
 }
 
+SPA_EXPORT
 void pw_thread_loop_add_listener(struct pw_thread_loop *loop,
 				 struct spa_hook *listener,
 				 const struct pw_thread_loop_events *events,
@@ -163,6 +174,7 @@ void pw_thread_loop_add_listener(struct pw_thread_loop *loop,
 	spa_hook_list_append(&loop->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 struct pw_loop *
 pw_thread_loop_get_loop(struct pw_thread_loop *loop)
 {
@@ -196,6 +208,7 @@ static void *do_loop(void *user_data)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 int pw_thread_loop_start(struct pw_thread_loop *loop)
 {
 	if (!loop->running) {
@@ -218,6 +231,7 @@ int pw_thread_loop_start(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_stop(struct pw_thread_loop *loop)
 {
 	pw_log_debug("thread-loop: %p stopping", loop);
@@ -238,6 +252,7 @@ void pw_thread_loop_stop(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_lock(struct pw_thread_loop *loop)
 {
 	pthread_mutex_lock(&loop->lock);
@@ -249,6 +264,7 @@ void pw_thread_loop_lock(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_unlock(struct pw_thread_loop *loop)
 {
 	pthread_mutex_unlock(&loop->lock);
@@ -264,6 +280,7 @@ void pw_thread_loop_unlock(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_signal(struct pw_thread_loop *loop, bool wait_for_accept)
 {
 	if (loop->n_waiting > 0)
@@ -283,6 +300,7 @@ void pw_thread_loop_signal(struct pw_thread_loop *loop, bool wait_for_accept)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_wait(struct pw_thread_loop *loop)
 {
 	loop->n_waiting++;
@@ -299,6 +317,7 @@ void pw_thread_loop_wait(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 int pw_thread_loop_timed_wait(struct pw_thread_loop *loop, int wait_max_sec)
 {
 	struct timespec timeout;
@@ -320,6 +339,7 @@ int pw_thread_loop_timed_wait(struct pw_thread_loop *loop, int wait_max_sec)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 void pw_thread_loop_accept(struct pw_thread_loop *loop)
 {
 	loop->n_waiting_for_accept--;
@@ -333,6 +353,7 @@ void pw_thread_loop_accept(struct pw_thread_loop *loop)
  *
  * \memberof pw_thread_loop
  */
+SPA_EXPORT
 bool pw_thread_loop_in_thread(struct pw_thread_loop *loop)
 {
 	return pthread_self() == loop->thread;

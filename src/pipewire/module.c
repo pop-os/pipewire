@@ -162,6 +162,7 @@ static const struct pw_global_events global_events = {
  *
  * \memberof pw_module
  */
+SPA_EXPORT
 struct pw_module *
 pw_module_load(struct pw_core *core,
 	       const char *name, const char *args,
@@ -282,22 +283,24 @@ pw_module_load(struct pw_core *core,
  * \param module the module to destroy
  * \memberof pw_module
  */
+SPA_EXPORT
 void pw_module_destroy(struct pw_module *module)
 {
 	struct impl *impl = SPA_CONTAINER_OF(module, struct impl, this);
-	struct pw_resource *resource, *tmp;
+	struct pw_resource *resource;
 
 	pw_log_debug("module %p: destroy", module);
 	pw_module_events_destroy(module);
 
 	spa_list_remove(&module->link);
 
+	spa_list_consume(resource, &module->resource_list, link)
+		pw_resource_destroy(resource);
+
 	if (module->global) {
 		spa_hook_remove(&module->global_listener);
 		pw_global_destroy(module->global);
 	}
-	spa_list_for_each_safe(resource, tmp, &module->resource_list, link)
-		pw_resource_destroy(resource);
 
 	free((char *) module->info.name);
 	free((char *) module->info.filename);
@@ -307,23 +310,27 @@ void pw_module_destroy(struct pw_module *module)
 	free(impl);
 }
 
+SPA_EXPORT
 struct pw_core *
 pw_module_get_core(struct pw_module *module)
 {
 	return module->core;
 }
 
+SPA_EXPORT
 struct pw_global * pw_module_get_global(struct pw_module *module)
 {
 	return module->global;
 }
 
+SPA_EXPORT
 const struct pw_module_info *
 pw_module_get_info(struct pw_module *module)
 {
 	return &module->info;
 }
 
+SPA_EXPORT
 void pw_module_add_listener(struct pw_module *module,
 			    struct spa_hook *listener,
 			    const struct pw_module_events *events,

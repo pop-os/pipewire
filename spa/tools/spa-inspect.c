@@ -17,7 +17,6 @@
  * Boston, MA 02110-1301, USA.
  */
 
-#include <error.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,7 +72,7 @@ inspect_node_params(struct data *data, struct spa_node *node)
 						data->type.param.idList, &idx1,
 						NULL, &param, &b)) <= 0) {
 			if (res != 0)
-				error(0, -res, "enum_params");
+				printf("error enum_params: %s", spa_strerror(res));
 			break;
 		}
 
@@ -88,7 +87,7 @@ inspect_node_params(struct data *data, struct spa_node *node)
 							id, &idx2,
 							NULL, &param, &b)) <= 0) {
 				if (res != 0)
-					error(0, -res, "enum_params %d", id);
+					printf("error enum_params %d: %s", id, spa_strerror(res));
 				break;
 			}
 			spa_debug_pod(0, data->map, param);
@@ -115,7 +114,7 @@ inspect_port_params(struct data *data, struct spa_node *node,
 						     data->type.param.idList, &idx1,
 						     NULL, &param, &b)) <= 0) {
 			if (res != 0)
-				error(0, -res, "port_enum_params");
+				printf("error port_enum_params: %s", spa_strerror(res));
 			break;
 		}
 		spa_pod_object_parse(param,
@@ -130,7 +129,7 @@ inspect_port_params(struct data *data, struct spa_node *node,
 							     id, &idx2,
 							     NULL, &param, &b)) <= 0) {
 				if (res != 0)
-					error(0, -res, "port_enum_params");
+					printf("error port_enum_params %d: %s", id, spa_strerror(res));
 				break;
 			}
 
@@ -200,10 +199,10 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 	printf("factory interfaces:\n");
 	for (index = 0;;) {
 		if ((res = spa_handle_factory_enum_interface_info(factory, &info, &index)) <= 0) {
-			if (res == 0)
-				break;
-			else
-				error(0, -res, "spa_handle_factory_enum_interface_info");
+			if (res != 0)
+				printf("error spa_handle_factory_enum_interface_info: %s",
+						spa_strerror(res));
+			break;
 		}
 		printf(" interface: '%s'\n", info->type);
 	}
@@ -221,10 +220,10 @@ static void inspect_factory(struct data *data, const struct spa_handle_factory *
 		uint32_t interface_id;
 
 		if ((res = spa_handle_factory_enum_interface_info(factory, &info, &index)) <= 0) {
-			if (res == 0)
-				break;
-			else
-				error(0, -res, "spa_handle_factory_enum_interface_info");
+			if (res != 0)
+				printf("error spa_handle_factory_enum_interface_info: %s",
+						spa_strerror(res));
+			break;
 		}
 		printf(" interface: '%s'\n", info->type);
 
@@ -261,12 +260,14 @@ static void do_remove_source(struct spa_source *source)
 
 int main(int argc, char *argv[])
 {
-	struct data data = { 0 };
+	struct data data;
 	int res;
 	void *handle;
 	spa_handle_factory_enum_func_t enum_func;
 	uint32_t index;
 	const char *str;
+
+	spa_zero(data);
 
 	if (argc < 2) {
 		printf("usage: %s <plugin.so>\n", argv[0]);
@@ -312,7 +313,7 @@ int main(int argc, char *argv[])
 
 		if ((res = enum_func(&factory, &index)) <= 0) {
 			if (res != 0)
-				error(0, -res, "enum_func");
+				printf("error enum_func: %s", spa_strerror(res));
 			break;
 		}
 		inspect_factory(&data, factory);

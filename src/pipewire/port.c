@@ -182,6 +182,7 @@ struct pw_port *pw_port_new(enum pw_direction direction,
 		goto no_mem;
 
 	this->direction = direction;
+	this->spa_direction = direction == PW_DIRECTION_INPUT ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT;
 	this->port_id = port_id;
 	this->properties = properties;
 	this->state = PW_PORT_STATE_INIT;
@@ -201,7 +202,7 @@ struct pw_port *pw_port_new(enum pw_direction direction,
 	spa_hook_list_init(&this->listener_list);
 
 	spa_graph_port_init(&this->rt.port,
-			    this->direction,
+			    this->spa_direction,
 			    this->port_id,
 			    0,
 			    &this->io);
@@ -214,7 +215,7 @@ struct pw_port *pw_port_new(enum pw_direction direction,
 	pw_map_init(&this->mix_port_map, 64, 64);
 
 	spa_graph_port_init(&this->rt.mix_port,
-			    pw_direction_reverse(this->direction),
+			    SPA_DIRECTION_REVERSE(this->spa_direction),
 			    0,
 			    0,
 			    &this->io);
@@ -229,21 +230,25 @@ struct pw_port *pw_port_new(enum pw_direction direction,
 	return NULL;
 }
 
+SPA_EXPORT
 enum pw_direction pw_port_get_direction(struct pw_port *port)
 {
 	return port->direction;
 }
 
+SPA_EXPORT
 uint32_t pw_port_get_id(struct pw_port *port)
 {
 	return port->port_id;
 }
 
+SPA_EXPORT
 const struct pw_properties *pw_port_get_properties(struct pw_port *port)
 {
 	return port->properties;
 }
 
+SPA_EXPORT
 int pw_port_update_properties(struct pw_port *port, const struct spa_dict *dict)
 {
 	struct pw_resource *resource;
@@ -269,11 +274,13 @@ int pw_port_update_properties(struct pw_port *port, const struct spa_dict *dict)
 	return changed;
 }
 
+SPA_EXPORT
 struct pw_node *pw_port_get_node(struct pw_port *port)
 {
 	return port->node;
 }
 
+SPA_EXPORT
 void pw_port_add_listener(struct pw_port *port,
 			  struct spa_hook *listener,
 			  const struct pw_port_events *events,
@@ -419,10 +426,13 @@ int pw_port_add(struct pw_port *port, struct pw_node *node)
 	struct pw_type *t = &core->type;
 	const char *str, *dir;
 
+	if (port->node != NULL)
+		return -EEXIST;
+
 	port->node = node;
 
 	spa_node_port_get_info(node->node,
-			       port->direction, port_id,
+			       port->spa_direction, port_id,
 			       &port->spa_info);
 
 	if (port->spa_info->props)
@@ -459,7 +469,7 @@ int pw_port_add(struct pw_port *port, struct pw_node *node)
 
 	pw_log_debug("port %p: setting node io", port);
 	spa_node_port_set_io(node->node,
-			     port->direction, port_id,
+			     port->spa_direction, port_id,
 			     t->io.Buffers,
 			     port->rt.port.io, sizeof(*port->rt.port.io));
 
@@ -480,14 +490,14 @@ int pw_port_add(struct pw_port *port, struct pw_node *node)
 
 void pw_port_unlink(struct pw_port *port)
 {
-	struct pw_link *l, *t;
+	struct pw_link *l;
 
 	if (port->direction == PW_DIRECTION_OUTPUT) {
-		spa_list_for_each_safe(l, t, &port->links, output_link)
+		spa_list_consume(l, &port->links, output_link)
 			pw_link_destroy(l);
 	}
 	else {
-		spa_list_for_each_safe(l, t, &port->links, input_link)
+		spa_list_consume(l, &port->links, input_link)
 			pw_link_destroy(l);
 	}
 }
@@ -530,13 +540,14 @@ static void pw_port_remove(struct pw_port *port)
 	}
 	spa_list_remove(&port->link);
 	pw_node_events_port_removed(node, port);
+	port->node = NULL;
 }
 
 void pw_port_destroy(struct pw_port *port)
 {
 	struct pw_node *node = port->node;
-	struct pw_control *control, *ctemp;
-	struct pw_resource *resource, *tmp;
+	struct pw_control *control;
+	struct pw_resource *resource;
 
 	pw_log_debug("port %p: destroy", port);
 
@@ -545,17 +556,18 @@ void pw_port_destroy(struct pw_port *port)
 	if (node)
 		pw_port_remove(port);
 
-	spa_list_for_each_safe(control, ctemp, &port->control_list[0], port_link)
+	spa_list_consume(control, &port->control_list[0], port_link)
 		pw_control_destroy(control);
-	spa_list_for_each_safe(control, ctemp, &port->control_list[1], port_link)
+	spa_list_consume(control, &port->control_list[1], port_link)
 		pw_control_destroy(control);
+
+	spa_list_consume(resource, &port->resource_list, link)
+		pw_resource_destroy(resource);
 
 	if (port->global) {
 		spa_hook_remove(&port->global_listener);
 		pw_global_destroy(port->global);
 	}
-	spa_list_for_each_safe(resource, tmp, &port->resource_list, link)
-		pw_resource_destroy(resource);
 
 	pw_log_debug("port %p: free", port);
 	pw_port_events_free(port);
@@ -575,7 +587,7 @@ do_port_command(struct spa_loop *loop,
 {
         struct pw_port *port = user_data;
 	struct pw_node *node = port->node;
-	return spa_node_port_send_command(node->node, port->direction, port->port_id, data);
+	return spa_node_port_send_command(node->node, port->spa_direction, port->port_id, data);
 }
 
 int pw_port_send_command(struct pw_port *port, bool block, const struct spa_command *command)
@@ -607,7 +619,7 @@ int pw_port_for_each_param(struct pw_port *port,
 		spa_pod_builder_init(&b, buf, sizeof(buf));
 		idx = index;
 		if ((res = spa_node_port_enum_params(node->node,
-						     port->direction, port->port_id,
+						     port->spa_direction, port->port_id,
 						     param_id, &index,
 						     filter, &param, &b)) <= 0)
 			break;
@@ -664,7 +676,7 @@ int pw_port_set_param(struct pw_port *port, uint32_t id, uint32_t flags,
 	struct pw_core *core = node->core;
 	struct pw_type *t = &core->type;
 
-	res = spa_node_port_set_param(node->node, port->direction, port->port_id, id, flags, param);
+	res = spa_node_port_set_param(node->node, port->spa_direction, port->port_id, id, flags, param);
 	pw_log_debug("port %p: set param %s: %d (%s)", port,
 			spa_type_map_get_type(t->map, id), res, spa_strerror(res));
 
@@ -692,7 +704,7 @@ int pw_port_use_buffers(struct pw_port *port, struct spa_buffer **buffers, uint3
 	if (n_buffers > 0 && port->state < PW_PORT_STATE_READY)
 		return -EIO;
 
-	res = spa_node_port_use_buffers(node->node, port->direction, port->port_id, buffers, n_buffers);
+	res = spa_node_port_use_buffers(node->node, port->spa_direction, port->port_id, buffers, n_buffers);
 	pw_log_debug("port %p: use %d buffers: %d (%s)", port, n_buffers, res, spa_strerror(res));
 
 	port->allocated = false;
@@ -722,7 +734,7 @@ int pw_port_alloc_buffers(struct pw_port *port,
 	if (port->state < PW_PORT_STATE_READY)
 		return -EIO;
 
-	res = spa_node_port_alloc_buffers(node->node, port->direction, port->port_id,
+	res = spa_node_port_alloc_buffers(node->node, port->spa_direction, port->port_id,
 					  params, n_params,
 					  buffers, n_buffers);
 	pw_log_debug("port %p: alloc %d buffers: %d (%s)", port, *n_buffers, res, spa_strerror(res));

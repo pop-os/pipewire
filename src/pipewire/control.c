@@ -85,14 +85,14 @@ pw_control_new(struct pw_core *core,
 void pw_control_destroy(struct pw_control *control)
 {
 	struct impl *impl = SPA_CONTAINER_OF(control, struct impl, this);
-	struct pw_control *other, *tmp;
+	struct pw_control *other;
 
 	pw_log_debug("control %p: destroy", control);
 
 	pw_control_events_destroy(control);
 
 	if (control->direction == SPA_DIRECTION_OUTPUT) {
-		spa_list_for_each_safe(other, tmp, &control->inputs, inputs_link)
+		spa_list_consume(other, &control->inputs, inputs_link)
 			pw_control_unlink(control, other);
 	}
 	else {
@@ -120,11 +120,13 @@ void pw_control_destroy(struct pw_control *control)
 	free(control);
 }
 
+SPA_EXPORT
 struct pw_port *pw_control_get_port(struct pw_control *control)
 {
 	return control->port;
 }
 
+SPA_EXPORT
 void pw_control_add_listener(struct pw_control *control,
 			     struct spa_hook *listener,
 			     const struct pw_control_events *events,
@@ -133,6 +135,7 @@ void pw_control_add_listener(struct pw_control *control,
 	spa_hook_list_append(&control->listener_list, listener, events, data);
 }
 
+SPA_EXPORT
 int pw_control_link(struct pw_control *control, struct pw_control *other)
 {
 	int res = 0;
@@ -169,7 +172,7 @@ int pw_control_link(struct pw_control *control, struct pw_control *other)
 	if (other->port) {
 		struct pw_port *port = other->port;
 		if ((res = spa_node_port_set_io(port->node->node,
-				     port->direction, port->port_id,
+				     port->spa_direction, port->port_id,
 				     other->id,
 				     impl->mem->ptr, control->size)) < 0) {
 			goto exit;
@@ -180,7 +183,7 @@ int pw_control_link(struct pw_control *control, struct pw_control *other)
 		if (control->port) {
 			struct pw_port *port = control->port;
 			if ((res = spa_node_port_set_io(port->node->node,
-					     port->direction, port->port_id,
+					     port->spa_direction, port->port_id,
 					     control->id,
 					     impl->mem->ptr, control->size)) < 0) {
 				goto exit;
@@ -198,6 +201,7 @@ int pw_control_link(struct pw_control *control, struct pw_control *other)
 	return res;
 }
 
+SPA_EXPORT
 int pw_control_unlink(struct pw_control *control, struct pw_control *other)
 {
 	int res = 0;
@@ -222,7 +226,7 @@ int pw_control_unlink(struct pw_control *control, struct pw_control *other)
 	if (spa_list_is_empty(&control->inputs)) {
 		struct pw_port *port = control->port;
 		if ((res = spa_node_port_set_io(port->node->node,
-				     port->direction, port->port_id,
+				     port->spa_direction, port->port_id,
 				     control->id, NULL, 0)) < 0) {
 			pw_log_warn("control %p: can't unset port control io", control);
 		}
@@ -231,7 +235,7 @@ int pw_control_unlink(struct pw_control *control, struct pw_control *other)
 	if (other->port) {
 		struct pw_port *port = other->port;
 		if ((res = spa_node_port_set_io(port->node->node,
-				     port->direction, port->port_id,
+				     port->spa_direction, port->port_id,
 				     other->id, NULL, 0)) < 0) {
 			pw_log_warn("control %p: can't unset port control io", control);
 		}

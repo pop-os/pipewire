@@ -99,8 +99,6 @@ struct pw_client {
 	struct pw_properties *properties;	/**< Client properties */
 
 	struct pw_client_info info;	/**< client info */
-	bool ucred_valid;		/**< if the ucred member is valid */
-	struct ucred ucred;		/**< ucred information */
 
 	struct pw_resource *core_resource;	/**< core resource object */
 
@@ -126,6 +124,8 @@ struct pw_client {
 #define pw_global_events_destroy(g)	pw_global_events_emit(g, destroy, 0)
 #define pw_global_events_free(g)	pw_global_events_emit(g, free, 0)
 #define pw_global_events_bind(g,...)	pw_global_events_emit(g, bind, 0, __VA_ARGS__)
+#define pw_global_events_permissions_changed(g,...) \
+					pw_global_events_emit(g, permissions_changed, 1, __VA_ARGS__)
 
 struct pw_global {
 	struct pw_core *core;		/**< the core */
@@ -303,7 +303,7 @@ struct pw_module {
 	void *user_data;                /**< module user_data */
 };
 
-#define pw_node_events_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_node_events, m, v, ##__VA_ARGS__)
+#define pw_node_events_emit(o,m,v,...) spa_hook_list_call_simple_safe(&o->listener_list, struct pw_node_events, m, v, ##__VA_ARGS__)
 #define pw_node_events_destroy(n)		pw_node_events_emit(n, destroy, 0)
 #define pw_node_events_free(n)			pw_node_events_emit(n, free, 0)
 #define pw_node_events_initialized(n)		pw_node_events_emit(n, initialized, 0)
@@ -383,6 +383,7 @@ struct pw_port {
 	bool registered;
 
 	enum pw_direction direction;	/**< port direction */
+	enum spa_direction spa_direction;/**< port direction */
 	uint32_t port_id;		/**< port id */
 	const struct spa_port_info *spa_info;
 
@@ -433,6 +434,8 @@ struct pw_resource {
 	uint32_t permissions;		/**< resource permissions */
 	uint32_t type;			/**< type of the client interface */
 	uint32_t version;		/**< version of the client interface */
+
+	bool removed;			/**< if the resource was removed */
 
 	struct spa_hook implementation;
 	struct spa_hook_list implementation_list;
