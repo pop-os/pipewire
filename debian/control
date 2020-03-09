@@ -34,6 +34,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+Recommends: pipewire,
 Description: libraries for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
