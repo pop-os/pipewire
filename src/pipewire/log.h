@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_LOG_H__
-#define __PIPEWIRE_LOG_H__
+#ifndef PIPEWIRE_LOG_H
+#define PIPEWIRE_LOG_H
 
 #include <spa/support/log.h>
 
@@ -61,45 +66,25 @@ pw_log_logv(enum spa_log_level level,
 /** Check if a loglevel is enabled \memberof pw_log */
 #define pw_log_level_enabled(lev) (pw_log_level >= (lev))
 
-#if defined(__USE_ISOC11) || defined(__USE_ISOC99) || \
-    (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L)
-
-#define pw_log_logc(lev,...)				\
-({							\
-	if (SPA_UNLIKELY(pw_log_level_enabled (lev)))	\
-		pw_log_log(lev,__VA_ARGS__);		\
+#define pw_log(lev,...)							\
+({									\
+	if (SPA_UNLIKELY(pw_log_level_enabled (lev)))			\
+		pw_log_log(lev,__FILE__,__LINE__,__func__,__VA_ARGS__);	\
 })
 
-#define pw_log_error(...)   pw_log_logc(SPA_LOG_LEVEL_ERROR,__FILE__,__LINE__,__func__,__VA_ARGS__)
-#define pw_log_warn(...)    pw_log_logc(SPA_LOG_LEVEL_WARN,__FILE__,__LINE__,__func__,__VA_ARGS__)
-#define pw_log_info(...)    pw_log_logc(SPA_LOG_LEVEL_INFO,__FILE__,__LINE__,__func__,__VA_ARGS__)
-#define pw_log_debug(...)   pw_log_logc(SPA_LOG_LEVEL_DEBUG,__FILE__,__LINE__,__func__,__VA_ARGS__)
-#define pw_log_trace(...)   pw_log_logc(SPA_LOG_LEVEL_TRACE,__FILE__,__LINE__,__func__,__VA_ARGS__)
+#define pw_log_error(...)   pw_log(SPA_LOG_LEVEL_ERROR,__VA_ARGS__)
+#define pw_log_warn(...)    pw_log(SPA_LOG_LEVEL_WARN,__VA_ARGS__)
+#define pw_log_info(...)    pw_log(SPA_LOG_LEVEL_INFO,__VA_ARGS__)
+#define pw_log_debug(...)   pw_log(SPA_LOG_LEVEL_DEBUG,__VA_ARGS__)
+#define pw_log_trace(...)   pw_log(SPA_LOG_LEVEL_TRACE,__VA_ARGS__)
 
+#ifndef FASTPATH
+#define pw_log_trace_fp(...)   pw_log(SPA_LOG_LEVEL_TRACE,__VA_ARGS__)
 #else
-
-#include <stdarg.h>
-
-#define PW_LOG_FUNC(name,lev)								\
-static inline void pw_log_##name (const char *format, ...)				\
-{											\
-	if (SPA_UNLIKELY(pw_log_level_enabled(lev))) {					\
-		va_list varargs;							\
-		va_start(varargs, format);						\
-		pw_log_logv(lev,__FILE__,__LINE__,__func__,format,varargs);		\
-		va_end(varargs);							\
-	}										\
-}
-
-PW_LOG_FUNC(error, SPA_LOG_LEVEL_ERROR)
-PW_LOG_FUNC(warn, SPA_LOG_LEVEL_WARN)
-PW_LOG_FUNC(info, SPA_LOG_LEVEL_INFO)
-PW_LOG_FUNC(debug, SPA_LOG_LEVEL_DEBUG)
-PW_LOG_FUNC(trace, SPA_LOG_LEVEL_TRACE)
-
+#define pw_log_trace_fp(...)
 #endif
 
 #ifdef __cplusplus
 }
 #endif
-#endif /* __PIPEWIRE_LOG_H__ */
+#endif /* PIPEWIRE_LOG_H */

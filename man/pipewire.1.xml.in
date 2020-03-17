@@ -4,19 +4,6 @@
 
 <!--
 This file is part of PipeWire.
-
-PipeWire is free software; you can redistribute it and/or modify it
-under the terms of the GNU Lesser General Public License as
-published by the Free Software Foundation; either version 2.1 of the
-License, or (at your option) any later version.
-
-PipeWire is distributed in the hope that it will be useful, but WITHOUT
-ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
-or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General
-Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
 -->
 
 <manpage name="pipewire" section="1" desc="The PipeWire media server">
@@ -28,6 +15,9 @@ License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
   <description>
     <p>PipeWire is a service that allows access to multimedia devices
     and allows media sharing between applications. </p>
+
+    <p>The pipewire daemon reads a config file that is further documented in
+    <manref name="pipewire.conf" section="5"/></p>
   </description>
 
   <options>
@@ -47,7 +37,7 @@ License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
     <option>
       <p><opt>-n | --name</opt></p>
 
-      <optdesc><p>Set the daemon name (Default pipewire-1).</p></optdesc>
+      <optdesc><p>Set the daemon name (Default pipewire-0).</p></optdesc>
     </option>
 
   </options>
@@ -58,7 +48,8 @@ License along with PipeWire; if not, see <http://www.gnu.org/licenses/>.
 
   <section name="See also">
     <p>
-      <manref name="pipewire-monitor" section="1"/>,
+      <manref name="pw-mon" section="1"/>,
+      <manref name="pw-cli" section="1"/>,
     </p>
   </section>
 

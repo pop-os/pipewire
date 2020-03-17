@@ -1,20 +1,25 @@
 /* GStreamer
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin Street, Suite 500,
- * Boston, MA 02110-1335, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -71,7 +76,6 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
   GstBuffer *buf;
   uint32_t i;
   GstPipeWirePoolData *data;
-  struct pw_type *t = pool->t;
 
   GST_LOG_OBJECT (pool, "wrap buffer");
 
@@ -84,19 +88,19 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
     GstMemory *gmem = NULL;
 
     GST_LOG_OBJECT (pool, "wrap buffer %d %d", d->mapoffset, d->maxsize);
-    if (d->type == t->data.MemFd) {
-      gmem = gst_fd_allocator_alloc (pool->fd_allocator, dup (d->fd),
-                d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_NONE);
+    if (d->type == SPA_DATA_MemFd) {
+      gmem = gst_fd_allocator_alloc (pool->fd_allocator, d->fd,
+                d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_DONT_CLOSE);
       gst_memory_resize (gmem, d->mapoffset, d->maxsize);
       data->offset = d->mapoffset;
     }
-    else if(d->type == t->data.DmaBuf) {
-      gmem = gst_dmabuf_allocator_alloc (pool->dmabuf_allocator, dup (d->fd),
-                d->mapoffset + d->maxsize);
+    else if(d->type == SPA_DATA_DmaBuf) {
+      gmem = gst_fd_allocator_alloc (pool->dmabuf_allocator, d->fd,
+                d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_DONT_CLOSE);
       gst_memory_resize (gmem, d->mapoffset, d->maxsize);
       data->offset = d->mapoffset;
     }
-    else if (d->type == t->data.MemPtr) {
+    else if (d->type == SPA_DATA_MemPtr) {
       gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, 0,
                                      d->maxsize, NULL, NULL);
       data->offset = 0;
@@ -107,7 +111,7 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
 
   data->pool = gst_object_ref (pool);
   data->owner = NULL;
-  data->header = spa_buffer_find_meta (b->buffer, t->meta.Header);
+  data->header = spa_buffer_find_meta_data (b->buffer, SPA_META_Header, sizeof(*data->header));
   data->flags = GST_BUFFER_FLAGS (buf);
   data->b = b;
   data->buf = buf;

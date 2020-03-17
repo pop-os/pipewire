@@ -1,54 +1,44 @@
-executable('test-mixer', 'test-mixer.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib, mathlib],
-           install : false)
-executable('test-bluez5', 'test-bluez5.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib, mathlib, dbus_dep],
-           install : false)
-executable('test-ringbuffer', 'test-ringbuffer.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib],
-           install : false)
-executable('test-graph', 'test-graph.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib],
-           install : false)
-executable('test-graph2', 'test-graph2.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib],
-           install : false)
-executable('test-perf', 'test-perf.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib],
-           install : false)
-executable('stress-ringbuffer', 'stress-ringbuffer.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib],
-           install : false)
-if sdl_dep.found()
-  executable('test-v4l2', 'test-v4l2.c',
-             include_directories : [spa_inc ],
-             dependencies : [dl_lib, sdl_dep, pthread_lib],
-             install : false)
+test_apps = [
+	'test-buffer',
+	'test-node',
+	'test-pod',
+	'test-utils',
+]
+
+foreach a : test_apps
+  test('spa-' + a,
+	executable('spa-' + a, a + '.c',
+		dependencies : [dl_lib, pthread_lib, mathlib ],
+		include_directories : [spa_inc ],
+		c_args : [ '-D_GNU_SOURCE' ],
+		install : false),
+	env : [
+		'SPA_PLUGIN_DIR=@0@/spa/plugins/'.format(meson.build_root()),
+	])
+endforeach
+
+if have_cpp
+test_cpp = executable('spa-test-cpp', 'test-cpp.cpp',
+                        include_directories : [spa_inc ],
+                        dependencies : [],
+                        install : false)
+test('spa-test-cpp', test_cpp)
 endif
-executable('test-props', 'test-props.c',
-           include_directories : [spa_inc ],
-           dependencies : [],
-           install : false)
-executable('test-props2', 'test-props2.c',
-           include_directories : [spa_inc ],
-           dependencies : [],
-           install : false)
-#executable('test-props4', 'test-props4.c',
-#           include_directories : [spa_inc ],
-#           dependencies : [],
-#           install : false)
-executable('test-props5', 'test-props5.c',
-           include_directories : [spa_inc ],
-           dependencies : [],
-           install : false)
-executable('test-control', 'test-control.c',
-           include_directories : [spa_inc ],
-           dependencies : [dl_lib, pthread_lib, mathlib],
-           install : false)
+
+benchmark_apps = [
+	'stress-ringbuffer',
+	'benchmark-pod',
+	'benchmark-dict',
+]
+
+foreach a : benchmark_apps
+  benchmark('spa-' + a,
+	executable('spa-' + a, a + '.c',
+		dependencies : [dl_lib, pthread_lib, mathlib ],
+		include_directories : [spa_inc ],
+		c_args : [ '-D_GNU_SOURCE' ],
+		install : false),
+	env : [
+		'SPA_PLUGIN_DIR=@0@/spa/plugins/'.format(meson.build_root()),
+	])
+endforeach

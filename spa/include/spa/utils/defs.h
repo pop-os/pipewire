@@ -1,24 +1,29 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_UTILS_DEFS_H__
-#define __SPA_UTILS_DEFS_H__
+#ifndef SPA_UTILS_DEFS_H
+#define SPA_UTILS_DEFS_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,22 +34,13 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdio.h>
 
-
-#define SPA_ASYNC_BIT			(1 << 30)
-#define SPA_ASYNC_MASK			(3 << 30)
-#define SPA_ASYNC_SEQ_MASK		(SPA_ASYNC_BIT - 1)
-
-#define SPA_RESULT_IS_OK(res)		((res) >= 0)
-#define SPA_RESULT_IS_ERROR(res)	((res) < 0)
-#define SPA_RESULT_IS_ASYNC(res)	(((res) & SPA_ASYNC_MASK) == SPA_ASYNC_BIT)
-
-#define SPA_RESULT_ASYNC_SEQ(res)	((res) & SPA_ASYNC_SEQ_MASK)
-#define SPA_RESULT_RETURN_ASYNC(seq)	(SPA_ASYNC_BIT | ((seq) & SPA_ASYNC_SEQ_MASK))
-
-#define SPA_FLAG_CHECK(field,flag)	(((field) & (flag)) == (flag))
+#define SPA_FLAG_MASK(field,mask,flag)	(((field) & (mask)) == (flag))
+#define SPA_FLAG_IS_SET(field,flag)	SPA_FLAG_MASK(field,flag,flag)
 #define SPA_FLAG_SET(field,flag)	((field) |= (flag))
-#define SPA_FLAG_UNSET(field,flag)	((field) &= ~(flag))
+#define SPA_FLAG_CLEAR(field,flag)	((field) &= ~(flag))
+#define SPA_FLAG_UPDATE(field,flag,val)	((val) ? SPA_FLAG_SET(field,flag) : SPA_FLAG_CLEAR(field,flag))
 
 enum spa_direction {
 	SPA_DIRECTION_INPUT = 0,
@@ -83,23 +79,37 @@ struct spa_fraction {
 ({				\
 	__typeof__(a) _a = (a);	\
 	__typeof__(b) _b = (b);	\
-	_a < _b ? _a : _b;	\
+	SPA_LIKELY(_a < _b) ? _a : _b;	\
 })
 #define SPA_MAX(a,b)		\
 ({				\
 	__typeof__(a) _a = (a);	\
 	__typeof__(b) _b = (b);	\
-	_a > _b ? _a : _b;	\
+	SPA_LIKELY(_a > _b) ? _a : _b;	\
 })
 #define SPA_CLAMP(v,low,high)				\
 ({							\
 	__typeof__(v) _v = (v);				\
 	__typeof__(low) _low = (low);			\
 	__typeof__(high) _high = (high);		\
-	_v > _high ? _high : ( _v < _low ? _low : _v);	\
+	SPA_MIN(SPA_MAX(_v, _low), _high);		\
+})
+
+#define SPA_SWAP(a,b)					\
+({							\
+	__typeof__(a) _t = (a);				\
+	a = b; b = _t;					\
+})
+
+#define SPA_TYPECHECK(type,x)		\
+({	type _dummy;			\
+	typeof(x) _dummy2;		\
+	(void)(&_dummy == &_dummy2);	\
+	x;				\
 })
 
 #define SPA_MEMBER(b,o,t) ((t*)((uint8_t*)(b) + (int)(o)))
+#define SPA_MEMBER_ALIGN(b,o,a,t) SPA_PTR_ALIGN(SPA_MEMBER(b,o,t),a,t)
 
 #define SPA_CONTAINER_OF(p,t,m) (t*)((uint8_t*)p - offsetof (t,m))
 
@@ -122,8 +132,10 @@ struct spa_fraction {
 #define SPA_USEC_PER_MSEC (1000ll)
 #define SPA_MSEC_PER_SEC  (1000ll)
 
-#define SPA_TIMESPEC_TO_TIME(ts) ((ts)->tv_sec * SPA_NSEC_PER_SEC + (ts)->tv_nsec)
-#define SPA_TIMEVAL_TO_TIME(tv)  ((tv)->tv_sec * SPA_NSEC_PER_SEC + (tv)->tv_usec * 1000ll)
+#define SPA_TIMESPEC_TO_NSEC(ts) ((ts)->tv_sec * SPA_NSEC_PER_SEC + (ts)->tv_nsec)
+#define SPA_TIMESPEC_TO_USEC(ts) ((ts)->tv_sec * SPA_USEC_PER_SEC + (ts)->tv_nsec / SPA_NSEC_PER_USEC)
+#define SPA_TIMEVAL_TO_NSEC(tv)  ((tv)->tv_sec * SPA_NSEC_PER_SEC + (tv)->tv_usec * SPA_NSEC_PER_USEC)
+#define SPA_TIMEVAL_TO_USEC(tv)  ((tv)->tv_sec * SPA_USEC_PER_SEC + (tv)->tv_usec)
 
 #ifdef __GNUC__
 #define SPA_PRINTF_FUNC(fmt, arg1) __attribute__((format(printf, fmt, arg1)))
@@ -139,8 +151,20 @@ struct spa_fraction {
 #define SPA_SENTINEL
 #endif
 
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+#define SPA_RESTRICT restrict
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define SPA_RESTRICT __restrict__
+#else
+#define SPA_RESTRICT
+#endif
+
 #define SPA_ROUND_DOWN_N(num,align)	((num) & ~((align) - 1))
 #define SPA_ROUND_UP_N(num,align)	SPA_ROUND_DOWN_N((num) + ((align) - 1),align)
+
+#define SPA_PTR_ALIGNMENT(p,align)	((intptr_t)(p) & ((align)-1))
+#define SPA_IS_ALIGNED(p,align)		(SPA_PTR_ALIGNMENT(p,align) == 0)
+#define SPA_PTR_ALIGN(p,align,type)	(type*)SPA_ROUND_UP_N((intptr_t)(p), (intptr_t)(align))
 
 #ifndef SPA_LIKELY
 #ifdef __GNUC__
@@ -157,14 +181,20 @@ struct spa_fraction {
 
 #define spa_return_if_fail(expr)					\
 	do {								\
-		if (SPA_UNLIKELY(!(expr)))				\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
 			return;						\
+		}							\
 	} while(false)
 
 #define spa_return_val_if_fail(expr, val)				\
 	do {								\
-		if (SPA_UNLIKELY(!(expr)))				\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
 			return (val);					\
+		}							\
 	} while(false)
 
 /* spa_assert_se() is an assert which guarantees side effects of x,
@@ -172,7 +202,25 @@ struct spa_fraction {
 #define spa_assert_se(expr)						\
 	do {								\
 		if (SPA_UNLIKELY(!(expr)))				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
 			abort();					\
+	} while (false)
+
+#define spa_assert(expr)						\
+	do {								\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			fprintf(stderr, "'%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
+			abort();					\
+		}							\
+	} while (false)
+
+#define spa_assert_not_reached()						\
+	do {									\
+		fprintf(stderr, "Code should not be reached at %s:%u %s()\n",	\
+				__FILE__, __LINE__, __func__);			\
+		abort();							\
 	} while (false)
 
 /* Does exactly nothing */
@@ -181,16 +229,34 @@ struct spa_fraction {
 #define spa_memzero(x,l) (memset((x), 0, (l)))
 #define spa_zero(x) (spa_memzero(&(x), sizeof(x)))
 
-#define spa_strerror(err)		\
-({					\
-	int __err = -err;		\
-	if (SPA_RESULT_IS_ASYNC(err))	\
-		__err = EINPROGRESS;	\
-	strerror(__err);		\
+#ifdef SPA_DEBUG_MEMCPY
+#define spa_memcpy(d,s,n)						\
+({									\
+	fprintf(stderr, "%s:%u %s() memcpy(%p, %p, %zd)\n",		\
+		__FILE__, __LINE__, __func__, (d), (s), (size_t)(n));	\
+	memcpy(d,s,n);							\
+})
+#define spa_memmove(d,s,n)						\
+({									\
+	fprintf(stderr, "%s:%u %s() memmove(%p, %p, %zd)\n",		\
+		__FILE__, __LINE__, __func__, (d), (s), (size_t)(n));	\
+	memmove(d,s,n);							\
+})
+#else
+#define spa_memcpy(d,s,n)	memcpy(d,s,n)
+#define spa_memmove(d,s,n)	memmove(d,s,n)
+#endif
+
+#define spa_aprintf(_fmt, ...)						\
+({									\
+	char *_strp;							\
+	if (asprintf(&(_strp), (_fmt), ## __VA_ARGS__ ) == -1)		\
+		_strp = NULL;						\
+	_strp;								\
 })
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-#endif /* __SPA_UTILS_DEFS_H__ */
+#endif /* SPA_UTILS_DEFS_H */

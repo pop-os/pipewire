@@ -1,39 +1,49 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <stdio.h>
 
 #include <spa/support/loop.h>
-#include <spa/support/type-map.h>
+#include <spa/utils/names.h>
+#include <spa/utils/result.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/loop.h>
 #include <pipewire/log.h>
+#include <pipewire/type.h>
 
 #define DATAS_SIZE (4096 * 8)
+
+#define NAME "loop"
 
 /** \cond */
 
 struct impl {
 	struct pw_loop this;
 
-	struct spa_handle *handle;
+	struct spa_handle *system_handle;
+	struct spa_handle *loop_handle;
 };
 /** \endcond */
 
@@ -42,74 +52,101 @@ struct impl {
  * \memberof pw_loop
  */
 SPA_EXPORT
-struct pw_loop *pw_loop_new(struct pw_properties *properties)
+struct pw_loop *pw_loop_new(const struct spa_dict *props)
 {
 	int res;
 	struct impl *impl;
 	struct pw_loop *this;
-	const struct spa_handle_factory *factory;
-	struct spa_type_map *map;
 	void *iface;
-	const struct spa_support *support;
+	struct spa_support support[32];
 	uint32_t n_support;
+	const char *lib;
 
-	support = pw_get_support(&n_support);
-	if (support == NULL)
-		return NULL;
+	n_support = pw_get_support(support, 32);
 
-        map = spa_support_find(support, n_support, SPA_TYPE__TypeMap);
-	if (map == NULL)
-		return NULL;
-
-	factory = pw_get_support_factory("loop");
-	if (factory == NULL)
-		return NULL;
-
-	impl = calloc(1, sizeof(struct impl) + factory->size);
-	if (impl == NULL)
-		return NULL;
-
-	impl->handle = SPA_MEMBER(impl, sizeof(struct impl), struct spa_handle);
+	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL) {
+		res = -errno;
+		goto error_cleanup;
+	}
 
 	this = &impl->this;
 
-	if ((res = spa_handle_factory_init(factory,
-					   impl->handle,
-					   NULL,
-					   support,
-					   n_support)) < 0) {
-		fprintf(stderr, "can't make factory instance: %d\n", res);
-		goto failed;
+	if (props)
+		lib = spa_dict_lookup(props, PW_KEY_LIBRARY_NAME_SYSTEM);
+	else
+		lib = NULL;
+
+	impl->system_handle = pw_load_spa_handle(lib,
+			SPA_NAME_SUPPORT_SYSTEM,
+			props, n_support, support);
+	if (impl->system_handle == NULL) {
+		res = -errno;
+		pw_log_error(NAME" %p: can't make "SPA_NAME_SUPPORT_SYSTEM" handle: %m", this);
+		goto error_free;
 	}
 
-        if ((res = spa_handle_get_interface(impl->handle,
-					    spa_type_map_get_id(map, SPA_TYPE__Loop),
+        if ((res = spa_handle_get_interface(impl->system_handle,
+					    SPA_TYPE_INTERFACE_System,
 					    &iface)) < 0) {
-                fprintf(stderr, "can't get %s interface %d\n", SPA_TYPE__Loop, res);
-                goto failed;
+                pw_log_error(NAME" %p: can't get System interface: %s", this, spa_strerror(res));
+                goto error_unload_system;
+	}
+	this->system = iface;
+
+	support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_System, iface);
+
+	if (props)
+		lib = spa_dict_lookup(props, PW_KEY_LIBRARY_NAME_LOOP);
+	else
+		lib = NULL;
+
+	impl->loop_handle = pw_load_spa_handle(lib,
+			SPA_NAME_SUPPORT_LOOP, props,
+			n_support, support);
+	if (impl->loop_handle == NULL) {
+		res = -errno;
+		pw_log_error(NAME" %p: can't make "SPA_NAME_SUPPORT_LOOP" handle: %m", this);
+		goto error_unload_system;
+	}
+
+        if ((res = spa_handle_get_interface(impl->loop_handle,
+					    SPA_TYPE_INTERFACE_Loop,
+					    &iface)) < 0) {
+		pw_log_error(NAME" %p: can't get Loop interface: %s",
+				this, spa_strerror(res));
+                goto error_unload_loop;
         }
 	this->loop = iface;
 
-        if ((res = spa_handle_get_interface(impl->handle,
-					    spa_type_map_get_id(map, SPA_TYPE__LoopControl),
+        if ((res = spa_handle_get_interface(impl->loop_handle,
+					    SPA_TYPE_INTERFACE_LoopControl,
 					    &iface)) < 0) {
-                fprintf(stderr, "can't get %s interface %d\n", SPA_TYPE__LoopControl, res);
-                goto failed;
+		pw_log_error(NAME" %p: can't get LoopControl interface: %s",
+				this, spa_strerror(res));
+                goto error_unload_loop;
         }
 	this->control = iface;
 
-        if ((res = spa_handle_get_interface(impl->handle,
-					    spa_type_map_get_id(map, SPA_TYPE__LoopUtils),
+        if ((res = spa_handle_get_interface(impl->loop_handle,
+					    SPA_TYPE_INTERFACE_LoopUtils,
 					    &iface)) < 0) {
-                fprintf(stderr, "can't get %s interface %d\n", SPA_TYPE__LoopUtils, res);
-                goto failed;
+		pw_log_error(NAME" %p: can't get LoopUtils interface: %s",
+				this, spa_strerror(res));
+                goto error_unload_loop;
         }
 	this->utils = iface;
 
 	return this;
 
-      failed:
+error_unload_loop:
+	pw_unload_spa_handle(impl->loop_handle);
+error_unload_system:
+	pw_unload_spa_handle(impl->system_handle);
+error_free:
 	free(impl);
+error_cleanup:
+	errno = -res;
 	return NULL;
 }
 
@@ -122,6 +159,7 @@ void pw_loop_destroy(struct pw_loop *loop)
 {
 	struct impl *impl = SPA_CONTAINER_OF(loop, struct impl, this);
 
-	spa_handle_clear(impl->handle);
+	pw_unload_spa_handle(impl->loop_handle);
+	pw_unload_spa_handle(impl->system_handle);
 	free(impl);
 }

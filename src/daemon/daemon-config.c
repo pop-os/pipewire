@@ -1,21 +1,26 @@
 /* PipeWire
- * Copyright (C) 2016 Axis Communications <dev-gstreamer@axis.com>
- * @author Linus Svensson <linus.svensson@axis.com>
+ * Copyright © 2016 Axis Communications <dev-gstreamer@axis.com>
+ *	@author Linus Svensson <linus.svensson@axis.com>
+ * Copyright © 2018 Wim Taymans
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -27,9 +32,8 @@
 #include <errno.h>
 
 #include <pipewire/pipewire.h>
-#include <pipewire/command.h>
-#include <pipewire/private.h>
 
+#include "daemon/command.h"
 #include "daemon/daemon-config.h"
 
 #define DEFAULT_CONFIG_FILE PIPEWIRE_CONFIG_DIR "/pipewire.conf"
@@ -40,7 +44,6 @@ parse_line(struct pw_daemon_config *config,
 {
 	struct pw_command *command = NULL;
 	char *p;
-	int ret = 0;
 	char *local_err = NULL;
 
 	/* search for comments */
@@ -48,20 +51,22 @@ parse_line(struct pw_daemon_config *config,
 		*p = '\0';
 
 	/* remove whitespaces */
-	pw_strip(line, "\n\r \t");
-
+	line = pw_strip(line, "\n\r \t");
 	if (*line == '\0')	/* empty line */
-		return 0;
+		goto out;
 
-	if ((command = pw_command_parse(line, &local_err)) == NULL) {
-		asprintf(err, "%s:%u: %s", filename, lineno, local_err);
-		free(local_err);
-		ret = -EINVAL;
-	} else {
-		spa_list_append(&config->commands, &command->link);
-	}
+	if ((command = pw_command_parse(config->properties, line, &local_err)) == NULL)
+		goto error_parse;
 
-	return ret;
+	spa_list_append(&config->commands, &command->link);
+
+out:
+	return 0;
+
+error_parse:
+	*err = spa_aprintf("%s:%u: %s", filename, lineno, local_err);
+	free(local_err);
+	return -EINVAL;
 }
 
 /**
@@ -69,14 +74,21 @@ parse_line(struct pw_daemon_config *config,
  *
  * Returns a new empty #struct pw_daemon_config.
  */
-struct pw_daemon_config *pw_daemon_config_new(void)
+struct pw_daemon_config *pw_daemon_config_new(struct pw_properties *properties)
 {
 	struct pw_daemon_config *config;
 
 	config = calloc(1, sizeof(struct pw_daemon_config));
+	if (config == NULL)
+		goto error_exit;
+
+	config->properties = properties;
 	spa_list_init(&config->commands);
 
 	return config;
+
+error_exit:
+	return NULL;
 }
 
 /**
@@ -114,7 +126,7 @@ int pw_daemon_config_load_file(struct pw_daemon_config *config, const char *file
 	pw_log_debug("deamon-config %p: loading configuration file '%s'", config, filename);
 
 	if ((f = fopen(filename, "r")) == NULL) {
-		asprintf(err, "failed to open configuration file '%s': %s", filename,
+		*err = spa_aprintf("failed to open configuration file '%s': %s", filename,
 			 strerror(errno));
 		goto open_error;
 	}
@@ -125,8 +137,7 @@ int pw_daemon_config_load_file(struct pw_daemon_config *config, const char *file
 		if (!fgets(buf, sizeof(buf), f)) {
 			if (feof(f))
 				break;
-
-			asprintf(err, "failed to read configuration file '%s': %s",
+			*err = spa_aprintf("failed to read configuration file '%s': %s",
 				 filename, strerror(errno));
 			goto read_error;
 		}
@@ -173,22 +184,22 @@ int pw_daemon_config_load(struct pw_daemon_config *config, char **err)
 /**
  * pw_daemon_config_run_commands:
  * @config: A #struct pw_daemon_config
- * @core: A #struct pw_core
+ * @context: A #struct pw_context
  *
  * Run all commands that have been parsed. The list of commands will be cleared
  * when this function has been called.
  *
  * Returns: 0 if all commands where executed with success, otherwise < 0.
  */
-int pw_daemon_config_run_commands(struct pw_daemon_config *config, struct pw_core *core)
+int pw_daemon_config_run_commands(struct pw_daemon_config *config, struct pw_context *context)
 {
 	char *err = NULL;
 	int ret = 0;
 	struct pw_command *command;
 
 	spa_list_for_each(command, &config->commands, link) {
-		if ((ret = pw_command_run(command, core, &err)) < 0) {
-			pw_log_warn("could not run command %s: %s", command->args[0], err);
+		if ((ret = pw_command_run(command, context, &err)) < 0) {
+			pw_log_error("could not run command %s: %s", command->args[0], err);
 			free(err);
 			break;
 		}

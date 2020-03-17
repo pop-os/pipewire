@@ -1,24 +1,29 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_LOG_IMPL_H__
-#define __SPA_LOG_IMPL_H__
+#ifndef SPA_LOG_IMPL_H
+#define SPA_LOG_IMPL_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,9 +31,10 @@ extern "C" {
 
 #include <stdio.h>
 
+#include <spa/utils/type.h>
 #include <spa/support/log.h>
 
-static inline void spa_log_impl_logv(struct spa_log *log,
+static inline SPA_PRINTF_FUNC(6, 0) void spa_log_impl_logv(void *object,
 				     enum spa_log_level level,
 				     const char *file,
 				     int line,
@@ -44,7 +50,7 @@ static inline void spa_log_impl_logv(struct spa_log *log,
                 levels[level], strrchr(file, '/') + 1, line, func, text);
         fputs(location, stderr);
 }
-static inline void spa_log_impl_log(struct spa_log *log,
+static inline SPA_PRINTF_FUNC(6,7) void spa_log_impl_log(void *object,
 				    enum spa_log_level level,
 				    const char *file,
 				    int line,
@@ -53,26 +59,28 @@ static inline void spa_log_impl_log(struct spa_log *log,
 {
 	va_list args;
 	va_start(args, fmt);
-	spa_log_impl_logv(log, level, file, line, func, fmt, args);
+	spa_log_impl_logv(object, level, file, line, func, fmt, args);
 	va_end(args);
 }
 
 #define SPA_LOG_IMPL_DEFINE(name)		\
 struct {					\
 	struct spa_log log;			\
+	struct spa_log_methods methods;		\
 } name
 
-#define SPA_LOG_IMPL_INIT			\
-        { { SPA_VERSION_LOG,			\
-            NULL,				\
-	    SPA_LOG_LEVEL_INFO,			\
-	    spa_log_impl_log,			\
+#define SPA_LOG_IMPL_INIT(name)				\
+	{ { { SPA_TYPE_INTERFACE_Log, SPA_VERSION_LOG,	\
+	      SPA_CALLBACKS_INIT(&name.methods, &name) },	\
+	    SPA_LOG_LEVEL_INFO,	},			\
+	  { SPA_VERSION_LOG_METHODS,			\
+	    spa_log_impl_log,				\
 	    spa_log_impl_logv,} }
 
 #define SPA_LOG_IMPL(name)			\
-        SPA_LOG_IMPL_DEFINE(name) = SPA_LOG_IMPL_INIT
+        SPA_LOG_IMPL_DEFINE(name) = SPA_LOG_IMPL_INIT(name)
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
-#endif /* __SPA_LOG_IMPL_H__ */
+#endif /* SPA_LOG_IMPL_H */

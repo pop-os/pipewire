@@ -1,43 +1,53 @@
 /* Simple Plugin API
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_META_H__
-#define __SPA_META_H__
+#ifndef SPA_META_H
+#define SPA_META_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include <spa/utils/defs.h>
-#include <spa/support/type-map.h>
+#include <spa/pod/pod.h>
 
 /** \page page_meta Metadata
  *
  * Metadata contains extra information on a buffer.
  */
-#define SPA_TYPE__Meta			SPA_TYPE_POINTER_BASE "Meta"
-#define SPA_TYPE_META_BASE		SPA_TYPE__Meta ":"
+enum spa_meta_type {
+	SPA_META_Invalid,
+	SPA_META_Header,	/**< struct spa_meta_header */
+	SPA_META_VideoCrop,	/**< struct spa_meta_region with cropping data */
+	SPA_META_VideoDamage,	/**< array of struct spa_meta_region with damage */
+	SPA_META_Bitmap,	/**< struct spa_meta_bitmap */
+	SPA_META_Cursor,	/**< struct spa_meta_cursor */
+	SPA_META_Control,	/**< metadata contains a spa_meta_control
+				  *  associated with the data */
 
-#define SPA_TYPE_META__Header		SPA_TYPE_META_BASE "Header"
-#define SPA_TYPE_META__VideoCrop	SPA_TYPE_META_BASE "VideoCrop"
-#define SPA_TYPE_META__Bitmap		SPA_TYPE_META_BASE "Bitmap"
-#define SPA_TYPE_META__Cursor		SPA_TYPE_META_BASE "Cursor"
+	SPA_META_LAST,		/**< not part of ABI/API */
+};
 
 /**
  * A metadata element.
@@ -47,10 +57,14 @@ extern "C" {
  * itself.
  */
 struct spa_meta {
-	uint32_t type;		/**< metadata type */
-	void *data;		/**< pointer to metadata */
+	uint32_t type;		/**< metadata type, one of enum spa_meta_type */
 	uint32_t size;		/**< size of metadata */
+	void *data;		/**< pointer to metadata */
 };
+
+#define spa_meta_first(m)	((m)->data)
+#define spa_meta_end(m)		SPA_MEMBER((m)->data,(m)->size,void)
+#define spa_meta_check(p,m)	(SPA_MEMBER(p,sizeof(*p),void) <= spa_meta_end(m))
 
 /**
  * Describes essential buffer header metadata such as flags and
@@ -64,69 +78,74 @@ struct spa_meta_header {
 #define SPA_META_HEADER_FLAG_GAP	(1 << 4)	/**< data contains media neutral data */
 #define SPA_META_HEADER_FLAG_DELTA_UNIT	(1 << 5)	/**< cannot be decoded independently */
 	uint32_t flags;				/**< flags */
-	uint32_t seq;				/**< sequence number, increments with a
-						  *  media specific frequency */
+	uint32_t offset;			/**< offset in current cycle */
 	int64_t pts;				/**< presentation timestamp */
-	int64_t dts_offset;			/**< decoding timestamp and a difference with pts */
+	int64_t dts_offset;			/**< decoding timestamp as a difference with pts */
+	uint64_t seq;				/**< sequence number, increments with a
+						  *  media specific frequency */
 };
 
-/**
- * Video cropping metadata
- * a */
-struct spa_meta_video_crop {
-	int32_t x, y;		/**< x and y offsets */
-	int32_t width, height;	/**< width and height */
+/** metadata structure for Region or an array of these for RegionArray */
+struct spa_meta_region {
+	struct spa_region region;
 };
 
-/**
- * Describes a control location in the buffer.
- */
-struct spa_meta_control {
-	uint32_t id;		/**< control id */
-	uint32_t offset;	/**< offset in buffer memory */
-};
+#define spa_meta_region_is_valid(m)	((m)->region.size.width != 0 && (m)->region.size.height != 0)
+
+/** iterate all the items in a metadata */
+#define spa_meta_for_each(pos,meta)					\
+	for (pos = (__typeof(pos))spa_meta_first(meta);			\
+	    spa_meta_check(pos, meta);					\
+            (pos)++)
 
 #define spa_meta_bitmap_is_valid(m)	((m)->format != 0)
 
 /**
  * Bitmap information
+ *
+ * This metadata contains a bitmap image in the given format and size.
+ * It is typically used for cursor images or other small images that are
+ * better transfered inline.
  */
 struct spa_meta_bitmap {
-	uint32_t format;		/**< bitmap video format, 0 invalid */
-	struct spa_rectangle size;		/**< width and height of bitmap */
+	uint32_t format;		/**< bitmap video format, one of enum spa_video_format. 0 is
+					  *  and invalid format and should be handled as if there is
+					  *  no new bitmap information. */
+	struct spa_rectangle size;	/**< width and height of bitmap */
 	int32_t stride;			/**< stride of bitmap data */
-	uint32_t offset;		/**< offset of bitmap data in this structure */
+	uint32_t offset;		/**< offset of bitmap data in this structure. An offset of
+					  *  0 means no image data (invisible), an offset >=
+					  *  sizeof(struct spa_meta_bitmap) contains valid bitmap
+					  *  info. */
 };
 
 #define spa_meta_cursor_is_valid(m)	((m)->id != 0)
 
 /**
  * Cursor information
+ *
+ * Metadata to describe the position and appearance of a pointing device.
  */
 struct spa_meta_cursor {
-	uint32_t id;			/**< cursor id, 0 for no cursor */
+	uint32_t id;			/**< cursor id. an id of 0 is an invalid id and means that
+					  *  there is no new cursor data */
 	uint32_t flags;			/**< extra flags */
 	struct spa_point position;	/**< position on screen */
-	struct spa_point hotspot;	/**< offsets for hotspot in bitmap */
-	uint32_t bitmap_offset;		/**< offset of bitmap meta in this structure */
+	struct spa_point hotspot;	/**< offsets for hotspot in bitmap, this field has no meaning
+					  *  when there is no valid bitmap (see below) */
+	uint32_t bitmap_offset;		/**< offset of bitmap meta in this structure. When the offset
+					  *  is 0, there is no new bitmap information. When the offset is
+					  *  >= sizeof(struct spa_meta_cursor) there is a
+					  *  struct spa_meta_bitmap at the offset. */
 };
 
-
-struct spa_type_meta {
-	uint32_t Header;
-	uint32_t VideoCrop;
+/** a timed set of events associated with the buffer */
+struct spa_meta_control {
+	struct spa_pod_sequence sequence;
 };
-
-static inline void spa_type_meta_map(struct spa_type_map *map, struct spa_type_meta *type)
-{
-	if (type->Header == 0) {
-		type->Header = spa_type_map_get_id(map, SPA_TYPE_META__Header);
-		type->VideoCrop = spa_type_map_get_id(map, SPA_TYPE_META__VideoCrop);
-	}
-}
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_META_H__ */
+#endif /* SPA_META_H */

@@ -1,114 +1,170 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_PORT_H__
-#define __PIPEWIRE_PORT_H__
+#ifndef PIPEWIRE_PORT_H
+#define PIPEWIRE_PORT_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define PW_TYPE__Port                          "PipeWire:Object:Port"
-#define PW_TYPE_PORT_BASE                      PW_TYPE__Port ":"
+#include <stdarg.h>
+#include <errno.h>
 
+#include <spa/utils/defs.h>
 #include <spa/utils/hook.h>
+#include <spa/param/param.h>
 
-/** \page page_port Port
- *
- * \section page_node_overview Overview
- *
- * A port can be used to link two nodes.
- */
-/** \class pw_port
- *
- * The port object
- */
+#include <pipewire/proxy.h>
+
+#define PW_TYPE_INTERFACE_Port	PW_TYPE_INFO_INTERFACE_BASE "Port"
+
+#define PW_VERSION_PORT		3
 struct pw_port;
-struct pw_link;
-struct pw_control;
 
-#include <pipewire/core.h>
-#include <pipewire/introspect.h>
-#include <pipewire/node.h>
-
-enum pw_port_state {
-	PW_PORT_STATE_ERROR = -1,	/**< the port is in error */
-	PW_PORT_STATE_INIT = 0,		/**< the port is being created */
-	PW_PORT_STATE_CONFIGURE = 1,	/**< the port is ready for format negotiation */
-	PW_PORT_STATE_READY = 2,	/**< the port is ready for buffer allocation */
-	PW_PORT_STATE_PAUSED = 3,	/**< the port is paused */
-	PW_PORT_STATE_STREAMING = 4,	/**< the port is streaming */
+/** \enum pw_direction The direction of a port \memberof pw_introspect */
+enum pw_direction {
+	PW_DIRECTION_INPUT = SPA_DIRECTION_INPUT,	/**< an input port direction */
+	PW_DIRECTION_OUTPUT = SPA_DIRECTION_OUTPUT	/**< an output port direction */
 };
 
-/** Port events, use \ref pw_port_add_listener */
+/** Convert a \ref pw_direction to a readable string \memberof pw_introspect */
+const char * pw_direction_as_string(enum pw_direction direction);
+
+
+/** \class pw_introspect
+ *
+ * The introspection methods and structures are used to get information
+ * about the object in the PipeWire server
+ */
+
+struct pw_port_info {
+	uint32_t id;				/**< id of the global */
+	enum pw_direction direction;		/**< port direction */
+#define PW_PORT_CHANGE_MASK_PROPS		(1 << 0)
+#define PW_PORT_CHANGE_MASK_PARAMS		(1 << 1)
+#define PW_PORT_CHANGE_MASK_ALL			((1 << 2)-1)
+	uint64_t change_mask;			/**< bitfield of changed fields since last call */
+	struct spa_dict *props;			/**< the properties of the port */
+	struct spa_param_info *params;		/**< parameters */
+	uint32_t n_params;			/**< number of items in \a params */
+};
+
+struct pw_port_info *
+pw_port_info_update(struct pw_port_info *info,
+		    const struct pw_port_info *update);
+
+void
+pw_port_info_free(struct pw_port_info *info);
+
+#define PW_PORT_EVENT_INFO	0
+#define PW_PORT_EVENT_PARAM	1
+#define PW_PORT_EVENT_NUM	2
+
+/** Port events */
 struct pw_port_events {
-#define PW_VERSION_PORT_EVENTS 0
+#define PW_VERSION_PORT_EVENTS	0
+	uint32_t version;
+	/**
+	 * Notify port info
+	 *
+	 * \param info info about the port
+	 */
+	void (*info) (void *object, const struct pw_port_info *info);
+	/**
+	 * Notify a port param
+	 *
+	 * Event emited as a result of the enum_params method.
+	 *
+	 * \param seq the sequence number of the request
+	 * \param id the param id
+	 * \param index the param index
+	 * \param next the param index of the next param
+	 * \param param the parameter
+	 */
+	void (*param) (void *object, int seq,
+		       uint32_t id, uint32_t index, uint32_t next,
+		       const struct spa_pod *param);
+};
+
+#define PW_PORT_METHOD_ADD_LISTENER	0
+#define PW_PORT_METHOD_SUBSCRIBE_PARAMS	1
+#define PW_PORT_METHOD_ENUM_PARAMS	2
+#define PW_PORT_METHOD_NUM		3
+
+/** Port methods */
+struct pw_port_methods {
+#define PW_VERSION_PORT_METHODS		0
 	uint32_t version;
 
-	/** The port is destroyed */
-	void (*destroy) (void *data);
+	int (*add_listener) (void *object,
+			struct spa_hook *listener,
+			const struct pw_port_events *events,
+			void *data);
+	/**
+	 * Subscribe to parameter changes
+	 *
+	 * Automatically emit param events for the given ids when
+	 * they are changed.
+	 *
+	 * \param ids an array of param ids
+	 * \param n_ids the number of ids in \a ids
+	 */
+	int (*subscribe_params) (void *object, uint32_t *ids, uint32_t n_ids);
 
-	/** The port is freed */
-	void (*free) (void *data);
-
-	/** the port info changed */
-	void (*info_changed) (void *data, struct pw_port_info *info);
-
-	/** a new link is added on this port */
-	void (*link_added) (void *data, struct pw_link *link);
-
-	/** a link is removed from this port */
-	void (*link_removed) (void *data, struct pw_link *link);
-
-	/** the state of the port changed */
-	void (*state_changed) (void *data, enum pw_port_state state);
-
-	/** a control was added to the port */
-	void (*control_added) (void *data, struct pw_control *control);
-
-	/** a control was removed from the port */
-	void (*control_removed) (void *data, struct pw_control *control);
+	/**
+	 * Enumerate port parameters
+	 *
+	 * Start enumeration of port parameters. For each param, a
+	 * param event will be emited.
+	 *
+	 * \param seq a sequence number returned in the reply
+	 * \param id the parameter id to enumerate
+	 * \param start the start index or 0 for the first param
+	 * \param num the maximum number of params to retrieve
+	 * \param filter a param filter or NULL
+	 */
+	int (*enum_params) (void *object, int seq,
+			uint32_t id, uint32_t start, uint32_t num,
+			const struct spa_pod *filter);
 };
 
-/** Get the port direction */
-enum pw_direction pw_port_get_direction(struct pw_port *port);
+#define pw_port_method(o,method,version,...)				\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)o,		\
+			struct pw_port_methods, _res,			\
+			method, version, ##__VA_ARGS__);		\
+	_res;								\
+})
 
-/** Get the port properties */
-const struct pw_properties *pw_port_get_properties(struct pw_port *port);
-
-/** Update the port properties */
-int pw_port_update_properties(struct pw_port *port, const struct spa_dict *dict);
-
-/** Get the port id */
-uint32_t pw_port_get_id(struct pw_port *port);
-
-/** Get the port parent node or NULL when not yet set */
-struct pw_node *pw_port_get_node(struct pw_port *port);
-
-/** Add an event listener on the port */
-void pw_port_add_listener(struct pw_port *port,
-			  struct spa_hook *listener,
-			  const struct pw_port_events *events,
-			  void *data);
+#define pw_port_add_listener(c,...)	pw_port_method(c,add_listener,0,__VA_ARGS__)
+#define pw_port_subscribe_params(c,...)	pw_port_method(c,subscribe_params,0,__VA_ARGS__)
+#define pw_port_enum_params(c,...)	pw_port_method(c,enum_params,0,__VA_ARGS__)
 
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_PORT_H__ */
+#endif /* PIPEWIRE_PORT_H */

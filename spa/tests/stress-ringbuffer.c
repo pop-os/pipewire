@@ -1,17 +1,24 @@
-#define _GNU_SOURCE
 #include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <sched.h>
+#include <errno.h>
+#include <semaphore.h>
 
 #include <spa/utils/ringbuffer.h>
 
-#define ARRAY_SIZE 64
+#define DEFAULT_SIZE 0x2000
+#define ARRAY_SIZE 63
 #define MAX_VALUE 0x10000
 
-struct spa_ringbuffer rb;
-uint32_t size;
-uint8_t *data;
+#ifdef __FreeBSD__
+static int sched_getcpu(void) { return -1; };
+#endif
+
+static struct spa_ringbuffer rb;
+static uint32_t size;
+static void *data;
+static sem_t sem;
 
 static int fill_int_array(int *array, int start, int count)
 {
@@ -38,7 +45,6 @@ static int cmp_array(int *array1, int *array2, int count)
 static void *reader_start(void *arg)
 {
 	int i = 0, a[ARRAY_SIZE], b[ARRAY_SIZE];
-	unsigned long j = 0, nfailures = 0;
 
 	printf("reader started on cpu: %d\n", sched_getcpu());
 
@@ -46,24 +52,22 @@ static void *reader_start(void *arg)
 
 	while (1) {
 		uint32_t index;
+		int32_t avail;
 
-		if (spa_ringbuffer_get_read_index(&rb, &index) >= ARRAY_SIZE * sizeof(int)) {
-			spa_ringbuffer_read_data(&rb, data, size, index & (size - 1), b,
-						 ARRAY_SIZE * sizeof(int));
+		avail = spa_ringbuffer_get_read_index(&rb, &index);
 
-			if (!cmp_array(a, b, ARRAY_SIZE)) {
-				nfailures++;
-				printf
-				    ("failure in chunk %lu - probability: %lu/%lu = %.3f per million\n",
-				     j, nfailures, j, (float) nfailures / (j + 1) * 1000000);
-				i = (b[0] + ARRAY_SIZE) % MAX_VALUE;
-			}
+		if (avail >= (int32_t)(sizeof(b))) {
+			spa_ringbuffer_read_data(&rb, data, size, index % size, b, sizeof(b));
+			spa_ringbuffer_read_update(&rb, index + sizeof(b));
+
+			if (index >= INT32_MAX - sizeof(a))
+				break;
+
+			spa_assert(cmp_array(a, b, ARRAY_SIZE));
 			i = fill_int_array(a, i, ARRAY_SIZE);
-			j++;
-
-			spa_ringbuffer_read_update(&rb, index + ARRAY_SIZE * sizeof(int));
 		}
 	}
+	sem_post(&sem);
 
 	return NULL;
 }
@@ -77,37 +81,64 @@ static void *writer_start(void *arg)
 
 	while (1) {
 		uint32_t index;
+		int32_t avail;
 
-		if (spa_ringbuffer_get_write_index(&rb, &index) >= ARRAY_SIZE * sizeof(int)) {
-			spa_ringbuffer_write_data(&rb, data, size, index & (size - 1), a,
-						  ARRAY_SIZE * sizeof(int));
-			spa_ringbuffer_write_update(&rb, index + ARRAY_SIZE * sizeof(int));
+		avail = size - spa_ringbuffer_get_write_index(&rb, &index);
+
+		if (avail >= (int32_t)(sizeof(a))) {
+			spa_ringbuffer_write_data(&rb, data, size, index % size, a, sizeof(a));
+			spa_ringbuffer_write_update(&rb, index + sizeof(a));
+
+			if (index >= INT32_MAX - sizeof(a))
+				break;
 
 			i = fill_int_array(a, i, ARRAY_SIZE);
 		}
 	}
+	sem_post(&sem);
 
 	return NULL;
 }
 
+#define exit_error(msg) \
+do { perror(msg); exit(EXIT_FAILURE); } while (0)
+
 int main(int argc, char *argv[])
 {
+	pthread_t reader_thread, writer_thread;
+	struct timespec ts;
+	int s;
+
 	printf("starting ringbuffer stress test\n");
 
-	sscanf(argv[1], "%d", &size);
+	if (argc > 1)
+		sscanf(argv[1], "%d", &size);
+	else
+		size = DEFAULT_SIZE;
 
 	printf("buffer size (bytes): %d\n", size);
-	printf("array size (bytes): %ld\n", sizeof(int) * ARRAY_SIZE);
+	printf("array size (bytes): %zd\n", sizeof(int) * ARRAY_SIZE);
 
 	spa_ringbuffer_init(&rb);
 	data = malloc(size);
 
-	pthread_t reader_thread, writer_thread;
+	if (sem_init(&sem, 0, 0) != 0)
+		exit_error("init_sem");
+
 	pthread_create(&reader_thread, NULL, reader_start, NULL);
 	pthread_create(&writer_thread, NULL, writer_start, NULL);
 
-	while (1)
-		sleep(1);
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		exit_error("clock_gettime");
+
+	ts.tv_sec += 2;
+
+	while ((s = sem_timedwait(&sem, &ts)) == -1 && errno == EINTR)
+		continue;
+	while ((s = sem_timedwait(&sem, &ts)) == -1 && errno == EINTR)
+		continue;
+
+	printf("read %u, written %u\n", rb.readindex, rb.writeindex);
 
 	return 0;
 }

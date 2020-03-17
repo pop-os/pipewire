@@ -1,24 +1,29 @@
-/* PipeWire
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
+/* Simple Plugin API
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_DBUS_H__
-#define __SPA_DBUS_H__
+#ifndef SPA_DBUS_H
+#define SPA_DBUS_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,10 +31,10 @@ extern "C" {
 
 #include <spa/support/loop.h>
 
-#define SPA_TYPE__DBus		SPA_TYPE_INTERFACE_BASE "DBus"
-#define SPA_TYPE_DBUS_BASE	SPA_TYPE__DBus ":"
+#define SPA_TYPE_INTERFACE_DBus		SPA_TYPE_INFO_INTERFACE_BASE "DBus"
 
-#define SPA_TYPE_DBUS__Connection	SPA_TYPE_DBUS_BASE "Connection"
+#define SPA_VERSION_DBUS		0
+struct spa_dbus { struct spa_interface iface; };
 
 enum spa_dbus_type {
 	SPA_DBUS_TYPE_SESSION,	/**< The login session bus */
@@ -58,10 +63,8 @@ struct spa_dbus_connection {
 #define spa_dbus_connection_get(c)	(c)->get((c))
 #define spa_dbus_connection_destroy(c)	(c)->destroy((c))
 
-struct spa_dbus {
-	/* the version of this structure. This can be used to expand this
-	 * structure in the future */
-#define SPA_VERSION_DBUS	0
+struct spa_dbus_methods {
+#define SPA_VERSION_DBUS_METHODS	0
         uint32_t version;
 
 	/**
@@ -76,14 +79,22 @@ struct spa_dbus {
 	 * \param error location for the DBusError
 	 * \return a new dbus connection wrapper or NULL on error
 	 */
-	struct spa_dbus_connection * (*get_connection) (struct spa_dbus *dbus,
+	struct spa_dbus_connection * (*get_connection) (void *object,
 							enum spa_dbus_type type);
 };
 
-#define spa_dbus_get_connection(d,...)	(d)->get_connection((d),__VA_ARGS__)
+static inline struct spa_dbus_connection *
+spa_dbus_get_connection(struct spa_dbus *dbus, enum spa_dbus_type type)
+{
+	struct spa_dbus_connection *res = NULL;
+	spa_interface_call_res(&dbus->iface,
+                        struct spa_dbus_methods, res,
+			get_connection, 0, type);
+	return res;
+}
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_DBUS_H__ */
+#endif /* SPA_DBUS_H */

@@ -1,30 +1,36 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_MAP_H__
-#define __PIPEWIRE_MAP_H__
+#ifndef PIPEWIRE_MAP_H
+#define PIPEWIRE_MAP_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include <string.h>
+#include <errno.h>
 
 #include <spa/utils/defs.h>
 #include <pipewire/array.h>
@@ -83,10 +89,17 @@ static inline void pw_map_clear(struct pw_map *map)
 	pw_array_clear(&map->items);
 }
 
+static inline void pw_map_reset(struct pw_map *map)
+{
+	pw_array_reset(&map->items);
+	map->free_list = SPA_ID_INVALID;
+}
+
 /** Insert data in the map
  * \param map the map to insert into
  * \param data the item to add
- * \return the id where the item was inserted
+ * \return the id where the item was inserted or SPA_ID_INVALID when the
+ *	item can not be inserted.
  * \memberof pw_map
  */
 static inline uint32_t pw_map_insert_new(struct pw_map *map, void *data)
@@ -100,7 +113,7 @@ static inline uint32_t pw_map_insert_new(struct pw_map *map, void *data)
 		map->free_list = item->next;
 	} else {
 		item = (union pw_map_item *) pw_array_add(&map->items, sizeof(union pw_map_item));
-		if (!item)
+		if (item == NULL)
 			return SPA_ID_INVALID;
 		start = (union pw_map_item *) map->items.data;
 	}
@@ -113,23 +126,27 @@ static inline uint32_t pw_map_insert_new(struct pw_map *map, void *data)
  * \param map the map to inser into
  * \param id the index to insert at
  * \param data the data to insert
- * \return true on success, false when the index is invalid
+ * \return 0 on success, -ENOSPC value when the index is invalid or a < 0
+ *	errno value.
  * \memberof pw_map
  */
-static inline bool pw_map_insert_at(struct pw_map *map, uint32_t id, void *data)
+static inline int pw_map_insert_at(struct pw_map *map, uint32_t id, void *data)
 {
 	size_t size = pw_map_get_size(map);
 	union pw_map_item *item;
 
 	if (id > size)
-		return false;
-	else if (id == size)
+		return -ENOSPC;
+	else if (id == size) {
 		item = (union pw_map_item *) pw_array_add(&map->items, sizeof(union pw_map_item));
-	else
+		if (item == NULL)
+			return -errno;
+	}
+	else {
 		item = pw_map_get_item(map, id);
-
+	}
 	item->data = data;
-	return true;
+	return 0;
 }
 
 /** Remove an item at index
@@ -186,4 +203,4 @@ static inline int pw_map_for_each(struct pw_map *map,
 }  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_MAP_H__ */
+#endif /* PIPEWIRE_MAP_H */

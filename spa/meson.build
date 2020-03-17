@@ -1,17 +1,5 @@
 #project('spa', 'c')
 
-
-alsa_dep = dependency('alsa')
-x11_dep = dependency('x11', required : false)
-sdl_dep = dependency('sdl2', required : false)
-avcodec_dep = dependency('libavcodec', required : false)
-avformat_dep = dependency('libavformat', required : false)
-avfilter_dep = dependency('libavfilter', required : false)
-libva_dep = dependency('libva', required : false)
-sbc_dep = dependency('sbc', required : false)
-libudev_dep = dependency('libudev')
-threads_dep = dependency('threads')
-
 #cc = meson.get_compiler('c')
 #dl_lib = cc.find_library('dl', required : false)
 #pthread_lib = dependencies('threads')
@@ -20,12 +8,44 @@ threads_dep = dependency('threads')
 spa_inc = include_directories('include')
 
 subdir('include')
-subdir('plugins')
+
+if get_option('spa-plugins')
+  # common dependencies
+  if get_option('alsa') or get_option('v4l2')
+    libudev_dep = dependency('libudev')
+  endif
+
+  # plugin-specific dependencies
+  if get_option('alsa')
+    alsa_dep = dependency('alsa')
+  endif
+  if get_option('bluez5')
+    bluez_dep = dependency('bluez', version : '>= 4.101')
+    sbc_dep = dependency('sbc')
+  endif
+  if get_option('ffmpeg')
+    avcodec_dep = dependency('libavcodec')
+    avformat_dep = dependency('libavformat')
+  endif
+  if get_option('jack')
+    jack_dep = dependency('jack', version : '>= 1.9.10')
+  endif
+  if get_option('vulkan')
+    vulkan_dep = dependency('vulkan')
+  endif
+
+  subdir('plugins')
+endif
+
 subdir('tools')
 subdir('tests')
+if get_option('examples')
+  subdir('examples')
+endif
 
-pkgconfig.generate(filebase : 'libspa-@0@'.format(spaversion),
+pkgconfig.generate(filebase : 'lib@0@'.format(spa_name),
   name : 'libspa',
+  subdirs : spa_name,
   description : 'Simple Plugin API',
-  version : pipewire_version,
+  version : spaversion,
   extra_cflags : '-D_REENTRANT')

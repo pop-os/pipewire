@@ -1,29 +1,33 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <signal.h>
-#include <stdio.h>
 #include <getopt.h>
 
-#include <pipewire/pipewire.h>
-#include <pipewire/core.h>
-#include <pipewire/module.h>
+#include <spa/utils/result.h>
+
+#include <pipewire/impl.h>
 
 #include "config.h"
 #include "daemon-config.h"
@@ -48,18 +52,18 @@ static void show_help(const char *name)
 
 int main(int argc, char *argv[])
 {
-	struct pw_core *core;
+	struct pw_context *context;
 	struct pw_main_loop *loop;
 	struct pw_daemon_config *config;
+	struct pw_properties *properties;
 	char *err = NULL;
-	struct pw_properties *props;
 	static const struct option long_options[] = {
 		{"help",	0, NULL, 'h'},
 		{"version",	0, NULL, 'v'},
 		{"name",	1, NULL, 'n'},
 		{NULL,		0, NULL, 0}
 	};
-	int c;
+	int c, res;
 
 	pw_init(&argc, &argv);
 
@@ -85,25 +89,38 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	properties = pw_properties_new(
+                                PW_KEY_CORE_NAME, daemon_name,
+                                PW_KEY_CONTEXT_PROFILE_MODULES, "none",
+                                PW_KEY_CORE_DAEMON, "true", NULL);
+
 	/* parse configuration */
-	config = pw_daemon_config_new();
+	config = pw_daemon_config_new(properties);
 	if (pw_daemon_config_load(config, &err) < 0) {
 		pw_log_error("failed to parse config: %s", err);
 		free(err);
 		return -1;
 	}
 
-	props = pw_properties_new(PW_CORE_PROP_NAME, daemon_name,
-				  PW_CORE_PROP_DAEMON, "1", NULL);
 
-	loop = pw_main_loop_new(props);
+	loop = pw_main_loop_new(&properties->dict);
+	if (loop == NULL) {
+		pw_log_error("failed to create main-loop: %m");
+		return -1;
+	}
+
 	pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGINT, do_quit, loop);
 	pw_loop_add_signal(pw_main_loop_get_loop(loop), SIGTERM, do_quit, loop);
 
-	core = pw_core_new(pw_main_loop_get_loop(loop), props);
+	context = pw_context_new(pw_main_loop_get_loop(loop), properties, 0);
+	if (context == NULL) {
+		pw_log_error("failed to create context: %m");
+		return -1;
+	}
 
-	if (pw_daemon_config_run_commands(config, core) < 0) {
-		pw_log_error("failed to run config commands");
+	if ((res = pw_daemon_config_run_commands(config, context)) < 0) {
+		pw_log_error("failed to run config commands: %s", spa_strerror(res));
+		pw_main_loop_quit(loop);
 		return -1;
 	}
 
@@ -112,7 +129,7 @@ int main(int argc, char *argv[])
 	pw_log_info("leave main loop");
 
 	pw_daemon_config_free(config);
-	pw_core_destroy(core);
+	pw_context_destroy(context);
 	pw_main_loop_destroy(loop);
 
 	return 0;

@@ -1,6 +1,20 @@
-pipewire_ext_headers = [
-  'client-node.h',
-  'protocol-native.h',
+pipewire_ext_sm_headers = [
+  'session-manager/impl-interfaces.h',
+  'session-manager/interfaces.h',
+  'session-manager/introspect.h',
+  'session-manager/keys.h',
 ]
 
-install_headers(pipewire_ext_headers, subdir : 'pipewire/extensions')
+pipewire_ext_headers = [
+  'client-node.h',
+  'metadata.h',
+  'profiler.h',
+  'protocol-native.h',
+  'session-manager.h',
+]
+
+install_headers(pipewire_ext_sm_headers,
+  subdir : join_paths(pipewire_headers_dir, 'extensions', 'session-manager'))
+
+install_headers(pipewire_ext_headers,
+  subdir : join_paths(pipewire_headers_dir, 'extensions'))

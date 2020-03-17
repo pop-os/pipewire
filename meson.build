@@ -1,6 +1,7 @@
-project('pipewire', 'c',
-  version : '0.2.7',
-  meson_version : '>= 0.47.0',
+project('pipewire', ['c' ],
+  version : '0.3.1',
+  license : 'MIT',
+  meson_version : '>= 0.50.0',
   default_options : [ 'warning_level=1',
                       'c_std=gnu99',
                       'buildtype=debugoptimized' ])
@@ -17,10 +18,13 @@ else
   pipewire_version_nano = 0
 endif
 
-spaversion = '0.1'
-apiversion = '0.2'
-soversion = 1
+spaversion = '0.2'
+apiversion = '0.3'
+soversion = 0
 libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
+
+pipewire_name = 'pipewire-@0@'.format(apiversion)
+spa_name = 'spa-@0@'.format(spaversion)
 
 prefix = get_option('prefix')
 pipewire_bindir = join_paths(prefix, get_option('bindir'))
@@ -30,14 +34,45 @@ pipewire_localedir = join_paths(prefix, get_option('localedir'))
 pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
 
 pipewire_configdir = join_paths(pipewire_sysconfdir, 'pipewire')
-modules_install_dir = join_paths(pipewire_libdir, 'pipewire-@0@'.format(apiversion))
-spa_plugindir = join_paths(pipewire_libdir, 'spa')
+modules_install_dir = join_paths(pipewire_libdir, pipewire_name)
+spa_plugindir = join_paths(pipewire_libdir, spa_name)
+
+pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 
 gnome = import('gnome')
 pkgconfig = import('pkgconfig')
 
+have_cpp = add_languages('cpp', required : false)
+
 cc = meson.get_compiler('c')
 
+if cc.get_id() == 'gcc'
+  add_global_arguments('-fvisibility=hidden',
+			'-Wsign-compare',
+			'-Wimplicit-fallthrough',
+			'-Wpointer-arith',
+			'-Wformat-security',
+			'-Werror=suggest-attribute=format',
+#			'-DSPA_DEBUG_MEMCPY',
+#			'-DFASTPATH',
+			language : 'c')
+endif
+
+sse_args = '-msse'
+sse2_args = '-msse2'
+ssse3_args = '-mssse3'
+sse41_args = '-msse4.1'
+fma_args = '-mfma'
+avx_args = '-mavx'
+avx2_args = '-mavx2'
+
+have_sse = cc.has_argument(sse_args)
+have_sse2 = cc.has_argument(sse2_args)
+have_ssse3 = cc.has_argument(ssse3_args)
+have_sse41 = cc.has_argument(sse41_args)
+have_fma = cc.has_argument(fma_args)
+have_avx = cc.has_argument(avx_args)
+have_avx2 = cc.has_argument(avx2_args)
 
 cdata = configuration_data()
 cdata.set('PIPEWIRE_VERSION_MAJOR', pipewire_version_major)
@@ -49,7 +84,7 @@ cdata.set('PIPEWIRE_DATADIR', '"@0@"'.format(pipewire_datadir))
 cdata.set('LOCALEDIR', '"@0@"'.format(pipewire_localedir))
 cdata.set('LIBDIR', '"@0@"'.format(pipewire_libdir))
 cdata.set('GETTEXT_PACKAGE', '"pipewire"')
-cdata.set('PIPEWIRE_LICENSE', '"LGPL"')
+cdata.set('PIPEWIRE_LICENSE', '"MIT"')
 cdata.set('PIPEWIRE_PACKAGE_ORIGIN', '"Unknown package origin"')
 cdata.set('PIPEWIRE_PACKAGE_NAME', '"PipeWire source release"')
 cdata.set('PACKAGE', '"pipewire"')
@@ -144,6 +179,7 @@ configinc = include_directories('.')
 pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
+  makedata.set('BUILD_ROOT', meson.build_root())
   makedata.set('VERSION', pipewire_version)
 if version_arr.length() == 4
   makedata.set('TAG', 'HEAD')
@@ -161,30 +197,48 @@ rt_lib = cc.find_library('rt', required : false) # clock_gettime
 dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
-
-if not get_option('gstreamer').disabled()
-  build_gst = true
-  glib_dep = [dependency('glib-2.0', version : '>=2.32.0', required: get_option('gstreamer'))]
-  gobject_dep = [dependency('gobject-2.0', required: get_option('gstreamer'))]
-  gmodule_dep = [dependency('gmodule-2.0', required: get_option('gstreamer'))]
-  gio_dep = [dependency('gio-2.0', required: get_option('gstreamer')), dependency('gio-unix-2.0', required: get_option('gstreamer'))]
-  gst_dep = [dependency('gstreamer-1.0', required: get_option('gstreamer')),
-             dependency('gstreamer-plugins-base-1.0', required: get_option('gstreamer')),
-             dependency('gstreamer-video-1.0', required: get_option('gstreamer')),
-             dependency('gstreamer-audio-1.0', required: get_option('gstreamer')),
-             dependency('gstreamer-allocators-1.0', required: get_option('gstreamer')),]
-  foreach dep: glib_dep + gobject_dep + gio_dep + gst_dep
-    if build_gst and not dep.found()
-      build_gst = false
-      message('@0@ not found, disabling GStreamer'.format(dep))
-    endif
-  endforeach
-else
-  build_gst = false
+sdl_dep = dependency('sdl2', required : false)
+if get_option('pw-cat')
+  sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
 endif
+
+if get_option('gstreamer') or get_option('pipewire-pulseaudio')
+  glib_dep = dependency('glib-2.0', version : '>=2.32.0')
+endif
+
+if get_option('gstreamer')
+  gobject_dep = dependency('gobject-2.0')
+  gmodule_dep = dependency('gmodule-2.0')
+  gio_dep = [dependency('gio-2.0'), dependency('gio-unix-2.0')]
+  gst_dep = [dependency('gstreamer-1.0'),
+             dependency('gstreamer-plugins-base-1.0'),
+             dependency('gstreamer-video-1.0'),
+             dependency('gstreamer-audio-1.0'),
+             dependency('gstreamer-allocators-1.0'),]
+endif
+
+# On FreeBSD, epoll-shim library is required for eventfd() and timerfd()
+epoll_shim_dep = (build_machine.system() == 'freebsd'
+    ? dependency('epoll-shim', required: true)
+    : dependency('', required: false))
 
 subdir('spa')
 subdir('src')
+
+if get_option('pipewire-jack')
+  jack_dep = dependency('jack', version : '>= 1.9.10')
+  subdir('pipewire-jack/src')
+endif
+
+if get_option('pipewire-pulseaudio')
+  pulseaudio_dep = dependency('libpulse', version : '>= 11.1')
+  subdir('pipewire-pulseaudio/src')
+endif
+
+if get_option('pipewire-alsa')
+  alsa_dep = dependency('alsa')
+  subdir('pipewire-alsa/alsa-plugins')
+endif
 
 if get_option('docs')
   doxygen = find_program('doxygen', required : false)
@@ -205,4 +259,5 @@ if get_option('man')
 endif
 
 setenv = find_program('pw-uninstalled.sh')
-run_target('uninstalled', command : [setenv, '-b@0@'.format(meson.build_root())])
+run_target('uninstalled', command : [setenv,
+    '-b@0@'.format(meson.build_root()), '-v@0@'.format(pipewire_version)])
