@@ -54,7 +54,7 @@ Multi-Arch: same
 Depends: ${misc:Depends},
          libpipewire-0.3-0 (= ${binary:Version}),
          libspa-lib-0.2-dev (= ${binary:Version}),
-Suggests: pipewire-0.2-doc,
+Suggests: pipewire-doc,
 Description: libraries for the PipeWire multimedia server - development
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -71,7 +71,7 @@ Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends}
-Suggests: pipewire-0.2-doc,
+Suggests: pipewire-doc,
 Description: libraries for the PipeWire multimedia server Simple Plugin API - development
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -83,12 +83,14 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
  .
  This package contains the development files for the Simple Plugin API.
 
-Package: libpipewire-0.2-doc
+Package: pipewire-doc
 Section: doc
 Build-Profiles: <!nodoc>
 Architecture: all
 Multi-Arch: foreign
 Depends: ${misc:Depends}
+Breaks: libpipewire-0.2-doc (<< 0.3.1)
+Replaces: libpipewire-0.2-doc (<< 0.3.1)
 Description: libraries for the PipeWire multimedia server - documentation
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
