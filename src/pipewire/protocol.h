@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_PROTOCOL_H__
-#define __PIPEWIRE_PROTOCOL_H__
+#ifndef PIPEWIRE_PROTOCOL_H
+#define PIPEWIRE_PROTOCOL_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,37 +33,42 @@ extern "C" {
 
 struct pw_protocol;
 
-#include <pipewire/core.h>
+#include <pipewire/context.h>
 #include <pipewire/properties.h>
 #include <pipewire/utils.h>
 
-#define PW_TYPE__Protocol               "PipeWire:Protocol"
-#define PW_TYPE_PROTOCOL_BASE           PW_TYPE__Protocol ":"
+#define PW_TYPE_INFO_Protocol		"PipeWire:Protocol"
+#define PW_TYPE_INFO_PROTOCOL_BASE	PW_TYPE_INFO_Protocol ":"
 
 struct pw_protocol_client {
 	struct spa_list link;		/**< link in protocol client_list */
 	struct pw_protocol *protocol;	/**< the owner protocol */
 
-	struct pw_remote *remote;	/**< the associated remote */
+	struct pw_core *core;
 
 	int (*connect) (struct pw_protocol_client *client,
+			const struct spa_dict *props,
 			void (*done_callback) (void *data, int result),
 			void *data);
 	int (*connect_fd) (struct pw_protocol_client *client, int fd, bool close);
 	int (*steal_fd) (struct pw_protocol_client *client);
 	void (*disconnect) (struct pw_protocol_client *client);
 	void (*destroy) (struct pw_protocol_client *client);
+	int (*set_paused) (struct pw_protocol_client *client, bool paused);
 };
 
-#define pw_protocol_client_connect(c,cb,d)	((c)->connect(c,cb,d))
+#define pw_protocol_client_connect(c,p,cb,d)	((c)->connect(c,p,cb,d))
 #define pw_protocol_client_connect_fd(c,fd,cl)	((c)->connect_fd(c,fd,cl))
 #define pw_protocol_client_steal_fd(c)		((c)->steal_fd(c))
 #define pw_protocol_client_disconnect(c)	((c)->disconnect(c))
 #define pw_protocol_client_destroy(c)		((c)->destroy(c))
+#define pw_protocol_client_set_paused(c,p)	((c)->set_paused(c,p))
 
 struct pw_protocol_server {
 	struct spa_list link;		/**< link in protocol server_list */
 	struct pw_protocol *protocol;	/**< the owner protocol */
+
+	struct pw_impl_core *core;
 
 	struct spa_list client_list;	/**< list of clients of this protocol */
 
@@ -68,14 +78,16 @@ struct pw_protocol_server {
 #define pw_protocol_server_destroy(l)	((l)->destroy(l))
 
 struct pw_protocol_marshal {
-        const char *type;               /**< interface type */
-	uint32_t version;               /**< version */
-	const void *method_marshal;
-	const void *method_demarshal;
-	uint32_t n_methods;             /**< number of methods in the interface */
-	const void *event_marshal;
-	const void *event_demarshal;
-        uint32_t n_events;              /**< number of events in the interface */
+	const char *type;		/**< interface type */
+	uint32_t version;		/**< version */
+#define PW_PROTOCOL_MARSHAL_FLAG_IMPL	(1 << 0)	/**< marshal for implementations */
+	uint32_t flags;			/**< version */
+	uint32_t n_client_methods;	/**< number of client methods */
+	uint32_t n_server_methods;	/**< number of server methods */
+	const void *client_marshal;
+	const void *server_demarshal;
+	const void *server_marshal;
+	const void *client_demarshal;
 };
 
 struct pw_protocol_implementaton {
@@ -83,11 +95,11 @@ struct pw_protocol_implementaton {
 	uint32_t version;
 
 	struct pw_protocol_client * (*new_client) (struct pw_protocol *protocol,
-						   struct pw_remote *remote,
-						   struct pw_properties *properties);
-	struct pw_protocol_server * (*add_server) (struct pw_protocol *protocol,
 						   struct pw_core *core,
-						   struct pw_properties *properties);
+						   const struct spa_dict *props);
+	struct pw_protocol_server * (*add_server) (struct pw_protocol *protocol,
+						   struct pw_impl_core *core,
+						   const struct spa_dict *props);
 };
 
 struct pw_protocol_events {
@@ -101,9 +113,11 @@ struct pw_protocol_events {
 #define pw_protocol_add_server(p,...)	(pw_protocol_get_implementation(p)->add_server(p,__VA_ARGS__))
 #define pw_protocol_ext(p,type,method,...)	(((type*)pw_protocol_get_extension(p))->method( __VA_ARGS__))
 
-struct pw_protocol *pw_protocol_new(struct pw_core *core, const char *name, size_t user_data_size);
+struct pw_protocol *pw_protocol_new(struct pw_context *context, const char *name, size_t user_data_size);
 
 void pw_protocol_destroy(struct pw_protocol *protocol);
+
+struct pw_context *pw_protocol_get_context(struct pw_protocol *protocol);
 
 void *pw_protocol_get_user_data(struct pw_protocol *protocol);
 
@@ -127,12 +141,12 @@ int pw_protocol_add_marshal(struct pw_protocol *protocol,
 			    const struct pw_protocol_marshal *marshal);
 
 const struct pw_protocol_marshal *
-pw_protocol_get_marshal(struct pw_protocol *protocol, uint32_t type);
+pw_protocol_get_marshal(struct pw_protocol *protocol, const char *type, uint32_t version, uint32_t flags);
 
-struct pw_protocol * pw_core_find_protocol(struct pw_core *core, const char *name);
+struct pw_protocol * pw_context_find_protocol(struct pw_context *context, const char *name);
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_PROTOCOL_H__ */
+#endif /* PIPEWIRE_PROTOCOL_H */

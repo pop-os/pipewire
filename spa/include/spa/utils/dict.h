@@ -1,31 +1,33 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_DICT_H__
-#define __SPA_DICT_H__
+#ifndef SPA_DICT_H
+#define SPA_DICT_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#define SPA_TYPE__Dict		SPA_TYPE_POINTER_BASE "Dict"
-#define SPA_TYPE_DICT_BASE	SPA_TYPE__Dict ":"
 
 #include <string.h>
 
@@ -39,24 +41,52 @@ struct spa_dict_item {
 #define SPA_DICT_ITEM_INIT(key,value) (struct spa_dict_item) { key, value }
 
 struct spa_dict {
-	const struct spa_dict_item *items;
+#define SPA_DICT_FLAG_SORTED	(1<<0)		/**< items are sorted */
+	uint32_t flags;
 	uint32_t n_items;
+	const struct spa_dict_item *items;
 };
 
-#define SPA_DICT_INIT(items,n_items) (struct spa_dict) { items, n_items }
+#define SPA_DICT_INIT(items,n_items) (struct spa_dict) { 0, n_items, items }
+#define SPA_DICT_INIT_ARRAY(items) (struct spa_dict) { 0, SPA_N_ELEMENTS(items), items }
 
 #define spa_dict_for_each(item, dict)				\
 	for ((item) = (dict)->items;				\
 	     (item) < &(dict)->items[(dict)->n_items];		\
 	     (item)++)
 
+static inline int spa_dict_item_compare(const void *i1, const void *i2)
+{
+	const struct spa_dict_item *it1 = (const struct spa_dict_item *)i1,
+	      *it2 = (const struct spa_dict_item *)i2;
+	return strcmp(it1->key, it2->key);
+}
+
+static inline void spa_dict_qsort(struct spa_dict *dict)
+{
+	qsort((void*)dict->items, dict->n_items, sizeof(struct spa_dict_item),
+			spa_dict_item_compare);
+	SPA_FLAG_SET(dict->flags, SPA_DICT_FLAG_SORTED);
+}
+
 static inline const struct spa_dict_item *spa_dict_lookup_item(const struct spa_dict *dict,
 							       const char *key)
 {
 	const struct spa_dict_item *item;
-	spa_dict_for_each(item, dict) {
-		if (!strcmp(item->key, key))
+
+	if (SPA_FLAG_IS_SET(dict->flags, SPA_DICT_FLAG_SORTED)) {
+		struct spa_dict_item k = SPA_DICT_ITEM_INIT(key, NULL);
+		item = (const struct spa_dict_item *)bsearch(&k,
+				(const void *) dict->items, dict->n_items,
+				sizeof(struct spa_dict_item),
+				spa_dict_item_compare);
+		if (item != NULL)
 			return item;
+	} else {
+		spa_dict_for_each(item, dict) {
+			if (!strcmp(item->key, key))
+				return item;
+		}
 	}
 	return NULL;
 }
@@ -71,4 +101,4 @@ static inline const char *spa_dict_lookup(const struct spa_dict *dict, const cha
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_DICT_H__ */
+#endif /* SPA_DICT_H */

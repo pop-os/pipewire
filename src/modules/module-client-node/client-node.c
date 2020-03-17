@@ -1,20 +1,25 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <string.h>
@@ -22,76 +27,83 @@
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <dlfcn.h>
-#include <sys/socket.h>
-#include <sys/mman.h>
-#include <sys/eventfd.h>
+#include <time.h>
 
+#include <spa/support/system.h>
 #include <spa/node/node.h>
+#include <spa/node/utils.h>
 #include <spa/pod/filter.h>
+#include <spa/pod/parser.h>
+#include <spa/debug/types.h>
 
-#include "pipewire/pipewire.h"
-#include "pipewire/interfaces.h"
+#include <pipewire/pipewire.h>
 #include "pipewire/private.h"
 
-#include "pipewire/core.h"
 #include "modules/spa/spa-node.h"
 #include "client-node.h"
-#include "transport.h"
+
+#define NAME "client-node"
 
 /** \cond */
 
-#define MAX_INPUTS       64
-#define MAX_OUTPUTS      64
+#define MAX_INPUTS	64
+#define MAX_OUTPUTS	64
 
-#define MAX_BUFFERS      64
+#define MAX_BUFFERS	64
+#define MAX_AREAS	1024
+#define MAX_MIX		128
 
 #define CHECK_IN_PORT_ID(this,d,p)       ((d) == SPA_DIRECTION_INPUT && (p) < MAX_INPUTS)
 #define CHECK_OUT_PORT_ID(this,d,p)      ((d) == SPA_DIRECTION_OUTPUT && (p) < MAX_OUTPUTS)
 #define CHECK_PORT_ID(this,d,p)          (CHECK_IN_PORT_ID(this,d,p) || CHECK_OUT_PORT_ID(this,d,p))
-#define CHECK_FREE_IN_PORT(this,d,p)     (CHECK_IN_PORT_ID(this,d,p) && !(this)->in_ports[p].valid)
-#define CHECK_FREE_OUT_PORT(this,d,p)    (CHECK_OUT_PORT_ID(this,d,p) && !(this)->out_ports[p].valid)
+#define CHECK_FREE_IN_PORT(this,d,p)     (CHECK_IN_PORT_ID(this,d,p) && (this)->in_ports[p] == NULL)
+#define CHECK_FREE_OUT_PORT(this,d,p)    (CHECK_OUT_PORT_ID(this,d,p) && (this)->out_ports[p] == NULL)
 #define CHECK_FREE_PORT(this,d,p)        (CHECK_FREE_IN_PORT (this,d,p) || CHECK_FREE_OUT_PORT (this,d,p))
-#define CHECK_IN_PORT(this,d,p)          (CHECK_IN_PORT_ID(this,d,p) && (this)->in_ports[p].valid)
-#define CHECK_OUT_PORT(this,d,p)         (CHECK_OUT_PORT_ID(this,d,p) && (this)->out_ports[p].valid)
+#define CHECK_IN_PORT(this,d,p)          (CHECK_IN_PORT_ID(this,d,p) && (this)->in_ports[p])
+#define CHECK_OUT_PORT(this,d,p)         (CHECK_OUT_PORT_ID(this,d,p) && (this)->out_ports[p])
 #define CHECK_PORT(this,d,p)             (CHECK_IN_PORT (this,d,p) || CHECK_OUT_PORT (this,d,p))
 
-#define GET_IN_PORT(this,p)	(&this->in_ports[p])
-#define GET_OUT_PORT(this,p)	(&this->out_ports[p])
+#define GET_IN_PORT(this,p)	(this->in_ports[p])
+#define GET_OUT_PORT(this,p)	(this->out_ports[p])
 #define GET_PORT(this,d,p)	(d == SPA_DIRECTION_INPUT ? GET_IN_PORT(this,p) : GET_OUT_PORT(this,p))
 
 #define CHECK_PORT_BUFFER(this,b,p)      (b < p->n_buffers)
-
-struct mem {
-	uint32_t id;
-	int ref;
-	int fd;
-	uint32_t type;
-	uint32_t flags;
-};
 
 struct buffer {
 	struct spa_buffer *outbuf;
 	struct spa_buffer buffer;
 	struct spa_meta metas[4];
 	struct spa_data datas[4];
-	bool outstanding;
-	uint32_t memid;
+	struct pw_memblock *mem;
+};
+
+struct mix {
+	bool valid;
+	bool active;
+	uint32_t id;
+	struct port *port;
+	uint32_t n_buffers;
+	struct buffer buffers[MAX_BUFFERS];
 };
 
 struct port {
-	bool valid;
+	struct pw_impl_port *port;
+	struct node *node;
+	struct impl *impl;
+
+	enum spa_direction direction;
+	uint32_t id;
+
+	struct spa_node mix_node;
+
 	struct spa_port_info info;
 	struct pw_properties *properties;
 
-	bool have_format;
+	unsigned int removed:1;
 	uint32_t n_params;
 	struct spa_pod **params;
-	struct spa_io_buffers *io;
 
-	uint32_t n_buffers;
-	struct buffer buffers[MAX_BUFFERS];
+	struct mix mix[MAX_MIX+1];
 };
 
 struct node {
@@ -99,308 +111,359 @@ struct node {
 
 	struct impl *impl;
 
-	struct spa_type_map *map;
 	struct spa_log *log;
 	struct spa_loop *data_loop;
+	struct spa_system *data_system;
 
-	const struct spa_node_callbacks *callbacks;
-	void *callbacks_data;
+	struct spa_hook_list hooks;
+	struct spa_callbacks callbacks;
 
 	struct pw_resource *resource;
+	struct pw_impl_client *client;
 
 	struct spa_source data_source;
 	int writefd;
 
-	uint32_t max_inputs;
 	uint32_t n_inputs;
-	uint32_t max_outputs;
 	uint32_t n_outputs;
-	struct port in_ports[MAX_INPUTS];
-	struct port out_ports[MAX_OUTPUTS];
+	struct port *in_ports[MAX_INPUTS];
+	struct port *out_ports[MAX_OUTPUTS];
+
+	struct port dummy;
 
 	uint32_t n_params;
 	struct spa_pod **params;
-
-	uint32_t seq;
 };
 
 struct impl {
-	struct pw_client_node this;
+	struct pw_impl_client_node this;
 
-	bool client_reuse;
-
-	struct pw_core *core;
-	struct pw_type *t;
+	struct pw_context *context;
 
 	struct node node;
 
-	struct pw_client_node_transport *transport;
+	struct pw_map io_map;
+	struct pw_memblock *io_areas;
+	struct pw_node_activation *activation;
 
 	struct spa_hook node_listener;
 	struct spa_hook resource_listener;
+	struct spa_hook object_listener;
 
-	struct pw_array mems;
+	uint32_t node_id;
+
+	uint32_t bind_node_version;
+	uint32_t bind_node_id;
 
 	int fds[2];
 	int other_fds[2];
-
-	uint32_t input_ready;
-	bool out_pending;
 };
+
+#define pw_client_node_resource(r,m,v,...)	\
+	pw_resource_call_res(r,struct pw_client_node_events,m,v,__VA_ARGS__)
+
+#define pw_client_node_resource_transport(r,...)	\
+	pw_client_node_resource(r,transport,0,__VA_ARGS__)
+#define pw_client_node_resource_set_param(r,...)	\
+	pw_client_node_resource(r,set_param,0,__VA_ARGS__)
+#define pw_client_node_resource_set_io(r,...)	\
+	pw_client_node_resource(r,set_io,0,__VA_ARGS__)
+#define pw_client_node_resource_event(r,...)	\
+	pw_client_node_resource(r,event,0,__VA_ARGS__)
+#define pw_client_node_resource_command(r,...)	\
+	pw_client_node_resource(r,command,0,__VA_ARGS__)
+#define pw_client_node_resource_add_port(r,...)	\
+	pw_client_node_resource(r,add_port,0,__VA_ARGS__)
+#define pw_client_node_resource_remove_port(r,...)	\
+	pw_client_node_resource(r,remove_port,0,__VA_ARGS__)
+#define pw_client_node_resource_port_set_param(r,...)	\
+	pw_client_node_resource(r,port_set_param,0,__VA_ARGS__)
+#define pw_client_node_resource_port_use_buffers(r,...)	\
+	pw_client_node_resource(r,port_use_buffers,0,__VA_ARGS__)
+#define pw_client_node_resource_port_set_io(r,...)	\
+	pw_client_node_resource(r,port_set_io,0,__VA_ARGS__)
+#define pw_client_node_resource_set_activation(r,...)	\
+	pw_client_node_resource(r,set_activation,0,__VA_ARGS__)
+
+static int
+do_port_use_buffers(struct impl *impl,
+		    enum spa_direction direction,
+		    uint32_t port_id,
+		    uint32_t mix_id,
+		    uint32_t flags,
+		    struct spa_buffer **buffers,
+		    uint32_t n_buffers);
 
 /** \endcond */
 
-static struct mem *ensure_mem(struct impl *impl, int fd, uint32_t type, uint32_t flags)
+static struct mix *find_mix(struct port *p, uint32_t mix_id)
 {
-	struct mem *m, *f = NULL;
+	struct mix *mix;
+	if (mix_id == SPA_ID_INVALID)
+		return &p->mix[MAX_MIX];
+	if (mix_id >= MAX_MIX)
+		return NULL;
+	mix = &p->mix[mix_id];
+	return mix;
+}
 
-	pw_array_for_each(m, &impl->mems) {
-		if (m->ref <= 0)
-			f = m;
-		else if (m->fd == fd)
-			goto found;
-	}
-
-	if (f == NULL) {
-		m = pw_array_add(&impl->mems, sizeof(struct mem));
-		m->id = pw_array_get_len(&impl->mems, struct mem) - 1;
-		m->ref = 0;
-	}
-	else {
-		m = f;
-	}
-	m->fd = fd;
-	m->type = type;
-	m->flags = flags;
-
-	pw_client_node_resource_add_mem(impl->node.resource,
-					m->id,
-					type,
-					m->fd,
-					m->flags);
-      found:
-	m->ref++;
-	return m;
+static void mix_init(struct mix *mix, struct port *p, uint32_t id)
+{
+	mix->valid = true;
+	mix->id = id;
+	mix->port = p;
+	mix->active = false;
+	mix->n_buffers = 0;
 }
 
 
-static int clear_buffers(struct node *this, struct port *port)
+static struct mix *ensure_mix(struct impl *impl, struct port *p, uint32_t mix_id)
+{
+	struct mix *mix;
+
+	if ((mix = find_mix(p, mix_id)) == NULL)
+		return NULL;
+	if (mix->valid)
+		return mix;
+	mix_init(mix, p, mix_id);
+	return mix;
+}
+
+static int clear_buffers(struct node *this, struct mix *mix)
 {
 	uint32_t i, j;
 	struct impl *impl = this->impl;
-	struct pw_type *t = impl->t;
 
-	for (i = 0; i < port->n_buffers; i++) {
-		struct buffer *b = &port->buffers[i];
-		struct mem *m;
+	for (i = 0; i < mix->n_buffers; i++) {
+		struct buffer *b = &mix->buffers[i];
+		struct pw_memblock *m;
 
-		spa_log_debug(this->log, "node %p: clear buffer %d", this, i);
+		spa_log_debug(this->log, NAME" %p: clear buffer %d", this, i);
 
 		for (j = 0; j < b->buffer.n_datas; j++) {
 			struct spa_data *d = &b->datas[j];
 
-			if (d->type == t->data.DmaBuf ||
-			    d->type == t->data.MemFd) {
+			if (d->type == SPA_DATA_MemId) {
 				uint32_t id;
 
 				id = SPA_PTR_TO_UINT32(b->buffer.datas[j].data);
-				m = pw_array_get_unchecked(&impl->mems, id, struct mem);
-				m->ref--;
+				m = pw_mempool_find_id(this->client->pool, id);
+				if (m) {
+					pw_log_debug(NAME " %p: mem %d", impl, m->id);
+					pw_memblock_unref(m);
+				}
 			}
 		}
-		m = pw_array_get_unchecked(&impl->mems, b->memid, struct mem);
-		m->ref--;
+		pw_memblock_unref(b->mem);
 	}
-	port->n_buffers = 0;
+	mix->n_buffers = 0;
 	return 0;
 }
 
-static int impl_node_enum_params(struct spa_node *node,
-				 uint32_t id, uint32_t *index,
-				 const struct spa_pod *filter,
-				 struct spa_pod **result,
-				 struct spa_pod_builder *builder)
+static void mix_clear(struct node *this, struct mix *mix)
 {
-	struct node *this;
+	struct port *port = mix->port;
 
-	spa_return_val_if_fail(node != NULL, -EINVAL);
-	spa_return_val_if_fail(index != NULL, -EINVAL);
-	spa_return_val_if_fail(builder != NULL, -EINVAL);
+	if (!mix->valid)
+		return;
+	do_port_use_buffers(this->impl, port->direction, port->id,
+			mix->id, 0, NULL, 0);
+	mix->valid = false;
+}
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+static int impl_node_enum_params(void *object, int seq,
+				 uint32_t id, uint32_t start, uint32_t num,
+				 const struct spa_pod *filter)
+{
+	struct node *this = object;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = { 0 };
+	struct spa_result_node_params result;
+	uint32_t count = 0;
+	bool found = false;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(num != 0, -EINVAL);
+
+	result.id = id;
+	result.next = 0;
 
 	while (true) {
 		struct spa_pod *param;
 
-		if (*index >= this->n_params)
-			return 0;
+		result.index = result.next++;
+		if (result.index >= this->n_params)
+			break;
 
-		param = this->params[(*index)++];
+		param = this->params[result.index];
 
-		if (!spa_pod_is_object_id(param, id))
+		if (param == NULL || !spa_pod_is_object_id(param, id))
 			continue;
 
-		if (spa_pod_filter(builder, result, param, filter) == 0)
+		found = true;
+
+		if (result.index < start)
+			continue;
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		if (spa_pod_filter(&b, &result.param, param, filter) != 0)
+			continue;
+
+		pw_log_debug(NAME " %p: %d param %u", this, seq, result.index);
+		spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+		if (++count == num)
 			break;
 	}
-	return 1;
+	return found ? 0 : -ENOENT;
 }
 
-static int impl_node_set_param(struct spa_node *node, uint32_t id, uint32_t flags,
+static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			       const struct spa_pod *param)
 {
-	struct node *this;
+	struct node *this = object;
 
-	if (node == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	spa_return_val_if_fail(this != NULL, -EINVAL);
 
 	if (this->resource == NULL)
-		return 0;
+		return param == NULL ? 0 : -EIO;
 
-	pw_client_node_resource_set_param(this->resource, this->seq, id, flags, param);
-
-	return SPA_RESULT_RETURN_ASYNC(this->seq++);
+	return pw_client_node_resource_set_param(this->resource, id, flags, param);
 }
 
-static inline void do_flush(struct node *this)
+static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
-	uint64_t cmd = 1;
-	if (write(this->writefd, &cmd, 8) != 8)
-		spa_log_warn(this->log, "node %p: error flushing : %s", this, strerror(errno));
+	struct node *this = object;
+	struct impl *impl = this->impl;
+	struct pw_memmap *mm;
+	uint32_t memid, mem_offset, mem_size;
+	uint32_t tag[5] = { impl->node_id, id, };
 
-}
-
-static int impl_node_send_command(struct spa_node *node, const struct spa_command *command)
-{
-	struct node *this;
-	int res = 0;
-	struct pw_type *t;
-
-	if (node == NULL || command == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-
-	if (this->resource == NULL)
+	if (impl->this.flags & 1)
 		return 0;
 
-	t = this->impl->t;
+	if ((mm = pw_mempool_find_tag(this->client->pool, tag, sizeof(tag))) != NULL)
+		pw_memmap_free(mm);
 
-	if (SPA_COMMAND_TYPE(command) == t->command_node.ClockUpdate) {
-		pw_client_node_resource_command(this->resource, this->seq++, command);
-	} else {
-		/* send start */
-		pw_client_node_resource_command(this->resource, this->seq, command);
-		res = SPA_RESULT_RETURN_ASYNC(this->seq++);
+	if (data) {
+		mm = pw_mempool_import_map(this->client->pool,
+				impl->context->pool, data, size, tag);
+		if (mm == NULL)
+			return -errno;
+
+		mem_offset = mm->offset;
+		memid = mm->block->id;
+		mem_size = size;
 	}
-	return res;
+	else {
+		memid = SPA_ID_INVALID;
+		mem_offset = mem_size = 0;
+	}
+
+	if (this->resource == NULL)
+		return data == NULL ? 0 : -EIO;
+
+	return pw_client_node_resource_set_io(this->resource,
+				       id,
+				       memid,
+				       mem_offset, mem_size);
+}
+
+static int impl_node_send_command(void *object, const struct spa_command *command)
+{
+	struct node *this = object;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(command != NULL, -EINVAL);
+
+	pw_log_debug(NAME " %p: send command %d", this, SPA_COMMAND_TYPE(command));
+
+	if (this->resource == NULL)
+		return -EIO;
+
+	return pw_client_node_resource_command(this->resource, command);
+}
+
+
+static void emit_port_info(struct node *this, struct port *port)
+{
+	spa_node_emit_port_info(&this->hooks,
+				port->direction, port->id, &port->info);
+}
+
+static int impl_node_add_listener(void *object,
+		struct spa_hook *listener,
+		const struct spa_node_events *events,
+		void *data)
+{
+	struct node *this = object;
+	struct spa_hook_list save;
+	uint32_t i;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	spa_hook_list_isolate(&this->hooks, &save, listener, events, data);
+
+	for (i = 0; i < MAX_INPUTS; i++) {
+		if (this->in_ports[i])
+			emit_port_info(this, this->in_ports[i]);
+	}
+	for (i = 0; i < MAX_OUTPUTS; i++) {
+		if (this->out_ports[i])
+			emit_port_info(this, this->out_ports[i]);
+	}
+	spa_hook_list_join(&this->hooks, &save);
+
+	return 0;
 }
 
 static int
-impl_node_set_callbacks(struct spa_node *node,
+impl_node_set_callbacks(void *object,
 			const struct spa_node_callbacks *callbacks,
 			void *data)
 {
-	struct node *this;
+	struct node *this = object;
 
-	if (node == NULL)
-		return -EINVAL;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
-	this->callbacks = callbacks;
-	this->callbacks_data = data;
+	this->callbacks = SPA_CALLBACKS_INIT(callbacks, data);
 
 	return 0;
 }
 
 static int
-impl_node_get_n_ports(struct spa_node *node,
-		      uint32_t *n_input_ports,
-		      uint32_t *max_input_ports,
-		      uint32_t *n_output_ports,
-		      uint32_t *max_output_ports)
+impl_node_sync(void *object, int seq)
 {
-	struct node *this;
+	struct node *this = object;
 
-	if (node == NULL)
-		return -EINVAL;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	pw_log_debug(NAME " %p: sync", this);
 
-	if (n_input_ports)
-		*n_input_ports = this->n_inputs;
-	if (max_input_ports)
-		*max_input_ports = this->max_inputs == 0 ? this->n_inputs : this->max_inputs;
-	if (n_output_ports)
-		*n_output_ports = this->n_outputs;
-	if (max_output_ports)
-		*max_output_ports = this->max_outputs == 0 ? this->n_outputs : this->max_outputs;
+	if (this->resource == NULL)
+		return -EIO;
 
-	return 0;
-}
-
-static int
-impl_node_get_port_ids(struct spa_node *node,
-		       uint32_t *input_ids,
-		       uint32_t n_input_ids,
-		       uint32_t *output_ids,
-		       uint32_t n_output_ids)
-{
-	struct node *this;
-	int c, i;
-
-	if (node == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-
-	if (input_ids) {
-		for (c = 0, i = 0; i < MAX_INPUTS && c < n_input_ids; i++) {
-			if (this->in_ports[i].valid)
-				input_ids[c++] = i;
-		}
-	}
-	if (output_ids) {
-		for (c = 0, i = 0; i < MAX_OUTPUTS && c < n_output_ids; i++) {
-			if (this->out_ports[i].valid)
-				output_ids[c++] = i;
-		}
-	}
-	return 0;
+	return pw_resource_ping(this->resource, seq);
 }
 
 static void
 do_update_port(struct node *this,
-	       enum spa_direction direction,
-	       uint32_t port_id,
+	       struct port *port,
 	       uint32_t change_mask,
 	       uint32_t n_params,
 	       const struct spa_pod **params,
 	       const struct spa_port_info *info)
 {
-	struct port *port;
-	struct pw_type *t = this->impl->t;
-
-	port = GET_PORT(this, direction, port_id);
+	uint32_t i;
 
 	if (change_mask & PW_CLIENT_NODE_PORT_UPDATE_PARAMS) {
-		int i;
-
-		port->have_format = false;
-
-		spa_log_info(this->log, "node %p: port %u update %d params", this, port_id, n_params);
+		spa_log_debug(this->log, NAME" %p: port %u update %d params", this, port->id, n_params);
 		for (i = 0; i < port->n_params; i++)
 			free(port->params[i]);
 		port->n_params = n_params;
 		port->params = realloc(port->params, port->n_params * sizeof(struct spa_pod *));
-
 		for (i = 0; i < port->n_params; i++) {
-			port->params[i] = pw_spa_pod_copy(params[i]);
-
-			if (spa_pod_is_object_id(port->params[i], t->param.idFormat))
-				port->have_format = true;
+			port->params[i] = params[i] ? spa_pod_copy(params[i]) : NULL;
 		}
 	}
 
@@ -409,6 +472,8 @@ do_update_port(struct node *this,
 			pw_properties_free(port->properties);
 		port->properties = NULL;
 		port->info.props = NULL;
+		port->info.n_params = 0;
+		port->info.params = NULL;
 
 		if (info) {
 			port->info = *info;
@@ -416,260 +481,262 @@ do_update_port(struct node *this,
 				port->properties = pw_properties_new_dict(info->props);
 				port->info.props = &port->properties->dict;
 			}
+			port->info.n_params = 0;
+			port->info.params = NULL;
+			spa_node_emit_port_info(&this->hooks, port->direction, port->id, info);
 		}
-	}
-
-	if (!port->valid) {
-		spa_log_info(this->log, "node %p: adding port %d", this, port_id);
-		port->have_format = false;
-		port->valid = true;
-
-		if (direction == SPA_DIRECTION_INPUT)
-			this->n_inputs++;
-		else
-			this->n_outputs++;
 	}
 }
 
 static void
-clear_port(struct node *this,
-	   struct port *port, enum spa_direction direction, uint32_t port_id)
+clear_port(struct node *this, struct port *port)
 {
-	do_update_port(this,
-		       direction,
-		       port_id,
+	int i;
+
+	spa_log_debug(this->log, NAME" %p: clear port %p", this, port);
+
+	if (port == NULL)
+		return;
+
+	do_update_port(this, port,
 		       PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 		       PW_CLIENT_NODE_PORT_UPDATE_INFO, 0, NULL, NULL);
-	clear_buffers(this, port);
-}
 
-static void do_uninit_port(struct node *this, enum spa_direction direction, uint32_t port_id)
-{
-	struct port *port;
-
-	spa_log_info(this->log, "node %p: removing port %d", this, port_id);
-
-	if (direction == SPA_DIRECTION_INPUT) {
-		port = GET_IN_PORT(this, port_id);
-		this->n_inputs--;
-	} else {
-		port = GET_OUT_PORT(this, port_id);
-		this->n_outputs--;
+	for (i = 0; i < MAX_MIX+1; i++) {
+		struct mix *mix = &port->mix[i];
+		mix_clear(this, mix);
 	}
-	clear_port(this, port, direction, port_id);
-	port->valid = false;
+
+	if (port->direction == SPA_DIRECTION_INPUT) {
+		if (this->in_ports[port->id] == port) {
+			this->in_ports[port->id] = NULL;
+			this->n_inputs--;
+		}
+	}
+	else {
+		if (this->out_ports[port->id] == port) {
+			this->out_ports[port->id] = NULL;
+			this->n_outputs--;
+		}
+	}
+	if (!port->removed)
+		spa_node_emit_port_info(&this->hooks, port->direction, port->id, NULL);
 }
 
 static int
-impl_node_add_port(struct spa_node *node, enum spa_direction direction, uint32_t port_id)
+impl_node_add_port(void *object, enum spa_direction direction, uint32_t port_id,
+		const struct spa_dict *props)
 {
-	struct node *this;
-	struct port *port;
+	struct node *this = object;
 
-	if (node == NULL)
-		return -EINVAL;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(CHECK_FREE_PORT(this, direction, port_id), -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	if (this->resource == NULL)
+		return -EIO;
 
-	if (!CHECK_FREE_PORT(this, direction, port_id))
-		return -EINVAL;
-
-	port = GET_PORT(this, direction, port_id);
-	clear_port(this, port, direction, port_id);
-
-	return 0;
+	return pw_client_node_resource_add_port(this->resource, direction, port_id, props);
 }
 
 static int
-impl_node_remove_port(struct spa_node *node, enum spa_direction direction, uint32_t port_id)
+impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_id)
 {
-	struct node *this;
+	struct node *this = object;
 
-	if (node == NULL)
-		return -EINVAL;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	if (this->resource == NULL)
+		return -EIO;
 
-	if (!CHECK_PORT(this, direction, port_id))
-		return -EINVAL;
-
-	do_uninit_port(this, direction, port_id);
-
-	return 0;
+	return pw_client_node_resource_remove_port(this->resource, direction, port_id);
 }
 
 static int
-impl_node_port_get_info(struct spa_node *node,
-			enum spa_direction direction, uint32_t port_id,
-			const struct spa_port_info **info)
-{
-	struct node *this;
-	struct port *port;
-
-	if (node == NULL || info == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-
-	if (!CHECK_PORT(this, direction, port_id))
-		return -EINVAL;
-
-	port = GET_PORT(this, direction, port_id);
-	*info = &port->info;
-
-	return 0;
-}
-
-static int
-impl_node_port_enum_params(struct spa_node *node,
+impl_node_port_enum_params(void *object, int seq,
 			   enum spa_direction direction, uint32_t port_id,
-			   uint32_t id, uint32_t *index,
-			   const struct spa_pod *filter,
-			   struct spa_pod **result,
-			   struct spa_pod_builder *builder)
+			   uint32_t id, uint32_t start, uint32_t num,
+			   const struct spa_pod *filter)
 {
-	struct node *this;
+	struct node *this = object;
 	struct port *port;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = { 0 };
+	struct spa_result_node_params result;
+	uint32_t count = 0;
+	bool found = false;
 
-	spa_return_val_if_fail(node != NULL, -EINVAL);
-	spa_return_val_if_fail(index != NULL, -EINVAL);
-	spa_return_val_if_fail(builder != NULL, -EINVAL);
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(num != 0, -EINVAL);
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	port = GET_PORT(this, direction, port_id);
+
+	pw_log_debug(NAME " %p: seq:%d port %d.%d id:%u start:%u num:%u n_params:%d",
+			this, seq, direction, port_id, id, start, num, port->n_params);
+
+	result.id = id;
+	result.next = 0;
+
+	while (true) {
+		struct spa_pod *param;
+
+		result.index = result.next++;
+		if (result.index >= port->n_params)
+			break;
+
+		param = port->params[result.index];
+
+		if (param == NULL || !spa_pod_is_object_id(param, id))
+			continue;
+
+		found = true;
+
+		if (result.index < start)
+			continue;
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		if (spa_pod_filter(&b, &result.param, param, filter) < 0)
+			continue;
+
+		pw_log_debug(NAME " %p: %d param %u", this, seq, result.index);
+		spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+		if (++count == num)
+			break;
+	}
+	return found ? 0 : -ENOENT;
+}
+
+static int
+impl_node_port_set_param(void *object,
+			 enum spa_direction direction, uint32_t port_id,
+			 uint32_t id, uint32_t flags,
+			 const struct spa_pod *param)
+{
+	struct node *this = object;
+	struct port *port;
+	uint32_t i;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+
+	pw_log_debug(NAME" %p: port %d.%d set param %s %d", this,
+			direction, port_id,
+			spa_debug_type_find_name(spa_type_param, id), id);
+
+	port = GET_PORT(this, direction, port_id);
+
+	if (id == SPA_PARAM_Format) {
+		for (i = 0; i < MAX_MIX+1; i++) {
+			struct mix *mix = &port->mix[i];
+			clear_buffers(this, mix);
+		}
+	}
+	if (this->resource == NULL)
+		return param == NULL ? 0 : -EIO;
+
+	return pw_client_node_resource_port_set_param(this->resource,
+					       direction, port_id,
+					       id, flags,
+					       param);
+}
+
+static int do_port_set_io(struct impl *impl,
+			  enum spa_direction direction, uint32_t port_id,
+			  uint32_t mix_id,
+			  uint32_t id, void *data, size_t size)
+{
+	struct node *this = &impl->node;
+	uint32_t memid, mem_offset, mem_size;
+	struct port *port;
+	struct mix *mix;
+	uint32_t tag[5] = { impl->node_id, direction, port_id, mix_id, id };
+	struct pw_memmap *mm;
+
+	pw_log_debug(NAME " %p: %s port %d.%d set io %p %zd", this,
+			direction == SPA_DIRECTION_INPUT ? "input" : "output",
+			port_id, mix_id, data, size);
 
 	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
 	port = GET_PORT(this, direction, port_id);
 
-	while (true) {
-		struct spa_pod *param;
-
-		if (*index >= port->n_params)
-			return 0;
-
-		param = port->params[(*index)++];
-
-		if (!spa_pod_is_object_id(param, id))
-			continue;
-
-		if (spa_pod_filter(builder, result, param, filter) == 0)
-			break;
-	}
-	return 1;
-}
-
-static int
-impl_node_port_set_param(struct spa_node *node,
-			 enum spa_direction direction, uint32_t port_id,
-			 uint32_t id, uint32_t flags,
-			 const struct spa_pod *param)
-{
-	struct node *this;
-
-	if (node == NULL)
+	if ((mix = find_mix(port, mix_id)) == NULL || !mix->valid)
 		return -EINVAL;
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
-
-	if (!CHECK_PORT(this, direction, port_id))
-		return -EINVAL;
-
-	if (this->resource == NULL)
-		return 0;
-
-	pw_client_node_resource_port_set_param(this->resource,
-					       this->seq,
-					       direction, port_id,
-					       id, flags,
-					       param);
-
-	return SPA_RESULT_RETURN_ASYNC(this->seq++);
-}
-
-static int
-impl_node_port_set_io(struct spa_node *node,
-		      enum spa_direction direction,
-		      uint32_t port_id,
-		      uint32_t id,
-		      void *data, size_t size)
-{
-	struct node *this;
-	struct impl *impl;
-	struct pw_type *t;
-	struct pw_memblock *mem;
-	struct mem *m;
-	uint32_t memid, mem_offset, mem_size;
-
-	if (node == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-	impl = this->impl;
-	t = impl->t;
-
-	if (this->resource == NULL)
-		return 0;
-
-	if (!CHECK_PORT(this, direction, port_id))
-		return -EINVAL;
+	if ((mm = pw_mempool_find_tag(this->client->pool, tag, sizeof(tag))) != NULL)
+		pw_memmap_free(mm);
 
 	if (data) {
-		if ((mem = pw_memblock_find(data)) == NULL)
-			return -EINVAL;
+		mm = pw_mempool_import_map(this->client->pool,
+				impl->context->pool, data, size, tag);
+		if (mm == NULL)
+			return -errno;
 
-		mem_offset = SPA_PTRDIFF(data, mem->ptr);
-		mem_size = mem->size;
-		if (mem_size - mem_offset < size)
-			return -EINVAL;
-
-		mem_offset += mem->offset;
-		m = ensure_mem(impl, mem->fd, t->data.MemFd, mem->flags);
-		memid = m->id;
+		mem_offset = mm->offset;
+		memid = mm->block->id;
+		mem_size = size;
 	}
 	else {
 		memid = SPA_ID_INVALID;
 		mem_offset = mem_size = 0;
 	}
 
-	pw_client_node_resource_port_set_io(this->resource,
-					    this->seq,
+	if (this->resource == NULL)
+		return data == NULL ? 0 : -EIO;
+
+	return pw_client_node_resource_port_set_io(this->resource,
 					    direction, port_id,
+					    mix_id,
 					    id,
 					    memid,
 					    mem_offset, mem_size);
-
-	return SPA_RESULT_RETURN_ASYNC(this->seq++);
 }
 
 static int
-impl_node_port_use_buffers(struct spa_node *node,
-			   enum spa_direction direction,
-			   uint32_t port_id,
-			   struct spa_buffer **buffers,
-			   uint32_t n_buffers)
+impl_node_port_set_io(void *object,
+		      enum spa_direction direction,
+		      uint32_t port_id,
+		      uint32_t id,
+		      void *data, size_t size)
 {
-	struct node *this;
-	struct impl *impl;
-	struct port *port;
+	/* ignore io on the node itself, we only care about the io on the
+	 * port mixers, the io on the node ports itself is handled on the
+	 * client side */
+	return -EINVAL;
+}
+
+static int
+do_port_use_buffers(struct impl *impl,
+		    enum spa_direction direction,
+		    uint32_t port_id,
+		    uint32_t mix_id,
+		    uint32_t flags,
+		    struct spa_buffer **buffers,
+		    uint32_t n_buffers)
+{
+	struct node *this = &impl->node;
+	struct port *p;
+	struct mix *mix;
 	uint32_t i, j;
 	struct pw_client_node_buffer *mb;
-	struct pw_type *t;
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
-	impl = this->impl;
-	spa_log_info(this->log, "node %p: use buffers %p %u", this, buffers, n_buffers);
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
-	t = impl->t;
+	p = GET_PORT(this, direction, port_id);
 
-	if (!CHECK_PORT(this, direction, port_id))
+	spa_log_debug(this->log, NAME " %p: %s port %d.%d use buffers %p %u flags:%08x", this,
+			direction == SPA_DIRECTION_INPUT ? "input" : "output",
+			port_id, mix_id, buffers, n_buffers, flags);
+
+	if (direction == SPA_DIRECTION_OUTPUT)
+		mix_id = SPA_ID_INVALID;
+
+	if ((mix = find_mix(p, mix_id)) == NULL || !mix->valid)
 		return -EINVAL;
 
-	port = GET_PORT(this, direction, port_id);
-
-	if (!port->have_format)
-		return -EIO;
-
-	clear_buffers(this, port);
+	clear_buffers(this, mix);
 
 	if (n_buffers > 0) {
 		mb = alloca(n_buffers * sizeof(struct pw_client_node_buffer));
@@ -677,16 +744,13 @@ impl_node_port_use_buffers(struct spa_node *node,
 		mb = NULL;
 	}
 
-	port->n_buffers = n_buffers;
-
 	if (this->resource == NULL)
-		return 0;
+		return n_buffers == 0 ? 0 : -EIO;
 
 	for (i = 0; i < n_buffers; i++) {
-		struct buffer *b = &port->buffers[i];
-		struct pw_memblock *mem;
-		struct mem *m;
-		size_t data_size, size;
+		struct buffer *b = &mix->buffers[i];
+		struct pw_memblock *mem, *m;
+		size_t data_size;
 		void *baseptr;
 
 		b->outbuf = buffers[i];
@@ -701,295 +765,159 @@ impl_node_port_use_buffers(struct spa_node *node,
 		else
 			return -EINVAL;
 
-		if ((mem = pw_memblock_find(baseptr)) == NULL)
+		if ((mem = pw_mempool_find_ptr(impl->context->pool, baseptr)) == NULL)
 			return -EINVAL;
 
-		data_size = 0;
+		data_size = buffers[i]->n_datas * sizeof(struct spa_chunk);
 		for (j = 0; j < buffers[i]->n_metas; j++) {
-			data_size += buffers[i]->metas[j].size;
+			data_size += SPA_ROUND_UP_N(buffers[i]->metas[j].size, 8);
 		}
 		for (j = 0; j < buffers[i]->n_datas; j++) {
 			struct spa_data *d = buffers[i]->datas;
-			data_size += sizeof(struct spa_chunk);
-			if (d->type == t->data.MemPtr)
+			if (d->type == SPA_DATA_MemPtr)
 				data_size += d->maxsize;
 		}
 
-		m = ensure_mem(impl, mem->fd, t->data.MemFd, mem->flags);
-		b->memid = m->id;
+		m = pw_mempool_import_block(this->client->pool, mem);
+		if (m == NULL)
+			return -errno;
+
+		b->mem = m;
 
 		mb[i].buffer = &b->buffer;
-		mb[i].mem_id = b->memid;
-		mb[i].offset = SPA_PTRDIFF(baseptr, mem->ptr + mem->offset);
+		mb[i].mem_id = m->id;
+		mb[i].offset = SPA_PTRDIFF(baseptr, SPA_MEMBER(mem->map->ptr, 0, void));
 		mb[i].size = data_size;
+		spa_log_debug(this->log, NAME" %p: buffer %d %d %d %d", this, i, mb[i].mem_id,
+				mb[i].offset, mb[i].size);
 
 		for (j = 0; j < buffers[i]->n_metas; j++)
 			memcpy(&b->buffer.metas[j], &buffers[i]->metas[j], sizeof(struct spa_meta));
 		b->buffer.n_metas = j;
 
-		size = 0;
 		for (j = 0; j < buffers[i]->n_datas; j++) {
 			struct spa_data *d = &buffers[i]->datas[j];
 
 			memcpy(&b->buffer.datas[j], d, sizeof(struct spa_data));
 
-			if (d->type == t->data.DmaBuf ||
-			    d->type == t->data.MemFd) {
-				m = ensure_mem(impl, d->fd, d->type, d->flags);
+			if (flags & SPA_NODE_BUFFERS_FLAG_ALLOC)
+				continue;
+
+			if (d->type == SPA_DATA_DmaBuf ||
+			    d->type == SPA_DATA_MemFd) {
+				uint32_t flags = PW_MEMBLOCK_FLAG_DONT_CLOSE;
+
+				if (d->flags & SPA_DATA_FLAG_READABLE)
+					flags |= PW_MEMBLOCK_FLAG_READABLE;
+				if (d->flags & SPA_DATA_FLAG_WRITABLE)
+					flags |= PW_MEMBLOCK_FLAG_WRITABLE;
+
+				m = pw_mempool_import(this->client->pool,
+					flags, d->type, d->fd);
+				if (m == NULL)
+					return -errno;
+
+				b->buffer.datas[j].type = SPA_DATA_MemId;
 				b->buffer.datas[j].data = SPA_UINT32_TO_PTR(m->id);
-			} else if (d->type == t->data.MemPtr) {
-				b->buffer.datas[j].data = SPA_INT_TO_PTR(size);
-				size += d->maxsize;
+			} else if (d->type == SPA_DATA_MemPtr) {
+				spa_log_debug(this->log, "mem %d %zd", j, SPA_PTRDIFF(d->data, baseptr));
+				b->buffer.datas[j].data = SPA_INT_TO_PTR(SPA_PTRDIFF(d->data, baseptr));
 			} else {
 				b->buffer.datas[j].type = SPA_ID_INVALID;
-				b->buffer.datas[j].data = 0;
+				b->buffer.datas[j].data = NULL;
 				spa_log_error(this->log, "invalid memory type %d", d->type);
 			}
 		}
 	}
+	mix->n_buffers = n_buffers;
 
-	pw_client_node_resource_port_use_buffers(this->resource,
-						 this->seq,
-						 direction, port_id,
+	return pw_client_node_resource_port_use_buffers(this->resource,
+						 direction, port_id, mix_id, flags,
 						 n_buffers, mb);
-
-	return SPA_RESULT_RETURN_ASYNC(this->seq++);
 }
 
 static int
-impl_node_port_alloc_buffers(struct spa_node *node,
-			     enum spa_direction direction,
-			     uint32_t port_id,
-			     struct spa_pod **params,
-			     uint32_t n_params,
-			     struct spa_buffer **buffers,
-			     uint32_t *n_buffers)
+impl_node_port_use_buffers(void *object,
+			   enum spa_direction direction,
+			   uint32_t port_id,
+			   uint32_t flags,
+			   struct spa_buffer **buffers,
+			   uint32_t n_buffers)
 {
-	struct node *this;
-	struct port *port;
+	struct node *this = object;
+	struct impl *impl;
 
-	if (node == NULL || buffers == NULL)
-		return -EINVAL;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	this = SPA_CONTAINER_OF(node, struct node, node);
+	impl = this->impl;
 
-	if (!CHECK_PORT(this, direction, port_id))
-		return -EINVAL;
+	return do_port_use_buffers(impl, direction, port_id,
+			SPA_ID_INVALID, flags, buffers, n_buffers);
+}
 
-	port = GET_PORT(this, direction, port_id);
+static int
+impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
+{
+	struct node *this = object;
 
-	if (!port->have_format)
-		return -EIO;
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(CHECK_OUT_PORT(this, SPA_DIRECTION_OUTPUT, port_id), -EINVAL);
+
+	spa_log_trace_fp(this->log, "reuse buffer %d", buffer_id);
 
 	return -ENOTSUP;
 }
 
-static int
-impl_node_port_reuse_buffer(struct spa_node *node, uint32_t port_id, uint32_t buffer_id)
+static int impl_node_process(void *object)
 {
-	struct node *this;
-	struct impl *impl;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-	impl = this->impl;
-
-	if (!CHECK_OUT_PORT(this, SPA_DIRECTION_OUTPUT, port_id))
-		return -EINVAL;
-
-	spa_log_trace(this->log, "reuse buffer %d", buffer_id);
-
-	pw_client_node_transport_add_message(impl->transport, (struct pw_client_node_message *)
-			&PW_CLIENT_NODE_MESSAGE_PORT_REUSE_BUFFER_INIT(port_id, buffer_id));
-	do_flush(this);
-
-	return 0;
-}
-
-static int
-impl_node_port_send_command(struct spa_node *node,
-			    enum spa_direction direction,
-			    uint32_t port_id, const struct spa_command *command)
-{
-	struct node *this;
-	struct impl *impl;
-	struct pw_type *t;
-
-	if (node == NULL || command == NULL)
-		return -EINVAL;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-
-	if (this->resource == NULL)
-		return 0;
-
-	impl = this->impl;
-	t = impl->t;
-
-	spa_log_trace(this->log, "send command %s",
-			spa_type_map_get_type(t->map, SPA_COMMAND_TYPE(command)));
-
-	pw_client_node_resource_port_command(this->resource,
-					     direction, port_id,
-					     command);
-	return 0;
-}
-
-static int impl_node_process_input(struct spa_node *node)
-{
-	struct node *this = SPA_CONTAINER_OF(node, struct node, node);
+	struct node *this = object;
 	struct impl *impl = this->impl;
-	struct spa_graph_node *n = &impl->this.node->rt.node;
-	bool client_reuse = impl->client_reuse;
-	struct spa_graph_port *p, *pp;
-	int res;
+	struct pw_impl_node *n = impl->this.node;
+	struct timespec ts;
 
-	if (impl->input_ready == 0) {
-		/* the client is not ready to receive our buffers, recycle them */
-		pw_log_trace("node not ready, recycle buffers");
-		spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link)
-			p->io->status = SPA_STATUS_NEED_BUFFER;
-		res = SPA_STATUS_NEED_BUFFER;
-	}
-	else {
-		spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link) {
-			struct spa_io_buffers *io = p->io;
+	spa_log_trace_fp(this->log, "%p: send process driver:%p", this, impl->this.node->driver_node);
 
-			pw_log_trace("set io status to %d %d", io->status, io->buffer_id);
-			impl->transport->inputs[p->port_id] = *io;
+	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &ts);
+	n->rt.activation->status = PW_NODE_ACTIVATION_TRIGGERED;
+	n->rt.activation->signal_time = SPA_TIMESPEC_TO_NSEC(&ts);
 
-			/* explicitly recycle buffers when the client is not going to do it */
-			if (!client_reuse && (pp = p->peer))
-		                spa_node_port_reuse_buffer(pp->node->implementation,
-						pp->port_id, io->buffer_id);
-		}
-		pw_client_node_transport_add_message(impl->transport,
-			       &PW_CLIENT_NODE_MESSAGE_INIT(PW_CLIENT_NODE_MESSAGE_PROCESS_INPUT));
-		do_flush(this);
-
-		impl->input_ready--;
-		res = SPA_STATUS_OK;
-	}
-	return res;
-}
-
-static int impl_node_process_output(struct spa_node *node)
-{
-	struct node *this;
-	struct impl *impl;
-	struct spa_graph_node *n;
-	struct spa_graph_port *p;
-
-	this = SPA_CONTAINER_OF(node, struct node, node);
-	impl = this->impl;
-	n = &impl->this.node->rt.node;
-
-	if (impl->out_pending)
-		goto done;
-
-	impl->out_pending = true;
-
-	spa_list_for_each(p, &n->ports[SPA_DIRECTION_OUTPUT], link) {
-		struct spa_io_buffers *io = p->io;
-
-		impl->transport->outputs[p->port_id] = *io;
-
-		pw_log_trace("%d %d -> %d %d", io->status, io->buffer_id,
-				impl->transport->outputs[p->port_id].status,
-				impl->transport->outputs[p->port_id].buffer_id);
-	}
-
-      done:
-	pw_client_node_transport_add_message(impl->transport,
-			       &PW_CLIENT_NODE_MESSAGE_INIT(PW_CLIENT_NODE_MESSAGE_PROCESS_OUTPUT));
-	do_flush(this);
+	if (spa_system_eventfd_write(this->data_system, this->writefd, 1) < 0)
+		spa_log_warn(this->log, NAME" %p: error %m", this);
 
 	return SPA_STATUS_OK;
 }
 
-static int handle_node_message(struct node *this, struct pw_client_node_message *message)
-{
-	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, node);
-	struct spa_graph_node *n;
-	struct spa_graph_port *p;
-
-	n = &impl->this.node->rt.node;
-
-	switch (PW_CLIENT_NODE_MESSAGE_TYPE(message)) {
-	case PW_CLIENT_NODE_MESSAGE_HAVE_OUTPUT:
-		spa_list_for_each(p, &n->ports[SPA_DIRECTION_OUTPUT], link) {
-			*p->io = impl->transport->outputs[p->port_id];
-			pw_log_trace("have output %d %d", p->io->status, p->io->buffer_id);
-		}
-		impl->out_pending = false;
-		this->callbacks->have_output(this->callbacks_data);
-		break;
-
-	case PW_CLIENT_NODE_MESSAGE_NEED_INPUT:
-		spa_list_for_each(p, &n->ports[SPA_DIRECTION_INPUT], link) {
-			*p->io = impl->transport->inputs[p->port_id];
-			pw_log_trace("need input %d %d", p->io->status, p->io->buffer_id);
-		}
-		impl->input_ready++;
-		this->callbacks->need_input(this->callbacks_data);
-		break;
-
-	case PW_CLIENT_NODE_MESSAGE_PORT_REUSE_BUFFER:
-		if (impl->client_reuse) {
-			struct pw_client_node_message_port_reuse_buffer *p =
-			    (struct pw_client_node_message_port_reuse_buffer *) message;
-			this->callbacks->reuse_buffer(this->callbacks_data, p->body.port_id.value,
-						     p->body.buffer_id.value);
-		}
-		break;
-
-	default:
-		pw_log_warn("unhandled message %d", PW_CLIENT_NODE_MESSAGE_TYPE(message));
-		return -ENOTSUP;
-	}
-	return 0;
-}
-
-static void setup_transport(struct impl *impl)
-{
-	uint32_t max_inputs = 0, max_outputs = 0, n_inputs = 0, n_outputs = 0;
-
-	spa_node_get_n_ports(&impl->node.node, &n_inputs, &max_inputs, &n_outputs, &max_outputs);
-
-	impl->transport = pw_client_node_transport_new(max_inputs, max_outputs);
-	impl->transport->area->n_input_ports = n_inputs;
-	impl->transport->area->n_output_ports = n_outputs;
-}
-
-static void
-client_node_done(void *data, int seq, int res)
+static struct pw_node *
+client_node_get_node(void *data,
+		   uint32_t version,
+		   size_t user_data_size)
 {
 	struct impl *impl = data;
 	struct node *this = &impl->node;
+	uint32_t new_id = user_data_size;
 
-	if (seq == 0 && res == 0 && impl->transport == NULL)
-		setup_transport(impl);
+	pw_log_debug(NAME" %p: bind %u/%u", this, new_id, version);
 
-	this->callbacks->done(this->callbacks_data, seq, res);
+	impl->bind_node_version = version;
+	impl->bind_node_id = new_id;
+	pw_map_insert_at(&this->client->objects, new_id, NULL);
+
+	return NULL;
 }
 
-static void
+static int
 client_node_update(void *data,
 		   uint32_t change_mask,
-		   uint32_t max_input_ports,
-		   uint32_t max_output_ports,
 		   uint32_t n_params,
-		   const struct spa_pod **params)
+		   const struct spa_pod **params,
+		   const struct spa_node_info *info)
 {
 	struct impl *impl = data;
 	struct node *this = &impl->node;
 
-	if (change_mask & PW_CLIENT_NODE_UPDATE_MAX_INPUTS)
-		this->max_inputs = max_input_ports;
-	if (change_mask & PW_CLIENT_NODE_UPDATE_MAX_OUTPUTS)
-		this->max_outputs = max_output_ports;
 	if (change_mask & PW_CLIENT_NODE_UPDATE_PARAMS) {
-		int i;
-		spa_log_info(this->log, "node %p: update %d params", this, n_params);
+		uint32_t i;
+		pw_log_debug(NAME" %p: update %d params", this, n_params);
 
 		for (i = 0; i < this->n_params; i++)
 			free(this->params[i]);
@@ -997,13 +925,16 @@ client_node_update(void *data,
 		this->params = realloc(this->params, this->n_params * sizeof(struct spa_pod *));
 
 		for (i = 0; i < this->n_params; i++)
-			this->params[i] = pw_spa_pod_copy(params[i]);
+			this->params[i] = params[i] ? spa_pod_copy(params[i]) : NULL;
 	}
-	spa_log_info(this->log, "node %p: got node update max_in %u, max_out %u", this,
-		     this->max_inputs, this->max_outputs);
+	if (change_mask & PW_CLIENT_NODE_UPDATE_INFO) {
+		spa_node_emit_info(&this->hooks, info);
+	}
+	pw_log_debug(NAME" %p: got node update", this);
+	return 0;
 }
 
-static void
+static int
 client_node_port_update(void *data,
 			enum spa_direction direction,
 			uint32_t port_id,
@@ -1014,95 +945,161 @@ client_node_port_update(void *data,
 {
 	struct impl *impl = data;
 	struct node *this = &impl->node;
+	struct port *port;
 	bool remove;
 
-	spa_log_info(this->log, "node %p: got port update", this);
+	spa_log_debug(this->log, NAME" %p: got port update change:%08x params:%d",
+			this, change_mask, n_params);
 	if (!CHECK_PORT_ID(this, direction, port_id))
-		return;
+		return -EINVAL;
 
 	remove = (change_mask == 0);
 
+	port = GET_PORT(this, direction, port_id);
+
 	if (remove) {
-		do_uninit_port(this, direction, port_id);
+		clear_port(this, port);
 	} else {
+		struct port *target;
+
+		if (port == NULL) {
+			target = &this->dummy;
+			spa_zero(this->dummy);
+			target->direction = direction;
+			target->id = port_id;
+		} else
+			target = port;
+
 		do_update_port(this,
-			       direction,
-			       port_id,
+			       target,
 			       change_mask,
-			       n_params, params, info);
+			       n_params, params,
+			       info);
 	}
-	pw_node_update_ports(impl->this.node);
+	return 0;
 }
 
-static void client_node_set_active(void *data, bool active)
+static int client_node_set_active(void *data, bool active)
 {
 	struct impl *impl = data;
-	pw_node_set_active(impl->this.node, active);
+	return pw_impl_node_set_active(impl->this.node, active);
 }
 
-static void client_node_event(void *data, struct spa_event *event)
+static int client_node_event(void *data, const struct spa_event *event)
 {
 	struct impl *impl = data;
 	struct node *this = &impl->node;
-	this->callbacks->event(this->callbacks_data, event);
+	spa_node_emit_event(&this->hooks, event);
+	return 0;
 }
 
-static struct pw_client_node_proxy_methods client_node_methods = {
-	PW_VERSION_CLIENT_NODE_PROXY_METHODS,
-	.done = client_node_done,
+static int client_node_port_buffers(void *data,
+			enum spa_direction direction,
+			uint32_t port_id,
+			uint32_t mix_id,
+			uint32_t n_buffers,
+			struct spa_buffer **buffers)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	struct port *p;
+	struct mix *mix;
+	uint32_t i, j;
+
+	spa_log_debug(this->log, NAME " %p: %s port %d.%d buffers %p %u", this,
+			direction == SPA_DIRECTION_INPUT ? "input" : "output",
+			port_id, mix_id, buffers, n_buffers);
+
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+
+	p = GET_PORT(this, direction, port_id);
+
+	if (direction == SPA_DIRECTION_OUTPUT)
+		mix_id = SPA_ID_INVALID;
+
+	if ((mix = find_mix(p, mix_id)) == NULL || !mix->valid)
+		return -EINVAL;
+
+	for (i = 0; i < n_buffers; i++) {
+		struct spa_buffer *oldbuf, *newbuf;
+
+		oldbuf = mix->buffers[i].outbuf;
+		newbuf = buffers[i];
+
+		spa_log_debug(this->log, "buffer %d n_datas:%d", i, newbuf->n_datas);
+
+		if (oldbuf->n_datas != newbuf->n_datas)
+			return -EINVAL;
+
+		for (j = 0; j < newbuf->n_datas; j++) {
+			struct spa_chunk *oldchunk = oldbuf->datas[j].chunk;
+
+			/* overwrite everything except the chunk */
+			oldbuf->datas[j] = newbuf->datas[j];
+			oldbuf->datas[j].chunk = oldchunk;
+
+			spa_log_debug(this->log, " data %d type:%d fl:%08x fd:%d, offs:%d max:%d",
+					j,
+					newbuf->datas[j].type,
+					newbuf->datas[j].flags,
+					(int) newbuf->datas[j].fd,
+					newbuf->datas[j].mapoffset,
+					newbuf->datas[j].maxsize);
+		}
+	}
+	mix->n_buffers = n_buffers;
+
+	return 0;
+}
+
+static struct pw_client_node_methods client_node_methods = {
+	PW_VERSION_CLIENT_NODE_METHODS,
+	.get_node = client_node_get_node,
 	.update = client_node_update,
 	.port_update = client_node_port_update,
 	.set_active = client_node_set_active,
 	.event = client_node_event,
+	.port_buffers = client_node_port_buffers,
 };
 
 static void node_on_data_fd_events(struct spa_source *source)
 {
 	struct node *this = source->data;
-	struct impl *impl = this->impl;
 
 	if (source->rmask & (SPA_IO_ERR | SPA_IO_HUP)) {
-		spa_log_warn(this->log, "node %p: got error", this);
+		spa_log_warn(this->log, NAME" %p: got error", this);
 		return;
 	}
 
 	if (source->rmask & SPA_IO_IN) {
-		struct pw_client_node_message message;
 		uint64_t cmd;
 
-		if (read(this->data_source.fd, &cmd, sizeof(uint64_t)) != sizeof(uint64_t))
-			spa_log_warn(this->log, "node %p: error reading message: %s",
-					this, strerror(errno));
+		if (spa_system_eventfd_read(this->data_system,
+					this->data_source.fd, &cmd) < 0 || cmd != 1)
+			spa_log_warn(this->log, NAME" %p: read %"PRIu64" failed %m", this, cmd);
 
-		while (pw_client_node_transport_next_message(impl->transport, &message) == 1) {
-			struct pw_client_node_message *msg = alloca(SPA_POD_SIZE(&message));
-			pw_client_node_transport_parse_message(impl->transport, msg);
-			handle_node_message(this, msg);
-		}
+		spa_log_trace_fp(this->log, NAME" %p: got ready", this);
+		spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
 	}
 }
 
-static const struct spa_node impl_node = {
-	SPA_VERSION_NODE,
-	NULL,
-	impl_node_enum_params,
-	impl_node_set_param,
-	impl_node_send_command,
-	impl_node_set_callbacks,
-	impl_node_get_n_ports,
-	impl_node_get_port_ids,
-	impl_node_add_port,
-	impl_node_remove_port,
-	impl_node_port_get_info,
-	impl_node_port_enum_params,
-	impl_node_port_set_param,
-	impl_node_port_use_buffers,
-	impl_node_port_alloc_buffers,
-	impl_node_port_set_io,
-	impl_node_port_reuse_buffer,
-	impl_node_port_send_command,
-	impl_node_process_input,
-	impl_node_process_output,
+static const struct spa_node_methods impl_node = {
+	SPA_VERSION_NODE_METHODS,
+	.add_listener = impl_node_add_listener,
+	.set_callbacks = impl_node_set_callbacks,
+	.sync = impl_node_sync,
+	.enum_params = impl_node_enum_params,
+	.set_param = impl_node_set_param,
+	.set_io = impl_node_set_io,
+	.send_command = impl_node_send_command,
+	.add_port = impl_node_add_port,
+	.remove_port = impl_node_remove_port,
+	.port_enum_params = impl_node_port_enum_params,
+	.port_set_param = impl_node_port_set_param,
+	.port_use_buffers = impl_node_port_use_buffers,
+	.port_set_io = impl_node_port_set_io,
+	.port_reuse_buffer = impl_node_port_reuse_buffer,
+	.process = impl_node_process,
 };
 
 static int
@@ -1111,26 +1108,24 @@ node_init(struct node *this,
 	  const struct spa_support *support,
 	  uint32_t n_support)
 {
-	uint32_t i;
+	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 
-	for (i = 0; i < n_support; i++) {
-		if (strcmp(support[i].type, SPA_TYPE__Log) == 0)
-			this->log = support[i].data;
-		else if (strcmp(support[i].type, SPA_TYPE_LOOP__DataLoop) == 0)
-			this->data_loop = support[i].data;
-		else if (strcmp(support[i].type, SPA_TYPE__TypeMap) == 0)
-			this->map = support[i].data;
-	}
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data-loop is needed");
 		return -EINVAL;
 	}
-	if (this->map == NULL) {
-		spa_log_error(this->log, "a type map is needed");
+	if (this->data_system == NULL) {
+		spa_log_error(this->log, "a data-system is needed");
 		return -EINVAL;
 	}
 
-	this->node = impl_node;
+	this->node.iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_Node,
+			SPA_VERSION_NODE,
+			&impl_node, this);
+	spa_hook_list_init(&this->hooks);
 
 	this->data_source.func = node_on_data_fd_events;
 	this->data_source.data = this;
@@ -1138,23 +1133,16 @@ node_init(struct node *this,
 	this->data_source.mask = SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP;
 	this->data_source.rmask = 0;
 
-	this->seq = 1;
-
-	return SPA_RESULT_RETURN_ASYNC(this->seq++);
+	return 0;
 }
 
 static int node_clear(struct node *this)
 {
 	uint32_t i;
 
-	for (i = 0; i < MAX_INPUTS; i++) {
-		if (this->in_ports[i].valid)
-			clear_port(this, &this->in_ports[i], SPA_DIRECTION_INPUT, i);
-	}
-	for (i = 0; i < MAX_OUTPUTS; i++) {
-		if (this->out_ports[i].valid)
-			clear_port(this, &this->out_ports[i], SPA_DIRECTION_OUTPUT, i);
-	}
+	for (i = 0; i < this->n_params; i++)
+		free(this->params[i]);
+	free(this->params);
 
 	return 0;
 }
@@ -1174,13 +1162,14 @@ static int do_remove_source(struct spa_loop *loop,
 static void client_node_resource_destroy(void *data)
 {
 	struct impl *impl = data;
-	struct pw_client_node *this = &impl->this;
+	struct pw_impl_client_node *this = &impl->this;
 	struct node *node = &impl->node;
 
-	pw_log_debug("client-node %p: destroy", impl);
+	pw_log_debug(NAME " %p: destroy", node);
 
 	impl->node.resource = this->resource = NULL;
 	spa_hook_remove(&impl->resource_listener);
+	spa_hook_remove(&impl->object_listener);
 
 	if (node->data_source.fd != -1) {
 		spa_loop_invoke(node->data_loop,
@@ -1191,66 +1180,434 @@ static void client_node_resource_destroy(void *data)
 				true,
 				&node->data_source);
 	}
-	pw_node_destroy(this->node);
+	if (this->node)
+		pw_impl_node_destroy(this->node);
+}
+
+static void client_node_resource_error(void *data, int seq, int res, const char *message)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	struct spa_result_node_error result;
+
+	pw_log_error(NAME " %p: error seq:%d %d (%s)", this, seq, res, message);
+	result.message = message;
+	spa_node_emit_result(&this->hooks, seq, res, SPA_RESULT_TYPE_NODE_ERROR, &result);
+}
+
+static void client_node_resource_pong(void *data, int seq)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+
+	pw_log_debug(NAME " %p: got pong, emit result %d", this, seq);
+	spa_node_emit_result(&this->hooks, seq, 0, 0, NULL);
+}
+
+void pw_impl_client_node_registered(struct pw_impl_client_node *this, struct pw_global *global)
+{
+	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
+	struct pw_impl_node *node = this->node;
+	struct pw_impl_client *client = impl->node.client;
+	uint32_t node_id = global->id;
+	struct pw_memblock *m;
+
+	pw_log_debug(NAME " %p: %d", &impl->node, node_id);
+
+	m = pw_mempool_import_block(client->pool, node->activation);
+	if (m == NULL) {
+		pw_log_debug(NAME " %p: can't import block: %m", &impl->node);
+		return;
+	}
+	impl->node_id = node_id;
+
+	if (this->resource == NULL)
+		return;
+
+	pw_resource_set_bound_id(this->resource, node_id);
+
+	pw_client_node_resource_transport(this->resource,
+					  impl->other_fds[0],
+					  impl->other_fds[1],
+					  m->id,
+					  0,
+					  sizeof(struct pw_node_activation));
+
+	if (impl->bind_node_id) {
+		pw_global_bind(global, client, PW_PERM_RWX,
+				impl->bind_node_version, impl->bind_node_id);
+	}
 }
 
 static void node_initialized(void *data)
 {
 	struct impl *impl = data;
-	struct pw_client_node *this = &impl->this;
-	struct pw_node *node = this->node;
+	struct pw_impl_client_node *this = &impl->this;
+	struct node *node = &impl->node;
+	struct pw_global *global;
+	struct spa_system *data_system = impl->node.data_system;
+	size_t size;
 
-	if (this->resource == NULL)
-		return;
-
-	impl->fds[0] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-	impl->fds[1] = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-	impl->node.data_source.fd = impl->fds[0];
-	impl->node.writefd = impl->fds[1];
+	impl->fds[0] = spa_system_eventfd_create(data_system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	impl->fds[1] = spa_system_eventfd_create(data_system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	impl->other_fds[0] = impl->fds[1];
 	impl->other_fds[1] = impl->fds[0];
+	node->data_source.fd = impl->fds[0];
+	node->writefd = impl->fds[1];
 
-	spa_loop_add_source(impl->node.data_loop, &impl->node.data_source);
-	pw_log_debug("client-node %p: transport fd %d %d", node, impl->fds[0], impl->fds[1]);
+	spa_loop_add_source(node->data_loop, &node->data_source);
+	pw_log_debug(NAME " %p: transport fd %d %d", node, impl->fds[0], impl->fds[1]);
 
-	pw_client_node_resource_transport(this->resource,
-					  pw_global_get_id(pw_node_get_global(node)),
-					  impl->other_fds[0],
-					  impl->other_fds[1],
-					  impl->transport);
+	size = sizeof(struct spa_io_buffers) * MAX_AREAS;
+
+	impl->io_areas = pw_mempool_alloc(impl->context->pool,
+			PW_MEMBLOCK_FLAG_READWRITE |
+			PW_MEMBLOCK_FLAG_MAP |
+			PW_MEMBLOCK_FLAG_SEAL,
+			SPA_DATA_MemFd, size);
+	if (impl->io_areas == NULL)
+                return;
+
+	pw_log_debug(NAME " %p: io areas %p", node, impl->io_areas->map->ptr);
+
+	if ((global = pw_impl_node_get_global(this->node)) != NULL)
+		pw_impl_client_node_registered(this, global);
 }
 
 static void node_free(void *data)
 {
 	struct impl *impl = data;
+	struct pw_impl_client_node *this = &impl->this;
+	struct node *node = &impl->node;
+	struct spa_system *data_system = node->data_system;
 
-	pw_log_debug("client-node %p: free", &impl->this);
-	node_clear(&impl->node);
+	this->node = NULL;
 
-	if (impl->transport)
-		pw_client_node_transport_destroy(impl->transport);
+	pw_log_debug(NAME " %p: free", node);
+	node_clear(node);
 
 	spa_hook_remove(&impl->node_listener);
 
-	pw_array_clear(&impl->mems);
+	if (this->resource)
+		pw_resource_destroy(this->resource);
+
+	if (impl->io_areas)
+		pw_memblock_unref(impl->io_areas);
+
+	pw_map_clear(&impl->io_map);
 
 	if (impl->fds[0] != -1)
-		close(impl->fds[0]);
+		spa_system_close(data_system, impl->fds[0]);
 	if (impl->fds[1] != -1)
-		close(impl->fds[1]);
+		spa_system_close(data_system, impl->fds[1]);
 	free(impl);
 }
 
-static const struct pw_node_events node_events = {
-	PW_VERSION_NODE_EVENTS,
+static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
+{
+	struct port *port = data;
+	struct impl *impl = port->impl;
+	struct mix *m;
+
+	if ((m = ensure_mix(impl, port, mix->port.port_id)) == NULL)
+		return -ENOMEM;
+
+	mix->id = pw_map_insert_new(&impl->io_map, NULL);
+	if (mix->id == SPA_ID_INVALID)
+		return -errno;
+
+	mix->io = SPA_MEMBER(impl->io_areas->map->ptr,
+			mix->id * sizeof(struct spa_io_buffers), void);
+	mix->io->buffer_id = SPA_ID_INVALID;
+	mix->io->status = SPA_STATUS_NEED_DATA;
+
+	pw_log_debug(NAME " %p: init mix io %d %p %p", impl, mix->id, mix->io,
+			impl->io_areas->map->ptr);
+
+	return 0;
+}
+
+static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
+{
+	struct port *port = data;
+	struct impl *impl = port->impl;
+	struct node *this = &impl->node;
+	struct mix *m;
+
+	pw_log_debug(NAME " %p: remove mix io %d %p %p", this, mix->id, mix->io,
+			impl->io_areas->map->ptr);
+
+	if ((m = find_mix(port, mix->port.port_id)) == NULL || !m->valid)
+		return -EINVAL;
+
+	pw_map_remove(&impl->io_map, mix->id);
+	m->valid = false;
+
+	return 0;
+}
+
+static const struct pw_impl_port_implementation port_impl = {
+	PW_VERSION_PORT_IMPLEMENTATION,
+	.init_mix = port_init_mix,
+	.release_mix = port_release_mix,
+};
+
+static int
+impl_mix_port_enum_params(void *object, int seq,
+			   enum spa_direction direction, uint32_t port_id,
+			   uint32_t id, uint32_t start, uint32_t num,
+			   const struct spa_pod *filter)
+{
+	struct port *port = object;
+
+	if (port->direction != direction)
+		return -ENOTSUP;
+
+	return impl_node_port_enum_params(&port->node->node, seq, direction, port->id,
+			id, start, num, filter);
+}
+
+static int
+impl_mix_port_set_param(void *object,
+			enum spa_direction direction, uint32_t port_id,
+			uint32_t id, uint32_t flags,
+			const struct spa_pod *param)
+{
+	return -ENOTSUP;
+}
+
+static int
+impl_mix_add_port(void *object, enum spa_direction direction, uint32_t mix_id,
+		const struct spa_dict *props)
+{
+	struct port *port = object;
+	pw_log_debug(NAME " %p: add port %d:%d.%d", object, direction, port->id, mix_id);
+	return 0;
+}
+
+static int
+impl_mix_remove_port(void *object, enum spa_direction direction, uint32_t mix_id)
+{
+	struct port *port = object;
+	pw_log_debug(NAME " %p: remove port %d:%d.%d", object, direction, port->id, mix_id);
+	return 0;
+}
+
+static int
+impl_mix_port_use_buffers(void *object,
+			   enum spa_direction direction,
+			   uint32_t mix_id,
+			   uint32_t flags,
+			   struct spa_buffer **buffers,
+			   uint32_t n_buffers)
+{
+	struct port *port = object;
+	struct impl *impl = port->impl;
+
+	return do_port_use_buffers(impl, direction, port->id, mix_id, flags, buffers, n_buffers);
+}
+
+static int impl_mix_port_set_io(void *object,
+			   enum spa_direction direction, uint32_t mix_id,
+			   uint32_t id, void *data, size_t size)
+{
+	struct port *p = object;
+	struct pw_impl_port *port = p->port;
+	struct impl *impl = port->owner_data;
+	struct pw_impl_port_mix *mix;
+
+	mix = pw_map_lookup(&port->mix_port_map, mix_id);
+	if (mix == NULL)
+		return -EINVAL;
+
+	if (id == SPA_IO_Buffers) {
+		if (data && size >= sizeof(struct spa_io_buffers))
+			mix->io = data;
+		else
+			mix->io = NULL;
+	}
+
+	return do_port_set_io(impl,
+			      direction, port->port_id, mix->port.port_id,
+			      id, data, size);
+}
+
+static int
+impl_mix_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
+{
+	struct port *p = object;
+	return impl_node_port_reuse_buffer(&p->node->node, p->id, buffer_id);
+}
+
+static int impl_mix_process(void *object)
+{
+	return SPA_STATUS_HAVE_DATA;
+}
+
+static const struct spa_node_methods impl_port_mix = {
+	SPA_VERSION_NODE_METHODS,
+	.port_enum_params = impl_mix_port_enum_params,
+	.port_set_param = impl_mix_port_set_param,
+	.add_port = impl_mix_add_port,
+	.remove_port = impl_mix_remove_port,
+	.port_use_buffers = impl_mix_port_use_buffers,
+	.port_set_io = impl_mix_port_set_io,
+	.port_reuse_buffer = impl_mix_port_reuse_buffer,
+	.process = impl_mix_process,
+};
+
+static void node_port_init(void *data, struct pw_impl_port *port)
+{
+	struct impl *impl = data;
+	struct port *p = pw_impl_port_get_user_data(port);
+	struct node *this = &impl->node;
+
+	pw_log_debug(NAME " %p: port %p init", this, port);
+
+	*p = this->dummy;
+	p->port = port;
+	p->node = this;
+	p->direction = port->direction;
+	p->id = port->port_id;
+	p->impl = impl;
+	p->mix_node.iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_Node,
+			SPA_VERSION_NODE,
+			&impl_port_mix, p);
+	mix_init(&p->mix[MAX_MIX], p, SPA_ID_INVALID);
+
+	if (p->direction == SPA_DIRECTION_INPUT) {
+		this->in_ports[p->id] = p;
+		this->n_inputs++;
+	} else {
+		this->out_ports[p->id] = p;
+		this->n_outputs++;
+	}
+	return;
+}
+
+static void node_port_added(void *data, struct pw_impl_port *port)
+{
+	struct impl *impl = data;
+	struct port *p = pw_impl_port_get_user_data(port);
+
+	pw_impl_port_set_mix(port, &p->mix_node,
+			PW_IMPL_PORT_MIX_FLAG_MULTI |
+			PW_IMPL_PORT_MIX_FLAG_MIX_ONLY);
+
+	port->flags |= PW_IMPL_PORT_FLAG_NO_MIXER;
+
+	port->impl = SPA_CALLBACKS_INIT(&port_impl, p);
+	port->owner_data = impl;
+}
+
+static void node_port_removed(void *data, struct pw_impl_port *port)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	struct port *p = pw_impl_port_get_user_data(port);
+
+	pw_log_debug(NAME " %p: port %p remove", this, port);
+
+	p->removed = true;
+	clear_port(this, p);
+}
+
+static void node_peer_added(void *data, struct pw_impl_node *peer)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	struct pw_memblock *m;
+
+	if (peer == impl->this.node)
+		return;
+
+	m = pw_mempool_import_block(this->client->pool, peer->activation);
+	if (m == NULL) {
+		pw_log_debug(NAME " %p: can't ensure mem: %m", this);
+		return;
+	}
+	pw_log_debug(NAME " %p: peer %p id:%u added mem_id:%u", &impl->this, peer,
+			peer->info.id, m->id);
+
+	if (this->resource == NULL)
+		return;
+
+	pw_client_node_resource_set_activation(this->resource,
+					  peer->info.id,
+					  peer->source.fd,
+					  m->id,
+					  0,
+					  sizeof(struct pw_node_activation));
+}
+
+static void node_peer_removed(void *data, struct pw_impl_node *peer)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	struct pw_memblock *m;
+
+	if (peer == impl->this.node)
+		return;
+
+	m = pw_mempool_find_fd(this->client->pool, peer->activation->fd);
+	if (m == NULL) {
+		pw_log_warn(NAME " %p: unknown peer %p fd:%d", this, peer,
+			peer->source.fd);
+		return;
+	}
+	pw_log_debug(NAME " %p: peer %p %u removed", this, peer,
+			peer->info.id);
+
+	if (this->resource != NULL) {
+		pw_client_node_resource_set_activation(this->resource,
+					  peer->info.id,
+					  -1,
+					  SPA_ID_INVALID,
+					  0,
+					  0);
+	}
+
+	pw_memblock_unref(m);
+}
+
+static void node_driver_changed(void *data, struct pw_impl_node *old, struct pw_impl_node *driver)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+
+	pw_log_debug(NAME " %p: driver changed %p -> %p", this, old, driver);
+
+	node_peer_removed(data, old);
+	node_peer_added(data, driver);
+}
+
+static const struct pw_impl_node_events node_events = {
+	PW_VERSION_IMPL_NODE_EVENTS,
 	.free = node_free,
 	.initialized = node_initialized,
+	.port_init = node_port_init,
+	.port_added = node_port_added,
+	.port_removed = node_port_removed,
+	.peer_added = node_peer_added,
+	.peer_removed = node_peer_removed,
+	.driver_changed = node_driver_changed,
 };
 
 static const struct pw_resource_events resource_events = {
 	PW_VERSION_RESOURCE_EVENTS,
 	.destroy = client_node_resource_destroy,
+	.error = client_node_resource_error,
+	.pong = client_node_resource_pong,
 };
+
+static int process_node(void *data)
+{
+	struct impl *impl = data;
+	struct node *this = &impl->node;
+	pw_log_trace_fp(NAME " %p: process", this);
+	return spa_node_process(&this->node);
+}
 
 /** Create a new client node
  * \param client an owner \ref pw_client
@@ -1259,84 +1616,106 @@ static const struct pw_resource_events resource_events = {
  * \param properties extra properties
  * \return a newly allocated client node
  *
- * Create a new \ref pw_node.
+ * Create a new \ref pw_impl_node.
  *
- * \memberof pw_client_node
+ * \memberof pw_impl_client_node
  */
-struct pw_client_node *pw_client_node_new(struct pw_resource *resource,
-					  struct pw_properties *properties)
+struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource,
+					  struct pw_properties *properties,
+					  bool do_register)
 {
 	struct impl *impl;
-	struct pw_client_node *this;
-	struct pw_client *client = pw_resource_get_client(resource);
-	struct pw_core *core = pw_client_get_core(client);
+	struct pw_impl_client_node *this;
+	struct pw_impl_client *client = pw_resource_get_client(resource);
+	struct pw_context *context = pw_impl_client_get_context(client);
 	const struct spa_support *support;
 	uint32_t n_support;
-	const char *name;
-	const char *str;
+	int res;
 
 	impl = calloc(1, sizeof(struct impl));
-	if (impl == NULL)
-		return NULL;
+	if (impl == NULL) {
+		res = -errno;
+		goto error_exit_cleanup;
+	}
+
+	if (properties == NULL)
+		properties = pw_properties_new(NULL, NULL);
+	if (properties == NULL) {
+		res = -errno;
+		goto error_exit_free;
+	}
+
+	pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d", client->global->id);
 
 	this = &impl->this;
 
-	impl->core = core;
-	impl->t = pw_core_get_type(core);
+	impl->context = context;
 	impl->fds[0] = impl->fds[1] = -1;
-	pw_log_debug("client-node %p: new", impl);
+	pw_log_debug(NAME " %p: new", &impl->node);
 
-	support = pw_core_get_support(impl->core, &n_support);
-
+	support = pw_context_get_support(impl->context, &n_support);
 	node_init(&impl->node, NULL, support, n_support);
 	impl->node.impl = impl;
+	impl->node.resource = resource;
+	impl->node.client = client;
+	this->flags = do_register ? 0 : 1;
 
-	pw_array_init(&impl->mems, 64);
-
-	if ((name = pw_properties_get(properties, "node.name")) == NULL)
-		name = "client-node";
+	pw_map_init(&impl->io_map, 64, 64);
 
 	this->resource = resource;
-	this->node = pw_spa_node_new(core,
-				     pw_resource_get_client(this->resource),
-				     NULL,
-				     name,
-				     PW_SPA_NODE_FLAG_ASYNC,
-				     &impl->node.node,
+	this->node = pw_spa_node_new(context,
+				     PW_SPA_NODE_FLAG_ASYNC |
+				     (do_register ? 0 : PW_SPA_NODE_FLAG_NO_REGISTER),
+				     (struct spa_node *)&impl->node.node,
 				     NULL,
 				     properties, 0);
+
 	if (this->node == NULL)
 		goto error_no_node;
 
-	str = pw_properties_get(properties, "pipewire.client.reuse");
-	impl->client_reuse = str && pw_properties_parse_bool(str);
+	this->node->remote = true;
+	this->flags = 0;
+
+	this->node->rt.target.signal = process_node;
+	this->node->rt.target.data = impl;
 
 	pw_resource_add_listener(this->resource,
-				 &impl->resource_listener,
-				 &resource_events,
-				 impl);
-	pw_resource_set_implementation(this->resource,
-				       &client_node_methods,
-				       impl);
+				&impl->resource_listener,
+				&resource_events,
+				impl);
+	pw_resource_add_object_listener(this->resource,
+				&impl->object_listener,
+				&client_node_methods,
+				impl);
 
-	impl->node.resource = this->resource;
+	this->node->port_user_data_size = sizeof(struct port);
 
-	pw_node_add_listener(this->node, &impl->node_listener, &node_events, impl);
+	pw_impl_node_add_listener(this->node, &impl->node_listener, &node_events, impl);
 
 	return this;
 
-      error_no_node:
-	pw_resource_destroy(this->resource);
+error_no_node:
+	res = -errno;
 	node_clear(&impl->node);
+	properties = NULL;
+	goto error_exit_free;
+
+error_exit_free:
 	free(impl);
+error_exit_cleanup:
+	if (resource)
+		pw_resource_destroy(resource);
+	if (properties)
+		pw_properties_free(properties);
+	errno = -res;
 	return NULL;
 }
 
 /** Destroy a client node
  * \param node the client node to destroy
- * \memberof pw_client_node
+ * \memberof pw_impl_client_node
  */
-void pw_client_node_destroy(struct pw_client_node *node)
+void pw_impl_client_node_destroy(struct pw_impl_client_node *node)
 {
 	pw_resource_destroy(node->resource);
 }

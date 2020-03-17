@@ -1,20 +1,25 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <string.h>
@@ -26,25 +31,16 @@
 #include <poll.h>
 
 #include <spa/support/log-impl.h>
-#include <spa/support/type-map-impl.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
-#include <spa/monitor/monitor.h>
+#include <spa/monitor/device.h>
 
 #include <spa/debug/dict.h>
 #include <spa/debug/pod.h>
 
-static SPA_TYPE_MAP_IMPL(default_map, 4096);
 static SPA_LOG_IMPL(default_log);
 
-struct type {
-	struct spa_type_monitor monitor;
-};
-
 struct data {
-	struct type type;
-
-	struct spa_type_map *map;
 	struct spa_log *log;
 	struct spa_loop main_loop;
 
@@ -60,30 +56,32 @@ struct data {
 };
 
 
-static void inspect_item(struct data *data, struct spa_pod *item)
+static void inspect_info(struct data *data, const struct spa_device_object_info *info)
 {
-	spa_debug_pod(0, data->map, item);
+	spa_debug_dict(0, info->props);
 }
 
-static void on_monitor_event(void *_data, struct spa_event *event)
+static void on_device_info(void *_data, const struct spa_device_info *info)
+{
+	spa_debug_dict(0, info->props);
+}
+
+static void on_device_object_info(void *_data, uint32_t id, const struct spa_device_object_info *info)
 {
 	struct data *data = _data;
 
-	if (SPA_EVENT_TYPE(event) == data->type.monitor.Added) {
-		fprintf(stderr, "added:\n");
-		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
-	} else if (SPA_EVENT_TYPE(event) == data->type.monitor.Removed) {
-		fprintf(stderr, "removed:\n");
-		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
-	} else if (SPA_EVENT_TYPE(event) == data->type.monitor.Changed) {
-		fprintf(stderr, "changed:\n");
-		inspect_item(data, SPA_POD_CONTENTS(struct spa_event, event));
+	if (info == NULL) {
+		fprintf(stderr, "removed: %u\n", id);
+	}
+	else {
+		fprintf(stderr, "added/changed: %u\n", id);
+		inspect_info(data, info);
 	}
 }
 
-static int do_add_source(struct spa_loop *loop, struct spa_source *source)
+static int do_add_source(void *object, struct spa_source *source)
 {
-	struct data *data = SPA_CONTAINER_OF(loop, struct data, main_loop);
+	struct data *data = object;
 
 	data->sources[data->n_sources] = *source;
 	data->n_sources++;
@@ -92,44 +90,26 @@ static int do_add_source(struct spa_loop *loop, struct spa_source *source)
 	return 0;
 }
 
-static int do_update_source(struct spa_source *source)
-{
-	return 0;
-}
-
-static void do_remove_source(struct spa_source *source)
-{
-}
-
-static const struct spa_monitor_callbacks impl_callbacks = {
-	SPA_VERSION_MONITOR_CALLBACKS,
-	.event = on_monitor_event,
+static const struct spa_loop_methods impl_loop = {
+	SPA_VERSION_LOOP_METHODS,
+	.add_source = do_add_source,
 };
 
-static void handle_monitor(struct data *data, struct spa_monitor *monitor)
+static const struct spa_device_events impl_device_events = {
+	SPA_VERSION_DEVICE_EVENTS,
+	.info = on_device_info,
+	.object_info = on_device_object_info,
+};
+
+static void handle_device(struct data *data, struct spa_device *device)
 {
-	int res;
-	uint32_t index;
+	struct spa_hook listener;
 
-	if (monitor->info)
-		spa_debug_dict(0, monitor->info);
-
-	for (index = 0;;) {
-		struct spa_pod *item;
-		uint8_t buffer[4096];
-		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
-		if ((res = spa_monitor_enum_items(monitor, &index, &item, &b)) <= 0) {
-			if (res != 0)
-				printf("spa_monitor_enum_items: %s\n", spa_strerror(res));
-			break;
-		}
-		inspect_item(data, item);
-	}
-	spa_monitor_set_callbacks(monitor, &impl_callbacks, data);
+	spa_device_add_listener(device, &listener, &impl_device_events, data);
 
 	while (true) {
-		int i, r;
+		int r;
+		uint32_t i;
 
 		/* rebuild */
 		if (data->rebuild_fds) {
@@ -149,7 +129,7 @@ static void handle_monitor(struct data *data, struct spa_monitor *monitor)
 			break;
 		}
 		if (r == 0) {
-			fprintf(stderr, "monitor %p: select timeout", monitor);
+			fprintf(stderr, "device %p: select timeout", device);
 			break;
 		}
 
@@ -159,34 +139,26 @@ static void handle_monitor(struct data *data, struct spa_monitor *monitor)
 			p->func(p);
 		}
 	}
+	spa_hook_remove(&listener);
 }
 
 int main(int argc, char *argv[])
 {
-	struct data data;
+	struct data data = { 0 };
 	int res;
 	void *handle;
 	spa_handle_factory_enum_func_t enum_func;
 	uint32_t fidx;
 
-	spa_zero(data);
-
-	data.map = &default_map.map;
 	data.log = &default_log.log;
-	data.main_loop.version = SPA_VERSION_LOOP;
-	data.main_loop.add_source = do_add_source;
-	data.main_loop.update_source = do_update_source;
-	data.main_loop.remove_source = do_remove_source;
+	data.main_loop.iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_Loop,
+			SPA_VERSION_LOOP,
+			&impl_loop, &data);
 
-	data.support[0].type = SPA_TYPE__TypeMap;
-	data.support[0].data = data.map;
-	data.support[1].type = SPA_TYPE__Log;
-	data.support[1].data = data.log;
-	data.support[2].type = SPA_TYPE_LOOP__MainLoop;
-	data.support[2].data = &data.main_loop;
+	data.support[1] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Log, data.log);
+	data.support[2] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Loop, &data.main_loop);
 	data.n_support = 3;
-
-	spa_type_monitor_map(data.map, &data.type.monitor);
 
 	if (argc < 2) {
 		printf("usage: %s <plugin.so>\n", argv[0]);
@@ -222,11 +194,11 @@ int main(int argc, char *argv[])
 				break;
 			}
 
-			if (!strcmp(info->type, SPA_TYPE__Monitor)) {
+			if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) == 0) {
 				struct spa_handle *handle;
 				void *interface;
 
-				handle = calloc(1, factory->size);
+				handle = calloc(1, spa_handle_factory_get_size(factory, NULL));
 				if ((res =
 				     spa_handle_factory_init(factory, handle, NULL, data.support,
 							     data.n_support)) < 0) {
@@ -235,12 +207,12 @@ int main(int argc, char *argv[])
 				}
 
 				if ((res =
-				     spa_handle_get_interface(handle, data.type.monitor.Monitor,
+				     spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device,
 							      &interface)) < 0) {
 					printf("can't get interface: %s\n", strerror(res));
 					continue;
 				}
-				handle_monitor(&data, interface);
+				handle_device(&data, interface);
 			}
 		}
 	}

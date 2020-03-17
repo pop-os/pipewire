@@ -1,25 +1,32 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 
-#include "pipewire/pipewire.h"
+#include "pipewire/array.h"
+#include "pipewire/utils.h"
 #include "pipewire/properties.h"
 
 /** \cond */
@@ -36,11 +43,14 @@ static int add_func(struct pw_properties *this, char *key, char *value)
 	struct properties *impl = SPA_CONTAINER_OF(this, struct properties, this);
 
 	item = pw_array_add(&impl->items, sizeof(struct spa_dict_item));
+	if (item == NULL)
+		return -errno;
+
 	item->key = key;
 	item->value = value;
 
 	this->dict.items = impl->items.data;
-	this->dict.n_items = pw_array_get_len(&impl->items, struct spa_dict_item);
+	this->dict.n_items++;
 	return 0;
 }
 
@@ -52,16 +62,11 @@ static void clear_item(struct spa_dict_item *item)
 
 static int find_index(const struct pw_properties *this, const char *key)
 {
-	struct properties *impl = SPA_CONTAINER_OF(this, struct properties, this);
-	int i, len = pw_array_get_len(&impl->items, struct spa_dict_item);
-
-	for (i = 0; i < len; i++) {
-		struct spa_dict_item *item =
-		    pw_array_get_unchecked(&impl->items, i, struct spa_dict_item);
-		if (strcmp(item->key, key) == 0)
-			return i;
-	}
-	return -1;
+	const struct spa_dict_item *item;
+	item = spa_dict_lookup_item(&this->dict, key);
+	if (item == NULL)
+		return -1;
+	return item - this->dict.items;
 }
 
 static struct properties *properties_new(int prealloc)
@@ -72,7 +77,8 @@ static struct properties *properties_new(int prealloc)
 	if (impl == NULL)
 		return NULL;
 
-	pw_array_init(&impl->items, prealloc);
+	pw_array_init(&impl->items, 16);
+	pw_array_ensure_size(&impl->items, sizeof(struct spa_dict_item) * prealloc);
 
 	return impl;
 }
@@ -99,7 +105,7 @@ struct pw_properties *pw_properties_new(const char *key, ...)
 	va_start(varargs, key);
 	while (key != NULL) {
 		value = va_arg(varargs, char *);
-		if (value)
+		if (value && key[0])
 			add_func(&impl->this, strdup(key), strdup(value));
 		key = va_arg(varargs, char *);
 	}
@@ -121,14 +127,15 @@ struct pw_properties *pw_properties_new_dict(const struct spa_dict *dict)
 	uint32_t i;
 	struct properties *impl;
 
-	impl = properties_new(16);
+	impl = properties_new(SPA_ROUND_UP_N(dict->n_items, 16));
 	if (impl == NULL)
 		return NULL;
 
 	for (i = 0; i < dict->n_items; i++) {
-		if (dict->items[i].key != NULL && dict->items[i].value != NULL)
-			add_func(&impl->this, strdup(dict->items[i].key),
-				 strdup(dict->items[i].value));
+		const struct spa_dict_item *it = &dict->items[i];
+		if (it->key != NULL && it->key[0] && it->value != NULL)
+			add_func(&impl->this, strdup(it->key),
+				 strdup(it->value));
 	}
 
 	return &impl->this;
@@ -152,6 +159,7 @@ pw_properties_new_string(const char *str)
 	struct properties *impl;
         const char *state = NULL, *s = NULL;
 	size_t len;
+	int res;
 
 	impl = properties_new(16);
 	if (impl == NULL)
@@ -161,15 +169,24 @@ pw_properties_new_string(const char *str)
 	while (s) {
 		char *val, *eq;
 
-		val = strndup(s, len);
+		if ((val = strndup(s, len)) == NULL) {
+			res = -errno;
+			goto no_mem;
+		}
+
 		eq = strchr(val, '=');
-		if (eq) {
+		if (eq && eq != val) {
 			*eq = '\0';
 			add_func(&impl->this, val, strdup(eq+1));
 		}
 		s = pw_split_walk(str, " \t\n\r", &len, &state);
 	}
 	return &impl->this;
+
+no_mem:
+	pw_properties_free(&impl->this);
+	errno = -res;
+	return NULL;
 }
 
 /** Copy a properties object
@@ -182,57 +199,125 @@ pw_properties_new_string(const char *str)
 SPA_EXPORT
 struct pw_properties *pw_properties_copy(const struct pw_properties *properties)
 {
-	struct properties *impl = SPA_CONTAINER_OF(properties, struct properties, this);
-	struct pw_properties *copy;
-	struct spa_dict_item *item;
-
-	copy = pw_properties_new(NULL, NULL);
-	if (copy == NULL)
-		return NULL;
-
-	pw_array_for_each(item, &impl->items)
-		add_func(copy, strdup(item->key), strdup(item->value));
-
-	return copy;
+	return pw_properties_new_dict(&properties->dict);
 }
 
-/** Merge properties into one
+/** Copy multiple keys from one property to another
  *
- * \param oldprops properties to merge into
- * \param newprops properties to merge
- * \return a newly allocated \ref pw_properties
- *
- * A new \ref pw_properties is allocated and the properties of
- * \a oldprops and \a newprops are copied into it in that order.
+ * \param src properties to copy from
+ * \param dst properties to copy to
+ * \param keys a NULL terminated list of keys to copy
+ * \return the number of keys changed in \a dest
  *
  * \memberof pw_properties
  */
 SPA_EXPORT
-struct pw_properties *pw_properties_merge(const struct pw_properties *oldprops,
-					  struct pw_properties *newprops)
+int pw_properties_update_keys(struct pw_properties *props,
+		const struct spa_dict *dict, const char *keys[])
 {
-	struct pw_properties *res = NULL;
+	int i, changed = 0;
+	const char *str;
 
-	if (oldprops == NULL) {
-		if (newprops == NULL)
-			res = NULL;
-		else
-			res = pw_properties_copy(newprops);
-	} else if (newprops == NULL) {
-		res = pw_properties_copy(oldprops);
-	} else {
-		const char *key;
-		void *state = NULL;
-
-		res = pw_properties_copy(oldprops);
-		if (res == NULL)
-			return NULL;
-
-		while ((key = pw_properties_iterate(newprops, &state))) {
-			pw_properties_set(res, key, pw_properties_get(newprops, key));
-		}
+	for (i = 0; keys[i]; i++) {
+		if ((str = spa_dict_lookup(dict, keys[i])) != NULL)
+			changed += pw_properties_set(props, keys[i], str);
 	}
-	return res;
+	return changed;
+}
+
+/** Clear a properties object
+ *
+ * \param properties properties to clear
+ *
+ * \memberof pw_properties
+ */
+SPA_EXPORT
+void pw_properties_clear(struct pw_properties *properties)
+{
+	struct properties *impl = SPA_CONTAINER_OF(properties, struct properties, this);
+	struct spa_dict_item *item;
+
+	pw_array_for_each(item, &impl->items)
+		clear_item(item);
+	pw_array_reset(&impl->items);
+	properties->dict.n_items = 0;
+}
+
+/** Update properties
+ *
+ * \param props properties to update
+ * \param dict new properties
+ * \return the number of changed properties
+ *
+ * The properties in \a props are updated with \a dict. Keys in \a dict
+ * with NULL values are removed from \a props.
+ *
+ * \memberof pw_properties
+ */
+SPA_EXPORT
+int pw_properties_update(struct pw_properties *props,
+		         const struct spa_dict *dict)
+{
+	uint32_t i;
+	int changed = 0;
+
+	for (i = 0; i < dict->n_items; i++)
+		changed += pw_properties_set(props, dict->items[i].key, dict->items[i].value);
+
+	return changed;
+}
+
+/** Add properties
+ *
+ * \param props properties to add
+ * \param dict new properties
+ * \return the number of added properties
+ *
+ * The properties from \a dict that are not yet in \a props are added.
+ *
+ * \memberof pw_properties
+ */
+SPA_EXPORT
+int pw_properties_add(struct pw_properties *props,
+		         const struct spa_dict *dict)
+{
+	uint32_t i;
+	int added = 0;
+
+	for (i = 0; i < dict->n_items; i++) {
+		if (pw_properties_get(props, dict->items[i].key) == NULL)
+			added += pw_properties_set(props, dict->items[i].key, dict->items[i].value);
+	}
+	return added;
+}
+
+/** Add keys
+ *
+ * \param props properties to add
+ * \param dict new properties
+ * \param keys a NULL terminated list of keys to add
+ * \return the number of added properties
+ *
+ * The properties with \a keys from \a dict that are not yet
+ * in \a props are added.
+ *
+ * \memberof pw_properties
+ */
+SPA_EXPORT
+int pw_properties_add_keys(struct pw_properties *props,
+		const struct spa_dict *dict, const char *keys[])
+{
+	uint32_t i;
+	int added = 0;
+	const char *str;
+
+	for (i = 0; keys[i]; i++) {
+		if ((str = spa_dict_lookup(dict, keys[i])) == NULL)
+			continue;
+		if (pw_properties_get(props, keys[i]) == NULL)
+			added += pw_properties_set(props, keys[i], str);
+	}
+	return added;
 }
 
 /** Free a properties object
@@ -245,11 +330,7 @@ SPA_EXPORT
 void pw_properties_free(struct pw_properties *properties)
 {
 	struct properties *impl = SPA_CONTAINER_OF(properties, struct properties, this);
-	struct spa_dict_item *item;
-
-	pw_array_for_each(item, &impl->items)
-		clear_item(item);
-
+	pw_properties_clear(properties);
 	pw_array_clear(&impl->items);
 	free(impl);
 }
@@ -257,7 +338,12 @@ void pw_properties_free(struct pw_properties *properties)
 static int do_replace(struct pw_properties *properties, const char *key, char *value, bool copy)
 {
 	struct properties *impl = SPA_CONTAINER_OF(properties, struct properties, this);
-	int index = find_index(properties, key);
+	int index;
+
+	if (key == NULL || key[0] == 0)
+		return 0;
+
+	index = find_index(properties, key);
 
 	if (index == -1) {
 		if (value == NULL)
@@ -274,13 +360,14 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		}
 
 		if (value == NULL) {
-			struct spa_dict_item *other = pw_array_get_unchecked(&impl->items,
+			struct spa_dict_item *last = pw_array_get_unchecked(&impl->items,
 						     pw_array_get_len(&impl->items, struct spa_dict_item) - 1,
 						     struct spa_dict_item);
 			clear_item(item);
-			item->key = other->key;
-			item->value = other->value;
+			item->key = last->key;
+			item->value = last->value;
 			impl->items.size -= sizeof(struct spa_dict_item);
+			properties->dict.n_items--;
 		} else {
 			free((char *) item->value);
 			item->value = copy ? strdup(value) : value;
@@ -311,12 +398,14 @@ int pw_properties_set(struct pw_properties *properties, const char *key, const c
 }
 
 SPA_EXPORT
-int
-pw_properties_setva(struct pw_properties *properties,
-		const char *key, const char *format, va_list args)
+int pw_properties_setva(struct pw_properties *properties,
+		   const char *key, const char *format, va_list args)
 {
-	char *value;
-	vasprintf(&value, format, args);
+	char *value = NULL;
+	if (format != NULL) {
+		if (vasprintf(&value, format, args) < 0)
+			return -errno;
+	}
 	return do_replace(properties, key, value, false);
 }
 
@@ -326,8 +415,9 @@ pw_properties_setva(struct pw_properties *properties,
  * \param key a key
  * \param format a value
  * \param ... extra arguments
- * \return 1 if the properties were changed. 0 if nothing was changed because
- *  the property already existed with the same value.
+ * \return 1 if the property was changed. 0 if nothing was changed because
+ *  the property already existed with the same value or because the key to remove
+ *  did not exist.
  *
  * Set the property in \a properties with \a key to the value in printf style \a format
  * Any previous value of \a key will be overwritten.

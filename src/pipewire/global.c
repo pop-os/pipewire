@@ -1,20 +1,25 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <errno.h>
@@ -22,31 +27,32 @@
 #include <time.h>
 #include <stdio.h>
 
-#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
 #include <pipewire/private.h>
-#include <pipewire/global.h>
+
+#include <spa/debug/types.h>
+
+#define NAME "global"
 
 /** \cond */
-struct global_impl {
+struct impl {
 	struct pw_global this;
+	bool registered;
 };
 
 /** \endcond */
-
 SPA_EXPORT
-uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_client *client)
+uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_client *client)
 {
-	uint32_t perms = PW_PERM_RWX;
+	if (client->permission_func == NULL)
+		return PW_PERM_RWX;
 
-	if (client->permission_func != NULL)
-		perms &= client->permission_func(global, client, client->permission_data);
-
-	return perms;
+	return client->permission_func(global, client, client->permission_data);
 }
 
 /** Create a new global
  *
- * \param core a core object
+ * \param context a context object
  * \param type the type of the global
  * \param version the version of the type
  * \param properties extra properties
@@ -58,108 +64,139 @@ uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_client *c
  */
 SPA_EXPORT
 struct pw_global *
-pw_global_new(struct pw_core *core,
-	      uint32_t type,
+pw_global_new(struct pw_context *context,
+	      const char *type,
 	      uint32_t version,
 	      struct pw_properties *properties,
+	      pw_global_bind_func_t func,
 	      void *object)
 {
-	struct global_impl *impl;
+	struct impl *impl;
 	struct pw_global *this;
+	int res;
 
-	impl = calloc(1, sizeof(struct global_impl));
-	if (impl == NULL)
+	if (properties == NULL)
+		properties = pw_properties_new(NULL, NULL);
+	if (properties == NULL)
 		return NULL;
+
+	impl = calloc(1, sizeof(struct impl));
+	if (impl == NULL) {
+		res = -errno;
+		goto error_cleanup;
+	}
 
 	this = &impl->this;
 
-	this->core = core;
+	this->context = context;
 	this->type = type;
 	this->version = version;
+	this->func = func;
 	this->object = object;
 	this->properties = properties;
-	this->id = SPA_ID_INVALID;
+	this->id = pw_map_insert_new(&context->globals, this);
+	if (this->id == SPA_ID_INVALID) {
+		res = -errno;
+		pw_log_error(NAME" %p: can't allocate new id: %m", this);
+		goto error_free;
+	}
 
+	spa_list_init(&this->resource_list);
 	spa_hook_list_init(&this->listener_list);
 
-	pw_log_debug("global %p: new %s", this,
-			spa_type_map_get_type(core->type.map, this->type));
+	pw_log_debug(NAME" %p: new %s %d", this, this->type, this->id);
 
 	return this;
+
+error_free:
+	free(impl);
+error_cleanup:
+	if (properties)
+		pw_properties_free(properties);
+	errno = -res;
+	return NULL;
 }
 
-/** register a global to the core registry
+/** register a global to the context registry
  *
  * \param global a global to add
- * \param owner an optional owner client of the global
- * \param parent an optional parent of the global
  * \return 0 on success < 0 errno value on failure
  *
  * \memberof pw_global
  */
 SPA_EXPORT
-int
-pw_global_register(struct pw_global *global,
-		   struct pw_client *owner,
-		   struct pw_global *parent)
+int pw_global_register(struct pw_global *global)
 {
+	struct impl *impl = SPA_CONTAINER_OF(global, struct impl, this);
 	struct pw_resource *registry;
-	struct pw_core *core = global->core;
+	struct pw_context *context = global->context;
 
-	global->owner = owner;
-	if (owner && parent == NULL)
-		parent = owner->global;
-	if (parent == NULL)
-		parent = core->global;
-	if (parent == NULL)
-		parent = global;
-	global->parent = parent;
+	if (impl->registered)
+		return -EEXIST;
 
-	global->id = pw_map_insert_new(&core->globals, global);
+	spa_list_append(&context->global_list, &global->link);
+	impl->registered = true;
 
-	spa_list_append(&core->global_list, &global->link);
-
-	pw_log_debug("global %p: add %u owner %p parent %p", global, global->id, owner, parent);
-	pw_core_events_global_added(core, global);
-
-	spa_list_for_each(registry, &core->registry_resource_list, link) {
+	spa_list_for_each(registry, &context->registry_resource_list, link) {
 		uint32_t permissions = pw_global_get_permissions(global, registry->client);
 		pw_log_debug("registry %p: global %d %08x", registry, global->id, permissions);
 		if (PW_PERM_IS_R(permissions))
 			pw_registry_resource_global(registry,
 						    global->id,
-						    global->parent->id,
 						    permissions,
 						    global->type,
 						    global->version,
-						    global->properties ?
-						        &global->properties->dict : NULL);
+						    &global->properties->dict);
 	}
+
+	pw_log_debug(NAME" %p: registered %u", global, global->id);
+	pw_context_emit_global_added(context, global);
+
+	return 0;
+}
+
+static int global_unregister(struct pw_global *global)
+{
+	struct impl *impl = SPA_CONTAINER_OF(global, struct impl, this);
+	struct pw_context *context = global->context;
+	struct pw_resource *resource;
+
+	if (!impl->registered)
+		return 0;
+
+	spa_list_for_each(resource, &context->registry_resource_list, link) {
+		uint32_t permissions = pw_global_get_permissions(global, resource->client);
+		pw_log_debug("registry %p: global %d %08x", resource, global->id, permissions);
+		if (PW_PERM_IS_R(permissions))
+			pw_registry_resource_global_remove(resource, global->id);
+	}
+
+	spa_list_remove(&global->link);
+	pw_map_remove(&context->globals, global->id);
+	impl->registered = false;
+
+	pw_log_debug(NAME" %p: unregistered %u", global, global->id);
+	pw_context_emit_global_removed(context, global);
+
 	return 0;
 }
 
 SPA_EXPORT
-struct pw_core *pw_global_get_core(struct pw_global *global)
+struct pw_context *pw_global_get_context(struct pw_global *global)
 {
-	return global->core;
+	return global->context;
 }
 
 SPA_EXPORT
-struct pw_client *pw_global_get_owner(struct pw_global *global)
-{
-	return global->owner;
-}
-
-SPA_EXPORT
-struct pw_global *pw_global_get_parent(struct pw_global *global)
-{
-	return global->parent;
-}
-
-SPA_EXPORT
-uint32_t pw_global_get_type(struct pw_global *global)
+const char * pw_global_get_type(struct pw_global *global)
 {
 	return global->type;
+}
+
+SPA_EXPORT
+bool pw_global_is_type(struct pw_global *global, const char *type)
+{
+	return strcmp(global->type, type) == 0;
 }
 
 SPA_EXPORT
@@ -187,6 +224,31 @@ uint32_t pw_global_get_id(struct pw_global *global)
 }
 
 SPA_EXPORT
+int pw_global_add_resource(struct pw_global *global, struct pw_resource *resource)
+{
+	resource->global = global;
+	pw_log_debug(NAME" %p: resource %p id:%d global:%d", global, resource,
+			resource->id, global->id);
+	spa_list_append(&global->resource_list, &resource->link);
+	pw_resource_set_bound_id(resource, global->id);
+	return 0;
+}
+
+SPA_EXPORT
+int pw_global_for_each_resource(struct pw_global *global,
+			   int (*callback) (void *data, struct pw_resource *resource),
+			   void *data)
+{
+	struct pw_resource *resource, *t;
+	int res;
+
+	spa_list_for_each_safe(resource, t, &global->resource_list, link)
+		if ((res = callback(data, resource)) != 0)
+			return res;
+	return 0;
+}
+
+SPA_EXPORT
 void pw_global_add_listener(struct pw_global *global,
 			    struct spa_hook *listener,
 			    const struct pw_global_events *events,
@@ -200,35 +262,99 @@ void pw_global_add_listener(struct pw_global *global,
  * \param global the global to bind to
  * \param client the client that binds
  * \param version the version
- * \param id the id
+ * \param id the id of the resource
  *
  * Let \a client bind to \a global with the given version and id.
  * After binding, the client and the global object will be able to
- * exchange messages.
+ * exchange messages on the proxy/resource with \a id.
  *
  * \memberof pw_global
  */
-SPA_EXPORT
-int
-pw_global_bind(struct pw_global *global, struct pw_client *client, uint32_t permissions,
-	       uint32_t version, uint32_t id)
+SPA_EXPORT int
+pw_global_bind(struct pw_global *global, struct pw_impl_client *client, uint32_t permissions,
+              uint32_t version, uint32_t id)
 {
 	int res;
 
 	if (global->version < version)
-		goto wrong_version;
+		goto error_version;
 
-	pw_global_events_bind(global, client, permissions, version, id);
+	if ((res = global->func(global->object, client, permissions, version, id)) < 0)
+		goto error_bind;
 
-	return 0;
-
-     wrong_version:
-	res = -EINVAL;
-	pw_core_resource_error(client->core_resource,
-			       client->core_resource->id,
-			     res, "id %d: interface version %d < %d",
-			     id, global->version, version);
 	return res;
+
+error_version:
+	res = -EPROTO;
+	if (client->core_resource)
+		pw_core_resource_errorf(client->core_resource, id, client->recv_seq,
+				res, "id %d: interface version %d < %d",
+				id, global->version, version);
+	goto error_exit;
+error_bind:
+	if (client->core_resource)
+		pw_core_resource_errorf(client->core_resource, id, client->recv_seq,
+			res, "can't bind global %u/%u: %d (%s)", id, version,
+			res, spa_strerror(res));
+	goto error_exit;
+
+error_exit:
+	pw_log_error(NAME" %p: can't bind global %u/%u: %d (%s)", global, id,
+			version, res, spa_strerror(res));
+	pw_map_insert_at(&client->objects, id, NULL);
+	if (client->core_resource)
+		pw_core_resource_remove_id(client->core_resource, id);
+	return res;
+}
+
+SPA_EXPORT
+int pw_global_update_permissions(struct pw_global *global, struct pw_impl_client *client,
+		uint32_t old_permissions, uint32_t new_permissions)
+{
+	struct pw_context *context = global->context;
+	struct pw_resource *resource, *t;
+	bool do_hide, do_show;
+
+	do_hide = PW_PERM_IS_R(old_permissions) && !PW_PERM_IS_R(new_permissions);
+	do_show = !PW_PERM_IS_R(old_permissions) && PW_PERM_IS_R(new_permissions);
+
+	pw_log_debug(NAME" %p: client %p permissions changed %d %08x -> %08x",
+			global, client, global->id, old_permissions, new_permissions);
+
+	pw_global_emit_permissions_changed(global, client, old_permissions, new_permissions);
+
+	spa_list_for_each(resource, &context->registry_resource_list, link) {
+		if (resource->client != client)
+			continue;
+
+		if (do_hide) {
+			pw_log_debug("client %p: resource %p hide global %d",
+					client, resource, global->id);
+			pw_registry_resource_global_remove(resource, global->id);
+		}
+		else if (do_show) {
+			pw_log_debug("client %p: resource %p show global %d",
+					client, resource, global->id);
+			pw_registry_resource_global(resource,
+						    global->id,
+						    new_permissions,
+						    global->type,
+						    global->version,
+						    &global->properties->dict);
+		}
+	}
+
+	spa_list_for_each_safe(resource, t, &global->resource_list, link) {
+		if (resource->client != client)
+			continue;
+
+		/* don't ever destroy the core resource */
+		if (!PW_PERM_IS_R(new_permissions) && global->id != PW_ID_CORE)
+			pw_resource_destroy(resource);
+		else
+			resource->permissions = new_permissions;
+	}
+	return 0;
 }
 
 /** Destroy a global
@@ -240,31 +366,20 @@ pw_global_bind(struct pw_global *global, struct pw_client *client, uint32_t perm
 SPA_EXPORT
 void pw_global_destroy(struct pw_global *global)
 {
-	struct pw_core *core = global->core;
-	struct pw_resource *registry;
+	struct pw_resource *resource;
 
-	pw_log_debug("global %p: destroy %u", global, global->id);
-	pw_global_events_destroy(global);
+	pw_log_debug(NAME" %p: destroy %u", global, global->id);
+	pw_global_emit_destroy(global);
 
-	if (global->id != SPA_ID_INVALID) {
-		spa_list_for_each(registry, &core->registry_resource_list, link) {
-			uint32_t permissions = pw_global_get_permissions(global, registry->client);
-			pw_log_debug("registry %p: global %d %08x", registry, global->id, permissions);
-			if (PW_PERM_IS_R(permissions))
-				pw_registry_resource_global_remove(registry, global->id);
-		}
+	spa_list_consume(resource, &global->resource_list, link)
+		pw_resource_destroy(resource);
 
-		pw_map_remove(&core->globals, global->id);
+	global_unregister(global);
 
-		spa_list_remove(&global->link);
-		pw_core_events_global_removed(core, global);
-	}
+	pw_log_debug(NAME" %p: free", global);
+	pw_global_emit_free(global);
 
-	pw_log_debug("global %p: free", global);
-	pw_global_events_free(global);
-
-	if (global->properties)
-		pw_properties_free(global->properties);
+	pw_properties_free(global->properties);
 
 	free(global);
 }

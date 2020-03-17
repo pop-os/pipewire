@@ -1,28 +1,35 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_ARRAY_H__
-#define __PIPEWIRE_ARRAY_H__
+#ifndef PIPEWIRE_ARRAY_H
+#define PIPEWIRE_ARRAY_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#include <errno.h>
 
 #include <spa/utils/defs.h>
 
@@ -53,10 +60,21 @@ struct pw_array {
 /** Check if an item with index \a idx and type \a t exist in array \memberof pw_array */
 #define pw_array_check_index(a,idx,t)		pw_array_check_index_s(a,idx,sizeof(t))
 
-#define pw_array_for_each(pos, array)							\
-	for (pos = (__typeof__(pos)) (array)->data;							\
-	     (const uint8_t *) pos < ((const uint8_t *) (array)->data + (array)->size);	\
+#define pw_array_first(a)	((a)->data)
+#define pw_array_end(a)		SPA_MEMBER((a)->data, (a)->size, void)
+#define pw_array_check(a,p)	(SPA_MEMBER(p,sizeof(*p),void) <= pw_array_end(a))
+
+#define pw_array_for_each(pos, array)					\
+	for (pos = (__typeof__(pos)) pw_array_first(array);		\
+	     pw_array_check(array, pos);				\
 	     (pos)++)
+
+#define pw_array_remove(a,p)						\
+({									\
+	(a)->size -= sizeof(*(p));					\
+	memmove(p, SPA_MEMBER((p), sizeof(*(p)), void),			\
+                SPA_PTRDIFF(pw_array_end(a),(p)));			\
+})
 
 /** Initialize the array with given extend \memberof pw_array */
 static inline void pw_array_init(struct pw_array *arr, size_t extend)
@@ -72,8 +90,14 @@ static inline void pw_array_clear(struct pw_array *arr)
 	free(arr->data);
 }
 
+/** Reset the array */
+static inline void pw_array_reset(struct pw_array *arr)
+{
+	arr->size = 0;
+}
+
 /** Make sure \a size bytes can be added to the array \memberof pw_array */
-static inline bool pw_array_ensure_size(struct pw_array *arr, size_t size)
+static inline int pw_array_ensure_size(struct pw_array *arr, size_t size)
 {
 	size_t alloc, need;
 
@@ -86,11 +110,11 @@ static inline bool pw_array_ensure_size(struct pw_array *arr, size_t size)
 		while (alloc < need)
 			alloc *= 2;
 		if (SPA_UNLIKELY((data = realloc(arr->data, alloc)) == NULL))
-			return false;
+			return -errno;
 		arr->data = data;
 		arr->alloc = alloc;
 	}
-	return true;
+	return 0;
 }
 
 /** Add \a ref size bytes to \a arr. A pointer to memory that can
@@ -99,7 +123,7 @@ static inline void *pw_array_add(struct pw_array *arr, size_t size)
 {
 	void *p;
 
-	if (!pw_array_ensure_size(arr, size))
+	if (pw_array_ensure_size(arr, size) < 0)
 		return NULL;
 
 	p = SPA_MEMBER(arr->data, arr->size, void);
@@ -114,8 +138,10 @@ static inline void *pw_array_add_fixed(struct pw_array *arr, size_t size)
 {
 	void *p;
 
-	if (SPA_UNLIKELY(arr->alloc < arr->size + size))
+	if (SPA_UNLIKELY(arr->alloc < arr->size + size)) {
+		errno = ENOSPC;
 		return NULL;
+	}
 
 	p = SPA_MEMBER(arr->data, arr->size, void);
 	arr->size += size;
@@ -131,4 +157,4 @@ static inline void *pw_array_add_fixed(struct pw_array *arr, size_t size)
 }  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_ARRAY_H__ */
+#endif /* PIPEWIRE_ARRAY_H */

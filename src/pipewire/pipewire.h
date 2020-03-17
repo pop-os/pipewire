@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_H__
-#define __PIPEWIRE_H__
+#ifndef PIPEWIRE_H
+#define PIPEWIRE_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,24 +31,31 @@ extern "C" {
 
 #include <spa/support/plugin.h>
 
+#include <pipewire/array.h>
 #include <pipewire/client.h>
+#include <pipewire/context.h>
+#include <pipewire/device.h>
+#include <pipewire/buffers.h>
 #include <pipewire/core.h>
-#include <pipewire/interfaces.h>
-#include <pipewire/introspect.h>
-#include <pipewire/link.h>
+#include <pipewire/factory.h>
+#include <pipewire/keys.h>
 #include <pipewire/log.h>
 #include <pipewire/loop.h>
+#include <pipewire/link.h>
 #include <pipewire/main-loop.h>
+#include <pipewire/map.h>
+#include <pipewire/mem.h>
 #include <pipewire/module.h>
-#include <pipewire/factory.h>
 #include <pipewire/node.h>
-#include <pipewire/port.h>
 #include <pipewire/properties.h>
 #include <pipewire/proxy.h>
-#include <pipewire/remote.h>
-#include <pipewire/resource.h>
+#include <pipewire/permission.h>
+#include <pipewire/protocol.h>
+#include <pipewire/port.h>
 #include <pipewire/stream.h>
+#include <pipewire/filter.h>
 #include <pipewire/thread-loop.h>
+#include <pipewire/data-loop.h>
 #include <pipewire/type.h>
 #include <pipewire/utils.h>
 #include <pipewire/version.h>
@@ -55,15 +67,16 @@ extern "C" {
  * This document describes the API for the PipeWire multimedia framework.
  * The API consists of two parts:
  *
- * \li The core API and tools to build new modules (See
- * \subpage page_core_api)
- * \li The remote API (See \subpage page_remote_api)
+ * \li The core API to access a PipeWire instance.
+ * (See \subpage page_core_api)
+ * \li The implementation API and tools to build new objects and
+ * modules (See \subpage page_implementation_api)
  *
  * \section sec_errors Error reporting
  *
- * Functions return either NULL or a negative int error code when an
- * error occurs. Error codes are used from the SPA plugin library on
- * which PipeWire is built.
+ * Functions return either NULL with errno set or a negative int error
+ * code when an error occurs. Error codes are used from the SPA plugin
+ * library on which PipeWire is built.
  *
  * Some functions might return asynchronously. The error code for such
  * functions is positive and SPA_RESULT_IS_ASYNC() will return true.
@@ -118,32 +131,24 @@ pw_get_user_name(void);
 const char *
 pw_get_host_name(void);
 
-char *
+const char *
 pw_get_client_name(void);
-
-void
-pw_fill_remote_properties(struct pw_core *core, struct pw_properties *properties);
-
-void
-pw_fill_stream_properties(struct pw_core *core, struct pw_properties *properties);
 
 enum pw_direction
 pw_direction_reverse(enum pw_direction direction);
 
-void *
-pw_get_support_interface(const char *type);
+uint32_t pw_get_support(struct spa_support *support, uint32_t max_support);
 
-void *pw_get_spa_dbus(struct pw_loop *loop);
-int pw_release_spa_dbus(void *dbus);
+struct spa_handle *pw_load_spa_handle(const char *lib,
+		const char *factory_name,
+		const struct spa_dict *info,
+		uint32_t n_support,
+		const struct spa_support support[]);
 
-const struct spa_handle_factory *
-pw_get_support_factory(const char *factory_name);
-
-const struct spa_support *
-pw_get_support(uint32_t *n_support);
+int pw_unload_spa_handle(struct spa_handle *handle);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __PIPEWIRE_H__ */
+#endif /* PIPEWIRE_H */

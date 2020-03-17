@@ -1,24 +1,29 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_PARAM_FORMAT_H__
-#define __SPA_PARAM_FORMAT_H__
+#ifndef SPA_PARAM_FORMAT_H
+#define SPA_PARAM_FORMAT_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,63 +31,117 @@ extern "C" {
 
 #include <spa/param/param.h>
 
-#define SPA_TYPE__Format		SPA_TYPE_PARAM_BASE "Format"
-#define SPA_TYPE_FORMAT_BASE		SPA_TYPE__Format ":"
+/** media type for SPA_TYPE_OBJECT_Format */
+enum spa_media_type {
+	SPA_MEDIA_TYPE_unknown,
+	SPA_MEDIA_TYPE_audio,
+	SPA_MEDIA_TYPE_video,
+	SPA_MEDIA_TYPE_image,
+	SPA_MEDIA_TYPE_binary,
+	SPA_MEDIA_TYPE_stream,
+	SPA_MEDIA_TYPE_application,
+};
 
-#define SPA_TYPE__MediaType		SPA_TYPE_ENUM_BASE "MediaType"
-#define SPA_TYPE_MEDIA_TYPE_BASE	SPA_TYPE__MediaType ":"
+/** media subtype for SPA_TYPE_OBJECT_Format */
+enum spa_media_subtype {
+	SPA_MEDIA_SUBTYPE_unknown,
+	SPA_MEDIA_SUBTYPE_raw,
+	SPA_MEDIA_SUBTYPE_dsp,
 
-#define SPA_TYPE_MEDIA_TYPE__audio	SPA_TYPE_MEDIA_TYPE_BASE "audio"
-#define SPA_TYPE_MEDIA_TYPE__video	SPA_TYPE_MEDIA_TYPE_BASE "video"
-#define SPA_TYPE_MEDIA_TYPE__image	SPA_TYPE_MEDIA_TYPE_BASE "image"
-#define SPA_TYPE_MEDIA_TYPE__binary	SPA_TYPE_MEDIA_TYPE_BASE "binary"
-#define SPA_TYPE_MEDIA_TYPE__stream	SPA_TYPE_MEDIA_TYPE_BASE "stream"
+	SPA_MEDIA_SUBTYPE_START_Audio	= 0x10000,
+	SPA_MEDIA_SUBTYPE_mp3,
+	SPA_MEDIA_SUBTYPE_aac,
+	SPA_MEDIA_SUBTYPE_vorbis,
+	SPA_MEDIA_SUBTYPE_wma,
+	SPA_MEDIA_SUBTYPE_ra,
+	SPA_MEDIA_SUBTYPE_sbc,
+	SPA_MEDIA_SUBTYPE_adpcm,
+	SPA_MEDIA_SUBTYPE_g723,
+	SPA_MEDIA_SUBTYPE_g726,
+	SPA_MEDIA_SUBTYPE_g729,
+	SPA_MEDIA_SUBTYPE_amr,
+	SPA_MEDIA_SUBTYPE_gsm,
 
-#define SPA_TYPE__MediaSubtype		SPA_TYPE_ENUM_BASE "MediaSubtype"
-#define SPA_TYPE_MEDIA_SUBTYPE_BASE	SPA_TYPE__MediaSubtype ":"
+	SPA_MEDIA_SUBTYPE_START_Video	= 0x20000,
+	SPA_MEDIA_SUBTYPE_h264,
+	SPA_MEDIA_SUBTYPE_mjpg,
+	SPA_MEDIA_SUBTYPE_dv,
+	SPA_MEDIA_SUBTYPE_mpegts,
+	SPA_MEDIA_SUBTYPE_h263,
+	SPA_MEDIA_SUBTYPE_mpeg1,
+	SPA_MEDIA_SUBTYPE_mpeg2,
+	SPA_MEDIA_SUBTYPE_mpeg4,
+	SPA_MEDIA_SUBTYPE_xvid,
+	SPA_MEDIA_SUBTYPE_vc1,
+	SPA_MEDIA_SUBTYPE_vp8,
+	SPA_MEDIA_SUBTYPE_vp9,
+	SPA_MEDIA_SUBTYPE_bayer,
 
-/* generic subtypes */
-#define SPA_TYPE_MEDIA_SUBTYPE__raw		SPA_TYPE_MEDIA_SUBTYPE_BASE "raw"
+	SPA_MEDIA_SUBTYPE_START_Image	= 0x30000,
+	SPA_MEDIA_SUBTYPE_jpeg,
 
-/* video subtypes */
-#define SPA_TYPE_MEDIA_SUBTYPE__Video		SPA_TYPE_MEDIA_SUBTYPE_BASE "Video"
-#define SPA_TYPE_MEDIA_SUBTYPE_VIDEO_BASE	SPA_TYPE_MEDIA_SUBTYPE__Video ":"
+	SPA_MEDIA_SUBTYPE_START_Binary	= 0x40000,
 
-#define SPA_TYPE_MEDIA_SUBTYPE__h264		SPA_TYPE_MEDIA_SUBTYPE_BASE "h264"
-#define SPA_TYPE_MEDIA_SUBTYPE__mjpg		SPA_TYPE_MEDIA_SUBTYPE_BASE "mjpg"
-#define SPA_TYPE_MEDIA_SUBTYPE__dv		SPA_TYPE_MEDIA_SUBTYPE_BASE "dv"
-#define SPA_TYPE_MEDIA_SUBTYPE__mpegts		SPA_TYPE_MEDIA_SUBTYPE_BASE "mpegts"
-#define SPA_TYPE_MEDIA_SUBTYPE__h263		SPA_TYPE_MEDIA_SUBTYPE_BASE "h263"
-#define SPA_TYPE_MEDIA_SUBTYPE__mpeg1		SPA_TYPE_MEDIA_SUBTYPE_BASE "mpeg1"
-#define SPA_TYPE_MEDIA_SUBTYPE__mpeg2		SPA_TYPE_MEDIA_SUBTYPE_BASE "mpeg2"
-#define SPA_TYPE_MEDIA_SUBTYPE__mpeg4		SPA_TYPE_MEDIA_SUBTYPE_BASE "mpeg4"
-#define SPA_TYPE_MEDIA_SUBTYPE__xvid		SPA_TYPE_MEDIA_SUBTYPE_BASE "xvid"
-#define SPA_TYPE_MEDIA_SUBTYPE__vc1		SPA_TYPE_MEDIA_SUBTYPE_BASE "vc1"
-#define SPA_TYPE_MEDIA_SUBTYPE__vp8		SPA_TYPE_MEDIA_SUBTYPE_BASE "vp8"
-#define SPA_TYPE_MEDIA_SUBTYPE__vp9		SPA_TYPE_MEDIA_SUBTYPE_BASE "vp9"
-#define SPA_TYPE_MEDIA_SUBTYPE__jpeg		SPA_TYPE_MEDIA_SUBTYPE_BASE "jpeg"
-#define SPA_TYPE_MEDIA_SUBTYPE__bayer		SPA_TYPE_MEDIA_SUBTYPE_BASE "bayer"
+	SPA_MEDIA_SUBTYPE_START_Stream	= 0x50000,
+	SPA_MEDIA_SUBTYPE_midi,
 
-/* audio subtypes */
-#define SPA_TYPE_MEDIA_SUBTYPE__Audio		SPA_TYPE_MEDIA_SUBTYPE_BASE "Audio"
-#define SPA_TYPE_MEDIA_SUBTYPE_AUDIO_BASE	SPA_TYPE_MEDIA_SUBTYPE__Audio ":"
+	SPA_MEDIA_SUBTYPE_START_Application	= 0x60000,
+	SPA_MEDIA_SUBTYPE_control,		/**< control stream, data contains
+						  *  spa_pod_sequence with control info. */
+};
 
-#define SPA_TYPE_MEDIA_SUBTYPE__mp3		SPA_TYPE_MEDIA_SUBTYPE_BASE "mp3"
-#define SPA_TYPE_MEDIA_SUBTYPE__aac		SPA_TYPE_MEDIA_SUBTYPE_BASE "aac"
-#define SPA_TYPE_MEDIA_SUBTYPE__vorbis		SPA_TYPE_MEDIA_SUBTYPE_BASE "vorbis"
-#define SPA_TYPE_MEDIA_SUBTYPE__wma		SPA_TYPE_MEDIA_SUBTYPE_BASE "wma"
-#define SPA_TYPE_MEDIA_SUBTYPE__ra		SPA_TYPE_MEDIA_SUBTYPE_BASE "ra"
-#define SPA_TYPE_MEDIA_SUBTYPE__sbc		SPA_TYPE_MEDIA_SUBTYPE_BASE "sbc"
-#define SPA_TYPE_MEDIA_SUBTYPE__adpcm		SPA_TYPE_MEDIA_SUBTYPE_BASE "adpcm"
-#define SPA_TYPE_MEDIA_SUBTYPE__g723		SPA_TYPE_MEDIA_SUBTYPE_BASE "g723"
-#define SPA_TYPE_MEDIA_SUBTYPE__g726		SPA_TYPE_MEDIA_SUBTYPE_BASE "g726"
-#define SPA_TYPE_MEDIA_SUBTYPE__g729		SPA_TYPE_MEDIA_SUBTYPE_BASE "g729"
-#define SPA_TYPE_MEDIA_SUBTYPE__amr		SPA_TYPE_MEDIA_SUBTYPE_BASE "amr"
-#define SPA_TYPE_MEDIA_SUBTYPE__gsm		SPA_TYPE_MEDIA_SUBTYPE_BASE "gsm"
-#define SPA_TYPE_MEDIA_SUBTYPE__midi		SPA_TYPE_MEDIA_SUBTYPE_BASE "midi"
+/** properties for audio SPA_TYPE_OBJECT_Format */
+enum spa_format {
+	SPA_FORMAT_START,		/**< id of the object, one of enum spa_param_type */
+
+	SPA_FORMAT_mediaType,		/**< media type (Id enum spa_media_type) */
+	SPA_FORMAT_mediaSubtype,	/**< media subtype (Id enum spa_media_subtype) */
+
+	/* Audio format keys */
+	SPA_FORMAT_START_Audio = 0x10000,
+	SPA_FORMAT_AUDIO_format,	/**< audio format, (Id enum spa_audio_format) */
+	SPA_FORMAT_AUDIO_flags,		/**< optional flags (Int) */
+	SPA_FORMAT_AUDIO_rate,		/**< sample rate (Int) */
+	SPA_FORMAT_AUDIO_channels,	/**< number of audio channels (Int) */
+	SPA_FORMAT_AUDIO_position,	/**< channel positions (Id enum spa_audio_position) */
+
+	/* Video Format keys */
+	SPA_FORMAT_START_Video = 0x20000,
+	SPA_FORMAT_VIDEO_format,		/**< video format (Id enum spa_video_format) */
+	SPA_FORMAT_VIDEO_modifier,		/**< format modifier (Long) */
+	SPA_FORMAT_VIDEO_size,			/**< size (Rectangle) */
+	SPA_FORMAT_VIDEO_framerate,		/**< frame rate (Fraction) */
+	SPA_FORMAT_VIDEO_maxFramerate,		/**< miximum frame rate (Fraction) */
+	SPA_FORMAT_VIDEO_views,			/**< number of views (Int) */
+	SPA_FORMAT_VIDEO_interlaceMode,		/**< (Id enum spa_video_interlace_mode) */
+	SPA_FORMAT_VIDEO_pixelAspectRatio,	/**< (Rectangle) */
+	SPA_FORMAT_VIDEO_multiviewMode,		/**< (Id enum spa_video_multiview_mode) */
+	SPA_FORMAT_VIDEO_multiviewFlags,	/**< (Id enum spa_video_multiview_flags) */
+	SPA_FORMAT_VIDEO_chromaSite,		/**< /Id enum spa_video_chroma_site) */
+	SPA_FORMAT_VIDEO_colorRange,		/**< /Id enum spa_video_color_range) */
+	SPA_FORMAT_VIDEO_colorMatrix,		/**< /Id enum spa_video_color_matrix) */
+	SPA_FORMAT_VIDEO_transferFunction,	/**< /Id enum spa_video_transfer_function) */
+	SPA_FORMAT_VIDEO_colorPrimaries,	/**< /Id enum spa_video_color_primaries) */
+	SPA_FORMAT_VIDEO_profile,		/**< (Int) */
+	SPA_FORMAT_VIDEO_level,			/**< (Int) */
+	SPA_FORMAT_VIDEO_H264_streamFormat,	/**< (Id enum spa_h264_stream_format) */
+	SPA_FORMAT_VIDEO_H264_alignment,	/**< (Id enum spa_h264_alignment) */
+
+	/* Image Format keys */
+	SPA_FORMAT_START_Image = 0x30000,
+	/* Binary Format keys */
+	SPA_FORMAT_START_Binary = 0x40000,
+	/* Stream Format keys */
+	SPA_FORMAT_START_Stream = 0x50000,
+	/* Application Format keys */
+	SPA_FORMAT_START_Application = 0x60000,
+};
+
+#define SPA_KEY_FORMAT_DSP		"format.dsp"		/**< a predefined DSP format,
+								  *  Ex. "32 bit float mono audio" */
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_PARAM_FORMAT_H__ */
+#endif /* SPA_PARAM_FORMAT_H */

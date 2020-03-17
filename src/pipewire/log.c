@@ -1,29 +1,39 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include <spa/support/log-impl.h>
 
 #include <pipewire/log.h>
 
+SPA_LOG_IMPL(default_log);
+
 #define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_ERROR
 
-SPA_EXPORT enum spa_log_level pw_log_level = DEFAULT_LOG_LEVEL;
+SPA_EXPORT
+enum spa_log_level pw_log_level = DEFAULT_LOG_LEVEL;
 
-static struct spa_log *global_log = NULL;
+static struct spa_log *global_log = &default_log.log;
 
 /** Set the global log interface
  * \param log the global log to set
@@ -77,10 +87,12 @@ pw_log_log(enum spa_log_level level,
 	   const char *func,
 	   const char *fmt, ...)
 {
-	if (SPA_UNLIKELY(pw_log_level_enabled(level) && global_log)) {
+	if (SPA_UNLIKELY(pw_log_level_enabled(level))) {
 		va_list args;
 		va_start(args, fmt);
-		global_log->logv(global_log, level, file, line, func, fmt, args);
+		spa_interface_call(&global_log->iface,
+			struct spa_log_methods, logv, 0, level, file, line,
+			func, fmt, args);
 		va_end(args);
 	}
 }
@@ -104,8 +116,10 @@ pw_log_logv(enum spa_log_level level,
 	    const char *fmt,
 	    va_list args)
 {
-	if (SPA_UNLIKELY(pw_log_level_enabled(level) && global_log)) {
-		global_log->logv(global_log, level, file, line, func, fmt, args);
+	if (SPA_UNLIKELY(pw_log_level_enabled(level))) {
+		spa_interface_call(&global_log->iface,
+			struct spa_log_methods, logv, 0, level, file, line,
+			func, fmt, args);
 	}
 }
 

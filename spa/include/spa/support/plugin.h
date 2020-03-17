@@ -1,24 +1,29 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_PLUGIN_H__
-#define __SPA_PLUGIN_H__
+#ifndef SPA_PLUGIN_H
+#define SPA_PLUGIN_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,27 +32,25 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/utils/dict.h>
 
-#define SPA_TYPE__Handle		SPA_TYPE_INTERFACE_BASE "Handle"
-#define SPA_TYPE__HandleFactory		SPA_TYPE_INTERFACE_BASE "HandleFactory"
-
 struct spa_handle {
 	/** Version of this struct */
 #define SPA_VERSION_HANDLE	0
 	uint32_t version;
 
-	/* user_data that can be set by the application */
-	void *user_data;
 	/**
-	 * Get the interface provided by \a handle with \a interface_id.
+	 * Get the interface provided by \a handle with \a type.
+	 *
+	 * \a interface is always a struct spa_interface but depending on
+	 * \a type, the struct might contain other information.
 	 *
 	 * \param handle a spa_handle
-	 * \param interface_id the interface id
+	 * \param type the interface type
 	 * \param interface result to hold the interface.
 	 * \return 0 on success
 	 *         -ENOTSUP when there are no interfaces
 	 *         -EINVAL when handle or info is NULL
 	 */
-	int (*get_interface) (struct spa_handle *handle, uint32_t interface_id, void **interface);
+	int (*get_interface) (struct spa_handle *handle, const char *type, void **interface);
 	/**
 	 * Clean up the memory of \a handle. After this, \a handle should not be used
 	 * anymore.
@@ -99,7 +102,17 @@ struct spa_handle_factory {
 #define SPA_VERSION_HANDLE_FACTORY	0
 	uint32_t version;
 	/**
-	 * The name
+	 * The name of the factory contains a logical name that describes
+	 * the function of the handle. Other plugins might contain an alternative
+	 * implementation with the same name.
+	 *
+	 * See utils/names.h for the list of standard names.
+	 *
+	 * Examples include:
+	 *
+	 *  api.alsa.pcm.sink: an object to write PCM samples to an alsa PLAYBACK
+	 *			device
+	 *  api.v4l2.source: an object to read from a v4l2 source.
 	 */
 	const char *name;
 	/**
@@ -107,9 +120,14 @@ struct spa_handle_factory {
 	 */
 	const struct spa_dict *info;
 	/**
-	 * The size of handles from this factory
+	 * Get the size of handles from this factory.
+	 *
+	 * \param factory a spa_handle_factory
+	 * \param params extra parameters that determine the size of the
+	 * handle.
 	 */
-	const size_t size;
+	size_t (*get_size) (const struct spa_handle_factory *factory,
+			    const struct spa_dict *params);
 
 	/**
 	 * Initialize an instance of this factory. The caller should allocate
@@ -121,7 +139,7 @@ struct spa_handle_factory {
 	 * \param factory a spa_handle_factory
 	 * \param handle a pointer to memory
 	 * \param info extra handle specific information, usually obtained
-	 *        from a spa_monitor. This can be used to configure the handle.
+	 *        from a spa_device. This can be used to configure the handle.
 	 * \param support support items
 	 * \param n_support number of elements in \a support
 	 * \return 0 on success
@@ -150,6 +168,7 @@ struct spa_handle_factory {
 				    uint32_t *index);
 };
 
+#define spa_handle_factory_get_size(h,...)		(h)->get_size((h),__VA_ARGS__)
 #define spa_handle_factory_init(h,...)			(h)->init((h),__VA_ARGS__)
 #define spa_handle_factory_enum_interface_info(h,...)	(h)->enum_interface_info((h),__VA_ARGS__)
 
@@ -178,8 +197,19 @@ typedef int (*spa_handle_factory_enum_func_t) (const struct spa_handle_factory *
  */
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index);
 
+
+
+#define SPA_KEY_FACTORY_NAME		"factory.name"		/**< the name of a factory */
+#define SPA_KEY_FACTORY_AUTHOR		"factory.author"	/**< a comma separated list of factory authors */
+#define SPA_KEY_FACTORY_DESCRIPTION	"factory.description"	/**< description of a factory */
+#define SPA_KEY_FACTORY_USAGE		"factory.usage"		/**< usage of a factory */
+
+#define SPA_KEY_LIBRARY_NAME		"library.name"		/**< the name of a library. This is usually
+								  *  the filename of the plugin without the
+								  *  path or the plugin extension. */
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_PLUGIN_H__ */
+#endif /* SPA_PLUGIN_H */
