@@ -5,7 +5,7 @@ pipewire (0.3.1-1) UNRELEASED; urgency=medium
     - Bump the soname of the libraries
   * Drop debian/pipewire.links, with debhelper 12, dh_installsystemduser is
     called during the build process and it's taking care of enabling the
-    systemd user service and socket
+    systemd user service and socket (Closes: #953216)
 
  -- Laurent Bigonville <bigon@debian.org>  Tue, 17 Mar 2020 17:14:19 +0100
 
