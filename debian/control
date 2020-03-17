@@ -163,3 +163,35 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
   - Generating graphs for audio and video processing.
  .
  This package contains the bluetooth plugins.
+
+Package: libspa-vulkan
+Architecture: linux-any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+Description: libraries for the PipeWire multimedia server - vulkan plugins
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains the vulkan plugins.
+
+Package: libspa-jack
+Architecture: linux-any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+Description: libraries for the PipeWire multimedia server - jack plugins
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains the jack plugins.
