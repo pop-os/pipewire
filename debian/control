@@ -27,7 +27,7 @@ Build-Depends: debhelper-compat (= 12),
                xmltoman,
 Build-Depends-Indep: doxygen <!nodoc>,
                      graphviz <!nodoc>,
-Standards-Version: 4.3.0
+Standards-Version: 4.5.0
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
