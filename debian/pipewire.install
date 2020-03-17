@@ -11,3 +11,6 @@ usr/lib/*/spa-0.2/test
 usr/lib/*/spa-0.2/v4l2
 usr/lib/*/spa-0.2/videotestsrc
 usr/lib/*/spa-0.2/volume
+usr/lib/*/spa-0.2/control
+usr/lib/*/spa-0.2/audioconvert
+usr/lib/*/spa-0.2/videoconvert
