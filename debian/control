@@ -32,7 +32,7 @@ Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
 
-Package: libpipewire-0.2-1
+Package: libpipewire-0.3-0
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
@@ -47,13 +47,13 @@ Description: libraries for the PipeWire multimedia server
   - Accessing sources of video for consumption.
   - Generating graphs for audio and video processing.
 
-Package: libpipewire-0.2-dev
+Package: libpipewire-0.3-dev
 Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
-         libpipewire-0.2-1 (= ${binary:Version}),
-         libspa-lib-0.1-dev (= ${binary:Version}),
+         libpipewire-0.3-0 (= ${binary:Version}),
+         libspa-lib-0.2-dev (= ${binary:Version}),
 Suggests: pipewire-0.2-doc,
 Description: libraries for the PipeWire multimedia server - development
  PipeWire is a server and user space API to deal with multimedia
@@ -66,7 +66,7 @@ Description: libraries for the PipeWire multimedia server - development
  .
  This package contains the development files.
 
-Package: libspa-lib-0.1-dev
+Package: libspa-lib-0.2-dev
 Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
