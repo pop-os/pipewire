@@ -1,8 +1,12 @@
 pipewire (0.2.7-2) UNRELEASED; urgency=medium
 
+  [ Laurent Bigonville ]
   * Drop debian/pipewire.links, with debhelper 12, dh_installsystemduser is
     called during the build process and it's taking care of enabling the
     systemd user service and socket
+
+  [ Debian Janitor ]
+  * Set upstream metadata fields: Repository, Repository-Browse.
 
  -- Laurent Bigonville <bigon@debian.org>  Sat, 02 Nov 2019 14:30:14 +0100
 
