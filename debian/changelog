@@ -1,5 +1,6 @@
 pipewire (0.3.1-1) UNRELEASED; urgency=medium
 
+  [ Laurent Bigonville ]
   * New upstream release (Closes: #954022)
     - debian/control: Adjust the build-dependencies
     - Bump the soname of the libraries
@@ -15,6 +16,10 @@ pipewire (0.3.1-1) UNRELEASED; urgency=medium
   * debian/rules: Tell dh_shlibdeps to also search for the private libraries
   * debian/pipewire.install: Install the control audioconvert and videoconvert
     module in the main package, they are not pulling new dependencies
+
+  [ Debian Janitor ]
+  * Set upstream metadata fields: Repository, Repository-Browse.
+  * Update standards version to 4.4.1, no changes needed.
 
  -- Laurent Bigonville <bigon@debian.org>  Wed, 20 May 2020 14:38:54 +0200
 

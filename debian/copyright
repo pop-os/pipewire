@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: pipewire
-Source: https://github.com/PipeWire/pipewire
+Source: https://gitlab.freedesktop.org/pipewire/pipewire
 
 Files: *
 Copyright: 2015-2017 Wim Taymans
