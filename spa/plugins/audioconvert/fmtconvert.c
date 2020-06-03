@@ -605,7 +605,7 @@ static int port_set_format(void *object,
 			return -EINVAL;
 
 		if (other->have_format) {
-			spa_log_info(this->log, NAME "%p: channels:%d<>%d rate:%d<>%d format:%d<>%d", this,
+			spa_log_debug(this->log, NAME "%p: channels:%d<>%d rate:%d<>%d format:%d<>%d", this,
 				info.info.raw.channels, other->format.info.raw.channels,
 				info.info.raw.rate, other->format.info.raw.rate,
 				info.info.raw.format, other->format.info.raw.format);
@@ -844,7 +844,8 @@ static int impl_node_process(void *object)
 		outio->buffer_id = SPA_ID_INVALID;
 	}
 	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
-		return SPA_STATUS_NEED_DATA;
+		return outio->status = inio->status;
+
 	if (SPA_UNLIKELY(inio->buffer_id >= inport->n_buffers))
 		return inio->status = -EINVAL;
 

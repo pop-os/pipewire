@@ -864,15 +864,13 @@ static int impl_node_process(void *object)
 
 	if (SPA_UNLIKELY(outio->status == SPA_STATUS_HAVE_DATA))
 		return SPA_STATUS_HAVE_DATA;
-
-	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
-		return SPA_STATUS_NEED_DATA;
-
 	/* recycle */
 	if (SPA_LIKELY(outio->buffer_id < outport->n_buffers)) {
 		recycle_buffer(this, outio->buffer_id);
 		outio->buffer_id = SPA_ID_INVALID;
 	}
+	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
+		return outio->status = inio->status;
 
 	if (SPA_UNLIKELY(inio->buffer_id >= inport->n_buffers))
 		return inio->status = -EINVAL;
@@ -902,6 +900,9 @@ static int impl_node_process(void *object)
 			db->datas[i].data = dst_datas[i];
 			db->datas[i].chunk->size = n_samples * outport->stride;
 		}
+
+		spa_log_trace_fp(this->log, NAME " %p: n_src:%d n_dst:%d n_samples:%d p:%d",
+				this, n_src_datas, n_dst_datas, n_samples, is_passthrough);
 
 		if (!is_passthrough)
 			channelmix_process(&this->mix, n_dst_datas, dst_datas,

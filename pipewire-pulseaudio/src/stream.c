@@ -36,6 +36,7 @@
 #define MIN_QUEUED	1
 
 #define MAX_SIZE	(4*1024*1024)
+#define BLOCK_SIZE	(64*1024)
 
 static const uint32_t audio_formats[] = {
 	[PA_SAMPLE_U8] = SPA_AUDIO_FORMAT_U8,
@@ -149,38 +150,18 @@ static inline pa_channel_position_t channel_id2pa(pa_stream *s, uint32_t id)
 	return PA_CHANNEL_POSITION_INVALID;
 }
 
-static inline int dequeue_buffer(pa_stream *s)
-{
-	struct pw_buffer *buf;
-	uint32_t index;
-
-	buf = pw_stream_dequeue_buffer(s->stream);
-	if (buf == NULL)
-		return -EPIPE;
-
-	spa_ringbuffer_get_write_index(&s->dequeued_ring, &index);
-	s->dequeued[index & MASK_BUFFERS] = buf;
-	if (s->direction == PA_STREAM_PLAYBACK)
-		s->dequeued_size += buf->buffer->datas[0].maxsize;
-	else
-		s->dequeued_size += buf->buffer->datas[0].chunk->size;
-	spa_ringbuffer_write_update(&s->dequeued_ring, index + 1);
-
-	return 0;
-}
-
 static void dump_buffer_attr(pa_stream *s, pa_buffer_attr *attr)
 {
-	pw_log_info("stream %p: maxlength: %u", s, attr->maxlength);
-	pw_log_info("stream %p: tlength: %u", s, attr->tlength);
-	pw_log_info("stream %p: minreq: %u", s, attr->minreq);
-	pw_log_info("stream %p: prebuf: %u", s, attr->prebuf);
-	pw_log_info("stream %p: fragsize: %u", s, attr->fragsize);
+	pw_log_debug("stream %p: maxlength: %u", s, attr->maxlength);
+	pw_log_debug("stream %p: tlength: %u", s, attr->tlength);
+	pw_log_debug("stream %p: minreq: %u", s, attr->minreq);
+	pw_log_debug("stream %p: prebuf: %u", s, attr->prebuf);
+	pw_log_debug("stream %p: fragsize: %u", s, attr->fragsize);
 }
 
 static void configure_buffers(pa_stream *s)
 {
-	s->buffer_attr.maxlength = s->maxsize;
+	s->buffer_attr.maxlength = MAX_SIZE;
 	if (s->buffer_attr.prebuf == (uint32_t)-1)
 		s->buffer_attr.prebuf = s->buffer_attr.minreq;
 	s->buffer_attr.fragsize = s->buffer_attr.minreq;
@@ -290,7 +271,7 @@ static const struct spa_pod *get_buffers_param(pa_stream *s, pa_buffer_attr *att
 	else
 		buffers = SPA_CLAMP(attr->maxlength / (size * stride), 3u, MAX_BUFFERS);
 
-	pw_log_info("stream %p: stride %d maxsize %d size %u buffers %d", s, stride, maxsize,
+	pw_log_debug("stream %p: stride %d maxsize %d size %u buffers %d", s, stride, maxsize,
 			size, buffers);
 
 	param = spa_pod_builder_add_object(b,
@@ -342,7 +323,7 @@ static void patch_buffer_attr(pa_stream *s, pa_buffer_attr *attr, pa_stream_flag
 	}
 
 	if (attr->maxlength == (uint32_t) -1)
-		attr->maxlength = 4*1024*1024; /* 4MB is the maximum queue length PulseAudio <= 0.9.9 supported. */
+		attr->maxlength = MAX_SIZE; /* 4MB is the maximum queue length PulseAudio <= 0.9.9 supported. */
 
 	if (attr->tlength == (uint32_t) -1)
 		attr->tlength = (uint32_t) pa_usec_to_bytes(250*PA_USEC_PER_MSEC, &s->sample_spec); /* 250ms of buffering */
@@ -431,12 +412,20 @@ static void stream_control_info(void *data, uint32_t id, const struct pw_stream_
 static void stream_add_buffer(void *data, struct pw_buffer *buffer)
 {
 	pa_stream *s = data;
-	s->maxsize += buffer->buffer->datas[0].maxsize;
+	buffer->size = buffer->buffer->datas[0].maxsize;
+	s->maxsize += buffer->size;
+	s->maxblock = SPA_MIN(buffer->size, s->maxblock);
 }
+
 static void stream_remove_buffer(void *data, struct pw_buffer *buffer)
 {
 	pa_stream *s = data;
+	struct pa_mem *m = buffer->user_data;
 	s->maxsize -= buffer->buffer->datas[0].maxsize;
+	s->maxblock = INT_MAX;
+	if (m != NULL)
+		spa_list_append(&s->free, &m->link);
+	buffer->user_data = NULL;
 }
 
 static void update_timing_info(pa_stream *s)
@@ -444,15 +433,10 @@ static void update_timing_info(pa_stream *s)
 	struct pw_time pwt;
 	pa_timing_info *ti = &s->timing_info;
 	size_t stride = pa_frame_size(&s->sample_spec);
-	int64_t delay, queued, ticks;
+	int64_t delay, pos;
 
 	pw_stream_get_time(s->stream, &pwt);
 	s->timing_info_valid = false;
-	s->queued = pwt.queued;
-	pw_log_trace("stream %p: %"PRIu64, s, s->queued);
-
-	if (pwt.rate.denom == 0)
-		return;
 
 	pa_timeval_store(&ti->timestamp, pwt.now / SPA_NSEC_PER_USEC);
 	ti->synchronized_clocks = true;
@@ -461,45 +445,123 @@ static void update_timing_info(pa_stream *s)
 	ti->write_index_corrupt = false;
 	ti->read_index_corrupt = false;
 
-	queued = pwt.queued + (pwt.ticks * s->sample_spec.rate / pwt.rate.denom) * stride;
-	ticks = ((pwt.ticks + pwt.delay) * s->sample_spec.rate / pwt.rate.denom) * stride;
-
-	delay = pwt.delay * SPA_USEC_PER_SEC / pwt.rate.denom;
+	if (pwt.rate.denom > 0) {
+		if (!s->have_time)
+			s->ticks_base = pwt.ticks + pwt.delay;
+		if (pwt.ticks > s->ticks_base)
+			pos = ((pwt.ticks - s->ticks_base) * s->sample_spec.rate / pwt.rate.denom) * stride;
+		else
+			pos = 0;
+		delay = pwt.delay * SPA_USEC_PER_SEC / pwt.rate.denom;
+		s->have_time = true;
+	} else {
+		pos = delay = 0;
+		s->have_time = false;
+	}
 	if (s->direction == PA_STREAM_PLAYBACK) {
-		ti->sink_usec = -delay;
-		ti->write_index = queued;
-		ti->read_index = ticks;
-	}
-	else {
+		ti->sink_usec = delay;
+		ti->configured_sink_usec = delay;
+		ti->read_index = pos;
+	} else {
 		ti->source_usec = delay;
-		ti->read_index = queued;
-		ti->write_index = ticks;
+		ti->configured_source_usec = delay;
+		ti->write_index = pos;
 	}
-
-	ti->configured_sink_usec = 0;
-	ti->configured_source_usec = 0;
 	ti->since_underrun = 0;
 	s->timing_info_valid = true;
+	s->queued_bytes = pwt.queued;
+
+	pw_log_debug("stream %p: %"PRIu64" rate:%d/%d ticks:%"PRIu64" pos:%"PRIu64" delay:%"PRIi64 " read:%"PRIu64
+			" write:%"PRIu64" queued:%"PRIi64,
+			s, pwt.queued, s->sample_spec.rate, pwt.rate.denom, pwt.ticks, pos, delay,
+			ti->read_index, ti->write_index, ti->read_index - ti->write_index);
+}
+
+static void queue_output(pa_stream *s)
+{
+	struct pa_mem *m, *t, *old;
+	struct pw_buffer *buf;
+
+	spa_list_for_each_safe(m, t, &s->ready, link) {
+		buf = pw_stream_dequeue_buffer(s->stream);
+		if (buf == NULL)
+			break;
+
+		if ((old = buf->user_data) != NULL)
+			spa_list_append(&s->free, &old->link);
+
+		spa_list_remove(&m->link);
+		s->ready_bytes -= m->size;
+
+		buf->buffer->datas[0].maxsize = m->maxsize;
+		buf->buffer->datas[0].data = m->data;
+		buf->buffer->datas[0].chunk->offset = m->offset;
+		buf->buffer->datas[0].chunk->size = m->size;
+		buf->user_data = m;
+
+		pw_stream_queue_buffer(s->stream, buf);
+	}
+}
+
+struct pa_mem *alloc_mem(pa_stream *s, size_t len)
+{
+	struct pa_mem *m;
+	if (spa_list_is_empty(&s->free)) {
+		if (len > s->maxblock)
+			len = s->maxblock;
+		m = calloc(1, sizeof(struct pa_mem) + len);
+		if (m == NULL)
+			return NULL;
+		m->data = SPA_MEMBER(m, sizeof(struct pa_mem), void);
+		m->maxsize = len;
+	} else {
+		m = spa_list_first(&s->free, struct pa_mem, link);
+		spa_list_remove(&m->link);
+	}
+	return m;
+}
+
+static void pull_input(pa_stream *s)
+{
+	struct pw_buffer *buf;
+	struct pa_mem *m;
+
+	while ((buf = pw_stream_dequeue_buffer(s->stream)) != NULL) {
+		if ((m = alloc_mem(s, 0)) == NULL) {
+			pw_log_error("stream %p: Can't alloc mem: %m", s);
+			pw_stream_queue_buffer(s->stream, buf);
+			continue;
+		}
+		m->data = buf->buffer->datas[0].data;
+		m->maxsize = buf->buffer->datas[0].maxsize;
+		m->offset = buf->buffer->datas[0].chunk->offset;
+		m->size = buf->buffer->datas[0].chunk->size;
+		m->user_data = buf;
+		buf->user_data = m;
+
+		spa_list_append(&s->ready, &m->link);
+		s->ready_bytes += m->size;
+	}
 }
 
 static void stream_process(void *data)
 {
 	pa_stream *s = data;
 
+	pw_log_trace("stream %p:", s);
 	update_timing_info(s);
 
-	while (dequeue_buffer(s) == 0);
-
-	if (s->dequeued_size <= 0)
-		return;
-
 	if (s->direction == PA_STREAM_PLAYBACK) {
+		queue_output(s);
+
 		if (s->write_callback)
-			s->write_callback(s, s->dequeued_size, s->write_userdata);
+			s->write_callback(s, s->maxblock, s->write_userdata);
 	}
 	else {
-		if (s->read_callback)
-			s->read_callback(s, s->dequeued_size, s->read_userdata);
+		pull_input(s);
+
+		if (s->read_callback && s->ready_bytes > 0)
+			s->read_callback(s, s->ready_bytes, s->read_userdata);
 	}
 }
 
@@ -564,11 +626,13 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 
 	s->refcount = 1;
 	s->context = c;
-	spa_list_init(&s->pending);
+	spa_list_init(&s->free);
+	spa_list_init(&s->ready);
 
 	s->direction = PA_STREAM_NODIRECTION;
 	s->state = PA_STREAM_UNCONNECTED;
 	s->flags = 0;
+	s->have_time = false;
 
 	if (ss)
 		s->sample_spec = *ss;
@@ -610,11 +674,10 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 	s->buffer_attr.minreq = (uint32_t) -1;
 	s->buffer_attr.prebuf = (uint32_t) -1;
 	s->buffer_attr.fragsize = (uint32_t) -1;
+	s->maxblock = INT_MAX;
 
 	s->device_index = PA_INVALID_INDEX;
 	s->device_name = NULL;
-
-	spa_ringbuffer_init(&s->dequeued_ring);
 
 	spa_list_append(&c->streams, &s->link);
 	pa_stream_ref(s);
@@ -673,6 +736,7 @@ static void stream_unlink(pa_stream *s)
 static void stream_free(pa_stream *s)
 {
 	int i;
+	struct pa_mem *m;
 
 	pw_log_debug("stream %p", s);
 
@@ -681,6 +745,10 @@ static void stream_free(pa_stream *s)
 		pw_stream_destroy(s->stream);
 	}
 
+	spa_list_consume(m, &s->free, link) {
+		spa_list_remove(&m->link);
+		free(m);
+	}
 	if (s->proplist)
 		pa_proplist_free(s->proplist);
 
@@ -700,6 +768,7 @@ void pa_stream_unref(pa_stream *s)
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
+	pw_log_debug("stream %p: ref %d", s, s->refcount);
 	if (--s->refcount == 0)
 		stream_free(s);
 }
@@ -711,6 +780,7 @@ pa_stream *pa_stream_ref(pa_stream *s)
 	spa_assert(s->refcount >= 1);
 
 	s->refcount++;
+	pw_log_debug("stream %p: ref %d", s, s->refcount);
 	return s;
 }
 
@@ -1032,7 +1102,8 @@ int pa_stream_connect_record(
 
 static void on_disconnected(pa_operation *o, void *userdata)
 {
-	pa_stream_set_state(o->stream, PA_STREAM_TERMINATED);
+	pa_stream *s = o->stream;
+	pa_stream_set_state(s, PA_STREAM_TERMINATED);
 }
 
 SPA_EXPORT
@@ -1060,59 +1131,12 @@ int pa_stream_disconnect(pa_stream *s)
 	return 0;
 }
 
-int peek_buffer(pa_stream *s)
-{
-	int32_t avail;
-	uint32_t index;
-
-	if (s->buffer != NULL)
-		return 0;
-
-	if ((avail = spa_ringbuffer_get_read_index(&s->dequeued_ring, &index)) < MIN_QUEUED)
-		return -EPIPE;
-
-	s->buffer = s->dequeued[index & MASK_BUFFERS];
-	s->buffer_index = index;
-	s->buffer_data = s->buffer->buffer->datas[0].data;
-	if (s->direction == PA_STREAM_RECORD) {
-		s->buffer_size = s->buffer->buffer->datas[0].chunk->size;
-		s->buffer_offset = s->buffer->buffer->datas[0].chunk->offset;
-	}
-	else {
-		s->buffer_size = s->buffer->buffer->datas[0].maxsize;
-	}
-	return 0;
-}
-
-int queue_buffer(pa_stream *s)
-{
-	if (s->buffer == NULL)
-		return 0;
-
-	if (s->direction == PA_STREAM_PLAYBACK)
-		s->dequeued_size -= s->buffer->buffer->datas[0].maxsize;
-	else
-		s->dequeued_size -= s->buffer->buffer->datas[0].chunk->size;
-	spa_ringbuffer_read_update(&s->dequeued_ring, s->buffer_index + 1);
-
-	s->buffer->size = s->buffer->buffer->datas[0].chunk->size;
-	pw_log_trace("%p %"PRIu64"/%d", s->buffer, s->buffer->size,
-			s->buffer->buffer->datas[0].chunk->offset);
-
-	pw_stream_queue_buffer(s->stream, s->buffer);
-	s->buffer = NULL;
-	s->buffer_offset = 0;
-	return 0;
-}
-
 SPA_EXPORT
 int pa_stream_begin_write(
         pa_stream *s,
         void **data,
         size_t *nbytes)
 {
-	int res;
-
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
@@ -1122,16 +1146,18 @@ int pa_stream_begin_write(
 	PA_CHECK_VALIDITY(s->context, data, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context, nbytes && *nbytes != 0, PA_ERR_INVALID);
 
-	if ((res = peek_buffer(s)) < 0) {
+	if (s->mem == NULL)
+		s->mem = alloc_mem(s, *nbytes);
+	if (s->mem == NULL) {
 		*data = NULL;
 		*nbytes = 0;
+		return -errno;
 	}
-	else {
-		size_t max = s->buffer_size - s->buffer_offset;
-		*data = SPA_MEMBER(s->buffer_data, s->buffer_offset, void);
-		*nbytes = *nbytes != (size_t)-1 ? SPA_MIN(*nbytes, max) : max;
-	}
-	pw_log_trace("peek buffer %p %zd", *data, *nbytes);
+	s->mem->offset = s->mem->size = 0;
+	*data = s->mem->data;
+	*nbytes = *nbytes != (size_t)-1 ? SPA_MIN(*nbytes, s->mem->maxsize) : s->mem->maxsize;
+
+	pw_log_trace("buffer %p %zd %p", *data, *nbytes, s->mem);
 
 	return 0;
 }
@@ -1146,8 +1172,13 @@ int pa_stream_cancel_write(pa_stream *s)
 	PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_PLAYBACK ||
 			s->direction == PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
 
-	pw_log_debug("cancel %p %p %d", s->buffer, s->buffer_data, s->buffer_size);
-	s->buffer = NULL;
+	if (s->mem == NULL)
+		return 0;
+
+	pw_log_trace("cancel %p %p %zd", s->mem, s->mem->data, s->mem->size);
+
+	spa_list_prepend(&s->free, &s->mem->link);
+	s->mem = NULL;
 
 	return 0;
 }
@@ -1172,6 +1203,9 @@ int pa_stream_write_ext_free(pa_stream *s,
         int64_t offset,
         pa_seek_mode_t seek)
 {
+	const void *src = data;
+	size_t towrite;
+
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 	spa_assert(data);
@@ -1183,52 +1217,45 @@ int pa_stream_write_ext_free(pa_stream *s,
 	PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_PLAYBACK ||
 			(seek == PA_SEEK_RELATIVE && offset == 0), PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context,
-			!s->buffer ||
-			((data >= s->buffer_data) &&
-			((const char*) data + nbytes <= (const char*) s->buffer_data + s->buffer_size)),
+			s->mem == NULL ||
+			((data >= s->mem->data) &&
+			((const char*) data + nbytes <= (const char*) s->mem->data + s->mem->maxsize)),
 			PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context, offset % pa_frame_size(&s->sample_spec) == 0, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context, nbytes % pa_frame_size(&s->sample_spec) == 0, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY(s->context, !free_cb || !s->buffer, PA_ERR_INVALID);
 
-	if (s->buffer == NULL) {
-		void *dst;
-		const void *src = data;
-		size_t towrite = nbytes, dsize;
+	pw_log_trace("stream %p: write %zd bytes", s, nbytes);
 
-		while (towrite > 0) {
-			dsize = towrite;
-
+	towrite = nbytes;
+	while (towrite > 0) {
+		size_t dsize = towrite;
+		if (s->mem == NULL) {
+			void *dst;
 			if (pa_stream_begin_write(s, &dst, &dsize) < 0 ||
 			    dst == NULL || dsize == 0) {
-				pw_log_debug("stream %p: out of buffers, wanted %zd bytes", s, nbytes);
+				pw_log_error("stream %p: out of buffers, wanted %zd bytes", s, nbytes);
 				break;
 			}
-
 			memcpy(dst, src, dsize);
-
-			s->buffer_offset += dsize;
-
-			if (s->buffer_offset >= s->buffer_size) {
-				s->buffer->buffer->datas[0].chunk->offset = 0;
-				s->buffer->buffer->datas[0].chunk->size = s->buffer_offset;
-				queue_buffer(s);
-			}
-			towrite -= dsize;
 			src = SPA_MEMBER(src, dsize, void);
+		} else {
+			s->mem->offset = SPA_PTRDIFF(src, s->mem->data);
 		}
-		if (free_cb)
-			free_cb(free_cb_data);
-
-		s->buffer = NULL;
+		towrite -= dsize;
+		s->mem->size = dsize;
+		if (s->mem->size >= s->mem->maxsize || towrite == 0) {
+			spa_list_append(&s->ready, &s->mem->link);
+			s->ready_bytes += s->mem->size;
+			s->mem = NULL;
+			queue_output(s);
+		}
 	}
-	else {
-		s->buffer->buffer->datas[0].chunk->offset = SPA_PTRDIFF(data, s->buffer_data);
-		s->buffer->buffer->datas[0].chunk->size = nbytes;
-		queue_buffer(s);
-	}
+	if (free_cb)
+		free_cb(free_cb_data);
 
-	update_timing_info(s);
+	s->timing_info.write_index += nbytes;
+	pw_log_debug("stream %p: written %zd bytes", s, nbytes);
 
 	return 0;
 }
@@ -1246,15 +1273,18 @@ int pa_stream_peek(pa_stream *s,
 	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_RECORD, PA_ERR_BADSTATE);
 
-	if (peek_buffer(s) < 0) {
+	if (spa_list_is_empty(&s->ready)) {
+		pw_log_error("stream %p: no buffer: %m", s);
 		*data = NULL;
 		*nbytes = 0;
-		pw_log_debug("stream %p: no buffer", s);
 		return 0;
 	}
-	*data = SPA_MEMBER(s->buffer_data, s->buffer_offset, void);
-	*nbytes = s->buffer_size;
-	pw_log_trace("stream %p: %p %zd %f", s, *data, *nbytes, *(float*)*data);
+	s->mem = spa_list_first(&s->ready, struct pa_mem, link);
+
+	*data = SPA_MEMBER(s->mem->data, s->mem->offset, void);
+	*nbytes = s->mem->size;
+
+	pw_log_trace("stream %p: %p %zd", s, *data, *nbytes);
 
 	return 0;
 }
@@ -1262,15 +1292,30 @@ int pa_stream_peek(pa_stream *s,
 SPA_EXPORT
 int pa_stream_drop(pa_stream *s)
 {
+	size_t nbytes;
+	struct pw_buffer *buf;
+
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
 	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_RECORD, PA_ERR_BADSTATE);
-	PA_CHECK_VALIDITY(s->context, s->buffer, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY(s->context, s->mem, PA_ERR_BADSTATE);
 
-	pw_log_trace("stream %p", s);
-	queue_buffer(s);
+	nbytes = s->mem->size;
+
+	pw_log_trace("stream %p %zd", s, nbytes);
+	spa_list_remove(&s->mem->link);
+	s->ready_bytes -= nbytes;
+
+	s->timing_info.read_index += nbytes;
+
+	buf = s->mem->user_data;
+	pw_stream_queue_buffer(s->stream, buf);
+	buf->user_data = NULL;
+
+	spa_list_append(&s->free, &s->mem->link);
+	s->mem = NULL;
 
 	return 0;
 }
@@ -1278,6 +1323,10 @@ int pa_stream_drop(pa_stream *s)
 SPA_EXPORT
 size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 {
+	const pa_timing_info *i;
+	uint64_t now, queued, writable, elapsed;
+	struct timespec ts;
+
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
@@ -1286,8 +1335,21 @@ size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 	PA_CHECK_VALIDITY_RETURN_ANY(s->context, s->direction != PA_STREAM_RECORD,
 			PA_ERR_BADSTATE, (size_t) -1);
 
-	pw_log_trace("stream %p: %zd", s, s->dequeued_size);
-	return s->dequeued_size;
+	if (!s->have_time)
+		return 0;
+
+	i = &s->timing_info;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	now = SPA_TIMESPEC_TO_USEC(&ts);
+	elapsed = pa_usec_to_bytes(now - SPA_TIMEVAL_TO_USEC(&i->timestamp), &s->sample_spec);
+
+	queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
+	queued -= SPA_MIN(queued, elapsed);
+
+	writable = s->maxblock - SPA_MIN(queued, s->maxblock);
+	pw_log_debug("stream %p: %lu", s, writable);
+	return writable;
 }
 
 SPA_EXPORT
@@ -1301,7 +1363,8 @@ size_t pa_stream_readable_size(PA_CONST pa_stream *s)
 	PA_CHECK_VALIDITY_RETURN_ANY(s->context, s->direction == PA_STREAM_RECORD,
 			PA_ERR_BADSTATE, (size_t) -1);
 
-	return s->dequeued_size;
+	pw_log_trace("stream %p: %zd", s, s->ready_bytes);
+	return s->ready_bytes;
 }
 
 struct success_ack {
@@ -1538,9 +1601,9 @@ pa_operation* pa_stream_cork(pa_stream *s, int b, pa_stream_success_cb_t cb, voi
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
 
+	pw_log_debug("stream %p: cork %d->%d", s, s->corked, b);
 	s->corked = b;
-	if (!b)
-		pw_stream_set_active(s->stream, true);
+	pw_stream_set_active(s->stream, !b);
 	o = pa_operation_new(s->context, s, on_success, sizeof(struct success_ack));
 	d = o->userdata;
 	d->cb = cb;
@@ -1555,6 +1618,7 @@ pa_operation* pa_stream_flush(pa_stream *s, pa_stream_success_cb_t cb, void *use
 {
 	pa_operation *o;
 	struct success_ack *d;
+	struct pa_mem *m;
 
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
@@ -1562,12 +1626,20 @@ pa_operation* pa_stream_flush(pa_stream *s, pa_stream_success_cb_t cb, void *use
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
 
+	pw_log_debug("stream %p:", s);
 	pw_stream_flush(s->stream, false);
-	update_timing_info(s);
 	o = pa_operation_new(s->context, s, on_success, sizeof(struct success_ack));
 	d = o->userdata;
 	d->cb = cb;
 	d->userdata = userdata;
+
+	spa_list_consume(m, &s->ready, link) {
+		spa_list_remove(&m->link);
+		spa_list_append(&s->free, &m->link);
+	}
+	s->ready_bytes = 0;
+	s->timing_info.write_index = s->timing_info.read_index = 0;
+	s->have_time = false;
 	pa_operation_sync(o);
 
 	return o;
@@ -1650,9 +1722,8 @@ pa_operation* pa_stream_set_name(pa_stream *s, const char *name, pa_stream_succe
 SPA_EXPORT
 int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 {
-	pa_usec_t res;
 	struct timespec ts;
-	uint64_t now, delay, read_time;
+	uint64_t now, res;
 	pa_timing_info *i;
 
 	spa_assert(s);
@@ -1660,25 +1731,31 @@ int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 
 	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
-	PA_CHECK_VALIDITY(s->context, s->timing_info_valid, PA_ERR_NODATA);
+
+	i = &s->timing_info;
+
+	if (s->direction == PA_STREAM_PLAYBACK) {
+		res = pa_bytes_to_usec((uint64_t) i->read_index, &s->sample_spec);
+		if (res > i->sink_usec)
+			res -= i->sink_usec;
+		else
+			res = 0;
+	} else {
+		res = pa_bytes_to_usec((uint64_t) i->write_index, &s->sample_spec);
+		res += i->source_usec;
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	now = SPA_TIMESPEC_TO_USEC(&ts);
-
-	i = &s->timing_info;
-	delay = now - SPA_TIMEVAL_TO_USEC(&i->timestamp);
-	read_time = pa_bytes_to_usec((uint64_t) i->read_index, &s->sample_spec);
-
-	res = delay + read_time;
+	if (s->have_time)
+		res += now - SPA_TIMEVAL_TO_USEC(&i->timestamp);
 
 	if (r_usec)
 		*r_usec = res;
 
-	pw_log_trace("stream %p: %"PRIu64" %"PRIu64" %"PRIu64" %"PRIi64" %"PRIi64" %"PRIi64" %"PRIu64,
-			s, now, delay, read_time,
-			i->write_index, i->read_index,
-			i->write_index - i->read_index,
-			res);
+	pw_log_debug("stream %p: now:%"PRIu64" diff:%"PRIi64
+			" write-index:%"PRIi64" read_index:%"PRIi64" res:%"PRIu64,
+			s, now, now - res, i->write_index, i->read_index, res);
 
 	return 0;
 }
@@ -1713,7 +1790,6 @@ int pa_stream_get_latency(pa_stream *s, pa_usec_t *r_usec, int *negative)
 
 	PA_CHECK_VALIDITY(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
-	PA_CHECK_VALIDITY(s->context, s->timing_info_valid, PA_ERR_NODATA);
 
 	pa_stream_get_time(s, &t);
 
@@ -1743,7 +1819,6 @@ const pa_timing_info* pa_stream_get_timing_info(pa_stream *s)
 
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
-	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->timing_info_valid, PA_ERR_NODATA);
 
 	pw_log_trace("stream %p: %"PRIi64" %"PRIi64" %"PRIi64, s,
 			s->timing_info.write_index, s->timing_info.read_index,

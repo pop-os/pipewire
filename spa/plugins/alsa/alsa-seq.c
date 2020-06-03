@@ -50,7 +50,7 @@ static int seq_open(struct seq_state *state, struct seq_conn *conn)
         snd_seq_port_info_t *pinfo;
 	int res;
 
-	spa_log_info(state->log, "%p: ALSA seq open '%s' duplex", state, props->device);
+	spa_log_debug(state->log, "%p: ALSA seq open '%s' duplex", state, props->device);
 
 	if ((res = snd_seq_open(&conn->hndl,
 			   props->device,
@@ -111,7 +111,7 @@ error_exit_close:
 static int seq_close(struct seq_state *state, struct seq_conn *conn)
 {
 	int res;
-	spa_log_info(state->log, "%p: Device '%s' closing", state, state->props.device);
+	spa_log_debug(state->log, "%p: Device '%s' closing", state, state->props.device);
 	if ((res = snd_seq_close(conn->hndl)) < 0) {
 		spa_log_warn(state->log, "close failed: %s", snd_strerror(res));
 	}
@@ -366,7 +366,7 @@ static struct seq_port *find_port(struct seq_state *state,
 		struct seq_stream *stream, const snd_seq_addr_t *addr)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		if (port->valid &&
 		    port->addr.client == addr->client &&
@@ -374,6 +374,49 @@ static struct seq_port *find_port(struct seq_state *state,
 			return port;
 	}
 	return NULL;
+}
+
+int spa_alsa_seq_activate_port(struct seq_state *state, struct seq_port *port, bool active)
+{
+	int res;
+	snd_seq_port_subscribe_t* sub;
+
+	spa_log_debug(state->log, "activate: %d.%d: started:%d active:%d wanted:%d",
+			port->addr.client, port->addr.port, state->started, port->active, active);
+
+	if (active && !state->started)
+		return 0;
+	if (port->active == active)
+		return 0;
+
+	snd_seq_port_subscribe_alloca(&sub);
+	if (port->direction == SPA_DIRECTION_OUTPUT) {
+		snd_seq_port_subscribe_set_sender(sub, &port->addr);
+		snd_seq_port_subscribe_set_dest(sub, &state->event.addr);
+	} else {
+		snd_seq_port_subscribe_set_sender(sub, &state->event.addr);
+		snd_seq_port_subscribe_set_dest(sub, &port->addr);
+	}
+
+	if (active) {
+		snd_seq_port_subscribe_set_time_update(sub, 1);
+		snd_seq_port_subscribe_set_time_real(sub, 1);
+		snd_seq_port_subscribe_set_queue(sub, state->event.queue_id);
+		if ((res = snd_seq_subscribe_port(state->event.hndl, sub)) < 0) {
+			spa_log_error(state->log, "can't subscribe to %d:%d - %s",
+				port->addr.client, port->addr.port, snd_strerror(res));
+			active = false;
+		}
+		spa_log_info(state->log, "subscribe: %d.%d", port->addr.client, port->addr.port);
+	} else {
+		if ((res = snd_seq_unsubscribe_port(state->event.hndl, sub)) < 0) {
+			spa_log_warn(state->log, "can't unsubscribe from %d:%d - %s",
+				port->addr.client, port->addr.port, snd_strerror(res));
+		}
+		spa_log_info(state->log, "unsubscribe: %d.%d", port->addr.client, port->addr.port);
+	}
+	port->active = active;
+	return res;
 }
 
 static struct buffer *peek_buffer(struct seq_state *state,
@@ -418,7 +461,7 @@ static int process_recycle(struct seq_state *state)
 	struct seq_stream *stream = &state->streams[SPA_DIRECTION_OUTPUT];
 	uint32_t i;
 
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 
@@ -505,7 +548,7 @@ static int process_read(struct seq_state *state)
 	/* prepare a buffer on each port, some ports might have their
 	 * buffer filled above */
 	res = 0;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 
@@ -557,7 +600,7 @@ static int process_write(struct seq_state *state)
 	uint32_t i;
 	int res = 0;
 
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		struct spa_io_buffers *io = port->io;
 		struct buffer *buffer;
@@ -774,13 +817,15 @@ static void reset_buffers(struct seq_state *this, struct seq_port *port)
 		}
 	}
 }
-static void reset_stream(struct seq_state *this, struct seq_stream *stream)
+static void reset_stream(struct seq_state *this, struct seq_stream *stream, bool active)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
-		if (port->valid)
+		if (port->valid) {
 			reset_buffers(this, port);
+			spa_alsa_seq_activate_port(this, port, active);
+		}
 	}
 }
 
@@ -825,8 +870,10 @@ int spa_alsa_seq_start(struct seq_state *state)
 		state->threshold = state->duration;
 	}
 
-	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT]);
-	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT]);
+	state->started = true;
+
+	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT], true);
+	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT], true);
 
 	state->source.func = alsa_on_timeout_event;
 	state->source.data = state;
@@ -838,8 +885,6 @@ int spa_alsa_seq_start(struct seq_state *state)
 	state->queue_base = 0;
 	init_loop(state);
 	set_timers(state);
-
-	state->started = true;
 
 	return 0;
 }
@@ -899,6 +944,9 @@ int spa_alsa_seq_pause(struct seq_state *state)
 	seq_stop(state, &state->event);
 
 	state->started = false;
+
+	reset_stream(state, &state->streams[SPA_DIRECTION_INPUT], false);
+	reset_stream(state, &state->streams[SPA_DIRECTION_OUTPUT], false);
 
 	return 0;
 }

@@ -48,32 +48,52 @@ pipewire_pulseaudio_c_args = [
 mapfile = 'map-file'
 vflag = '-Wl,--version-script,@0@/@1@'.format(meson.current_source_dir(), mapfile)
 
-pipewire_pulseaudio = shared_library('pulse-pw',
+libpulse_path = get_option('libpulse-path')
+if libpulse_path == ''
+  libpulse_path = join_paths(modules_install_dir, 'pulse')
+endif
+
+tools_config = configuration_data()
+tools_config.set('LIBPULSE_PATH', libpulse_path)
+
+configure_file(input : 'pw-pulse.in',
+               output : 'pw-pulse',
+               configuration : tools_config,
+               install: true,
+               install_dir : pipewire_bindir)
+
+pipewire_pulseaudio = shared_library('pulse',
     pipewire_pulseaudio_sources,
-    soversion : pipewire_version,
+    soversion : soversion,
+    version : libversion,
     c_args : pipewire_pulseaudio_c_args,
     link_args : vflag,
     include_directories : [configinc],
     dependencies : [pipewire_dep, pulseaudio_dep, mathlib],
     install : true,
+    install_dir : libpulse_path,
 )
 
-pipewire_pulseaudio = shared_library('pulse-mainloop-glib-pw',
+pipewire_pulseaudio = shared_library('pulse-mainloop-glib',
     pipewire_mainloop_glib_sources,
-    soversion : pipewire_version,
+    soversion : soversion,
+    version : libversion,
     c_args : pipewire_pulseaudio_c_args,
     link_args : vflag,
     include_directories : [configinc],
     dependencies : [pipewire_dep, pulseaudio_dep, mathlib, glib_dep],
     install : true,
+    install_dir : libpulse_path,
 )
 
-pipewire_pulseaudio = shared_library('pulse-simple-pw',
+pipewire_pulseaudio = shared_library('pulse-simple',
     pipewire_mainloop_simple_sources,
-    soversion : pipewire_version,
+    soversion : soversion,
+    version : libversion,
     c_args : pipewire_pulseaudio_c_args,
     link_args : vflag,
     include_directories : [configinc],
     dependencies : [pipewire_dep, pulseaudio_dep, mathlib, glib_dep],
     install : true,
+    install_dir : libpulse_path,
 )

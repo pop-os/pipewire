@@ -60,6 +60,8 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_src_debug);
 #define GST_CAT_DEFAULT pipewire_src_debug
 
 #define DEFAULT_ALWAYS_COPY     false
+#define DEFAULT_MIN_BUFFERS     1
+#define DEFAULT_MAX_BUFFERS     INT32_MAX
 
 enum
 {
@@ -68,6 +70,8 @@ enum
   PROP_CLIENT_NAME,
   PROP_STREAM_PROPERTIES,
   PROP_ALWAYS_COPY,
+  PROP_MIN_BUFFERS,
+  PROP_MAX_BUFFERS,
   PROP_FD,
 };
 
@@ -124,6 +128,14 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->always_copy = g_value_get_boolean (value);
       break;
 
+    case PROP_MIN_BUFFERS:
+      pwsrc->min_buffers = g_value_get_int (value);
+      break;
+
+    case PROP_MAX_BUFFERS:
+      pwsrc->max_buffers = g_value_get_int (value);
+      break;
+
     case PROP_FD:
       pwsrc->fd = g_value_get_int (value);
       break;
@@ -155,6 +167,14 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
 
     case PROP_ALWAYS_COPY:
       g_value_set_boolean (value, pwsrc->always_copy);
+      break;
+
+    case PROP_MIN_BUFFERS:
+      g_value_set_int (value, pwsrc->min_buffers);
+      break;
+
+    case PROP_MAX_BUFFERS:
+      g_value_set_int (value, pwsrc->max_buffers);
       break;
 
     case PROP_FD:
@@ -195,18 +215,9 @@ clock_disabled:
 }
 
 static void
-clear_queue (GstPipeWireSrc *pwsrc)
-{
-  g_queue_foreach (&pwsrc->queue, (GFunc) gst_mini_object_unref, NULL);
-  g_queue_clear (&pwsrc->queue);
-}
-
-static void
 gst_pipewire_src_finalize (GObject * object)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (object);
-
-  clear_queue (pwsrc);
 
   pw_context_destroy (pwsrc->context);
   pwsrc->context = NULL;
@@ -277,6 +288,24 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                          G_PARAM_READWRITE |
                                                          G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class,
+                                   PROP_MIN_BUFFERS,
+                                   g_param_spec_int ("min-buffers",
+                                                     "Min Buffers",
+                                                     "Minimum number of buffers to negotiate with PipeWire",
+                                                     1, G_MAXINT, DEFAULT_MIN_BUFFERS,
+                                                     G_PARAM_READWRITE |
+                                                     G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class,
+                                   PROP_MAX_BUFFERS,
+                                   g_param_spec_int ("max-buffers",
+                                                     "Max Buffers",
+                                                     "Maximum number of buffers to negotiate with PipeWire",
+                                                     1, G_MAXINT, DEFAULT_MAX_BUFFERS,
+                                                     G_PARAM_READWRITE |
+                                                     G_PARAM_STATIC_STRINGS));
+
    g_object_class_install_property (gobject_class,
                                     PROP_FD,
                                     g_param_spec_int ("fd",
@@ -320,9 +349,9 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   GST_OBJECT_FLAG_SET (src, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 
   src->always_copy = DEFAULT_ALWAYS_COPY;
+  src->min_buffers = DEFAULT_MIN_BUFFERS;
+  src->max_buffers = DEFAULT_MAX_BUFFERS;
   src->fd = -1;
-
-  g_queue_init (&src->queue);
 
   src->client_name = g_strdup(pw_get_client_name ());
 
@@ -372,29 +401,16 @@ on_remove_buffer (void *_data, struct pw_buffer *b)
   GstPipeWireSrc *pwsrc = _data;
   GstPipeWirePoolData *data = b->user_data;
   GstBuffer *buf = data->buf;
-  GList *walk;
 
   GST_DEBUG_OBJECT (pwsrc, "remove buffer %p", buf);
 
   GST_MINI_OBJECT_CAST (buf)->dispose = NULL;
 
-  walk = pwsrc->queue.head;
-  while (walk) {
-    GList *next = walk->next;
-
-    if (walk->data == buf) {
-      gst_buffer_unref (buf);
-      g_queue_delete_link (&pwsrc->queue, walk);
-    }
-    walk = next;
-  }
   gst_buffer_unref (buf);
 }
 
-static void
-on_process (void *_data)
+static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
 {
-  GstPipeWireSrc *pwsrc = _data;
   struct pw_buffer *b;
   GstBuffer *buf;
   GstPipeWirePoolData *data;
@@ -403,7 +419,7 @@ on_process (void *_data)
 
   b = pw_stream_dequeue_buffer (pwsrc->stream);
   if (b == NULL)
-          return;
+          return NULL;
 
   data = b->user_data;
   buf = data->buf;
@@ -431,12 +447,14 @@ on_process (void *_data)
     mem->size = SPA_MIN(d->chunk->size, d->maxsize - mem->offset);
     mem->offset += data->offset;
   }
+  return buf;
+}
 
-  gst_buffer_ref (buf);
-  g_queue_push_tail (&pwsrc->queue, buf);
-
+static void
+on_process (void *_data)
+{
+  GstPipeWireSrc *pwsrc = _data;
   pw_thread_loop_signal (pwsrc->loop, FALSE);
-  return;
 }
 
 static void
@@ -694,11 +712,14 @@ on_param_changed (void *data, uint32_t id,
     const struct spa_pod *params[2];
     struct spa_pod_builder b = { NULL };
     uint8_t buffer[512];
+    uint32_t buffers = buffers = CLAMP (16, pwsrc->min_buffers, pwsrc->max_buffers);
 
     spa_pod_builder_init (&b, buffer, sizeof (buffer));
     params[0] = spa_pod_builder_add_object (&b,
         SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(16, 1, INT32_MAX),
+        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(buffers,
+                                                            pwsrc->min_buffers,
+                                                            pwsrc->max_buffers),
         SPA_PARAM_BUFFERS_blocks,  SPA_POD_CHOICE_RANGE_Int(0, 1, INT32_MAX),
         SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
         SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
@@ -825,7 +846,8 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     if (state != PW_STREAM_STATE_STREAMING)
       goto streaming_stopped;
 
-    buf = g_queue_pop_head (&pwsrc->queue);
+
+    buf = dequeue_buffer (pwsrc);
     GST_LOG_OBJECT (pwsrc, "popped buffer %p", buf);
     if (buf != NULL)
       break;
@@ -833,8 +855,6 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     pw_thread_loop_wait (pwsrc->loop);
   }
   pw_thread_loop_unlock (pwsrc->loop);
-
-  gst_buffer_unref (buf);
 
   if (pwsrc->always_copy) {
     *buffer = gst_buffer_copy_deep (buf);
@@ -857,7 +877,8 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     dts = (dts >= base_time ? dts - base_time : 0);
 
   GST_LOG_OBJECT (pwsrc,
-      "pts %" G_GUINT64_FORMAT ", dts %" G_GUINT64_FORMAT ", base-time %" GST_TIME_FORMAT " -> %" GST_TIME_FORMAT ", %" GST_TIME_FORMAT,
+      "pts %" G_GUINT64_FORMAT ", dts %" G_GUINT64_FORMAT
+      ", base-time %" GST_TIME_FORMAT " -> %" GST_TIME_FORMAT ", %" GST_TIME_FORMAT,
       GST_BUFFER_PTS (*buffer), GST_BUFFER_DTS (*buffer), GST_TIME_ARGS (base_time),
       GST_TIME_ARGS (pts), GST_TIME_ARGS (dts));
 
@@ -896,7 +917,6 @@ gst_pipewire_src_stop (GstBaseSrc * basesrc)
   pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
   pw_thread_loop_lock (pwsrc->loop);
-  clear_queue (pwsrc);
   pw_thread_loop_unlock (pwsrc->loop);
 
   return TRUE;
@@ -989,8 +1009,6 @@ no_stream:
 static void
 gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
 {
-  clear_queue (pwsrc);
-
   pw_thread_loop_stop (pwsrc->loop);
 
   pwsrc->last_time = gst_clock_get_time (pwsrc->clock);

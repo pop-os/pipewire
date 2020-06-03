@@ -152,11 +152,15 @@ do {									\
 
 #define PA_FAIL(context, error)                                 \
     do {                                                        \
-        return -pa_context_set_error((context), (error));          \
+	pw_log_debug("fail at %s:%u %s()",			\
+			, __FILE__, __LINE__, __func__);	\
+        return -pa_context_set_error((context), (error));	\
     } while(false)
 
 #define PA_FAIL_RETURN_ANY(context, error, value)      \
     do {                                               \
+	pw_log_debug("fail at %s:%u %s()",			\
+			, __FILE__, __LINE__, __func__);	\
         pa_context_set_error((context), (error));         \
         return value;                                  \
     } while(false)
@@ -321,6 +325,15 @@ struct global *pa_context_find_global(pa_context *c, uint32_t id);
 struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, const char *name);
 struct global *pa_context_find_linked(pa_context *c, uint32_t id);
 
+struct pa_mem {
+	struct spa_list link;
+	void *data;
+	size_t maxsize;
+	size_t size;
+	size_t offset;
+	void *user_data;
+};
+
 #define MAX_BUFFERS     64u
 #define MASK_BUFFERS    (MAX_BUFFERS-1)
 
@@ -353,12 +366,15 @@ struct pa_stream {
 	char *device_name;
 
 	pa_timing_info timing_info;
+	uint64_t ticks_base;
+	size_t queued_bytes;
 
 	uint32_t direct_on_input;
 
-	bool suspended:1;
-	bool corked:1;
-	bool timing_info_valid:1;
+	unsigned int suspended:1;
+	unsigned int corked:1;
+	unsigned int timing_info_valid:1;
+	unsigned int have_time:1;
 
 	pa_stream_notify_cb_t state_callback;
 	void *state_userdata;
@@ -383,25 +399,20 @@ struct pa_stream {
 	pa_stream_notify_cb_t buffer_attr_callback;
 	void *buffer_attr_userdata;
 
-	int64_t offset;
-
-	struct pw_buffer *dequeued[MAX_BUFFERS];
-	struct spa_ringbuffer dequeued_ring;
-	size_t dequeued_size;
 	size_t maxsize;
-	struct spa_list pending;
+	size_t maxblock;
 
-	struct pw_buffer *buffer;
-	uint32_t buffer_index;
-	void *buffer_data;
-	uint32_t buffer_size;
-	uint32_t buffer_offset;
+	struct pa_mem *mem;	/* current mem for playback */
+	struct spa_list free;	/* free to fill */
+	struct spa_list ready;	/* ready for playback */
+	size_t ready_bytes;
+
+	struct pw_buffer *buffer;	/* currently reading for capture */
 
 	uint32_t n_channel_volumes;
 	float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
 	bool mute;
 	pa_operation *drain;
-	uint64_t queued;
 };
 
 void pa_stream_set_state(pa_stream *s, pa_stream_state_t st);

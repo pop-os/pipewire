@@ -99,9 +99,11 @@ struct port {
 	struct spa_port_info info;
 	struct pw_properties *properties;
 
-	unsigned int removed:1;
 	uint32_t n_params;
 	struct spa_pod **params;
+
+	unsigned int removed:1;
+	unsigned int destroyed:1;
 
 	struct mix mix[MAX_MIX+1];
 };
@@ -658,7 +660,8 @@ static int do_port_set_io(struct impl *impl,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, data, size);
 
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+	if (!CHECK_PORT(this, direction, port_id))
+		return data == NULL ? 0 : -EINVAL;
 
 	port = GET_PORT(this, direction, port_id);
 
@@ -746,6 +749,9 @@ do_port_use_buffers(struct impl *impl,
 
 	if (this->resource == NULL)
 		return n_buffers == 0 ? 0 : -EIO;
+
+	if (p->destroyed)
+		return 0;
 
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b = &mix->buffers[i];
@@ -960,6 +966,7 @@ client_node_port_update(void *data,
 	port = GET_PORT(this, direction, port_id);
 
 	if (remove) {
+		port->destroyed = true;
 		clear_port(this, port);
 	} else {
 		struct port *target;
@@ -1320,8 +1327,7 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 
 	mix->io = SPA_MEMBER(impl->io_areas->map->ptr,
 			mix->id * sizeof(struct spa_io_buffers), void);
-	mix->io->buffer_id = SPA_ID_INVALID;
-	mix->io->status = SPA_STATUS_NEED_DATA;
+	*mix->io = SPA_IO_BUFFERS_INIT;
 
 	pw_log_debug(NAME " %p: init mix io %d %p %p", impl, mix->id, mix->io,
 			impl->io_areas->map->ptr);

@@ -682,10 +682,10 @@ static void do_quit(void *data, int signal_number)
 static void show_help(const char *name)
 {
         fprintf(stdout, "%s [options]\n"
-             "  -h, --help                            Show this help\n"
-             "  -v, --version                         Show version\n"
-             "  -r, --remote                          Remote daemon name\n",
-	     name);
+		"  -h, --help                            Show this help\n"
+		"      --version                         Show version\n"
+		"  -r, --remote                          Remote daemon name\n",
+		name);
 }
 
 int main(int argc, char *argv[])
@@ -694,21 +694,21 @@ int main(int argc, char *argv[])
 	struct pw_loop *l;
 	const char *opt_remote = NULL;
 	static const struct option long_options[] = {
-		{"help",	0, NULL, 'h'},
-		{"version",	0, NULL, 'v'},
-		{"remote",	1, NULL, 'r'},
-		{NULL,		0, NULL, 0}
+		{ "help",	no_argument,		NULL, 'h' },
+		{ "version",	no_argument,		NULL, 'V' },
+		{ "remote",	required_argument,	NULL, 'r' },
+		{ NULL,	0, NULL, 0}
 	};
 	int c;
 
 	pw_init(&argc, &argv);
 
-	while ((c = getopt_long(argc, argv, "hvr:", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVr:", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			show_help(argv[0]);
 			return 0;
-		case 'v':
+		case 'V':
 			fprintf(stdout, "%s\n"
 				"Compiled with libpipewire %s\n"
 				"Linked with libpipewire %s\n",
@@ -720,21 +720,26 @@ int main(int argc, char *argv[])
 			opt_remote = optarg;
 			break;
 		default:
+			show_help(argv[0]);
 			return -1;
 		}
 	}
 
 	data.loop = pw_main_loop_new(NULL);
-	if (data.loop == NULL)
+	if (data.loop == NULL) {
+		fprintf(stderr, "can't create main loop: %m\n");
 		return -1;
+	}
 
 	l = pw_main_loop_get_loop(data.loop);
 	pw_loop_add_signal(l, SIGINT, do_quit, &data);
 	pw_loop_add_signal(l, SIGTERM, do_quit, &data);
 
 	data.context = pw_context_new(l, NULL, 0);
-	if (data.context == NULL)
+	if (data.context == NULL) {
+		fprintf(stderr, "can't create context: %m\n");
 		return -1;
+	}
 
 	spa_list_init(&data.pending_list);
 
@@ -743,8 +748,10 @@ int main(int argc, char *argv[])
 				PW_KEY_REMOTE_NAME, opt_remote,
 				NULL),
 			0);
-	if (data.core == NULL)
+	if (data.core == NULL) {
+		fprintf(stderr, "can't connect: %m\n");
 		return -1;
+	}
 
 	pw_core_add_listener(data.core,
 				   &data.core_listener,

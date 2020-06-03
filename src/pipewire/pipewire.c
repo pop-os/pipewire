@@ -172,6 +172,11 @@ static const struct spa_handle_factory *find_factory(struct plugin *plugin, cons
 				break;
                         goto out;
                 }
+		if (factory->version < 1) {
+			pw_log_warn("factory version %d < 1 not supported",
+					factory->version);
+			continue;
+		}
                 if (strcmp(factory->name, factory_name) == 0)
                         return factory;
 	}
@@ -351,7 +356,7 @@ SPA_EXPORT
 void pw_init(int *argc, char **argv[])
 {
 	const char *str;
-	struct spa_dict_item items[4];
+	struct spa_dict_item items[5];
 	uint32_t n_items;
 	struct spa_dict info;
 	struct support *support = &global_support;
@@ -380,6 +385,7 @@ void pw_init(int *argc, char **argv[])
 	n_items = 0;
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "true");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LINE, "true");
 	snprintf(level, sizeof(level), "%d", pw_log_level);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LEVEL, level);
 	if ((str = getenv("PIPEWIRE_LOG")) != NULL)

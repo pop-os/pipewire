@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2019 Collabora Ltd.
+ * Copyright © 2020 Collabora Ltd.
  *   @author George Kiagiadakis <george.kiagiadakis@collabora.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -23,40 +23,84 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <stdbool.h>
-#include <string.h>
-
 #include <pipewire/impl.h>
 #include <extensions/session-manager.h>
+#include <extensions/session-manager/introspect-funcs.h>
 
+#include <spa/utils/result.h>
+#include <spa/pod/builder.h>
 #include <spa/pod/filter.h>
 
-#include "endpoint-stream.h"
-#include "client-endpoint.h"
+#define MAX_PARAMS 32
 
 #define NAME "endpoint-stream"
 
-struct resource_data {
-	struct endpoint_stream *stream;
+struct pw_proxy *pw_core_endpoint_stream_export(struct pw_core *core,
+		const char *type, const struct spa_dict *props, void *object,
+		size_t user_data_size);
+
+struct impl
+{
+	struct pw_global *global;
+	struct spa_hook global_listener;
+
+	union {
+		struct pw_endpoint_stream *stream;
+		struct pw_resource *resource;
+	};
+	struct spa_hook resource_listener;
+	struct spa_hook stream_listener;
+
+	struct pw_endpoint_stream_info *cached_info;
+	struct spa_list cached_params;
+
+	int ping_seq;
+	bool registered;
+};
+
+struct param_data
+{
+	struct spa_list link;
+	uint32_t id;
+	struct pw_array params;
+};
+
+struct resource_data
+{
+	struct impl *impl;
+
+	struct pw_resource *resource;
 	struct spa_hook object_listener;
+
 	uint32_t n_subscribe_ids;
 	uint32_t subscribe_ids[32];
 };
 
-#define pw_endpoint_stream_resource(r,m,v,...)	\
-	pw_resource_call(r,struct pw_endpoint_stream_events,m,v,__VA_ARGS__)
-#define pw_endpoint_stream_resource_info(r,...)	\
-	pw_endpoint_stream_resource(r,info,0,__VA_ARGS__)
-#define pw_endpoint_stream_resource_param(r,...)	\
-	pw_endpoint_stream_resource(r,param,0,__VA_ARGS__)
-
-static int endpoint_stream_enum_params (void *object, int seq,
-				uint32_t id, uint32_t start, uint32_t num,
-				const struct spa_pod *filter)
+struct factory_data
 {
-	struct pw_resource *resource = object;
-	struct resource_data *data = pw_resource_get_user_data(resource);
-	struct endpoint_stream *this = data->stream;
+	struct pw_impl_factory *this;
+
+	struct pw_impl_module *module;
+	struct spa_hook module_listener;
+
+	struct pw_export_type export;
+};
+
+#define pw_endpoint_stream_resource(r,m,v,...)      \
+	pw_resource_call(r,struct pw_endpoint_stream_events,m,v,__VA_ARGS__)
+
+#define pw_endpoint_stream_resource_info(r,...)        \
+        pw_endpoint_stream_resource(r,info,0,__VA_ARGS__)
+#define pw_endpoint_stream_resource_param(r,...)        \
+        pw_endpoint_stream_resource(r,param,0,__VA_ARGS__)
+
+static int method_enum_params(void *object, int seq,
+			uint32_t id, uint32_t start, uint32_t num,
+			const struct spa_pod *filter)
+{
+	struct resource_data *d = object;
+	struct impl *impl = d->impl;
+	struct param_data *pdata;
 	struct spa_pod *result;
 	struct spa_pod *param;
 	uint8_t buffer[1024];
@@ -65,274 +109,432 @@ static int endpoint_stream_enum_params (void *object, int seq,
 	uint32_t next = start;
 	uint32_t count = 0;
 
-	while (true) {
-		index = next++;
-		if (index >= this->n_params)
-			break;
+	pw_log_debug(NAME" %p: param %u %d/%d", impl, id, start, num);
 
-		param = this->params[index];
-
-		if (param == NULL || !spa_pod_is_object_id(param, id))
+	spa_list_for_each(pdata, &impl->cached_params, link) {
+		if (pdata->id != id)
 			continue;
 
-		spa_pod_builder_init(&b, buffer, sizeof(buffer));
-		if (spa_pod_filter(&b, &result, param, filter) != 0)
-			continue;
+		while (true) {
+			index = next++;
+			if (index >= pw_array_get_len(&pdata->params, void*))
+				return 0;
 
-		pw_log_debug(NAME" %p: %d param %u", this, seq, index);
+			param = *pw_array_get_unchecked(&pdata->params, index, struct spa_pod*);
 
-		pw_endpoint_stream_resource_param(resource, seq, id, index, next, result);
+			spa_pod_builder_init(&b, buffer, sizeof(buffer));
+			if (spa_pod_filter(&b, &result, param, filter) != 0)
+				continue;
 
-		if (++count == num)
-			break;
+			pw_log_debug(NAME" %p: %d param %u", impl, seq, index);
+
+			pw_endpoint_stream_resource_param(d->resource, seq, id, index, next, result);
+
+			if (++count == num)
+				return 0;
+		}
 	}
+
 	return 0;
 }
 
-static int endpoint_stream_subscribe_params (void *object, uint32_t *ids, uint32_t n_ids)
+static int method_subscribe_params(void *object, uint32_t *ids, uint32_t n_ids)
 {
-	struct pw_resource *resource = object;
-	struct resource_data *data = pw_resource_get_user_data(resource);
+	struct resource_data *d = object;
+	struct impl *impl = d->impl;
 	uint32_t i;
 
-	n_ids = SPA_MIN(n_ids, SPA_N_ELEMENTS(data->subscribe_ids));
-	data->n_subscribe_ids = n_ids;
+	n_ids = SPA_MIN(n_ids, SPA_N_ELEMENTS(d->subscribe_ids));
+	d->n_subscribe_ids = n_ids;
 
 	for (i = 0; i < n_ids; i++) {
-		data->subscribe_ids[i] = ids[i];
+		d->subscribe_ids[i] = ids[i];
 		pw_log_debug(NAME" %p: resource %d subscribe param %u",
-			data->stream, pw_resource_get_id(resource), ids[i]);
-		endpoint_stream_enum_params(resource, 1, ids[i], 0, UINT32_MAX, NULL);
+			impl, pw_resource_get_id(d->resource), ids[i]);
+		method_enum_params(object, 1, ids[i], 0, UINT32_MAX, NULL);
 	}
 	return 0;
 }
 
-static int endpoint_stream_set_param (void *object, uint32_t id, uint32_t flags,
-				const struct spa_pod *param)
+static int method_set_param(void *object, uint32_t id, uint32_t flags,
+			  const struct spa_pod *param)
 {
-	struct pw_resource *resource = object;
-	struct resource_data *data = pw_resource_get_user_data(resource);
-	struct endpoint_stream *this = data->stream;
+	struct resource_data *d = object;
+	struct impl *impl = d->impl;
+	/* store only on the implementation; our cache will be updated
+	   by the param event, since we are subscribed */
+	pw_endpoint_stream_set_param(impl->stream, id, flags, param);
+	return 0;
+}
 
-	pw_client_endpoint_resource_set_param(this->client_ep->resource,
-						id, flags, param);
+static const struct pw_endpoint_stream_methods stream_methods = {
+	PW_VERSION_ENDPOINT_STREAM_METHODS,
+	.subscribe_params = method_subscribe_params,
+	.enum_params = method_enum_params,
+	.set_param = method_set_param,
+};
+
+static int global_bind(void *_data, struct pw_impl_client *client,
+		uint32_t permissions, uint32_t version, uint32_t id)
+{
+	struct impl *impl = _data;
+	struct pw_resource *resource;
+	struct resource_data *data;
+
+	resource = pw_resource_new(client, id, permissions,
+				PW_TYPE_INTERFACE_EndpointStream,
+				version, sizeof(*data));
+	if (resource == NULL)
+		return -errno;
+
+	data = pw_resource_get_user_data(resource);
+	data->impl = impl;
+	data->resource = resource;
+
+	pw_global_add_resource(impl->global, resource);
+
+	/* resource methods -> implemention */
+	pw_resource_add_object_listener(resource,
+			&data->object_listener,
+			&stream_methods, data);
+
+	pw_endpoint_stream_resource_info(resource, impl->cached_info);
 
 	return 0;
 }
 
-static const struct pw_endpoint_stream_methods methods = {
-	PW_VERSION_ENDPOINT_STREAM_METHODS,
-	.subscribe_params = endpoint_stream_subscribe_params,
-	.enum_params = endpoint_stream_enum_params,
-	.set_param = endpoint_stream_set_param,
+static void global_destroy(void *data)
+{
+	struct impl *impl = data;
+	spa_hook_remove(&impl->global_listener);
+	impl->global = NULL;
+	if (impl->resource)
+		pw_resource_destroy(impl->resource);
+}
+
+static const struct pw_global_events global_events = {
+	PW_VERSION_GLOBAL_EVENTS,
+	.destroy = global_destroy,
 };
 
-struct emit_param_data {
-	struct endpoint_stream *this;
-	struct spa_pod *param;
-	uint32_t id;
-	uint32_t index;
-	uint32_t next;
+static void impl_resource_destroy(void *data)
+{
+	struct impl *impl = data;
+	struct param_data *pdata, *tmp;
+
+	spa_hook_remove(&impl->resource_listener);
+	impl->resource = NULL;
+
+	/* clear cache */
+	if (impl->cached_info)
+		pw_endpoint_stream_info_free(impl->cached_info);
+	spa_list_for_each_safe(pdata, tmp, &impl->cached_params, link) {
+		struct spa_pod **pod;
+		pw_array_for_each(pod, &pdata->params)
+			free(*pod);
+		pw_array_clear(&pdata->params);
+		spa_list_remove(&pdata->link);
+		free(pdata);
+	}
+
+	if (impl->global)
+		pw_global_destroy(impl->global);
+}
+
+static void register_global(struct impl *impl)
+{
+	impl->cached_info->id = pw_global_get_id (impl->global);
+	pw_resource_set_bound_id(impl->resource, impl->cached_info->id);
+	pw_global_register(impl->global);
+	impl->registered = true;
+}
+
+static void impl_resource_pong (void *data, int seq)
+{
+	struct impl *impl = data;
+
+	/* complete registration, if this was the initial sync */
+	if (!impl->registered && seq == impl->ping_seq) {
+		register_global(impl);
+	}
+}
+
+static const struct pw_resource_events impl_resource_events = {
+	PW_VERSION_RESOURCE_EVENTS,
+	.destroy = impl_resource_destroy,
+	.pong = impl_resource_pong,
+};
+
+static int emit_info(void *data, struct pw_resource *resource)
+{
+	const struct pw_endpoint_stream_info *info = data;
+	pw_endpoint_stream_resource_info(resource, info);
+	return 0;
+}
+
+static void event_info(void *object, const struct pw_endpoint_stream_info *info)
+{
+	struct impl *impl = object;
+	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
+	uint32_t i;
+
+	/* figure out changes to params */
+	if (info->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_PARAMS) {
+		for (i = 0; i < info->n_params; i++) {
+			if ((!impl->cached_info ||
+				info->params[i].flags != impl->cached_info->params[i].flags)
+			    && info->params[i].flags & SPA_PARAM_INFO_READ)
+				changed_ids[n_changed_ids++] = info->params[i].id;
+		}
+	}
+
+	/* cache for new clients */
+	impl->cached_info = pw_endpoint_stream_info_update (impl->cached_info, info);
+
+	/* notify existing clients */
+	pw_global_for_each_resource(impl->global, emit_info, (void*) info);
+
+	/* cache params & register */
+	if (n_changed_ids > 0) {
+		/* prepare params storage */
+		for (i = 0; i < n_changed_ids; i++) {
+			struct param_data *pdata = calloc(1, sizeof(struct param_data));
+			pdata->id = changed_ids[i];
+			pw_array_init(&pdata->params, sizeof(void*));
+			spa_list_append(&impl->cached_params, &pdata->link);
+		}
+
+		/* subscribe to impl */
+		pw_endpoint_stream_subscribe_params(impl->stream, changed_ids, n_changed_ids);
+
+		/* register asynchronously on the pong event */
+		impl->ping_seq = pw_resource_ping(impl->resource, 0);
+	}
+	else if (!impl->registered) {
+		register_global(impl);
+	}
+}
+
+struct param_event_args
+{
+	uint32_t id, index, next;
+	const struct spa_pod *param;
 };
 
 static int emit_param(void *_data, struct pw_resource *resource)
 {
-	struct emit_param_data *d = _data;
+	struct param_event_args *args = _data;
 	struct resource_data *data;
 	uint32_t i;
 
 	data = pw_resource_get_user_data(resource);
 	for (i = 0; i < data->n_subscribe_ids; i++) {
-		if (data->subscribe_ids[i] == d->id) {
+		if (data->subscribe_ids[i] == args->id) {
 			pw_endpoint_stream_resource_param(resource, 1,
-				d->id, d->index, d->next, d->param);
+				args->id, args->index, args->next, args->param);
 		}
 	}
 	return 0;
 }
 
-static void endpoint_stream_notify_subscribed(struct endpoint_stream *this,
-					uint32_t index, uint32_t next)
+static void event_param(void *object, int seq,
+		       uint32_t id, uint32_t index, uint32_t next,
+		       const struct spa_pod *param)
 {
-	struct pw_global *global = this->global;
-	struct emit_param_data data;
-	struct spa_pod *param = this->params[index];
+	struct impl *impl = object;
+	struct param_data *pdata;
+	struct spa_pod **pod;
+	struct param_event_args args = { id, index, next, param };
 
-	if (!param || !spa_pod_is_object (param))
-		return;
+	/* cache for new requests */
+	spa_list_for_each(pdata, &impl->cached_params, link) {
+		if (pdata->id != id)
+			continue;
 
-	data.this = this;
-	data.param = param;
-	data.id = SPA_POD_OBJECT_ID (param);
-	data.index = index;
-	data.next = next;
-
-	pw_global_for_each_resource(global, emit_param, &data);
-}
-
-static int emit_info(void *data, struct pw_resource *resource)
-{
-	struct endpoint_stream *this = data;
-	pw_endpoint_stream_resource_info(resource, &this->info);
-	return 0;
-}
-
-int endpoint_stream_update(struct endpoint_stream *this,
-			uint32_t change_mask,
-			uint32_t n_params,
-			const struct spa_pod **params,
-			const struct pw_endpoint_stream_info *info)
-{
-	if (change_mask & PW_CLIENT_ENDPOINT_UPDATE_PARAMS) {
-		uint32_t i;
-		size_t size = n_params * sizeof(struct spa_pod *);
-
-		pw_log_debug(NAME" %p: update %d params", this, n_params);
-
-		for (i = 0; i < this->n_params; i++)
-			free(this->params[i]);
-		this->params = realloc(this->params, size);
-		if (size > 0 && !this->params) {
-			this->n_params = 0;
-			goto no_mem;
+		if (!pw_array_check_index(&pdata->params, index, void*)) {
+			while (pw_array_get_len(&pdata->params, void*) <= index)
+				pw_array_add_ptr(&pdata->params, NULL);
 		}
-		this->n_params = n_params;
 
-		for (i = 0; i < this->n_params; i++) {
-			this->params[i] = params[i] ? spa_pod_copy(params[i]) : NULL;
-			endpoint_stream_notify_subscribed(this, i, i+1);
-		}
+		pod = pw_array_get_unchecked(&pdata->params, index, struct spa_pod*);
+		free(*pod);
+		*pod = spa_pod_copy(param);
 	}
 
-	if (change_mask & PW_CLIENT_ENDPOINT_UPDATE_INFO) {
-		if (info->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_LINK_PARAMS) {
-			free(this->info.link_params);
-			this->info.link_params = spa_pod_copy(info->link_params);
-		}
+	/* notify existing clients */
+	pw_global_for_each_resource(impl->global, emit_param, &args);
+}
 
-		if (info->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_PROPS)
-			pw_properties_update(this->props, info->props);
+static const struct pw_endpoint_stream_events stream_events = {
+	PW_VERSION_ENDPOINT_STREAM_EVENTS,
+	.info = event_info,
+	.param = event_param,
+};
 
-		if (info->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_PARAMS) {
-			size_t size = info->n_params * sizeof(struct spa_param_info);
+static void *stream_new(struct pw_context *context,
+			  struct pw_resource *resource,
+			  struct pw_properties *properties)
+{
+	struct impl *impl;
 
-			this->info.params = realloc(this->info.params, size);
-			if (size > 0 && !this->info.params) {
-				this->info.n_params = 0;
-				goto no_mem;
-			}
-			this->info.n_params = info->n_params;
-
-			memcpy(this->info.params, info->params, size);
-		}
-
-		if (!this->info.name)
-			this->info.name = info->name ? strdup(info->name) : NULL;
-
-		this->info.change_mask = info->change_mask;
-		pw_global_for_each_resource(this->global, emit_info, this);
-		this->info.change_mask = 0;
+	impl = calloc(1, sizeof(*impl));
+	if (impl == NULL) {
+		pw_properties_free(properties);
+		return NULL;
 	}
 
-	return 0;
-
-      no_mem:
-	pw_log_error(NAME" can't update: no memory");
-	pw_resource_error(this->client_ep->resource, -ENOMEM,
-			NAME" can't update: no memory");
-	return -ENOMEM;
-}
-
-static int endpoint_stream_bind(void *_data, struct pw_impl_client *client,
-			uint32_t permissions, uint32_t version, uint32_t id)
-{
-	struct endpoint_stream *this = _data;
-	struct pw_global *global = this->global;
-	struct pw_resource *resource;
-	struct resource_data *data;
-
-	resource = pw_resource_new(client, id, permissions,
-			pw_global_get_type(global), version, sizeof(*data));
-	if (resource == NULL)
-		goto no_mem;
-
-	data = pw_resource_get_user_data(resource);
-	data->stream = this;
-	pw_resource_add_object_listener(resource, &data->object_listener,
-					&methods, resource);
-
-	pw_log_debug(NAME" %p: bound to %d", this, pw_resource_get_id(resource));
-	pw_global_add_resource(global, resource);
-
-	this->info.change_mask = PW_ENDPOINT_STREAM_CHANGE_MASK_ALL;
-	pw_endpoint_stream_resource_info(resource, &this->info);
-	this->info.change_mask = 0;
-
-	return 0;
-
-      no_mem:
-	pw_log_error(NAME" can't create resource: no memory");
-	pw_resource_error(this->client_ep->resource, -ENOMEM,
-			NAME" can't create resource: no memory");
-	return -ENOMEM;
-}
-
-int endpoint_stream_init(struct endpoint_stream *this,
-		uint32_t id, uint32_t endpoint_id,
-		struct client_endpoint *client_ep,
-		struct pw_context *context,
-		struct pw_properties *properties)
-{
-	pw_log_debug(NAME" %p: new", this);
-
-	this->client_ep = client_ep;
-	this->id = id;
-	this->props = properties;
-
-	pw_properties_setf(properties, PW_KEY_ENDPOINT_ID, "%u", endpoint_id);
-
-	properties = pw_properties_copy(properties);
-	if (!properties)
-		goto no_mem;
-
-	this->global = pw_global_new (context,
+	impl->global = pw_global_new(context,
 			PW_TYPE_INTERFACE_EndpointStream,
 			PW_VERSION_ENDPOINT_STREAM,
-			properties, endpoint_stream_bind, this);
-	if (!this->global)
-		goto no_mem;
+			properties,
+			global_bind, impl);
+	if (impl->global == NULL) {
+		free(impl);
+		return NULL;
+	}
+	impl->resource = resource;
 
-	pw_properties_setf(this->props, PW_KEY_OBJECT_ID, "%u",
-			pw_global_get_id(this->global));
+	spa_list_init(&impl->cached_params);
 
-	this->info.version = PW_VERSION_ENDPOINT_STREAM_INFO;
-	this->info.id = pw_global_get_id(this->global);
-	this->info.endpoint_id = endpoint_id;
-	this->info.props = &this->props->dict;
+	/* handle destroy events */
+	pw_global_add_listener(impl->global,
+			&impl->global_listener,
+			&global_events, impl);
+	pw_resource_add_listener(impl->resource,
+			&impl->resource_listener,
+			&impl_resource_events, impl);
 
-	return pw_global_register(this->global);
+	/* handle implementation events -> cache + client resources */
+	pw_endpoint_stream_add_listener(impl->stream,
+			&impl->stream_listener,
+			&stream_events, impl);
 
-      no_mem:
-	pw_log_error(NAME" - can't create - out of memory");
-	return -ENOMEM;
+	/* global is not registered here on purpose;
+	   we first cache info + params and then expose the global */
+
+	return impl;
 }
 
-void endpoint_stream_clear(struct endpoint_stream *this)
+static void *create_object(void *data,
+			   struct pw_resource *resource,
+			   const char *type,
+			   uint32_t version,
+			   struct pw_properties *properties,
+			   uint32_t new_id)
 {
-	uint32_t i;
+	struct factory_data *d = data;
+	struct pw_resource *impl_resource;
+	struct pw_impl_client *client = pw_resource_get_client(resource);
+	void *result;
+	int res;
 
-	pw_log_debug(NAME" %p: destroy", this);
+	impl_resource = pw_resource_new(client, new_id, PW_PERM_RWX, type, version, 0);
+	if (impl_resource == NULL) {
+		res = -errno;
+		goto error_resource;
+	}
 
-	pw_global_destroy(this->global);
+	pw_resource_install_marshal(impl_resource, true);
 
-	for (i = 0; i < this->n_params; i++)
-		free(this->params[i]);
-	free(this->params);
+	if (properties == NULL)
+		properties = pw_properties_new(NULL, NULL);
+	if (properties == NULL) {
+		res = -ENOMEM;
+		goto error_stream;
+	}
 
-	free(this->info.name);
-	free(this->info.link_params);
-	free(this->info.params);
+	pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d",
+			pw_impl_client_get_info(client)->id);
+	pw_properties_setf(properties, PW_KEY_FACTORY_ID, "%d",
+			pw_impl_factory_get_info(d->this)->id);
 
-	if (this->props)
-		pw_properties_free(this->props);
+	result = stream_new(pw_impl_client_get_context(client), impl_resource, properties);
+	if (result == NULL) {
+		res = -errno;
+		goto error_stream;
+	}
+	return result;
+
+error_resource:
+	pw_log_error("can't create resource: %s", spa_strerror(res));
+	pw_resource_errorf_id(resource, new_id, res, "can't create resource: %s", spa_strerror(res));
+	goto error_exit;
+error_stream:
+	pw_log_error("can't create endpoint stream: %s", spa_strerror(res));
+	pw_resource_errorf_id(resource, new_id, res, "can't create endpoint stream: %s", spa_strerror(res));
+	goto error_exit_free;
+
+error_exit_free:
+	pw_resource_remove(impl_resource);
+error_exit:
+	errno = -res;
+	return NULL;
+}
+
+static const struct pw_impl_factory_implementation impl_factory = {
+	PW_VERSION_IMPL_FACTORY_IMPLEMENTATION,
+	.create_object = create_object,
+};
+
+static void module_destroy(void *data)
+{
+	struct factory_data *d = data;
+
+	spa_hook_remove(&d->module_listener);
+	spa_list_remove(&d->export.link);
+	pw_impl_factory_destroy(d->this);
+}
+
+static void module_registered(void *data)
+{
+	struct factory_data *d = data;
+	struct pw_impl_module *module = d->module;
+	struct pw_impl_factory *factory = d->this;
+	struct spa_dict_item items[1];
+	char id[16];
+	int res;
+
+	snprintf(id, sizeof(id), "%d", pw_impl_module_get_info(module)->id);
+	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_MODULE_ID, id);
+	pw_impl_factory_update_properties(factory, &SPA_DICT_INIT(items, 1));
+
+	if ((res = pw_impl_factory_register(factory, NULL)) < 0) {
+		pw_log_error(NAME" %p: can't register factory: %s", factory, spa_strerror(res));
+	}
+}
+
+static const struct pw_impl_module_events module_events = {
+	PW_VERSION_IMPL_MODULE_EVENTS,
+	.destroy = module_destroy,
+	.registered = module_registered,
+};
+
+int endpoint_stream_factory_init(struct pw_impl_module *module)
+{
+	struct pw_context *context = pw_impl_module_get_context(module);
+	struct pw_impl_factory *factory;
+	struct factory_data *data;
+
+	factory = pw_context_create_factory(context,
+				 "endpoint-stream",
+				 PW_TYPE_INTERFACE_EndpointStream,
+				 PW_VERSION_ENDPOINT_STREAM,
+				 NULL,
+				 sizeof(*data));
+	if (factory == NULL)
+		return -errno;
+
+	data = pw_impl_factory_get_user_data(factory);
+	data->this = factory;
+	data->module = module;
+
+	pw_impl_factory_set_implementation(factory, &impl_factory, data);
+
+	data->export.type = PW_TYPE_INTERFACE_EndpointStream;
+	data->export.func = pw_core_endpoint_stream_export;
+	pw_context_register_export_type(context, &data->export);
+
+	pw_impl_module_add_listener(module, &data->module_listener, &module_events, data);
+
+	return 0;
 }

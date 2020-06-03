@@ -47,10 +47,8 @@
 struct impl {
 	struct pw_impl_link this;
 
-	unsigned int prepare:1;
 	unsigned int io_set:1;
 	unsigned int activated:1;
-	unsigned int passive:1;
 
 	unsigned int output_destroyed:1;
 	unsigned int input_destroyed:1;
@@ -74,25 +72,6 @@ struct impl {
 
 /** \endcond */
 
-static void debug_link(struct pw_impl_link *link)
-{
-	struct pw_impl_node *in = link->input->node, *out = link->output->node;
-
-	pw_log_debug(NAME" %p: %d %d %d out %d %d %d , %d %d %d in %d %d %d", link,
-			out->n_used_input_links,
-			out->n_ready_input_links,
-			out->idle_used_input_links,
-			out->n_used_output_links,
-			out->n_ready_output_links,
-			out->idle_used_output_links,
-			in->n_used_input_links,
-			in->n_ready_input_links,
-			in->idle_used_input_links,
-			in->n_used_output_links,
-			in->n_ready_output_links,
-			in->idle_used_output_links);
-}
-
 static void info_changed(struct pw_impl_link *link)
 {
 	struct pw_resource *resource;
@@ -109,17 +88,21 @@ static void info_changed(struct pw_impl_link *link)
 static void pw_impl_link_update_state(struct pw_impl_link *link, enum pw_link_state state, char *error)
 {
 	enum pw_link_state old = link->info.state;
-	struct pw_impl_node *in = link->input->node, *out = link->output->node;
 
 	if (state == old)
 		return;
 
+	pw_log_debug(NAME" %p: %s -> %s (%s)", link,
+		     pw_link_state_as_string(old),
+		     pw_link_state_as_string(state), error);
+
 	if (state == PW_LINK_STATE_ERROR) {
-		pw_log_error(NAME" %p: update state %s -> error (%s)", link,
-		     pw_link_state_as_string(old), error);
+		pw_log_error("(%s) %s -> error (%s)", link->name,
+				pw_link_state_as_string(old), error);
 	} else {
-		pw_log_debug(NAME" %p: update state %s -> %s", link,
-		     pw_link_state_as_string(old), pw_link_state_as_string(state));
+		pw_log_info("(%s) %s -> %s", link->name,
+				pw_link_state_as_string(old),
+				pw_link_state_as_string(state));
 	}
 
 	link->info.state = state;
@@ -131,24 +114,14 @@ static void pw_impl_link_update_state(struct pw_impl_link *link, enum pw_link_st
 	link->info.change_mask |= PW_LINK_CHANGE_MASK_STATE;
 	info_changed(link);
 
-	debug_link(link);
-
 	if (old != PW_LINK_STATE_PAUSED && state == PW_LINK_STATE_PAUSED) {
-		if (++out->n_ready_output_links == out->n_used_output_links &&
-		    out->n_ready_input_links == out->n_used_input_links)
-			pw_impl_node_set_state(out, PW_NODE_STATE_RUNNING);
-		if (++in->n_ready_input_links == in->n_used_input_links &&
-		    in->n_ready_output_links == in->n_used_output_links)
-			pw_impl_node_set_state(in, PW_NODE_STATE_RUNNING);
-		pw_impl_link_activate(link);
-	}
-	else if (old == PW_LINK_STATE_PAUSED && state < PW_LINK_STATE_PAUSED) {
-		if (--out->n_ready_output_links == 0 &&
-		    out->n_ready_input_links == 0)
-			pw_impl_node_set_state(out, PW_NODE_STATE_IDLE);
-		if (--in->n_ready_input_links == 0 &&
-		    in->n_ready_output_links == 0)
-			pw_impl_node_set_state(in, PW_NODE_STATE_IDLE);
+		link->prepared = true;
+		link->preparing = false;
+		pw_context_recalc_graph(link->context, "link prepared");
+	} else if (old == PW_LINK_STATE_PAUSED && state < PW_LINK_STATE_PAUSED) {
+		link->prepared = false;
+		link->preparing = false;
+		pw_context_recalc_graph(link->context, "link unprepared");
 	}
 }
 
@@ -522,13 +495,16 @@ do_activate_link(struct spa_loop *loop,
 	spa_list_append(&this->input->rt.mix_list, &this->rt.in_mix.rt_link);
 
 	if (impl->inode != impl->onode) {
-		uint32_t required;
+		struct pw_node_activation_state *state;
 
 		this->rt.target.activation = impl->inode->rt.activation;
 		spa_list_append(&impl->onode->rt.target_list, &this->rt.target.link);
-		required = ++this->rt.target.activation->state[0].required;
-		pw_log_trace(NAME" %p: node:%p required:%d", this,
-				impl->inode, required);
+
+		state = &this->rt.target.activation->state[0];
+		state->required++;
+
+		pw_log_trace(NAME" %p: node:%p state:%p pending:%d/%d", this, impl->inode,
+				state, state->pending, state->required);
 	}
 	return 0;
 }
@@ -538,12 +514,11 @@ int pw_impl_link_activate(struct pw_impl_link *this)
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 	int res;
 
-	pw_log_debug(NAME" %p: activate %d %d", this, impl->activated, this->info.state);
+	pw_log_debug(NAME" %p: activate activated:%d state:%s", this, impl->activated,
+			pw_link_state_as_string(this->info.state));
 
-	if (impl->activated)
+	if (impl->activated || !this->prepared || !impl->inode->active || !impl->onode->active)
 		return 0;
-
-	pw_impl_link_prepare(this);
 
 	if (!impl->io_set) {
 		if ((res = port_set_io(this, this->output, SPA_IO_Buffers, this->io,
@@ -557,12 +532,12 @@ int pw_impl_link_activate(struct pw_impl_link *this)
 			return res;
 		impl->io_set = true;
 	}
+	pw_loop_invoke(this->output->node->data_loop,
+	       do_activate_link, SPA_ID_INVALID, NULL, 0, false, this);
 
-	if (this->info.state == PW_LINK_STATE_PAUSED) {
-		pw_loop_invoke(this->output->node->data_loop,
-		       do_activate_link, SPA_ID_INVALID, NULL, 0, false, this);
-		impl->activated = true;
-	}
+	impl->activated = true;
+	pw_log_info("(%s) activated", this->name);
+
 	return 0;
 }
 static void check_states(void *obj, void *user_data, int res, uint32_t id)
@@ -589,9 +564,9 @@ static void check_states(void *obj, void *user_data, int res, uint32_t id)
 
 	if (output->node->info.state == PW_NODE_STATE_ERROR ||
 	    input->node->info.state == PW_NODE_STATE_ERROR) {
-		pw_log_warn(NAME" %p: one of the nodes is in error out:%d in:%d", this,
-				output->node->info.state,
-				input->node->info.state);
+		pw_log_warn(NAME" %p: one of the nodes is in error out:%s in:%s", this,
+				pw_node_state_as_string(output->node->info.state),
+				pw_node_state_as_string(input->node->info.state));
 		return;
 	}
 
@@ -698,29 +673,18 @@ int pw_impl_link_prepare(struct pw_impl_link *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 
-	pw_log_debug(NAME" %p: prepare %d", this, impl->prepare);
+	pw_log_debug(NAME" %p: prepare prepared:%d busy:%d", this, this->prepared, this->preparing);
 
-	if (impl->prepare)
+	if (this->preparing || this->prepared)
 		return 0;
 
-	impl->prepare = true;
-
-	this->output->node->n_used_output_links++;
-	this->input->node->n_used_input_links++;
-
-	if (impl->passive) {
-		this->output->node->idle_used_output_links++;
-		this->input->node->idle_used_input_links++;
-	}
-
-	debug_link(this);
+	this->preparing = true;
 
 	pw_work_queue_add(impl->work,
 			  this, -EBUSY, (pw_work_func_t) check_states, this);
 
 	return 0;
 }
-
 
 static int
 do_deactivate_link(struct spa_loop *loop,
@@ -735,12 +699,14 @@ do_deactivate_link(struct spa_loop *loop,
 	spa_list_remove(&this->rt.in_mix.rt_link);
 
 	if (this->input->node != this->output->node) {
-		uint32_t required;
+		struct pw_node_activation_state *state;
 
 		spa_list_remove(&this->rt.target.link);
-		required = --this->rt.target.activation->state[0].required;
-		pw_log_trace(NAME" %p: node:%p required:%d", this,
-				impl->inode, required);
+		state = &this->rt.target.activation->state[0];
+		state->required--;
+
+		pw_log_trace(NAME" %p: node:%p state:%p pending:%d/%d", this, impl->inode,
+				state, state->pending, state->required);
 	}
 
 	return 0;
@@ -749,57 +715,23 @@ do_deactivate_link(struct spa_loop *loop,
 int pw_impl_link_deactivate(struct pw_impl_link *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
-	struct pw_impl_node *input_node, *output_node;
 
-	pw_log_debug(NAME" %p: deactivate %d %d", this, impl->prepare, impl->activated);
+	pw_log_debug(NAME" %p: deactivate activated:%d", this, impl->activated);
 
-	if (!impl->prepare)
+	if (!impl->activated)
 		return 0;
 
-	impl->prepare = false;
-	if (impl->activated) {
-		pw_loop_invoke(this->output->node->data_loop,
-			       do_deactivate_link, SPA_ID_INVALID, NULL, 0, true, this);
+	pw_loop_invoke(this->output->node->data_loop,
+		       do_deactivate_link, SPA_ID_INVALID, NULL, 0, true, this);
 
-		port_set_io(this, this->output, SPA_IO_Buffers, NULL, 0,
-				&this->rt.out_mix, impl->output_destroyed);
-		port_set_io(this, this->input, SPA_IO_Buffers, NULL, 0,
-				&this->rt.in_mix, impl->input_destroyed);
+	port_set_io(this, this->output, SPA_IO_Buffers, NULL, 0,
+			&this->rt.out_mix, impl->output_destroyed);
+	port_set_io(this, this->input, SPA_IO_Buffers, NULL, 0,
+			&this->rt.in_mix, impl->input_destroyed);
 
-		impl->io_set = false;
-		impl->activated = false;
-	}
-
-	output_node = this->output->node;
-	input_node = this->input->node;
-
-	output_node->n_used_output_links--;
-	input_node->n_used_input_links--;
-
-	if (impl->passive) {
-		output_node->idle_used_output_links--;
-		input_node->idle_used_input_links--;
-	}
-
-	debug_link(this);
-
-	if (input_node->n_used_input_links <= input_node->idle_used_input_links &&
-	    input_node->n_used_output_links <= input_node->idle_used_output_links &&
-	    input_node->info.state > PW_NODE_STATE_IDLE) {
-		pw_impl_node_set_state(input_node, PW_NODE_STATE_IDLE);
-		pw_log_debug(NAME" %p: input port %p state %d -> %d", this,
-				this->input, this->input->state, PW_IMPL_PORT_STATE_PAUSED);
-	}
-
-	if (output_node->n_used_input_links <= output_node->idle_used_input_links &&
-	    output_node->n_used_output_links <= output_node->idle_used_output_links &&
-	    output_node->info.state > PW_NODE_STATE_IDLE) {
-		pw_impl_node_set_state(output_node, PW_NODE_STATE_IDLE);
-		pw_log_debug(NAME" %p: output port %p state %d -> %d", this,
-				this->output, this->output->state, PW_IMPL_PORT_STATE_PAUSED);
-	}
-
-	pw_impl_link_update_state(this, PW_LINK_STATE_INIT, NULL);
+	impl->io_set = false;
+	impl->activated = false;
+	pw_log_info("(%s) deactivated", this->name);
 
 	return 0;
 }
@@ -833,11 +765,17 @@ error_resource:
 static void port_state_changed(struct pw_impl_link *this, struct pw_impl_port *port, struct pw_impl_port *other,
 			enum pw_impl_port_state state, const char *error)
 {
+	pw_log_debug(NAME" %p: port state %d", this, state);
 	switch (state) {
 	case PW_IMPL_PORT_STATE_ERROR:
 		pw_impl_link_update_state(this, PW_LINK_STATE_ERROR, error ? strdup(error) : NULL);
 		break;
 	default:
+		if (state < PW_IMPL_PORT_STATE_PAUSED && this->prepared) {
+			this->preparing = false;
+			this->prepared = false;
+			pw_impl_link_update_state(this, PW_LINK_STATE_INIT, NULL);
+		}
 		break;
 	}
 }
@@ -892,18 +830,29 @@ static void output_node_result(void *data, int seq, int res, uint32_t type, cons
 	struct pw_impl_port *port = impl->this.output;
 	pw_log_trace(NAME" %p: output port %p result seq:%d res:%d type:%u",
 			impl, port, seq, res, type);
-
 	node_result(impl, port, seq, res, type, result);
+}
+
+static void node_active_changed(void *data, bool active)
+{
+	struct impl *impl = data;
+	struct pw_impl_link *this = &impl->this;
+	pw_log_debug(NAME" %p: input active:%d output active:%d", impl,
+			impl->inode->active, impl->onode->active);
+	if (impl->inode->active && impl->onode->active)
+		pw_impl_link_prepare(this);
 }
 
 static const struct pw_impl_node_events input_node_events = {
 	PW_VERSION_IMPL_NODE_EVENTS,
 	.result = input_node_result,
+	.active_changed = node_active_changed,
 };
 
 static const struct pw_impl_node_events output_node_events = {
 	PW_VERSION_IMPL_NODE_EVENTS,
 	.result = output_node_result,
+	.active_changed = node_active_changed,
 };
 
 static bool pw_impl_node_can_reach(struct pw_impl_node *output, struct pw_impl_node *input)
@@ -1040,7 +989,6 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	struct impl *impl;
 	struct pw_impl_link *this;
 	struct pw_impl_node *input_node, *output_node;
-	const char *str;
 	int res;
 
 	if (output == input)
@@ -1084,10 +1032,6 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	this->output = output;
 	this->input = input;
 
-	/* passive means that this link does not make the nodes active */
-	if ((str = pw_properties_get(properties, PW_KEY_LINK_PASSIVE)) != NULL)
-		impl->passive = pw_properties_parse_bool(str);
-
 	spa_hook_list_init(&this->listener_list);
 
 	impl->format_filter = format_filter;
@@ -1101,8 +1045,8 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	input_node->live = output_node->live;
 
-	pw_log_debug(NAME" %p: output node %p live %d, passive %d, feedback %d",
-			this, output_node, output_node->live, impl->passive, this->feedback);
+	pw_log_debug(NAME" %p: output node %p live %d, feedback %d",
+			this, output_node, output_node->live, this->feedback);
 
 	spa_list_append(&output->links, &this->output_link);
 	spa_list_append(&input->links, &this->input_link);
@@ -1134,14 +1078,17 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 		     output_node, output->port_id, this->rt.out_mix.port.port_id,
 		     input_node, input->port_id, this->rt.in_mix.port.port_id);
 
+	asprintf(&this->name, "%d.%d -> %d.%d",
+			output_node->info.id, output->port_id,
+			input_node->info.id, input->port_id);
+	pw_log_info("(%s) (%s) -> (%s)", this->name, output_node->name, input_node->name);
+
 	pw_impl_port_emit_link_added(output, this);
 	pw_impl_port_emit_link_added(input, this);
 
 	try_link_controls(impl, output, input);
 
 	pw_impl_node_emit_peer_added(output_node, input_node);
-
-	pw_context_recalc_graph(context);
 
 	return this;
 
@@ -1246,11 +1193,7 @@ int pw_impl_link_register(struct pw_impl_link *link,
 	pw_global_add_listener(link->global, &link->global_listener, &global_events, link);
 	pw_global_register(link->global);
 
-	debug_link(link);
-
-	if ((input_node->n_used_input_links >= input_node->idle_used_input_links ||
-	    output_node->n_used_output_links >= output_node->idle_used_output_links) &&
-	    input_node->active && output_node->active)
+	if (input_node->active && output_node->active)
 		pw_impl_link_prepare(link);
 
 	return 0;
@@ -1267,6 +1210,7 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 	struct impl *impl = SPA_CONTAINER_OF(link, struct impl, this);
 
 	pw_log_debug(NAME" %p: destroy", impl);
+	pw_log_info("(%s) destroy", link->name);
 	pw_impl_link_emit_destroy(link);
 
 	pw_impl_link_deactivate(link);
@@ -1293,8 +1237,7 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 
 	pw_properties_free(link->properties);
 
-	pw_context_recalc_graph(link->context);
-
+	free(link->name);
 	free(link->info.format);
 	free(impl);
 }

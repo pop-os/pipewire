@@ -235,6 +235,7 @@ pw_core_resource_errorf(struct pw_resource *resource, uint32_t id, int seq,
 #define pw_context_driver_emit_xrun(c,n)	pw_context_driver_emit(c, xrun, 0, n)
 #define pw_context_driver_emit_incomplete(c,n)	pw_context_driver_emit(c, incomplete, 0, n)
 #define pw_context_driver_emit_timeout(c,n)	pw_context_driver_emit(c, timeout, 0, n)
+#define pw_context_driver_emit_drained(c,n)	pw_context_driver_emit(c, drained, 0, n)
 
 struct pw_context_driver_events {
 #define PW_VERSION_CONTEXT_DRIVER_EVENTS	0
@@ -248,6 +249,8 @@ struct pw_context_driver_events {
 	void (*incomplete) (void *data, struct pw_impl_node *node);
 	/** The driver got a sync timeout */
 	void (*timeout) (void *data, struct pw_impl_node *node);
+	/** a node drained */
+	void (*drained) (void *data, struct pw_impl_node *node);
 };
 
 #define pw_registry_resource(r,m,v,...) pw_resource_call(r, struct pw_registry_events,m,v,##__VA_ARGS__)
@@ -386,7 +389,7 @@ struct pw_impl_module {
 };
 
 struct pw_node_activation_state {
-	int status;			/**< current status */
+	int status;                     /**< current status, the result of spa_node_process() */
 	int32_t required;		/**< required number of signals */
 	int32_t pending;		/**< number of pending signals */
 };
@@ -540,20 +543,11 @@ struct pw_impl_node {
 	struct spa_list output_ports;		/**< list of output ports */
 	struct pw_map output_port_map;		/**< map from port_id to port */
 
-	uint32_t n_used_input_links;		/**< number of active input links */
-	uint32_t idle_used_input_links;		/**< number of active input to be idle */
-	uint32_t n_ready_input_links;		/**< number of ready input links */
-
-	uint32_t n_used_output_links;		/**< number of active output links */
-	uint32_t idle_used_output_links;	/**< number of active output to be idle */
-	uint32_t n_ready_output_links;		/**< number of ready output links */
-
 	struct spa_hook_list listener_list;
 
 	struct pw_loop *data_loop;		/**< the data loop for this node */
 
 	uint32_t quantum_size;			/**< desired quantum */
-	uint32_t quantum_current;		/**< current quantum for driver */
 	struct spa_source source;		/**< source to remotely trigger this node */
 	struct pw_memblock *activation;
 	struct {
@@ -630,7 +624,7 @@ struct pw_impl_port {
 	struct spa_hook global_listener;
 
 #define PW_IMPL_PORT_FLAG_TO_REMOVE		(1<<0)		/**< if the port should be removed from the
-							  *  implementation when destroyed */
+								  *  implementation when destroyed */
 #define PW_IMPL_PORT_FLAG_BUFFERS		(1<<1)		/**< port has data */
 #define PW_IMPL_PORT_FLAG_CONTROL		(1<<2)		/**< port has control */
 #define PW_IMPL_PORT_FLAG_NO_MIXER		(1<<3)		/**< don't try to add mixer to port */
@@ -659,7 +653,7 @@ struct pw_impl_port {
 	struct spa_callbacks impl;
 
 	struct spa_node *mix;		/**< port buffer mix/split */
-#define PW_IMPL_PORT_MIX_FLAG_MULTI		(1<<0)	/**< multi input or output */
+#define PW_IMPL_PORT_MIX_FLAG_MULTI	(1<<0)	/**< multi input or output */
 #define PW_IMPL_PORT_MIX_FLAG_MIX_ONLY	(1<<1)	/**< only negotiate mix ports */
 #define PW_IMPL_PORT_MIX_FLAG_NEGOTIATE	(1<<2)	/**< negotiate buffers  */
 	uint32_t mix_flags;		/**< flags for the mixing */
@@ -701,19 +695,21 @@ struct pw_control_link {
 
 struct pw_impl_link {
 	struct pw_context *context;		/**< context object */
-	struct spa_list link;		/**< link in context link_list */
-	struct pw_global *global;	/**< global for this link */
+	struct spa_list link;			/**< link in context link_list */
+	struct pw_global *global;		/**< global for this link */
 	struct spa_hook global_listener;
 
-        struct pw_link_info info;		/**< introspectable link info */
+	char *name;
+
+	struct pw_link_info info;		/**< introspectable link info */
 	struct pw_properties *properties;	/**< extra link properties */
 
-	struct spa_io_buffers *io;	/**< link io area */
+	struct spa_io_buffers *io;		/**< link io area */
 
 	struct pw_impl_port *output;		/**< output port */
-	struct spa_list output_link;	/**< link in output port links */
+	struct spa_list output_link;		/**< link in output port links */
 	struct pw_impl_port *input;		/**< input port */
-	struct spa_list input_link;	/**< link in input port links */
+	struct spa_list input_link;		/**< link in input port links */
 
 	struct spa_hook_list listener_list;
 
@@ -722,14 +718,16 @@ struct pw_impl_link {
 
 	struct {
 		struct pw_impl_port_mix out_mix;	/**< port added to the output mixer */
-		struct pw_impl_port_mix in_mix;	/**< port added to the input mixer */
-		struct pw_node_target target;	/**< target to trigger the input node */
+		struct pw_impl_port_mix in_mix;		/**< port added to the input mixer */
+		struct pw_node_target target;		/**< target to trigger the input node */
 	} rt;
 
 	void *user_data;
 
 	unsigned int registered:1;
 	unsigned int feedback:1;
+	unsigned int preparing:1;
+	unsigned int prepared:1;
 };
 
 #define pw_resource_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_resource_events, m, v, ##__VA_ARGS__)
@@ -965,7 +963,7 @@ int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version);
 
 void pw_proxy_remove(struct pw_proxy *proxy);
 
-int pw_context_recalc_graph(struct pw_context *context);
+int pw_context_recalc_graph(struct pw_context *context, const char *reason);
 
 void pw_impl_port_update_info(struct pw_impl_port *port, const struct spa_port_info *info);
 
