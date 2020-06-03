@@ -594,7 +594,8 @@ impl_node_port_use_buffers(void *object,
 
 	spa_return_val_if_fail(port->have_format, -EIO);
 
-	spa_log_debug(this->log, NAME " %p: use buffers %d on port %d", this, n_buffers, port_id);
+	spa_log_debug(this->log, NAME " %p: use buffers %d on port %d:%d", this,
+			n_buffers, direction, port_id);
 
 	clear_buffers(this, port);
 
@@ -612,8 +613,11 @@ impl_node_port_use_buffers(void *object,
 			if (size == SPA_ID_INVALID)
 				size = d[j].maxsize;
 			else
-				if (size != d[j].maxsize)
+				if (size != d[j].maxsize) {
+					spa_log_error(this->log, NAME " %p: invalid size %d on buffer %p", this,
+						      size, buffers[i]);
 					return -EINVAL;
+				}
 
 			if (d[j].data == NULL) {
 				spa_log_error(this->log, NAME " %p: invalid memory on buffer %p", this,
@@ -713,7 +717,10 @@ static int impl_node_process(void *object)
 	struct spa_io_buffers *outio, *inio;
 	struct buffer *sbuf, *dbuf;
 	struct spa_buffer *sb, *db;
-	uint32_t i, size, in_len, out_len, pin_len, pout_len, maxsize, max;
+	uint32_t i, size, in_len, out_len, maxsize, max;
+#ifndef FASTPATH
+	uint32_t pin_len, pout_len;
+#endif
 	int res = 0;
 	const void **src_datas;
 	void **dst_datas;
@@ -731,25 +738,26 @@ static int impl_node_process(void *object)
 	spa_return_val_if_fail(outio != NULL, -EIO);
 	spa_return_val_if_fail(inio != NULL, -EIO);
 
-	spa_log_trace_fp(this->log, NAME " %p: status %d %d %d",
-			this, inio->status, outio->status, inio->buffer_id);
+	spa_log_trace_fp(this->log, NAME " %p: status %p %d %d -> %p %d %d", this,
+			inio, inio->status, inio->buffer_id,
+			outio, outio->status, outio->buffer_id);
 
-	if (outio->status == SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(outio->status == SPA_STATUS_HAVE_DATA))
 		return SPA_STATUS_HAVE_DATA;
 
-	if (inio->status != SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
 		return SPA_STATUS_NEED_DATA;
 
 	/* recycle */
-	if (outio->buffer_id < outport->n_buffers) {
+	if (SPA_LIKELY(outio->buffer_id < outport->n_buffers)) {
 		recycle_buffer(this, outio->buffer_id);
 		outio->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (inio->buffer_id >= inport->n_buffers)
+	if (SPA_UNLIKELY(inio->buffer_id >= inport->n_buffers))
 		return inio->status = -EINVAL;
 
-	if ((dbuf = peek_buffer(this, outport)) == NULL)
+	if (SPA_UNLIKELY((dbuf = peek_buffer(this, outport)) == NULL))
 		return outio->status = -EPIPE;
 
 	sbuf = &inport->buffers[inio->buffer_id];
@@ -760,11 +768,10 @@ static int impl_node_process(void *object)
 	size = sb->datas[0].chunk->size;
 	maxsize = db->datas[0].maxsize;
 
-	if (this->io_position) {
+	if (SPA_LIKELY(this->io_position))
 		max = this->io_position->clock.duration;
-	} else {
+	else
 		max = maxsize / sizeof(float);
-	}
 
 	switch (this->mode) {
 	case MODE_SPLIT:
@@ -788,9 +795,6 @@ static int impl_node_process(void *object)
 	in_len = (size - inport->offset) / sizeof(float);
 	out_len = (maxsize - outport->offset) / sizeof(float);
 
-	pin_len = in_len;
-	pout_len = out_len;
-
 	src_datas = alloca(sizeof(void*) * this->resample.channels);
 	dst_datas = alloca(sizeof(void*) * this->resample.channels);
 
@@ -799,12 +803,19 @@ static int impl_node_process(void *object)
 	for (i = 0; i < db->n_datas; i++)
 		dst_datas[i] = SPA_MEMBER(db->datas[i].data, outport->offset, void);
 
+#ifndef FASTPATH
+	pin_len = in_len;
+	pout_len = out_len;
+#endif
+
 	resample_process(&this->resample, src_datas, &in_len, dst_datas, &out_len);
 
+#ifndef FASTPATH
 	spa_log_trace_fp(this->log, NAME " %p: in %d/%d %zd %d out %d/%d %zd %d max:%d",
 			this, pin_len, in_len, size / sizeof(float), inport->offset,
 			pout_len, out_len, maxsize / sizeof(float), outport->offset,
 			max);
+#endif
 
 	for (i = 0; i < db->n_datas; i++) {
 		db->datas[i].chunk->size = outport->offset + (out_len * sizeof(float));

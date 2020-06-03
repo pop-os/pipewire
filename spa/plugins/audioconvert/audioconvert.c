@@ -143,8 +143,7 @@ static int make_link(struct impl *this,
 	l->in_port = in_port;
 	l->in_flags = 0;
 	l->negotiated = false;
-	l->io.status = SPA_STATUS_NEED_DATA;
-	l->io.buffer_id = SPA_ID_INVALID;
+	l->io = SPA_IO_BUFFERS_INIT;
 	l->n_buffers = 0;
 	l->min_buffers = min_buffers;
 
@@ -1072,17 +1071,19 @@ static int impl_node_process(void *object)
 		ready = 0;
 		for (i = 0; i < this->n_nodes; i++) {
 			r = spa_node_process(this->nodes[i]);
+
 			spa_log_trace_fp(this->log, NAME " %p: process %d %d: %s",
 					this, i, r, r < 0 ? spa_strerror(r) : "ok");
-			if (r < 0)
+
+			if (SPA_UNLIKELY(r < 0))
 				return r;
 
 			if (r & SPA_STATUS_HAVE_DATA)
 				ready++;
 
-			if (i == 0)
+			if (SPA_UNLIKELY(i == 0))
 				res |= r & SPA_STATUS_NEED_DATA;
-			if (i == this->n_nodes-1)
+			if (SPA_UNLIKELY(i == this->n_nodes-1))
 				res |= r & SPA_STATUS_HAVE_DATA;
 		}
 		if (res & SPA_STATUS_HAVE_DATA)

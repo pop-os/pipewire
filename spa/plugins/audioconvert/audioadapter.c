@@ -169,7 +169,7 @@ static int link_io(struct impl *this)
 			res, spa_strerror(res));
 	}
 
-	spa_zero(this->io_buffers);
+	this->io_buffers = SPA_IO_BUFFERS_INIT;
 
 	if ((res = spa_node_port_set_io(this->follower,
 			this->direction, 0,
@@ -640,7 +640,7 @@ static int follower_ready(void *data, int status)
 {
 	struct impl *this = data;
 
-	spa_log_trace(this->log, NAME " %p: ready %d", this, status);
+	spa_log_trace_fp(this->log, NAME " %p: ready %d", this, status);
 
 	this->master = true;
 

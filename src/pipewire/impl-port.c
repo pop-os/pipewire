@@ -153,7 +153,7 @@ static int schedule_mix_input(void *object)
 	struct spa_io_buffers *io = &this->rt.io;
 	struct pw_impl_port_mix *mix;
 
-	if (PW_IMPL_PORT_IS_CONTROL(this))
+	if (SPA_UNLIKELY(PW_IMPL_PORT_IS_CONTROL(this)))
 		return SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA;
 
 	spa_list_for_each(mix, &this->rt.mix_list, rt_link) {
@@ -429,8 +429,6 @@ struct pw_impl_port *pw_context_create_port(
 	pw_impl_port_set_mix(this, NULL, 0);
 
 	pw_map_init(&this->mix_port_map, 64, 64);
-
-	this->rt.io.status = SPA_STATUS_NEED_DATA;
 
 	if (info)
 		update_info(this, info);

@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.1',
+  version : '0.3.2',
   license : 'MIT',
   meson_version : '>= 0.50.0',
   default_options : [ 'warning_level=1',
@@ -53,8 +53,14 @@ if cc.get_id() == 'gcc'
 			'-Wpointer-arith',
 			'-Wformat-security',
 			'-Werror=suggest-attribute=format',
+			'-Wmissing-braces',
+		        '-Wno-missing-field-initializers',
+		        '-Wno-unused-parameter',
+			'-Wtype-limits',
+			'-Wold-style-declaration',
+			'-Wvariadic-macros',
 #			'-DSPA_DEBUG_MEMCPY',
-#			'-DFASTPATH',
+			'-DFASTPATH',
 			language : 'c')
 endif
 
@@ -198,9 +204,7 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : false)
-if get_option('pw-cat')
-  sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
-endif
+sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
 
 if get_option('gstreamer') or get_option('pipewire-pulseaudio')
   glib_dep = dependency('glib-2.0', version : '>=2.32.0')
@@ -222,6 +226,10 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
     ? dependency('epoll-shim', required: true)
     : dependency('', required: false))
 
+alsa_dep = (get_option('pipewire-alsa')
+    ? dependency('alsa')
+    : dependency('', required: false))
+
 subdir('spa')
 subdir('src')
 
@@ -236,7 +244,6 @@ if get_option('pipewire-pulseaudio')
 endif
 
 if get_option('pipewire-alsa')
-  alsa_dep = dependency('alsa')
   subdir('pipewire-alsa/alsa-plugins')
 endif
 

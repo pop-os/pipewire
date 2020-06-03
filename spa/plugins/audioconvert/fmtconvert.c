@@ -363,23 +363,23 @@ static int port_enum_formats(void *object,
 				spa_pod_builder_add(builder,
 					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(18,
 								info.info.raw.format,
-								SPA_AUDIO_FORMAT_U8P,
-								SPA_AUDIO_FORMAT_U8,
-								SPA_AUDIO_FORMAT_S16P,
-								SPA_AUDIO_FORMAT_S16,
-								SPA_AUDIO_FORMAT_S16_OE,
 								SPA_AUDIO_FORMAT_F32P,
 								SPA_AUDIO_FORMAT_F32,
 								SPA_AUDIO_FORMAT_F32_OE,
+								SPA_AUDIO_FORMAT_S24_32P,
+								SPA_AUDIO_FORMAT_S24_32,
+								SPA_AUDIO_FORMAT_S24_32_OE,
 								SPA_AUDIO_FORMAT_S32P,
 								SPA_AUDIO_FORMAT_S32,
 								SPA_AUDIO_FORMAT_S32_OE,
+								SPA_AUDIO_FORMAT_S16P,
+								SPA_AUDIO_FORMAT_S16,
+								SPA_AUDIO_FORMAT_S16_OE,
 								SPA_AUDIO_FORMAT_S24P,
 								SPA_AUDIO_FORMAT_S24,
 								SPA_AUDIO_FORMAT_S24_OE,
-								SPA_AUDIO_FORMAT_S24_32P,
-								SPA_AUDIO_FORMAT_S24_32,
-								SPA_AUDIO_FORMAT_S24_32_OE),
+								SPA_AUDIO_FORMAT_U8P,
+								SPA_AUDIO_FORMAT_U8),
 					0);
 			} else {
 				spa_pod_builder_add(builder,
@@ -817,7 +817,6 @@ static int impl_node_process(void *object)
 	const void **src_datas;
 	void **dst_datas;
 	uint32_t i, n_src_datas, n_dst_datas;
-	int res = 0;
 	uint32_t n_samples, size, maxsize, offs;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
@@ -837,19 +836,19 @@ static int impl_node_process(void *object)
 			inio, inio->status, inio->buffer_id,
 			outio, outio->status, outio->buffer_id);
 
-	if (outio->status == SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(outio->status == SPA_STATUS_HAVE_DATA))
 		return inio->status | outio->status;
 
-	if (outio->buffer_id < outport->n_buffers) {
+	if (SPA_LIKELY(outio->buffer_id < outport->n_buffers)) {
 		recycle_buffer(this, outport, outio->buffer_id);
 		outio->buffer_id = SPA_ID_INVALID;
 	}
-	if (inio->status != SPA_STATUS_HAVE_DATA)
+	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA))
 		return SPA_STATUS_NEED_DATA;
-	if (inio->buffer_id >= inport->n_buffers)
+	if (SPA_UNLIKELY(inio->buffer_id >= inport->n_buffers))
 		return inio->status = -EINVAL;
 
-	if ((outbuf = dequeue_buffer(this, outport)) == NULL)
+	if (SPA_UNLIKELY((outbuf = dequeue_buffer(this, outport)) == NULL))
 		return outio->status = -EPIPE;
 
 	inbuf = &inport->buffers[inio->buffer_id];
@@ -891,13 +890,11 @@ static int impl_node_process(void *object)
 		convert_process(&this->conv, dst_datas, src_datas, n_samples);
 
 	inio->status = SPA_STATUS_NEED_DATA;
-	res |= SPA_STATUS_NEED_DATA;
 
 	outio->status = SPA_STATUS_HAVE_DATA;
 	outio->buffer_id = outbuf->id;
-	res |= SPA_STATUS_HAVE_DATA;
 
-	return res;
+	return SPA_STATUS_NEED_DATA | SPA_STATUS_HAVE_DATA;
 }
 
 static const struct spa_node_methods impl_node = {
