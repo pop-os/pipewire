@@ -1,22 +1,35 @@
 /* Simple Plugin API
- * Copyright (C) 2018 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
+#ifndef SPA_POD_COMPARE_H
+#define SPA_POD_COMPARE_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdarg.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -27,25 +40,27 @@
 #include <spa/pod/iter.h>
 #include <spa/pod/builder.h>
 
-static inline int spa_pod_compare_value(enum spa_pod_type type, const void *r1, const void *r2)
+static inline int spa_pod_compare_value(uint32_t type, const void *r1, const void *r2, uint32_t size)
 {
 	switch (type) {
-	case SPA_POD_TYPE_INVALID:
+	case SPA_TYPE_None:
 		return 0;
-	case SPA_POD_TYPE_BOOL:
-	case SPA_POD_TYPE_ID:
-		return *(int32_t *) r1 == *(uint32_t *) r2 ? 0 : 1;
-	case SPA_POD_TYPE_INT:
+	case SPA_TYPE_Bool:
+	case SPA_TYPE_Id:
+		return *(uint32_t *) r1 == *(uint32_t *) r2 ? 0 : 1;
+	case SPA_TYPE_Int:
 		return *(int32_t *) r1 - *(int32_t *) r2;
-	case SPA_POD_TYPE_LONG:
+	case SPA_TYPE_Long:
 		return *(int64_t *) r1 - *(int64_t *) r2;
-	case SPA_POD_TYPE_FLOAT:
+	case SPA_TYPE_Float:
 		return *(float *) r1 - *(float *) r2;
-	case SPA_POD_TYPE_DOUBLE:
+	case SPA_TYPE_Double:
 		return *(double *) r1 - *(double *) r2;
-	case SPA_POD_TYPE_STRING:
-		return strcmp(r1, r2);
-	case SPA_POD_TYPE_RECTANGLE:
+	case SPA_TYPE_String:
+		return strcmp((char *)r1, (char *)r2);
+	case SPA_TYPE_Bytes:
+		return memcmp((char *)r1, (char *)r2, size);
+	case SPA_TYPE_Rectangle:
 	{
 		const struct spa_rectangle *rec1 = (struct spa_rectangle *) r1,
 		    *rec2 = (struct spa_rectangle *) r2;
@@ -56,7 +71,7 @@ static inline int spa_pod_compare_value(enum spa_pod_type type, const void *r1, 
 		else
 			return 1;
 	}
-	case SPA_POD_TYPE_FRACTION:
+	case SPA_TYPE_Fraction:
 	{
 		const struct spa_fraction *f1 = (struct spa_fraction *) r1,
 		    *f2 = (struct spa_fraction *) r2;
@@ -76,92 +91,91 @@ static inline int spa_pod_compare_value(enum spa_pod_type type, const void *r1, 
 	return 0;
 }
 
-static inline int spa_pod_compare_part(const struct spa_pod *pod1, uint32_t pod1_size,
-				       const struct spa_pod *pod2, uint32_t pod2_size)
-{
-	const struct spa_pod *p1, *p2;
-	int res;
-
-	p2 = pod2;
-
-	SPA_POD_FOREACH(pod1, pod1_size, p1) {
-		bool do_advance = true;
-		uint32_t recurse_offset = 0;
-
-		if (p2 == NULL)
-			return -EINVAL;
-
-		switch (SPA_POD_TYPE(p1)) {
-		case SPA_POD_TYPE_STRUCT:
-		case SPA_POD_TYPE_OBJECT:
-			if (SPA_POD_TYPE(p2) != SPA_POD_TYPE(p1))
-				return -EINVAL;
-
-			if (SPA_POD_TYPE(p1) == SPA_POD_TYPE_STRUCT)
-				recurse_offset = sizeof(struct spa_pod_struct);
-			else
-				recurse_offset = sizeof(struct spa_pod_object);
-
-			do_advance = true;
-			break;
-		case SPA_POD_TYPE_PROP:
-		{
-			struct spa_pod_prop *pr1, *pr2;
-			void *a1, *a2;
-
-			pr1 = (struct spa_pod_prop *) p1;
-			pr2 = spa_pod_contents_find_prop(pod2, pod2_size, pr1->body.key);
-
-			if (pr2 == NULL)
-				return -EINVAL;
-
-			/* incompatible property types */
-			if (pr1->body.value.type != pr2->body.value.type)
-				return -EINVAL;
-
-			if (pr1->body.flags & SPA_POD_PROP_FLAG_UNSET ||
-			    pr2->body.flags & SPA_POD_PROP_FLAG_UNSET)
-				return -EINVAL;
-
-			a1 = SPA_MEMBER(pr1, sizeof(struct spa_pod_prop), void);
-			a2 = SPA_MEMBER(pr2, sizeof(struct spa_pod_prop), void);
-
-			res = spa_pod_compare_value(pr1->body.value.type, a1, a2);
-			break;
-		}
-		default:
-			if (SPA_POD_TYPE(p1) != SPA_POD_TYPE(p2))
-				return -EINVAL;
-
-			res = spa_pod_compare_value(SPA_POD_TYPE(p1), SPA_POD_BODY(p1), SPA_POD_BODY(p2));
-			do_advance = true;
-			break;
-		}
-		if (recurse_offset) {
-			res = spa_pod_compare_part(SPA_MEMBER(p1,recurse_offset,void),
-						   SPA_POD_SIZE(p1) - recurse_offset,
-						   SPA_MEMBER(p2,recurse_offset,void),
-						   SPA_POD_SIZE(p2) - recurse_offset);
-		}
-		if (do_advance) {
-			p2 = spa_pod_next(p2);
-			if (!spa_pod_is_inside(pod2, pod2_size, p2))
-				p2 = NULL;
-		}
-		if (res != 0)
-			return res;
-	}
-	if (p2 != NULL)
-		return -EINVAL;
-
-	return 0;
-}
-
 static inline int spa_pod_compare(const struct spa_pod *pod1,
 				  const struct spa_pod *pod2)
 {
+	int res = 0;
+	uint32_t n_vals1, n_vals2;
+	uint32_t choice1, choice2;
+
         spa_return_val_if_fail(pod1 != NULL, -EINVAL);
         spa_return_val_if_fail(pod2 != NULL, -EINVAL);
 
-	return spa_pod_compare_part(pod1, SPA_POD_SIZE(pod1), pod2, SPA_POD_SIZE(pod2));
+	pod1 = spa_pod_get_values(pod1,  &n_vals1, &choice1);
+	pod2 = spa_pod_get_values(pod2,  &n_vals2, &choice2);
+
+	if (n_vals1 != n_vals2)
+		return -EINVAL;
+
+	if (SPA_POD_TYPE(pod1) != SPA_POD_TYPE(pod2))
+		return -EINVAL;
+
+	switch (SPA_POD_TYPE(pod1)) {
+	case SPA_TYPE_Struct:
+	{
+		const struct spa_pod *p1, *p2;
+		size_t p1s, p2s;
+
+		p1 = (const struct spa_pod*)SPA_POD_BODY_CONST(pod1);
+		p1s = SPA_POD_BODY_SIZE(pod1);
+		p2 = (const struct spa_pod*)SPA_POD_BODY_CONST(pod2);
+		p2s = SPA_POD_BODY_SIZE(pod2);
+
+		while (true) {
+			if (!spa_pod_is_inside(pod1, p1s, p1) ||
+			    !spa_pod_is_inside(pod2, p2s, p2))
+				return -EINVAL;
+
+			if ((res = spa_pod_compare(p1, p2)) != 0)
+				return res;
+
+			p1 = (const struct spa_pod*)spa_pod_next(p1);
+			p2 = (const struct spa_pod*)spa_pod_next(p2);
+		}
+		break;
+	}
+	case SPA_TYPE_Object:
+	{
+		const struct spa_pod_prop *p1, *p2;
+		const struct spa_pod_object *o1, *o2;
+
+		o1 = (const struct spa_pod_object*)pod1;
+		o2 = (const struct spa_pod_object*)pod2;
+
+		p2 = NULL;
+		SPA_POD_OBJECT_FOREACH(o1, p1) {
+			if ((p2 = spa_pod_object_find_prop(o2, p2, p1->key)) == NULL)
+				return 1;
+			if ((res = spa_pod_compare(&p1->value, &p2->value)) != 0)
+				return res;
+		}
+		p1 = NULL;
+		SPA_POD_OBJECT_FOREACH(o2, p2) {
+			if ((p1 = spa_pod_object_find_prop(o1, p1, p2->key)) == NULL)
+				return -1;
+		}
+		break;
+	}
+	case SPA_TYPE_Array:
+	{
+		if (SPA_POD_BODY_SIZE(pod1) != SPA_POD_BODY_SIZE(pod2))
+			return -EINVAL;
+		res = memcmp(SPA_POD_BODY(pod1), SPA_POD_BODY(pod2), SPA_POD_BODY_SIZE(pod2));
+		break;
+	}
+	default:
+		if (SPA_POD_BODY_SIZE(pod1) != SPA_POD_BODY_SIZE(pod2))
+			return -EINVAL;
+		res = spa_pod_compare_value(SPA_POD_TYPE(pod1),
+				SPA_POD_BODY(pod1), SPA_POD_BODY(pod2),
+				SPA_POD_BODY_SIZE(pod1));
+		break;
+	}
+	return res;
 }
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

@@ -1,20 +1,25 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <stdlib.h>
@@ -24,30 +29,47 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __FreeBSD__
+#include <sys/thr.h>
+#endif
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/resource.h>
-#include <sys/eventfd.h>
 
 #include "config.h"
 
 #include <spa/support/dbus.h>
+#include <spa/utils/result.h>
 
-#include "pipewire/core.h"
-#include "pipewire/interfaces.h"
-#include "pipewire/link.h"
-#include "pipewire/log.h"
-#include "pipewire/module.h"
-#include "pipewire/utils.h"
+#include <pipewire/impl.h>
+
+#define DEFAULT_RT_PRIO		20
+#define DEFAULT_RT_TIME_SOFT	200000
+#define DEFAULT_RT_TIME_HARD	200000
+
+#define MODULE_USAGE	"[rt.prio=<priority: default "SPA_STRINGIFY(DEFAULT_RT_PRIO) ">] "		\
+			"[rt.time.soft=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_SOFT)"] "	\
+			"[rt.time.hard=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_HARD)"] "
+
+static const struct spa_dict_item module_props[] = {
+	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
+	{ PW_KEY_MODULE_DESCRIPTION, "Use RTKit to raise thread priorities" },
+	{ PW_KEY_MODULE_USAGE, MODULE_USAGE },
+	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
+};
 
 struct impl {
-	struct pw_core *core;
-	struct pw_type *type;
-	struct pw_properties *properties;
+	struct pw_context *context;
 
 	struct spa_loop *loop;
+	struct spa_system *system;
 	struct spa_source source;
+	struct pw_properties *props;
+
+	int rt_prio;
+	rlim_t rt_time_soft;
+	rlim_t rt_time_hard;
 
 	struct spa_hook module_listener;
 };
@@ -78,10 +100,6 @@ struct impl {
 ***/
 
 #include <dbus/dbus.h>
-
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -127,7 +145,7 @@ struct pw_rtkit_bus *pw_rtkit_bus_get_system(void)
 
 	return bus;
 
-      error:
+error:
 	free(bus);
 	pw_log_error("Failed to connect to system bus: %s", error.message);
 	dbus_error_free(&error);
@@ -143,7 +161,13 @@ void pw_rtkit_bus_free(struct pw_rtkit_bus *system_bus)
 
 static pid_t _gettid(void)
 {
+#ifndef __FreeBSD__
 	return (pid_t) syscall(SYS_gettid);
+#else
+	long pid;
+	thr_self(&pid);
+	return (pid_t)pid;
+#endif
 }
 
 static int translate_error(const char *name)
@@ -226,7 +250,7 @@ static long long rtkit_get_int_property(struct pw_rtkit_bus *connection, const c
 		dbus_message_iter_next(&iter);
 	}
 
-      finish:
+finish:
 
 	if (m)
 		dbus_message_unref(m);
@@ -312,7 +336,7 @@ int pw_rtkit_make_realtime(struct pw_rtkit_bus *connection, pid_t thread, int pr
 
 	ret = 0;
 
-      finish:
+finish:
 
 	if (m)
 		dbus_message_unref(m);
@@ -371,7 +395,7 @@ int pw_rtkit_make_high_priority(struct pw_rtkit_bus *connection, pid_t thread, i
 
 	ret = 0;
 
-      finish:
+finish:
 
 	if (m)
 		dbus_message_unref(m);
@@ -384,20 +408,41 @@ int pw_rtkit_make_high_priority(struct pw_rtkit_bus *connection, pid_t thread, i
 	return ret;
 }
 
+static int do_remove_source(struct spa_loop *loop,
+			    bool async,
+			    uint32_t seq,
+			    const void *data,
+			    size_t size,
+			    void *user_data)
+{
+	struct spa_source *source = user_data;
+	spa_loop_remove_source(loop, source);
+	return 0;
+}
+
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
 
 	spa_hook_remove(&impl->module_listener);
 
-	if (impl->properties)
-		pw_properties_free(impl->properties);
-
+	if (impl->source.fd != -1) {
+		spa_loop_invoke(impl->loop,
+				do_remove_source,
+				SPA_ID_INVALID,
+				NULL,
+				0,
+				true,
+				&impl->source);
+		spa_system_close(impl->system, impl->source.fd);
+		impl->source.fd = -1;
+	}
+	pw_properties_free(impl->props);
 	free(impl);
 }
 
-static const struct pw_module_events module_events = {
-	PW_VERSION_MODULE_EVENTS,
+static const struct pw_impl_module_events module_events = {
+	PW_VERSION_IMPL_MODULE_EVENTS,
 	.destroy = module_destroy,
 };
 
@@ -411,58 +456,86 @@ static void idle_func(struct spa_source *source)
 	long long rttime;
 	uint64_t count;
 
-	read(impl->source.fd, &count, sizeof(uint64_t));
+	spa_system_eventfd_read(impl->system, impl->source.fd, &count);
 
-	rtprio = 20;
-	rttime = 20000;
+	system_bus = pw_rtkit_bus_get_system();
+	if (system_bus == NULL) {
+		pw_log_warn("could not get system bus: %s", strerror(errno));
+		return;
+	}
+
+	rtprio = pw_rtkit_get_max_realtime_priority(system_bus);
+	if (rtprio >= 0)
+		rtprio = SPA_MIN(rtprio, impl->rt_prio);
+	else
+		rtprio = impl->rt_prio;
 
 	spa_zero(sp);
 	sp.sched_priority = rtprio;
 
+#ifndef __FreeBSD__
 	if (pthread_setschedparam(pthread_self(), SCHED_OTHER | SCHED_RESET_ON_FORK, &sp) == 0) {
 		pw_log_debug("SCHED_OTHER|SCHED_RESET_ON_FORK worked.");
-		return;
+		goto exit;
+	}
+#endif
+
+	rl.rlim_cur = impl->rt_time_soft;
+	rl.rlim_max = impl->rt_time_hard;
+
+	rttime = pw_rtkit_get_rttime_usec_max(system_bus);
+	if (rttime >= 0) {
+		rl.rlim_cur = SPA_MIN(rl.rlim_cur, (long unsigned int)rttime);
+		rl.rlim_max = SPA_MIN(rl.rlim_max, (long unsigned int)rttime);
 	}
 
-	system_bus = pw_rtkit_bus_get_system();
-	if (system_bus == NULL)
-		return;
+	pw_log_debug("rt.prio:%d rt.time.soft:%lu rt.time.hard:%lu",
+			rtprio, rl.rlim_cur, rl.rlim_max);
 
-	rl.rlim_cur = rl.rlim_max = rttime;
 	if ((r = setrlimit(RLIMIT_RTTIME, &rl)) < 0)
 		pw_log_debug("setrlimit() failed: %s", strerror(errno));
 
-	if (rttime >= 0) {
-		r = getrlimit(RLIMIT_RTTIME, &rl);
-		if (r >= 0 && (long long) rl.rlim_max > rttime) {
-			pw_log_debug("Clamping rlimit-rttime to %lld for RealtimeKit", rttime);
-			rl.rlim_cur = rl.rlim_max = rttime;
-
-			if ((r = setrlimit(RLIMIT_RTTIME, &rl)) < 0)
-				pw_log_debug("setrlimit() failed: %s", strerror(errno));
-		}
-	}
-
 	if ((r = pw_rtkit_make_realtime(system_bus, 0, rtprio)) < 0) {
-		pw_log_debug("could not make thread realtime: %s", strerror(r));
+		pw_log_warn("could not make thread realtime: %s", spa_strerror(r));
 	} else {
-		pw_log_debug("thread made realtime");
+		pw_log_info("processing thread made realtime");
 	}
+exit:
 	pw_rtkit_bus_free(system_bus);
 }
 
-static int module_init(struct pw_module *module, struct pw_properties *properties)
+static int get_default_int(struct pw_properties *properties, const char *name, int def)
 {
-	struct pw_core *core = pw_module_get_core(module);
+	int val;
+	const char *str;
+	if ((str = pw_properties_get(properties, name)) != NULL)
+		val = atoi(str);
+	else {
+		val = def;
+		pw_properties_setf(properties, name, "%d", val);
+	}
+	return val;
+}
+
+SPA_EXPORT
+int pipewire__module_init(struct pw_impl_module *module, const char *args)
+{
+	struct pw_context *context = pw_impl_module_get_context(module);
 	struct impl *impl;
 	struct spa_loop *loop;
+	struct spa_system *system;
 	const struct spa_support *support;
 	uint32_t n_support;
+	int res;
 
-	support = pw_core_get_support(core, &n_support);
+	support = pw_context_get_support(context, &n_support);
 
-	loop = spa_support_find(support, n_support, SPA_TYPE_LOOP__DataLoop);
+	loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
         if (loop == NULL)
+                return -ENOTSUP;
+
+	system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+        if (system == NULL)
                 return -ENOTSUP;
 
 	impl = calloc(1, sizeof(struct impl));
@@ -471,25 +544,42 @@ static int module_init(struct pw_module *module, struct pw_properties *propertie
 
 	pw_log_debug("module %p: new", impl);
 
-	impl->core = core;
-	impl->type = pw_core_get_type(core);
-	impl->properties = properties;
+	impl->context = context;
 	impl->loop = loop;
+	impl->system = system;
+	impl->props = args ? pw_properties_new_string(args) : pw_properties_new(NULL, NULL);
+	if (impl->props == NULL) {
+		res = -errno;
+		goto error;
+	}
+
+	impl->rt_prio = get_default_int(impl->props, "rt.prio", DEFAULT_RT_PRIO);
+	impl->rt_time_soft = get_default_int(impl->props, "rt.time.soft", DEFAULT_RT_TIME_SOFT);
+	impl->rt_time_hard = get_default_int(impl->props, "rt.time.hard", DEFAULT_RT_TIME_HARD);
 
 	impl->source.loop = loop;
 	impl->source.func = idle_func;
 	impl->source.data = impl;
-	impl->source.fd = eventfd(1, EFD_CLOEXEC | EFD_NONBLOCK);
+	impl->source.fd = spa_system_eventfd_create(system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	impl->source.mask = SPA_IO_IN;
-	spa_loop_add_source(impl->loop, &impl->source);
+	if (impl->source.fd == -1) {
+		res = -errno;
+		goto error;
+	}
 
-	pw_module_add_listener(module, &impl->module_listener, &module_events, impl);
+	spa_loop_add_source(impl->loop, &impl->source);
+	spa_system_eventfd_write(system, impl->source.fd, 1);
+
+	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
+
+	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
+	pw_impl_module_update_properties(module, &impl->props->dict);
 
 	return 0;
-}
 
-SPA_EXPORT
-int pipewire__module_init(struct pw_module *module, const char *args)
-{
-	return module_init(module, NULL);
+error:
+	if (impl->props)
+		pw_properties_free(impl->props);
+	free(impl);
+	return res;
 }

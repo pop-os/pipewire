@@ -1,33 +1,76 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include <assert.h>
 
 #include <pipewire/log.h>
 #include <pipewire/proxy.h>
 #include <pipewire/core.h>
-#include <pipewire/remote.h>
 #include <pipewire/private.h>
+#include <pipewire/type.h>
+
+#include <spa/debug/types.h>
+
+#define NAME "proxy"
 
 /** \cond */
 struct proxy {
 	struct pw_proxy this;
 };
 /** \endcond */
+
+int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version)
+{
+	int res;
+
+	proxy->refcount = 1;
+	proxy->type = type;
+	proxy->version = version;
+	proxy->bound_id = SPA_ID_INVALID;
+
+	proxy->id = pw_map_insert_new(&proxy->core->objects, proxy);
+	if (proxy->id == SPA_ID_INVALID) {
+		res = -errno;
+		pw_log_error(NAME" %p: can't allocate new id: %m", proxy);
+		goto error;
+	}
+
+	spa_hook_list_init(&proxy->listener_list);
+	spa_hook_list_init(&proxy->object_listener_list);
+
+	if ((res = pw_proxy_install_marshal(proxy, false)) < 0) {
+		pw_log_error(NAME" %p: no marshal for type %s/%d", proxy,
+				type, version);
+		goto error_clean;
+	}
+	return 0;
+
+error_clean:
+	pw_map_remove(&proxy->core->objects, proxy->id);
+error:
+	return res;
+}
 
 /** Create a proxy object with a given id and type
  *
@@ -39,41 +82,65 @@ struct proxy {
  * This function creates a new proxy object with the supplied id and type. The
  * proxy object will have an id assigned from the client id space.
  *
- * \sa pw_remote
+ * \sa pw_core
  *
  * \memberof pw_proxy
  */
 SPA_EXPORT
 struct pw_proxy *pw_proxy_new(struct pw_proxy *factory,
-			      uint32_t type,
+			      const char *type, uint32_t version,
 			      size_t user_data_size)
 {
 	struct proxy *impl;
 	struct pw_proxy *this;
-	struct pw_remote *remote = factory->remote;
+	int res;
 
 	impl = calloc(1, sizeof(struct proxy) + user_data_size);
 	if (impl == NULL)
 		return NULL;
 
 	this = &impl->this;
-	this->remote = remote;
+	this->core = factory->core;
 
-	spa_hook_list_init(&this->listener_list);
-	spa_hook_list_init(&this->proxy_listener_list);
-
-	this->id = pw_map_insert_new(&remote->objects, this);
+	if ((res = pw_proxy_init(this, type, version)) < 0)
+		goto error_init;
 
 	if (user_data_size > 0)
 		this->user_data = SPA_MEMBER(impl, sizeof(struct proxy), void);
 
-	this->marshal = pw_protocol_get_marshal(remote->conn->protocol, type);
-
-	spa_list_append(&this->remote->proxy_list, &this->link);
-
-	pw_log_debug("proxy %p: new %u, remote %p, marshal %p", this, this->id, remote, this->marshal);
-
+	pw_log_debug(NAME" %p: new %u type %s/%d core-proxy:%p, marshal:%p",
+			this, this->id, type, version, this->core, this->marshal);
 	return this;
+
+error_init:
+	free(impl);
+	errno = -res;
+	return NULL;
+}
+
+SPA_EXPORT
+int pw_proxy_install_marshal(struct pw_proxy *this, bool implementor)
+{
+	struct pw_core *core = this->core;
+	const struct pw_protocol_marshal *marshal;
+
+	if (core == NULL)
+		return -EIO;
+
+	marshal = pw_protocol_get_marshal(core->conn->protocol,
+			this->type, this->version,
+			implementor ? PW_PROTOCOL_MARSHAL_FLAG_IMPL : 0);
+	if (marshal == NULL)
+		return -EPROTO;
+
+	this->marshal = marshal;
+	this->type = marshal->type;
+
+	this->impl = SPA_INTERFACE_INIT(
+			this->type,
+			this->marshal->version,
+			this->marshal->client_marshal, this);
+	return 0;
 }
 
 SPA_EXPORT
@@ -89,9 +156,39 @@ uint32_t pw_proxy_get_id(struct pw_proxy *proxy)
 }
 
 SPA_EXPORT
+int pw_proxy_set_bound_id(struct pw_proxy *proxy, uint32_t global_id)
+{
+	proxy->bound_id = global_id;
+	pw_proxy_emit_bound(proxy, global_id);
+	return 0;
+}
+
+SPA_EXPORT
+uint32_t pw_proxy_get_bound_id(struct pw_proxy *proxy)
+{
+	return proxy->bound_id;
+}
+
+SPA_EXPORT
+const char *pw_proxy_get_type(struct pw_proxy *proxy, uint32_t *version)
+{
+	if (version)
+		*version = proxy->version;
+	return proxy->type;
+}
+
+SPA_EXPORT
+struct pw_core *pw_proxy_get_core(struct pw_proxy *proxy)
+{
+	return proxy->core;
+}
+
+SPA_EXPORT
 struct pw_protocol *pw_proxy_get_protocol(struct pw_proxy *proxy)
 {
-	return proxy->remote->conn->protocol;
+	if (proxy->core == NULL || proxy->core->conn == NULL)
+		return NULL;
+	return proxy->core->conn->protocol;
 }
 
 SPA_EXPORT
@@ -104,40 +201,135 @@ void pw_proxy_add_listener(struct pw_proxy *proxy,
 }
 
 SPA_EXPORT
-void pw_proxy_add_proxy_listener(struct pw_proxy *proxy,
+void pw_proxy_add_object_listener(struct pw_proxy *proxy,
 				 struct spa_hook *listener,
-				 const void *events,
+				 const void *funcs,
 				 void *data)
 {
-	spa_hook_list_append(&proxy->proxy_listener_list, listener, events, data);
+	spa_hook_list_append(&proxy->object_listener_list, listener, funcs, data);
 }
 
 /** Destroy a proxy object
  *
  * \param proxy Proxy object to destroy
  *
- * \note This is normally called by \ref pw_remote when the server
+ * \note This is normally called by \ref pw_core when the server
  *       decides to destroy the server side object
  * \memberof pw_proxy
  */
 SPA_EXPORT
 void pw_proxy_destroy(struct pw_proxy *proxy)
 {
-	struct proxy *impl = SPA_CONTAINER_OF(proxy, struct proxy, this);
+	pw_log_debug(NAME" %p: destroy id:%u removed:%u zombie:%u ref:%u", proxy,
+			proxy->id, proxy->removed, proxy->zombie, proxy->refcount);
 
-	pw_log_debug("proxy %p: destroy %u", proxy, proxy->id);
-	pw_proxy_events_destroy(proxy);
+	assert(!proxy->destroyed);
+	proxy->destroyed = true;
 
-	pw_map_insert_at(&proxy->remote->objects, proxy->id, NULL);
-	spa_list_remove(&proxy->link);
+	if (!proxy->removed) {
+		/* if the server did not remove this proxy, schedule a
+		 * destroy if we can */
+		if (proxy->core) {
+			pw_core_destroy(proxy->core, proxy);
+			proxy->refcount++;
+		} else {
+			proxy->removed = true;
+		}
+	}
+	if (proxy->removed) {
+		if (proxy->core)
+			pw_map_remove(&proxy->core->objects, proxy->id);
+	}
 
-	free(impl);
+	if (!proxy->zombie) {
+		/* mark zombie and emit destroyed. No more
+		 * events will be emited on zombie objects */
+		proxy->zombie = true;
+		pw_proxy_emit_destroy(proxy);
+	}
+	pw_proxy_unref(proxy);
+}
+
+/** called when cleaning up or when the server removed the resource. Can
+ * be called multiple times */
+void pw_proxy_remove(struct pw_proxy *proxy)
+{
+	assert(proxy->refcount > 0);
+
+	pw_log_debug(NAME" %p: remove id:%u removed:%u destroyed:%u zombie:%u", proxy,
+			proxy->id, proxy->removed, proxy->destroyed, proxy->zombie);
+
+	proxy->refcount++;
+	if (!proxy->removed) {
+		/* mark removed and emit the removed signal only once and
+		 * only when not already destroyed */
+		proxy->removed = true;
+		if (!proxy->destroyed)
+			pw_proxy_emit_removed(proxy);
+	}
+	if (proxy->destroyed) {
+		proxy->destroyed = false;
+		pw_proxy_destroy(proxy);
+	}
+	pw_proxy_unref(proxy);
 }
 
 SPA_EXPORT
-struct spa_hook_list *pw_proxy_get_proxy_listeners(struct pw_proxy *proxy)
+void pw_proxy_unref(struct pw_proxy *proxy)
 {
-	return &proxy->proxy_listener_list;
+	assert(proxy->refcount > 0);
+	if (--proxy->refcount > 0)
+		return;
+
+	pw_log_debug(NAME" %p: free %u", proxy, proxy->id);
+	/** client must explicitly destroy all proxies */
+	assert(proxy->destroyed);
+	free(proxy);
+}
+
+SPA_EXPORT
+int pw_proxy_sync(struct pw_proxy *proxy, int seq)
+{
+	int res = -EIO;
+	struct pw_core *core = proxy->core;
+
+	if (core != NULL) {
+		res = pw_core_sync(core, proxy->id, seq);
+		pw_log_debug(NAME" %p: %u seq:%d sync %u", proxy, proxy->id, seq, res);
+	}
+	return res;
+}
+
+SPA_EXPORT
+int pw_proxy_errorf(struct pw_proxy *proxy, int res, const char *error, ...)
+{
+	va_list ap;
+	int r = -EIO;
+	struct pw_core *core = proxy->core;
+
+	va_start(ap, error);
+	if (core != NULL)
+		r = pw_core_errorv(core, proxy->id,
+				core->recv_seq, res, error, ap);
+	va_end(ap);
+	return r;
+}
+
+SPA_EXPORT
+int pw_proxy_error(struct pw_proxy *proxy, int res, const char *error)
+{
+	int r = -EIO;
+	struct pw_core *core = proxy->core;
+	if (core != NULL)
+		r = pw_core_error(core, proxy->id,
+				core->recv_seq, res, error);
+	return r;
+}
+
+SPA_EXPORT
+struct spa_hook_list *pw_proxy_get_object_listeners(struct pw_proxy *proxy)
+{
+	return &proxy->object_listener_list;
 }
 
 SPA_EXPORT

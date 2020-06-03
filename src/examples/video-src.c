@@ -1,51 +1,36 @@
 /* PipeWire
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <stdio.h>
 #include <errno.h>
 #include <time.h>
 #include <math.h>
-#include <sys/mman.h>
 
-#include <spa/support/type-map.h>
-#include <spa/param/format-utils.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 
 #include <pipewire/pipewire.h>
-
-struct type {
-	struct spa_type_media_type media_type;
-	struct spa_type_media_subtype media_subtype;
-	struct spa_type_format_video format_video;
-	struct spa_type_video_format video_format;
-	uint32_t meta_cursor;
-};
-
-static inline void init_type(struct type *type, struct pw_type *map)
-{
-	pw_type_get(map, SPA_TYPE__MediaType, &type->media_type);
-	pw_type_get(map, SPA_TYPE__MediaSubtype, &type->media_subtype);
-	pw_type_get(map, SPA_TYPE_FORMAT__Video, &type->format_video);
-	pw_type_get(map, SPA_TYPE__VideoFormat, &type->video_format);
-	pw_type_get(map, SPA_TYPE_META__Cursor, &type->meta_cursor);
-}
 
 #define BPP	3
 #define WIDTH	320
@@ -55,18 +40,16 @@ static inline void init_type(struct type *type, struct pw_type *map)
 #define CURSOR_HEIGHT	64
 #define CURSOR_BPP	4
 
+#define MAX_BUFFERS	64
+
 #define M_PI_M2 ( M_PI + M_PI )
 
 struct data {
-	struct type type;
-
 	struct pw_main_loop *loop;
 	struct spa_source *timer;
 
+	struct pw_context *context;
 	struct pw_core *core;
-	struct pw_type *t;
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
 
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
@@ -76,6 +59,7 @@ struct data {
 
 	int counter;
 	uint32_t seq;
+
 	double crop;
 	double accumulator;
 };
@@ -101,28 +85,31 @@ static void draw_elipse(uint32_t *dst, int width, int height, uint32_t color)
 static void on_timeout(void *userdata, uint64_t expirations)
 {
 	struct data *data = userdata;
-	int i, j;
+	struct pw_buffer *b;
+	struct spa_buffer *buf;
+	uint32_t i, j;
 	uint8_t *p;
+	struct spa_meta *m;
 	struct spa_meta_header *h;
-	struct spa_meta_video_crop *mc;
+	struct spa_meta_region *mc;
 	struct spa_meta_cursor *mcs;
-	struct pw_buffer *buf;
-	struct spa_buffer *b;
 
-	buf = pw_stream_dequeue_buffer(data->stream);
-	if (buf == NULL)
+	pw_log_trace("timeout");
+
+	if ((b = pw_stream_dequeue_buffer(data->stream)) == NULL) {
+		pw_log_warn("out of buffers: %m");
+		return;
+	}
+
+	buf = b->buffer;
+	if ((p = buf->datas[0].data) == NULL)
 		return;
 
-	b = buf->buffer;
-
-	if ((p = b->datas[0].data) == NULL)
-		goto done;
-
-	if ((h = spa_buffer_find_meta(b, data->t->meta.Header))) {
+	if ((h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h)))) {
 #if 0
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC, &now);
-		h->pts = SPA_TIMESPEC_TO_TIME(&now);
+		h->pts = SPA_TIMESPEC_TO_NSEC(&now);
 #else
 		h->pts = -1;
 #endif
@@ -130,18 +117,29 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		h->seq = data->seq++;
 		h->dts_offset = 0;
 	}
-	if ((mc = spa_buffer_find_meta(b, data->t->meta.VideoCrop))) {
-		data->crop = (sin(data->accumulator) + 1.0) * 32.0;
-		mc->x = data->crop;
-		mc->y = data->crop;
-		mc->width = WIDTH - data->crop*2;
-		mc->height = HEIGHT - data->crop*2;
+	if ((m = spa_buffer_find_meta(buf, SPA_META_VideoDamage))) {
+		struct spa_meta_region *r = spa_meta_first(m);
+
+		if (spa_meta_check(r, m)) {
+			r->region.position = SPA_POINT(0,0);
+			r->region.size = data->format.size;
+			r++;
+		}
+		if (spa_meta_check(r, m))
+			r->region = SPA_REGION(0,0,0,0);
 	}
-	if ((mcs = spa_buffer_find_meta(b, data->type.meta_cursor))) {
+	if ((mc = spa_buffer_find_meta_data(buf, SPA_META_VideoCrop, sizeof(*mc)))) {
+		data->crop = (sin(data->accumulator) + 1.0) * 32.0;
+		mc->region.position.x = data->crop;
+		mc->region.position.y = data->crop;
+		mc->region.size.width = WIDTH - data->crop*2;
+		mc->region.size.height = HEIGHT - data->crop*2;
+	}
+	if ((mcs = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof(*mcs)))) {
 		struct spa_meta_bitmap *mb;
 		uint32_t *bitmap, color;
 
-		mcs->id = 1; /* 0 is invalid cursor, anything else is valid */
+		mcs->id = 1;
 		mcs->position.x = (sin(data->accumulator) + 1.0) * 160.0 + 80;
 		mcs->position.y = (cos(data->accumulator) + 1.0) * 100.0 + 50;
 		mcs->hotspot.x = 0;
@@ -149,7 +147,7 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		mcs->bitmap_offset = sizeof(struct spa_meta_cursor);
 
 		mb = SPA_MEMBER(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
-		mb->format = data->type.video_format.ARGB;
+		mb->format = SPA_VIDEO_FORMAT_ARGB;
 		mb->size.width = CURSOR_WIDTH;
 		mb->size.height = CURSOR_HEIGHT;
 		mb->stride = CURSOR_WIDTH * CURSOR_BPP;
@@ -166,7 +164,7 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		for (j = 0; j < data->format.size.width * BPP; j++) {
 			p[j] = data->counter + j * i;
 		}
-		p += b->datas[0].chunk->stride;
+		p += data->stride;
 		data->counter += 13;
 	}
 
@@ -174,10 +172,11 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	if (data->accumulator >= M_PI_M2)
 		data->accumulator -= M_PI_M2;
 
-	b->datas[0].chunk->size = b->datas[0].maxsize;
+	buf->datas[0].chunk->offset = 0;
+	buf->datas[0].chunk->size = data->format.size.height * data->stride;
+	buf->datas[0].chunk->stride = data->stride;
 
-      done:
-	pw_stream_queue_buffer(data->stream, buf);
+	pw_stream_queue_buffer(data->stream, b);
 }
 
 static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum pw_stream_state state,
@@ -188,6 +187,16 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 	printf("stream state: \"%s\"\n", pw_stream_state_as_string(state));
 
 	switch (state) {
+	case PW_STREAM_STATE_ERROR:
+	case PW_STREAM_STATE_UNCONNECTED:
+		pw_main_loop_quit(data->loop);
+		break;
+
+	case PW_STREAM_STATE_PAUSED:
+		printf("node id: %d\n", pw_stream_get_node_id(data->stream));
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+				data->timer, NULL, NULL, false);
+		break;
 	case PW_STREAM_STATE_STREAMING:
 	{
 		struct timespec timeout, interval;
@@ -202,149 +211,116 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		break;
 	}
 	default:
-		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
-				data->timer, NULL, NULL, false);
 		break;
 	}
 }
 
 static void
-on_stream_format_changed(void *_data, const struct spa_pod *format)
+on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 {
 	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
-	struct pw_type *t = data->t;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	const struct spa_pod *params[4];
+	const struct spa_pod *params[5];
 
-	if (format == NULL) {
-		pw_stream_finish_format(stream, 0, NULL, 0);
+	if (param == NULL || id != SPA_PARAM_Format)
 		return;
-	}
-	spa_format_video_raw_parse(format, &data->format, &data->type.format_video);
+
+	spa_format_video_raw_parse(param, &data->format);
 
 	data->stride = SPA_ROUND_UP_N(data->format.size.width * BPP, 4);
 
-	params[0] = spa_pod_builder_object(&b,
-		t->param.idBuffers, t->param_buffers.Buffers,
-		":", t->param_buffers.size,    "i", data->stride * data->format.size.height,
-		":", t->param_buffers.stride,  "i", data->stride,
-		":", t->param_buffers.buffers, "iru", 2,
-			SPA_POD_PROP_MIN_MAX(1, 32),
-		":", t->param_buffers.align,   "i", 16);
+	params[0] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+		SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, MAX_BUFFERS),
+		SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
+		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(data->stride * data->format.size.height),
+		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(data->stride),
+		SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
 
-	params[1] = spa_pod_builder_object(&b,
-		t->param.idMeta, t->param_meta.Meta,
-		":", t->param_meta.type, "I", t->meta.Header,
-		":", t->param_meta.size, "i", sizeof(struct spa_meta_header));
-	params[2] = spa_pod_builder_object(&b,
-		t->param.idMeta, t->param_meta.Meta,
-		":", t->param_meta.type, "I", t->meta.VideoCrop,
-		":", t->param_meta.size, "i", sizeof(struct spa_meta_video_crop));
+	params[1] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
+		SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
+
+	params[2] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoDamage),
+		SPA_PARAM_META_size, SPA_POD_CHOICE_RANGE_Int(
+					sizeof(struct spa_meta_region) * 16,
+					sizeof(struct spa_meta_region) * 1,
+					sizeof(struct spa_meta_region) * 16));
+	params[3] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
+		SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_region)));
 #define CURSOR_META_SIZE(w,h)	(sizeof(struct spa_meta_cursor) + \
 				 sizeof(struct spa_meta_bitmap) + w * h * CURSOR_BPP)
-	params[3] = spa_pod_builder_object(&b,
-		t->param.idMeta, t->param_meta.Meta,
-		":", t->param_meta.type, "I", data->type.meta_cursor,
-		":", t->param_meta.size, "i", CURSOR_META_SIZE(CURSOR_WIDTH,CURSOR_HEIGHT));
+	params[4] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
+		SPA_PARAM_META_size, SPA_POD_Int(
+			CURSOR_META_SIZE(CURSOR_WIDTH,CURSOR_HEIGHT)));
 
-	pw_stream_finish_format(stream, 0, params, 4);
+	pw_stream_update_params(stream, params, 5);
 }
 
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.state_changed = on_stream_state_changed,
-	.format_changed = on_stream_format_changed,
-};
-
-static void on_state_changed(void *_data, enum pw_remote_state old, enum pw_remote_state state, const char *error)
-{
-	struct data *data = _data;
-	struct pw_remote *remote = data->remote;
-
-	switch (state) {
-	case PW_REMOTE_STATE_ERROR:
-		printf("remote error: %s\n", error);
-		pw_main_loop_quit(data->loop);
-		break;
-
-	case PW_REMOTE_STATE_CONNECTED:
-	{
-		const struct spa_pod *params[1];
-		uint8_t buffer[1024];
-		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-
-		printf("remote state: \"%s\"\n",
-		       pw_remote_state_as_string(state));
-
-		data->stream = pw_stream_new(remote,
-				"video-src",
-				pw_properties_new(
-					"media.class", "Video/Source",
-					PW_NODE_PROP_MEDIA, "Video",
-					PW_NODE_PROP_CATEGORY, "Source",
-					PW_NODE_PROP_ROLE, "Screen",
-					NULL));
-
-		params[0] = spa_pod_builder_object(&b,
-			data->t->param.idEnumFormat, data->t->spa_format,
-			"I", data->type.media_type.video,
-			"I", data->type.media_subtype.raw,
-			":", data->type.format_video.format,    "I", data->type.video_format.RGB,
-			":", data->type.format_video.size,      "Rru", &SPA_RECTANGLE(WIDTH, HEIGHT),
-				SPA_POD_PROP_MIN_MAX(&SPA_RECTANGLE(1, 1),
-						     &SPA_RECTANGLE(4096, 4096)),
-			":", data->type.format_video.framerate, "F", &SPA_FRACTION(25, 1));
-
-		pw_stream_add_listener(data->stream,
-				       &data->stream_listener,
-				       &stream_events,
-				       data);
-
-		pw_stream_connect(data->stream,
-				  PW_DIRECTION_OUTPUT,
-				  NULL,
-				  PW_STREAM_FLAG_DRIVER |
-				  PW_STREAM_FLAG_MAP_BUFFERS,
-				  params, 1);
-		break;
-	}
-	default:
-		printf("remote state: \"%s\"\n", pw_remote_state_as_string(state));
-		break;
-	}
-}
-
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_state_changed,
+	.param_changed = on_stream_param_changed,
 };
 
 int main(int argc, char *argv[])
 {
-	struct data data;
-
-	spa_zero(data);
+	struct data data = { 0, };
+	const struct spa_pod *params[1];
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
 	pw_init(&argc, &argv);
 
 	data.loop = pw_main_loop_new(NULL);
-	data.core = pw_core_new(pw_main_loop_get_loop(data.loop), NULL);
-	data.t = pw_core_get_type(data.core);
-	data.remote = pw_remote_new(data.core, NULL, 0);
-
-	init_type(&data.type, data.t);
+	data.context = pw_context_new(pw_main_loop_get_loop(data.loop), NULL, 0);
 
 	data.timer = pw_loop_add_timer(pw_main_loop_get_loop(data.loop), on_timeout, &data);
 
-	pw_remote_add_listener(data.remote, &data.remote_listener, &remote_events, &data);
+	data.core = pw_context_connect(data.context, NULL, 0);
+	if (data.core == NULL)
+		return -1;
 
-	pw_remote_connect(data.remote);
+	data.stream = pw_stream_new(data.core, "video-src",
+		pw_properties_new(
+			PW_KEY_MEDIA_CLASS, "Video/Source",
+			NULL));
+
+	params[0] = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+		SPA_FORMAT_mediaType,       SPA_POD_Id(SPA_MEDIA_TYPE_video),
+		SPA_FORMAT_mediaSubtype,    SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+		SPA_FORMAT_VIDEO_format,    SPA_POD_Id(SPA_VIDEO_FORMAT_RGB),
+		SPA_FORMAT_VIDEO_size,      SPA_POD_CHOICE_RANGE_Rectangle(
+						&SPA_RECTANGLE(320, 240),
+						&SPA_RECTANGLE(1, 1),
+						&SPA_RECTANGLE(4096, 4096)),
+		SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&SPA_FRACTION(25, 1)));
+
+	pw_stream_add_listener(data.stream,
+			       &data.stream_listener,
+			       &stream_events,
+			       &data);
+
+	pw_stream_connect(data.stream,
+			  PW_DIRECTION_OUTPUT,
+			  PW_ID_ANY,
+			  PW_STREAM_FLAG_DRIVER |
+			  PW_STREAM_FLAG_MAP_BUFFERS,
+			  params, 1);
 
 	pw_main_loop_run(data.loop);
 
-	pw_core_destroy(data.core);
+	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
 	return 0;

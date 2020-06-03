@@ -1,35 +1,38 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_LOG_H__
-#define __SPA_LOG_H__
+#ifndef SPA_LOG_H
+#define SPA_LOG_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define SPA_TYPE__Log		SPA_TYPE_INTERFACE_BASE "Log"
-#define SPA_TYPE_LOG_BASE	SPA_TYPE__Log ":"
-
 #include <stdarg.h>
 
 #include <spa/utils/defs.h>
+#include <spa/utils/hook.h>
 
 enum spa_log_level {
 	SPA_LOG_LEVEL_NONE = 0,
@@ -43,21 +46,23 @@ enum spa_log_level {
 /**
  * The Log interface
  */
+#define SPA_TYPE_INTERFACE_Log	SPA_TYPE_INFO_INTERFACE_BASE "Log"
+
+#define SPA_VERSION_LOG		0
+
 struct spa_log {
 	/** the version of this log. This can be used to expand this
 	 * structure in the future */
-#define SPA_VERSION_LOG	0
-	uint32_t version;
-	/**
-	 * Extra information about the log
-	 */
-	const struct spa_dict *info;
-
+	struct spa_interface iface;
 	/**
 	 * Logging level, everything above this level is not logged
 	 */
 	enum spa_log_level level;
+};
 
+struct spa_log_methods {
+#define SPA_VERSION_LOG_METHODS	0
+	uint32_t version;
 	/**
 	 * Log a message with the given log level.
 	 *
@@ -69,7 +74,7 @@ struct spa_log {
 	 * \param fmt printf style format
 	 * \param ... format arguments
 	 */
-	void (*log) (struct spa_log *log,
+	void (*log) (void *object,
 		     enum spa_log_level level,
 		     const char *file,
 		     int line,
@@ -87,7 +92,7 @@ struct spa_log {
 	 * \param fmt printf style format
 	 * \param args format arguments
 	 */
-	void (*logv) (struct spa_log *log,
+	void (*logv) (void *object,
 		      enum spa_log_level level,
 		      const char *file,
 		      int line,
@@ -103,8 +108,20 @@ struct spa_log {
 
 #define spa_log_log(l,lev,...)					\
 ({								\
-	if (SPA_UNLIKELY (spa_log_level_enabled (l, lev)))	\
-		(l)->log((l),lev,__VA_ARGS__);			\
+	struct spa_log *_l = l;					\
+	if (SPA_UNLIKELY(spa_log_level_enabled(_l, lev)))	\
+		spa_interface_call(&_l->iface,			\
+			struct spa_log_methods, log, 0, lev,	\
+			__VA_ARGS__);				\
+})
+
+#define spa_log_logv(l,lev,...)					\
+({								\
+	struct spa_log *_l = l;					\
+	if (SPA_UNLIKELY(spa_log_level_enabled(_l, lev)))	\
+		spa_interface_call(&_l->iface,			\
+			struct spa_log_methods, logv, 0, lev,	\
+			__VA_ARGS__);				\
 })
 
 #define spa_log_error(l,...)	spa_log_log(l,SPA_LOG_LEVEL_ERROR,__FILE__,__LINE__,__func__,__VA_ARGS__)
@@ -113,15 +130,23 @@ struct spa_log {
 #define spa_log_debug(l,...)	spa_log_log(l,SPA_LOG_LEVEL_DEBUG,__FILE__,__LINE__,__func__,__VA_ARGS__)
 #define spa_log_trace(l,...)	spa_log_log(l,SPA_LOG_LEVEL_TRACE,__FILE__,__LINE__,__func__,__VA_ARGS__)
 
+#ifndef FASTPATH
+#define spa_log_trace_fp(l,...)	spa_log_log(l,SPA_LOG_LEVEL_TRACE,__FILE__,__LINE__,__func__,__VA_ARGS__)
+#else
+#define spa_log_trace_fp(l,...)
+#endif
+
 #else
 
 #define SPA_LOG_FUNC(name,lev)							\
 static inline void spa_log_##name (struct spa_log *l, const char *format, ...)  \
 {										\
-	if (SPA_UNLIKELY (spa_log_level_enabled (l, lev))) {			\
+	if (SPA_UNLIKELY(spa_log_level_enabled(l, lev))) {			\
 		va_list varargs;						\
 		va_start (varargs, format);					\
-		(l)->logv((l),lev,__FILE__,__LINE__,__func__,format,varargs);	\
+		spa_interface_call(&l->iface,					\
+			struct spa_log_methods, logv, 0, lev,			\
+			__FILE__,__LINE__,__func__,format,varargs);		\
 		va_end (varargs);						\
 	}									\
 }
@@ -132,8 +157,22 @@ SPA_LOG_FUNC(info, SPA_LOG_LEVEL_INFO)
 SPA_LOG_FUNC(debug, SPA_LOG_LEVEL_DEBUG)
 SPA_LOG_FUNC(trace, SPA_LOG_LEVEL_TRACE)
 
+#ifndef FASTPATH
+SPA_LOG_FUNC(trace_fp, SPA_LOG_LEVEL_TRACE)
+#else
+static inline void spa_log_trace_fp (struct spa_log *l, const char *format, ...) { }
 #endif
+
+#endif
+
+/** keys can be given when initializing the logger handle */
+#define SPA_KEY_LOG_LEVEL		"log.level"		/**< the default log level */
+#define SPA_KEY_LOG_COLORS		"log.colors"		/**< enable colors in the logger */
+#define SPA_KEY_LOG_FILE		"log.file"		/**< log to the specified file instead of
+								  *  stderr. */
+#define SPA_KEY_LOG_TIMESTAMP		"log.timestamp"		/**< log timestamps */
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
-#endif /* __SPA_LOG_H__ */
+#endif /* SPA_LOG_H */

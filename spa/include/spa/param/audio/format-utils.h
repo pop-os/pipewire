@@ -1,70 +1,105 @@
 /* Simple Plugin API
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_PARAM_AUDIO_FORMAT_UTILS_H__
-#define __SPA_PARAM_AUDIO_FORMAT_UTILS_H__
+#ifndef SPA_PARAM_AUDIO_FORMAT_UTILS_H
+#define SPA_PARAM_AUDIO_FORMAT_UTILS_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <spa/param/format-utils.h>
+
+#include <spa/pod/parser.h>
+#include <spa/pod/builder.h>
 #include <spa/param/audio/format.h>
-#include <spa/param/audio/raw-utils.h>
+#include <spa/param/format-utils.h>
 
-struct spa_type_format_audio {
-	uint32_t format;
-	uint32_t flags;
-	uint32_t layout;
-	uint32_t rate;
-	uint32_t channels;
-	uint32_t channel_mask;
-};
-
-static inline void
-spa_type_format_audio_map(struct spa_type_map *map, struct spa_type_format_audio *type)
+static inline int
+spa_format_audio_raw_parse(const struct spa_pod *format, struct spa_audio_info_raw *info)
 {
-	if (type->format == 0) {
-		type->format = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__format);
-		type->flags = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__flags);
-		type->layout = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__layout);
-		type->rate = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__rate);
-		type->channels = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__channels);
-		type->channel_mask = spa_type_map_get_id(map, SPA_TYPE_FORMAT_AUDIO__channelMask);
-	}
+	struct spa_pod *position = NULL;
+	int res;
+	info->flags = 0;
+	res = spa_pod_parse_object(format,
+			SPA_TYPE_OBJECT_Format, NULL,
+			SPA_FORMAT_AUDIO_format,	SPA_POD_Id(&info->format),
+			SPA_FORMAT_AUDIO_rate,		SPA_POD_Int(&info->rate),
+			SPA_FORMAT_AUDIO_channels,	SPA_POD_Int(&info->channels),
+			SPA_FORMAT_AUDIO_position,	SPA_POD_OPT_Pod(&position));
+	if (position == NULL ||
+	    !spa_pod_copy_array(position, SPA_TYPE_Id, info->position, SPA_AUDIO_MAX_CHANNELS))
+		SPA_FLAG_SET(info->flags, SPA_AUDIO_FLAG_UNPOSITIONED);
+
+	return res;
 }
 
 static inline int
-spa_format_audio_raw_parse(const struct spa_pod *format,
-			   struct spa_audio_info_raw *info, struct spa_type_format_audio *type)
+spa_format_audio_dsp_parse(const struct spa_pod *format, struct spa_audio_info_dsp *info)
 {
-	return spa_pod_object_parse(format,
-		":",type->format,	"I", &info->format,
-		":",type->rate,		"i", &info->rate,
-		":",type->channels,	"i", &info->channels,
-		":",type->flags,	"?i", &info->flags,
-		":",type->layout,	"?i", &info->layout,
-		":",type->channel_mask,	"?i", &info->channel_mask, NULL);
+	int res;
+	res = spa_pod_parse_object(format,
+			SPA_TYPE_OBJECT_Format, NULL,
+			SPA_FORMAT_AUDIO_format,	SPA_POD_Id(&info->format));
+	return res;
+}
+
+static inline struct spa_pod *
+spa_format_audio_raw_build(struct spa_pod_builder *builder, uint32_t id, struct spa_audio_info_raw *info)
+{
+	struct spa_pod_frame f;
+	spa_pod_builder_push_object(builder, &f, SPA_TYPE_OBJECT_Format, id);
+	spa_pod_builder_add(builder,
+			SPA_FORMAT_mediaType,		SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+			SPA_FORMAT_mediaSubtype,	SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+			SPA_FORMAT_AUDIO_format,	SPA_POD_Id(info->format),
+			SPA_FORMAT_AUDIO_rate,		SPA_POD_Int(info->rate),
+			SPA_FORMAT_AUDIO_channels,	SPA_POD_Int(info->channels),
+			0);
+
+	if (!SPA_FLAG_IS_SET(info->flags, SPA_AUDIO_FLAG_UNPOSITIONED)) {
+		spa_pod_builder_prop(builder, SPA_FORMAT_AUDIO_position, 0);
+		spa_pod_builder_array(builder, sizeof(uint32_t), SPA_TYPE_Id,
+				info->channels, info->position);
+	}
+	return (struct spa_pod*)spa_pod_builder_pop(builder, &f);
+}
+
+static inline struct spa_pod *
+spa_format_audio_dsp_build(struct spa_pod_builder *builder, uint32_t id, struct spa_audio_info_dsp *info)
+{
+	struct spa_pod_frame f;
+	spa_pod_builder_push_object(builder, &f, SPA_TYPE_OBJECT_Format, id);
+	spa_pod_builder_add(builder,
+			SPA_FORMAT_mediaType,		SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+			SPA_FORMAT_mediaSubtype,	SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+			SPA_FORMAT_AUDIO_format,	SPA_POD_Id(info->format),
+			0);
+	return (struct spa_pod*)spa_pod_builder_pop(builder, &f);
 }
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_PARAM_AUDIO_FORMAT_UTILS */
+#endif /* SPA_PARAM_AUDIO_FORMAT_UTILS_H */

@@ -1,149 +1,446 @@
 /* Simple Plugin API
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_POD_ITER_H__
-#define __SPA_POD_ITER_H__
+#ifndef SPA_POD_ITER_H
+#define SPA_POD_ITER_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include <errno.h>
-#include <stdarg.h>
+#include <sys/types.h>
 
 #include <spa/pod/pod.h>
 
-struct spa_pod_iter {
-	const void *data;
-	uint32_t size;
+struct spa_pod_frame {
+	struct spa_pod pod;
+	struct spa_pod_frame *parent;
 	uint32_t offset;
+	uint32_t flags;
 };
 
-static inline void spa_pod_iter_init(struct spa_pod_iter *iter,
-				     const void *data, uint32_t size, uint32_t offset)
+static inline bool spa_pod_is_inside(const void *pod, uint32_t size, const void *iter)
 {
-	iter->data = data;
-	iter->size = size;
-	iter->offset = offset;
+	return SPA_POD_BODY(iter) <= SPA_MEMBER(pod, size, void) &&
+		SPA_MEMBER(iter, SPA_POD_SIZE(iter), void) <= SPA_MEMBER(pod, size, void);
 }
 
-static inline struct spa_pod *spa_pod_iter_current(struct spa_pod_iter *iter)
+static inline void *spa_pod_next(const void *iter)
 {
-	if (iter->offset + 8 <= iter->size) {
-		struct spa_pod *pod = SPA_MEMBER(iter->data, iter->offset, struct spa_pod);
-		if (SPA_POD_SIZE(pod) <= iter->size)
-			return pod;
-	}
-	return NULL;
+	return SPA_MEMBER(iter, SPA_ROUND_UP_N(SPA_POD_SIZE(iter), 8), void);
 }
 
-static inline void spa_pod_iter_advance(struct spa_pod_iter *iter, struct spa_pod *current)
+static inline struct spa_pod_prop *spa_pod_prop_first(const struct spa_pod_object_body *body)
 {
-	if (current)
-		iter->offset += SPA_ROUND_UP_N(SPA_POD_SIZE(current), 8);
+	return SPA_MEMBER(body, sizeof(struct spa_pod_object_body), struct spa_pod_prop);
 }
 
-static inline bool spa_pod_is_inside(const void *pod, uint32_t size, const struct spa_pod *iter)
+static inline bool spa_pod_prop_is_inside(const struct spa_pod_object_body *body,
+		uint32_t size, const struct spa_pod_prop *iter)
 {
-	return iter < SPA_MEMBER(pod, size, struct spa_pod);
+	return SPA_POD_CONTENTS(struct spa_pod_prop, iter) <= SPA_MEMBER(body, size, void) &&
+		SPA_MEMBER(iter, SPA_POD_PROP_SIZE(iter), void) <= SPA_MEMBER(body, size, void);
 }
 
-static inline struct spa_pod *spa_pod_next(const struct spa_pod *iter)
+static inline struct spa_pod_prop *spa_pod_prop_next(const struct spa_pod_prop *iter)
 {
-	return SPA_MEMBER(iter, SPA_ROUND_UP_N (SPA_POD_SIZE (iter), 8), struct spa_pod);
+	return SPA_MEMBER(iter, SPA_ROUND_UP_N(SPA_POD_PROP_SIZE(iter), 8), struct spa_pod_prop);
+}
+
+static inline struct spa_pod_control *spa_pod_control_first(const struct spa_pod_sequence_body *body)
+{
+	return SPA_MEMBER(body, sizeof(struct spa_pod_sequence_body), struct spa_pod_control);
+}
+
+static inline bool spa_pod_control_is_inside(const struct spa_pod_sequence_body *body,
+		uint32_t size, const struct spa_pod_control *iter)
+{
+	return SPA_POD_CONTENTS(struct spa_pod_control, iter) <= SPA_MEMBER(body, size, void) &&
+		SPA_MEMBER(iter, SPA_POD_CONTROL_SIZE(iter), void) <= SPA_MEMBER(body, size, void);
+}
+
+static inline struct spa_pod_control *spa_pod_control_next(const struct spa_pod_control *iter)
+{
+	return SPA_MEMBER(iter, SPA_ROUND_UP_N(SPA_POD_CONTROL_SIZE(iter), 8), struct spa_pod_control);
 }
 
 #define SPA_POD_ARRAY_BODY_FOREACH(body, _size, iter)							\
-	for ((iter) = SPA_MEMBER((body), sizeof(struct spa_pod_array_body), __typeof__(*(iter)));	\
-	     (iter) < SPA_MEMBER((body), (_size), __typeof__(*(iter)));					\
-	     (iter) = SPA_MEMBER((iter), (body)->child.size, __typeof__(*(iter))))
+	for ((iter) = (__typeof__(iter))SPA_MEMBER((body), sizeof(struct spa_pod_array_body), void);	\
+	     (iter) < (__typeof__(iter))SPA_MEMBER((body), (_size), void);				\
+	     (iter) = (__typeof__(iter))SPA_MEMBER((iter), (body)->child.size, void))
+
+#define SPA_POD_ARRAY_FOREACH(obj, iter)							\
+	SPA_POD_ARRAY_BODY_FOREACH(&(obj)->body, SPA_POD_BODY_SIZE(obj), iter)
+
+#define SPA_POD_CHOICE_BODY_FOREACH(body, _size, iter)							\
+	for ((iter) = (__typeof__(iter))SPA_MEMBER((body), sizeof(struct spa_pod_choice_body), void);	\
+	     (iter) < (__typeof__(iter))SPA_MEMBER((body), (_size), void);				\
+	     (iter) = (__typeof__(iter))SPA_MEMBER((iter), (body)->child.size, void))
+
+#define SPA_POD_CHOICE_FOREACH(obj, iter)							\
+	SPA_POD_CHOICE_BODY_FOREACH(&(obj)->body, SPA_POD_BODY_SIZE(obj), iter)
 
 #define SPA_POD_FOREACH(pod, size, iter)					\
 	for ((iter) = (pod);							\
 	     spa_pod_is_inside(pod, size, iter);				\
-	     (iter) = spa_pod_next(iter))
+	     (iter) = (__typeof__(iter))spa_pod_next(iter))
 
-#define SPA_POD_CONTENTS_FOREACH(pod, offset, iter)						\
-	SPA_POD_FOREACH(SPA_MEMBER((pod), (offset), struct spa_pod),SPA_POD_SIZE (pod)-(offset),iter)
+#define SPA_POD_STRUCT_FOREACH(obj, iter)							\
+	SPA_POD_FOREACH(SPA_POD_BODY(obj), SPA_POD_BODY_SIZE(obj), iter)
 
 #define SPA_POD_OBJECT_BODY_FOREACH(body, size, iter)						\
-	for ((iter) = SPA_MEMBER((body), sizeof(struct spa_pod_object_body), struct spa_pod);	\
-	     spa_pod_is_inside(body, size, iter);						\
-	     (iter) = spa_pod_next(iter))
+	for ((iter) = spa_pod_prop_first(body);				\
+	     spa_pod_prop_is_inside(body, size, iter);			\
+	     (iter) = spa_pod_prop_next(iter))
 
 #define SPA_POD_OBJECT_FOREACH(obj, iter)							\
 	SPA_POD_OBJECT_BODY_FOREACH(&(obj)->body, SPA_POD_BODY_SIZE(obj), iter)
 
-#define SPA_POD_PROP_ALTERNATIVE_FOREACH(body, _size, iter)					\
-	for ((iter) = SPA_MEMBER((body), (body)->value.size +					\
-				sizeof(struct spa_pod_prop_body), __typeof__(*iter));		\
-	     (iter) <= SPA_MEMBER((body), (_size)-(body)->value.size, __typeof__(*iter));	\
-	     (iter) = SPA_MEMBER((iter), (body)->value.size, __typeof__(*iter)))
+#define SPA_POD_SEQUENCE_BODY_FOREACH(body, size, iter)						\
+	for ((iter) = spa_pod_control_first(body);						\
+	     spa_pod_control_is_inside(body, size, iter);						\
+	     (iter) = spa_pod_control_next(iter))
 
-static inline struct spa_pod_prop *spa_pod_contents_find_prop(const struct spa_pod *pod,
-							      uint32_t size, uint32_t key)
+#define SPA_POD_SEQUENCE_FOREACH(seq, iter)							\
+	SPA_POD_SEQUENCE_BODY_FOREACH(&(seq)->body, SPA_POD_BODY_SIZE(seq), iter)
+
+
+static inline void *spa_pod_from_data(void *data, size_t maxsize, off_t offset, size_t size)
 {
-	const struct spa_pod *res;
-	SPA_POD_FOREACH(pod, size, res) {
-		if (res->type == SPA_POD_TYPE_PROP
-		    && ((struct spa_pod_prop *) res)->body.key == key)
-			return (struct spa_pod_prop *) res;
+	void *pod;
+	if (size < sizeof(struct spa_pod) || offset + size > maxsize)
+		return NULL;
+	pod = SPA_MEMBER(data, offset, void);
+	if (SPA_POD_SIZE(pod) > size)
+		return NULL;
+	return pod;
+}
+
+static inline int spa_pod_is_none(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_None);
+}
+
+static inline int spa_pod_is_bool(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Bool && SPA_POD_BODY_SIZE(pod) >= sizeof(int32_t));
+}
+
+static inline int spa_pod_get_bool(const struct spa_pod *pod, bool *value)
+{
+	if (!spa_pod_is_bool(pod))
+		return -EINVAL;
+	*value = !!SPA_POD_VALUE(struct spa_pod_bool, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_id(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Id && SPA_POD_BODY_SIZE(pod) >= sizeof(uint32_t));
+}
+
+static inline int spa_pod_get_id(const struct spa_pod *pod, uint32_t *value)
+{
+	if (!spa_pod_is_id(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_id, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_int(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Int && SPA_POD_BODY_SIZE(pod) >= sizeof(int32_t));
+}
+
+static inline int spa_pod_get_int(const struct spa_pod *pod, int32_t *value)
+{
+	if (!spa_pod_is_int(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_int, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_long(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Long && SPA_POD_BODY_SIZE(pod) >= sizeof(int64_t));
+}
+
+static inline int spa_pod_get_long(const struct spa_pod *pod, int64_t *value)
+{
+	if (!spa_pod_is_long(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_long, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_float(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Float && SPA_POD_BODY_SIZE(pod) >= sizeof(float));
+}
+
+static inline int spa_pod_get_float(const struct spa_pod *pod, float *value)
+{
+	if (!spa_pod_is_float(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_float, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_double(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Double && SPA_POD_BODY_SIZE(pod) >= sizeof(double));
+}
+
+static inline int spa_pod_get_double(const struct spa_pod *pod, double *value)
+{
+	if (!spa_pod_is_double(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_double, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_string(const struct spa_pod *pod)
+{
+	const char *s = (const char *)SPA_POD_CONTENTS(struct spa_pod_string, pod);
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_String &&
+			SPA_POD_BODY_SIZE(pod) > 0 &&
+			s[SPA_POD_BODY_SIZE(pod)-1] == '\0');
+}
+
+static inline int spa_pod_get_string(const struct spa_pod *pod, const char **value)
+{
+	if (!spa_pod_is_string(pod))
+		return -EINVAL;
+	*value = (const char *)SPA_POD_CONTENTS(struct spa_pod_string, pod);
+	return 0;
+}
+
+static inline int spa_pod_copy_string(const struct spa_pod *pod, size_t maxlen, char *dest)
+{
+	const char *s = (const char *)SPA_POD_CONTENTS(struct spa_pod_string, pod);
+	if (!spa_pod_is_string(pod) || maxlen < 1)
+		return -EINVAL;
+	strncpy(dest, s, maxlen-1);
+	dest[maxlen-1]= '\0';
+	return 0;
+}
+
+static inline int spa_pod_is_bytes(const struct spa_pod *pod)
+{
+	return SPA_POD_TYPE(pod) == SPA_TYPE_Bytes;
+}
+
+static inline int spa_pod_get_bytes(const struct spa_pod *pod, const void **value, uint32_t *len)
+{
+	if (!spa_pod_is_bytes(pod))
+		return -EINVAL;
+	*value = (const void *)SPA_POD_CONTENTS(struct spa_pod_bytes, pod);
+	*len = SPA_POD_BODY_SIZE(pod);
+	return 0;
+}
+
+static inline int spa_pod_is_pointer(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Pointer &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_pod_pointer_body));
+}
+
+static inline int spa_pod_get_pointer(const struct spa_pod *pod, uint32_t *type, const void **value)
+{
+	if (!spa_pod_is_pointer(pod))
+		return -EINVAL;
+	*type = ((struct spa_pod_pointer*)pod)->body.type;
+	*value = ((struct spa_pod_pointer*)pod)->body.value;
+	return 0;
+}
+
+static inline int spa_pod_is_fd(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Fd &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(int64_t));
+}
+
+static inline int spa_pod_get_fd(const struct spa_pod *pod, int64_t *value)
+{
+	if (!spa_pod_is_fd(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_fd, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_rectangle(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Rectangle &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_rectangle));
+}
+
+static inline int spa_pod_get_rectangle(const struct spa_pod *pod, struct spa_rectangle *value)
+{
+	if (!spa_pod_is_rectangle(pod))
+		return -EINVAL;
+	*value = SPA_POD_VALUE(struct spa_pod_rectangle, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_fraction(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Fraction &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_fraction));
+}
+
+static inline int spa_pod_get_fraction(const struct spa_pod *pod, struct spa_fraction *value)
+{
+	spa_return_val_if_fail(spa_pod_is_fraction(pod), -EINVAL);
+	*value = SPA_POD_VALUE(struct spa_pod_fraction, pod);
+	return 0;
+}
+
+static inline int spa_pod_is_bitmap(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Bitmap &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(uint8_t));
+}
+
+static inline int spa_pod_is_array(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Array &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_pod_array_body));
+}
+
+static inline void *spa_pod_get_array(const struct spa_pod *pod, uint32_t *n_values)
+{
+	spa_return_val_if_fail(spa_pod_is_array(pod), NULL);
+	*n_values = SPA_POD_ARRAY_N_VALUES(pod);
+	return SPA_POD_ARRAY_VALUES(pod);
+}
+
+static inline uint32_t spa_pod_copy_array(const struct spa_pod *pod, uint32_t type,
+		void *values, uint32_t max_values)
+{
+	uint32_t n_values;
+	void *v = spa_pod_get_array(pod, &n_values);
+	if (v == NULL || max_values == 0 || SPA_POD_ARRAY_VALUE_TYPE(pod) != type)
+		return 0;
+	n_values = SPA_MIN(n_values, max_values);
+	memcpy(values, v, SPA_POD_ARRAY_VALUE_SIZE(pod) * n_values);
+	return n_values;
+}
+
+static inline int spa_pod_is_choice(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Choice &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_pod_choice_body));
+}
+
+static inline struct spa_pod *spa_pod_get_values(const struct spa_pod *pod, uint32_t *n_vals, uint32_t *choice)
+{
+	if (pod->type == SPA_TYPE_Choice) {
+		*choice = SPA_POD_CHOICE_TYPE(pod);
+		*n_vals = *choice == SPA_CHOICE_None ? 1 : SPA_POD_CHOICE_N_VALUES(pod);
+		return (struct spa_pod*)SPA_POD_CHOICE_CHILD(pod);
+	} else {
+		*n_vals = 1;
+		*choice = SPA_CHOICE_None;
+		return (struct spa_pod*)pod;
+	}
+}
+
+static inline int spa_pod_is_struct(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Struct);
+}
+
+static inline int spa_pod_is_object(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Object &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_pod_object_body));
+}
+
+static inline bool spa_pod_is_object_type(const struct spa_pod *pod, uint32_t type)
+{
+	return (pod && spa_pod_is_object(pod) && SPA_POD_OBJECT_TYPE(pod) == type);
+}
+
+static inline bool spa_pod_is_object_id(const struct spa_pod *pod, uint32_t id)
+{
+	return (pod && spa_pod_is_object(pod) && SPA_POD_OBJECT_ID(pod) == id);
+}
+
+static inline int spa_pod_is_sequence(const struct spa_pod *pod)
+{
+	return (SPA_POD_TYPE(pod) == SPA_TYPE_Sequence &&
+			SPA_POD_BODY_SIZE(pod) >= sizeof(struct spa_pod_sequence_body));
+}
+
+static inline const struct spa_pod_prop *spa_pod_object_find_prop(const struct spa_pod_object *pod,
+		const struct spa_pod_prop *start, uint32_t key)
+{
+	const struct spa_pod_prop *first, *res;
+
+	first = spa_pod_prop_first(&pod->body);
+	start = start ? spa_pod_prop_next(start) : first;
+
+	for (res = start; spa_pod_prop_is_inside(&pod->body, pod->pod.size, res);
+	     res = spa_pod_prop_next(res)) {
+		if (res->key == key)
+			return res;
+	}
+	for (res = first; res != start; res = spa_pod_prop_next(res)) {
+		if (res->key == key)
+			return res;
 	}
 	return NULL;
 }
 
-static inline struct spa_pod_prop *spa_pod_find_prop(const struct spa_pod *pod, uint32_t key)
+static inline const struct spa_pod_prop *spa_pod_find_prop(const struct spa_pod *pod,
+		const struct spa_pod_prop *start, uint32_t key)
 {
-	uint32_t offset;
-
-	if (pod->type == SPA_POD_TYPE_OBJECT)
-		offset = sizeof(struct spa_pod_object);
-	else if (pod->type == SPA_POD_TYPE_STRUCT)
-		offset = sizeof(struct spa_pod_struct);
-	else
+	if (!spa_pod_is_object(pod))
 		return NULL;
+	return spa_pod_object_find_prop((const struct spa_pod_object *)pod, start, key);
+}
 
-	return spa_pod_contents_find_prop(SPA_MEMBER(pod, offset, const struct spa_pod),
-					  SPA_POD_SIZE(pod) - offset, key);
+static inline int spa_pod_object_fixate(struct spa_pod_object *pod)
+{
+	struct spa_pod_prop *res;
+	SPA_POD_OBJECT_FOREACH(pod, res) {
+		if (res->value.type == SPA_TYPE_Choice)
+			((struct spa_pod_choice*)&res->value)->body.type = SPA_CHOICE_None;
+	}
+	return 0;
 }
 
 static inline int spa_pod_fixate(struct spa_pod *pod)
 {
-	struct spa_pod *res;
-	uint32_t offset;
-
-	if (pod->type == SPA_POD_TYPE_OBJECT)
-		offset = sizeof(struct spa_pod_object);
-	else if (pod->type == SPA_POD_TYPE_STRUCT)
-		offset = sizeof(struct spa_pod_struct);
-	else
+	if (!spa_pod_is_object(pod))
 		return -EINVAL;
-
-	SPA_POD_CONTENTS_FOREACH(pod, offset, res) {
-		if (res->type == SPA_POD_TYPE_PROP)
-			((struct spa_pod_prop *) res)->body.flags &= ~SPA_POD_PROP_FLAG_UNSET;
-	}
-	return 0;
+	return spa_pod_object_fixate((struct spa_pod_object *)pod);
 }
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_POD_H__ */
+#endif /* SPA_POD_H */

@@ -1,0 +1,60 @@
+stages:
+  - container
+  - build
+
+variables:
+  # Update this tag when you want to trigger a rebuild
+  FDO_DISTRIBUTION_TAG: '2019-11-21-01'
+  FDO_DISTRIBUTION_VERSION: '31'
+  FDO_UPSTREAM_REPO: 'pipewire/pipewire'
+  FDO_FEDORA_IMAGE: "$CI_REGISTRY_IMAGE/fedora/$FDO_DISTRIBUTION_VERSION:$FDO_DISTRIBUTION_TAG"
+
+include:
+ -  project: 'wayland/ci-templates'
+    ref: master
+    file: '/templates/fedora.yml'
+
+container_build:
+  extends: .fdo.container-ifnot-exists@fedora
+  stage: container
+  variables:
+    GIT_STRATEGY: none # no need to pull the whole tree for rebuilding the image
+    FEDORA_RPMS: >-
+      alsa-lib-devel
+      bluez-libs-devel
+      dbus-devel
+      doxygen
+      findutils
+      gcc
+      git
+      glib-devel
+      graphviz
+      gstreamer1-devel
+      gstreamer1-plugins-base-devel
+      jack-audio-connection-kit-devel
+      libv4l-devel
+      libva-devel
+      libX11-devel
+      make
+      meson
+      pulseaudio-libs-devel
+      sbc-devel
+      SDL2-devel
+      systemd-devel
+      vulkan-loader-devel
+      which
+      xmltoman
+      libsndfile-devel
+
+build:
+  stage: build
+  image: $FDO_FEDORA_IMAGE
+  script:
+     - ./autogen.sh -Ddocs=true -Daudiomixer=true -Daudiotestsrc=true -Dtest=true -Dvideotestsrc=true -Dvolume=true
+     - make
+     - XDG_RUNTIME_DIR=$PWD/build make test
+     - DESTDIR=$PWD/build/i make install
+     - PREFIX=$PWD/build/i/usr/local ./check_missing_headers.sh
+  artifacts:
+    paths:
+      - build/

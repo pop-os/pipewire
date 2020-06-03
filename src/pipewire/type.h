@@ -1,90 +1,52 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_TYPE_H__
-#define __PIPEWIRE_TYPE_H__
+#ifndef PIPEWIRE_TYPE_H
+#define PIPEWIRE_TYPE_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <spa/support/type-map.h>
-#include <spa/node/event.h>
-#include <spa/node/command.h>
-#include <spa/monitor/monitor.h>
-#include <spa/param/buffers.h>
-#include <spa/param/meta.h>
-#include <spa/param/io.h>
-#include <spa/node/io.h>
+#include <spa/utils/type.h>
 
-#include <pipewire/map.h>
-
-#define PW_TYPE_BASE		"PipeWire:"
-
-#define PW_TYPE__Object		PW_TYPE_BASE "Object"
-#define PW_TYPE_OBJECT_BASE	PW_TYPE__Object ":"
-
-#define PW_TYPE__Interface	PW_TYPE_BASE "Interface"
-#define PW_TYPE_INTERFACE_BASE	PW_TYPE__Interface ":"
-
-/** \class pw_type
- * \brief PipeWire type support struct
- *
- * This structure contains some of the most common types
- * and should be initialized with \ref pw_type_init() */
-struct pw_type {
-	struct spa_type_map *map;	/**< the type mapper */
-
-	uint32_t core;
-	uint32_t registry;
-	uint32_t node;
-	uint32_t port;
-	uint32_t factory;
-	uint32_t link;
-	uint32_t client;
-	uint32_t module;
-
-	uint32_t spa_log;
-	uint32_t spa_node;
-	uint32_t spa_clock;
-	uint32_t spa_monitor;
-	uint32_t spa_format;
-	uint32_t spa_props;
-
-	struct spa_type_io io;
-	struct spa_type_param param;
-	struct spa_type_meta meta;
-	struct spa_type_data data;
-	struct spa_type_event_node event_node;
-	struct spa_type_command_node command_node;
-	struct spa_type_monitor monitor;
-	struct spa_type_param_buffers param_buffers;
-	struct spa_type_param_meta param_meta;
-	struct spa_type_param_io param_io;
+enum {
+	PW_TYPE_FIRST = SPA_TYPE_VENDOR_PipeWire,
 };
 
-int pw_type_init(struct pw_type *type);
+#define PW_TYPE_INFO_BASE		"PipeWire:"
 
-int pw_type_get(struct pw_type *type, const char *id, void *data);
+#define PW_TYPE_INFO_Object		PW_TYPE_INFO_BASE "Object"
+#define PW_TYPE_INFO_OBJECT_BASE	PW_TYPE_INFO_Object ":"
+
+#define PW_TYPE_INFO_Interface		PW_TYPE_INFO_BASE "Interface"
+#define PW_TYPE_INFO_INTERFACE_BASE	PW_TYPE_INFO_Interface ":"
+
+const struct spa_type_info * pw_type_info(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __PIPEWIRE_TYPE_H__ */
+#endif /* PIPEWIRE_TYPE_H */

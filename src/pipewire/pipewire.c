@@ -1,20 +1,25 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -24,139 +29,171 @@
 #include <unistd.h>
 #include <limits.h>
 #include <stdio.h>
+#ifndef __FreeBSD__
 #include <sys/prctl.h>
+#endif
 #include <pwd.h>
 #include <errno.h>
 #include <dlfcn.h>
 
-#include <spa/support/dbus.h>
+#include <spa/utils/names.h>
+#include <spa/support/cpu.h>
 
 #include "pipewire.h"
 #include "private.h"
-#include "version.h"
 
-static char **categories = NULL;
+#define MAX_SUPPORT	32
 
-static struct support_info {
+#define SUPPORTLIB	"support/libspa-support"
+
+struct plugin {
+	struct spa_list link;
+	char *filename;
 	void *hnd;
 	spa_handle_factory_enum_func_t enum_func;
-	struct spa_support support[16];
-	uint32_t n_support;
-} support_info;
+	struct spa_list handles;
+	int ref;
+};
 
-struct interface {
+struct handle {
 	struct spa_list link;
-	struct spa_handle *handle;
-	uint32_t type;
-	void *iface;
+	struct plugin *plugin;
+	char *factory_name;
+	int ref;
+	struct spa_handle handle;
 };
 
 struct registry {
-	struct spa_list interfaces;
+	struct spa_list plugins;
+};
+
+struct support {
+	char **categories;
+	const char *plugin_dir;
+	const char *support_lib;
+	struct registry *registry;
+	struct spa_support support[MAX_SUPPORT];
+	uint32_t n_support;
 };
 
 static struct registry global_registry;
+static struct support global_support;
 
-static bool
-open_support(const char *path,
-	     const char *lib,
-	     struct support_info *info)
+static struct plugin *
+find_plugin(struct registry *registry, const char *filename)
 {
-	char *filename;
-
-        if (asprintf(&filename, "%s/%s.so", path, lib) < 0)
-		goto no_filename;
-
-        if ((info->hnd = dlopen(filename, RTLD_NOW)) == NULL) {
-                fprintf(stderr, "can't load %s: %s\n", filename, dlerror());
-                goto open_failed;
-        }
-        if ((info->enum_func = dlsym(info->hnd, SPA_HANDLE_FACTORY_ENUM_FUNC_NAME)) == NULL) {
-                fprintf(stderr, "can't find enum function in %s\n", filename);
-                goto no_symbol;
-        }
-	free(filename);
-	return true;
-
-      no_filename:
-	return false;
-      no_symbol:
-	dlclose(info->hnd);
-      open_failed:
-        free(filename);
-	return false;
-}
-
-static const struct spa_handle_factory *get_factory(struct support_info *info, const char *factory_name)
-{
-	int res;
-	uint32_t index;
-        const struct spa_handle_factory *factory;
-
-        for (index = 0;;) {
-                if ((res = info->enum_func(&factory, &index)) <= 0) {
-                        if (res != 0)
-                                fprintf(stderr, "can't enumerate factories: %s\n", spa_strerror(res));
-                        break;
-                }
-                if (strcmp(factory->name, factory_name) == 0)
-                        return factory;
+	struct plugin *p;
+	spa_list_for_each(p, &registry->plugins, link) {
+		if (!strcmp(p->filename, filename))
+			return p;
 	}
 	return NULL;
 }
 
-static struct interface *
-load_interface(struct support_info *info,
-	       const char *factory_name,
-	       const char *type)
+static struct plugin *
+open_plugin(struct registry *registry,
+	    const char *path,
+	    const char *lib)
 {
-        int res;
-        struct spa_handle *handle;
-        uint32_t type_id;
-        const struct spa_handle_factory *factory;
-	struct interface *iface;
-        void *ptr;
-	struct spa_type_map *map = NULL;
+	struct plugin *plugin;
+	char *filename;
+	void *hnd;
+	spa_handle_factory_enum_func_t enum_func;
+	int res;
 
-	factory = get_factory(info, factory_name);
-	if (factory == NULL)
-		goto not_found;
+        if ((filename = spa_aprintf("%s/%s.so", path, lib)) == NULL) {
+		res = -errno;
+		goto error_out;
+	}
 
-        handle = calloc(1, factory->size);
-        if ((res = spa_handle_factory_init(factory,
-                                           handle, NULL, info->support, info->n_support)) < 0) {
-                fprintf(stderr, "can't make factory instance: %d\n", res);
-                goto init_failed;
+	if ((plugin = find_plugin(registry, filename)) != NULL) {
+		free(filename);
+		plugin->ref++;
+		return plugin;
+	}
+
+        if ((hnd = dlopen(filename, RTLD_NOW)) == NULL) {
+		res = -ENOENT;
+		pw_log_error("can't load %s: %s", filename, dlerror());
+		goto error_free_filename;
+        }
+        if ((enum_func = dlsym(hnd, SPA_HANDLE_FACTORY_ENUM_FUNC_NAME)) == NULL) {
+		res = -ENOSYS;
+		pw_log_error("can't find enum function: %s", dlerror());
+		goto error_dlclose;
         }
 
-	map = pw_get_support_interface(SPA_TYPE__TypeMap);
-	type_id = map ? spa_type_map_get_id(map, type) : 0;
+	if ((plugin = calloc(1, sizeof(struct plugin))) == NULL) {
+		res = -errno;
+		goto error_dlclose;
+	}
 
-        if ((res = spa_handle_get_interface(handle, type_id, &ptr)) < 0) {
-                fprintf(stderr, "can't get %s interface %d\n", type, res);
-                goto interface_failed;
-        }
+	pw_log_debug("loaded plugin:'%s'", filename);
+	plugin->ref = 1;
+	plugin->filename = filename;
+	plugin->hnd = hnd;
+	plugin->enum_func = enum_func;
+	spa_list_init(&plugin->handles);
 
-	if ((iface = calloc(1, sizeof(struct interface))) == NULL)
-		goto alloc_failed;
+	spa_list_append(&registry->plugins, &plugin->link);
 
-	iface->handle = handle;
-	iface->type = type_id;
-	iface->iface = ptr;
-	spa_list_append(&global_registry.interfaces, &iface->link);
+	return plugin;
 
-        return iface;
-
-      alloc_failed:
-      interface_failed:
-	spa_handle_clear(handle);
-      init_failed:
-	free(handle);
-      not_found:
+error_dlclose:
+	dlclose(hnd);
+error_free_filename:
+        free(filename);
+error_out:
+	errno = -res;
 	return NULL;
 }
 
-static void configure_debug(const char *str)
+static void
+unref_plugin(struct plugin *plugin)
+{
+	if (--plugin->ref == 0) {
+		spa_list_remove(&plugin->link);
+		pw_log_debug("unloaded plugin:'%s'", plugin->filename);
+		dlclose(plugin->hnd);
+		free(plugin->filename);
+		free(plugin);
+	}
+}
+
+static const struct spa_handle_factory *find_factory(struct plugin *plugin, const char *factory_name)
+{
+	int res = -ENOENT;
+	uint32_t index;
+        const struct spa_handle_factory *factory;
+
+        for (index = 0;;) {
+                if ((res = plugin->enum_func(&factory, &index)) <= 0) {
+                        if (res == 0)
+				break;
+                        goto out;
+                }
+                if (strcmp(factory->name, factory_name) == 0)
+                        return factory;
+	}
+	res = -ENOENT;
+out:
+	pw_log_error("can't find factory %s: %s", factory_name, spa_strerror(res));
+	errno = -res;
+	return NULL;
+}
+
+static void unref_handle(struct handle *handle)
+{
+	if (--handle->ref == 0) {
+		spa_list_remove(&handle->link);
+		spa_handle_clear(&handle->handle);
+		unref_plugin(handle->plugin);
+		free(handle->factory_name);
+		free(handle);
+	}
+}
+
+static void configure_debug(struct support *support, const char *str)
 {
 	char **level;
 	int n_tokens;
@@ -166,85 +203,136 @@ static void configure_debug(const char *str)
 		pw_log_set_level(atoi(level[0]));
 
 	if (n_tokens > 1)
-		categories = pw_split_strv(level[1], ",", INT_MAX, &n_tokens);
+		support->categories = pw_split_strv(level[1], ",", INT_MAX, &n_tokens);
+
+	if (level)
+		pw_free_strv(level);
 }
 
-/** Get a support interface
- * \param type the interface type
- * \return the interface or NULL when not configured
- */
 SPA_EXPORT
-void *pw_get_support_interface(const char *type)
+uint32_t pw_get_support(struct spa_support *support, uint32_t max_support)
 {
-	int i;
+	uint32_t i, n = SPA_MIN(global_support.n_support, max_support);
+	for (i = 0; i < n; i++)
+		support[i] = global_support.support[i];
+	return n;
+}
 
-	for (i = 0; i < support_info.n_support; i++) {
-		if (strcmp(support_info.support->type, type) == 0)
-			return support_info.support->data;
+SPA_EXPORT
+struct spa_handle *pw_load_spa_handle(const char *lib,
+		const char *factory_name,
+		const struct spa_dict *info,
+		uint32_t n_support,
+		const struct spa_support support[])
+{
+	struct support *sup = &global_support;
+	struct plugin *plugin;
+	struct handle *handle;
+        const struct spa_handle_factory *factory;
+        int res;
+
+	if (factory_name == NULL) {
+		res = -EINVAL;
+		goto error_out;
+	}
+
+	if (lib == NULL)
+		lib = sup->support_lib;
+
+	pw_log_debug("load lib:'%s' factory-name:'%s'", lib, factory_name);
+
+	if ((plugin = open_plugin(sup->registry, sup->plugin_dir, lib)) == NULL) {
+		res = -errno;
+		pw_log_error("can't load '%s': %m", lib);
+		goto error_out;
+	}
+
+	factory = find_factory(plugin, factory_name);
+	if (factory == NULL) {
+		res = -errno;
+		pw_log_error("can't find factory '%s': %m %s", factory_name, spa_strerror(res));
+		goto error_unref_plugin;
+	}
+
+	handle = calloc(1, sizeof(struct handle) + spa_handle_factory_get_size(factory, info));
+	if (handle == NULL) {
+		res = -errno;
+		goto error_unref_plugin;
+	}
+
+        if ((res = spa_handle_factory_init(factory,
+                                           &handle->handle, info,
+					   support, n_support)) < 0) {
+                pw_log_error("can't make factory instance '%s': %d (%s)",
+				factory_name, res, spa_strerror(res));
+                goto error_free_handle;
+        }
+
+	handle->ref = 1;
+	handle->plugin = plugin;
+	handle->factory_name = strdup(factory_name);
+	spa_list_append(&plugin->handles, &handle->link);
+
+	return &handle->handle;
+
+error_free_handle:
+	free(handle);
+error_unref_plugin:
+	unref_plugin(plugin);
+error_out:
+	errno = -res;
+	return NULL;
+}
+
+static struct handle *find_handle(struct spa_handle *handle)
+{
+	struct registry *registry = global_support.registry;
+	struct plugin *p;
+	struct handle *h;
+
+	spa_list_for_each(p, &registry->plugins, link) {
+		spa_list_for_each(h, &p->handles, link) {
+			if (&h->handle == handle)
+				return h;
+		}
 	}
 	return NULL;
 }
 
 SPA_EXPORT
-const struct spa_handle_factory *pw_get_support_factory(const char *factory_name)
+int pw_unload_spa_handle(struct spa_handle *handle)
 {
-	return get_factory(&support_info, factory_name);
-}
+	struct handle *h;
 
-SPA_EXPORT
-const struct spa_support *pw_get_support(uint32_t *n_support)
-{
-	*n_support = support_info.n_support;
-	return support_info.support;
-}
-
-SPA_EXPORT
-void *pw_get_spa_dbus(struct pw_loop *loop)
-{
-	struct support_info dbus_support_info;
-	const char *str;
-	struct interface *iface;
-
-	dbus_support_info.n_support = support_info.n_support;
-	memcpy(dbus_support_info.support, support_info.support,
-			sizeof(struct spa_support) * dbus_support_info.n_support);
-
-	dbus_support_info.support[dbus_support_info.n_support++] =
-			SPA_SUPPORT_INIT(SPA_TYPE__LoopUtils, loop->utils);
-
-	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
-		str = PLUGINDIR;
-
-	if (open_support(str, "support/libspa-dbus", &dbus_support_info)) {
-		iface = load_interface(&dbus_support_info, "dbus", SPA_TYPE__DBus);
-		if (iface != NULL)
-			return iface->iface;
-	}
-	return NULL;
-}
-static struct interface *find_interface(void *iface)
-{
-	struct interface *i;
-	spa_list_for_each(i, &global_registry.interfaces, link) {
-		if (i->iface == iface)
-			return i;
-	}
-	return NULL;
-}
-
-SPA_EXPORT
-int pw_release_spa_dbus(void *dbus)
-{
-	struct interface *iface;
-
-	if ((iface = find_interface(dbus)) == NULL)
+	if ((h = find_handle(handle)) == NULL)
 		return -ENOENT;
 
-	spa_list_remove(&iface->link);
-	spa_handle_clear(iface->handle);
-	free(iface->handle);
-	free(iface);
+	unref_handle(h);
+
 	return 0;
+}
+
+static void *add_interface(struct support *support,
+		const char *factory_name,
+		const char *type,
+		const struct spa_dict *info)
+{
+	struct spa_handle *handle;
+	void *iface = NULL;
+	int res = -ENOENT;
+
+	handle = pw_load_spa_handle(support->support_lib,
+			factory_name, info,
+			support->n_support, support->support);
+
+	if (handle == NULL ||
+	    (res = spa_handle_get_interface(handle, type, &iface)) < 0) {
+			pw_log_error("can't get %s interface %d", type, res);
+	} else {
+		support->support[support->n_support++] =
+			SPA_SUPPORT_INIT(type, iface);
+	}
+	return iface;
 }
 
 /** Initialize PipeWire
@@ -263,31 +351,51 @@ SPA_EXPORT
 void pw_init(int *argc, char **argv[])
 {
 	const char *str;
-	struct interface *iface;
-	struct support_info *info = &support_info;
+	struct spa_dict_item items[4];
+	uint32_t n_items;
+	struct spa_dict info;
+	struct support *support = &global_support;
+	struct spa_log *log;
+	char level[32];
+
+	if (support->registry != NULL)
+		return;
 
 	if ((str = getenv("PIPEWIRE_DEBUG")))
-		configure_debug(str);
+		configure_debug(support, str);
+	else
+		pw_log_set_level(SPA_LOG_LEVEL_WARN);
 
 	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
 		str = PLUGINDIR;
+	support->plugin_dir = str;
 
-	if (support_info.n_support > 0)
-		return;
+	if ((str = getenv("SPA_SUPPORT_LIB")) == NULL)
+		str = SUPPORTLIB;
+	support->support_lib = str;
 
-	spa_list_init(&global_registry.interfaces);
+	spa_list_init(&global_registry.plugins);
+	support->registry = &global_registry;
 
-	if (open_support(str, "support/libspa-support", info)) {
-		iface = load_interface(info, "mapper", SPA_TYPE__TypeMap);
-		if (iface != NULL)
-			info->support[info->n_support++] = SPA_SUPPORT_INIT(SPA_TYPE__TypeMap, iface->iface);
+	n_items = 0;
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "true");
+	snprintf(level, sizeof(level), "%d", pw_log_level);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LEVEL, level);
+	if ((str = getenv("PIPEWIRE_LOG")) != NULL)
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_FILE, str);
+	info = SPA_DICT_INIT(items, n_items);
 
-		iface = load_interface(info, "logger", SPA_TYPE__Log);
-		if (iface != NULL) {
-			info->support[info->n_support++] = SPA_SUPPORT_INIT(SPA_TYPE__Log, iface->iface);
-			pw_log_set(iface->iface);
-		}
-	}
+	log = add_interface(support, SPA_NAME_SUPPORT_LOG, SPA_TYPE_INTERFACE_Log, &info);
+	if (log)
+		pw_log_set(log);
+
+	n_items = 0;
+	if ((str = getenv("PIPEWIRE_CPU")))
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_CPU_FORCE, str);
+	info = SPA_DICT_INIT(items, n_items);
+
+	add_interface(support, SPA_NAME_SUPPORT_CPU, SPA_TYPE_INTERFACE_CPU, &info);
 	pw_log_info("version %s", pw_get_library_version());
 }
 
@@ -306,11 +414,11 @@ bool pw_debug_is_category_enabled(const char *name)
 {
 	int i;
 
-	if (categories == NULL)
+	if (global_support.categories == NULL)
 		return false;
 
-	for (i = 0; categories[i]; i++) {
-		if (strcmp (categories[i], name) == 0)
+	for (i = 0; global_support.categories[i]; i++) {
+		if (strcmp(global_support.categories[i], name) == 0)
 			return true;
 	}
 	return false;
@@ -320,6 +428,7 @@ bool pw_debug_is_category_enabled(const char *name)
 SPA_EXPORT
 const char *pw_get_application_name(void)
 {
+	errno = ENOTSUP;
 	return NULL;
 }
 
@@ -330,8 +439,10 @@ const char *pw_get_prgname(void)
 	static char tcomm[16 + 1];
 	spa_zero(tcomm);
 
+#ifndef __FreeBSD__
 	if (prctl(PR_GET_NAME, (unsigned long) tcomm, 0, 0, 0) == 0)
 		return tcomm;
+#endif
 
 	return NULL;
 }
@@ -368,76 +479,25 @@ const char *pw_get_host_name(void)
  * \memberof pw_pipewire
  */
 SPA_EXPORT
-char *pw_get_client_name(void)
+const char *pw_get_client_name(void)
 {
-	char *c;
 	const char *cc;
+	static char cname[256];
 
 	if ((cc = pw_get_application_name()))
-		return strdup(cc);
+		return cc;
 	else if ((cc = pw_get_prgname()))
-		return strdup(cc);
+		return cc;
 	else {
-		if (asprintf(&c, "pipewire-pid-%zd", (size_t) getpid()) < 0)
+		if (snprintf(cname, sizeof(cname), "pipewire-pid-%zd", (size_t) getpid()) < 0)
 			return NULL;
-		return c;
+		cname[255] = 0;
+		return cname;
 	}
-}
-
-/** Fill remote properties
- * \param properties a \ref pw_properties
- *
- * Fill \a properties with a set of default remote properties.
- *
- * \memberof pw_pipewire
- */
-SPA_EXPORT
-void pw_fill_remote_properties(struct pw_core *core, struct pw_properties *properties)
-{
-	const char *val;
-
-	if (!pw_properties_get(properties, "application.name"))
-		pw_properties_set(properties, "application.name", pw_get_application_name());
-
-	if (!pw_properties_get(properties, "application.prgname"))
-		pw_properties_set(properties, "application.prgname", pw_get_prgname());
-
-	if (!pw_properties_get(properties, "application.language")) {
-		pw_properties_set(properties, "application.language", getenv("LANG"));
-	}
-	if (!pw_properties_get(properties, "application.process.id")) {
-		pw_properties_setf(properties, "application.process.id", "%zd", (size_t) getpid());
-	}
-	if (!pw_properties_get(properties, "application.process.user"))
-		pw_properties_set(properties, "application.process.user", pw_get_user_name());
-
-	if (!pw_properties_get(properties, "application.process.host"))
-		pw_properties_set(properties, "application.process.host", pw_get_host_name());
-
-	if (!pw_properties_get(properties, "application.process.session_id")) {
-		pw_properties_set(properties, "application.process.session_id",
-				  getenv("XDG_SESSION_ID"));
-	}
-	pw_properties_set(properties, PW_CORE_PROP_VERSION, core->info.version);
-	pw_properties_set(properties, PW_CORE_PROP_NAME, core->info.name);
-
-	if ((val = pw_properties_get(core->properties, PW_CORE_PROP_DAEMON)))
-		pw_properties_set(properties, PW_CORE_PROP_DAEMON, val);
-}
-
-/** Fill stream properties
- * \param properties a \ref pw_properties
- *
- * Fill \a properties with a set of default stream properties.
- *
- * \memberof pw_pipewire
- */
-SPA_EXPORT
-void pw_fill_stream_properties(struct pw_core *core, struct pw_properties *properties)
-{
 }
 
 /** Reverse the direction \memberof pw_pipewire */
+SPA_EXPORT
 enum pw_direction pw_direction_reverse(enum pw_direction direction)
 {
 	if (direction == PW_DIRECTION_INPUT)
@@ -452,4 +512,15 @@ SPA_EXPORT
 const char* pw_get_library_version(void)
 {
 	return pw_get_headers_version();
+}
+
+static const struct spa_type_info type_info[] = {
+	{ SPA_ID_INVALID, SPA_ID_INVALID, "spa_types", spa_types },
+	{ 0, 0, NULL, NULL },
+};
+
+SPA_EXPORT
+const struct spa_type_info * pw_type_info(void)
+{
+	return type_info;
 }

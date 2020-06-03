@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_STREAM_H__
-#define __PIPEWIRE_STREAM_H__
+#ifndef PIPEWIRE_STREAM_H
+#define PIPEWIRE_STREAM_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,7 +35,8 @@ extern "C" {
  *
  * Media streams are used to exchange data with the PipeWire server. A
  * stream is a wrapper around a proxy for a \ref pw_client_node with
- * just one port.
+ * an adapter. This means the stream will automatically do conversion
+ * to the type required by the server.
  *
  * Streams can be used to:
  *
@@ -41,8 +47,8 @@ extern "C" {
  * choose a port for you.
  *
  * For more complicated nodes such as filters or ports with multiple
- * inputs and/or outputs you will need to create a pw_node yourself and
- * export it with \ref pw_remote_export.
+ * inputs and/or outputs you will need to use the pw_filter or make
+ * a pw_node yourself and export it with \ref pw_core_export.
  *
  * \section sec_create Create
  *
@@ -72,18 +78,15 @@ extern "C" {
  *
  * \section sec_format Format negotiation
  *
- * After connecting the stream, it will transition to the \ref
- * PW_STREAM_STATE_CONFIGURE state. In this state the format will be
- * negotiated by the PipeWire server.
+ * After connecting the stream, the server will want to configure some
+ * parameters on the stream. You will be notified of these changes
+ * with the param_changed event.
  *
- * Once the format has been selected, the format_changed event is
- * emited with the configured format as a parameter.
+ * When a format param change is emited, the client should now prepare
+ * itself to deal with the format and complete the negotiation procedure
+ * with a call to \ref pw_stream_update_params().
  *
- * The client should now prepare itself to deal with the format and
- * complete the negotiation procedure with a call to \ref
- * pw_stream_finish_format().
- *
- * As arguments to \ref pw_stream_finish_format() an array of spa_param
+ * As arguments to \ref pw_stream_update_params() an array of spa_param
  * structures must be given. They contain parameters such as buffer size,
  * number of buffers, required metadata and other parameters for the
  * media buffers.
@@ -142,38 +145,61 @@ extern "C" {
  * The stream object provides a convenient way to send and
  * receive data streams from/to PipeWire.
  *
- * See also \ref page_streams and \ref page_core_api
+ * See also \ref page_streams and \ref page_context_api
  */
 struct pw_stream;
 
 #include <spa/buffer/buffer.h>
 #include <spa/param/param.h>
 
-#include <pipewire/remote.h>
-
 /** \enum pw_stream_state The state of a stream \memberof pw_stream */
 enum pw_stream_state {
 	PW_STREAM_STATE_ERROR = -1,		/**< the strean is in error */
 	PW_STREAM_STATE_UNCONNECTED = 0,	/**< unconnected */
 	PW_STREAM_STATE_CONNECTING = 1,		/**< connection is in progress */
-	PW_STREAM_STATE_CONFIGURE = 2,		/**< stream is being configured */
-	PW_STREAM_STATE_READY = 3,		/**< stream is ready */
-	PW_STREAM_STATE_PAUSED = 4,		/**< paused, fully configured but not
-						  *  processing data yet */
-	PW_STREAM_STATE_STREAMING = 5		/**< streaming */
+	PW_STREAM_STATE_PAUSED = 2,		/**< paused */
+	PW_STREAM_STATE_STREAMING = 3		/**< streaming */
 };
 
 struct pw_buffer {
-	struct spa_buffer *buffer;	/* the spa buffer */
-	void *user_data;		/* user data attached to the buffer */
-	uint64_t size;			/* For input streams, this field is set by pw_stream
-					   with the duration of the buffer in ticks.
-					   For output streams, this field is set by the user.
-					   This field is added for all queued buffers and
-					   returned in the time info. */
+	struct spa_buffer *buffer;	/**< the spa buffer */
+	void *user_data;		/**< user data attached to the buffer */
+	uint64_t size;			/**< For input streams, this field is set by pw_stream
+					  *  with the duration of the buffer in ticks.
+					  *  For output streams, this field is set by the user.
+					  *  This field is added for all queued buffers and
+					  *  returned in the time info. */
 };
 
-/** Events for a stream */
+struct pw_stream_control {
+	const char *name;		/**< name of the control */
+	uint32_t flags;			/**< extra flags (unused) */
+	float def;			/**< default value */
+	float min;			/**< min value */
+	float max;			/**< max value */
+	float *values;			/**< array of values */
+	uint32_t n_values;		/**< number of values in array */
+	uint32_t max_values;		/**< max values that can be set on this control */
+};
+
+/** A time structure \memberof pw_stream */
+struct pw_time {
+	int64_t now;			/**< the monotonic time */
+	struct spa_fraction rate;	/**< the rate of \a ticks and delay */
+	uint64_t ticks;			/**< the ticks at \a now. This is the current time that
+					  *  the remote end is reading/writing. */
+	int64_t delay;			/**< delay to device, add to ticks to get the time of the
+					  *  device. Positive for INPUT streams and
+					  *  negative for OUTPUT streams. */
+	uint64_t queued;		/**< data queued in the stream, this is the sum
+					  *  of the size fields in the pw_buffer that are
+					  *  currently queued */
+};
+
+#include <pipewire/pipewire.h>
+
+/** Events for a stream. These events are always called from the mainloop
+ * unless explicitly documented otherwise. */
 struct pw_stream_events {
 #define PW_VERSION_STREAM_EVENTS	0
 	uint32_t version;
@@ -182,10 +208,14 @@ struct pw_stream_events {
 	/** when the stream state changes */
 	void (*state_changed) (void *data, enum pw_stream_state old,
 				enum pw_stream_state state, const char *error);
-	/** when the format changed. The listener should call
-	 * pw_stream_finish_format() from within this callback or later to complete
-	 * the format negotiation and start the buffer negotiation. */
-	void (*format_changed) (void *data, const struct spa_pod *format);
+
+	/** Notify information about a control.  */
+	void (*control_info) (void *data, uint32_t id, const struct pw_stream_control *control);
+
+	/** when io changed on the stream. */
+	void (*io_changed) (void *data, uint32_t id, void *area, uint32_t size);
+	/** when a parameter changed */
+	void (*param_changed) (void *data, uint32_t id, const struct spa_pod *param);
 
         /** when a new buffer was created for this stream */
         void (*add_buffer) (void *data, struct pw_buffer *buffer);
@@ -197,6 +227,10 @@ struct pw_stream_events {
 	 *  mainloop but can also be called directly from the realtime data
 	 *  thread if the user is prepared to deal with this. */
         void (*process) (void *data);
+
+	/** The stream is drained */
+        void (*drained) (void *data);
+
 };
 
 /** Convert a stream state to a readable string \memberof pw_stream */
@@ -207,7 +241,9 @@ enum pw_stream_flags {
 	PW_STREAM_FLAG_NONE = 0,			/**< no flags */
 	PW_STREAM_FLAG_AUTOCONNECT	= (1 << 0),	/**< try to automatically connect
 							  *  this stream */
-	PW_STREAM_FLAG_INACTIVE		= (1 << 1),	/**< start the stream inactive */
+	PW_STREAM_FLAG_INACTIVE		= (1 << 1),	/**< start the stream inactive,
+							  *  pw_stream_set_active() needs to be
+							  *  called explicitly */
 	PW_STREAM_FLAG_MAP_BUFFERS	= (1 << 2),	/**< mmap the buffers */
 	PW_STREAM_FLAG_DRIVER		= (1 << 3),	/**< be a driver */
 	PW_STREAM_FLAG_RT_PROCESS	= (1 << 4),	/**< call process from the realtime
@@ -215,18 +251,23 @@ enum pw_stream_flags {
 	PW_STREAM_FLAG_NO_CONVERT	= (1 << 5),	/**< don't convert format */
 	PW_STREAM_FLAG_EXCLUSIVE	= (1 << 6),	/**< require exclusive access to the
 							  *  device */
+	PW_STREAM_FLAG_DONT_RECONNECT	= (1 << 7),	/**< don't try to reconnect this stream
+							  *  when the sink/source is removed */
+	PW_STREAM_FLAG_ALLOC_BUFFERS	= (1 << 8),	/**< the application will allocate buffer
+							  *  memory. In the add_buffer event, the
+							  *  data of the buffer should be set */
 };
 
 /** Create a new unconneced \ref pw_stream \memberof pw_stream
  * \return a newly allocated \ref pw_stream */
 struct pw_stream *
-pw_stream_new(struct pw_remote *remote,		/**< a \ref pw_remote */
-	      const char *name,			/**< a stream name */
+pw_stream_new(struct pw_core *core,		/**< a \ref pw_core */
+	      const char *name,			/**< a stream media name */
 	      struct pw_properties *props	/**< stream properties, ownership is taken */);
 
 struct pw_stream *
 pw_stream_new_simple(struct pw_loop *loop,	/**< a \ref pw_loop to use */
-		     const char *name,		/**< a stream name */
+		     const char *name,		/**< a stream media name */
 		     struct pw_properties *props,/**< stream properties, ownership is taken */
 		     const struct pw_stream_events *events,	/**< stream events */
 		     void *data					/**< data passed to events */);
@@ -243,16 +284,11 @@ enum pw_stream_state pw_stream_get_state(struct pw_stream *stream, const char **
 
 const char *pw_stream_get_name(struct pw_stream *stream);
 
-struct pw_remote *pw_stream_get_remote(struct pw_stream *stream);
-
-/** Indicates that the stream is live, boolean default false */
-#define PW_STREAM_PROP_IS_LIVE		"pipewire.latency.is-live"
-/** The minimum latency of the stream, int, default 0 */
-#define PW_STREAM_PROP_LATENCY_MIN	"pipewire.latency.min"
-/** The maximum latency of the stream, int default MAXINT */
-#define PW_STREAM_PROP_LATENCY_MAX	"pipewire.latency.max"
+struct pw_core *pw_stream_get_core(struct pw_stream *stream);
 
 const struct pw_properties *pw_stream_get_properties(struct pw_stream *stream);
+
+int pw_stream_update_properties(struct pw_stream *stream, const struct spa_dict *dict);
 
 /** Connect a stream for input or output on \a port_path. \memberof pw_stream
  * \return 0 on success < 0 on error.
@@ -262,8 +298,9 @@ const struct pw_properties *pw_stream_get_properties(struct pw_stream *stream);
 int
 pw_stream_connect(struct pw_stream *stream,		/**< a \ref pw_stream */
 		  enum pw_direction direction,		/**< the stream direction */
-		  const char *port_path,		/**< the port path to connect to or NULL
-							  *  to let the server choose a port */
+		  uint32_t target_id,			/**< the target object id to connect to or
+							  *  PW_ID_ANY to let the manager
+							  *  select a target. */
 		  enum pw_stream_flags flags,		/**< stream flags */
 		  const struct spa_pod **params,	/**< an array with params. The params
 							  *  should ideally contain supported
@@ -278,51 +315,26 @@ pw_stream_get_node_id(struct pw_stream *stream);
 /** Disconnect \a stream \memberof pw_stream */
 int pw_stream_disconnect(struct pw_stream *stream);
 
+/** Set the stream in error state */
+int pw_stream_set_error(struct pw_stream *stream,	/**< a \ref pw_stream */
+			int res,			/**< a result code */
+			const char *error, ...		/**< an error message */) SPA_PRINTF_FUNC(3, 4);
+
 /** Complete the negotiation process with result code \a res \memberof pw_stream
  *
  * This function should be called after notification of the format.
 
  * When \a res indicates success, \a params contain the parameters for the
  * allocation state.  */
-void
-pw_stream_finish_format(struct pw_stream *stream,	/**< a \ref pw_stream */
-			int res,			/**< a result code */
+int
+pw_stream_update_params(struct pw_stream *stream,	/**< a \ref pw_stream */
 			const struct spa_pod **params,	/**< an array of params. The params should
 							  *  ideally contain parameters for doing
 							  *  buffer allocation. */
 			uint32_t n_params		/**< number of elements in \a params */);
 
-
-/** Audio controls */
-#define PW_STREAM_CONTROL_VOLUME	"volume"
-
-/** Video controls */
-#define PW_STREAM_CONTROL_CONTRAST	"contrast"
-#define PW_STREAM_CONTROL_BRIGHTNESS	"brightness"
-#define PW_STREAM_CONTROL_HUE		"hue"
-#define PW_STREAM_CONTROL_SATURATION	"saturation"
-
-/** Set a control value */
-int pw_stream_set_control(struct pw_stream *stream, const char *name, float value);
-/** Get a control value */
-int pw_stream_get_control(struct pw_stream *stream, const char *name, float *value);
-
-/** Activate or deactivate the stream \memberof pw_stream */
-int pw_stream_set_active(struct pw_stream *stream, bool active);
-
-/** A time structure \memberof pw_stream */
-struct pw_time {
-	int64_t now;			/**< the monotonic time */
-	struct spa_fraction rate;	/**< the rate of \a ticks */
-	uint64_t ticks;			/**< the ticks at \a now. This is the current time that
-					     the remote end is reading/writing. */
-	uint64_t delay;			/**< delay to device, add to ticks for INPUT streams and
-					     subtract from ticks for OUTPUT streams to get the
-					     time of the device. */
-	uint64_t queued;		/**< data queued in the stream, this is the sum
-					     of the size fields in the pw_buffer that are
-					     currently queued */
-};
+/** Set control values */
+int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_values, float *values, ...);
 
 /** Query the time on the stream \memberof pw_stream */
 int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time);
@@ -334,9 +346,15 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream);
 /** Submit a buffer for playback or recycle a buffer for capture. */
 int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer);
 
+/** Activate or deactivate the stream \memberof pw_stream */
+int pw_stream_set_active(struct pw_stream *stream, bool active);
+
+/** Flush a stream. When \a drain is true, the drained callback will
+ * be called when all data is played or recorded */
+int pw_stream_flush(struct pw_stream *stream, bool drain);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __PIPEWIRE_STREAM_H__ */
+#endif /* PIPEWIRE_STREAM_H */

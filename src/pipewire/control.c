@@ -1,26 +1,34 @@
 /* PipeWire
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <spa/pod/parser.h>
+#include <spa/debug/types.h>
 
 #include <pipewire/control.h>
 #include <pipewire/private.h>
+
+#define NAME "control"
 
 struct impl {
 	struct pw_control this;
@@ -29,99 +37,97 @@ struct impl {
 };
 
 struct pw_control *
-pw_control_new(struct pw_core *core,
-	       struct pw_port *port,
-	       const struct spa_pod *param,
+pw_control_new(struct pw_context *context,
+	       struct pw_impl_port *port,
+	       uint32_t id, uint32_t size,
 	       size_t user_data_size)
 {
 	struct impl *impl;
 	struct pw_control *this;
 	enum spa_direction direction;
-	struct pw_type *t = &core->type;
+
+	switch (id) {
+	case SPA_IO_Control:
+		direction = SPA_DIRECTION_INPUT;
+		break;
+	case SPA_IO_Notify:
+		direction = SPA_DIRECTION_OUTPUT;
+		break;
+	default:
+		errno = ENOTSUP;
+		goto error_exit;
+	}
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
-		goto exit;
+		goto error_exit;
 
 	this = &impl->this;
+	this->id = id;
+	this->size = size;
 
-	direction = spa_pod_is_object_id(param, t->param_io.idPropsOut) ?
-		SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
+	pw_log_debug(NAME" %p: new %s %d", this,
+			spa_debug_type_find_name(spa_type_io, this->id), direction);
 
-	if (spa_pod_object_parse(param,
-				":", t->param_io.id, "I", &this->id,
-				":", t->param_io.size, "i", &this->size,
-				":", t->param.propId, "I", &this->prop_id) < 0)
-		goto exit_free;
-
-	pw_log_debug("control %p: new %s %d", this, spa_type_map_get_type(t->map, this->prop_id), direction);
-
-	this->core = core;
+	this->context = context;
 	this->port = port;
-	this->param = pw_spa_pod_copy(param);
 	this->direction = direction;
 
-	spa_list_init(&this->inputs);
+	spa_list_init(&this->links);
 
         if (user_data_size > 0)
 		this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
 
 	spa_hook_list_init(&this->listener_list);
 
-	spa_list_append(&core->control_list[direction], &this->link);
+	spa_list_append(&context->control_list[direction], &this->link);
 	if (port) {
 		spa_list_append(&port->control_list[direction], &this->port_link);
-		pw_port_events_control_added(port, this);
+		pw_impl_port_emit_control_added(port, this);
 	}
-
 	return this;
 
-    exit_free:
-	free(impl);
-    exit:
+error_exit:
 	return NULL;
 }
 
 void pw_control_destroy(struct pw_control *control)
 {
 	struct impl *impl = SPA_CONTAINER_OF(control, struct impl, this);
-	struct pw_control *other;
+	struct pw_control_link *link;
 
-	pw_log_debug("control %p: destroy", control);
+	pw_log_debug(NAME" %p: destroy", control);
 
-	pw_control_events_destroy(control);
+	pw_control_emit_destroy(control);
 
 	if (control->direction == SPA_DIRECTION_OUTPUT) {
-		spa_list_consume(other, &control->inputs, inputs_link)
-			pw_control_unlink(control, other);
+		spa_list_consume(link, &control->links, out_link)
+			pw_control_remove_link(link);
 	}
 	else {
-		if (control->output)
-			pw_control_unlink(control->output, control);
+		spa_list_consume(link, &control->links, in_link)
+			pw_control_remove_link(link);
 	}
 
 	spa_list_remove(&control->link);
 
 	if (control->port) {
 		spa_list_remove(&control->port_link);
-		pw_port_events_control_removed(control->port, control);
+		pw_impl_port_emit_control_removed(control->port, control);
 	}
 
-	pw_log_debug("control %p: free", control);
-	pw_control_events_free(control);
+	pw_log_debug(NAME" %p: free", control);
+	pw_control_emit_free(control);
 
 	if (control->direction == SPA_DIRECTION_OUTPUT) {
 		if (impl->mem)
-			pw_memblock_free(impl->mem);
+			pw_memblock_unref(impl->mem);
 	}
-
-	free(control->param);
-
 	free(control);
 }
 
 SPA_EXPORT
-struct pw_port *pw_control_get_port(struct pw_control *control)
+struct pw_impl_port *pw_control_get_port(struct pw_control *control)
 {
 	return control->port;
 }
@@ -135,114 +141,125 @@ void pw_control_add_listener(struct pw_control *control,
 	spa_hook_list_append(&control->listener_list, listener, events, data);
 }
 
+static int port_set_io(struct pw_impl_port *port, uint32_t mix, uint32_t id, void *data, uint32_t size)
+{
+	int res;
+
+	if (port->mix) {
+		res = spa_node_port_set_io(port->mix, port->direction, mix, id, data, size);
+		if (SPA_RESULT_IS_OK(res))
+			return res;
+	}
+
+	if ((res = spa_node_port_set_io(port->node->node,
+			port->direction, port->port_id,
+			id, data, size)) < 0) {
+		pw_log_warn("port %p: set io failed %d %s", port,
+			res, spa_strerror(res));
+	}
+	return res;
+}
+
 SPA_EXPORT
-int pw_control_link(struct pw_control *control, struct pw_control *other)
+int pw_control_add_link(struct pw_control *control, uint32_t cmix,
+		struct pw_control *other, uint32_t omix,
+		struct pw_control_link *link)
 {
 	int res = 0;
 	struct impl *impl;
+	uint32_t size;
 
 	if (control->direction == SPA_DIRECTION_INPUT) {
-		struct pw_control *tmp = control;
-		control = other;
-		other = tmp;
+		SPA_SWAP(control, other);
+		SPA_SWAP(cmix, omix);
 	}
 	if (control->direction != SPA_DIRECTION_OUTPUT ||
 	    other->direction != SPA_DIRECTION_INPUT)
 		return -EINVAL;
 
-	/* input control already has a linked output control */
-	if (other->output != NULL)
-		return -EEXIST;
-
 	impl = SPA_CONTAINER_OF(control, struct impl, this);
 
-	pw_log_debug("control %p: link to %p %s", control, other,
-			spa_type_map_get_type(control->core->type.map, control->prop_id));
+	pw_log_debug(NAME" %p: link to %p %s", control, other,
+			spa_debug_type_find_name(spa_type_io, control->id));
+
+	size = SPA_MAX(control->size, other->size);
 
 	if (impl->mem == NULL) {
-		if ((res = pw_memblock_alloc(PW_MEMBLOCK_FLAG_WITH_FD |
-					     PW_MEMBLOCK_FLAG_SEAL |
-					     PW_MEMBLOCK_FLAG_MAP_READWRITE,
-					     control->size,
-					     &impl->mem)) < 0)
-			goto exit;
-
-	}
-
-	if (other->port) {
-		struct pw_port *port = other->port;
-		if ((res = spa_node_port_set_io(port->node->node,
-				     port->spa_direction, port->port_id,
-				     other->id,
-				     impl->mem->ptr, control->size)) < 0) {
+		impl->mem = pw_mempool_alloc(control->context->pool,
+						PW_MEMBLOCK_FLAG_READWRITE |
+						PW_MEMBLOCK_FLAG_SEAL |
+						PW_MEMBLOCK_FLAG_MAP,
+						SPA_DATA_MemFd, size);
+		if (impl->mem == NULL) {
+			res = -errno;
 			goto exit;
 		}
 	}
 
-	if (spa_list_is_empty(&control->inputs)) {
+	if (spa_list_is_empty(&control->links)) {
 		if (control->port) {
-			struct pw_port *port = control->port;
-			if ((res = spa_node_port_set_io(port->node->node,
-					     port->spa_direction, port->port_id,
-					     control->id,
-					     impl->mem->ptr, control->size)) < 0) {
+			if ((res = port_set_io(control->port, cmix,
+						control->id,
+						impl->mem->map->ptr, size)) < 0) {
+				pw_log_warn(NAME" %p: set io failed %d %s", control,
+					res, spa_strerror(res));
 				goto exit;
 			}
 		}
 	}
 
-	other->output = control;
-	spa_list_append(&control->inputs, &other->inputs_link);
+	if (other->port) {
+		if ((res = port_set_io(other->port, omix,
+				other->id, impl->mem->map->ptr, size)) < 0) {
+			pw_log_warn(NAME" %p: set io failed %d %s", control,
+					res, spa_strerror(res));
+			goto exit;
+		}
+	}
 
-	pw_control_events_linked(control, other);
-	pw_control_events_linked(other, control);
+	link->output = control;
+	link->input = other;
+	link->out_port = cmix;
+	link->in_port = omix;
+	link->valid = true;
+	spa_list_append(&control->links, &link->out_link);
+	spa_list_append(&other->links, &link->in_link);
 
-     exit:
+	pw_control_emit_linked(control, other);
+	pw_control_emit_linked(other, control);
+exit:
 	return res;
 }
 
 SPA_EXPORT
-int pw_control_unlink(struct pw_control *control, struct pw_control *other)
+int pw_control_remove_link(struct pw_control_link *link)
 {
 	int res = 0;
+	struct pw_control *output = link->output;
+	struct pw_control *input = link->input;
 
-	if (control->direction == SPA_DIRECTION_INPUT) {
-		struct pw_control *tmp = control;
-		control = other;
-		other = tmp;
-	}
-	if (control->direction != SPA_DIRECTION_OUTPUT ||
-	    other->direction != SPA_DIRECTION_INPUT)
-		return -EINVAL;
+	pw_log_debug(NAME" %p: unlink from %p", output, input);
 
-	if (other->output != control)
-		return -EINVAL;
+	spa_list_remove(&link->in_link);
+	spa_list_remove(&link->out_link);
+	link->valid = false;
 
-	pw_log_debug("control %p: unlink from %p", control, other);
-
-	other->output = NULL;
-	spa_list_remove(&other->inputs_link);
-
-	if (spa_list_is_empty(&control->inputs)) {
-		struct pw_port *port = control->port;
-		if ((res = spa_node_port_set_io(port->node->node,
-				     port->spa_direction, port->port_id,
-				     control->id, NULL, 0)) < 0) {
-			pw_log_warn("control %p: can't unset port control io", control);
+	if (spa_list_is_empty(&output->links)) {
+		if ((res = port_set_io(output->port, link->out_port,
+					output->id, NULL, 0)) < 0) {
+			pw_log_warn(NAME" %p: can't unset port control io", output);
 		}
 	}
 
-	if (other->port) {
-		struct pw_port *port = other->port;
-		if ((res = spa_node_port_set_io(port->node->node,
-				     port->spa_direction, port->port_id,
-				     other->id, NULL, 0)) < 0) {
-			pw_log_warn("control %p: can't unset port control io", control);
+	if (input->port) {
+		if ((res = port_set_io(input->port, link->in_port,
+				     input->id, NULL, 0)) < 0) {
+			pw_log_warn(NAME" %p: can't unset port control io", output);
 		}
 	}
 
-	pw_control_events_unlinked(control, other);
-	pw_control_events_unlinked(other, control);
+	pw_control_emit_unlinked(output, input);
+	pw_control_emit_unlinked(input, output);
 
 	return res;
 }

@@ -1,106 +1,109 @@
 /* PipeWire
- * Copyright (C) 2016 Axis Communications AB
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_FACTORY_H__
-#define __PIPEWIRE_FACTORY_H__
+#ifndef PIPEWIRE_FACTORY_H
+#define PIPEWIRE_FACTORY_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define PW_TYPE_INTERFACE__Factory		PW_TYPE_INTERFACE_BASE "Factory"
-#define PW_TYPE_FACTORY_BASE			PW_TYPE_INTERFACE__Factory ":"
+#include <stdarg.h>
+#include <errno.h>
 
-/** \class pw_factory
- *
- * \brief PipeWire factory interface.
- *
- * The factory is used to make objects on demand.
- */
+#include <spa/utils/defs.h>
+#include <spa/utils/hook.h>
+
+#include <pipewire/proxy.h>
+
+#define PW_TYPE_INTERFACE_Factory	PW_TYPE_INFO_INTERFACE_BASE "Factory"
+
+#define PW_VERSION_FACTORY		3
 struct pw_factory;
 
-#include <pipewire/core.h>
-#include <pipewire/client.h>
-#include <pipewire/global.h>
-#include <pipewire/properties.h>
-#include <pipewire/resource.h>
+/** The factory information. Extra information can be added in later versions \memberof pw_introspect */
+struct pw_factory_info {
+	uint32_t id;			/**< id of the global */
+	const char *name;		/**< name the factory */
+	const char *type;		/**< type of the objects created by this factory */
+	uint32_t version;		/**< version of the objects */
+#define PW_FACTORY_CHANGE_MASK_PROPS	(1 << 0)
+#define PW_FACTORY_CHANGE_MASK_ALL	((1 << 1)-1)
+	uint64_t change_mask;		/**< bitfield of changed fields since last call */
+	struct spa_dict *props;		/**< the properties of the factory */
+};
 
-/** Factory events, listen to them with \ref pw_factory_add_listener */
+struct pw_factory_info *
+pw_factory_info_update(struct pw_factory_info *info,
+		       const struct pw_factory_info *update);
+
+void
+pw_factory_info_free(struct pw_factory_info *info);
+
+
+#define PW_FACTORY_EVENT_INFO		0
+#define PW_FACTORY_EVENT_NUM		1
+
+/** Factory events */
 struct pw_factory_events {
-#define PW_VERSION_FACRORY_EVENTS	0
+#define PW_VERSION_FACTORY_EVENTS	0
 	uint32_t version;
-
-	/** the factory is destroyed */
-        void (*destroy) (void *data);
+	/**
+	 * Notify factory info
+	 *
+	 * \param info info about the factory
+	 */
+	void (*info) (void *object, const struct pw_factory_info *info);
 };
 
-struct pw_factory_implementation {
-#define PW_VERSION_FACTORY_IMPLEMENTATION	0
+#define PW_FACTORY_METHOD_ADD_LISTENER	0
+#define PW_FACTORY_METHOD_NUM		1
+
+/** Factory methods */
+struct pw_factory_methods {
+#define PW_VERSION_FACTORY_METHODS	0
 	uint32_t version;
 
-	/** The function to create an object from this factory */
-	void *(*create_object) (void *data,
-				struct pw_resource *resource,
-				uint32_t type,
-				uint32_t version,
-				struct pw_properties *properties,
-				uint32_t new_id);
+	int (*add_listener) (void *object,
+			struct spa_hook *listener,
+			const struct pw_factory_events *events,
+			void *data);
 };
 
-struct pw_factory *pw_factory_new(struct pw_core *core,
-				  const char *name,
-				  uint32_t type,
-				  uint32_t version,
-				  struct pw_properties *properties,
-				  size_t user_data_size);
+#define pw_factory_method(o,method,version,...)				\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)o,		\
+			struct pw_factory_methods, _res,		\
+			method, version, ##__VA_ARGS__);		\
+	_res;								\
+})
 
-int pw_factory_register(struct pw_factory *factory,
-			struct pw_client *owner,
-			struct pw_global *parent,
-			struct pw_properties *properties);
-
-void pw_factory_destroy(struct pw_factory *factory);
-
-void *pw_factory_get_user_data(struct pw_factory *factory);
-
-/** Get the global of this factory */
-struct pw_global *pw_factory_get_global(struct pw_factory *factory);
-
-/** Add an event listener */
-void pw_factory_add_listener(struct pw_factory *factory,
-			     struct spa_hook *listener,
-			     const struct pw_factory_events *events,
-			     void *data);
-
-void pw_factory_set_implementation(struct pw_factory *factory,
-				   const struct pw_factory_implementation *implementation,
-				   void *data);
-
-void *pw_factory_create_object(struct pw_factory *factory,
-			       struct pw_resource *resource,
-			       uint32_t type,
-			       uint32_t version,
-			       struct pw_properties *properties,
-			       uint32_t new_id);
+#define pw_factory_add_listener(c,...)	pw_factory_method(c,add_listener,0,__VA_ARGS__)
 
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_FACTORY_H__ */
+#endif /* PIPEWIRE_FACTORY_H */
