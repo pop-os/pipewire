@@ -28,4 +28,4 @@ override_dh_makeshlibs:
 		-- -c4
 
 override_dh_shlibdeps:
-	dh_shlibdeps -l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/
+	dh_shlibdeps -l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 -Xlibpulse-mainloop-glib -- -dRecommends -edebian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/pulse/libpulse-mainloop-glib.so.0 -dDepends
