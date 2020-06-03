@@ -931,8 +931,10 @@ static void node_on_fd_events(struct spa_source *source)
 	if (SPA_LIKELY(source->rmask & SPA_IO_IN)) {
 		uint64_t cmd;
 
-		if (SPA_UNLIKELY(spa_system_eventfd_read(data_system, this->source.fd, &cmd) < 0 || cmd != 1))
-			pw_log_warn(NAME" %p: read %"PRIu64" failed %m", this, cmd);
+		if (SPA_UNLIKELY(spa_system_eventfd_read(data_system, this->source.fd, &cmd) < 0))
+			pw_log_warn(NAME" %p: read failed %m", this);
+		if (SPA_UNLIKELY(cmd > 1))
+			pw_log_warn(NAME" %p: missed %"PRIu64" wakeups", this, cmd - 1);
 
 		pw_log_trace_fp(NAME" %p: got process", this);
 		this->rt.target.signal(this->rt.target.data);
@@ -1054,6 +1056,9 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	reset_position(this, &this->rt.activation->position);
 	this->rt.activation->sync_timeout = DEFAULT_SYNC_TIMEOUT;
 	this->rt.activation->sync_left = 0;
+
+	this->rt.rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
+	this->rt.rate_limit.burst = 1;
 
 	check_properties(this);
 
@@ -1356,11 +1361,14 @@ static int node_ready(void *data, int status)
 		uint64_t min_timeout = UINT64_MAX;
 
 		if (SPA_UNLIKELY(state->pending > 0)) {
-			pw_log_warn("(%s-%u) graph not finished: state:%p pending %d/%d",
-					node->name, node->info.id, state, state->pending,
-					state->required);
 			pw_context_driver_emit_incomplete(node->context, node);
-			dump_states(node);
+			if (ratelimit_test(&node->rt.rate_limit, a->signal_time)) {
+				pw_log_warn("(%s-%u) graph not finished: state:%p quantum:%"PRIu64
+						" pending %d/%d", node->name, node->info.id,
+						state, a->position.clock.duration,
+						state->pending, state->required);
+				dump_states(node);
+			}
 			node->rt.target.signal(node->rt.target.data);
 		}
 
@@ -1442,8 +1450,10 @@ static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_po
 	a->xrun_delay = delay;
 	a->max_delay = SPA_MAX(a->max_delay, delay);
 
-	pw_log_debug(NAME" %p: XRun! count:%u time:%"PRIu64" delay:%"PRIu64" max:%"PRIu64,
-			this, a->xrun_count, trigger, delay, a->max_delay);
+	if (ratelimit_test(&this->rt.rate_limit, a->signal_time)) {
+		pw_log_error(NAME" %p: XRun! count:%u time:%"PRIu64" delay:%"PRIu64" max:%"PRIu64,
+				this, a->xrun_count, trigger, delay, a->max_delay);
+	}
 
 	pw_context_driver_emit_xrun(this->context, this);
 

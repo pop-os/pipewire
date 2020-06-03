@@ -212,6 +212,8 @@ static int debug_params(struct impl *this, struct spa_node *node,
         spa_log_error(this->log, "params %s: %d:%d (%s) %s",
 			spa_debug_type_find_name(spa_type_param, id),
 			direction, port_id, debug, spa_strerror(err));
+	if (err == -EBUSY)
+		return 0;
 
         state = 0;
         while (true) {
@@ -259,9 +261,13 @@ static int negotiate_buffers(struct impl *this)
 				this->direction, 0,
 				SPA_PARAM_Buffers, &state,
 				param, &param, &b)) < 0) {
-		debug_params(this, this->follower, this->direction, 0,
+		if (res == -ENOENT)
+			param = NULL;
+		else {
+			debug_params(this, this->follower, this->direction, 0,
 				SPA_PARAM_Buffers, param, "follower buffers", res);
-		return -ENOTSUP;
+			return res;
+		}
 	}
 
 	state = 0;
@@ -274,6 +280,8 @@ static int negotiate_buffers(struct impl *this)
 				SPA_PARAM_Buffers, param, "convert buffers", res);
 		return -ENOTSUP;
 	}
+	if (param == NULL)
+		return -ENOTSUP;
 
 	spa_pod_fixate(param);
 
@@ -456,9 +464,13 @@ static int negotiate_format(struct impl *this)
 				this->direction, 0,
 				SPA_PARAM_EnumFormat, &state,
 				format, &format, &b)) < 0) {
-		debug_params(this, this->follower, this->direction, 0,
-				SPA_PARAM_EnumFormat, format, "follower format", res);
-		return -ENOTSUP;
+		if (res == -ENOENT)
+			format = NULL;
+		else {
+			debug_params(this, this->follower, this->direction, 0,
+					SPA_PARAM_EnumFormat, format, "follower format", res);
+			return res;
+		}
 	}
 
 	if (this->convert) {
@@ -473,6 +485,8 @@ static int negotiate_format(struct impl *this)
 			return -ENOTSUP;
 		}
 	}
+	if (format == NULL)
+		return -ENOTSUP;
 
 	spa_pod_fixate(format);
 

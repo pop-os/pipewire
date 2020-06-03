@@ -24,6 +24,20 @@ executable('pw-profiler',
 	dependencies : [pipewire_dep],
 )
 
+executable('pw-mididump',
+	[ 'pw-mididump.c', 'midifile.c'],
+	c_args : [ '-D_GNU_SOURCE' ],
+	install: true,
+	dependencies : [pipewire_dep, mathlib],
+)
+
+executable('pw-metadata',
+	[ 'pw-metadata.c'],
+	c_args : [ '-D_GNU_SOURCE' ],
+	install: true,
+	dependencies : [pipewire_dep],
+)
+
 if get_option('pw-cat') and sndfile_dep.found()
 
   pwcat_sources = [
@@ -34,6 +48,8 @@ if get_option('pw-cat') and sndfile_dep.found()
   pwcat_aliases = [
     'pw-play',
     'pw-record',
+    'pw-midiplay',
+    'pw-midirecord',
   ]
 
   executable('pw-cat',

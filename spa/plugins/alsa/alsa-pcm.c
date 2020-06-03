@@ -15,7 +15,7 @@
 
 #include "alsa-pcm.h"
 
-#define CHECK(s,msg) if ((err = (s)) < 0) { spa_log_error(state->log, msg ": %s", snd_strerror(err)); return err; }
+#define CHECK(s,msg,...) if ((err = (s)) < 0) { spa_log_error(state->log, msg ": %s", ##__VA_ARGS__, snd_strerror(err)); return err; }
 
 static int spa_alsa_open(struct state *state)
 {
@@ -35,7 +35,7 @@ static int spa_alsa_open(struct state *state)
 			   state->stream,
 			   SND_PCM_NONBLOCK |
 			   SND_PCM_NO_AUTO_RESAMPLE |
-			   SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT), "open failed");
+			   SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT), "%s: open failed", props->device);
 
 	if ((err = spa_system_timerfd_create(state->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
@@ -72,7 +72,7 @@ int spa_alsa_close(struct state *state)
 		return 0;
 
 	spa_log_debug(state->log, NAME" %p: Device '%s' closing", state, state->props.device);
-	CHECK(snd_pcm_close(state->hndl), "close failed");
+	CHECK(snd_pcm_close(state->hndl), "%s: close failed", state->props.device);
 
 	spa_system_close(state->data_system, state->timerfd);
 	state->opened = false;
@@ -404,6 +404,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	struct spa_audio_info_raw *info = &fmt->info.raw;
 	snd_pcm_t *hndl;
 	unsigned int periods;
+	bool match = true;
 
 	if ((err = spa_alsa_open(state)) < 0)
 		return err;
@@ -439,10 +440,10 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	if (rchannels != info->channels) {
 		spa_log_warn(state->log, NAME" %p: Channels doesn't match (requested %u, get %u",
 				state, info->channels, rchannels);
-		if (flags & SPA_NODE_PARAM_FLAG_NEAREST)
-			info->channels = rchannels;
-		else
+		if (!SPA_FLAG_IS_SET(flags, SPA_NODE_PARAM_FLAG_NEAREST))
 			return -EINVAL;
+		info->channels = rchannels;
+		match = false;
 	}
 
 	/* set the stream rate */
@@ -451,10 +452,10 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	if (rrate != info->rate) {
 		spa_log_warn(state->log, NAME" %p: Rate doesn't match (requested %iHz, get %iHz)",
 				state, info->rate, rrate);
-		if (flags & SPA_NODE_PARAM_FLAG_NEAREST)
-			info->rate = rrate;
-		else
+		if (!SPA_FLAG_IS_SET(flags, SPA_NODE_PARAM_FLAG_NEAREST))
 			return -EINVAL;
+		info->rate = rrate;
+		match = false;
 	}
 
 	state->format = format;
@@ -470,15 +471,17 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;
 
-	spa_log_info(state->log, NAME" %p: format:%s rate:%d channels:%d "
+	spa_log_info(state->log, NAME" %s (%s): format:%s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd",
-			state, snd_pcm_format_name(state->format), state->rate, state->channels,
+			state->props.device,
+			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
+			snd_pcm_format_name(state->format), state->rate, state->channels,
 			state->buffer_frames, state->period_frames, periods, state->frame_size);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
 
-	return 0;
+	return match ? 0 : 1;
 }
 
 static int set_swparams(struct state *state)
@@ -566,7 +569,7 @@ static int alsa_recover(struct state *state, int err)
 		delay = SPA_TIMEVAL_TO_USEC(&diff);
 		missing = delay * state->rate / SPA_USEC_PER_SEC;
 
-		spa_log_error(state->log, NAME" %p: xrun of %"PRIu64" usec %"PRIu64" %f",
+		spa_log_trace(state->log, NAME" %p: xrun of %"PRIu64" usec %"PRIu64" %f",
 				state, delay, missing, state->safety);
 
 		spa_node_call_xrun(&state->callbacks,

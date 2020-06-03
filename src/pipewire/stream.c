@@ -496,13 +496,14 @@ static int impl_port_enum_params(void *object, int seq,
 	struct spa_result_node_params result;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = { 0 };
-	uint32_t idx = 0, count = 0;
+	uint32_t count = 0;
 	struct param *p;
+	bool found = false;
 
 	spa_return_val_if_fail(num != 0, -EINVAL);
 
 	result.id = id;
-	result.next = start;
+	result.next = 0;
 
 	pw_log_debug(NAME" %p: param id %d (%s) start:%d num:%d", d, id,
 			spa_debug_type_find_name(spa_type_param, id),
@@ -511,14 +512,15 @@ static int impl_port_enum_params(void *object, int seq,
 	spa_list_for_each(p, &d->param_list, link) {
 		struct spa_pod *param;
 
-		if (idx++ < start)
-			continue;
-
 		result.index = result.next++;
+		if (result.index < start)
+			continue;
 
 		param = p->param;
 		if (param == NULL || p->id != id)
 			continue;
+
+		found = true;
 
 		spa_pod_builder_init(&b, buffer, sizeof(buffer));
 		if (spa_pod_filter(&b, &result.param, param, filter) != 0)
@@ -529,7 +531,7 @@ static int impl_port_enum_params(void *object, int seq,
 		if (++count == num)
 			break;
 	}
-	return 0;
+	return found ? 0 : -ENOENT;
 }
 
 static int map_data(struct stream *impl, struct spa_data *data, int prot)
@@ -614,8 +616,8 @@ static int impl_port_set_param(void *object,
 	pw_log_debug(NAME" %p: param id %d (%s) changed: %p", impl, id,
 			spa_debug_type_find_name(spa_type_param, id), param);
 
-	if (param && pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-		spa_debug_pod(2, NULL, param);
+	if (param)
+		pw_log_pod(SPA_LOG_LEVEL_DEBUG, param);
 
 	if ((res = update_params(impl, id, &param, param ? 1 : 0)) < 0)
 		return res;

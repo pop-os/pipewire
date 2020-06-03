@@ -622,7 +622,7 @@ static pa_stream* stream_new(pa_context *c, const char *name,
 
 	props = pw_properties_new(PW_KEY_CLIENT_API, "pulseaudio",
 				NULL);
-	pw_properties_update(props, &s->proplist->props->dict);
+	pw_properties_update_proplist(props, s->proplist);
 
 	s->refcount = 1;
 	s->context = c;
@@ -1335,20 +1335,21 @@ size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 	PA_CHECK_VALIDITY_RETURN_ANY(s->context, s->direction != PA_STREAM_RECORD,
 			PA_ERR_BADSTATE, (size_t) -1);
 
-	if (!s->have_time)
-		return 0;
-
 	i = &s->timing_info;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	now = SPA_TIMESPEC_TO_USEC(&ts);
-	elapsed = pa_usec_to_bytes(now - SPA_TIMEVAL_TO_USEC(&i->timestamp), &s->sample_spec);
+	if (s->have_time) {
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		now = SPA_TIMESPEC_TO_USEC(&ts);
+		elapsed = pa_usec_to_bytes(now - SPA_TIMEVAL_TO_USEC(&i->timestamp), &s->sample_spec);
+	} else {
+		elapsed = 0;
+	}
 
 	queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
 	queued -= SPA_MIN(queued, elapsed);
 
 	writable = s->maxblock - SPA_MIN(queued, s->maxblock);
-	pw_log_debug("stream %p: %lu", s, writable);
+	pw_log_debug("stream %p: %"PRIu64, s, writable);
 	return writable;
 }
 
