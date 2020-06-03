@@ -118,7 +118,7 @@ Description: PipeWire multimedia server
  .
  This package contains the server and command-line utilities.
 
-Package: libspa-ffmpeg
+Package: libspa-0.2-ffmpeg
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
@@ -150,7 +150,7 @@ Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  .
  This package contains the GStreamer plugin.
 
-Package: libspa-bluetooth
+Package: libspa-0.2-bluetooth
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
@@ -166,7 +166,7 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
  .
  This package contains the bluetooth plugins.
 
-Package: libspa-vulkan
+Package: libspa-0.2-vulkan
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
@@ -182,7 +182,7 @@ Description: libraries for the PipeWire multimedia server - vulkan plugins
  .
  This package contains the vulkan plugins.
 
-Package: libspa-jack
+Package: libspa-0.2-jack
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
