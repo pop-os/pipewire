@@ -1,12 +1,15 @@
 spa_alsa_sources = ['alsa.c',
-                'alsa-monitor.c',
-                'alsa-sink.c',
-                'alsa-source.c',
-                'alsa-utils.c']
+                'alsa-udev.c',
+                'alsa-pcm-device.c',
+                'alsa-pcm-sink.c',
+                'alsa-pcm-source.c',
+                'alsa-pcm.c',
+                'alsa-seq-source.c',
+                'alsa-seq.c']
 
 spa_alsa = shared_library('spa-alsa',
                            spa_alsa_sources,
                            include_directories : [spa_inc],
-                           dependencies : [ alsa_dep, libudev_dep ],
+                           dependencies : [ alsa_dep, libudev_dep, mathlib, ],
                            install : true,
-                           install_dir : '@0@/spa/alsa'.format(get_option('libdir')))
+                           install_dir : join_paths(spa_plugindir, 'alsa'))

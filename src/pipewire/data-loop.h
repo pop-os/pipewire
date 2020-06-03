@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_DATA_LOOP_H__
-#define __PIPEWIRE_DATA_LOOP_H__
+#ifndef PIPEWIRE_DATA_LOOP_H
+#define PIPEWIRE_DATA_LOOP_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,15 +49,22 @@ struct pw_data_loop_events {
 	void (*destroy) (void *data);
 };
 
-/** Make a new loop */
+/** Make a new loop. */
 struct pw_data_loop *
-pw_data_loop_new(struct pw_properties *properties);
+pw_data_loop_new(const struct spa_dict *props);
 
 /** Add an event listener to loop */
 void pw_data_loop_add_listener(struct pw_data_loop *loop,
 			       struct spa_hook *listener,
 			       const struct pw_data_loop_events *events,
 			       void *data);
+
+/** wait for activity on the loop up to \a timeout milliseconds.
+ * Should be called from the loop function */
+int pw_data_loop_wait(struct pw_data_loop *loop, int timeout);
+
+/** make sure the thread will exit. Can be called from a loop callback */
+void pw_data_loop_exit(struct pw_data_loop *loop);
 
 /** Get the loop implementation of this data loop */
 struct pw_loop *
@@ -74,4 +86,4 @@ bool pw_data_loop_in_thread(struct pw_data_loop *loop);
 }
 #endif
 
-#endif /* __PIPEWIRE_DATA_LOOP_H__ */
+#endif /* PIPEWIRE_DATA_LOOP_H */

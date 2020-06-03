@@ -2,15 +2,107 @@ option('docs',
        description: 'Build documentation',
        type: 'boolean',
        value: false)
+option('examples',
+       description: 'Build examples',
+       type: 'boolean',
+       value: true)
 option('man',
        description: 'Build manpages',
        type: 'boolean',
-       value: false)
+       value: true)
+option('tests',
+       description: 'Build tests',
+       type: 'boolean',
+       value: true)
 option('gstreamer',
        description: 'Build GStreamer plugins',
-       type: 'feature',
-       value: 'auto')
+       type: 'boolean',
+       value: true)
 option('systemd',
        description: 'Enable systemd integration',
+       type: 'boolean',
+       value: true)
+option('pipewire-alsa',
+       description: 'Enable pipewire-alsa integration',
+       type: 'boolean',
+       value: true)
+option('pipewire-jack',
+       description: 'Enable pipewire-jack integration',
+       type: 'boolean',
+       value: true)
+option('pipewire-pulseaudio',
+       description: 'Enable pipewire-pulseaudio integration',
+       type: 'boolean',
+       value: true)
+option('spa-plugins',
+       description: 'Enable spa plugins integration',
+       type: 'boolean',
+       value: true)
+option('alsa',
+       description: 'Enable alsa spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('audiomixer',
+       description: 'Enable audiomixer spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('audioconvert',
+       description: 'Enable audioconvert spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('bluez5',
+       description: 'Enable bluez5 spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('control',
+       description: 'Enable control spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('audiotestsrc',
+       description: 'Enable audiotestsrc spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('ffmpeg',
+       description: 'Enable ffmpeg spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('jack',
+       description: 'Enable jack spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('support',
+       description: 'Enable support spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('evl',
+       description: 'Enable EVL support spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('test',
+       description: 'Enable test spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('v4l2',
+       description: 'Enable v4l2 spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('videoconvert',
+       description: 'Enable videoconvert spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('videotestsrc',
+       description: 'Enable videotestsrc spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('volume',
+       description: 'Enable volume spa plugin integration',
+       type: 'boolean',
+       value: false)
+option('vulkan',
+       description: 'Enable vulkan spa plugin integration',
+       type: 'boolean',
+       value: true)
+option('pw-cat',
+       description: 'Build pw-cat/pw-play/pw-record',
        type: 'boolean',
        value: true)

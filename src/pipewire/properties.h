@@ -1,29 +1,36 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_PROPERTIES_H__
-#define __PIPEWIRE_PROPERTIES_H__
+#ifndef PIPEWIRE_PROPERTIES_H
+#define PIPEWIRE_PROPERTIES_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#include <stdarg.h>
+	
 #include <spa/utils/dict.h>
 
 /** \class pw_properties
@@ -36,7 +43,8 @@ extern "C" {
  * serialization such as base64 for binary blobs.
  */
 struct pw_properties {
-	struct spa_dict dict;
+	struct spa_dict dict;	/**< dictionary of key/values */
+	uint32_t flags;		/**< extra flags */
 };
 
 struct pw_properties *
@@ -51,9 +59,18 @@ pw_properties_new_string(const char *args);
 struct pw_properties *
 pw_properties_copy(const struct pw_properties *properties);
 
-struct pw_properties *
-pw_properties_merge(const struct pw_properties *oldprops,
-		    struct pw_properties *newprops);
+int pw_properties_update_keys(struct pw_properties *props,
+		     const struct spa_dict *dict, const char *keys[]);
+
+int pw_properties_update(struct pw_properties *oldprops,
+		     const struct spa_dict *dict);
+
+int pw_properties_add(struct pw_properties *oldprops,
+		     const struct spa_dict *dict);
+int pw_properties_add_keys(struct pw_properties *oldprops,
+		     const struct spa_dict *dict, const char *keys[]);
+
+void pw_properties_clear(struct pw_properties *properties);
 
 void
 pw_properties_free(struct pw_properties *properties);
@@ -64,6 +81,9 @@ pw_properties_set(struct pw_properties *properties, const char *key, const char 
 int
 pw_properties_setf(struct pw_properties *properties,
 		   const char *key, const char *format, ...) SPA_PRINTF_FUNC(3, 4);
+int
+pw_properties_setva(struct pw_properties *properties,
+		   const char *key, const char *format, va_list args) SPA_PRINTF_FUNC(3,0);
 const char *
 pw_properties_get(const struct pw_properties *properties, const char *key);
 
@@ -98,4 +118,4 @@ static inline double pw_properties_parse_double(const char *value) {
 }
 #endif
 
-#endif /* __PIPEWIRE_PROPERTIES_H__ */
+#endif /* PIPEWIRE_PROPERTIES_H */

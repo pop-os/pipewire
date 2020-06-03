@@ -1,24 +1,29 @@
 /* Simple Plugin API
- * Copyright (C) 2017 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __SPA_GRAPH_H__
-#define __SPA_GRAPH_H__
+#ifndef SPA_GRAPH_H
+#define SPA_GRAPH_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +31,7 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
+#include <spa/utils/hook.h>
 #include <spa/node/node.h>
 #include <spa/node/io.h>
 
@@ -35,82 +41,216 @@ extern "C" {
 
 struct spa_graph;
 struct spa_graph_node;
+struct spa_graph_link;
 struct spa_graph_port;
 
-struct spa_graph_callbacks {
-#define SPA_VERSION_GRAPH_CALLBACKS	0
+struct spa_graph_state {
+	int status;			/**< current status */
+	int32_t required;		/**< required number of signals */
+	int32_t pending;		/**< number of pending signals */
+};
+
+static inline void spa_graph_state_reset(struct spa_graph_state *state)
+{
+	state->pending = state->required;
+}
+
+struct spa_graph_link {
+	struct spa_list link;
+	struct spa_graph_state *state;
+	int (*signal) (void *data);
+	void *signal_data;
+};
+
+#define spa_graph_link_signal(l)	((l)->signal((l)->signal_data))
+
+#define spa_graph_state_dec(s,c) (__atomic_sub_fetch(&(s)->pending, c, __ATOMIC_SEQ_CST) == 0)
+
+static inline int spa_graph_link_trigger(struct spa_graph_link *link)
+{
+	struct spa_graph_state *state = link->state;
+
+	spa_debug("link %p: state %p: pending %d/%d", link, state,
+                        state->pending, state->required);
+
+	if (spa_graph_state_dec(state, 1))
+		spa_graph_link_signal(link);
+
+        return state->status;
+}
+struct spa_graph {
+	uint32_t flags;			/* flags */
+	struct spa_graph_node *parent;	/* parent node or NULL when driver */
+	struct spa_graph_state *state;	/* state of graph */
+	struct spa_list nodes;		/* list of nodes of this graph */
+};
+
+struct spa_graph_node_callbacks {
+#define SPA_VERSION_GRAPH_NODE_CALLBACKS	0
 	uint32_t version;
 
-	int (*need_input) (void *data, struct spa_graph_node *node);
-	int (*have_output) (void *data, struct spa_graph_node *node);
+	int (*process) (void *data, struct spa_graph_node *node);
+	int (*reuse_buffer) (void *data, struct spa_graph_node *node,
+			uint32_t port_id, uint32_t buffer_id);
 };
-
-struct spa_graph {
-	struct spa_list nodes;
-	const struct spa_graph_callbacks *callbacks;
-	void *callbacks_data;
-};
-
-#define spa_graph_need_input(g,n)	((g)->callbacks->need_input((g)->callbacks_data, (n)))
-#define spa_graph_have_output(g,n)	((g)->callbacks->have_output((g)->callbacks_data, (n)))
-#define spa_graph_reuse_buffer(g,n,p,i)	((g)->callbacks->reuse_buffer((g)->callbacks_data, (n),(p),(i)))
 
 struct spa_graph_node {
 	struct spa_list link;		/**< link in graph nodes list */
 	struct spa_graph *graph;	/**< owner graph */
 	struct spa_list ports[2];	/**< list of input and output ports */
-	struct spa_list ready_link;	/**< link for scheduler */
-#define SPA_GRAPH_NODE_FLAG_ASYNC	(1 << 0)
+	struct spa_list links;		/**< list of links to next nodes */
 	uint32_t flags;			/**< node flags */
-	uint32_t required[2];		/**< required number of ports */
-	uint32_t ready[2];		/**< number of ports with data */
-	int state;			/**< state of the node */
-	struct spa_node *implementation;/**< node implementation */
-	void *scheduler_data;		/**< scheduler private data */
+	struct spa_graph_state *state;	/**< state of the node */
+	struct spa_graph_link graph_link;	/**< link in graph */
+	struct spa_graph *subgraph;	/**< subgraph or NULL */
+	struct spa_callbacks callbacks;
+	struct spa_list sched_link;	/**< link for scheduler */
 };
+
+#define spa_graph_node_call(n,method,version,...)			\
+({									\
+	int __res = 0;							\
+	spa_callbacks_call_res(&(n)->callbacks,				\
+			struct spa_graph_node_callbacks, __res,		\
+			method, version, ##__VA_ARGS__);		\
+	__res;								\
+})
+
+#define spa_graph_node_process(n)		spa_graph_node_call(n, process, 0, n)
+#define spa_graph_node_reuse_buffer(n,p,i)	spa_graph_node_call(n, reuse_buffer, 0, n, p, i)
 
 struct spa_graph_port {
 	struct spa_list link;		/**< link in node port list */
 	struct spa_graph_node *node;	/**< owner node */
 	enum spa_direction direction;	/**< port direction */
 	uint32_t port_id;		/**< port id */
-#define SPA_GRAPH_PORT_FLAG_DISABLED	(1 << 0)
 	uint32_t flags;			/**< port flags */
-	struct spa_io_buffers *io;	/**< io area of the port */
 	struct spa_graph_port *peer;	/**< peer */
-	void *scheduler_data;		/**< scheduler private data */
 };
 
-static inline void spa_graph_init(struct spa_graph *graph)
+static inline int spa_graph_node_trigger(struct spa_graph_node *node)
+{
+	struct spa_graph_link *l;
+	spa_debug("node %p trigger", node);
+	spa_list_for_each(l, &node->links, link)
+		spa_graph_link_trigger(l);
+	return 0;
+}
+
+static inline int spa_graph_run(struct spa_graph *graph)
+{
+	struct spa_graph_node *n, *t;
+	struct spa_list pending;
+
+	spa_graph_state_reset(graph->state);
+	spa_debug("graph %p run with state %p pending %d/%d", graph, graph->state,
+			graph->state->pending, graph->state->required);
+
+	spa_list_init(&pending);
+
+	spa_list_for_each(n, &graph->nodes, link) {
+		struct spa_graph_state *s = n->state;
+		spa_graph_state_reset(s);
+		spa_debug("graph %p node %p: state %p pending %d/%d status %d", graph, n,
+				s, s->pending, s->required, s->status);
+		if (--s->pending == 0)
+			spa_list_append(&pending, &n->sched_link);
+	}
+	spa_list_for_each_safe(n, t, &pending, sched_link)
+		spa_graph_node_process(n);
+
+	return 0;
+}
+
+static inline int spa_graph_finish(struct spa_graph *graph)
+{
+	spa_debug("graph %p finish", graph);
+	if (graph->parent)
+		return spa_graph_node_trigger(graph->parent);
+	return 0;
+}
+static inline int spa_graph_link_signal_node(void *data)
+{
+	struct spa_graph_node *node = (struct spa_graph_node *)data;
+	spa_debug("node %p call process", node);
+	return spa_graph_node_process(node);
+}
+
+static inline int spa_graph_link_signal_graph(void *data)
+{
+	struct spa_graph_node *node = (struct spa_graph_node *)data;
+	return spa_graph_finish(node->graph);
+}
+
+static inline void spa_graph_init(struct spa_graph *graph, struct spa_graph_state *state)
 {
 	spa_list_init(&graph->nodes);
+	graph->flags = 0;
+	graph->state = state;
+	spa_debug("graph %p init state %p", graph, state);
 }
 
 static inline void
-spa_graph_set_callbacks(struct spa_graph *graph,
-			const struct spa_graph_callbacks *callbacks,
-			void *data)
+spa_graph_link_add(struct spa_graph_node *out,
+		   struct spa_graph_state *state,
+		   struct spa_graph_link *link)
 {
-	graph->callbacks = callbacks;
-	graph->callbacks_data = data;
+	link->state = state;
+	state->required++;
+	spa_debug("node %p add link %p to state %p %d", out, link, state, state->required);
+	spa_list_append(&out->links, &link->link);
+}
+
+static inline void spa_graph_link_remove(struct spa_graph_link *link)
+{
+	link->state->required--;
+	spa_debug("link %p state %p remove %d", link, link->state, link->state->required);
+	spa_list_remove(&link->link);
 }
 
 static inline void
-spa_graph_node_init(struct spa_graph_node *node)
+spa_graph_node_init(struct spa_graph_node *node, struct spa_graph_state *state)
 {
 	spa_list_init(&node->ports[SPA_DIRECTION_INPUT]);
 	spa_list_init(&node->ports[SPA_DIRECTION_OUTPUT]);
+	spa_list_init(&node->links);
 	node->flags = 0;
-	node->required[SPA_DIRECTION_INPUT] = node->ready[SPA_DIRECTION_INPUT] = 0;
-	node->required[SPA_DIRECTION_OUTPUT] = node->ready[SPA_DIRECTION_OUTPUT] = 0;
-	spa_debug("node %p init", node);
+	node->subgraph = NULL;
+	node->state = state;
+	node->state->required = node->state->pending = 0;
+	node->state->status = SPA_STATUS_OK;
+	node->graph_link.signal = spa_graph_link_signal_graph;
+	node->graph_link.signal_data = node;
+	spa_debug("node %p init state %p", node, state);
+}
+
+
+static inline int spa_graph_node_impl_sub_process(void *data, struct spa_graph_node *node)
+{
+	struct spa_graph *graph = node->subgraph;
+	spa_debug("node %p: sub process %p", node, graph);
+	return spa_graph_run(graph);
+}
+
+static const struct spa_graph_node_callbacks spa_graph_node_sub_impl_default = {
+	SPA_VERSION_GRAPH_NODE_CALLBACKS,
+	.process = spa_graph_node_impl_sub_process,
+};
+
+static inline void spa_graph_node_set_subgraph(struct spa_graph_node *node,
+		struct spa_graph *subgraph)
+{
+	node->subgraph = subgraph;
+	subgraph->parent = node;
+	spa_debug("node %p set subgraph %p", node, subgraph);
 }
 
 static inline void
-spa_graph_node_set_implementation(struct spa_graph_node *node,
-				  struct spa_node *implementation)
+spa_graph_node_set_callbacks(struct spa_graph_node *node,
+		const struct spa_graph_node_callbacks *callbacks,
+		void *data)
 {
-	node->implementation = implementation;
+	node->callbacks = SPA_CALLBACKS_INIT(callbacks, data);
 }
 
 static inline void
@@ -118,24 +258,33 @@ spa_graph_node_add(struct spa_graph *graph,
 		   struct spa_graph_node *node)
 {
 	node->graph = graph;
-	node->state = SPA_STATUS_OK;
-	node->ready_link.next = NULL;
 	spa_list_append(&graph->nodes, &node->link);
-	spa_debug("node %p add", node);
+	node->state->required++;
+	spa_debug("node %p add to graph %p, state %p required %d",
+			node, graph, node->state, node->state->required);
+	spa_graph_link_add(node, graph->state, &node->graph_link);
 }
+
+static inline void spa_graph_node_remove(struct spa_graph_node *node)
+{
+	spa_debug("node %p remove from graph %p, state %p required %d",
+			node, node->graph, node->state, node->state->required);
+	spa_graph_link_remove(&node->graph_link);
+	node->state->required--;
+	spa_list_remove(&node->link);
+}
+
 
 static inline void
 spa_graph_port_init(struct spa_graph_port *port,
 		    enum spa_direction direction,
 		    uint32_t port_id,
-		    uint32_t flags,
-		    struct spa_io_buffers *io)
+		    uint32_t flags)
 {
 	spa_debug("port %p init type %d id %d", port, direction, port_id);
 	port->direction = direction;
 	port->port_id = port_id;
 	port->flags = flags;
-	port->io = io;
 }
 
 static inline void
@@ -145,32 +294,18 @@ spa_graph_port_add(struct spa_graph_node *node,
 	spa_debug("port %p add to node %p", port, node);
 	port->node = node;
 	spa_list_append(&node->ports[port->direction], &port->link);
-	if (!(port->flags & SPA_PORT_INFO_FLAG_OPTIONAL))
-		node->required[port->direction]++;
-}
-
-static inline void spa_graph_node_remove(struct spa_graph_node *node)
-{
-	spa_debug("node %p remove", node);
-	spa_list_remove(&node->link);
-	if (node->ready_link.next)
-		spa_list_remove(&node->ready_link);
 }
 
 static inline void spa_graph_port_remove(struct spa_graph_port *port)
 {
 	spa_debug("port %p remove", port);
 	spa_list_remove(&port->link);
-	if (!(port->flags & SPA_PORT_INFO_FLAG_OPTIONAL) &&
-	    port->node->required[port->direction] > 0) {
-		port->node->required[port->direction]--;
-	}
 }
 
 static inline void
 spa_graph_port_link(struct spa_graph_port *out, struct spa_graph_port *in)
 {
-	spa_debug("port %p link to %p", out, in);
+	spa_debug("port %p link to %p %p %p", out, in, in->node, in->node->state);
 	out->peer = in;
 	in->peer = out;
 }
@@ -185,8 +320,33 @@ spa_graph_port_unlink(struct spa_graph_port *port)
 	}
 }
 
+static inline int spa_graph_node_impl_process(void *data, struct spa_graph_node *node)
+{
+	struct spa_node *n = (struct spa_node *)data;
+	struct spa_graph_state *state = node->state;
+
+	spa_debug("node %p: process state %p: %d, node %p", node, state, state->status, n);
+	if ((state->status = spa_node_process(n)) != SPA_STATUS_OK)
+		spa_graph_node_trigger(node);
+
+        return state->status;
+}
+
+static inline int spa_graph_node_impl_reuse_buffer(void *data, struct spa_graph_node *node,
+		uint32_t port_id, uint32_t buffer_id)
+{
+	struct spa_node *n = (struct spa_node *)data;
+	return spa_node_port_reuse_buffer(n, port_id, buffer_id);
+}
+
+static const struct spa_graph_node_callbacks spa_graph_node_impl_default = {
+	SPA_VERSION_GRAPH_NODE_CALLBACKS,
+	.process = spa_graph_node_impl_process,
+	.reuse_buffer = spa_graph_node_impl_reuse_buffer,
+};
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __SPA_GRAPH_H__ */
+#endif /* SPA_GRAPH_H */

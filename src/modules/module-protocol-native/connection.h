@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H__
-#define __PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H__
+#ifndef PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H
+#define PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +31,8 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 #include <spa/utils/hook.h>
+
+#include <extensions/protocol-native.h>
 
 struct pw_protocol_native_connection_events {
 #define PW_VERSION_PROTOCOL_NATIVE_CONNECTION_EVENTS	0
@@ -36,6 +43,8 @@ struct pw_protocol_native_connection_events {
 	void (*error) (void *data, int error);
 
 	void (*need_flush) (void *data);
+
+	void (*start) (void *data, uint32_t version);
 };
 
 /** \class pw_protocol_native_connection
@@ -61,42 +70,37 @@ pw_protocol_native_connection_add_listener(struct pw_protocol_native_connection 
 }
 
 struct pw_protocol_native_connection *
-pw_protocol_native_connection_new(struct pw_core *core, int fd);
+pw_protocol_native_connection_new(struct pw_context *context, int fd);
+
+int pw_protocol_native_connection_set_fd(struct pw_protocol_native_connection *conn, int fd);
 
 void
 pw_protocol_native_connection_destroy(struct pw_protocol_native_connection *conn);
 
-bool
+int
 pw_protocol_native_connection_get_next(struct pw_protocol_native_connection *conn,
-				       uint8_t *opcode,
-				       uint32_t *dest_id,
-				       void **data, uint32_t *size);
+				const struct pw_protocol_native_message **msg);
 
 uint32_t pw_protocol_native_connection_add_fd(struct pw_protocol_native_connection *conn, int fd);
-
 int pw_protocol_native_connection_get_fd(struct pw_protocol_native_connection *conn, uint32_t index);
 
 struct spa_pod_builder *
-pw_protocol_native_connection_begin_resource(struct pw_protocol_native_connection *conn,
-                                             struct pw_resource *resource,
-                                             uint8_t opcode);
+pw_protocol_native_connection_begin(struct pw_protocol_native_connection *conn,
+                                    uint32_t id, uint8_t opcode,
+				    struct pw_protocol_native_message **msg);
 
-struct spa_pod_builder *
-pw_protocol_native_connection_begin_proxy(struct pw_protocol_native_connection *conn,
-                                          struct pw_proxy *proxy,
-                                          uint8_t opcode);
-void
+int
 pw_protocol_native_connection_end(struct pw_protocol_native_connection *conn,
                                   struct spa_pod_builder *builder);
 
-bool
+int
 pw_protocol_native_connection_flush(struct pw_protocol_native_connection *conn);
 
-bool
+int
 pw_protocol_native_connection_clear(struct pw_protocol_native_connection *conn);
 
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif
 
-#endif /* __PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H__ */
+#endif /* PIPEWIRE_PROTOCOL_NATIVE_CONNECTION_H */

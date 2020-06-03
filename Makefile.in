@@ -1,27 +1,46 @@
 all:
-	ninja -C build
+	ninja -C @BUILD_ROOT@
 
 install:
-	ninja -C build install
+	ninja -C @BUILD_ROOT@ install
+
+uninstall:
+	ninja -C @BUILD_ROOT@ uninstall
 
 clean:
-	ninja -C build clean
+	ninja -C @BUILD_ROOT@ clean
 
 run: all
-	SPA_PLUGIN_DIR=build/spa/plugins \
-	PIPEWIRE_MODULE_DIR=build \
-	PIPEWIRE_CONFIG_FILE=build/src/daemon/pipewire.conf \
-	build/src/daemon/pipewire
+	SPA_PLUGIN_DIR=@BUILD_ROOT@/spa/plugins \
+	PIPEWIRE_MODULE_DIR=@BUILD_ROOT@ \
+	PATH=@BUILD_ROOT@/src/examples:$(PATH) \
+	PIPEWIRE_CONFIG_FILE=@BUILD_ROOT@/src/daemon/pipewire.conf \
+	$(DBG) @BUILD_ROOT@/src/daemon/pipewire
+
+gdb:
+	$(MAKE) run DBG=gdb
+
+valgrind:
+	$(MAKE) run DBG="DISABLE_RTKIT=1 valgrind"
+
+test: all
+	ninja -C @BUILD_ROOT@ test
+
+benchmark: all
+	ninja -C @BUILD_ROOT@ benchmark
 
 monitor: all
-	SPA_PLUGIN_DIR=build/spa/plugins \
-	PIPEWIRE_MODULE_DIR=build/src/modules/ \
-	build/src/tools/pipewire-monitor
+	SPA_PLUGIN_DIR=@BUILD_ROOT@/spa/plugins \
+	PIPEWIRE_MODULE_DIR=@BUILD_ROOT@/src/modules/ \
+	@BUILD_ROOT@/src/tools/pw-mon
 
 cli: all
-	SPA_PLUGIN_DIR=build/spa/plugins \
-	PIPEWIRE_MODULE_DIR=build/src/modules/ \
-	build/src/tools/pipewire-cli
+	SPA_PLUGIN_DIR=@BUILD_ROOT@/spa/plugins \
+	PIPEWIRE_MODULE_DIR=@BUILD_ROOT@/src/modules/ \
+	@BUILD_ROOT@/src/tools/pw-cli
+
+shell: all
+	ninja -C @BUILD_ROOT@ uninstalled
 
 dist: all
 	git archive --prefix=pipewire-@VERSION@/ -o pipewire-@VERSION@.tar.gz @TAG@
@@ -33,8 +52,8 @@ publish: all
 	git branch -D gh-pages 2>/dev/null || true && \
 	git branch -D draft 2>/dev/null || true && \
 	git checkout -b draft && \
-	git add -f build/doc/html && \
+	git add -f @BUILD_ROOT@/doc/html && \
 	git commit -anm "Deploy on gh-pages" && \
-	git subtree split --prefix build/doc/html -b gh-pages && \
+	git subtree split --prefix @BUILD_ROOT@/doc/html -b gh-pages && \
 	git push --force origin gh-pages:gh-pages && \
-	git checkout master 2>/dev/null
+	git checkout work 2>/dev/null

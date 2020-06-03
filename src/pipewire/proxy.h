@@ -1,24 +1,29 @@
 /* PipeWire
- * Copyright (C) 2015 Wim Taymans <wim.taymans@gmail.com>
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2018 Wim Taymans
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef __PIPEWIRE_PROXY_H__
-#define __PIPEWIRE_PROXY_H__
+#ifndef PIPEWIRE_PROXY_H
+#define PIPEWIRE_PROXY_H
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,9 +43,8 @@ extern "C" {
  * \section sec_page_proxy_core Core proxy
  *
  * A proxy for a remote core object can be obtained by making
- * a remote connection. See \ref pw_page_remote_api
- *
- * A pw_core_proxy can then be retrieved with \ref pw_remote_get_core_proxy
+ * a remote connection with \ref pw_core_connect.
+ * See \ref pw_page_remote_api
  *
  * Some methods on proxy object allow creation of more proxy objects or
  * create a binding between a local proxy and global resource.
@@ -105,13 +109,27 @@ struct pw_proxy_events {
 
 	/** The proxy is destroyed */
         void (*destroy) (void *data);
+
+	/** a proxy is bound to a global id */
+        void (*bound) (void *data, uint32_t global_id);
+
+	/** a proxy is removed from the server. Use pw_proxy_destroy to
+	 * free the proxy. */
+        void (*removed) (void *data);
+
+	/** a reply to a sync method completed */
+        void (*done) (void *data, int seq);
+
+	/** an error occured on the proxy */
+        void (*error) (void *data, int seq, int res, const char *message);
 };
 
 /** Make a new proxy object. The id can be used to bind to a remote object and
   * can be retrieved with \ref pw_proxy_get_id . */
 struct pw_proxy *
 pw_proxy_new(struct pw_proxy *factory,	/**< factory */
-	     uint32_t type,		/**< interface type */
+	     const char *type,		/**< interface type */
+	     uint32_t version,		/**< interface version */
 	     size_t user_data_size	/**< size of user data */);
 
 /** Add an event listener to proxy */
@@ -120,11 +138,11 @@ void pw_proxy_add_listener(struct pw_proxy *proxy,
 			   const struct pw_proxy_events *events,
 			   void *data);
 
-/** Add a listener for the events received from the remote resource. The
-  * events depend on the type of the remote resource. */
-void pw_proxy_add_proxy_listener(struct pw_proxy *proxy,	/**< the proxy */
+/** Add a listener for the events received from the remote object. The
+  * events depend on the type of the remote object type. */
+void pw_proxy_add_object_listener(struct pw_proxy *proxy,	/**< the proxy */
 				 struct spa_hook *listener,	/**< listener */
-				 const void *events,		/**< proxied events */
+				 const void *funcs,		/**< proxied functions */
 				 void *data			/**< data passed to events */);
 
 /** destroy a proxy */
@@ -136,20 +154,54 @@ void *pw_proxy_get_user_data(struct pw_proxy *proxy);
 /** Get the local id of the proxy */
 uint32_t pw_proxy_get_id(struct pw_proxy *proxy);
 
+/** Get the type and version of the proxy */
+const char *pw_proxy_get_type(struct pw_proxy *proxy, uint32_t *version);
+
 /** Get the protocol used for the proxy */
 struct pw_protocol *pw_proxy_get_protocol(struct pw_proxy *proxy);
 
+/** Generate an sync method for a proxy. This will generate a done event
+ * with the same seq number of the reply. */
+int pw_proxy_sync(struct pw_proxy *proxy, int seq);
+
+/** Set the global id this proxy is bound to. This is usually used internally
+ * and will also emit the bound event */
+int pw_proxy_set_bound_id(struct pw_proxy *proxy, uint32_t global_id);
+/** Get the global id bound to this proxy of SPA_ID_INVALID when not bound
+ * to a global */
+uint32_t pw_proxy_get_bound_id(struct pw_proxy *proxy);
+
+/** Generate an error for a proxy */
+int pw_proxy_error(struct pw_proxy *proxy, int res, const char *error);
+int pw_proxy_errorf(struct pw_proxy *proxy, int res, const char *error, ...) SPA_PRINTF_FUNC(3, 4);
+
 /** Get the listener of proxy */
-struct spa_hook_list *pw_proxy_get_proxy_listeners(struct pw_proxy *proxy);
+struct spa_hook_list *pw_proxy_get_object_listeners(struct pw_proxy *proxy);
 
 /** Get the marshal functions for the proxy */
 const struct pw_protocol_marshal *pw_proxy_get_marshal(struct pw_proxy *proxy);
 
-#define pw_proxy_notify(p,type,event,ver,...)	spa_hook_list_call(pw_proxy_get_proxy_listeners(p),type,event,ver,## __VA_ARGS__)
-#define pw_proxy_do(p,type,method,...)		((type*) pw_proxy_get_marshal(p)->method_marshal)->method(p, ## __VA_ARGS__)
+/** Install a marshal function on a proxy */
+int pw_proxy_install_marshal(struct pw_proxy *proxy, bool implementor);
+
+#define pw_proxy_notify(p,type,event,version,...)			\
+	spa_hook_list_call(pw_proxy_get_object_listeners(p),		\
+			type, event, version, ## __VA_ARGS__)
+
+#define pw_proxy_call(p,type,method,version,...)			\
+	spa_interface_call((struct spa_interface*)p,			\
+			type, method, version, ##__VA_ARGS__)
+
+#define pw_proxy_call_res(p,type,method,version,...)			\
+({									\
+	int _res = -ENOTSUP;						\
+	spa_interface_call_res((struct spa_interface*)p,		\
+			type, _res, method, version, ##__VA_ARGS__);	\
+	_res;								\
+})
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __PIPEWIRE_PROXY_H__ */
+#endif /* PIPEWIRE_PROXY_H */
