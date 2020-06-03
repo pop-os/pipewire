@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.3',
+  version : '0.3.4',
   license : 'MIT',
   meson_version : '>= 0.50.0',
   default_options : [ 'warning_level=3',
@@ -60,6 +60,7 @@ if cc.get_id() == 'gcc'
 		        '-Wno-missing-field-initializers',
 		        '-Wno-unused-parameter',
 			'-Wno-pedantic',
+			'-Wunused-result',
 			'-DFASTPATH',
 #			'-DSPA_DEBUG_MEMCPY',
 			language : 'c')
@@ -75,6 +76,7 @@ if cc.get_id() == 'gcc'
 		        '-Wno-missing-field-initializers',
 		        '-Wno-unused-parameter',
 			'-Wno-pedantic',
+			'-Wunused-result',
 			language : 'cpp')
 endif
 
