@@ -17,7 +17,7 @@ pipewire (0.2.7-1) unstable; urgency=medium
   * debian/libpipewire-0.2-1.symbols: Update
   * Build-Depend on debhelper-compat 12 and drop debian/compat
 
- -- Jeremy Bicha <jbicha@debian.org>  Fri, 01 Nov 2019 21:44:56 -0400
+ -- Jeremy Bicha <jbicha@debian.org>  Fri, 01 Nov 2019 21:50:48 -0400
 
 pipewire (0.2.5-1) unstable; urgency=medium
 
