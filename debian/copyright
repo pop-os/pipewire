@@ -1,59 +1,41 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: pipewire
 Source: https://gitlab.freedesktop.org/pipewire/pipewire
+License: Expat and LGPL-2.1+
 
 Files: *
-Copyright: 2015-2017 Wim Taymans
-License: LGPL-2+
-
-Files: git-version-gen
-Copyright: 2007-2008, Free Software Foundation
-License: GPL-3+
-
-Files: spa/plugins/bluez5/a2dp-codecs.c
-Copyright: 2016-2017 Arkadiusz Bokowy
-License: Expat
-
-Files: spa/plugins/bluez5/a2dp-codecs.h
-Copyright: 2004-2010 Marcel Holtmann
-           2006-2010
-License: LGPL-2.1+
-
-Files: spa/plugins/bluez5/rtp.h
-Copyright: 2004-2010 Marcel Holtmann
-License: LGPL-2.1+
-
-Files: spa/plugins/videotestsrc/videotestsrc.c
-Copyright: 2016 Axis Communications AB
-           2016 Wim Taymans
-License: LGPL-2+
-
-Files: src/daemon/daemon-config.*
-       src/modules/spa/module-monitor.c
-       src/modules/spa/module-node.c
-       src/pipewire/command.*
-       src/pipewire/module.*
-Copyright: 2016 Axis Communications
-License: LGPL-2+
-
-Files: spa/plugins/support/plugin.c
-       spa/plugins/test/plugin.c
-       spa/plugins/videotestsrc/draw.c
-       spa/plugins/videotestsrc/plugin.c
-       src/pipewire/factory.*
-Copyright: 2016, Axis Communications AB
-License: LGPL-2+
-
-Files: src/gst/gstpipewiredeviceprovider.*
-Copyright: 2012 Olivier Crete
-           2015 Wim Taymans
-License: LGPL-2+
-
-Files: src/modules/module-rtkit.c
 Copyright: 2009 Lennart Poettering
            2010 David Henningsson
-           2015 Wim Taymans
-License: Expat and LGPL-2+
+           2015-2020 Wim Taymans
+           2016 Axis Communications
+           2018-2020 Collabora Ltd.
+           2020 Konsulko Group
+License: Expat
+
+Files: pipewire-pulseaudio/*
+Copyright: 1999 Tom Tromey
+           2000 Red Hat, Inc.
+           2004-2009 Lennart Poettering
+           2006 Pierre Ossman
+           2006 Pierre Ossman for Cendio AB
+           2011 Intel Corporation
+           2011 Collabora Multimedia
+           2011 Arun Raghavan
+           2015-2018 Wim Taymans
+License: LGPL-2+ and LGPL-2.1+
+
+Files: spa/plugins/bluez5/*
+Copyright: 2004-2010 Marcel Holtmann
+           2006-2010 Nokia Corporation
+           2016-2017 Arkadiusz Bokowy
+           2018 Wim Taymans
+           2019 Collabora Ltd.
+License: Expat and LGPL-2.1+
+
+Files: src/modules/module-client-node/v0/*
+       src/modules/module-protocol-native/v0/*
+Copyright: 2015-2017 Wim Taymans
+License: LGPL-2+
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -73,23 +55,6 @@ License: Expat
  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  THE SOFTWARE.
-
-License: GPL-3+
- This program is free software: you can redistribute it and/or modify
- it under the terms of the GNU General Public License as published by
- the Free Software Foundation, version 3 of the License, or
- (at your option) any later version.
- .
- This program is distributed in the hope that it will be useful,
- but WITHOUT ANY WARRANTY; without even the implied warranty of
- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- GNU General Public License for more details.
- .
- You should have received a copy of the GNU General Public License
- along with this program.  If not, see <http://www.gnu.org/licenses/>.
- .
- On Debian systems, the complete text of the GNU General
- Public License can be found in `/usr/share/common-licenses/GPL-3'.
 
 License: LGPL-2+
  This package is free software; you can redistribute it and/or
