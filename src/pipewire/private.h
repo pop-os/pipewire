@@ -45,7 +45,7 @@ struct ucred {
 #endif
 
 #ifndef spa_debug
-#define spa_debug pw_log_trace
+#define spa_debug(...) pw_log_trace(__VA_ARGS__)
 #endif
 
 struct defaults {
@@ -58,6 +58,29 @@ struct defaults {
 	uint32_t link_max_buffers;
 	unsigned int mem_allow_mlock;
 };
+
+struct ratelimit {
+	uint64_t interval;
+	uint64_t begin;
+	unsigned burst;
+	unsigned n_printed, n_missed;
+};
+
+static inline bool ratelimit_test(struct ratelimit *r, uint64_t now)
+{
+	if (r->begin + r->interval < now) {
+		if (r->n_missed)
+			pw_log_warn("%u events suppressed", r->n_missed);
+		r->begin = now;
+		r->n_printed = 0;
+		r->n_missed = 0;
+	} else if (r->n_printed >= r->burst) {
+		r->n_missed++;
+		return false;
+	}
+	r->n_printed++;
+	return true;
+}
 
 #define MAX_PARAMS	32
 
@@ -564,6 +587,8 @@ struct pw_impl_node {
 		struct pw_node_target target;		/* our target that is signaled by the
 							   driver */
 		struct spa_list driver_link;		/* our link in driver */
+
+		struct ratelimit rate_limit;
 	} rt;
 
         void *user_data;                /**< extra user data */
@@ -782,6 +807,7 @@ struct pw_proxy {
 					  *  be removed from server */
 	unsigned int removed:1;		/**< proxy was removed from server */
 	unsigned int destroyed:1;	/**< proxy was destroyed by client */
+	unsigned int in_map:1;		/**< proxy is in core object map */
 
 	struct spa_hook_list listener_list;
 	struct spa_hook_list object_listener_list;
@@ -957,6 +983,10 @@ pw_context_find_port(struct pw_context *context,
 		  struct spa_pod **format_filters,
 		  char **error);
 
+int pw_context_debug_port_params(struct pw_context *context,
+		struct spa_node *node, enum spa_direction direction,
+		uint32_t port_id, uint32_t id, const char *debug, int err);
+
 const struct pw_export_type *pw_context_find_export_type(struct pw_context *context, const char *type);
 
 int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version);
@@ -1060,6 +1090,21 @@ int pw_control_remove_link(struct pw_control_link *link);
 void pw_control_destroy(struct pw_control *control);
 
 void pw_proxy_unref(struct pw_proxy *proxy);
+
+#define PW_LOG_OBJECT_POD	(1<<0)
+void pw_log_log_object(enum spa_log_level level, const char *file, int line,
+	   const char *func, uint32_t flags, const void *object);
+
+#define pw_log_object(lev,fl,obj)						\
+({										\
+	if (SPA_UNLIKELY(pw_log_level_enabled (lev)))				\
+		pw_log_log_object(lev,__FILE__,__LINE__,__func__,(fl),(obj));	\
+})
+
+#define pw_log_pod(lev,pod) pw_log_object(lev,PW_LOG_OBJECT_POD,pod)
+#define pw_log_format(lev,pod) pw_log_object(lev,PW_LOG_OBJECT_POD,pod)
+
+bool pw_log_is_default(void);
 
 /** \endcond */
 

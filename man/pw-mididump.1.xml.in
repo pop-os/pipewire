@@ -6,14 +6,20 @@
 This file is part of PipeWire.
 -->
 
-<manpage name="pw-mon" section="1" desc="The PipeWire monitor">
+<manpage name="pw-mididump" section="1" desc="The PipeWire midi dump">
 
   <synopsis>
-    <cmd>pw-mon [<arg>options</arg>]</cmd>
+	  <cmd>pw-mididump [<arg>options</arg>]  [<arg>FILE</arg>]</cmd>
   </synopsis>
 
   <description>
-    <p>Monitor objects on the PipeWire instance.</p>
+    <p>Dump midi messages to stdout.</p>
+
+    <p>When a midi file is given, the events inside the file are printed.</p>
+
+    <p>When no file is given, <cmd>pw-mididump</cmd> creates a PipeWire
+       midi input stream and will print all midi events received on the port to
+       stdout.</p>
   </description>
 
   <options>
@@ -45,6 +51,7 @@ This file is part of PipeWire.
   <section name="See also">
     <p>
       <manref name="pipewire" section="1"/>,
+      <manref name="pw-cat" section="1"/>,
     </p>
   </section>
 
