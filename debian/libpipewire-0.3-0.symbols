@@ -56,6 +56,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_data_loop_destroy@Base 0.3.1
  pw_data_loop_exit@Base 0.3.1
  pw_data_loop_in_thread@Base 0.3.1
+ pw_data_loop_invoke@Base 0.3.5
  pw_data_loop_new@Base 0.3.1
  pw_data_loop_start@Base 0.3.1
  pw_data_loop_stop@Base 0.3.1
