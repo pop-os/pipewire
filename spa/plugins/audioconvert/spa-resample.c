@@ -38,7 +38,6 @@
 SPA_LOG_IMPL(logger);
 
 #include "resample.h"
-#include "resample-native.h"
 
 #define DEFAULT_QUALITY	RESAMPLE_DEFAULT_QUALITY
 
@@ -63,14 +62,14 @@ struct data {
 
 #define OPTIONS		"hvr:f:q:"
 static const struct option long_options[] = {
-	{"help",	no_argument,		NULL, 'h'},
-	{"verbose",	no_argument,		NULL, 'v'},
+	{ "help",	no_argument,		NULL, 'h'},
+	{ "verbose",	no_argument,		NULL, 'v'},
 
-	{"rate",	required_argument,	NULL, 'r' },
-	{"format",	required_argument,	NULL, 'f' },
-	{"quality",	required_argument,	NULL, 'q' },
+	{ "rate",	required_argument,	NULL, 'r' },
+	{ "format",	required_argument,	NULL, 'f' },
+	{ "quality",	required_argument,	NULL, 'q' },
 
-        {NULL, 0, NULL, 0 }
+        { NULL, 0, NULL, 0 }
 };
 
 static void show_usage(const char *name, bool is_error)
@@ -166,7 +165,7 @@ static int do_conversion(struct data *d)
 	r.i_rate = d->iinfo.samplerate;
 	r.o_rate = d->oinfo.samplerate;
 	r.quality = d->quality < 0 ? DEFAULT_QUALITY : d->quality;
-	impl_native_init(&r);
+	resample_native_init(&r);
 
 	for (j = 0; j < channels; j++)
 		src[j] = &in[MAX_SAMPLES * j];
@@ -218,7 +217,7 @@ static int do_conversion(struct data *d)
 
 int main(int argc, char *argv[])
 {
-	char c;
+	int c;
 	int longopt_index = 0, ret;
 	struct data data;
 

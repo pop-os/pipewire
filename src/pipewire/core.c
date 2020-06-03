@@ -106,6 +106,7 @@ static void core_event_add_mem(void *data, uint32_t id, uint32_t type, int fd, u
 	if (m->id != id) {
 		pw_log_error(NAME" %p: invalid mem id %u, expected %u",
 				this, id, m->id);
+		pw_proxy_errorf(&this->proxy, -EINVAL, "invalid mem id %u, expected %u", id, m->id);
 		pw_memblock_unref(m);
 	}
 }
@@ -114,7 +115,7 @@ static void core_event_remove_mem(void *data, uint32_t id)
 {
 	struct pw_core *this = data;
 	pw_log_debug(NAME" %p: remove mem %u", this, id);
-	pw_mempool_unref_id(this->pool, id);
+	pw_mempool_remove_id(this->pool, id);
 }
 
 static const struct pw_core_events core_events = {

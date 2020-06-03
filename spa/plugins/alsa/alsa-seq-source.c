@@ -350,7 +350,7 @@ static struct seq_port *find_port(struct seq_state *state,
 		struct seq_stream *stream, const snd_seq_addr_t *addr)
 {
 	uint32_t i;
-	for (i = 0; i < MAX_PORTS; i++) {
+	for (i = 0; i < stream->last_port; i++) {
 		struct seq_port *port = &stream->ports[i];
 		if (port->valid &&
 		    port->addr.client == addr->client &&
@@ -369,23 +369,30 @@ static struct seq_port *alloc_port(struct seq_state *state, struct seq_stream *s
 			port->id = i;
 			port->direction = stream->direction;
 			port->valid = true;
+			if (stream->last_port < i + 1)
+				stream->last_port = i + 1;
 			return port;
 		}
 	}
 	return NULL;
 }
-static void free_port(struct seq_state *state, struct seq_port *port)
+
+static void free_port(struct seq_state *state, struct seq_stream *stream, struct seq_port *port)
 {
+	if (port->id + 1 == stream->last_port) {
+		int i;
+		for (i = stream->last_port - 1; i >= 0; i--)
+			if (!stream->ports[i].valid)
+				break;
+		stream->last_port = i + 1;
+	}
 	spa_node_emit_port_info(&state->hooks,
 			port->direction, port->id, NULL);
-	port->valid = false;
+	spa_zero(*port);
 }
 
 static void init_port(struct seq_state *state, struct seq_port *port, const snd_seq_addr_t *addr)
 {
-	snd_seq_port_subscribe_t* sub;
-	int res;
-
 	port->addr = *addr;
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
 			SPA_PORT_CHANGE_MASK_PROPS |
@@ -406,23 +413,7 @@ static void init_port(struct seq_state *state, struct seq_port *port, const snd_
 	spa_list_init(&port->free);
 	spa_list_init(&port->ready);
 
-	snd_seq_port_subscribe_alloca(&sub);
-	if (port->direction == SPA_DIRECTION_OUTPUT) {
-		snd_seq_port_subscribe_set_sender(sub, addr);
-		snd_seq_port_subscribe_set_dest(sub, &state->event.addr);
-	} else {
-		snd_seq_port_subscribe_set_sender(sub, &state->event.addr);
-		snd_seq_port_subscribe_set_dest(sub, addr);
-	}
-	snd_seq_port_subscribe_set_time_update(sub, 1);
-	snd_seq_port_subscribe_set_time_real(sub, 1);
-	snd_seq_port_subscribe_set_queue(sub, state->event.queue_id);
-
-	if ((res = snd_seq_subscribe_port(state->event.hndl, sub)) < 0) {
-                spa_log_error(state->log, "can't subscribe to %d:%d - %s",
-				addr->client, addr->port, snd_strerror(res));
-	}
-	spa_log_debug(state->log, "connect: %d.%d: %d", addr->client, addr->port, res);
+	spa_alsa_seq_activate_port(state, port, true);
 
 	emit_port_info(state, port, true);
 }
@@ -435,7 +426,7 @@ static void update_stream_port(struct seq_state *state, struct seq_stream *strea
 	if (info == NULL) {
 		spa_log_debug(state->log, "free port %d.%d", addr->client, addr->port);
 		if (port)
-			free_port(state, port);
+			free_port(state, stream, port);
 	} else {
 		if (port == NULL && (caps & stream->caps) == stream->caps) {
 			spa_log_debug(state->log, "new port %d.%d", addr->client, addr->port);
@@ -446,7 +437,7 @@ static void update_stream_port(struct seq_state *state, struct seq_stream *strea
 		} else if (port != NULL) {
 			if ((caps & stream->caps) != stream->caps) {
 				spa_log_debug(state->log, "free port %d.%d", addr->client, addr->port);
-				free_port(state, port);
+				free_port(state, stream, port);
 			}
 			else {
 				spa_log_debug(state->log, "update port %d.%d", addr->client, addr->port);

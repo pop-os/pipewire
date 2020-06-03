@@ -73,6 +73,10 @@ static void context_unlink(pa_context *c)
 		pa_stream_set_state(s, c->state == PA_CONTEXT_FAILED ?
 				PA_STREAM_FAILED : PA_STREAM_TERMINATED);
 	}
+	if (c->core) {
+		pw_core_disconnect(c->core);
+		c->core = NULL;
+	}
 	spa_list_consume(g, &c->globals, link)
 		global_free(c, g);
 
@@ -177,18 +181,59 @@ struct global *pa_context_find_linked(pa_context *c, uint32_t idx)
 	return NULL;
 }
 
+static const char *str_etype(pa_subscription_event_type_t event)
+{
+	switch (event & PA_SUBSCRIPTION_EVENT_TYPE_MASK) {
+	case PA_SUBSCRIPTION_EVENT_NEW:
+		return "new";
+	case PA_SUBSCRIPTION_EVENT_CHANGE:
+		return "change";
+	case PA_SUBSCRIPTION_EVENT_REMOVE:
+		return "remove";
+	}
+	return "invalid";
+}
+
+static const char *str_efac(pa_subscription_event_type_t event)
+{
+	switch (event & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) {
+	case PA_SUBSCRIPTION_EVENT_SINK:
+		return "sink";
+	case PA_SUBSCRIPTION_EVENT_SOURCE:
+		return "source";
+	case PA_SUBSCRIPTION_EVENT_SINK_INPUT:
+		return "sink-input";
+	case PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT:
+		return "source-output";
+	case PA_SUBSCRIPTION_EVENT_MODULE:
+		return "module";
+	case PA_SUBSCRIPTION_EVENT_CLIENT:
+		return "client";
+	case PA_SUBSCRIPTION_EVENT_SAMPLE_CACHE:
+		return "sample-cache";
+	case PA_SUBSCRIPTION_EVENT_SERVER:
+		return "server";
+	case PA_SUBSCRIPTION_EVENT_AUTOLOAD:
+		return "autoload";
+	case PA_SUBSCRIPTION_EVENT_CARD:
+		return "card";
+	}
+	return "invalid";
+}
+
 static void emit_event(pa_context *c, struct global *g, pa_subscription_event_type_t event)
 {
 	if (c->subscribe_callback && (c->subscribe_mask & g->mask)) {
-		pw_log_debug("context %p: obj %d: emit %d:%d", c, g->id, event, g->event);
+		pw_log_debug("context %p: obj %d: emit %s:%s", c, g->id,
+				str_etype(event), str_efac(g->event));
 		c->subscribe_callback(c,
 				event | g->event,
 				g->id,
 				c->subscribe_userdata);
 
 		if (g->mask == (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE)) {
-			pw_log_debug("context %p: obj %d: emit %d:%d", c, g->node_info.monitor,
-					event, PA_SUBSCRIPTION_EVENT_SOURCE);
+			pw_log_debug("context %p: obj %d: emit %s:source", c, g->node_info.monitor,
+					str_etype(event));
 			c->subscribe_callback(c,
 					event | PA_SUBSCRIPTION_EVENT_SOURCE,
 					g->node_info.monitor,
@@ -376,9 +421,13 @@ static void parse_props(struct global *g, const struct spa_pod *param)
 					g->node_info.channel_volumes, SPA_AUDIO_MAX_CHANNELS);
 
 			if (n_vals != g->node_info.n_channel_volumes) {
+				pw_log_debug("channel change %d->%d, trigger remove",
+						g->node_info.n_channel_volumes, n_vals);
 				emit_event(g->context, g, PA_SUBSCRIPTION_EVENT_REMOVE);
-				emit_event(g->context, g, PA_SUBSCRIPTION_EVENT_NEW);
 				g->node_info.n_channel_volumes = n_vals;
+				/* mark as init, this will emit the NEW event when the
+				 * params are updated */
+				g->init = true;
 			}
 			break;
 		}
@@ -514,6 +563,7 @@ static void proxy_done(void *data, int seq)
 		} else {
 			event = PA_SUBSCRIPTION_EVENT_CHANGE;
 		}
+		pw_log_debug("emit because of pending");
 		emit_event(g->context, g, event);
 	}
 }
@@ -790,6 +840,7 @@ static void on_success(pa_operation *o, void *userdata)
 {
 	struct success_data *d = userdata;
 	pa_context *c = o->context;
+	pw_log_debug("context %p: error %d", c, d->error);
 	if (d->error != 0)
 		pa_context_set_error(c, d->error);
 	if (d->cb)

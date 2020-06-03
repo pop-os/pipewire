@@ -29,6 +29,8 @@
 extern "C" {
 #endif
 
+struct itimerspec;
+
 #include <time.h>
 #include <sys/types.h>
 

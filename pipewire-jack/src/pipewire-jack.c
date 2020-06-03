@@ -86,8 +86,8 @@ struct port;
 
 struct globals {
 	jack_thread_creator_t creator;
-	jack_client_t *client;
-	struct pw_properties *properties;
+	pthread_mutex_t lock;
+	struct pw_array descriptions;
 };
 
 static struct globals globals;
@@ -214,11 +214,13 @@ struct link {
 };
 
 struct context {
-	struct pw_thread_loop *loop;
+	struct pw_thread_loop *loop;	/* thread_lock protects all below */
 	struct pw_context *context;
 
-	struct pw_map globals;
 	struct spa_list free_objects;
+
+	pthread_mutex_t lock;		/* protects map and lists below, in addition to thread_lock */
+	struct pw_map globals;
 	struct spa_list ports;
 	struct spa_list nodes;
 	struct spa_list links;
@@ -317,7 +319,10 @@ struct client {
 	struct pw_node_activation *activation;
 	uint32_t xrun_count;
 
-	struct spa_list target_links;
+	struct {
+		struct pw_node_activation *driver_activation;
+		struct spa_list target_links;
+	} rt;
 
 	unsigned int started:1;
 	unsigned int active:1;
@@ -332,6 +337,8 @@ struct client {
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
 };
+
+static int do_sync(struct client *client);
 
 #include "metadata.c"
 
@@ -372,7 +379,9 @@ static struct object * alloc_object(struct client *c)
 
 static void free_object(struct client *c, struct object *o)
 {
+	pthread_mutex_lock(&c->context.lock);
         spa_list_remove(&o->link);
+	pthread_mutex_unlock(&c->context.lock);
 	spa_list_append(&c->context.free_objects, &o->link);
 }
 
@@ -410,8 +419,30 @@ static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_
 	return mix;
 }
 
+static int clear_buffers(struct client *c, struct mix *mix)
+{
+	struct port *port = mix->port;
+	struct buffer *b;
+	uint32_t i, j;
+
+	pw_log_debug(NAME" %p: port %p clear buffers", c, port);
+
+	for (i = 0; i < mix->n_buffers; i++) {
+		b = &mix->buffers[i];
+
+		for (j = 0; j < b->n_mem; j++)
+			pw_memmap_free(b->mem[j]);
+
+		b->n_mem = 0;
+	}
+	mix->n_buffers = 0;
+	spa_list_init(&mix->queue);
+	return 0;
+}
+
 static void free_mix(struct client *c, struct mix *mix)
 {
+	clear_buffers(c, mix);
 	spa_list_remove(&mix->port_link);
 	spa_list_append(&c->free_mix, &mix->link);
 }
@@ -432,7 +463,6 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	o->id = SPA_ID_INVALID;
 	o->port.node_id = c->node_id;
 	o->port.port_id = p->id;
-	spa_list_append(&c->context.ports, &o->link);
 
 	p->valid = true;
 	p->zeroed = false;
@@ -441,6 +471,10 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	spa_list_init(&p->mix);
 
 	spa_list_append(&c->ports[direction], &p->link);
+
+	pthread_mutex_lock(&c->context.lock);
+	spa_list_append(&c->context.ports, &o->link);
+	pthread_mutex_unlock(&c->context.lock);
 
 	return p;
 }
@@ -663,8 +697,8 @@ do_remove_sources(struct spa_loop *loop,
 
 static void unhandle_socket(struct client *c)
 {
-        pw_loop_invoke(c->loop->loop,
-                       do_remove_sources, 1, NULL, 0, true, c);
+	pw_data_loop_invoke(c->loop,
+			do_remove_sources, 1, NULL, 0, true, c);
 }
 
 static void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
@@ -962,7 +996,7 @@ static inline uint32_t cycle_run(struct client *c)
 	int fd = c->socket_source->fd;
 	struct spa_io_position *pos = c->position;
 	struct pw_node_activation *activation = c->activation;
-	struct pw_node_activation *driver = c->driver_activation;
+	struct pw_node_activation *driver = c->rt.driver_activation;
 
 	/* this is blocking if nothing ready */
 	if (SPA_UNLIKELY(read(fd, &cmd, sizeof(cmd)) != sizeof(cmd))) {
@@ -991,9 +1025,9 @@ static inline uint32_t cycle_run(struct client *c)
 	check_buffer_frames(c);
 	check_sample_rate(c);
 
-	c->jack_state = position_to_jack(driver, &c->jack_position);
-
 	if (SPA_LIKELY(driver)) {
+		c->jack_state = position_to_jack(driver, &c->jack_position);
+
 		if (SPA_UNLIKELY(activation->pending_sync)) {
 			if (c->sync_callback == NULL ||
 			    c->sync_callback(c->jack_state, &c->jack_position, c->sync_arg))
@@ -1038,7 +1072,7 @@ static inline void signal_sync(struct client *c)
 	activation->finish_time = nsec;
 
 	cmd = 1;
-	spa_list_for_each(l, &c->target_links, target_link) {
+	spa_list_for_each(l, &c->rt.target_links, target_link) {
 		struct pw_node_activation_state *state;
 
 		if (SPA_UNLIKELY(l->activation == NULL))
@@ -1063,7 +1097,7 @@ static inline void signal_sync(struct client *c)
 
 static inline void cycle_signal(struct client *c, int status)
 {
-	struct pw_node_activation *driver = c->driver_activation;
+	struct pw_node_activation *driver = c->rt.driver_activation;
 	struct pw_node_activation *activation = c->activation;
 
 	if (SPA_LIKELY(status == 0)) {
@@ -1114,9 +1148,19 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 	}
 }
 
+static int
+do_clear_link(struct spa_loop *loop,
+                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct link *link = user_data;
+	spa_list_remove(&link->target_link);
+	return 0;
+}
+
 static void clear_link(struct client *c, struct link *link)
 {
-	spa_list_remove(&link->target_link);
+	pw_data_loop_invoke(c->loop,
+			do_clear_link, 1, NULL, 0, true, link);
 	pw_memmap_free(link->mem);
 	close(link->signalfd);
 	spa_list_remove(&link->link);
@@ -1129,8 +1173,6 @@ static void clean_transport(struct client *c)
 
 	if (!c->has_transport)
 		return;
-
-	pw_data_loop_stop(c->loop);
 
 	unhandle_socket(c);
 
@@ -1214,6 +1256,15 @@ static int install_timemaster(struct client *c)
 	return 0;
 }
 
+static int
+do_update_driver_activation(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	c->rt.driver_activation = c->driver_activation;
+	return 0;
+}
+
 static int update_driver_activation(struct client *c)
 {
 	struct link *link;
@@ -1221,7 +1272,9 @@ static int update_driver_activation(struct client *c)
 
 	link = find_activation(&c->links, c->driver_id);
 	c->driver_activation = link ? link->activation : NULL;
-
+	pw_data_loop_invoke(c->loop,
+                       do_update_driver_activation, SPA_ID_INVALID, NULL, 0,
+		       c->driver_activation == NULL, c);
 	install_timemaster(c);
 
 	return 0;
@@ -1259,12 +1312,13 @@ static int client_node_set_io(void *object,
 
 	switch (id) {
 	case SPA_IO_Position:
+		if (ptr == NULL)
+			pw_data_loop_stop(c->loop);
 		c->position = ptr;
 		c->driver_id = ptr ? c->position->clock.id : SPA_ID_INVALID;
 		update_driver_activation(c);
-		if (ptr) {
+		if (ptr)
 			check_sample_rate(c);
-		}
 		break;
 	default:
 		break;
@@ -1329,27 +1383,6 @@ static int client_node_remove_port(void *object,
 	struct client *c = (struct client *) object;
 	pw_proxy_error((struct pw_proxy*)c->node, -ENOTSUP, "remove port not supported");
 	return -ENOTSUP;
-}
-
-static int clear_buffers(struct client *c, struct mix *mix)
-{
-	struct port *port = mix->port;
-        struct buffer *b;
-	uint32_t i, j;
-
-        pw_log_debug(NAME" %p: port %p clear buffers", c, port);
-
-	for (i = 0; i < mix->n_buffers; i++) {
-		b = &mix->buffers[i];
-
-		for (j = 0; j < b->n_mem; j++)
-			pw_memmap_free(b->mem[j]);
-
-		b->n_mem = 0;
-        }
-	mix->n_buffers = 0;
-	spa_list_init(&mix->queue);
-	return 0;
 }
 
 static int param_enum_format(struct client *c, struct port *p,
@@ -1541,20 +1574,26 @@ static int client_node_port_set_param(void *object,
 					 NULL);
 }
 
-static void init_buffer(struct port *p, void *data, size_t maxframes)
+static void *init_buffer(struct port *p)
 {
+	void *data = p->emptyptr;
+	if (p->zeroed)
+		return data;
+
 	if (p->object->port.type_id == TYPE_ID_MIDI) {
 		struct midi_buffer *mb = data;
 		mb->magic = MIDI_BUFFER_MAGIC;
 		mb->buffer_size = MAX_BUFFER_FRAMES * sizeof(float);
-		mb->nframes = maxframes;
+		mb->nframes = MAX_BUFFER_FRAMES;
 		mb->write_pos = 0;
 		mb->event_count = 0;
 		mb->lost_events = 0;
-		pw_log_debug("port %p: init midi buffer %p size:%d", p, data, mb->buffer_size);
-	}
-	else
-		memset(data, 0, maxframes * sizeof(float));
+		pw_log_debug("port %p: init midi buffer size:%d", p, mb->buffer_size);
+	} else
+		memset(data, 0, MAX_BUFFER_FRAMES * sizeof(float));
+
+	p->zeroed = true;
+	return data;
 }
 
 static int client_node_port_use_buffers(void *object,
@@ -1686,10 +1725,6 @@ static int client_node_port_use_buffers(void *object,
 						"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
 			}
 		}
-
-		init_buffer(p, p->emptyptr, MAX_BUFFER_FRAMES);
-		p->zeroed = true;
-
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
 		if (direction == SPA_DIRECTION_OUTPUT)
 			reuse_buffer(c, mix, b->id);
@@ -1769,7 +1804,7 @@ do_activate_link(struct spa_loop *loop,
 	struct link *link = user_data;
 	struct client *c = link->client;
 	pw_log_trace("link %p activate", link);
-	spa_list_append(&c->target_links, &link->target_link);
+	spa_list_append(&c->rt.target_links, &link->target_link);
 	return 0;
 }
 
@@ -1824,7 +1859,7 @@ static int client_node_set_activation(void *object,
 		link->signalfd = signalfd;
 		spa_list_append(&c->links, &link->link);
 
-		pw_loop_invoke(c->loop->loop,
+		pw_data_loop_invoke(c->loop,
                        do_activate_link, SPA_ID_INVALID, NULL, 0, false, link);
 	}
 	else {
@@ -1894,31 +1929,12 @@ static int metadata_property(void *object, uint32_t id,
 		const char *key, const char *type, const char *value)
 {
 	struct client *c = (struct client *) object;
-	int keylen = strlen(key);
-	char *dst = alloca(JACK_UUID_STRING_SIZE + keylen);
-	struct pw_properties * props = get_properties();
-	jack_property_change_t change;
 	jack_uuid_t uuid;
 
+	pw_log_info("set id:%u '%s' to '%s@%s'", id, key, value, type);
+
 	uuid = jack_port_uuid_generate(id);
-
-	make_key(dst, uuid, key, keylen);
-
-	if (value == NULL || type == NULL) {
-		pw_properties_setf(props, dst, NULL);
-		change = PropertyDeleted;
-	} else {
-		change = PropertyCreated;
-		if (pw_properties_get(props, dst) != NULL)
-			change = PropertyChanged;
-
-		pw_properties_setf(props, dst, "%s@%s", value, type);
-	}
-
-	pw_log_debug("set id:%u '%s' to '%s@%s'", id, dst, value, type);
-
-	if (c->property_callback)
-		c->property_callback(uuid, key, change, c->property_arg);
+	update_property(c, uuid, key, type, value);
 
 	return 0;
 }
@@ -1962,7 +1978,10 @@ static void registry_event_global(void *data, uint32_t id,
 			o->node.priority = pw_properties_parse_int(str);
 
 		pw_log_debug(NAME" %p: add node %d", c, id);
+
+		pthread_mutex_lock(&c->context.lock);
 		spa_list_append(&c->context.nodes, &o->link);
+		pthread_mutex_unlock(&c->context.lock);
 	}
 	else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
 		const struct spa_dict_item *item;
@@ -2018,7 +2037,10 @@ static void registry_event_global(void *data, uint32_t id,
 			if (o == NULL)
 				goto exit;
 
+			pthread_mutex_lock(&c->context.lock);
 			spa_list_append(&c->context.ports, &o->link);
+			pthread_mutex_unlock(&c->context.lock);
+
 			ot = pw_map_lookup(&c->context.globals, node_id);
 			if (ot == NULL || ot->type != INTERFACE_Node)
 				goto exit_free;
@@ -2056,7 +2078,9 @@ static void registry_event_global(void *data, uint32_t id,
 		o = alloc_object(c);
 		object_type = INTERFACE_Link;
 
+		pthread_mutex_lock(&c->context.lock);
 		spa_list_append(&c->context.links, &o->link);
+		pthread_mutex_unlock(&c->context.lock);
 
 		if ((str = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_PORT)) == NULL)
 			goto exit_free;
@@ -2081,7 +2105,7 @@ static void registry_event_global(void *data, uint32_t id,
 		c->metadata = pw_proxy_get_user_data(proxy);
 		c->metadata->proxy = (struct pw_metadata*)proxy;
 
-		pw_proxy_add_object_listener(proxy,
+		pw_metadata_add_listener(proxy,
 				&c->metadata->listener,
 				&metadata_events, c);
 		goto exit;
@@ -2093,10 +2117,12 @@ static void registry_event_global(void *data, uint32_t id,
 	o->type = object_type;
 	o->id = id;
 
+	pthread_mutex_lock(&c->context.lock);
         size = pw_map_get_size(&c->context.globals);
         while (id > size)
 		pw_map_insert_at(&c->context.globals, size++, NULL);
 	pw_map_insert_at(&c->context.globals, id, o);
+	pthread_mutex_unlock(&c->context.lock);
 
 	pw_thread_loop_unlock(c->context.loop);
 
@@ -2206,6 +2232,7 @@ jack_client_t * jack_client_open (const char *client_name,
 			0);
 	client->allow_mlock = client->context.context->defaults.mem_allow_mlock;
 	spa_list_init(&client->context.free_objects);
+	pthread_mutex_init(&client->context.lock, NULL);
 	spa_list_init(&client->context.nodes);
 	spa_list_init(&client->context.ports);
 	spa_list_init(&client->context.links);
@@ -2229,7 +2256,7 @@ jack_client_t * jack_client_open (const char *client_name,
 		goto init_failed;
 
 	spa_list_init(&client->links);
-	spa_list_init(&client->target_links);
+	spa_list_init(&client->rt.target_links);
 
 	client->buffer_frames = (uint32_t)-1;
 	client->sample_rate = (uint32_t)-1;
@@ -2315,8 +2342,6 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (status)
 		*status = 0;
 
-	globals.client = (jack_client_t *)client;
-
 	pw_log_debug(NAME" %p: new", client);
 	return (jack_client_t *)client;
 
@@ -2363,12 +2388,14 @@ int jack_client_close (jack_client_t *client)
 
 	res = jack_deactivate(client);
 
-	pw_thread_loop_stop(c->context.loop);
-
 	pw_context_destroy(c->context.context);
+
+	pw_thread_loop_stop(c->context.loop);
 	pw_thread_loop_destroy(c->context.loop);
 
 	pw_log_debug(NAME" %p: free", client);
+	pthread_mutex_destroy(&c->context.lock);
+	pw_data_loop_destroy(c->loop);
 	free(c);
 
 	return res;
@@ -2397,19 +2424,23 @@ char *jack_get_uuid_for_client_name (jack_client_t *client,
 {
 	struct client *c = (struct client *) client;
 	struct object *o;
+	char *uuid = NULL;
 
 	spa_return_val_if_fail(c != NULL, NULL);
 	spa_return_val_if_fail(client_name != NULL, NULL);
 
+	pthread_mutex_lock(&c->context.lock);
+
 	spa_list_for_each(o, &c->context.nodes, link) {
 		if (strcmp(o->node.name, client_name) == 0) {
-			char *uuid = spa_aprintf( "%" PRIu64, (cuuid << 32) | o->id);
+			uuid = spa_aprintf( "%" PRIu64, (cuuid << 32) | o->id);
 			pw_log_debug(NAME" %p: name %s -> %s",
 					client, client_name, uuid);
-			return uuid;
+			break;
 		}
 	}
-	return NULL;
+	pthread_mutex_unlock(&c->context.lock);
+	return uuid;
 }
 
 SPA_EXPORT
@@ -2420,6 +2451,7 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 	struct object *o;
 	jack_uuid_t uuid;
 	jack_uuid_t cuuid = 0x2;
+	char *name = NULL;
 
 	spa_return_val_if_fail(c != NULL, NULL);
 	spa_return_val_if_fail(client_uuid != NULL, NULL);
@@ -2427,14 +2459,17 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 	if (jack_uuid_parse(client_uuid, &uuid) < 0)
 		return NULL;
 
+	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(o, &c->context.nodes, link) {
 		if ((cuuid << 32 | o->id) == uuid) {
 			pw_log_debug(NAME" %p: uuid %s (%"PRIu64")-> %s",
 					client, client_uuid, uuid, o->node.name);
-			return strdup(o->node.name);
+			name = strdup(o->node.name);
+			break;
 		}
 	}
-	return NULL;
+	pthread_mutex_unlock(&c->context.lock);
+	return name;
 }
 
 SPA_EXPORT
@@ -2456,14 +2491,16 @@ static int do_activate(struct client *c)
 {
 	int res;
 
-	pw_data_loop_start(c->loop);
-
 	pw_thread_loop_lock(c->context.loop);
+
+	if ((res = pw_data_loop_start(c->loop)) < 0)
+		goto done;
+
 	pw_log_debug(NAME" %p: activate", c);
 	pw_client_node_set_active(c->node, true);
 
 	res = do_sync(c);
-
+done:
 	pw_thread_loop_unlock(c->context.loop);
 	return res;
 }
@@ -2504,6 +2541,8 @@ int jack_deactivate (jack_client_t *client)
 
 	pw_thread_loop_lock(c->context.loop);
 	pw_log_debug(NAME" %p: deactivate", c);
+	pw_data_loop_stop(c->loop);
+
 	pw_client_node_set_active(c->node, false);
 
 	c->activation->pending_new_pos = false;
@@ -2513,12 +2552,11 @@ int jack_deactivate (jack_client_t *client)
 
 	pw_thread_loop_unlock(c->context.loop);
 
-	pw_data_loop_stop(c->loop);
-
 	if (res < 0)
 		return res;
 
 	c->active = false;
+
 	return 0;
 }
 
@@ -2980,6 +3018,8 @@ jack_port_t * jack_port_register (jack_client_t *client,
 	snprintf(o->port.name, sizeof(o->port.name), "%s:%s", c->name, port_name);
 	o->port.type_id = type_id;
 
+	init_buffer(p);
+
 	pw_log_debug(NAME" %p: port %p", c, p);
 
 	spa_list_init(&p->mix);
@@ -3175,11 +3215,7 @@ void * jack_port_get_buffer (jack_port_t *port, jack_nframes_t frames)
 			break;
 		}
 		if (ptr == NULL) {
-			ptr = p->emptyptr;
-			if (!p->zeroed) {
-				init_buffer(p, ptr, MAX_BUFFER_FRAMES);
-				p->zeroed = true;
-			}
+			ptr = init_buffer(p);
 		}
 	} else {
 		switch (p->object->port.type_id) {
@@ -3266,13 +3302,13 @@ int jack_port_connected (const jack_port_t *port)
 
 	c = o->client;
 
-	pw_thread_loop_lock(c->context.loop);
+	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(l, &c->context.links, link) {
 		if (l->port_link.src == o->id ||
 		    l->port_link.dst == o->id)
 			res++;
 	}
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_unlock(&c->context.lock);
 
 	return res;
 }
@@ -3291,7 +3327,7 @@ int jack_port_connected_to (const jack_port_t *port,
 
 	c = o->client;
 
-	pw_thread_loop_lock(c->context.loop);
+	pthread_mutex_lock(&c->context.lock);
 
 	p = find_port(c, port_name);
 	if (p == NULL)
@@ -3309,7 +3345,7 @@ int jack_port_connected_to (const jack_port_t *port,
 		res = 1;
 
      exit:
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_lock(&c->context.lock);
 
 	return res;
 }
@@ -3339,8 +3375,7 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 
 	res = malloc(sizeof(char*) * (CONNECTION_NUM_FOR_PORT + 1));
 
-	pw_thread_loop_lock(c->context.loop);
-
+	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(l, &c->context.links, link) {
 		if (l->port_link.src == o->id)
 			p = pw_map_lookup(&c->context.globals, l->port_link.dst);
@@ -3356,7 +3391,7 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 		if (count == CONNECTION_NUM_FOR_PORT)
 			break;
 	}
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_unlock(&c->context.lock);
 
 	if (count == 0) {
 		free(res);
@@ -3576,11 +3611,9 @@ int jack_port_request_monitor_by_name (jack_client_t *client,
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 	spa_return_val_if_fail(port_name != NULL, -EINVAL);
 
-	pw_thread_loop_lock(c->context.loop);
-
+	pthread_mutex_lock(&c->context.lock);
 	p = find_port(c, port_name);
-
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_unlock(&c->context.lock);
 
 	if (p == NULL) {
 		pw_log_error(NAME" %p: jack_port_request_monitor_by_name called"
@@ -3901,11 +3934,11 @@ const char ** jack_get_ports (jack_client_t *client,
 	if (type_name_pattern && type_name_pattern[0])
 		regcomp(&type_regex, type_name_pattern, REG_EXTENDED | REG_NOSUB);
 
-	pw_thread_loop_lock(c->context.loop);
 
 	pw_log_debug(NAME" %p: ports id:%d name:%s type:%s flags:%08lx", c, id,
 			port_name_pattern, type_name_pattern, flags);
 
+	pthread_mutex_lock(&c->context.lock);
 	count = 0;
 	spa_list_for_each(o, &c->context.ports, link) {
 		pw_log_debug(NAME" %p: check port type:%d flags:%08lx name:%s", c,
@@ -3933,6 +3966,8 @@ const char ** jack_get_ports (jack_client_t *client,
 				c, o->port.name, o->port.priority, count);
 		tmp[count++] = o;
 	}
+	pthread_mutex_unlock(&c->context.lock);
+
 	if (count > 0) {
 		qsort(tmp, count, sizeof(struct object *), port_compare_func);
 
@@ -3943,8 +3978,6 @@ const char ** jack_get_ports (jack_client_t *client,
 	} else {
 		res = NULL;
 	}
-
-	pw_thread_loop_unlock(c->context.loop);
 
 	if (port_name_pattern && port_name_pattern[0])
 		regfree(&port_regex);
@@ -3962,11 +3995,9 @@ jack_port_t * jack_port_by_name (jack_client_t *client, const char *port_name)
 
 	spa_return_val_if_fail(c != NULL, NULL);
 
-	pw_thread_loop_lock(c->context.loop);
-
+	pthread_mutex_lock(&c->context.lock);
 	res = find_port(c, port_name);
-
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_unlock(&c->context.lock);
 
 	return (jack_port_t *)res;
 }
@@ -3980,7 +4011,7 @@ jack_port_t * jack_port_by_id (jack_client_t *client,
 
 	spa_return_val_if_fail(c != NULL, NULL);
 
-	pw_thread_loop_lock(c->context.loop);
+	pthread_mutex_lock(&c->context.lock);
 
 	o = pw_map_lookup(&c->context.globals, port_id);
 	pw_log_debug(NAME" %p: port %d -> %p", c, port_id, o);
@@ -3991,7 +4022,7 @@ jack_port_t * jack_port_by_id (jack_client_t *client,
 	res = o;
 
       exit:
-	pw_thread_loop_unlock(c->context.loop);
+	pthread_mutex_unlock(&c->context.lock);
 
 	return (jack_port_t *)res;
 }
@@ -4124,7 +4155,7 @@ void jack_set_error_function (void (*func)(const char *))
 SPA_EXPORT
 void default_jack_info_callback(const char *desc)
 {
-	pw_log_info("pw jack info: %s",desc);
+	pw_log_info("pw jack info: %s", desc);
 }
 
 SPA_EXPORT
@@ -4255,7 +4286,7 @@ jack_transport_state_t jack_transport_query (const jack_client_t *client,
 
 	spa_return_val_if_fail(c != NULL, JackTransportStopped);
 
-	if (SPA_LIKELY((a = c->driver_activation) != NULL))
+	if (SPA_LIKELY((a = c->rt.driver_activation) != NULL))
 		jack_state = position_to_jack(a, pos);
 	else if (pos != NULL)
 		memset(pos, 0, sizeof(jack_position_t));
@@ -4274,7 +4305,7 @@ jack_nframes_t jack_get_current_transport_frame (const jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 
-	if (SPA_UNLIKELY((a = c->driver_activation) == NULL))
+	if (SPA_UNLIKELY((a = c->rt.driver_activation) == NULL))
 		return -EIO;
 
 	pos = &a->position;
@@ -4300,7 +4331,7 @@ int  jack_transport_reposition (jack_client_t *client,
 
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 
-	a = c->driver_activation;
+	a = c->rt.driver_activation;
 	na = c->activation;
 	if (!a || !na)
 		return -EIO;
@@ -4321,7 +4352,7 @@ int  jack_transport_reposition (jack_client_t *client,
 
 static void update_command(struct client *c, uint32_t command)
 {
-	struct pw_node_activation *a = c->driver_activation;
+	struct pw_node_activation *a = c->rt.driver_activation;
 	if (!a)
 		return;
 	ATOMIC_STORE(a->command, command);
@@ -4451,7 +4482,7 @@ int jack_client_create_thread (jack_client_t* client,
 	if (globals.creator == NULL)
 		globals.creator = pthread_create;
 
-	pw_log_info("client %p: create thread", client);
+	pw_log_debug("client %p: create thread", client);
 	return globals.creator(thread, NULL, start_routine, arg);
 }
 
@@ -4658,7 +4689,7 @@ int jack_get_video_image_size(jack_client_t *client, jack_image_size_t *size)
 
 	spa_return_val_if_fail(c != NULL, 0);
 
-	a = c->driver_activation;
+	a = c->rt.driver_activation;
 	if (SPA_UNLIKELY(a == NULL))
 		a = c->activation;
 	if (SPA_UNLIKELY(a == NULL))
@@ -4679,4 +4710,6 @@ static void reg(void) __attribute__ ((constructor));
 static void reg(void)
 {
 	pw_init(NULL, NULL);
+	pthread_mutex_init(&globals.lock, NULL);
+	pw_array_init(&globals.descriptions, 16);
 }

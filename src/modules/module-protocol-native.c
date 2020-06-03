@@ -34,8 +34,7 @@
 
 #include <spa/pod/iter.h>
 #include <spa/utils/result.h>
-#include <spa/debug/pod.h>
-#include <spa/debug/types.h>
+
 
 #include "config.h"
 
@@ -50,6 +49,12 @@
 
 #include "modules/module-protocol-native/connection.h"
 #include "modules/module-protocol-native/defs.h"
+
+#undef spa_debug
+#define spa_debug pw_log_debug
+
+#include <spa/debug/pod.h>
+#include <spa/debug/types.h>
 
 #define NAME "protocol-native"
 
@@ -130,7 +135,7 @@ struct client_data {
 static void debug_msg(const char *prefix, const struct pw_protocol_native_message *msg, bool hex)
 {
 	struct spa_pod *pod;
-	fprintf(stderr, "%s: id:%d op:%d size:%d seq:%d\n", prefix,
+	pw_log_debug("%s: id:%d op:%d size:%d seq:%d\n", prefix,
 			msg->id, msg->opcode, msg->size, msg->seq);
 
 	if ((pod = spa_pod_from_data(msg->data, msg->size, 0, msg->size)) != NULL)
@@ -713,8 +718,10 @@ error:
 	pw_proxy_notify((struct pw_proxy*)this,
 			struct pw_core_events, error, 0, 0,
 			this->recv_seq, res, "connection error");
-	pw_loop_destroy_source(loop, impl->source);
-	impl->source = NULL;
+	if (impl->source) {
+		pw_loop_destroy_source(loop, impl->source);
+		impl->source = NULL;
+	}
 }
 
 static void on_need_flush(void *data)
@@ -1005,7 +1012,7 @@ create_server(struct pw_protocol *protocol,
 
 	pw_loop_add_hook(pw_context_get_main_loop(context), &s->hook, &impl_hooks, s);
 
-	pw_log_info(NAME" %p: created server %p", protocol, this);
+	pw_log_debug(NAME" %p: created server %p", protocol, this);
 
 	return s;
 }

@@ -37,6 +37,7 @@ static void on_success(pa_operation *o, void *userdata)
 {
 	struct success_ack *d = userdata;
 	pa_context *c = o->context;
+	pw_log_debug("error:%d", d->error);
 	if (d->error != 0)
 		pa_context_set_error(c, d->error);
 	if (d->cb)
@@ -559,7 +560,7 @@ static void source_callback(struct source_data *d)
 	pa_source_info i;
 	pa_format_info ii[1];
 	pa_format_info *ip[1];
-	enum pa_sink_flags flags;
+	enum pa_source_flags flags;
 
 	flags = PA_SOURCE_LATENCY | PA_SOURCE_DYNAMIC_LATENCY |
 		  PA_SOURCE_DECIBEL_VOLUME;

@@ -1,6 +1,6 @@
-/* Spa
+/* PipeWire
  *
- * Copyright © 2019 Wim Taymans
+ * Copyright © 2020 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,33 +22,20 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include "resample-native-impl.h"
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-static void inner_product_c(float *d, const float * SPA_RESTRICT s,
-		const float * SPA_RESTRICT taps, uint32_t n_taps)
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <regex.h>
+#include <math.h>
+
+#include <pipewire/pipewire.h>
+
+static void reg(void) __attribute__ ((constructor));
+static void reg(void)
 {
-	float sum = 0.0f;
-	uint32_t i;
-
-	for (i = 0; i < n_taps; i++)
-		sum += s[i] * taps[i];
-	*d = sum;
+	pw_init(NULL, NULL);
 }
-
-static void inner_product_ip_c(float *d, const float * SPA_RESTRICT s,
-	const float * SPA_RESTRICT t0, const float * SPA_RESTRICT t1, float x,
-	uint32_t n_taps)
-{
-	float sum[2] = { 0.0f, 0.0f };
-	uint32_t i;
-
-	for (i = 0; i < n_taps; i++) {
-		sum[0] += s[i] * t0[i];
-		sum[1] += s[i] * t1[i];
-	}
-	*d = (sum[1] - sum[0]) * x + sum[0];
-}
-
-MAKE_RESAMPLER_COPY(c);
-MAKE_RESAMPLER_FULL(c);
-MAKE_RESAMPLER_INTER(c);

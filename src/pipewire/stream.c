@@ -45,7 +45,6 @@
 #define NAME "stream"
 
 #define MAX_BUFFERS	64
-#define MIN_QUEUED	1
 
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 #define MAX_PORTS	1
@@ -94,6 +93,7 @@ struct stream {
 	const char *path;
 
 	struct pw_context *context;
+	struct spa_hook context_listener;
 
 	enum spa_direction direction;
 	enum pw_stream_flags flags;
@@ -104,8 +104,12 @@ struct stream {
 	struct spa_node_methods node_methods;
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
-	struct spa_io_buffers *io;
+
 	struct spa_io_position *position;
+	struct spa_io_buffers *io;
+	struct {
+		struct spa_io_position *position;
+	} rt;
 
 	uint32_t change_mask_all;
 	struct spa_port_info port_info;
@@ -129,6 +133,7 @@ struct stream {
 	unsigned int disconnecting:1;
 	unsigned int free_proxy:1;
 	unsigned int draining:1;
+	unsigned int drained:1;
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
 };
@@ -246,7 +251,7 @@ static inline struct buffer *pop_queue(struct stream *stream, struct queue *queu
 	uint32_t index, id;
 	struct buffer *buffer;
 
-	if ((avail = spa_ringbuffer_get_read_index(&queue->ring, &index)) < MIN_QUEUED) {
+	if ((avail = spa_ringbuffer_get_read_index(&queue->ring, &index)) < 1) {
 		errno = EPIPE;
 		return NULL;
 	}
@@ -311,9 +316,10 @@ do_call_process(struct spa_loop *loop,
 
 static void call_process(struct stream *impl)
 {
+	struct pw_stream *stream = &impl->this;
 	pw_log_trace(NAME" %p: call process", impl);
 	if (SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_RT_PROCESS)) {
-		do_call_process(NULL, false, 1, NULL, 0, impl);
+		pw_stream_emit_process(stream);
 	}
 	else {
 		pw_loop_invoke(impl->context->main_loop,
@@ -329,7 +335,6 @@ do_call_drained(struct spa_loop *loop,
 	struct pw_stream *stream = &impl->this;
 	pw_log_trace(NAME" %p: drained", stream);
 	pw_stream_emit_drained(stream);
-	impl->draining = false;
 	return 0;
 }
 
@@ -337,6 +342,15 @@ static void call_drained(struct stream *impl)
 {
 	pw_loop_invoke(impl->context->main_loop,
 		do_call_drained, 1, NULL, 0, false, impl);
+}
+
+static int
+do_set_position(struct spa_loop *loop,
+		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct stream *impl = user_data;
+	impl->rt.position = impl->position;
+	return 0;
 }
 
 static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
@@ -353,6 +367,8 @@ static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
 			impl->position = data;
 		else
 			impl->position = NULL;
+		pw_loop_invoke(impl->context->data_loop,
+				do_set_position, 1, NULL, 0, true, impl);
 		break;
 	}
 	pw_stream_emit_io_changed(stream, id, data, size);
@@ -699,7 +715,7 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 
 static inline void copy_position(struct stream *impl, int64_t queued)
 {
-	struct spa_io_position *p = impl->position;
+	struct spa_io_position *p = impl->rt.position;
 	if (p != NULL) {
 		SEQ_WRITE(impl->seq);
 		impl->time.now = p->clock.nsec;
@@ -717,20 +733,15 @@ static int impl_node_process_input(void *object)
 	struct pw_stream *stream = &impl->this;
 	struct spa_io_buffers *io = impl->io;
 	struct buffer *b;
-	uint64_t size;
 
-	size = impl->time.ticks - impl->dequeued.incount;
-
-	pw_log_trace(NAME" %p: process in status:%d id:%d ticks:%"PRIu64" delay:%"PRIi64" size:%"PRIi64,
-			stream, io->status, io->buffer_id, impl->time.ticks, impl->time.delay, size);
+	pw_log_trace(NAME" %p: process in status:%d id:%d ticks:%"PRIu64" delay:%"PRIi64,
+			stream, io->status, io->buffer_id, impl->time.ticks, impl->time.delay);
 
 	if (io->status != SPA_STATUS_HAVE_DATA)
 		goto done;
 
 	if ((b = get_buffer(stream, io->buffer_id)) == NULL)
 		goto done;
-
-	b->this.size = size;
 
 	/* push new buffer */
 	if (push_queue(impl, &impl->dequeued, b) == 0)
@@ -760,11 +771,9 @@ static int impl_node_process_output(void *object)
 	uint32_t index;
 
 again:
-	pw_log_trace(NAME" %p: process out status:%d id:%d ticks:%"PRIu64" delay:%"PRIi64, stream,
-			io->status, io->buffer_id, impl->time.ticks, impl->time.delay);
+	pw_log_trace(NAME" %p: process out status:%d id:%d", stream, io->status, io->buffer_id);
 
-	res = 0;
-	if (io->status != SPA_STATUS_HAVE_DATA) {
+	if ((res = io->status) != SPA_STATUS_HAVE_DATA) {
 		/* recycle old buffer */
 		if ((b = get_buffer(stream, io->buffer_id)) != NULL) {
 			pw_log_trace(NAME" %p: recycle buffer %d", stream, b->id);
@@ -774,31 +783,30 @@ again:
 		/* pop new buffer */
 		if ((b = pop_queue(impl, &impl->queued)) != NULL) {
 			io->buffer_id = b->id;
-			io->status = SPA_STATUS_HAVE_DATA;
+			res = io->status = SPA_STATUS_HAVE_DATA;
 			pw_log_trace(NAME" %p: pop %d %p", stream, b->id, io);
+		} else if (impl->draining) {
+			impl->drained = true;
+			io->buffer_id = SPA_ID_INVALID;
+			res = io->status = SPA_STATUS_DRAINED;
+			pw_log_trace(NAME" %p: draining", stream);
 		} else {
 			io->buffer_id = SPA_ID_INVALID;
-			io->status = SPA_STATUS_NEED_DATA;
+			res = io->status = SPA_STATUS_NEED_DATA;
 			pw_log_trace(NAME" %p: no more buffers %p", stream, io);
-			if (impl->draining) {
-				call_drained(impl);
-				goto exit;
-			}
 		}
 	}
 
 	if (!impl->draining &&
 	    !SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_DRIVER) &&
-	    spa_ringbuffer_get_read_index(&impl->queued.ring, &index) < MIN_QUEUED) {
+	    spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index) > 0) {
 		call_process(impl);
 		if (spa_ringbuffer_get_read_index(&impl->queued.ring, &index) > 0 &&
 		    io->status == SPA_STATUS_NEED_DATA)
 			goto again;
 	}
-exit:
 	copy_position(impl, impl->queued.outcount);
 
-	res = io->status;
 	pw_log_trace(NAME" %p: res %d", stream, res);
 
 	return res;
@@ -1039,6 +1047,20 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
+static void context_drained(void *data, struct pw_impl_node *node)
+{
+	struct stream *impl = data;
+	if (impl->node != node)
+		return;
+	if (impl->draining && impl->drained)
+		call_drained(impl);
+}
+
+static const struct pw_context_driver_events context_events = {
+	PW_VERSION_CONTEXT_DRIVER_EVENTS,
+	.drained = context_drained,
+};
+
 static struct stream *
 stream_new(struct pw_context *context, const char *name,
 		struct pw_properties *props, const struct pw_properties *extra)
@@ -1102,6 +1124,9 @@ stream_new(struct pw_context *context, const char *name,
 	impl->context = context;
 	impl->allow_mlock = context->defaults.mem_allow_mlock;
 
+	spa_hook_list_append(&impl->context->driver_listener_list,
+			&impl->context_listener,
+			&context_events, impl);
 	return impl;
 
 error_properties:
@@ -1225,6 +1250,8 @@ void pw_stream_destroy(struct pw_stream *stream)
 		spa_list_remove(&c->link);
 		free(c);
 	}
+
+	spa_hook_remove(&impl->context_listener);
 
 	if (impl->data.context)
 		pw_context_destroy(impl->data.context);
@@ -1505,7 +1532,6 @@ pw_stream_connect(struct pw_stream *stream,
 
 	pw_proxy_add_listener(stream->proxy, &stream->proxy_listener, &proxy_events, stream);
 
-
 	pw_impl_node_add_listener(impl->node, &stream->node_listener, &node_events, stream);
 
 	return 0;
@@ -1771,7 +1797,9 @@ do_drain(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *impl = user_data;
+	pw_log_trace(NAME" %p", impl);
 	impl->draining = true;
+	impl->drained = false;
 	return 0;
 }
 

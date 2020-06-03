@@ -61,6 +61,8 @@ struct _GstPipeWireSrc {
   gchar *path;
   gchar *client_name;
   gboolean always_copy;
+  gint min_buffers;
+  gint max_buffers;
   int fd;
 
   gboolean negotiated;
@@ -82,7 +84,6 @@ struct _GstPipeWireSrc {
   GstStructure *properties;
 
   GstPipeWirePool *pool;
-  GQueue queue;
   GstClock *clock;
   GstClockTime last_time;
 };

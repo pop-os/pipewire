@@ -116,10 +116,11 @@ static void check_properties(struct pw_impl_device *device)
 {
 	const char *str;
 
-	if ((str = pw_properties_get(device->properties, PW_KEY_DEVICE_NAME))) {
+	if ((str = pw_properties_get(device->properties, PW_KEY_DEVICE_NAME)) &&
+	    (device->name == NULL || strcmp(str, device->name) != 0)) {
 		free(device->name);
 		device->name = strdup(str);
-		pw_log_info(NAME" %p: name '%s'", device, device->name);
+		pw_log_debug(NAME" %p: name '%s'", device, device->name);
 	}
 }
 
@@ -139,6 +140,7 @@ struct pw_impl_device *pw_context_create_device(struct pw_context *context,
 	}
 
 	this = &impl->this;
+	this->name = strdup("device");
 	pw_log_debug(NAME" %p: new", this);
 
 	if (properties == NULL)
