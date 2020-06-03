@@ -6,6 +6,7 @@ License: Expat and LGPL-2.1+
 Files: *
 Copyright: 2009 Lennart Poettering
            2010 David Henningsson
+           2013 Inigo Quilez
            2015-2020 Wim Taymans
            2016 Axis Communications
            2018-2020 Collabora Ltd.
