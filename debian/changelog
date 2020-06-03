@@ -23,6 +23,11 @@ pipewire (0.3.5-1) UNRELEASED; urgency=medium
 
   [ Simon McVittie ]
   * New upstream release
+  * Version the names of the plugin packages.
+    They're installed in a versioned directory, and this package is going
+    to have to go through NEW anyway if there are incompatible changes
+    to SPA (0.3 or 1.0).
+  * d/copyright: Update
 
  -- Simon McVittie <smcv@debian.org>  Wed, 03 Jun 2020 10:40:11 +0100
 
