@@ -118,6 +118,23 @@ Description: PipeWire multimedia server
  .
  This package contains the server and command-line utilities.
 
+Package: pipewire-examples
+Architecture: linux-any
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         pipewire
+Section: net
+Description: PipeWire multimedia server - examples and manual tests
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains example programs and manual tests.
+
 Package: libspa-0.2-ffmpeg
 Architecture: linux-any
 Multi-Arch: same

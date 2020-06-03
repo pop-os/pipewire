@@ -1,5 +1,7 @@
 etc/pipewire
-usr/bin
+usr/bin/pipewire
+usr/bin/pw-*
+usr/bin/spa-*
 usr/lib/systemd
 usr/share/man
 usr/lib/*/pipewire-0.3/
