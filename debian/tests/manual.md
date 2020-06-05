@@ -98,8 +98,3 @@ audiotestsrc, videotestsrc
 --------------------------
 
 TODO
-
-Vulkan compute source (libspa-0.2-vulkan)
------------------------------------------
-
-TODO

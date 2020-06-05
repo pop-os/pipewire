@@ -13,6 +13,7 @@ override_dh_auto_configure:
 		-Dffmpeg=false \
 		-Dvideotestsrc=true \
 		-Dvolume=true \
+		-Dvulkan=false \
 		-Dtest=true \
 		-Dman=true \
 		-Ddocs=true
