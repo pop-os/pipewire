@@ -1,5 +1,6 @@
 etc/pipewire
 usr/bin/pipewire
+usr/bin/pipewire-media-session
 usr/bin/pw-*
 usr/bin/spa-*
 usr/lib/systemd
