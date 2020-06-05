@@ -10,7 +10,7 @@ override_dh_auto_configure:
 	dh_auto_configure -- \
 		-Dauto_features=enabled \
 		-Daudiotestsrc=true \
-		-Dffmpeg=true \
+		-Dffmpeg=false \
 		-Dvideotestsrc=true \
 		-Dvolume=true \
 		-Dtest=true \
