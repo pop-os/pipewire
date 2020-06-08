@@ -1,1 +1,3 @@
+scripts-Don-t-add-an-empty-entry-to-LD_LIBRARY_PATH.patch
+scripts-Use-special-LIB-token-for-architecture-independen.patch
 conf-disable-bluez5.patch
