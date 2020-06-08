@@ -5,8 +5,6 @@ Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.
 Uploaders: Jeremy Bicha <jbicha@debian.org>
 Build-Depends: debhelper-compat (= 12),
                libasound2-dev,
-               libavcodec-dev,
-               libavformat-dev,
                libbluetooth-dev,
                libdbus-1-dev,
                libglib2.0-dev (>= 2.32.0),
