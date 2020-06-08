@@ -1,6 +1,16 @@
 etc/pipewire
 usr/bin/pipewire
 usr/bin/pipewire-media-session
-usr/bin/pw-*
+usr/bin/pw-cat
+usr/bin/pw-cli
+usr/bin/pw-dot
+usr/bin/pw-metadata
+usr/bin/pw-mididump
+usr/bin/pw-midiplay
+usr/bin/pw-midirecord
+usr/bin/pw-mon
+usr/bin/pw-play
+usr/bin/pw-profiler
+usr/bin/pw-record
 usr/bin/spa-*
 usr/share/man

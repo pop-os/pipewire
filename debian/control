@@ -123,8 +123,7 @@ Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
          libpipewire-0.3-modules,
-         pipewire-bin,
-         pipewire-client-libraries,
+         pipewire-bin
 Section: net
 Description: PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
@@ -164,7 +163,8 @@ Package: pipewire-client-libraries
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
-         ${shlibs:Depends}
+         ${shlibs:Depends},
+         pipewire
 Recommends: ${shlibs:Recommends}
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
