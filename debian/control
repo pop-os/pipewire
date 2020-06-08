@@ -34,7 +34,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-Recommends: pipewire,
+Recommends: pipewire (= ${binary:Version}),
 Description: libraries for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -123,8 +123,8 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         libpipewire-0.3-modules,
-         pipewire-bin
+         libpipewire-0.3-modules (= ${binary:Version}),
+         pipewire-bin (= ${binary:Version}),
 Description: PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -144,7 +144,7 @@ Architecture: linux-any
 Multi-Arch: foreign
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         libpipewire-0.3-modules,
+         libpipewire-0.3-modules (= ${binary:Version}),
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: PipeWire multimedia server - programs
@@ -165,7 +165,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         pipewire
+         pipewire (= ${binary:Version}),
 Recommends: ${shlibs:Recommends}
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
@@ -187,7 +187,7 @@ Package: pipewire-tests
 Architecture: linux-any
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         pipewire
+         pipewire (= ${binary:Version}),
 Section: misc
 Description: PipeWire multimedia server - tests and examples
  PipeWire is a server and user space API to deal with multimedia
@@ -205,6 +205,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         pipewire (= ${binary:Version}),
 Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -222,6 +223,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         pipewire (= ${binary:Version}),
 Description: libraries for the PipeWire multimedia server - bluetooth plugins
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -241,6 +243,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         pipewire (= ${binary:Version}),
 Description: libraries for the PipeWire multimedia server - JACK client
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
