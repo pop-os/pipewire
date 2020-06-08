@@ -1,0 +1,185 @@
+From: Simon McVittie <smcv@debian.org>
+Date: Mon, 8 Jun 2020 14:24:49 +0100
+Subject: man: Add man pages for pw-jack, pw-pulse
+
+Signed-off-by: Simon McVittie <smcv@debian.org>
+Applied-upstream: 0.3.6, commit:b91a7180185857fb012d5cc4832ec4f3591e3d78
+---
+ man/meson.build       |  8 ++++++
+ man/pw-jack.1.xml.in  | 70 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ man/pw-pulse.1.xml.in | 70 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 148 insertions(+)
+ create mode 100644 man/pw-jack.1.xml.in
+ create mode 100644 man/pw-pulse.1.xml.in
+
+diff --git a/man/meson.build b/man/meson.build
+index b18214e..0418327 100644
+--- a/man/meson.build
++++ b/man/meson.build
+@@ -19,6 +19,14 @@ manpages = [
+   [ 'pw-mon', '1' ]
+ ]
+ 
++if get_option('pipewire-jack')
++  manpages += [[ 'pw-jack', '1' ]]
++endif
++
++if get_option('pipewire-pulseaudio')
++  manpages += [[ 'pw-pulse', '1' ]]
++endif
++
+ foreach m : manpages
+   file = m.get(0) + '.' + m.get(1)
+   infile = file + '.xml.in'
+diff --git a/man/pw-jack.1.xml.in b/man/pw-jack.1.xml.in
+new file mode 100644
+index 0000000..84f5bb7
+--- /dev/null
++++ b/man/pw-jack.1.xml.in
+@@ -0,0 +1,70 @@
++<?xml version="1.0"?><!--*-nxml-*-->
++<!DOCTYPE manpage SYSTEM "xmltoman.dtd">
++<?xml-stylesheet type="text/xsl" href="xmltoman.xsl" ?>
++
++<!--
++This file is part of PipeWire.
++-->
++
++<manpage name="pw-jack" section="1" desc="Use PipeWire instead of JACK">
++
++  <synopsis>
++    <cmd>pw-jack [<arg>options</arg>] <arg>COMMAND</arg> [<arg>FILE</arg>]</cmd>
++  </synopsis>
++
++  <description>
++    <p><file>pw-jack</file> modifies the LD_LIBRARY_PATH environment
++      variable so that applications will load PipeWire's reimplementation
++      of the JACK client libraries instead of JACK's own
++      libraries. This results in JACK clients being redirected to
++      PipeWire.</p>
++
++    <p>If PipeWire's reimplementation of the JACK client libraries
++      has been installed as a system-wide replacement for JACK's
++      own libraries, then the whole system already behaves in that way,
++      in which case <file>pw-jack</file> has no practical effect.</p>
++  </description>
++
++  <options>
++
++    <option>
++      <p><opt>-h</opt></p>
++      <optdesc><p>Show help.</p></optdesc>
++    </option>
++
++    <option>
++      <p><opt>-r</opt> <arg>NAME</arg></p>
++      <optdesc><p>The name of the remote instance to connect to. If left
++        unspecified, a connection is made to the default PipeWire
++        instance.</p></optdesc>
++    </option>
++
++    <option>
++      <p><opt>-v</opt></p>
++      <optdesc><p>Verbose operation.</p></optdesc>
++    </option>
++  </options>
++
++  <section name="Example">
++    <p><cmd>pw-jack sndfile-jackplay /usr/share/sounds/freedesktop/stereo/bell.oga</cmd></p>
++  </section>
++
++  <section name="Notes">
++    <p>Using PipeWire for audio is currently considered to be
++      experimental.</p>
++  </section>
++
++  <section name="Authors">
++    <p>The PipeWire Developers &lt;@PACKAGE_BUGREPORT@&gt;;
++      PipeWire is available from <url href="@PACKAGE_URL@"/></p>
++  </section>
++
++  <section name="See also">
++    <p>
++      <manref name="pipewire" section="1"/>,
++      <manref name="jackd" section="1"/>,
++      <manref name="pw-pulse" section="1"/>
++    </p>
++  </section>
++
++</manpage>
+diff --git a/man/pw-pulse.1.xml.in b/man/pw-pulse.1.xml.in
+new file mode 100644
+index 0000000..5607f64
+--- /dev/null
++++ b/man/pw-pulse.1.xml.in
+@@ -0,0 +1,70 @@
++<?xml version="1.0"?><!--*-nxml-*-->
++<!DOCTYPE manpage SYSTEM "xmltoman.dtd">
++<?xml-stylesheet type="text/xsl" href="xmltoman.xsl" ?>
++
++<!--
++This file is part of PipeWire.
++-->
++
++<manpage name="pw-pulse" section="1" desc="Use PipeWire instead of PulseAudio">
++
++  <synopsis>
++    <cmd>pw-pulse [<arg>options</arg>] <arg>COMMAND</arg> [<arg>FILE</arg>]</cmd>
++  </synopsis>
++
++  <description>
++    <p><file>pw-pulse</file> modifies the LD_LIBRARY_PATH environment
++      variable so that applications will load PipeWire's reimplementation
++      of the PulseAudio client libraries instead of PulseAudio's own
++      libraries. This results in PulseAudio clients being redirected to
++      PipeWire.</p>
++
++    <p>If PipeWire's reimplementation of the PulseAudio client libraries
++      has been installed as a system-wide replacement for PulseAudio's
++      own libraries, then the whole system already behaves in that way,
++      in which case <file>pw-pulse</file> has no practical effect.</p>
++  </description>
++
++  <options>
++
++    <option>
++      <p><opt>-h</opt></p>
++      <optdesc><p>Show help.</p></optdesc>
++    </option>
++
++    <option>
++      <p><opt>-r</opt> <arg>NAME</arg></p>
++      <optdesc><p>The name of the remote instance to connect to. If left
++        unspecified, a connection is made to the default PipeWire
++        instance.</p></optdesc>
++    </option>
++
++    <option>
++      <p><opt>-v</opt></p>
++      <optdesc><p>Verbose operation.</p></optdesc>
++    </option>
++  </options>
++
++  <section name="Example">
++    <p><cmd>pw-pulse gst123 /usr/share/sounds/freedesktop/stereo/bell.oga</cmd></p>
++  </section>
++
++  <section name="Notes">
++    <p>Using PipeWire for audio is currently considered to be
++      experimental.</p>
++  </section>
++
++  <section name="Authors">
++    <p>The PipeWire Developers &lt;@PACKAGE_BUGREPORT@&gt;;
++      PipeWire is available from <url href="@PACKAGE_URL@"/></p>
++  </section>
++
++  <section name="See also">
++    <p>
++      <manref name="pipewire" section="1"/>,
++      <manref name="pulseaudio" section="1"/>,
++      <manref name="pw-jack" section="1"/>
++    </p>
++  </section>
++
++</manpage>

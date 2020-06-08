@@ -5,3 +5,5 @@ usr/lib/*/pipewire-0.3/jack
 usr/lib/*/pipewire-0.3/pulse
 usr/share/alsa/alsa.conf.d/50-pipewire.conf
 usr/share/alsa/alsa.conf.d/99-pipewire-default.conf usr/share/doc/pipewire-client-libraries/examples/alsa.conf.d
+usr/share/man/man1/pw-jack.*
+usr/share/man/man1/pw-pulse.*

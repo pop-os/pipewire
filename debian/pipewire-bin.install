@@ -13,4 +13,12 @@ usr/bin/pw-play
 usr/bin/pw-profiler
 usr/bin/pw-record
 usr/bin/spa-*
-usr/share/man
+usr/share/man/man1/pipewire.*
+usr/share/man/man1/pw-cat.*
+usr/share/man/man1/pw-cli.*
+usr/share/man/man1/pw-dot.*
+usr/share/man/man1/pw-metadata.*
+usr/share/man/man1/pw-mididump.*
+usr/share/man/man1/pw-mon.*
+usr/share/man/man1/pw-profiler.*
+usr/share/man/man5
