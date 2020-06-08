@@ -179,7 +179,8 @@ Description: PipeWire multimedia server - client libraries
  .
  This package contains client libraries allowing programs designed for
  the ALSA, JACK and PulseAudio APIs to use a PipeWire server for audio
- playback and recording. They are not used by default.
+ playback and recording. They are not used by default, and are currently
+ considered to be experimental.
 
 Package: pipewire-tests
 Architecture: linux-any
@@ -230,7 +231,9 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
   - Generating graphs for audio and video processing.
  .
  This package contains a plugin to make Bluetooth audio devices such as
- speakers and headsets available to PipeWire clients.
+ speakers and headsets available to the PipeWire server. It is considered
+ to be experimental, and is disabled by default (even if installed) to
+ avoid conflicts with equivalent functionality in PulseAudio.
 
 Package: libspa-0.2-jack
 Architecture: linux-any
@@ -248,3 +251,4 @@ Description: libraries for the PipeWire multimedia server - JACK client
  .
  This package contains a plugin to make PipeWire able to connect to a
  JACK server, which will be used for audio playback and recording.
+ Using PipeWire for audio is considered to be experimental.
