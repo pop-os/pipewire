@@ -4,3 +4,4 @@ fix-error-reporting.patch
 spa-examples-Load-plugins-from-SPA_PLUGIN_DIR-or-installe.patch
 Optionally-install-examples-and-tests.patch
 conf-disable-bluez5.patch
+Don-t-run-benchmarks-and-tests-for-CPU-instruction-set-ex.patch
