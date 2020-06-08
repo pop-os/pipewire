@@ -118,13 +118,13 @@ Description: libraries for the PipeWire multimedia server - documentation
  This package contains the API reference.
 
 Package: pipewire
+Section: video
 Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
          libpipewire-0.3-modules,
          pipewire-bin
-Section: net
 Description: PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -139,6 +139,7 @@ Description: PipeWire multimedia server
  pipewire on-demand.
 
 Package: pipewire-bin
+Section: video
 Architecture: linux-any
 Multi-Arch: foreign
 Depends: ${misc:Depends},
