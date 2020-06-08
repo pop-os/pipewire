@@ -137,13 +137,13 @@ Description: PipeWire multimedia server - client libraries
  the ALSA, JACK and PulseAudio APIs to use a PipeWire server for audio
  playback and recording. They are not used by default.
 
-Package: pipewire-examples
+Package: pipewire-tests
 Architecture: linux-any
 Depends: ${misc:Depends},
          ${shlibs:Depends},
          pipewire
-Section: net
-Description: PipeWire multimedia server - examples and manual tests
+Section: misc
+Description: PipeWire multimedia server - tests and examples
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -152,7 +152,7 @@ Description: PipeWire multimedia server - examples and manual tests
   - Accessing sources of video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains example programs and manual tests.
+ This package contains automated and manual tests and example programs.
 
 Package: gstreamer1.0-pipewire
 Architecture: linux-any

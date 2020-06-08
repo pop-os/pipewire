@@ -1,3 +1,6 @@
 scripts-Don-t-add-an-empty-entry-to-LD_LIBRARY_PATH.patch
 scripts-Use-special-LIB-token-for-architecture-independen.patch
+fix-error-reporting.patch
+spa-examples-Load-plugins-from-SPA_PLUGIN_DIR-or-installe.patch
+Optionally-install-examples-and-tests.patch
 conf-disable-bluez5.patch

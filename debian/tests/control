@@ -1,0 +1,4 @@
+Tests: gnome-desktop-testing
+Depends:
+ gnome-desktop-testing,
+ pipewire-tests,
