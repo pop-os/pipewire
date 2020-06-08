@@ -8,21 +8,25 @@ Install `pipewire`.
 
 Run `pw-cli dump`.
 
-ALSA client plugin (pipewire-client-libraries)
-----------------------------------------------
+ALSA client plugin (pipewire-audio-client-libraries)
+----------------------------------------------------
 
-Install `pipewire-client-libraries` and `alsa-utils`.
+Install `pipewire-audio-client-libraries` and `alsa-utils`.
+Make sure PulseAudio is not currently playing audio and is configured
+to release the audio device when not in use.
 
 `aplay -L` should list `pipewire`.
 
 `aplay -D pipewire /usr/share/sounds/alsa/Front_Center.wav` should
 play a sound.
 
-JACK client library replacement (pipewire-client-libraries)
------------------------------------------------------------
+JACK client library replacement (pipewire-audio-client-libraries)
+-----------------------------------------------------------------
 
-Install `pipewire`, `pipewire-client-libraries`, `alsa-utils` and
+Install `pipewire`, `pipewire-audio-client-libraries`, `alsa-utils` and
 `sndfile-tools`. Do not have a real JACK server running.
+Make sure PulseAudio is not currently playing audio and is configured
+to release the audio device when not in use.
 
 `aplay -D jack /usr/share/sounds/alsa/Front_Center.wav` and
 `sndfile-jackplay /usr/share/sounds/alsa/Front_Center.wav` should fail
@@ -50,26 +54,30 @@ should succeed.
     `Cannot connect output port 0 (alsa_pcm:playback_1)` and plays
     silence for the length of the test file.
 
-PulseAudio client library replacement (pipewire-client-libraries)
------------------------------------------------------------------
+PulseAudio client library replacement (pipewire-audio-client-libraries)
+-----------------------------------------------------------------------
 
-Install `pipewire`, `pipewire-client-libraries`, `alsa-utils` and
-`pulseaudio-utils`.
+Install `pipewire`, `pipewire-audio-client-libraries`, `alsa-utils` and
+`pulseaudio-utils`. Make sure PulseAudio is not currently playing audio
+and is configured to release the audio device when not in use.
 
 Setup: let your pulseaudio service become idle, then
 `pkill -STOP pulseaudio`.
 
-`paplay /usr/share/sounds/alsa/Front_Center.wav` should hang.
+`paplay /usr/share/sounds/alsa/Front_Center.wav` should hang (because
+PulseAudio has been stopped).
 
 `pw-pulse paplay /usr/share/sounds/alsa/Front_Center.wav` should play
 the audio.
 
-Teardown: `pkill -CONT pulseaudio`.
+Teardown: `pkill -CONT pulseaudio` to return it to normal.
 
 GStreamer elements (gstreamer1.0-pipewire)
 ------------------------------------------
 
 Install `gstreamer1.0-tools` and `gstreamer1.0-pipewire`.
+Make sure PulseAudio is not currently playing audio and is configured
+to release the audio device when not in use.
 
 Run: `gst-inspect-1.0 pipewire`. It should list `pipewiresrc`,
 `pipewiresink` and `pipewiredeviceprovider`.
