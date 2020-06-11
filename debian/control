@@ -79,7 +79,9 @@ Description: libraries for the PipeWire multimedia server - modules
   - Accessing sources of video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains modules used by the PipeWire server and by clients.
+ This package contains modules used by the PipeWire server and by clients,
+ and should not normally be depended on directly. PipeWire clients should
+ depend on the pipewire package instead.
 
 Package: libspa-lib-0.2-dev
 Section: libdevel
