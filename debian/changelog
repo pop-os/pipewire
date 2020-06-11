@@ -66,16 +66,8 @@ pipewire (0.3.6-1) UNRELEASED; urgency=medium
   * d/shlibs.local: Generate lockstep dependencies between binaries.
     Upstream developers are never going to support mixing libraries from
     different builds of PipeWire, and neither should we.
-  * d/p/scripts-Don-t-add-an-empty-entry-to-LD_LIBRARY_PATH.patch,
-    d/p/scripts-Use-special-LIB-token-for-architecture-independen.patch:
-    Add patches to make pw-pulse, pw-jack multiarch-friendly.
-    By using the special token ${LIB} in LD_LIBRARY_PATH, we can use the
-    same script for x86_64 and i386, or any other combination of
-    architectures.
   * Install automated tests and example programs into a new
     pipewire-tests package.
-    - d/p/fix-error-reporting.patch:
-      Add a patch from upstream to fix dlopen() error reporting
     - d/p/spa-examples-Load-plugins-from-SPA_PLUGIN_DIR-or-installe.patch,
       d/p/Optionally-install-examples-and-tests.patch:
       Make the tests and examples installable
@@ -84,19 +76,12 @@ pipewire (0.3.6-1) UNRELEASED; urgency=medium
     Ideally some of these would be automated into autopkgtests (we can't
     assert that we hear a sound, but we can at least assert that aplay
     exits successfully) but for now they are just manual tests.
-  * d/p/Don-t-run-benchmarks-and-tests-for-CPU-instruction-set-ex.patch:
-    Add patch to work around upstream issue #246. PipeWire avoids depending
-    on non-baseline x86 CPU instructions at runtime, but some of its tests
-    do not.
   * pipewire-tests: Override custom-library-search-path Lintian tag.
     Some of these tests use a RUNPATH to link to libraries from
     pipewire itself.
-  * d/p/man-Add-man-pages-for-pw-jack-pw-pulse.patch:
-    Add man pages for pw-jack, pw-pulse
   * Install symlinks to pw-cat(1) for its various aliases
   * d/rules: Update exclusion paths for dh_makeshlibs
   * Set upstream metadata fields: Bug-Database, Bug-Submit
-  * New upstream release
 
  -- Simon McVittie <smcv@debian.org>  Thu, 11 Jun 2020 10:08:21 +0100
 

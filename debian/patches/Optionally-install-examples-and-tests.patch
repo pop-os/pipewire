@@ -27,18 +27,18 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/262
  meson.build                          |  6 ++++++
  meson_options.txt                    |  4 ++++
  pipewire-jack/src/meson.build        |  3 ++-
- spa/examples/meson.build             |  9 +++++---
+ spa/examples/meson.build             | 12 +++++++----
  spa/plugins/audioconvert/meson.build | 35 +++++++++++++++++++++++++++---
  spa/tests/meson.build                | 41 +++++++++++++++++++++++++++++++++---
- src/examples/meson.build             | 36 ++++++++++++++++++++-----------
+ src/examples/meson.build             | 39 ++++++++++++++++++++++------------
  src/modules/meson.build              | 14 +++++++++++-
  src/tests/meson.build                | 28 ++++++++++++++++++++++--
  template.test.in                     |  3 +++
- 10 files changed, 154 insertions(+), 25 deletions(-)
+ 10 files changed, 158 insertions(+), 27 deletions(-)
  create mode 100644 template.test.in
 
 diff --git a/meson.build b/meson.build
-index 60ca0c1..3b06e56 100644
+index c93cef4..088e43e 100644
 --- a/meson.build
 +++ b/meson.build
 @@ -30,6 +30,7 @@ prefix = get_option('prefix')
@@ -49,8 +49,8 @@ index 60ca0c1..3b06e56 100644
  pipewire_localedir = join_paths(prefix, get_option('localedir'))
  pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
  
-@@ -299,6 +300,11 @@ alsa_dep = (get_option('pipewire-alsa')
-     ? dependency('alsa')
+@@ -303,6 +304,11 @@ alsa_dep = (get_option('pipewire-alsa')
+     ? dependency('alsa', version : '>=1.1.7')
      : dependency('', required: false))
  
 +installed_tests_metadir = join_paths(pipewire_datadir, 'installed-tests', pipewire_name)
@@ -62,7 +62,7 @@ index 60ca0c1..3b06e56 100644
  subdir('src')
  
 diff --git a/meson_options.txt b/meson_options.txt
-index b2b2af7..1ca8dfd 100644
+index 9637704..5883024 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
 @@ -14,6 +14,10 @@ option('tests',
@@ -77,10 +77,10 @@ index b2b2af7..1ca8dfd 100644
         description: 'Build GStreamer plugins',
         type: 'boolean',
 diff --git a/pipewire-jack/src/meson.build b/pipewire-jack/src/meson.build
-index e673a87..a4376c3 100644
+index 0ea2614..a052eaa 100644
 --- a/pipewire-jack/src/meson.build
 +++ b/pipewire-jack/src/meson.build
-@@ -71,7 +71,8 @@ if sdl_dep.found()
+@@ -70,7 +70,8 @@ if sdl_dep.found()
    executable('video-dsp-play',
      '../examples/video-dsp-play.c',
      c_args : [ '-D_GNU_SOURCE' ],
@@ -91,19 +91,29 @@ index e673a87..a4376c3 100644
      link_with: pipewire_jack,
    )
 diff --git a/spa/examples/meson.build b/spa/examples/meson.build
-index 21c2d1d..d0e5079 100644
+index e00440e..fa4c9a7 100644
 --- a/spa/examples/meson.build
 +++ b/spa/examples/meson.build
-@@ -3,17 +3,20 @@ if sdl_dep.found()
+@@ -3,14 +3,16 @@ if sdl_dep.found()
               include_directories : [configinc, spa_inc],
               c_args : ['-D_GNU_SOURCE'],
               dependencies : [dl_lib, sdl_dep, pthread_lib],
 -             install : false)
 +             install : installed_tests_enabled,
 +             install_dir : join_paths(installed_tests_execdir, 'examples', 'spa'))
+ 
+   if get_option('libcamera') and libcamera_dep.found()
+     executable('local-libcamera', 'local-libcamera.c',
+                include_directories : [configinc, spa_inc],
+                c_args : ['-D_GNU_SOURCE'],
+                dependencies : [dl_lib, sdl_dep, pthread_lib, libcamera_dep],
+-               install : false)
++               install : installed_tests_enabled,
++               install_dir : join_paths(installed_tests_execdir, 'examples', 'spa'))
+   endif
  endif
  
- executable('example-control', 'example-control.c',
+@@ -18,10 +20,12 @@ executable('example-control', 'example-control.c',
               include_directories : [configinc, spa_inc],
               c_args : ['-D_GNU_SOURCE'],
               dependencies : [dl_lib, pthread_lib, mathlib],
@@ -258,10 +268,10 @@ index 0ec72e1..ad0519d 100644
 +  endif
  endforeach
 diff --git a/src/examples/meson.build b/src/examples/meson.build
-index e5c53f9..16dfbdc 100644
+index dbb91c6..c7c07dd 100644
 --- a/src/examples/meson.build
 +++ b/src/examples/meson.build
-@@ -1,46 +1,53 @@
+@@ -1,52 +1,60 @@
  executable('video-src',
    'video-src.c',
    c_args : [ '-D_GNU_SOURCE' ],
@@ -280,6 +290,14 @@ index e5c53f9..16dfbdc 100644
  )
  executable('audio-src',
    'audio-src.c',
+   c_args : [ '-D_GNU_SOURCE' ],
+-  install: false,
++  install : installed_tests_enabled,
++  install_dir : join_paths(installed_tests_execdir, 'examples'),
+   dependencies : [pipewire_dep, mathlib],
+ )
+ executable('audio-dsp-src',
+   'audio-dsp-src.c',
    c_args : [ '-D_GNU_SOURCE' ],
 -  install: false,
 +  install : installed_tests_enabled,
@@ -322,7 +340,7 @@ index e5c53f9..16dfbdc 100644
    dependencies : [pipewire_dep, mathlib],
  )
  
-@@ -69,7 +76,8 @@ endif
+@@ -76,7 +84,8 @@ endif
  executable('bluez-session',
    'bluez-session.c',
    c_args : [ '-D_GNU_SOURCE' ],
@@ -332,7 +350,7 @@ index e5c53f9..16dfbdc 100644
    dependencies : [pipewire_dep, mathlib],
  )
  
-@@ -77,26 +85,30 @@ if sdl_dep.found()
+@@ -84,27 +93,31 @@ if sdl_dep.found()
    executable('video-play',
      'video-play.c',
      c_args : [ '-D_GNU_SOURCE' ],
@@ -358,6 +376,7 @@ index e5c53f9..16dfbdc 100644
 +    install_dir : join_paths(installed_tests_execdir, 'examples'),
      dependencies : [pipewire_dep, sdl_dep],
    )
+ 
    executable('export-sink',
      'export-sink.c',
      c_args : [ '-D_GNU_SOURCE' ],
@@ -368,10 +387,10 @@ index e5c53f9..16dfbdc 100644
    )
  endif
 diff --git a/src/modules/meson.build b/src/modules/meson.build
-index c99c229..92ac181 100644
+index a63e9ce..0d3ddf8 100644
 --- a/src/modules/meson.build
 +++ b/src/modules/meson.build
-@@ -119,12 +119,24 @@ test('pw-test-protocol-native',
+@@ -127,12 +127,24 @@ test('pw-test-protocol-native',
  			c_args : libpipewire_c_args,
  			include_directories : [configinc, spa_inc ],
  			dependencies : [pipewire_dep],

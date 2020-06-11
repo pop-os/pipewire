@@ -9,9 +9,10 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/262
 ---
  spa/examples/adapter-control.c | 36 ++++++++++++++++++++++++++++--------
  spa/examples/example-control.c | 31 +++++++++++++++++++++++++------
+ spa/examples/local-libcamera.c | 27 ++++++++++++++++++++-------
  spa/examples/local-v4l2.c      | 25 ++++++++++++++++++-------
- spa/examples/meson.build       |  9 ++++++---
- 4 files changed, 77 insertions(+), 24 deletions(-)
+ spa/examples/meson.build       | 12 ++++++++----
+ 5 files changed, 99 insertions(+), 32 deletions(-)
 
 diff --git a/spa/examples/adapter-control.c b/spa/examples/adapter-control.c
 index c80c860..8a3daf5 100644
@@ -244,6 +245,89 @@ index 6f54db5..29052f5 100644
  					SPA_NAME_SUPPORT_LOOP)) < 0)
  		return res;
  
+diff --git a/spa/examples/local-libcamera.c b/spa/examples/local-libcamera.c
+index cd08a5b..bd9ff62 100644
+--- a/spa/examples/local-libcamera.c
++++ b/spa/examples/local-libcamera.c
+@@ -24,6 +24,9 @@
+  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  * DEALINGS IN THE SOFTWARE.
+  */
++
++#include "config.h"
++
+ #include <string.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -54,8 +57,6 @@
+ 
+ static SPA_LOG_IMPL(default_log);
+ 
+-#define PATH "build/spa/plugins/"
+-
+ #define MAX_BUFFERS     8
+ 
+ #define USE_BUFFER 		false
+@@ -70,6 +71,7 @@ struct buffer {
+ };
+ 
+ struct data {
++	const char *plugin_dir;
+ 	struct spa_log *log;
+ 	struct spa_system *system;
+ 	struct spa_loop *loop;
+@@ -103,10 +105,17 @@ static int load_handle(struct data *data, struct spa_handle **handle, const char
+ 	spa_handle_factory_enum_func_t enum_func;
+ 	uint32_t i;
+ 
+-	if ((hnd = dlopen(lib, RTLD_NOW)) == NULL) {
+-		printf("can't load %s: %s\n", lib, dlerror());
++	char *path = NULL;
++
++	if ((path = spa_aprintf("%s/%s", data->plugin_dir, lib)) == NULL) {
++		return -ENOMEM;
++	}
++	if ((hnd = dlopen(path, RTLD_NOW)) == NULL) {
++		printf("can't load %s: %s\n", path, dlerror());
++		free(path);
+ 		return -errno;
+ 	}
++	free(path);
+ 	if ((enum_func = dlsym(hnd, SPA_HANDLE_FACTORY_ENUM_FUNC_NAME)) == NULL) {
+ 		printf("can't find enum function\n");
+ 		return -errno;
+@@ -245,7 +254,7 @@ static int make_nodes(struct data *data, const char *device)
+ 
+ 	if ((res =
+ 	     make_node(data, &data->source,
+-		     PATH "libcamera/libspa-libcamera.so",
++		     "libcamera/libspa-libcamera.so",
+ 		     SPA_NAME_API_LIBCAMERA_SOURCE)) < 0) {
+ 		printf("can't create libcamera-source: %d\n", res);
+ 		return res;
+@@ -472,8 +481,12 @@ int main(int argc, char *argv[])
+ 	struct spa_handle *handle = NULL;
+ 	void *iface;
+ 
++	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
++		str = PLUGINDIR;
++	data.plugin_dir = str;
++
+ 	if ((res = load_handle(&data, &handle,
+-					PATH "support/libspa-support.so",
++					"support/libspa-support.so",
+ 					SPA_NAME_SUPPORT_SYSTEM)) < 0)
+ 		return res;
+ 
+@@ -485,7 +498,7 @@ int main(int argc, char *argv[])
+ 	data.support[data.n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_System, data.system);
+ 
+ 	if ((res = load_handle(&data, &handle,
+-					PATH "support/libspa-support.so",
++					"support/libspa-support.so",
+ 					SPA_NAME_SUPPORT_LOOP)) < 0)
+ 		return res;
+ 
 diff --git a/spa/examples/local-v4l2.c b/spa/examples/local-v4l2.c
 index a8466c2..7bb8b61 100644
 --- a/spa/examples/local-v4l2.c
@@ -327,10 +411,10 @@ index a8466c2..7bb8b61 100644
  		return res;
  
 diff --git a/spa/examples/meson.build b/spa/examples/meson.build
-index f84067f..21c2d1d 100644
+index ba5615b..e00440e 100644
 --- a/spa/examples/meson.build
 +++ b/spa/examples/meson.build
-@@ -1,16 +1,19 @@
+@@ -1,23 +1,27 @@
  if sdl_dep.found()
    executable('local-v4l2', 'local-v4l2.c',
 -             include_directories : [spa_inc ],
@@ -338,6 +422,15 @@ index f84067f..21c2d1d 100644
 +             c_args : ['-D_GNU_SOURCE'],
               dependencies : [dl_lib, sdl_dep, pthread_lib],
               install : false)
+ 
+   if get_option('libcamera') and libcamera_dep.found()
+     executable('local-libcamera', 'local-libcamera.c',
+-               include_directories : [spa_inc ],
++               include_directories : [configinc, spa_inc],
++               c_args : ['-D_GNU_SOURCE'],
+                dependencies : [dl_lib, sdl_dep, pthread_lib, libcamera_dep],
+                install : false)
+   endif
  endif
  
  executable('example-control', 'example-control.c',
