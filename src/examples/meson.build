@@ -16,6 +16,12 @@ executable('audio-src',
   install: false,
   dependencies : [pipewire_dep, mathlib],
 )
+executable('audio-dsp-src',
+  'audio-dsp-src.c',
+  c_args : [ '-D_GNU_SOURCE' ],
+  install: false,
+  dependencies : [pipewire_dep, mathlib],
+)
 executable('export-source',
   'export-source.c',
   c_args : [ '-D_GNU_SOURCE' ],
@@ -59,6 +65,7 @@ if alsa_dep.found()
     'media-session/policy-node.c',
     'media-session/v4l2-monitor.c',
     'media-session/v4l2-endpoint.c',
+    'media-session/libcamera-monitor.c',
     'media-session/suspend-node.c',
     c_args : [ '-D_GNU_SOURCE' ],
     install: true,
@@ -93,6 +100,7 @@ if sdl_dep.found()
     install: false,
     dependencies : [pipewire_dep, sdl_dep],
   )
+
   executable('export-sink',
     'export-sink.c',
     c_args : [ '-D_GNU_SOURCE' ],

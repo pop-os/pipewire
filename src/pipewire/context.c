@@ -358,9 +358,6 @@ void pw_context_destroy(struct pw_context *context)
 	spa_list_consume(core, &context->core_list, link)
 		pw_core_disconnect(core);
 
-	spa_list_consume(module, &context->module_list, link)
-		pw_impl_module_destroy(module);
-
 	spa_list_consume(node, &context->node_list, link)
 		pw_impl_node_destroy(node);
 
@@ -369,6 +366,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	spa_list_consume(resource, &context->registry_resource_list, link)
 		pw_resource_destroy(resource);
+
+	spa_list_consume(module, &context->module_list, link)
+		pw_impl_module_destroy(module);
 
 	spa_list_consume(global, &context->global_list, link)
 		pw_global_destroy(global);
@@ -455,6 +455,14 @@ int pw_context_update_properties(struct pw_context *context, const struct spa_di
 	return changed;
 }
 
+static bool global_can_read(struct pw_context *context, struct pw_global *global)
+{
+	if (context->current_client &&
+	    !PW_PERM_IS_R(pw_global_get_permissions(global, context->current_client)))
+		return false;
+	return true;
+}
+
 SPA_EXPORT
 int pw_context_for_each_global(struct pw_context *context,
 			    int (*callback) (void *data, struct pw_global *global),
@@ -464,8 +472,7 @@ int pw_context_for_each_global(struct pw_context *context,
 	int res;
 
 	spa_list_for_each_safe(g, t, &context->global_list, link) {
-		if (context->current_client &&
-		    !PW_PERM_IS_R(pw_global_get_permissions(g, context->current_client)))
+		if (!global_can_read(context, g))
 			continue;
 		if ((res = callback(data, g)) != 0)
 			return res;
@@ -484,8 +491,7 @@ struct pw_global *pw_context_find_global(struct pw_context *context, uint32_t id
 		return NULL;
 	}
 
-	if (context->current_client &&
-	    !PW_PERM_IS_R(pw_global_get_permissions(global, context->current_client))) {
+	if (!global_can_read(context, global)) {
 		errno = EACCES;
 		return NULL;
 	}
@@ -528,8 +534,7 @@ struct pw_impl_port *pw_context_find_port(struct pw_context *context,
 		if (other_port->node == n)
 			continue;
 
-		if (context->current_client &&
-		    !PW_PERM_IS_R(pw_global_get_permissions(n->global, context->current_client)))
+		if (!global_can_read(context, n->global))
 			continue;
 
 		pw_log_debug(NAME" %p: node id:%d", context, n->global->id);
@@ -1016,6 +1021,10 @@ struct spa_handle *pw_context_load_spa_handle(struct pw_context *context,
 SPA_EXPORT
 int pw_context_register_export_type(struct pw_context *context, struct pw_export_type *type)
 {
+	if (pw_context_find_export_type(context, type->type)) {
+		pw_log_warn("context %p: duplicate export type %s", context, type->type);
+		return -EEXIST;
+	}
 	pw_log_debug("context %p: Add export type %s to context", context, type->type);
 	spa_list_append(&context->export_list, &type->link);
 	return 0;

@@ -1069,6 +1069,7 @@ static int setup_sndfile(struct data *data)
 	const char *s;
 	unsigned int nom = 0;
 
+	spa_zero(info);
 	/* for record, you fill in the info first */
 	if (data->mode == mode_record) {
 		if (data->format == NULL)
@@ -1583,6 +1584,8 @@ error_connect_fail:
 	if (data.stream)
 		pw_stream_destroy(data.stream);
 error_no_stream:
+	if (data.registry)
+		pw_proxy_destroy((struct pw_proxy*)data.registry);
 error_no_registry:
 	pw_core_disconnect(data.core);
 error_ctx_connect_failed:
@@ -1598,6 +1601,7 @@ error_bad_file:
 		sf_close(data.file);
 	if (data.midi.file)
 		midi_file_close(data.midi.file);
+	pw_deinit();
 	return exit_code;
 
 error_usage:

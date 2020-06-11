@@ -60,8 +60,8 @@ int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version)
 	spa_hook_list_init(&proxy->object_listener_list);
 
 	if ((res = pw_proxy_install_marshal(proxy, false)) < 0) {
-		pw_log_error(NAME" %p: no marshal for type %s/%d", proxy,
-				type, version);
+		pw_log_error(NAME" %p: no marshal for type %s/%d: %s", proxy,
+				type, version, spa_strerror(res));
 		goto error_clean;
 	}
 	proxy->in_map = true;
@@ -160,6 +160,7 @@ SPA_EXPORT
 int pw_proxy_set_bound_id(struct pw_proxy *proxy, uint32_t global_id)
 {
 	proxy->bound_id = global_id;
+	pw_log_debug(NAME" %p: id:%d bound:%d", proxy, proxy->id, global_id);
 	pw_proxy_emit_bound(proxy, global_id);
 	return 0;
 }
@@ -239,7 +240,7 @@ void pw_proxy_destroy(struct pw_proxy *proxy)
 	if (!proxy->removed) {
 		/* if the server did not remove this proxy, schedule a
 		 * destroy if we can */
-		if (proxy->core) {
+		if (proxy->core && !proxy->core->removed) {
 			pw_core_destroy(proxy->core, proxy);
 			proxy->refcount++;
 		} else {
@@ -298,12 +299,19 @@ void pw_proxy_unref(struct pw_proxy *proxy)
 }
 
 SPA_EXPORT
+void pw_proxy_ref(struct pw_proxy *proxy)
+{
+	assert(proxy->refcount > 0);
+	proxy->refcount++;
+}
+
+SPA_EXPORT
 int pw_proxy_sync(struct pw_proxy *proxy, int seq)
 {
 	int res = -EIO;
 	struct pw_core *core = proxy->core;
 
-	if (core != NULL) {
+	if (core && !core->removed) {
 		res = pw_core_sync(core, proxy->id, seq);
 		pw_log_debug(NAME" %p: %u seq:%d sync %u", proxy, proxy->id, seq, res);
 	}
@@ -318,7 +326,7 @@ int pw_proxy_errorf(struct pw_proxy *proxy, int res, const char *error, ...)
 	struct pw_core *core = proxy->core;
 
 	va_start(ap, error);
-	if (core != NULL)
+	if (core && !core->removed)
 		r = pw_core_errorv(core, proxy->id,
 				core->recv_seq, res, error, ap);
 	va_end(ap);
@@ -330,7 +338,8 @@ int pw_proxy_error(struct pw_proxy *proxy, int res, const char *error)
 {
 	int r = -EIO;
 	struct pw_core *core = proxy->core;
-	if (core != NULL)
+
+	if (core && !core->removed)
 		r = pw_core_error(core, proxy->id,
 				core->recv_seq, res, error);
 	return r;

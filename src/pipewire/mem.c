@@ -98,22 +98,23 @@ static struct spa_list _mempools = SPA_LIST_INIT(&_mempools);
 struct mempool {
 	struct pw_mempool this;
 
-	struct spa_list link;
+	struct spa_list link;		/* link in global _mempools */
 
 	struct spa_hook_list listener_list;
 
-	struct pw_map map;
-	struct spa_list blocks;
+	struct pw_map map;		/* map memblock to id */
+	struct spa_list blocks;		/* list of memblock */
 	uint32_t pagesize;
 };
 
 struct memblock {
 	struct pw_memblock this;
-	struct spa_list link;
-	struct spa_list mappings;
-	struct spa_list maps;
+	struct spa_list link;		/* link in mempool */
+	struct spa_list mappings;	/* list of struct mapping */
+	struct spa_list memmaps;	/* list of struct memmap */
 };
 
+/* a mapped region of a block */
 struct mapping {
 	struct memblock *block;
 	int ref;
@@ -124,6 +125,7 @@ struct mapping {
 	void *ptr;
 };
 
+/* a reference to a (part of a) mapped region */
 struct memmap {
 	struct pw_memmap this;
 	struct mapping *mapping;
@@ -260,6 +262,9 @@ static struct mapping * memblock_find_mapping(struct memblock *b,
 	struct pw_mempool *pool = b->this.pool;
 
 	spa_list_for_each(m, &b->mappings, link) {
+		pw_log_debug(NAME" %p: check %p offset:(%d <= %d) end:(%d >= %d)",
+				pool, m, m->offset, offset, m->offset + m->size,
+				offset + size);
 		if (m->offset <= offset && (m->offset + m->size) >= (offset + size)) {
 			pw_log_debug(NAME" %p: found %p id:%d fd:%d offs:%d size:%d ref:%d",
 					pool, &b->this, b->this.id, b->this.fd,
@@ -321,7 +326,7 @@ static struct mapping * memblock_map(struct memblock *b,
 	return m;
 }
 
-static void mapping_unmap(struct mapping *m)
+static void mapping_free(struct mapping *m)
 {
 	struct memblock *b = m->block;
 	struct mempool *p = SPA_CONTAINER_OF(b->this.pool, struct mempool, this);
@@ -333,7 +338,15 @@ static void mapping_unmap(struct mapping *m)
 		munmap(m->ptr, m->size);
 	spa_list_remove(&m->link);
 	free(m);
+}
 
+static void mapping_unmap(struct mapping *m)
+{
+	struct memblock *b = m->block;
+	struct mempool *p = SPA_CONTAINER_OF(b->this.pool, struct mempool, this);
+        pw_log_debug(NAME" %p: mapping:%p block:%p fd:%d ptr:%p size:%d block-ref:%d",
+			p, m, b, b->this.fd, m->ptr, m->size, b->this.ref);
+	mapping_free(m);
 	pw_memblock_unref(&b->this);
 }
 
@@ -349,7 +362,7 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 
 	pw_map_range_init(&range, offset, size, p->pagesize);
 
-	m = memblock_find_mapping(b, flags, range.offset, range.size);
+	m = memblock_find_mapping(b, flags, offset, size);
 	if (m == NULL)
 		m = memblock_map(b, flags, range.offset, range.size);
 	if (m == NULL)
@@ -372,7 +385,7 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 	if (tag)
 		memcpy(mm->this.tag, tag, sizeof(mm->this.tag));
 
-	spa_list_append(&b->maps, &mm->link);
+	spa_list_append(&b->memmaps, &mm->link);
 
         pw_log_debug(NAME" %p: map:%p block:%p fd:%d ptr:%p (%d %d) mapping:%p ref:%d", p,
 			&mm->this, b, b->this.fd, mm->this.ptr, offset, size, m, m->ref);
@@ -454,7 +467,7 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 	b->this.type = type;
 	b->this.size = size;
 	spa_list_init(&b->mappings);
-	spa_list_init(&b->maps);
+	spa_list_init(&b->memmaps);
 
 #ifdef USE_MEMFD
 	b->this.fd = memfd_create("pipewire-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
@@ -500,9 +513,10 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 
 	b->this.id = pw_map_insert_new(&impl->map, b);
 	spa_list_append(&impl->blocks, &b->link);
-	pw_log_debug(NAME" %p: block:%p id:%d type:%u", pool, &b->this, b->this.id, type);
+	pw_log_debug(NAME" %p: block:%p id:%d type:%u size:%zd", pool, &b->this, b->this.id, type, size);
 
-	pw_mempool_emit_added(impl, &b->this);
+	if (!SPA_FLAG_IS_SET(flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
+		pw_mempool_emit_added(impl, &b->this);
 
 	return &b->this;
 
@@ -546,7 +560,7 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	if (b == NULL)
 		return NULL;
 
-	spa_list_init(&b->maps);
+	spa_list_init(&b->memmaps);
 	spa_list_init(&b->mappings);
 
 	b->this.ref = 1;
@@ -560,7 +574,8 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	pw_log_debug(NAME" %p: block:%p id:%u flags:%08x type:%u fd:%d",
 			pool, b, b->this.id, flags, type, fd);
 
-	pw_mempool_emit_added(impl, &b->this);
+	if (!SPA_FLAG_IS_SET(flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
+		pw_mempool_emit_added(impl, &b->this);
 
 	return &b->this;
 }
@@ -569,6 +584,8 @@ SPA_EXPORT
 struct pw_memblock * pw_mempool_import_block(struct pw_mempool *pool,
 		struct pw_memblock *mem)
 {
+	pw_log_debug(NAME" %p: import block:%p type:%d fd:%d", pool,
+			mem, mem->type, mem->fd);
 	return pw_mempool_import(pool,
 			mem->flags | PW_MEMBLOCK_FLAG_DONT_CLOSE,
 			mem->type, mem->fd);
@@ -581,7 +598,6 @@ struct pw_memmap * pw_mempool_import_map(struct pw_mempool *pool,
 	struct pw_memblock *old, *block;
 	struct memblock *b;
 	struct pw_memmap *map;
-	struct mapping *m;
 	uint32_t offset;
 
 	old = pw_mempool_find_ptr(other, data);
@@ -595,6 +611,8 @@ struct pw_memmap * pw_mempool_import_map(struct pw_mempool *pool,
 		return NULL;
 
 	if (block->ref == 1) {
+		struct mapping *m;
+
 		b = SPA_CONTAINER_OF(block, struct memblock, this);
 
 		m = calloc(1, sizeof(struct mapping));
@@ -607,6 +625,8 @@ struct pw_memmap * pw_mempool_import_map(struct pw_mempool *pool,
 		m->offset = old->map->offset;
 		m->size = old->map->size;
 		spa_list_append(&b->mappings, &m->link);
+		pw_log_debug(NAME" %p: mapping:%p block:%p offset:%u size:%u ref:%u",
+				pool, m, block, m->offset, m->size, block->ref);
 	} else {
 		block->ref--;
 	}
@@ -618,7 +638,8 @@ struct pw_memmap * pw_mempool_import_map(struct pw_mempool *pool,
 	if (map == NULL)
 		return NULL;
 
-	pw_log_debug(NAME" %p: block:%p id:%u", pool, block, block->id);
+	pw_log_debug(NAME" %p: from pool:%p block:%p id:%u data:%p size:%u ref:%d",
+			pool, other, block, block->id, data, size, block->ref);
 
 	return map;
 }
@@ -653,6 +674,7 @@ void pw_memblock_free(struct pw_memblock *block)
 	struct pw_mempool *pool = block->pool;
 	struct mempool *impl = SPA_CONTAINER_OF(pool, struct mempool, this);
 	struct memmap *mm;
+	struct mapping *m;
 
 	spa_return_if_fail(block != NULL);
 
@@ -667,10 +689,16 @@ void pw_memblock_free(struct pw_memblock *block)
 		pw_map_remove(&impl->map, block->id);
 	spa_list_remove(&b->link);
 
-	pw_mempool_emit_removed(impl, block);
+	if (!SPA_FLAG_IS_SET(block->flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
+		pw_mempool_emit_removed(impl, block);
 
-	spa_list_consume(mm, &b->maps, link)
+	spa_list_consume(mm, &b->memmaps, link)
 		pw_memmap_free(&mm->this);
+
+	spa_list_consume(m, &b->mappings, link) {
+		pw_log_warn(NAME" %p: stray mapping:%p", pool, m);
+		mapping_free(m);
+	}
 
 	if (block->fd != -1 && !(block->flags & PW_MEMBLOCK_FLAG_DONT_CLOSE)) {
 		pw_log_debug(NAME" %p: close fd:%d", pool, block->fd);
@@ -734,7 +762,7 @@ struct pw_memmap * pw_mempool_find_tag(struct pw_mempool *pool, uint32_t tag[5],
 	pw_log_debug(NAME" %p: find tag %zd", pool, size);
 
 	spa_list_for_each(b, &impl->blocks, link) {
-		spa_list_for_each(mm, &b->maps, link) {
+		spa_list_for_each(mm, &b->memmaps, link) {
 			if (memcmp(tag, mm->this.tag, size) == 0) {
 				pw_log_debug(NAME" %p: found %p", pool, mm);
 				return &mm->this;

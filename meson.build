@@ -1,7 +1,7 @@
 project('pipewire', ['c' ],
-  version : '0.3.5',
+  version : '0.3.6',
   license : 'MIT',
-  meson_version : '>= 0.50.0',
+  meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'buildtype=debugoptimized' ])
@@ -35,6 +35,21 @@ pipewire_sysconfdir = join_paths(prefix, get_option('sysconfdir'))
 
 pipewire_configdir = join_paths(pipewire_sysconfdir, 'pipewire')
 modules_install_dir = join_paths(pipewire_libdir, pipewire_name)
+
+if host_machine.system() == 'linux'
+  # glibc ld.so interprets ${LIB} in a library loading path with an
+  # appropriate value for the current architecture, typically something
+  # like lib, lib64 or lib/x86_64-linux-gnu.
+  # This allows the same pw-pulse script to work for both 32- and 64-bit
+  # applications on biarch/multiarch distributions, by setting something
+  # like LD_LIBRARY_PATH='/usr/${LIB}/pipewire-0.3/pulse'.
+  # Note that ${LIB} is a special token expanded by the runtime linker,
+  # not an environment variable, and must be passed through literally.
+  modules_install_dir_dlopen = join_paths(prefix, '${LIB}', pipewire_name)
+else
+  modules_install_dir_dlopen = modules_install_dir
+endif
+
 spa_plugindir = join_paths(pipewire_libdir, spa_name)
 
 pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
@@ -49,7 +64,6 @@ cc = meson.get_compiler('c')
 if cc.get_id() == 'gcc'
   add_global_arguments('-fvisibility=hidden',
 			'-Wsign-compare',
-			'-Wimplicit-fallthrough',
 			'-Wpointer-arith',
 			'-Wformat',
 			'-Wformat-security',
@@ -67,7 +81,6 @@ if cc.get_id() == 'gcc'
 			language : 'c')
   add_global_arguments('-fvisibility=hidden',
 			'-Wsign-compare',
-			'-Wimplicit-fallthrough',
 			'-Wpointer-arith',
 			'-Wformat',
 			'-Wformat-security',
@@ -80,6 +93,12 @@ if cc.get_id() == 'gcc'
 			'-Wno-pedantic',
 			'-Wunused-result',
 			language : 'cpp')
+  # warn on implicit fall-through if supported by compiler (gcc >= 7.x)
+  gcc_major_version = cc.version().split('.')[0]
+  if(gcc_major_version.to_int() >= 7)
+    add_global_arguments('-Wimplicit-fallthrough', language : 'c')
+    add_global_arguments('-Wimplicit-fallthrough', language : 'cpp')
+  endif
 endif
 
 sse_args = '-msse'
@@ -268,7 +287,7 @@ if get_option('gstreamer')
   gobject_dep = dependency('gobject-2.0')
   gmodule_dep = dependency('gmodule-2.0')
   gio_dep = [dependency('gio-2.0'), dependency('gio-unix-2.0')]
-  gst_dep = [dependency('gstreamer-1.0'),
+  gst_dep = [dependency('gstreamer-1.0', version : '>= 1.10.0'),
              dependency('gstreamer-plugins-base-1.0'),
              dependency('gstreamer-video-1.0'),
              dependency('gstreamer-audio-1.0'),
@@ -281,7 +300,7 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
     : dependency('', required: false))
 
 alsa_dep = (get_option('pipewire-alsa')
-    ? dependency('alsa')
+    ? dependency('alsa', version : '>=1.1.7')
     : dependency('', required: false))
 
 subdir('spa')

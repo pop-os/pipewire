@@ -89,7 +89,7 @@ static void core_event_bound_id(void *data, uint32_t id, uint32_t global_id)
 	struct pw_core *this = data;
 	struct pw_proxy *proxy;
 
-	pw_log_debug(NAME" %p: proxy %u bound %u", this, id, global_id);
+	pw_log_debug(NAME" %p: proxy id %u bound %u", this, id, global_id);
 	if ((proxy = pw_map_lookup(&this->objects, id)) != NULL) {
 		pw_proxy_set_bound_id(proxy, global_id);
 	}
@@ -173,26 +173,39 @@ static int remove_proxy(void *object, void *data)
 	if (object == NULL)
 		return 0;
 
-	if (object != core) {
-		p->core = NULL;
+	if (object != core)
 		pw_proxy_remove(p);
-	}
 
 	return 0;
 }
 
-static void proxy_core_destroy(void *data)
+static int destroy_proxy(void *object, void *data)
+{
+	struct pw_core *core = data;
+	struct pw_proxy *p = object;
+
+	if (object == NULL)
+		return 0;
+
+	if (object != core) {
+		pw_log_warn(NAME" %p: leaked proxy %p id:%d", core, p, p->id);
+		p->core = NULL;
+	}
+	return 0;
+}
+
+static void proxy_core_removed(void *data)
 {
 	struct pw_core *core = data;
 	struct pw_stream *stream, *s2;
 	struct pw_filter *filter, *f2;
 
-	if (core->destroyed)
+	if (core->removed)
 		return;
 
-	core->destroyed = true;
+	core->removed = true;
 
-	pw_log_debug(NAME" %p: core proxy destroy", core);
+	pw_log_debug(NAME" %p: core proxy removed", core);
 	spa_list_remove(&core->link);
 
 	spa_list_for_each_safe(stream, s2, &core->stream_list, link)
@@ -201,15 +214,32 @@ static void proxy_core_destroy(void *data)
 		pw_filter_disconnect(filter);
 
 	pw_map_for_each(&core->objects, remove_proxy, core);
-	pw_map_reset(&core->objects);
+}
+
+static void proxy_core_destroy(void *data)
+{
+	struct pw_core *core = data;
+	struct pw_stream *stream;
+	struct pw_filter *filter;
+
+	if (core->destroyed)
+		return;
+
+	core->destroyed = true;
+
+	pw_log_debug(NAME" %p: core proxy destroy", core);
 
 	spa_list_consume(stream, &core->stream_list, link)
 		pw_stream_destroy(stream);
 	spa_list_consume(filter, &core->filter_list, link)
 		pw_filter_destroy(filter);
 
-	pw_protocol_client_disconnect(core->conn);
 	pw_proxy_destroy((struct pw_proxy*)core->client);
+
+	pw_map_for_each(&core->objects, destroy_proxy, core);
+	pw_map_reset(&core->objects);
+
+	pw_protocol_client_disconnect(core->conn);
 
 	pw_mempool_destroy(core->pool);
 
@@ -223,6 +253,7 @@ static void proxy_core_destroy(void *data)
 
 static const struct pw_proxy_events proxy_core_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = proxy_core_removed,
 	.destroy = proxy_core_destroy,
 };
 
@@ -258,6 +289,7 @@ struct pw_proxy *pw_core_export(struct pw_core *core,
 		res = -errno;
 		goto error_proxy_failed;
 	}
+	pw_log_debug(NAME" %p: export:%s proxy:%p", core, type, proxy);
 	return proxy;
 
 error_export_type:
@@ -376,6 +408,8 @@ pw_context_connect(struct pw_context *context, struct pw_properties *properties,
 	if (core == NULL)
 		return NULL;
 
+	pw_log_debug(NAME" %p: connect", core);
+
 	if ((res = pw_protocol_client_connect(core->conn,
 					&core->properties->dict,
 					NULL, NULL)) < 0)
@@ -400,6 +434,8 @@ pw_context_connect_fd(struct pw_context *context, int fd, struct pw_properties *
 	core = core_new(context, properties, user_data_size);
 	if (core == NULL)
 		return NULL;
+
+	pw_log_debug(NAME" %p: connect fd:%d", core, fd);
 
 	if ((res = pw_protocol_client_connect_fd(core->conn, fd, true)) < 0)
 		goto error_free;
@@ -430,12 +466,15 @@ pw_context_connect_self(struct pw_context *context, struct pw_properties *proper
 SPA_EXPORT
 int pw_core_steal_fd(struct pw_core *core)
 {
-	return pw_protocol_client_steal_fd(core->conn);
+	int fd = pw_protocol_client_steal_fd(core->conn);
+	pw_log_debug(NAME" %p: fd:%d", core, fd);
+	return fd;
 }
 
 SPA_EXPORT
 int pw_core_set_paused(struct pw_core *core, bool paused)
 {
+	pw_log_debug(NAME" %p: state:%s", core, paused ? "pause" : "resume");
 	return pw_protocol_client_set_paused(core->conn, paused);
 }
 

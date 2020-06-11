@@ -74,6 +74,7 @@ struct support {
 	struct registry *registry;
 	struct spa_support support[MAX_SUPPORT];
 	uint32_t n_support;
+	unsigned int in_valgrind:1;
 };
 
 static struct registry global_registry;
@@ -154,7 +155,8 @@ unref_plugin(struct plugin *plugin)
 	if (--plugin->ref == 0) {
 		spa_list_remove(&plugin->link);
 		pw_log_debug("unloaded plugin:'%s'", plugin->filename);
-		dlclose(plugin->hnd);
+		if (!global_support.in_valgrind)
+			dlclose(plugin->hnd);
 		free(plugin->filename);
 		free(plugin);
 	}
@@ -191,6 +193,7 @@ static void unref_handle(struct handle *handle)
 {
 	if (--handle->ref == 0) {
 		spa_list_remove(&handle->link);
+		pw_log_debug("clear handle '%s'", handle->factory_name);
 		spa_handle_clear(&handle->handle);
 		unref_plugin(handle->plugin);
 		free(handle->factory_name);
@@ -366,10 +369,11 @@ void pw_init(int *argc, char **argv[])
 	if (support->registry != NULL)
 		return;
 
+	if ((str = getenv("VALGRIND")))
+		support->in_valgrind = pw_properties_parse_bool(str);
+
 	if ((str = getenv("PIPEWIRE_DEBUG")))
 		configure_debug(support, str);
-	else
-		pw_log_set_level(SPA_LOG_LEVEL_WARN);
 
 	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
 		str = PLUGINDIR;
@@ -408,6 +412,31 @@ void pw_init(int *argc, char **argv[])
 
 	add_interface(support, SPA_NAME_SUPPORT_CPU, SPA_TYPE_INTERFACE_CPU, &info);
 	pw_log_info("version %s", pw_get_library_version());
+}
+
+SPA_EXPORT
+void pw_deinit(void)
+{
+	struct support *support = &global_support;
+	struct registry *registry = &global_registry;
+	struct plugin *p;
+
+	support->plugin_dir = NULL;
+	if (support->categories)
+		pw_free_strv(support->categories);
+	support->categories = NULL;
+	support->support_lib = NULL;
+	support->registry = NULL;
+
+	pw_log_set(NULL);
+
+	spa_list_consume(p, &registry->plugins, link) {
+		struct handle *h;
+		p->ref++;
+		spa_list_consume(h, &p->handles, link)
+			unref_handle(h);
+		unref_plugin(p);
+	}
 }
 
 /** Check if a debug category is enabled
@@ -481,6 +510,12 @@ const char *pw_get_host_name(void)
 
 	hname[255] = 0;
 	return hname;
+}
+
+SPA_EXPORT
+bool pw_in_valgrind(void)
+{
+	return global_support.in_valgrind;
 }
 
 /** Get the client name

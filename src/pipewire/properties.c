@@ -43,8 +43,11 @@ static int add_func(struct pw_properties *this, char *key, char *value)
 	struct properties *impl = SPA_CONTAINER_OF(this, struct properties, this);
 
 	item = pw_array_add(&impl->items, sizeof(struct spa_dict_item));
-	if (item == NULL)
+	if (item == NULL) {
+		free(key);
+		free(value);
 		return -errno;
+	}
 
 	item->key = key;
 	item->value = value;
@@ -178,6 +181,8 @@ pw_properties_new_string(const char *str)
 		if (eq && eq != val) {
 			*eq = '\0';
 			add_func(&impl->this, val, strdup(eq+1));
+		} else {
+			free(val);
 		}
 		s = pw_split_walk(str, " \t\n\r", &len, &state);
 	}

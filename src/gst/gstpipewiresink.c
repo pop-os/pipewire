@@ -570,7 +570,7 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
 
   pw_thread_loop_lock (pwsink->loop);
   if (pw_stream_get_state (pwsink->stream, &error) != PW_STREAM_STATE_STREAMING)
-    goto done;
+    goto done_unlock;
 
   if (buffer->pool != GST_BUFFER_POOL_CAST (pwsink->pool)) {
     GstBuffer *b = NULL;
@@ -592,15 +592,15 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
 
     pw_thread_loop_lock (pwsink->loop);
     if (pw_stream_get_state (pwsink->stream, &error) != PW_STREAM_STATE_STREAMING)
-      goto done;
+      goto done_unlock;
   }
 
   GST_DEBUG ("push buffer");
   do_send_buffer (pwsink, buffer);
 
-done:
+done_unlock:
   pw_thread_loop_unlock (pwsink->loop);
-
+done:
   return res;
 
 not_negotiated:
@@ -648,7 +648,9 @@ gst_pipewire_sink_start (GstBaseSink * basesink)
   }
 
   pw_thread_loop_lock (pwsink->loop);
-  pwsink->stream = pw_stream_new (pwsink->core, pwsink->client_name, props);
+  if ((pwsink->stream = pw_stream_new (pwsink->core, pwsink->client_name, props)) == NULL)
+    goto no_stream;
+
   pwsink->pool->stream = pwsink->stream;
 
   pw_stream_add_listener(pwsink->stream,
@@ -659,6 +661,13 @@ gst_pipewire_sink_start (GstBaseSink * basesink)
   pw_thread_loop_unlock (pwsink->loop);
 
   return TRUE;
+
+no_stream:
+  {
+    GST_ELEMENT_ERROR (pwsink, RESOURCE, FAILED, ("can't create stream"), (NULL));
+    pw_thread_loop_unlock (pwsink->loop);
+    return FALSE;
+  }
 }
 
 static gboolean
@@ -680,6 +689,30 @@ gst_pipewire_sink_stop (GstBaseSink * basesink)
   return TRUE;
 }
 
+static void on_core_done (void *object, uint32_t id, int seq)
+{
+  GstPipeWireSink * pwsink = object;
+  if (id == PW_ID_CORE) {
+    pwsink->last_seq = seq;
+    pw_thread_loop_signal (pwsink->loop, FALSE);
+  }
+}
+
+static const struct pw_core_events core_events = {
+  PW_VERSION_CORE_EVENTS,
+  .done = on_core_done,
+};
+
+static void do_sync(GstPipeWireSink * pwsink)
+{
+  pwsink->pending_seq = pw_core_sync(pwsink->core, 0, pwsink->pending_seq);
+  while (true) {
+    if (pwsink->last_seq == pwsink->pending_seq || pwsink->last_error < 0)
+      break;
+    pw_thread_loop_wait (pwsink->loop);
+  }
+}
+
 static gboolean
 gst_pipewire_sink_open (GstPipeWireSink * pwsink)
 {
@@ -695,6 +728,11 @@ gst_pipewire_sink_open (GstPipeWireSink * pwsink)
 
   if (pwsink->core == NULL)
     goto connect_error;
+
+  pw_core_add_listener(pwsink->core,
+                       &pwsink->core_listener,
+                       &core_events,
+                       pwsink);
 
   pw_thread_loop_unlock (pwsink->loop);
 
@@ -721,9 +759,11 @@ gst_pipewire_sink_close (GstPipeWireSink * pwsink)
 {
   pw_thread_loop_lock (pwsink->loop);
   if (pwsink->stream) {
-    pw_stream_disconnect (pwsink->stream);
+    pw_stream_destroy (pwsink->stream);
+    pwsink->stream = NULL;
   }
   if (pwsink->core) {
+    do_sync(pwsink);
     pw_core_disconnect (pwsink->core);
     pwsink->core = NULL;
   }
@@ -731,10 +771,6 @@ gst_pipewire_sink_close (GstPipeWireSink * pwsink)
 
   pw_thread_loop_stop (pwsink->loop);
 
-  if (pwsink->stream) {
-    pw_stream_destroy (pwsink->stream);
-    pwsink->stream = NULL;
-  }
   return TRUE;
 }
 
@@ -752,10 +788,12 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_READY_TO_PAUSED:
       break;
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
-      /* uncork and start recording */
+      /* uncork and start play */
+      pw_stream_set_active(this->stream, true);
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
-      /* stop recording ASAP by corking */
+      /* stop play ASAP by corking */
+      pw_stream_set_active(this->stream, false);
       break;
     default:
       break;

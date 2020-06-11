@@ -82,7 +82,6 @@ static void on_process(void *userdata, struct spa_io_position *position)
 	struct spa_data *d;
 	struct spa_pod *pod;
 	struct spa_pod_control *c;
-	uint8_t *p;
 	uint64_t frame;
 
 	frame = data->clock_time;
@@ -95,7 +94,7 @@ static void on_process(void *userdata, struct spa_io_position *position)
 	buf = b->buffer;
 	d = &buf->datas[0];
 
-	if ((p = d->data) == NULL)
+	if (d->data == NULL)
 		return;
 
 	if ((pod = spa_pod_from_data(d->data, d->maxsize, d->chunk->offset, d->chunk->size)) == NULL)
@@ -114,6 +113,7 @@ static void on_process(void *userdata, struct spa_io_position *position)
 		ev.data = SPA_POD_BODY(&c->value),
 		ev.size = SPA_POD_BODY_SIZE(&c->value);
 
+		fprintf(stdout, "%4d: ", c->offset);
 		midi_file_dump_event(stdout, &ev);
 	}
 
@@ -221,5 +221,6 @@ int main(int argc, char *argv[])
 	} else {
 		res = dump_filter(&data);
 	}
+	pw_deinit();
 	return res;
 }

@@ -323,7 +323,7 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
 	struct node *this = object;
-	int res;
+	int res = 0;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -443,7 +443,8 @@ do_update_port(struct node *this,
 	port = GET_PORT(this, direction, port_id);
 
 	if (!port->valid) {
-		spa_log_debug(this->log, "node %p: adding port %d", this, port_id);
+		spa_log_debug(this->log, "node %p: adding port %d, direction %d",
+				this, port_id, direction);
 		port->id = port_id;
 		port->direction = direction;
 		port->have_format = false;
@@ -1226,7 +1227,8 @@ static void client_node0_resource_destroy(void *data)
 				true,
 				&node->data_source);
 	}
-	pw_impl_node_destroy(this->node);
+	if (this->node)
+		pw_impl_node_destroy(this->node);
 }
 
 static void node_initialized(void *data)
@@ -1259,7 +1261,10 @@ static void node_initialized(void *data)
 static void node_free(void *data)
 {
 	struct impl *impl = data;
+	struct pw_impl_client_node0 *this = &impl->this;
 	struct spa_system *data_system = impl->node.data_system;
+
+	this->node = NULL;
 
 	pw_log_debug("client-node %p: free", &impl->this);
 	node_clear(&impl->node);
@@ -1268,6 +1273,9 @@ static void node_free(void *data)
 		pw_client_node0_transport_destroy(impl->transport);
 
 	spa_hook_remove(&impl->node_listener);
+
+	if (this->resource)
+		pw_resource_destroy(this->resource);
 
 	pw_array_clear(&impl->mems);
 

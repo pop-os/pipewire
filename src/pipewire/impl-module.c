@@ -87,7 +87,7 @@ static char *find_module(const char *path, const char *name)
 
 		newpath = spa_aprintf("%s/%s", path, entry->d_name);
 		if (newpath == NULL)
-			return NULL;
+			break;
 
 		if (stat(newpath, &s) == 0 && S_ISDIR(s.st_mode)) {
 			filename = find_module(newpath, name);
@@ -322,7 +322,7 @@ void pw_impl_module_destroy(struct pw_impl_module *module)
 
 	pw_properties_free(module->properties);
 
-	if (dlclose(impl->hnd) != 0)
+	if (!pw_in_valgrind() && dlclose(impl->hnd) != 0)
 		pw_log_warn(NAME" %p: dlclose failed: %s", module, dlerror());
 	free(impl);
 }

@@ -131,7 +131,7 @@ struct stream {
 	struct pw_time time;
 
 	unsigned int disconnecting:1;
-	unsigned int free_proxy:1;
+	unsigned int disconnect_core:1;
 	unsigned int draining:1;
 	unsigned int drained:1;
 	unsigned int allow_mlock:1;
@@ -610,8 +610,8 @@ static int impl_port_set_param(void *object,
 	struct pw_stream *stream = &impl->this;
 	int res;
 
-	if (impl->disconnecting)
-		return param == NULL ? 0 : -EIO;
+	if (impl->disconnecting && param != NULL)
+		return -EIO;
 
 	pw_log_debug(NAME" %p: param id %d (%s) changed: %p", impl, id,
 			spa_debug_type_find_name(spa_type_param, id), param);
@@ -622,7 +622,7 @@ static int impl_port_set_param(void *object,
 	if ((res = update_params(impl, id, &param, param ? 1 : 0)) < 0)
 		return res;
 
-	if (id == SPA_PARAM_Format && param == NULL)
+	if (id == SPA_PARAM_Format)
 		clear_buffers(stream);
 
 	pw_stream_emit_param_changed(stream, id, param);
@@ -646,8 +646,8 @@ static int impl_port_use_buffers(void *object,
 	int prot, res;
 	int size = 0;
 
-	if (impl->disconnecting)
-		return n_buffers == 0 ? 0 : -EIO;
+	if (impl->disconnecting && n_buffers > 0)
+		return -EIO;
 
 	prot = PROT_READ | (direction == SPA_DIRECTION_OUTPUT ? PROT_WRITE : 0);
 
@@ -827,13 +827,20 @@ static const struct spa_node_methods impl_node = {
 	.port_reuse_buffer = impl_port_reuse_buffer,
 };
 
-static void proxy_destroy(void *_data)
+static void proxy_removed(void *_data)
 {
 	struct pw_stream *stream = _data;
-	stream->proxy = NULL;
+	pw_log_debug(NAME" %p: removed", stream);
 	spa_hook_remove(&stream->proxy_listener);
 	stream->node_id = SPA_ID_INVALID;
 	stream_set_state(stream, PW_STREAM_STATE_UNCONNECTED, NULL);
+}
+
+static void proxy_destroy(void *_data)
+{
+	struct pw_stream *stream = _data;
+	pw_log_debug(NAME" %p: destroy", stream);
+	proxy_removed(_data);
 }
 
 static void proxy_error(void *_data, int seq, int res, const char *message)
@@ -851,6 +858,7 @@ static void proxy_bound(void *data, uint32_t global_id)
 
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = proxy_removed,
 	.destroy = proxy_destroy,
 	.error = proxy_error,
 	.bound = proxy_bound,
@@ -1182,12 +1190,15 @@ pw_stream_new_simple(struct pw_loop *loop,
 		return NULL;
 
 	context = pw_context_new(loop, NULL, 0);
-	if (context == NULL)
-		return NULL;
+	if (context == NULL) {
+		res = -errno;
+		goto error_cleanup;
+	}
 
 	impl = stream_new(context, name, props, NULL);
 	if (impl == NULL) {
 		res = -errno;
+		props = NULL;
 		goto error_cleanup;
 	}
 
@@ -1198,7 +1209,10 @@ pw_stream_new_simple(struct pw_loop *loop,
 	return this;
 
 error_cleanup:
-	pw_context_destroy(context);
+	if (context)
+		pw_context_destroy(context);
+	if (props)
+		pw_properties_free(props);
 	errno = -res;
 	return NULL;
 }
@@ -1390,7 +1404,7 @@ pw_stream_connect(struct pw_stream *stream,
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	struct pw_impl_factory *factory;
-	struct pw_properties *props;
+	struct pw_properties *props = NULL;
 	struct pw_impl_node *follower;
 	const char *str;
 	uint32_t i;
@@ -1480,7 +1494,7 @@ pw_stream_connect(struct pw_stream *stream,
 		spa_list_append(&stream->core->stream_list, &stream->link);
 		pw_core_add_listener(stream->core,
 				&stream->core_listener, &core_events, stream);
-		impl->free_proxy = true;
+		impl->disconnect_core = true;
 	}
 
 	pw_log_debug(NAME" %p: creating node", stream);
@@ -1520,6 +1534,7 @@ pw_stream_connect(struct pw_stream *stream,
 		}
 	} else {
 		impl->node = follower;
+		pw_properties_free(props);
 	}
 	if (!SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_INACTIVE))
 		pw_impl_node_set_active(impl->node, true);
@@ -1566,15 +1581,17 @@ int pw_stream_disconnect(struct pw_stream *stream)
 	if (impl->node)
 		pw_impl_node_set_active(impl->node, false);
 
-	if (stream->proxy)
+	if (stream->proxy) {
 		pw_proxy_destroy(stream->proxy);
+		stream->proxy = NULL;
+	}
 
 	if (impl->node) {
 		pw_impl_node_destroy(impl->node);
 		impl->node = NULL;
 	}
-	if (impl->free_proxy) {
-		impl->free_proxy = false;
+	if (impl->disconnect_core) {
+		impl->disconnect_core = false;
 		spa_hook_remove(&stream->core_listener);
 		spa_list_remove(&stream->link);
 		pw_core_disconnect(stream->core);
@@ -1590,16 +1607,18 @@ int pw_stream_set_error(struct pw_stream *stream,
 	if (res < 0) {
 		va_list args;
 		char *value;
+		int r;
 
 		va_start(args, error);
-		if (vasprintf(&value, error, args) < 0)
+		r = vasprintf(&value, error, args);
+		va_end(args);
+		if (r < 0)
 			return -errno;
 
 		if (stream->proxy)
 			pw_proxy_error(stream->proxy, res, value);
 		stream_set_state(stream, PW_STREAM_STATE_ERROR, value);
 
-		va_end(args);
 		free(value);
 	}
 	return res;
@@ -1633,7 +1652,7 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 	struct spa_pod *pod;
 	struct control *c;
 
-        va_start(varargs, values);
+	va_start(varargs, values);
 
 	spa_pod_builder_push_object(&b, &f[0], SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
 	while (1) {
@@ -1666,6 +1685,8 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 		values = va_arg(varargs, float *);
 	}
 	pod = spa_pod_builder_pop(&b, &f[0]);
+
+	va_end(varargs);
 
 	pw_impl_node_set_param(impl->node, SPA_PARAM_Props, 0, pod);
 

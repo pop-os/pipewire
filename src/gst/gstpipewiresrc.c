@@ -377,7 +377,8 @@ buffer_recycle (GstMiniObject *obj)
 
   GST_LOG_OBJECT (obj, "recycle buffer");
   pw_thread_loop_lock (src->loop);
-  pw_stream_queue_buffer (src->stream, data->b);
+  if (src->stream)
+    pw_stream_queue_buffer (src->stream, data->b);
   pw_thread_loop_unlock (src->loop);
 
   return FALSE;
@@ -721,7 +722,7 @@ on_param_changed (void *data, uint32_t id,
     const struct spa_pod *params[2];
     struct spa_pod_builder b = { NULL };
     uint8_t buffer[512];
-    uint32_t buffers = buffers = CLAMP (16, pwsrc->min_buffers, pwsrc->max_buffers);
+    uint32_t buffers = CLAMP (16, pwsrc->min_buffers, pwsrc->max_buffers);
 
     spa_pod_builder_init (&b, buffer, sizeof (buffer));
     params[0] = spa_pod_builder_add_object (&b,
@@ -954,6 +955,30 @@ static const struct pw_stream_events stream_events = {
         .process = on_process,
 };
 
+static void on_core_done (void *object, uint32_t id, int seq)
+{
+  GstPipeWireSrc * pwsrc = object;
+  if (id == PW_ID_CORE) {
+    pwsrc->last_seq = seq;
+    pw_thread_loop_signal (pwsrc->loop, FALSE);
+  }
+}
+
+static const struct pw_core_events core_events = {
+  PW_VERSION_CORE_EVENTS,
+  .done = on_core_done,
+};
+
+static void do_sync(GstPipeWireSrc * pwsrc)
+{
+  pwsrc->pending_seq = pw_core_sync(pwsrc->core, 0, pwsrc->pending_seq);
+  while (true) {
+    if (pwsrc->last_seq == pwsrc->pending_seq || pwsrc->last_error < 0)
+      break;
+    pw_thread_loop_wait (pwsrc->loop);
+  }
+}
+
 static gboolean
 gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
 {
@@ -972,6 +997,11 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
   if (pwsrc->core == NULL)
       goto connect_error;
 
+  pw_core_add_listener(pwsrc->core,
+                       &pwsrc->core_listener,
+                       &core_events,
+                       pwsrc);
+
   if (pwsrc->properties) {
     props = pw_properties_new (NULL, NULL);
     gst_structure_foreach (pwsrc->properties, copy_properties, props);
@@ -988,7 +1018,6 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
                          &pwsrc->stream_listener,
                          &stream_events,
                          pwsrc);
-
 
   pwsrc->clock = gst_pipewire_clock_new (pwsrc->stream, pwsrc->last_time);
   pw_thread_loop_unlock (pwsrc->loop);
@@ -1018,8 +1047,6 @@ no_stream:
 static void
 gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
 {
-  pw_thread_loop_stop (pwsrc->loop);
-
   pwsrc->last_time = gst_clock_get_time (pwsrc->clock);
 
   gst_element_post_message (GST_ELEMENT (pwsrc),
@@ -1030,11 +1057,19 @@ gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
   g_clear_object (&pwsrc->clock);
   GST_OBJECT_UNLOCK (pwsrc);
 
-  pw_stream_destroy (pwsrc->stream);
-  pwsrc->stream = NULL;
+  pw_thread_loop_lock (pwsrc->loop);
+  if (pwsrc->stream) {
+    pw_stream_destroy (pwsrc->stream);
+    pwsrc->stream = NULL;
+  }
+  if (pwsrc->core) {
+    do_sync(pwsrc);
+    pw_core_disconnect (pwsrc->core);
+    pwsrc->core = NULL;
+  }
+  pw_thread_loop_unlock (pwsrc->loop);
 
-  pw_core_disconnect (pwsrc->core);
-  pwsrc->core = NULL;
+  pw_thread_loop_stop (pwsrc->loop);
 }
 
 static GstStateChangeReturn
@@ -1052,9 +1087,11 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
       break;
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
       /* uncork and start recording */
+      pw_stream_set_active(this->stream, true);
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       /* stop recording ASAP by corking */
+      pw_stream_set_active(this->stream, false);
       break;
     default:
       break;
