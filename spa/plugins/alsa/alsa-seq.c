@@ -137,6 +137,13 @@ static int init_stream(struct seq_state *state, enum spa_direction direction)
 	return 0;
 }
 
+static int uninit_stream(struct seq_state *state, enum spa_direction direction)
+{
+	struct seq_stream *stream = &state->streams[direction];
+	snd_midi_event_free(stream->codec);
+	return 0;
+}
+
 static void init_ports(struct seq_state *state)
 {
 	snd_seq_addr_t addr;
@@ -323,6 +330,9 @@ int spa_alsa_seq_close(struct seq_state *state)
 
 	seq_close(state, &state->sys);
 	seq_close(state, &state->event);
+
+	uninit_stream(state, SPA_DIRECTION_INPUT);
+	uninit_stream(state, SPA_DIRECTION_OUTPUT);
 
 	spa_system_close(state->data_system, state->timerfd);
 	state->opened = false;
@@ -679,7 +689,7 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 {
 	snd_seq_queue_status_t *status;
 	const snd_seq_real_time_t* queue_time;
-	uint64_t queue_real;
+	uint64_t queue_real, position;
 	double err, corr;
 	uint64_t clock_elapsed, queue_elapsed;
 
@@ -688,6 +698,9 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 		state->rate = clock->rate;
 		state->duration = clock->duration;
 		state->threshold = state->duration;
+		position = clock->position;
+	} else {
+		position = 0;
 	}
 
 	/* take queue time */
@@ -698,12 +711,12 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 
 	if (state->queue_base == 0) {
 		state->queue_base = nsec - queue_real;
-		state->clock_base = state->position->clock.position;
+		state->clock_base = position;
 	}
 
 	corr = 1.0 - (state->z2 + state->z3);
 
-	clock_elapsed = state->position->clock.position - state->clock_base;
+	clock_elapsed = position - state->clock_base;
 	state->queue_time = nsec - state->queue_base;
 	queue_elapsed = NSEC_TO_CLOCK(state->clock, state->queue_time) / corr;
 
@@ -754,7 +767,7 @@ int spa_alsa_seq_process(struct seq_state *state)
 
 	res = process_recycle(state);
 
-	if (state->following) {
+	if (state->following && state->position) {
 		update_time(state, state->position->clock.nsec, true);
 		res |= process_read(state);
 	}

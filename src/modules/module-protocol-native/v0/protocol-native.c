@@ -406,6 +406,8 @@ struct spa_pod_prop_body0 {
              (iter) <= SPA_MEMBER((body), (_size)-(body)->value.size, __typeof__(*iter));       \
              (iter) = SPA_MEMBER((iter), (body)->value.size, __typeof__(*iter)))
 
+#define SPA0_POD_PROP_N_VALUES(b,size)     ((size - sizeof(struct spa_pod_prop_body0)) / (b)->value.size)
+
 static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_impl_client *client,
 		struct spa_pod_builder *builder)
 {
@@ -445,7 +447,8 @@ static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_imp
 			type = SPA_CHOICE_Flags;
 			break;
 		}
-		if (!SPA_FLAG_IS_SET(b->flags, SPA_POD_PROP0_FLAG_UNSET))
+		if (!SPA_FLAG_IS_SET(b->flags, SPA_POD_PROP0_FLAG_UNSET) &&
+		    SPA0_POD_PROP_N_VALUES(b, size) == 1)
 			type = SPA_CHOICE_None;
 
 		spa_pod_builder_push_choice(builder, &f, type, 0);
@@ -806,17 +809,19 @@ static void registry_marshal_global(void *object, uint32_t id, uint32_t permissi
 	n_items = props ? props->n_items : 0;
 
 	parent_id = 0;
-	if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
-		if ((str = spa_dict_lookup(props, "node.id")) != NULL)
-			parent_id = atoi(str);
-	} else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
-		if ((str = spa_dict_lookup(props, "device.id")) != NULL)
-			parent_id = atoi(str);
-	} else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0 ||
-	    strcmp(type, PW_TYPE_INTERFACE_Device) == 0 ||
-	    strcmp(type, PW_TYPE_INTERFACE_Factory) == 0) {
-		if ((str = spa_dict_lookup(props, "module.id")) != NULL)
-			parent_id = atoi(str);
+	if (props) {
+		if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+			if ((str = spa_dict_lookup(props, "node.id")) != NULL)
+				parent_id = atoi(str);
+		} else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+			if ((str = spa_dict_lookup(props, "device.id")) != NULL)
+				parent_id = atoi(str);
+		} else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0 ||
+		    strcmp(type, PW_TYPE_INTERFACE_Device) == 0 ||
+		    strcmp(type, PW_TYPE_INTERFACE_Factory) == 0) {
+			if ((str = spa_dict_lookup(props, "module.id")) != NULL)
+				parent_id = atoi(str);
+		}
 	}
 
 	version = 0;

@@ -651,13 +651,17 @@ static int do_sync(struct client *client)
 	return 0;
 }
 
+static void on_node_removed(void *data)
+{
+	struct client *client = data;
+	pw_proxy_destroy((struct pw_proxy*)client->node);
+}
+
 static void on_node_destroy(void *data)
 {
 	struct client *client = data;
-
 	client->node = NULL;
 	spa_hook_remove(&client->proxy_listener);
-
 }
 
 static void on_node_bound(void *data, uint32_t global_id)
@@ -666,8 +670,9 @@ static void on_node_bound(void *data, uint32_t global_id)
 	client->node_id = global_id;
 }
 
-static const struct pw_proxy_events proxy_events = {
+static const struct pw_proxy_events node_proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = on_node_removed,
 	.destroy = on_node_destroy,
 	.bound = on_node_bound,
 };
@@ -1004,8 +1009,7 @@ static inline uint32_t cycle_run(struct client *c)
 		pw_log_warn(NAME" %p: read failed %m", c);
 		if (errno == EWOULDBLOCK)
 			return 0;
-	}
-	if (SPA_UNLIKELY(cmd > 1))
+	} else if (SPA_UNLIKELY(cmd > 1))
 		pw_log_warn(NAME" %p: missed %"PRIu64" wakeups", c, cmd - 1);
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1750,7 +1754,7 @@ static int client_node_port_set_io(void *object,
 {
 	struct client *c = (struct client *) object;
 	struct port *p = GET_PORT(c, direction, port_id);
-        struct pw_memmap *mm;
+        struct pw_memmap *mm, *old;
         struct mix *mix;
 	uint32_t tag[5] = { c->node_id, direction, port_id, mix_id, id };
         void *ptr;
@@ -1761,8 +1765,7 @@ static int client_node_port_set_io(void *object,
 		goto exit;
 	}
 
-	if ((mm = pw_mempool_find_tag(c->pool, tag, sizeof(tag))) != NULL)
-		pw_memmap_free(mm);
+	old = pw_mempool_find_tag(c->pool, tag, sizeof(tag));
 
         if (mem_id == SPA_ID_INVALID) {
                 mm = ptr = NULL;
@@ -1774,7 +1777,7 @@ static int client_node_port_set_io(void *object,
                 if (mm == NULL) {
                         pw_log_warn(NAME" %p: can't map memory id %u", c, mem_id);
 			res = -EINVAL;
-                        goto exit;
+                        goto exit_free;
                 }
 		ptr = mm->ptr;
         }
@@ -1789,8 +1792,10 @@ static int client_node_port_set_io(void *object,
 	default:
 		break;
 	}
-
-      exit:
+exit_free:
+	if (old != NULL)
+		pw_memmap_free(old);
+exit:
 	if (res < 0)
 		pw_proxy_error((struct pw_proxy*)c->node, res, spa_strerror(res));
 	return res;
@@ -2314,7 +2319,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	pw_client_node_add_listener(client->node,
 			&client->node_listener, &client_node_events, client);
         pw_proxy_add_listener((struct pw_proxy*)client->node,
-			&client->proxy_listener, &proxy_events, client);
+			&client->proxy_listener, &node_proxy_events, client);
 
 	ni = SPA_NODE_INFO_INIT();
 	ni.max_input_ports = MAX_PORTS;
@@ -2387,9 +2392,15 @@ int jack_client_close (jack_client_t *client)
 
 	res = jack_deactivate(client);
 
+	pw_thread_loop_stop(c->context.loop);
+
+	if (c->registry)
+		pw_proxy_destroy((struct pw_proxy*)c->registry);
+	if (c->metadata->proxy)
+		pw_proxy_destroy((struct pw_proxy*)c->metadata->proxy);
+	pw_core_disconnect(c->core);
 	pw_context_destroy(c->context.context);
 
-	pw_thread_loop_stop(c->context.loop);
 	pw_thread_loop_destroy(c->context.loop);
 
 	pw_log_debug(NAME" %p: free", client);
@@ -3658,6 +3669,7 @@ int jack_connect (jack_client_t *client,
 	struct object *src, *dst;
 	struct spa_dict props;
 	struct spa_dict_item items[5];
+	struct pw_proxy *proxy;
 	char val[4][16];
 	int res;
 
@@ -3692,13 +3704,15 @@ int jack_connect (jack_client_t *client,
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_LINK_INPUT_PORT, val[3]);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_OBJECT_LINGER, "true");
 
-	pw_core_create_object(c->core,
+	proxy = pw_core_create_object(c->core,
 				    "link-factory",
 				    PW_TYPE_INTERFACE_Link,
 				    PW_VERSION_LINK,
 				    &props,
 				    0);
 	res = do_sync(c);
+
+	pw_proxy_destroy(proxy);
 
       exit:
 	pw_thread_loop_unlock(c->context.loop);

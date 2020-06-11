@@ -31,7 +31,10 @@ if get_option('spa-plugins')
     jack_dep = dependency('jack', version : '>= 1.9.10')
   endif
   if get_option('vulkan')
-    vulkan_dep = dependency('vulkan')
+    vulkan_dep = dependency('vulkan', version : '>= 1.1.69')
+  endif
+  if get_option('libcamera')
+    libcamera_dep = dependency('camera')
   endif
 
   subdir('plugins')

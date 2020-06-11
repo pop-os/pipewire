@@ -85,9 +85,6 @@ struct node_data {
 	struct spa_hook client_node_listener;
 	struct spa_hook proxy_client_node_listener;
 
-	struct pw_proxy *proxy;
-	struct spa_hook proxy_listener;
-
 	struct spa_list links;
 };
 
@@ -125,10 +122,11 @@ do_deactivate_link(struct spa_loop *loop,
 
 static void clear_link(struct node_data *data, struct link *link)
 {
-	pw_loop_invoke(data->context->data_loop,
+	struct pw_context *context = data->context;
+	pw_loop_invoke(context->data_loop,
 		do_deactivate_link, SPA_ID_INVALID, NULL, 0, true, link);
 	pw_memmap_free(link->map);
-	close(link->signalfd);
+	spa_system_close(context->data_system, link->signalfd);
 	spa_list_remove(&link->link);
 	free(link);
 }
@@ -151,7 +149,7 @@ static void clean_transport(struct node_data *data)
 	pw_memmap_free(data->activation);
 	data->node->rt.activation = data->node->activation->map->ptr;
 
-	close(data->rtwritefd);
+	spa_system_close(data->context->data_system, data->rtwritefd);
 	data->have_transport = false;
 }
 
@@ -267,8 +265,8 @@ static int client_node_transport(void *object,
 	pw_log_debug("remote-node %p: fds:%d %d node:%u activation:%p",
 		proxy, readfd, writefd, data->remote_id, data->activation->ptr);
 
-        data->rtwritefd = writefd;
-	close(data->node->source.fd);
+	data->rtwritefd = writefd;
+	spa_system_close(data->context->data_system, data->node->source.fd);
 	data->node->source.fd = readfd;
 
 	data->have_transport = true;
@@ -446,6 +444,10 @@ client_node_set_io(void *object,
 	if (old != NULL)
 		pw_memmap_free(old);
 
+	if (res < 0) {
+		pw_log_error("node %p: set_io: %s", proxy, spa_strerror(res));
+		pw_proxy_errorf(proxy, res, "node_set_io failed: %s", spa_strerror(res));
+	}
 	return res;
 }
 
@@ -557,9 +559,13 @@ client_node_port_set_param(void *object,
 		goto error_exit;
 	}
 
-        pw_log_debug("port %p: set param %d %p", port, id, param);
+	pw_log_debug("port %p: set param %d %p", port, id, param);
 
-        if (id == SPA_PARAM_Format) {
+	res = pw_impl_port_set_param(port, id, flags, param);
+	if (res < 0)
+		goto error_exit;
+
+	if (id == SPA_PARAM_Format) {
 		struct mix *mix;
 		spa_list_for_each(mix, &data->mix[direction], link) {
 			if (mix->port->port_id == port_id)
@@ -567,14 +573,10 @@ client_node_port_set_param(void *object,
 		}
 	}
 
-	res = pw_impl_port_set_param(port, id, flags, param);
-	if (res < 0)
-		goto error_exit;
-
 	return res;
 
 error_exit:
-        pw_log_error("port %p: set_param %d %p: %s", port, id, param, spa_strerror(res));
+	pw_log_error("port %p: set_param %d %p: %s", port, id, param, spa_strerror(res));
 	pw_proxy_errorf(proxy, res, "port_set_param: %s", spa_strerror(res));
 	return res;
 }
@@ -735,7 +737,7 @@ client_node_port_set_io(void *object,
 	struct pw_proxy *proxy = object;
 	struct node_data *data = proxy->user_data;
 	struct mix *mix;
-	struct pw_memmap *mm;
+	struct pw_memmap *mm, *old;
 	void *ptr;
 	int res = 0;
 	uint32_t tag[5] = { data->remote_id, direction, port_id, mix_id, id };
@@ -743,11 +745,10 @@ client_node_port_set_io(void *object,
 	mix = ensure_mix(data, direction, port_id, mix_id);
 	if (mix == NULL) {
 		res = -ENOENT;
-		goto error_exit;
+		goto exit;
 	}
 
-	if ((mm = pw_mempool_find_tag(data->pool, tag, sizeof(tag))) != NULL)
-		pw_memmap_free(mm);
+	old = pw_mempool_find_tag(data->pool, tag, sizeof(tag));
 
 	if (memid == SPA_ID_INVALID) {
 		mm = ptr = NULL;
@@ -758,7 +759,7 @@ client_node_port_set_io(void *object,
 				PW_MEMMAP_FLAG_READWRITE, offset, size, tag);
 		if (mm == NULL) {
 			res = -errno;
-			goto error_exit;
+			goto exit_free;
 		}
 		ptr = mm->ptr;
 	}
@@ -769,9 +770,6 @@ client_node_port_set_io(void *object,
 	if (id == SPA_IO_Buffers) {
 		if (ptr == NULL && mix->mix.io)
 			deactivate_mix(data, mix);
-		mix->mix.io = ptr;
-		if (ptr)
-			activate_mix(data, mix);
 	}
 
 	if ((res = spa_node_port_set_io(mix->port->mix,
@@ -779,29 +777,37 @@ client_node_port_set_io(void *object,
 		if (res == -ENOTSUP)
 			res = 0;
 		else
-			goto error_exit;
+			goto exit_free;
 	}
-	return res;
-
-error_exit:
-        pw_log_error("port %p: set_io: %s", mix, spa_strerror(res));
-	pw_proxy_errorf(proxy, res, "port_set_io failed: %s", spa_strerror(res));
+	if (id == SPA_IO_Buffers) {
+		mix->mix.io = ptr;
+		if (ptr)
+			activate_mix(data, mix);
+	}
+exit_free:
+	if (old != NULL)
+		pw_memmap_free(old);
+exit:
+	if (res < 0) {
+		pw_log_error("port %p: set_io: %s", mix, spa_strerror(res));
+		pw_proxy_errorf(proxy, res, "port_set_io failed: %s", spa_strerror(res));
+	}
 	return res;
 }
 
 static int link_signal_func(void *user_data)
 {
 	struct link *link = user_data;
-	uint64_t cmd = 1;
+	struct spa_system *data_system = link->data->context->data_system;
 	struct timespec ts;
 
 	pw_log_trace("link %p: signal", link);
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
 	link->target.activation->status = PW_NODE_ACTIVATION_TRIGGERED;
 	link->target.activation->signal_time = SPA_TIMESPEC_TO_NSEC(&ts);
 
-	if (write(link->signalfd, &cmd, sizeof(cmd)) != sizeof(cmd))
+	if (SPA_UNLIKELY(spa_system_eventfd_write(data_system, link->signalfd, 1) < 0))
 		pw_log_warn("link %p: write failed %m", link);
 
 	return 0;
@@ -837,7 +843,7 @@ client_node_set_activation(void *object,
 	if (data->remote_id == node_id) {
 		pw_log_debug("node %p: our activation %u: %u %u %u", node, node_id,
 				memid, offset, size);
-		close(signalfd);
+		spa_system_close(data->context->data_system, signalfd);
 		return 0;
 	}
 
@@ -970,11 +976,8 @@ static void node_destroy(void *data)
 static void node_free(void *data)
 {
 	struct node_data *d = data;
-
 	pw_log_debug("%p: free", d);
-
-	if (d->client_node)
-		pw_proxy_destroy((struct pw_proxy*)d->client_node);
+	d->node = NULL;
 }
 
 static void node_info_changed(void *data, const struct pw_node_info *info)
@@ -983,6 +986,9 @@ static void node_info_changed(void *data, const struct pw_node_info *info)
 	uint32_t change_mask;
 
 	pw_log_debug("info changed %p", d);
+
+	if (d->client_node == NULL)
+		return;
 
 	change_mask = 0;
 	if (info->change_mask & PW_NODE_CHANGE_MASK_PROPS)
@@ -1002,6 +1008,9 @@ static void node_port_info_changed(void *data, struct pw_impl_port *port,
 
 	pw_log_debug("info changed %p", d);
 
+	if (d->client_node == NULL)
+		return;
+
 	if (info->change_mask & PW_PORT_CHANGE_MASK_PROPS)
 		change_mask |= PW_CLIENT_NODE_PORT_UPDATE_INFO;
 	if (info->change_mask & PW_PORT_CHANGE_MASK_PARAMS) {
@@ -1015,6 +1024,10 @@ static void node_active_changed(void *data, bool active)
 {
 	struct node_data *d = data;
 	pw_log_debug("active %d", active);
+
+	if (d->client_node == NULL)
+		return;
+
 	pw_client_node_set_active(d->client_node, active);
 }
 
@@ -1027,23 +1040,31 @@ static const struct pw_impl_node_events node_events = {
 	.active_changed = node_active_changed,
 };
 
+static void client_node_removed(void *_data)
+{
+	struct node_data *data = _data;
+	pw_log_debug("%p: removed", data);
+
+	spa_hook_remove(&data->proxy_client_node_listener);
+
+	if (data->node) {
+		spa_hook_remove(&data->node_listener);
+		pw_impl_node_set_state(data->node, PW_NODE_STATE_SUSPENDED);
+
+		clean_node(data);
+
+		if (data->do_free)
+			pw_impl_node_destroy(data->node);
+	}
+	data->client_node = NULL;
+}
+
 static void client_node_destroy(void *_data)
 {
 	struct node_data *data = _data;
 
 	pw_log_debug("%p: destroy", data);
-
-	clean_node(data);
-
-	spa_hook_remove(&data->node_listener);
-
-	data->client_node = NULL;
-
-	if (data->proxy)
-		pw_proxy_destroy(data->proxy);
-
-	if (data->do_free)
-		pw_impl_node_destroy(data->node);
+	client_node_removed(_data);
 }
 
 static void client_node_bound(void *_data, uint32_t global_id)
@@ -1055,26 +1076,9 @@ static void client_node_bound(void *_data, uint32_t global_id)
 
 static const struct pw_proxy_events proxy_client_node_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = client_node_removed,
 	.destroy = client_node_destroy,
 	.bound = client_node_bound,
-};
-
-static void proxy_destroy(void *_data)
-{
-	struct node_data *data = _data;
-
-	pw_log_debug("%p: destroy", data);
-	spa_hook_remove(&data->proxy_listener);
-	data->proxy = NULL;
-
-	if (data->client_node)
-		pw_proxy_destroy((struct pw_proxy*)data->client_node);
-}
-
-
-static const struct pw_proxy_events proxy_events = {
-	PW_VERSION_PROXY_EVENTS,
-	.destroy = proxy_destroy,
 };
 
 static int node_ready(void *d, int status)
@@ -1082,9 +1086,9 @@ static int node_ready(void *d, int status)
 	struct node_data *data = d;
 	struct pw_impl_node *node = data->node;
 	struct pw_node_activation *a = node->rt.activation;
+	struct spa_system *data_system = data->context->data_system;
 	struct timespec ts;
 	struct pw_impl_port *p;
-	uint64_t cmd = 1;
 
 	pw_log_trace("node %p: ready driver:%d exported:%d status:%d", node,
 			node->driver, node->exported, status);
@@ -1094,11 +1098,11 @@ static int node_ready(void *d, int status)
 			spa_node_process(p->mix);
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
 	a->status = PW_NODE_ACTIVATION_TRIGGERED;
 	a->signal_time = SPA_TIMESPEC_TO_NSEC(&ts);
 
-	if (write(data->rtwritefd, &cmd, sizeof(cmd)) != sizeof(cmd))
+	if (SPA_UNLIKELY(spa_system_eventfd_write(data_system, data->rtwritefd, 1) < 0))
 		pw_log_warn("node %p: write failed %m", node);
 
 	return 0;
@@ -1192,12 +1196,7 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 					  client_node);
         do_node_init(client_node);
 
-	data->proxy = (struct pw_proxy*) pw_client_node_get_node(data->client_node,
-			PW_VERSION_NODE, user_data_size);
-
-	pw_proxy_add_listener(data->proxy, &data->proxy_listener, &proxy_events, data);
-
-	return data->proxy;
+	return client_node;
 }
 
 struct pw_proxy *pw_core_node_export(struct pw_core *core,

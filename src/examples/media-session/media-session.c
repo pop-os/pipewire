@@ -28,6 +28,7 @@
 #include <math.h>
 #include <getopt.h>
 #include <time.h>
+#include <signal.h>
 
 #include "config.h"
 
@@ -41,6 +42,7 @@
 #include <spa/monitor/device.h>
 
 #include "pipewire/pipewire.h"
+#include "pipewire/private.h"
 #include "extensions/session-manager.h"
 
 #include <dbus/dbus.h>
@@ -53,6 +55,7 @@
 
 #define sm_object_emit_update(s)		sm_object_emit(s, update, 0)
 #define sm_object_emit_destroy(s)		sm_object_emit(s, destroy, 0)
+#define sm_object_emit_free(s)			sm_object_emit(s, free, 0)
 
 #define sm_media_session_emit(s,m,v,...) spa_hook_list_call(&(s)->hooks, struct sm_media_session_events, m, v, ##__VA_ARGS__)
 
@@ -65,6 +68,7 @@
 int sm_metadata_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
+int sm_libcamera_monitor_start(struct sm_media_session *sess);
 int sm_bluez5_monitor_start(struct sm_media_session *sess);
 int sm_alsa_monitor_start(struct sm_media_session *sess);
 int sm_suspend_node_start(struct sm_media_session *sess);
@@ -235,17 +239,56 @@ int sm_object_remove_data(struct sm_object *obj, const char *id)
 
 int sm_object_destroy(struct sm_object *obj)
 {
-	pw_log_debug(NAME" %p: object %d", obj->session, obj->id);
-	if (obj->proxy) {
-		pw_proxy_destroy(obj->proxy);
-		if (obj->handle == obj->proxy)
-			obj->handle = NULL;
-		obj->proxy = NULL;
+	struct impl *impl = SPA_CONTAINER_OF(obj->session, struct impl, this);
+	struct data *d;
+	struct pw_proxy *p, *h;
+
+	p = obj->proxy;
+	h = obj->handle;
+
+	pw_log_debug(NAME" %p: object %d proxy:%p handle:%p", obj->session,
+			obj->id, p, h);
+
+	sm_object_emit_destroy(obj);
+
+	if (SPA_FLAG_IS_SET(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER)) {
+		SPA_FLAG_CLEAR(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER);
+		spa_hook_remove(&obj->object_listener);
 	}
-	if (obj->handle) {
-		pw_proxy_destroy(obj->handle);
-		obj->handle = NULL;
+
+	if (obj->id != SPA_ID_INVALID)
+		remove_object(impl, obj);
+
+	if (obj->destroy)
+		obj->destroy(obj);
+
+	if (p) {
+		pw_proxy_ref(p);
+		spa_hook_remove(&obj->proxy_listener);
 	}
+	if (h) {
+		pw_proxy_ref(h);
+		spa_hook_remove(&obj->handle_listener);
+	}
+	if (p)
+		pw_proxy_destroy(p);
+	if (h != p)
+		pw_proxy_destroy(h);
+
+	sm_object_emit_free(obj);
+
+	if (obj->props)
+		pw_properties_free(obj->props);
+	obj->props = NULL;
+
+	spa_list_consume(d, &obj->data, link) {
+		spa_list_remove(&d->link);
+		free(d);
+	}
+	if (p)
+		pw_proxy_unref(p);
+	if (h)
+		pw_proxy_unref(h);
 	return 0;
 }
 
@@ -909,46 +952,6 @@ static const struct object_info endpoint_link_info = {
 /**
  * Proxy
  */
-static void
-destroy_proxy(void *data)
-{
-	struct sm_object *obj = data;
-	struct impl *impl = SPA_CONTAINER_OF(obj->session, struct impl, this);
-	struct data *d;
-
-	pw_log_debug("object %p: proxy:%p id:%d", obj, obj->proxy, obj->id);
-
-	if (SPA_FLAG_IS_SET(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER)) {
-		SPA_FLAG_CLEAR(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER);
-		spa_hook_remove(&obj->object_listener);
-	}
-
-	if (obj->id != SPA_ID_INVALID)
-		remove_object(impl, obj);
-
-	sm_object_emit_destroy(obj);
-
-	if (obj->destroy)
-		obj->destroy(obj);
-
-	if (obj->proxy) {
-		spa_hook_remove(&obj->proxy_listener);
-		obj->proxy = NULL;
-	}
-	if (obj->handle) {
-		spa_hook_remove(&obj->handle_listener);
-		obj->handle = NULL;
-	}
-	if (obj->props)
-		pw_properties_free(obj->props);
-	obj->props = NULL;
-
-	spa_list_consume(d, &obj->data, link) {
-		spa_list_remove(&d->link);
-		free(d);
-	}
-}
-
 static void done_proxy(void *data, int seq)
 {
 	struct sm_object *obj = data;
@@ -978,7 +981,6 @@ static void bound_proxy(void *data, uint32_t id)
 
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
-	.destroy = destroy_proxy,
 	.done = done_proxy,
 	.bound = bound_proxy,
 };
@@ -1043,9 +1045,7 @@ static struct sm_object *init_object(struct impl *impl, const struct object_info
 			pw_proxy_add_object_listener(obj->proxy, &obj->object_listener, info->events, obj);
 		SPA_FLAG_UPDATE(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER, info->events != NULL);
 	}
-	if (handle) {
-		pw_proxy_add_listener(obj->handle, &obj->handle_listener, &proxy_events, obj);
-	}
+	pw_proxy_add_listener(obj->handle, &obj->handle_listener, &proxy_events, obj);
 
 	if (info->init)
 		info->init(obj);
@@ -1074,7 +1074,8 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 	}
 	obj = init_object(impl, info, proxy, handle, SPA_ID_INVALID, props);
 
-	pw_log_debug(NAME" %p: created new object %p proxy %p", impl, obj, obj->proxy);
+	pw_log_debug(NAME" %p: created new object %p proxy:%p handle:%p", impl,
+			obj, obj->proxy, obj->handle);
 
 	return obj;
 }
@@ -1271,7 +1272,7 @@ registry_global_remove(void *data, uint32_t id)
 	if ((obj = find_object(impl, id)) == NULL)
 		return;
 
-	remove_object(impl, obj);
+	sm_object_destroy(obj);
 }
 
 static const struct pw_registry_events registry_events = {
@@ -1391,6 +1392,12 @@ static void check_endpoint_link(struct endpoint_link *link)
 	}
 }
 
+static void proxy_link_removed(void *data)
+{
+	struct link *l = data;
+	pw_proxy_destroy(l->proxy);
+}
+
 static void proxy_link_destroy(void *data)
 {
 	struct link *l = data;
@@ -1404,6 +1411,7 @@ static void proxy_link_destroy(void *data)
 
 static const struct pw_proxy_events proxy_link_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.removed = proxy_link_removed,
 	.destroy = proxy_link_destroy
 };
 
@@ -1639,7 +1647,7 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 	pw_log_error("error id:%u seq:%d res:%d (%s): %s",
 			id, seq, res, spa_strerror(res), message);
 
-	if (id == 0) {
+	if (id == PW_ID_CORE) {
 		if (res == -EPIPE)
 			pw_main_loop_quit(impl->loop);
 	}
@@ -1693,8 +1701,10 @@ static void session_shutdown(struct impl *impl)
 {
 	struct sm_object *obj;
 
-	spa_list_for_each(obj, &impl->global_list, link)
-		sm_media_session_emit_remove(impl, obj);
+	pw_log_info(NAME" %p", impl);
+
+	spa_list_consume(obj, &impl->global_list, link)
+		sm_object_destroy(obj);
 
 	sm_media_session_emit_destroy(impl);
 
@@ -1706,6 +1716,12 @@ static void session_shutdown(struct impl *impl)
 		pw_core_disconnect(impl->monitor_core);
 	if (impl->this.info)
 		pw_core_info_free(impl->this.info);
+}
+
+static void do_quit(void *data, int signal_number)
+{
+	struct impl *impl = data;
+	pw_main_loop_quit(impl->loop);
 }
 
 #define DEFAULT_ENABLED		"alsa-pcm,alsa-seq,v4l2,bluez5,metadata,suspend-node,policy-node"
@@ -1720,6 +1736,7 @@ static const struct {
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start },
 	{ "alsa-pcm", "alsa pcm udev detection", sm_alsa_monitor_start },
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start },
+	{ "libcamera", "libcamera udev detection", sm_libcamera_monitor_start },
 	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start },
 	{ "metadata", "export metadata API", sm_metadata_start },
 	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start },
@@ -1750,9 +1767,12 @@ static void show_help(const char *name)
 	     name, DEFAULT_ENABLED, DEFAULT_DISABLED);
 
         fprintf(stdout,
-             "\noptions:\n");
+             "\noptions: (*=enabled)\n");
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
-		fprintf(stdout, "\t%-15.15s: %s\n", modules[i].name, modules[i].desc);
+		fprintf(stdout, "\t  %c %-15.15s: %s\n",
+				opt_contains(DEFAULT_ENABLED, modules[i].name) &&
+				!opt_contains(DEFAULT_DISABLED, modules[i].name) ? '*' : ' ',
+				modules[i].name, modules[i].desc);
 	}
 }
 
@@ -1817,6 +1837,10 @@ int main(int argc, char *argv[])
 	if (impl.loop == NULL)
 		return -1;
 	impl.this.loop = pw_main_loop_get_loop(impl.loop);
+
+	pw_loop_add_signal(impl.this.loop, SIGINT, do_quit, &impl);
+	pw_loop_add_signal(impl.this.loop, SIGTERM, do_quit, &impl);
+
 	impl.this.context = pw_context_new(impl.this.loop, NULL, 0);
 	if (impl.this.context == NULL)
 		return -1;
@@ -1824,6 +1848,7 @@ int main(int argc, char *argv[])
 	pw_context_add_spa_lib(impl.this.context, "api.bluez5.*", "bluez5/libspa-bluez5");
 	pw_context_add_spa_lib(impl.this.context, "api.alsa.*", "alsa/libspa-alsa");
 	pw_context_add_spa_lib(impl.this.context, "api.v4l2.*", "v4l2/libspa-v4l2");
+	pw_context_add_spa_lib(impl.this.context, "api.libcamera.*", "libcamera/libspa-libcamera");
 
 	pw_context_set_object(impl.this.context, SM_TYPE_MEDIA_SESSION, &impl);
 
@@ -1870,6 +1895,9 @@ exit:
 
 	pw_map_clear(&impl.endpoint_links);
 	pw_map_clear(&impl.globals);
+	pw_properties_free(impl.this.props);
+
+	pw_deinit();
 
 	return res;
 }

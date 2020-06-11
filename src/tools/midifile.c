@@ -139,17 +139,15 @@ static int open_read(struct midi_file *mf, const char *filename, struct midi_fil
 	uint16_t i;
 	struct stat st;
 
-	if (stat(filename, &st) < 0) {
-		res = -errno;
-		goto exit;
-	}
-
-	mf->size = st.st_size;
-
 	if ((mf->fd = open(filename, O_RDONLY)) < 0) {
 		res = -errno;
 		goto exit;
 	}
+	if (fstat(mf->fd, &st) < 0) {
+		res = -errno;
+		goto exit_close;
+	}
+	mf->size = st.st_size;
 
 	mf->data = mmap(NULL, mf->size, PROT_READ, MAP_SHARED, mf->fd, 0);
 	if (mf->data == MAP_FAILED) {
@@ -678,8 +676,8 @@ int midi_file_dump_event(FILE *out, const struct midi_event *ev)
 			fprintf(out, "Key Signature: %d %s: %s", abs(sf),
 					sf > 0 ? "sharps" : "flats",
 					ev->data[4] == 0 ?
-						major_keys[SPA_CLAMP(sf + 9, 0, 19)] :
-						minor_keys[SPA_CLAMP(sf + 9, 0, 19)]);
+						major_keys[SPA_CLAMP(sf + 9, 0, 18)] :
+						minor_keys[SPA_CLAMP(sf + 9, 0, 18)]);
 			break;
 		}
 		case 0x7f:

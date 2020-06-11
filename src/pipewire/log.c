@@ -34,7 +34,7 @@
 
 SPA_LOG_IMPL(default_log);
 
-#define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_ERROR
+#define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_WARN
 
 SPA_EXPORT
 enum spa_log_level pw_log_level = DEFAULT_LOG_LEVEL;
@@ -338,9 +338,13 @@ void pw_log_log_object(enum spa_log_level level,
 	struct log_ctx ctx = { level, file, 0, func, };
 	if (flags & PW_LOG_OBJECT_POD) {
 		const struct spa_pod *pod = object;
-		log_pod_value(&ctx, 0, SPA_TYPE_ROOT,
-			SPA_POD_TYPE(pod),
-			SPA_POD_BODY(pod),
-			SPA_POD_BODY_SIZE(pod));
+		if (pod == NULL) {
+			pw_log_log(level, file, line, func, "NULL");
+		} else {
+			log_pod_value(&ctx, 0, SPA_TYPE_ROOT,
+				SPA_POD_TYPE(pod),
+				SPA_POD_BODY(pod),
+				SPA_POD_BODY_SIZE(pod));
+		}
 	}
 }
