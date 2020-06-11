@@ -62,6 +62,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_data_loop_stop@Base 0.3.1
  pw_data_loop_wait@Base 0.3.1
  pw_debug_is_category_enabled@Base 0.3.1
+ pw_deinit@Base 0.3.6
  pw_device_info_free@Base 0.3.1
  pw_device_info_update@Base 0.3.1
  pw_direction_as_string@Base 0.3.1
@@ -208,6 +209,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_impl_port_set_param@Base 0.3.1
  pw_impl_port_update_properties@Base 0.3.1
  pw_impl_port_use_buffers@Base 0.3.1
+ pw_in_valgrind@Base 0.3.6
  pw_init@Base 0.3.1
  pw_link_info_free@Base 0.3.1
  pw_link_info_update@Base 0.3.1
@@ -285,6 +287,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_proxy_get_user_data@Base 0.3.1
  pw_proxy_install_marshal@Base 0.3.1
  pw_proxy_new@Base 0.3.1
+ pw_proxy_ref@Base 0.3.6
  pw_proxy_set_bound_id@Base 0.3.1
  pw_proxy_sync@Base 0.3.1
  pw_proxy_unref@Base 0.3.1
