@@ -2,3 +2,10 @@ Tests: gnome-desktop-testing
 Depends:
  gnome-desktop-testing,
  pipewire-tests,
+
+Tests: libpipewire-0.3-dev
+Restrictions: allow-stderr, superficial
+Depends:
+ build-essential,
+ libpipewire-0.3-dev,
+ pkg-config,
