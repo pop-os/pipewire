@@ -8,6 +8,60 @@ Install `pipewire`.
 
 Run `pw-cli dump`.
 
+Video streams
+-------------
+
+Install `pipewire` and `pipewire-tests`.
+
+Run `/usr/libexec/installed-tests/pipewire-0.3/examples/video-src`
+(or `video-src-alloc`). It will print a node ID, for example 42.
+
+In another terminal, run
+`/usr/libexec/installed-tests/pipewire-0.3/examples/video-play 42`
+or `/usr/libexec/installed-tests/pipewire-0.3/examples/export-sink 42`,
+replacing 42 by the node ID you saw. You should get a window with an
+animation.
+
+Similarly, if you uncomment the lines
+
+```
+add-spa-lib videotestsrc videotestsrc/libspa-videotestsrc
+create-object spa-node-factory factory.name=videotestsrc node.name=videotestsrc Spa:Pod:Object:Param:Props:patternType=1
+```
+
+in `/etc/pipewire/pipewire.conf`, then you should see a node in the output
+of `pw-cli ls Node` with `node.name = "videotestsrc"`. Pass its node ID
+to `video-play` to see a different animation.
+
+V4L2 cameras
+------------
+
+If you have a camera, run
+`/usr/libexec/installed-tests/pipewire-0.3/examples/local-v4l2` or
+`/usr/libexec/installed-tests/pipewire-0.3/examples/spa/local-v4l2`.
+You should get a camera stream displayed in a window (but this might
+fail if it cannot negotiate a suitable capture resolution).
+
+Audio sink
+----------
+
+Use `pw-play` to play a WAV file.
+
+Audio test source
+-----------------
+
+If you uncomment the lines
+
+```
+add-spa-lib audiotestsrc audiotestsrc/libspa-audiotestsrc
+create-object adapter factory.name=audiotestsrc node.name=my-test
+```
+
+in `/etc/pipewire/pipewire.conf`, then you should see a node in the output
+of `pw-cli ls Node` with `node.name = "my-test"`. You can record from it
+with `pw-record --target ${node id here} test.wav` (press Ctrl+C to
+stop recording).
+
 ALSA client plugin (pipewire-audio-client-libraries)
 ----------------------------------------------------
 
@@ -91,18 +145,3 @@ until you press Ctrl+C.
 
 Run: `gst-launch-1.0 pipewiresrc '!' videoconvert '!' autovideosink`.
 You should get a webcam image (if you have a webcam).
-
-Bluetooth as audio backend (libspa-0.2-bluetooth)
--------------------------------------------------
-
-TODO
-
-JACK as audio backend (libspa-0.2-jack)
----------------------------------------
-
-TODO
-
-audiotestsrc, videotestsrc
---------------------------
-
-TODO
