@@ -50,7 +50,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          libpipewire-0.3-0 (= ${binary:Version}),
-         libspa-lib-0.2-dev (= ${binary:Version}),
+         libspa-0.2-dev (= ${binary:Version}),
 Suggests: pipewire-doc,
 Description: libraries for the PipeWire multimedia server - development
  PipeWire is a server and user space API to deal with multimedia
@@ -83,7 +83,7 @@ Description: libraries for the PipeWire multimedia server - modules
  and should not normally be depended on directly. PipeWire clients should
  depend on the pipewire package instead.
 
-Package: libspa-lib-0.2-dev
+Package: libspa-0.2-dev
 Section: libdevel
 Architecture: linux-any
 Multi-Arch: same
