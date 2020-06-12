@@ -68,6 +68,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         libspa-0.2-modules (= ${binary:Version}),
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: libraries for the PipeWire multimedia server - modules
@@ -99,6 +100,27 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
   - Generating graphs for audio and video processing.
  .
  This package contains the development files for the Simple Plugin API.
+
+Package: libspa-0.2-modules
+Architecture: linux-any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+Breaks: pipewire (<< 0.3.5)
+Replaces: pipewire (<< 0.3.5)
+Description: libraries for the PipeWire multimedia server Simple Plugin API - modules
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains core support modules used in the Simple Plugin API,
+ together with test and utility modules that do not introduce additional
+ dependencies. It should not normally be depended on directly: PipeWire
+ clients should depend on the pipewire package instead.
 
 Package: pipewire-doc
 Section: doc
@@ -225,7 +247,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         pipewire (= ${binary:Version}),
+         libspa-0.2-modules (= ${binary:Version}),
 Description: libraries for the PipeWire multimedia server - bluetooth plugins
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -245,7 +267,7 @@ Architecture: linux-any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         pipewire (= ${binary:Version}),
+         libspa-0.2-modules (= ${binary:Version}),
 Description: libraries for the PipeWire multimedia server - JACK client
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
