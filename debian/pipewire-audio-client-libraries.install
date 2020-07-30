@@ -1,5 +1,6 @@
 usr/bin/pw-jack
 usr/bin/pw-pulse
+usr/lib/*/alsa-lib/libasound_module_ctl_pipewire.so
 usr/lib/*/alsa-lib/libasound_module_pcm_pipewire.so
 usr/lib/*/pipewire-0.3/jack
 usr/lib/*/pipewire-0.3/pulse
