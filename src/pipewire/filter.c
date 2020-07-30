@@ -57,6 +57,7 @@ struct buffer {
 	uint32_t id;
 #define BUFFER_FLAG_MAPPED	(1 << 0)
 #define BUFFER_FLAG_QUEUED	(1 << 1)
+#define BUFFER_FLAG_ADDED	(1 << 2)
 	uint32_t flags;
 };
 
@@ -585,7 +586,8 @@ static void clear_buffers(struct port *port)
 	for (i = 0; i < port->n_buffers; i++) {
 		struct buffer *b = &port->buffers[i];
 
-		pw_filter_emit_remove_buffer(&impl->this, port->user_data, &b->this);
+		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ADDED))
+			pw_filter_emit_remove_buffer(&impl->this, port->user_data, &b->this);
 
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->this.buffer->n_datas; j++) {
@@ -675,6 +677,7 @@ static int impl_port_use_buffers(void *object,
 				    d->type == SPA_DATA_DmaBuf) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
+					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				}
 				else if (d->data == NULL) {
 					pw_log_error(NAME" %p: invalid buffer mem", filter);
@@ -682,7 +685,6 @@ static int impl_port_use_buffers(void *object,
 				}
 				buf_size += d->maxsize;
 			}
-			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 
 			if (size > 0 && buf_size != size) {
 				pw_log_error(NAME" %p: invalid buffer size %d", filter, buf_size);
@@ -697,8 +699,6 @@ static int impl_port_use_buffers(void *object,
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b = &port->buffers[i];
 
-		b->flags = 0;
-		b->id = i;
 		b->this.buffer = buffers[i];
 
 		if (port->direction == SPA_DIRECTION_OUTPUT) {
@@ -706,6 +706,7 @@ static int impl_port_use_buffers(void *object,
 			push_queue(port, &port->dequeued, b);
 		}
 
+		SPA_FLAG_SET(b->flags, BUFFER_FLAG_ADDED);
 		pw_filter_emit_add_buffer(filter, port->user_data, &b->this);
 	}
 
@@ -919,9 +920,10 @@ static void on_core_error(void *_data, uint32_t id, int seq, int res, const char
 {
 	struct pw_filter *filter = _data;
 
-	pw_log_error(NAME" %p: error id:%u seq:%d res:%d (%s): %s", filter,
+	pw_log_debug(NAME" %p: error id:%u seq:%d res:%d (%s): %s", filter,
 			id, seq, res, spa_strerror(res), message);
-	if (id == 0) {
+
+	if (id == PW_ID_CORE && res == -EPIPE) {
 		filter_set_state(filter, PW_FILTER_STATE_UNCONNECTED, message);
 	}
 }

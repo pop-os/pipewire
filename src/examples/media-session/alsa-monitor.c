@@ -33,6 +33,7 @@
 #include <alsa/asoundlib.h>
 
 #include <spa/monitor/device.h>
+#include <spa/monitor/event.h>
 #include <spa/node/node.h>
 #include <spa/node/keys.h>
 #include <spa/utils/result.h>
@@ -41,6 +42,7 @@
 #include <spa/utils/keys.h>
 #include <spa/param/props.h>
 #include <spa/pod/builder.h>
+#include <spa/pod/parser.h>
 #include <spa/debug/dict.h>
 #include <spa/debug/pod.h>
 #include <spa/support/dbus.h>
@@ -115,6 +117,8 @@ struct impl {
 
 	struct spa_source *jack_timeout;
 	struct pw_proxy *jack_device;
+
+	unsigned int use_acp:1;
 };
 
 #undef NAME
@@ -188,7 +192,7 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	struct node *node;
 	struct impl *impl = device->impl;
 	int res;
-	const char *dev, *subdev, *stream;
+	const char *dev, *subdev, *stream, *profile;
 	int priority;
 
 	pw_log_debug("new node %u", id);
@@ -210,11 +214,15 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
 
 	if ((dev = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_DEVICE)) == NULL)
-		dev = "0";
+		if ((dev = pw_properties_get(node->props, "alsa.device")) == NULL)
+			dev = "0";
 	if ((subdev = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_SUBDEVICE)) == NULL)
-		subdev = "0";
+		if ((subdev = pw_properties_get(node->props, "alsa.subdevice")) == NULL)
+			subdev = "0";
 	if ((stream = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_STREAM)) == NULL)
 		stream = "unknown";
+	if ((profile = pw_properties_get(node->props, "device.profile.name")) == NULL)
+		profile = "unknown";
 
 	if (!strcmp(stream, "capture"))
 		node->direction = PW_DIRECTION_OUTPUT;
@@ -232,6 +240,11 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 		priority += 1000;
 	priority -= atol(dev) * 16;
 	priority -= atol(subdev);
+
+	if (strstr(profile, "analog-") == profile)
+		priority += 9;
+	else if (strstr(profile, "iec958-") == profile)
+		priority += 8;
 
 	if (pw_properties_get(node->props, PW_KEY_PRIORITY_MASTER) == NULL) {
 		pw_properties_setf(node->props, PW_KEY_PRIORITY_MASTER, "%d", priority);
@@ -340,10 +353,38 @@ static void alsa_device_object_info(void *data, uint32_t id,
 	}
 }
 
+static void alsa_device_event(void *data, const struct spa_event *event)
+{
+	struct device *device = data;
+	struct node *node;
+	uint32_t id, type;
+	struct spa_pod *props = NULL;
+
+	if (spa_pod_parse_object(&event->pod,
+			SPA_TYPE_EVENT_Device, &type,
+			SPA_EVENT_DEVICE_Object, SPA_POD_Int(&id),
+			SPA_EVENT_DEVICE_Props, SPA_POD_OPT_Pod(&props)) < 0)
+		return;
+
+	if ((node = alsa_find_node(device, id)) == NULL)
+		return;
+
+	switch (type) {
+	case SPA_DEVICE_EVENT_ObjectConfig:
+		if (props)
+			pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
+				SPA_PARAM_Props, 0, props);
+		break;
+	default:
+		break;
+	}
+}
+
 static const struct spa_device_events alsa_device_events = {
 	SPA_VERSION_DEVICE_EVENTS,
 	.info = alsa_device_info,
-	.object_info = alsa_device_object_info
+	.object_info = alsa_device_object_info,
+	.event = alsa_device_event,
 };
 
 static struct device *alsa_find_device(struct impl *impl, uint32_t id)
@@ -446,8 +487,12 @@ static int update_device_props(struct device *device)
 
 static void set_profile(struct device *device, int index)
 {
+	struct impl *impl = device->impl;
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+
+	if (impl->use_acp)
+		return;
 
 	pw_log_debug("%p: set profile %d id:%d", device, index, device->device_id);
 
@@ -661,7 +706,7 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 	struct spa_handle *handle;
 	int res;
 	void *iface;
-	const char *card;
+	const char *card, *factory_name;
 
 	pw_log_debug("new device %u", id);
 
@@ -670,9 +715,13 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 		return NULL;
 	}
 
+	if (impl->use_acp)
+		factory_name = SPA_NAME_API_ALSA_ACP_DEVICE;
+	else
+		factory_name = info->factory_name;
+
 	handle = pw_context_load_spa_handle(context,
-			info->factory_name,
-			info->props);
+			factory_name, info->props);
 	if (handle == NULL) {
 		res = -errno;
 		pw_log_error("can't make factory instance: %m");
@@ -825,6 +874,7 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 	struct pw_context *context = session->context;
 	struct impl *impl;
 	void *iface;
+	const char *str;
 	int res;
 
 	impl = calloc(1, sizeof(struct impl));
@@ -832,6 +882,9 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 		return -errno;
 
 	impl->session = session;
+
+	if ((str = pw_properties_get(session->props, "alsa.use-acp")) != NULL)
+		impl->use_acp = pw_properties_parse_bool(str);
 
 	if (session->dbus_connection)
 		impl->conn = spa_dbus_connection_get(session->dbus_connection);

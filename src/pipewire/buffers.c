@@ -39,7 +39,7 @@
 #define NAME "buffers"
 
 #define MAX_ALIGN	32
-#define MAX_BLOCKS	4u
+#define MAX_BLOCKS	64u
 
 struct port {
 	struct spa_node *node;
@@ -257,11 +257,11 @@ int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 	res = param_filter(result, &input, &output, SPA_PARAM_Buffers, &b);
 	if (res < 0) {
 		pw_context_debug_port_params(context, input.node, input.direction,
-				input.port_id, SPA_PARAM_Buffers,
-				"input param", res);
+				input.port_id, SPA_PARAM_Buffers, res,
+				"input param");
 		pw_context_debug_port_params(context, output.node, output.direction,
-				output.port_id, SPA_PARAM_Buffers,
-				"output param", res);
+				output.port_id, SPA_PARAM_Buffers, res,
+				"output param");
 		return res;
 	}
 	n_params = res;
@@ -354,6 +354,7 @@ int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 SPA_EXPORT
 void pw_buffers_clear(struct pw_buffers *buffers)
 {
+	pw_log_debug(NAME" %p: clear %d buffers:%p", buffers, buffers->n_buffers, buffers->buffers);
 	if (buffers->mem)
 		pw_memblock_unref(buffers->mem);
 	free(buffers->buffers);

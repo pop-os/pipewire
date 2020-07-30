@@ -30,6 +30,7 @@
 
 #include <pipewire/pipewire.h>
 #include <gst/gstpipewirepool.h>
+#include <gst/gstpipewirecore.h>
 
 G_BEGIN_DECLS
 
@@ -64,27 +65,27 @@ struct _GstPipeWireSrc {
   gint min_buffers;
   gint max_buffers;
   int fd;
+  gboolean resend_last;
+  gint keepalive_time;
 
   gboolean negotiated;
   gboolean flushing;
   gboolean started;
+  gboolean eos;
 
   gboolean is_live;
   GstClockTime min_latency;
   GstClockTime max_latency;
 
-  struct pw_thread_loop *loop;
-
-  struct pw_context *context;
-  struct pw_core *core;
+  GstPipeWireCore *core;
   struct spa_hook core_listener;
-  int last_error;
   int last_seq;
   int pending_seq;
 
   struct pw_stream *stream;
   struct spa_hook stream_listener;
 
+  GstBuffer *last_buffer;
   GstStructure *properties;
 
   GstPipeWirePool *pool;

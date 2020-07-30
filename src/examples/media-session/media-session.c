@@ -44,6 +44,7 @@
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
 #include "extensions/session-manager.h"
+#include "extensions/client-node.h"
 
 #include <dbus/dbus.h>
 
@@ -65,6 +66,8 @@
 #define sm_media_session_emit_rescan(s,seq)		sm_media_session_emit(s, rescan, 0, seq)
 #define sm_media_session_emit_destroy(s)		sm_media_session_emit(s, destroy, 0)
 
+int sm_access_flatpak_start(struct sm_media_session *sess);
+int sm_access_portal_start(struct sm_media_session *sess);
 int sm_metadata_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
@@ -120,6 +123,8 @@ struct impl {
 	struct spa_list endpoint_link_list;	/** list of struct endpoint_link */
 	struct pw_map endpoint_links;		/** map of endpoint_link */
 
+	struct spa_list link_list;		/** list of struct link */
+
 	struct spa_list sync_list;		/** list of struct sync */
 	int rescan_seq;
 	int last_seq;
@@ -146,7 +151,8 @@ struct link {
 	uint32_t input_port;
 
 	struct endpoint_link *endpoint_link;
-	struct spa_list link;		/**< link in struct endpoint_link link_list */
+	struct spa_list link;		/**< link in struct endpoint_link link_list or
+					  *  struct impl link_list */
 };
 
 struct object_info {
@@ -332,6 +338,36 @@ static uint32_t clear_params(struct spa_list *param_list, uint32_t id)
 	}
 	return count;
 }
+
+/**
+ * Core
+ */
+static const struct object_info core_object_info = {
+	.type = PW_TYPE_INTERFACE_Core,
+	.version = PW_VERSION_CORE,
+	.size = sizeof(struct sm_object),
+	.init = NULL,
+};
+
+/**
+ * Module
+ */
+static const struct object_info module_info = {
+	.type = PW_TYPE_INTERFACE_Module,
+	.version = PW_VERSION_MODULE,
+	.size = sizeof(struct sm_object),
+	.init = NULL,
+};
+
+/**
+ * Factory
+ */
+static const struct object_info factory_info = {
+	.type = PW_TYPE_INTERFACE_Factory,
+	.version = PW_VERSION_FACTORY,
+	.size = sizeof(struct sm_object),
+	.init = NULL,
+};
 
 /**
  * Clients
@@ -996,7 +1032,13 @@ static const struct object_info *get_object_info(struct impl *impl, const char *
 {
 	const struct object_info *info;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0)
+	if (strcmp(type, PW_TYPE_INTERFACE_Core) == 0)
+		info = &core_object_info;
+	else if (strcmp(type, PW_TYPE_INTERFACE_Module) == 0)
+		info = &module_info;
+	else if (strcmp(type, PW_TYPE_INTERFACE_Factory) == 0)
+		info = &factory_info;
+	else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0)
 		info = &client_info;
 	else if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
 		info = &spa_device_info;
@@ -1065,6 +1107,9 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 	struct sm_object *obj;
 
 	type = pw_proxy_get_type(handle, NULL);
+
+	if (strcmp(type, PW_TYPE_INTERFACE_ClientNode) == 0)
+		type = PW_TYPE_INTERFACE_Node;
 
 	info = get_object_info(impl, type);
 	if (info == NULL) {
@@ -1197,6 +1242,21 @@ int sm_media_session_destroy_object(struct sm_media_session *sess, uint32_t id)
 {
 	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
 	pw_registry_destroy(impl->registry, id);
+	return 0;
+}
+
+int sm_media_session_for_each_object(struct sm_media_session *sess,
+                            int (*callback) (void *data, struct sm_object *object),
+                            void *data)
+{
+	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
+	struct sm_object *obj;
+	int res;
+
+	spa_list_for_each(obj, &impl->global_list, link) {
+		if ((res = callback(data, obj)) != 0)
+			return res;
+	}
 	return 0;
 }
 
@@ -1402,8 +1462,9 @@ static void proxy_link_destroy(void *data)
 {
 	struct link *l = data;
 
+	spa_list_remove(&l->link);
+
 	if (l->endpoint_link) {
-		spa_list_remove(&l->link);
 		check_endpoint_link(l->endpoint_link);
 		l->endpoint_link = NULL;
 	}
@@ -1463,6 +1524,8 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 			if (link) {
 				l->endpoint_link = link;
 				spa_list_append(&link->link_list, &l->link);
+			} else {
+				spa_list_append(&impl->link_list, &l->link);
 			}
 
 			outport = spa_list_next(outport, link);
@@ -1569,6 +1632,39 @@ int sm_media_session_create_links(struct sm_media_session *sess,
 				&link->info);
 	}
 	return res;
+}
+
+int sm_media_session_remove_links(struct sm_media_session *sess,
+		const struct spa_dict *dict)
+{
+	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
+	struct sm_object *obj;
+	struct sm_node *outnode = NULL, *innode = NULL;
+	const char *str;
+	struct link *l, *t;
+
+	/* find output node */
+	if ((str = spa_dict_lookup(dict, PW_KEY_LINK_OUTPUT_NODE)) != NULL &&
+	    (obj = find_object(impl, atoi(str))) != NULL &&
+	    strcmp(obj->type, PW_TYPE_INTERFACE_Node) == 0) {
+		outnode = (struct sm_node*)obj;
+	}
+
+	/* find input node */
+	if ((str = spa_dict_lookup(dict, PW_KEY_LINK_INPUT_NODE)) != NULL &&
+	    (obj = find_object(impl, atoi(str))) != NULL &&
+	    strcmp(obj->type, PW_TYPE_INTERFACE_Node) == 0) {
+		innode = (struct sm_node*)obj;
+	}
+	if (innode == NULL || outnode == NULL)
+		return -EINVAL;
+
+	spa_list_for_each_safe(l, t, &impl->link_list, link) {
+		if (l->output_node == outnode->obj.id && l->input_node == innode->obj.id) {
+			pw_proxy_destroy(l->proxy);
+		}
+	}
+	return 0;
 }
 
 static void monitor_core_done(void *data, uint32_t id, int seq)
@@ -1724,23 +1820,27 @@ static void do_quit(void *data, int signal_number)
 	pw_main_loop_quit(impl->loop);
 }
 
-#define DEFAULT_ENABLED		"alsa-pcm,alsa-seq,v4l2,bluez5,metadata,suspend-node,policy-node"
+#define DEFAULT_ENABLED		"flatpak,portal,metadata,alsa-acp,alsa-seq,v4l2,bluez5,suspend-node,policy-node"
 #define DEFAULT_DISABLED	""
 
 static const struct {
 	const char *name;
 	const char *desc;
 	int (*start)(struct sm_media_session *sess);
+	const char *props;
 
 } modules[] = {
-	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start },
-	{ "alsa-pcm", "alsa pcm udev detection", sm_alsa_monitor_start },
-	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start },
-	{ "libcamera", "libcamera udev detection", sm_libcamera_monitor_start },
-	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start },
-	{ "metadata", "export metadata API", sm_metadata_start },
-	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start },
-	{ "policy-node", "configure and link nodes", sm_policy_node_start },
+	{ "flatpak", "manage flatpak access", sm_access_flatpak_start, NULL },
+	{ "portal", "manage portal permissions", sm_access_portal_start, NULL },
+	{ "metadata", "export metadata API", sm_metadata_start, NULL },
+	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
+	{ "alsa-pcm", "alsa pcm udev detection", sm_alsa_monitor_start, NULL },
+	{ "alsa-acp", "alsa card profile udev detection", sm_alsa_monitor_start, "alsa.use-acp=true" },
+	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },
+	{ "libcamera", "libcamera udev detection", sm_libcamera_monitor_start, NULL },
+	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start, NULL },
+	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start, NULL },
+	{ "policy-node", "configure and link nodes", sm_policy_node_start, NULL },
 };
 
 static int opt_contains(const char *opt, const char *val)
@@ -1829,9 +1929,8 @@ int main(int argc, char *argv[])
 	if (impl.this.props == NULL)
 		return -1;
 
-	spa_dict_for_each(item, &impl.this.props->dict) {
+	spa_dict_for_each(item, &impl.this.props->dict)
 		pw_log_info("  '%s' = '%s'", item->key, item->value);
-	}
 
 	impl.loop = pw_main_loop_new(NULL);
 	if (impl.loop == NULL)
@@ -1854,6 +1953,7 @@ int main(int argc, char *argv[])
 
 	pw_map_init(&impl.globals, 64, 64);
 	spa_list_init(&impl.global_list);
+	spa_list_init(&impl.link_list);
 	pw_map_init(&impl.endpoint_links, 64, 64);
 	spa_list_init(&impl.endpoint_link_list);
 	spa_list_init(&impl.sync_list);
@@ -1878,6 +1978,14 @@ int main(int argc, char *argv[])
 		const char *name = modules[i].name;
 		if (opt_contains(opt_enabled, name) &&
 		    !opt_contains(opt_disabled, name)) {
+			if (modules[i].props) {
+				struct pw_properties *props;
+				props = pw_properties_new_string(modules[i].props);
+				if (props) {
+					pw_properties_update(impl.this.props, &props->dict);
+					pw_properties_free(props);
+				}
+			}
 			pw_log_info("enable: %s", name);
 			modules[i].start(&impl.this);
 		}

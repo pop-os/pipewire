@@ -64,7 +64,6 @@ struct impl {
 static int emit_object_info(struct impl *this, uint32_t id)
 {
 	struct spa_device_object_info info;
-	const char *str;
 	struct spa_dict_item items[20];
 	uint32_t n_items = 0;
 
@@ -113,7 +112,6 @@ static int
 impl_device_add_listener(void *object, struct spa_hook *listener,
 		const struct spa_device_events *events, void *data)
 {
-	int res;
 	struct impl *this = object;
     struct spa_hook_list save;
 
@@ -162,7 +160,6 @@ static int impl_clear(struct spa_handle *handle)
 
 	if(this->dev.camera) {
 		deleteLibCamera(this->dev.camera);
-		free(this->dev.camera);
 		this->dev.camera = NULL;
 	}
 	return 0;

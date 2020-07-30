@@ -62,6 +62,8 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_src_debug);
 #define DEFAULT_ALWAYS_COPY     false
 #define DEFAULT_MIN_BUFFERS     1
 #define DEFAULT_MAX_BUFFERS     INT32_MAX
+#define DEFAULT_RESEND_LAST     false
+#define DEFAULT_KEEPALIVE_TIME  0
 
 enum
 {
@@ -73,6 +75,8 @@ enum
   PROP_MIN_BUFFERS,
   PROP_MAX_BUFFERS,
   PROP_FD,
+  PROP_RESEND_LAST,
+  PROP_KEEPALIVE_TIME,
 };
 
 
@@ -88,6 +92,8 @@ G_DEFINE_TYPE (GstPipeWireSrc, gst_pipewire_src, GST_TYPE_PUSH_SRC);
 
 static GstStateChangeReturn
 gst_pipewire_src_change_state (GstElement * element, GstStateChange transition);
+
+static gboolean gst_pipewire_src_send_event (GstElement * elem, GstEvent * event);
 
 static gboolean gst_pipewire_src_negotiate (GstBaseSrc * basesrc);
 
@@ -140,6 +146,14 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->fd = g_value_get_int (value);
       break;
 
+    case PROP_RESEND_LAST:
+      pwsrc->resend_last = g_value_get_boolean (value);
+      break;
+
+    case PROP_KEEPALIVE_TIME:
+      pwsrc->keepalive_time = g_value_get_int (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -181,6 +195,14 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
       g_value_set_int (value, pwsrc->fd);
       break;
 
+    case PROP_RESEND_LAST:
+      g_value_set_boolean (value, pwsrc->resend_last);
+      break;
+
+    case PROP_KEEPALIVE_TIME:
+      g_value_set_int (value, pwsrc->keepalive_time);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -218,11 +240,6 @@ static void
 gst_pipewire_src_finalize (GObject * object)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (object);
-
-  pw_context_destroy (pwsrc->context);
-  pwsrc->context = NULL;
-  pw_thread_loop_destroy (pwsrc->loop);
-  pwsrc->loop = NULL;
 
   if (pwsrc->properties)
     gst_structure_free (pwsrc->properties);
@@ -306,17 +323,36 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                      G_PARAM_READWRITE |
                                                      G_PARAM_STATIC_STRINGS));
 
-   g_object_class_install_property (gobject_class,
-                                    PROP_FD,
-                                    g_param_spec_int ("fd",
-                                                      "Fd",
-                                                      "The fd to connect with",
-                                                      -1, G_MAXINT, -1,
-                                                      G_PARAM_READWRITE |
-                                                      G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (gobject_class,
+                                   PROP_FD,
+                                   g_param_spec_int ("fd",
+                                                     "Fd",
+                                                     "The fd to connect with",
+                                                     -1, G_MAXINT, -1,
+                                                     G_PARAM_READWRITE |
+                                                     G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class,
+                                   PROP_RESEND_LAST,
+                                   g_param_spec_boolean ("resend-last",
+                                                         "Resend last",
+                                                         "Resend last buffer on EOS",
+                                                         DEFAULT_RESEND_LAST,
+                                                         G_PARAM_READWRITE |
+                                                         G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class,
+                                   PROP_KEEPALIVE_TIME,
+                                   g_param_spec_int ("keepalive-time",
+                                                     "Keepalive Time",
+                                                     "Periodically send last buffer (in milliseconds, 0 = disabled)",
+                                                     0, G_MAXINT, DEFAULT_KEEPALIVE_TIME,
+                                                     G_PARAM_READWRITE |
+                                                     G_PARAM_STATIC_STRINGS));
 
   gstelement_class->provide_clock = gst_pipewire_src_provide_clock;
   gstelement_class->change_state = gst_pipewire_src_change_state;
+  gstelement_class->send_event = gst_pipewire_src_send_event;
 
   gst_element_class_set_static_metadata (gstelement_class,
       "PipeWire source", "Source/Video",
@@ -352,14 +388,12 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   src->min_buffers = DEFAULT_MIN_BUFFERS;
   src->max_buffers = DEFAULT_MAX_BUFFERS;
   src->fd = -1;
+  src->resend_last = DEFAULT_RESEND_LAST;
+  src->keepalive_time = DEFAULT_KEEPALIVE_TIME;
 
   src->client_name = g_strdup(pw_get_client_name ());
 
   src->pool =  gst_pipewire_pool_new ();
-  src->loop = pw_thread_loop_new ("pipewire-main-loop", NULL);
-  src->context = pw_context_new (pw_thread_loop_get_loop(src->loop), NULL, 0);
-  GST_DEBUG ("loop %p context %p", src->loop, src->context);
-
 }
 
 static gboolean
@@ -376,10 +410,10 @@ buffer_recycle (GstMiniObject *obj)
   data->queued = TRUE;
 
   GST_LOG_OBJECT (obj, "recycle buffer");
-  pw_thread_loop_lock (src->loop);
+  pw_thread_loop_lock (src->core->loop);
   if (src->stream)
     pw_stream_queue_buffer (src->stream, data->b);
-  pw_thread_loop_unlock (src->loop);
+  pw_thread_loop_unlock (src->core->loop);
 
   return FALSE;
 }
@@ -464,7 +498,7 @@ static void
 on_process (void *_data)
 {
   GstPipeWireSrc *pwsrc = _data;
-  pw_thread_loop_signal (pwsrc->loop, FALSE);
+  pw_thread_loop_signal (pwsrc->core->loop, FALSE);
 }
 
 static void
@@ -487,7 +521,7 @@ on_state_changed (void *data,
           ("stream error: %s", error), (NULL));
       break;
   }
-  pw_thread_loop_signal (pwsrc->loop, FALSE);
+  pw_thread_loop_signal (pwsrc->core->loop, FALSE);
 }
 
 static void
@@ -516,7 +550,7 @@ static gboolean
 gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
 {
   const char *error = NULL;
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   GST_DEBUG_OBJECT (pwsrc, "doing stream start");
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream, &error);
@@ -528,21 +562,21 @@ gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
     if (state == PW_STREAM_STATE_ERROR)
       goto start_error;
 
-    pw_thread_loop_wait (pwsrc->loop);
+    pw_thread_loop_wait (pwsrc->core->loop);
   }
 
   parse_stream_properties (pwsrc, pw_stream_get_properties (pwsrc->stream));
   GST_DEBUG_OBJECT (pwsrc, "signal started");
   pwsrc->started = TRUE;
-  pw_thread_loop_signal (pwsrc->loop, FALSE);
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_signal (pwsrc->core->loop, FALSE);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
 
 start_error:
   {
     GST_DEBUG_OBJECT (pwsrc, "error starting stream: %s", error);
-    pw_thread_loop_unlock (pwsrc->loop);
+    pw_thread_loop_unlock (pwsrc->core->loop);
     return FALSE;
   }
 }
@@ -553,7 +587,7 @@ wait_negotiated (GstPipeWireSrc *this)
   enum pw_stream_state state;
   const char *error = NULL;
 
-  pw_thread_loop_lock (this->loop);
+  pw_thread_loop_lock (this->core->loop);
   while (TRUE) {
     state = pw_stream_get_state (this->stream, &error);
 
@@ -566,10 +600,10 @@ wait_negotiated (GstPipeWireSrc *this)
     if (this->started)
       break;
 
-    pw_thread_loop_wait (this->loop);
+    pw_thread_loop_wait (this->core->loop);
   }
   GST_DEBUG_OBJECT (this, "got started signal");
-  pw_thread_loop_unlock (this->loop);
+  pw_thread_loop_unlock (this->core->loop);
 
   return state;
 }
@@ -616,7 +650,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   gst_caps_unref (caps);
 
   /* first disconnect */
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   if (pw_stream_get_state(pwsrc->stream, &error) != PW_STREAM_STATE_UNCONNECTED) {
     GST_DEBUG_OBJECT (basesrc, "disconnect capture");
     pw_stream_disconnect (pwsrc->stream);
@@ -632,7 +666,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
         goto connect_error;
       }
 
-      pw_thread_loop_wait (pwsrc->loop);
+      pw_thread_loop_wait (pwsrc->core->loop);
     }
   }
 
@@ -656,9 +690,9 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
     if (state == PW_STREAM_STATE_ERROR)
       goto connect_error;
 
-    pw_thread_loop_wait (pwsrc->loop);
+    pw_thread_loop_wait (pwsrc->core->loop);
   }
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   result = gst_pipewire_src_stream_start (pwsrc);
 
@@ -693,7 +727,7 @@ no_common_caps:
   }
 connect_error:
   {
-    pw_thread_loop_unlock (pwsrc->loop);
+    pw_thread_loop_unlock (pwsrc->core->loop);
     return FALSE;
   }
 }
@@ -753,11 +787,11 @@ gst_pipewire_src_unlock (GstBaseSrc * basesrc)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   GST_DEBUG_OBJECT (pwsrc, "setting flushing");
   pwsrc->flushing = TRUE;
-  pw_thread_loop_signal (pwsrc->loop, FALSE);
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_signal (pwsrc->core->loop, FALSE);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
 }
@@ -767,10 +801,10 @@ gst_pipewire_src_unlock_stop (GstBaseSrc * basesrc)
 {
   GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   GST_DEBUG_OBJECT (pwsrc, "unsetting flushing");
   pwsrc->flushing = FALSE;
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
 }
@@ -833,13 +867,14 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
   GstClockTime pts, dts, base_time;
   const char *error = NULL;
   GstBuffer *buf;
+  gboolean update_time = FALSE, timeout = FALSE;
 
   pwsrc = GST_PIPEWIRE_SRC (psrc);
 
   if (!pwsrc->negotiated)
     goto not_negotiated;
 
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   while (TRUE) {
     enum pw_stream_state state;
 
@@ -856,15 +891,42 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     if (state != PW_STREAM_STATE_STREAMING)
       goto streaming_stopped;
 
-
-    buf = dequeue_buffer (pwsrc);
-    GST_LOG_OBJECT (pwsrc, "popped buffer %p", buf);
-    if (buf != NULL)
+    if (pwsrc->eos) {
+      if (pwsrc->last_buffer == NULL)
+        goto streaming_eos;
+      buf = pwsrc->last_buffer;
+      pwsrc->last_buffer = NULL;
+      update_time = TRUE;
+      GST_LOG_OBJECT (pwsrc, "EOS, send last buffer");
       break;
-
-    pw_thread_loop_wait (pwsrc->loop);
+    } else if (timeout) {
+      if (pwsrc->last_buffer != NULL) {
+        update_time = TRUE;
+        buf = gst_buffer_ref(pwsrc->last_buffer);
+        GST_LOG_OBJECT (pwsrc, "timeout, send keepalive buffer");
+        break;
+      }
+    } else {
+      buf = dequeue_buffer (pwsrc);
+      GST_LOG_OBJECT (pwsrc, "popped buffer %p", buf);
+      if (buf != NULL) {
+	if (pwsrc->resend_last || pwsrc->keepalive_time > 0)
+          gst_buffer_replace (&pwsrc->last_buffer, buf);
+        break;
+      }
+    }
+    timeout = FALSE;
+    if (pwsrc->keepalive_time > 0) {
+      struct timespec abstime;
+      pw_thread_loop_get_time(pwsrc->core->loop, &abstime,
+		      pwsrc->keepalive_time * SPA_NSEC_PER_MSEC);
+      if (pw_thread_loop_timed_wait_full (pwsrc->core->loop, &abstime) == -ETIMEDOUT)
+        timeout = TRUE;
+    } else {
+      pw_thread_loop_wait (pwsrc->core->loop);
+    }
   }
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   if (pwsrc->always_copy) {
     *buffer = gst_buffer_copy_deep (buf);
@@ -878,8 +940,18 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
   else
     base_time = 0;
 
-  pts = GST_BUFFER_PTS (*buffer);
-  dts = GST_BUFFER_DTS (*buffer);
+  if (update_time) {
+    GstClock *clock = gst_element_get_clock (GST_ELEMENT_CAST (pwsrc));
+    if (clock != NULL) {
+      pts = dts = gst_clock_get_time (clock);
+      gst_object_unref (clock);
+    } else {
+      pts = dts = GST_CLOCK_TIME_NONE;
+    }
+  } else {
+    pts = GST_BUFFER_PTS (*buffer);
+    dts = GST_BUFFER_DTS (*buffer);
+  }
 
   if (GST_CLOCK_TIME_IS_VALID (pts))
     pts = (pts >= base_time ? pts - base_time : 0);
@@ -901,14 +973,19 @@ not_negotiated:
   {
     return GST_FLOW_NOT_NEGOTIATED;
   }
+streaming_eos:
+  {
+    pw_thread_loop_unlock (pwsrc->core->loop);
+    return GST_FLOW_EOS;
+  }
 streaming_error:
   {
-    pw_thread_loop_unlock (pwsrc->loop);
+    pw_thread_loop_unlock (pwsrc->core->loop);
     return GST_FLOW_ERROR;
   }
 streaming_stopped:
   {
-    pw_thread_loop_unlock (pwsrc->loop);
+    pw_thread_loop_unlock (pwsrc->core->loop);
     return GST_FLOW_FLUSHING;
   }
 }
@@ -926,8 +1003,10 @@ gst_pipewire_src_stop (GstBaseSrc * basesrc)
 
   pwsrc = GST_PIPEWIRE_SRC (basesrc);
 
-  pw_thread_loop_lock (pwsrc->loop);
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
+  pwsrc->eos = false;
+  gst_buffer_replace (&pwsrc->last_buffer, NULL);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
 }
@@ -955,52 +1034,16 @@ static const struct pw_stream_events stream_events = {
         .process = on_process,
 };
 
-static void on_core_done (void *object, uint32_t id, int seq)
-{
-  GstPipeWireSrc * pwsrc = object;
-  if (id == PW_ID_CORE) {
-    pwsrc->last_seq = seq;
-    pw_thread_loop_signal (pwsrc->loop, FALSE);
-  }
-}
-
-static const struct pw_core_events core_events = {
-  PW_VERSION_CORE_EVENTS,
-  .done = on_core_done,
-};
-
-static void do_sync(GstPipeWireSrc * pwsrc)
-{
-  pwsrc->pending_seq = pw_core_sync(pwsrc->core, 0, pwsrc->pending_seq);
-  while (true) {
-    if (pwsrc->last_seq == pwsrc->pending_seq || pwsrc->last_error < 0)
-      break;
-    pw_thread_loop_wait (pwsrc->loop);
-  }
-}
-
 static gboolean
 gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
 {
   struct pw_properties *props;
 
-  if (pw_thread_loop_start (pwsrc->loop) < 0)
-    goto mainloop_failed;
-
-  pw_thread_loop_lock (pwsrc->loop);
-
-  if (pwsrc->fd == -1)
-    pwsrc->core = pw_context_connect (pwsrc->context, NULL, 0);
-  else
-    pwsrc->core = pw_context_connect_fd (pwsrc->context, dup(pwsrc->fd), NULL, 0);
-
+  pwsrc->core = gst_pipewire_core_get(pwsrc->fd);
   if (pwsrc->core == NULL)
       goto connect_error;
 
-  pw_core_add_listener(pwsrc->core,
-                       &pwsrc->core_listener,
-                       &core_events,
-                       pwsrc);
+  pw_thread_loop_lock (pwsrc->core->loop);
 
   if (pwsrc->properties) {
     props = pw_properties_new (NULL, NULL);
@@ -1009,7 +1052,7 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
     props = NULL;
   }
 
-  if ((pwsrc->stream = pw_stream_new (pwsrc->core,
+  if ((pwsrc->stream = pw_stream_new (pwsrc->core->core,
                                   pwsrc->client_name, props)) == NULL)
     goto no_stream;
 
@@ -1020,26 +1063,22 @@ gst_pipewire_src_open (GstPipeWireSrc * pwsrc)
                          pwsrc);
 
   pwsrc->clock = gst_pipewire_clock_new (pwsrc->stream, pwsrc->last_time);
-  pw_thread_loop_unlock (pwsrc->loop);
+  pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
 
   /* ERRORS */
-mainloop_failed:
-  {
-    GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("error starting mainloop"), (NULL));
-    return FALSE;
-  }
 connect_error:
   {
     GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("can't connect"), (NULL));
-    pw_thread_loop_unlock (pwsrc->loop);
     return FALSE;
   }
 no_stream:
   {
     GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED, ("can't create stream"), (NULL));
-    pw_thread_loop_unlock (pwsrc->loop);
+    pw_thread_loop_unlock (pwsrc->core->loop);
+    gst_pipewire_core_release (pwsrc->core);
+    pwsrc->core = NULL;
     return FALSE;
   }
 }
@@ -1057,19 +1096,39 @@ gst_pipewire_src_close (GstPipeWireSrc * pwsrc)
   g_clear_object (&pwsrc->clock);
   GST_OBJECT_UNLOCK (pwsrc);
 
-  pw_thread_loop_lock (pwsrc->loop);
+  pw_thread_loop_lock (pwsrc->core->loop);
   if (pwsrc->stream) {
     pw_stream_destroy (pwsrc->stream);
     pwsrc->stream = NULL;
   }
+  pw_thread_loop_unlock (pwsrc->core->loop);
+
   if (pwsrc->core) {
-    do_sync(pwsrc);
-    pw_core_disconnect (pwsrc->core);
+    gst_pipewire_core_release (pwsrc->core);
     pwsrc->core = NULL;
   }
-  pw_thread_loop_unlock (pwsrc->loop);
+}
 
-  pw_thread_loop_stop (pwsrc->loop);
+static gboolean
+gst_pipewire_src_send_event (GstElement * elem, GstEvent * event)
+{
+  GstPipeWireSrc *this = GST_PIPEWIRE_SRC_CAST (elem);
+  gboolean ret;
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_EOS:
+      GST_DEBUG_OBJECT (this, "got EOS");
+      pw_thread_loop_lock (this->core->loop);
+      this->eos = true;
+      pw_thread_loop_signal (this->core->loop, FALSE);
+      pw_thread_loop_unlock (this->core->loop);
+      ret = TRUE;
+      break;
+    default:
+      ret = GST_ELEMENT_CLASS (parent_class)->send_event (elem, event);
+      break;
+  }
+  return ret;
 }
 
 static GstStateChangeReturn
@@ -1087,11 +1146,15 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
       break;
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
       /* uncork and start recording */
+      pw_thread_loop_lock (this->core->loop);
       pw_stream_set_active(this->stream, true);
+      pw_thread_loop_unlock (this->core->loop);
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       /* stop recording ASAP by corking */
+      pw_thread_loop_lock (this->core->loop);
       pw_stream_set_active(this->stream, false);
+      pw_thread_loop_unlock (this->core->loop);
       break;
     default:
       break;

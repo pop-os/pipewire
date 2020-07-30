@@ -548,6 +548,7 @@ struct pw_impl_node {
 					  *  is selected to drive the graph */
 	unsigned int visited:1;		/**< for sorting */
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */
+	unsigned int passive:1;		/**< driver graph only has passive links */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 
@@ -637,6 +638,7 @@ struct pw_impl_port_implementation {
 #define pw_impl_port_emit_state_changed(p,o,s,e)	pw_impl_port_emit(p, state_changed, 0, o, s, e)
 #define pw_impl_port_emit_control_added(p,c)		pw_impl_port_emit(p, control_added, 0, c)
 #define pw_impl_port_emit_control_removed(p,c)		pw_impl_port_emit(p, control_removed, 0, c)
+#define pw_impl_port_emit_param_changed(p,i)		pw_impl_port_emit(p, param_changed, 1, i)
 
 #define PW_IMPL_PORT_IS_CONTROL(port)	SPA_FLAG_MASK(port->flags, \
 						PW_IMPL_PORT_FLAG_BUFFERS|PW_IMPL_PORT_FLAG_CONTROL,\
@@ -753,6 +755,7 @@ struct pw_impl_link {
 	unsigned int feedback:1;
 	unsigned int preparing:1;
 	unsigned int prepared:1;
+	unsigned int passive:1;
 };
 
 #define pw_resource_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_resource_events, m, v, ##__VA_ARGS__)
@@ -986,7 +989,7 @@ pw_context_find_port(struct pw_context *context,
 
 int pw_context_debug_port_params(struct pw_context *context,
 		struct spa_node *node, enum spa_direction direction,
-		uint32_t port_id, uint32_t id, const char *debug, int err);
+		uint32_t port_id, uint32_t id, int err, const char *debug, ...);
 
 const struct pw_export_type *pw_context_find_export_type(struct pw_context *context, const char *type);
 

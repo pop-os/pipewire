@@ -383,7 +383,7 @@ impl_node_port_enum_params(void *object, int seq,
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, id,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 1, MAX_BUFFERS),
-			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
+			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(this->blocks),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(
 							this->props.max_latency * this->frame_size,
 							this->props.min_latency * this->frame_size,
@@ -751,6 +751,8 @@ impl_init(const struct spa_handle_factory *factory,
 	for (i = 0; info && i < info->n_items; i++) {
 		if (!strcmp(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {
 			snprintf(this->props.device, 63, "%s", info->items[i].value);
+		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_CHANNELS)) {
+			this->default_channels = atoi(info->items[i].value);
 		}
 	}
 

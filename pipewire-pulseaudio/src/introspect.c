@@ -22,8 +22,10 @@
 #include <spa/param/props.h>
 
 #include <pipewire/pipewire.h>
+#include <extensions/metadata.h>
 
 #include <pulse/introspect.h>
+#include <pulse/xmalloc.h>
 
 #include "internal.h"
 
@@ -31,6 +33,7 @@ struct success_ack {
 	pa_context_success_cb_t cb;
 	int error;
 	void *userdata;
+	uint32_t idx;
 };
 
 static void on_success(pa_operation *o, void *userdata)
@@ -46,10 +49,10 @@ static void on_success(pa_operation *o, void *userdata)
 }
 
 struct sink_data {
-	pa_context *context;
 	pa_sink_info_cb_t cb;
 	void *userdata;
-	struct global *global;
+	char *name;
+	uint32_t idx;
 };
 
 static pa_sink_state_t node_state_to_sink(enum pw_node_state s)
@@ -70,33 +73,21 @@ static pa_sink_state_t node_state_to_sink(enum pw_node_state s)
 	}
 }
 
-static int wait_global(pa_context *c, struct global *g, pa_operation *o)
+static int has_profile(pa_card_profile_info2 **list, pa_card_profile_info2 *active)
 {
-	if (g->init) {
-		pa_operation_sync(o);
-		return -EBUSY;
+	for(;*list; list++) {
+		if (*list == active)
+			return 1;
 	}
 	return 0;
 }
 
-static int wait_globals(pa_context *c, pa_subscription_mask_t mask, pa_operation *o)
+static int sink_callback(pa_context *c, struct global *g, struct sink_data *d)
 {
-	struct global *g;
-	spa_list_for_each(g, &c->globals, link) {
-		if (!(g->mask & mask))
-			continue;
-		if (wait_global(c, g, o) < 0)
-			return -EBUSY;
-	}
-	return 0;
-}
-
-static void sink_callback(struct sink_data *d)
-{
-	struct global *g = d->global;
+	struct global *cg;
 	struct pw_node_info *info = g->info;
 	const char *str;
-	uint32_t n;
+	uint32_t n, j;
 	pa_sink_info i;
 	pa_format_info ii[1];
 	pa_format_info *ip[1];
@@ -126,46 +117,89 @@ static void sink_callback(struct sink_data *d)
 		i.volume.values[n] = g->node_info.volume * g->node_info.channel_volumes[n] * PA_VOLUME_NORM;
 	i.mute = g->node_info.mute;
 	i.monitor_source = g->node_info.monitor;
-	i.monitor_source_name = "unknown";
+	i.monitor_source_name = pa_context_find_global_name(c, i.monitor_source);
 	i.latency = 0;
 	i.driver = "PipeWire";
 	i.flags = PA_SINK_HARDWARE |
-		  PA_SINK_HW_VOLUME_CTRL | PA_SINK_HW_MUTE_CTRL |
 		  PA_SINK_LATENCY | PA_SINK_DYNAMIC_LATENCY |
 		  PA_SINK_DECIBEL_VOLUME;
+	if (SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_HW_VOLUME))
+		  i.flags |= PA_SINK_HW_VOLUME_CTRL;
+	if (SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_HW_MUTE))
+		  i.flags |= PA_SINK_HW_MUTE_CTRL;
 	i.proplist = pa_proplist_new_dict(info->props);
 	i.configured_latency = 0;
-	i.base_volume = PA_VOLUME_NORM;
+	i.base_volume = g->node_info.base_volume * PA_VOLUME_NORM;
+	i.n_volume_steps = g->node_info.volume_step * (PA_VOLUME_NORM+1);
 	i.state = node_state_to_sink(info->state);
-	i.n_volume_steps = PA_VOLUME_NORM+1;
-	i.card = PA_INVALID_INDEX;
+	i.card = g->node_info.device_id;
 	i.n_ports = 0;
 	i.ports = NULL;
 	i.active_port = NULL;
+	if ((cg = pa_context_find_global(c, i.card)) != NULL) {
+		pa_sink_port_info *spi;
+		pa_card_info *ci = &cg->card_info.info;
+
+		spi = alloca(ci->n_ports * sizeof(pa_sink_port_info));
+		i.ports = alloca((ci->n_ports + 1) * sizeof(pa_sink_port_info *));
+
+		for (n = 0,j = 0; n < ci->n_ports; n++) {
+			if (ci->ports[n]->direction != PA_DIRECTION_OUTPUT)
+				continue;
+			if (!has_profile(ci->ports[n]->profiles2, ci->active_profile2))
+				continue;
+			i.ports[j] = &spi[j];
+			spi[j].name = ci->ports[n]->name;
+			spi[j].description = ci->ports[n]->description;
+			spi[j].priority = ci->ports[n]->priority;
+			spi[j].available = ci->ports[n]->available;
+			if (n == cg->card_info.active_port_output)
+				i.active_port = i.ports[j];
+			j++;
+		}
+		i.n_ports = j;
+		if (i.n_ports == 0)
+			i.ports = NULL;
+		else
+			i.ports[j] = NULL;
+	}
 	i.n_formats = 1;
 	ii[0].encoding = PA_ENCODING_PCM;
 	ii[0].plist = pa_proplist_new();
 	ip[0] = ii;
 	i.formats = ip;
-	d->cb(d->context, &i, 0, d->userdata);
+	d->cb(c, &i, 0, d->userdata);
 	pa_proplist_free(i.proplist);
 	pa_proplist_free(ii[0].plist);
+	return 0;
 }
 
 static void sink_info(pa_operation *o, void *userdata)
 {
 	struct sink_data *d = userdata;
-	int eol = 1;
+	struct global *g;
+	pa_context *c = o->context;
+	int error = 0;
 
-	if (d->global) {
-		if (wait_global(d->context, d->global, o) < 0)
-			return;
-		sink_callback(d);
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SINK, d->name);
+		pa_xfree(d->name);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & PA_SUBSCRIPTION_MASK_SINK))
+			g = NULL;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
+
+	pw_log_debug("%p", c);
+
+	if (g) {
+		error = sink_callback(c, g, d);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+	if (error)
+		pa_context_set_error(c, error);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -173,7 +207,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_sink_info_by_name(pa_context *c, const char *name, pa_sink_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct sink_data *d;
 
 	pa_assert(c);
@@ -183,14 +216,15 @@ pa_operation* pa_context_get_sink_info_by_name(pa_context *c, const char *name, 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
 
-	g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SINK, name);
+	pw_log_debug("%p", c);
+
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, sink_info, sizeof(struct sink_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
+	d->name = pa_xstrdup(name);
 	pa_operation_sync(o);
 
 	return o;
@@ -200,7 +234,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_sink_info_by_index(pa_context *c, uint32_t idx, pa_sink_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct sink_data *d;
 
 	pa_assert(c);
@@ -210,16 +243,13 @@ pa_operation* pa_context_get_sink_info_by_index(pa_context *c, uint32_t idx, pa_
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SINK))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, sink_info, sizeof(struct sink_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
+	d->idx = idx;
 	pa_operation_sync(o);
 
 	return o;
@@ -228,16 +258,13 @@ pa_operation* pa_context_get_sink_info_by_index(pa_context *c, uint32_t idx, pa_
 static void sink_info_list(pa_operation *o, void *userdata)
 {
 	struct sink_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
-	if (wait_globals(c, PA_SUBSCRIPTION_MASK_SINK, o) < 0)
-		return;
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_SINK))
 			continue;
-		d->global = g;
-		sink_callback(d);
+		sink_callback(c, g, d);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -255,9 +282,10 @@ pa_operation* pa_context_get_sink_info_list(pa_context *c, pa_sink_info_cb_t cb,
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, sink_info_list, sizeof(struct sink_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -265,7 +293,7 @@ pa_operation* pa_context_get_sink_info_list(pa_context *c, pa_sink_info_cb_t cb,
 	return o;
 }
 
-static void set_stream_volume(pa_context *c, pa_stream *s, const pa_cvolume *volume, bool mute)
+static int set_stream_volume(pa_context *c, pa_stream *s, const pa_cvolume *volume, bool mute)
 {
 	uint32_t i, n_channel_volumes;
 	float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
@@ -290,9 +318,10 @@ static void set_stream_volume(pa_context *c, pa_stream *s, const pa_cvolume *vol
 				SPA_PROP_channelVolumes, n_channel_volumes, vols,
 				0);
 	}
+	return 0;
 }
 
-static void set_node_volume(pa_context *c, struct global *g, const pa_cvolume *volume, bool mute)
+static int set_node_volume(pa_context *c, struct global *g, const pa_cvolume *volume, bool mute)
 {
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
@@ -309,7 +338,7 @@ static void set_node_volume(pa_context *c, struct global *g, const pa_cvolume *v
 		if (n_channel_volumes == g->node_info.n_channel_volumes &&
 		    memcmp(g->node_info.channel_volumes, vols, n_channel_volumes * sizeof(float)) == 0 &&
 		    mute == g->node_info.mute)
-			return;
+			return 0;
 
 		memcpy(g->node_info.channel_volumes, vols, n_channel_volumes * sizeof(float));
 		g->node_info.n_channel_volumes = n_channel_volumes;
@@ -317,9 +346,12 @@ static void set_node_volume(pa_context *c, struct global *g, const pa_cvolume *v
 		n_channel_volumes = g->node_info.n_channel_volumes;
 		vols = g->node_info.channel_volumes;
 		if (mute == g->node_info.mute)
-			return;
+			return 0;
 	}
 	g->node_info.mute = mute;
+
+	if (!SPA_FLAG_IS_SET(g->permissions, PW_PERM_W | PW_PERM_X))
+		return PA_ERR_ACCESS;
 
 	pw_node_set_param((struct pw_node*)g->proxy,
 		SPA_PARAM_Props, 0,
@@ -330,16 +362,139 @@ static void set_node_volume(pa_context *c, struct global *g, const pa_cvolume *v
 								SPA_TYPE_Float,
 								n_channel_volumes,
 								vols)));
+	return 0;
 }
 
+static int set_device_volume(pa_context *c, struct global *g, struct global *cg, uint32_t id,
+		uint32_t device_id, const pa_cvolume *volume, bool mute)
+{
+	char buf[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+	struct spa_pod_frame f[2];
+	struct spa_pod *param;
+	uint32_t i, n_channel_volumes;
+	float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
+	float *vols;
+
+	if (volume) {
+		for (i = 0; i < volume->channels; i++)
+			channel_volumes[i] = volume->values[i] / (float) PA_VOLUME_NORM;
+		vols = channel_volumes;
+		n_channel_volumes = volume->channels;
+
+		if (n_channel_volumes == g->node_info.n_channel_volumes &&
+		    memcmp(g->node_info.channel_volumes, vols, n_channel_volumes * sizeof(float)) == 0 &&
+		    mute == g->node_info.mute)
+			return 0;
+
+		memcpy(g->node_info.channel_volumes, vols, n_channel_volumes * sizeof(float));
+		g->node_info.n_channel_volumes = n_channel_volumes;
+	} else {
+		n_channel_volumes = g->node_info.n_channel_volumes;
+		vols = g->node_info.channel_volumes;
+		if (mute == g->node_info.mute)
+			return 0;
+	}
+	g->node_info.mute = mute;
+
+	if (!SPA_FLAG_IS_SET(cg->permissions, PW_PERM_W | PW_PERM_X))
+		return PA_ERR_ACCESS;
+
+	spa_pod_builder_push_object(&b, &f[0],
+			SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+	spa_pod_builder_add(&b,
+			SPA_PARAM_ROUTE_index, SPA_POD_Int(id),
+			SPA_PARAM_ROUTE_device, SPA_POD_Int(device_id),
+			0);
+	spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
+	spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Props,	SPA_PARAM_Props,
+			SPA_PROP_mute,			SPA_POD_Bool(mute),
+			SPA_PROP_channelVolumes,	SPA_POD_Array(sizeof(float),
+								SPA_TYPE_Float,
+								n_channel_volumes,
+								vols));
+	param = spa_pod_builder_pop(&b, &f[0]);
+
+	pw_device_set_param((struct pw_node*)cg->proxy,
+		SPA_PARAM_Route, 0, param);
+
+	return 0;
+}
+
+static int set_volume(pa_context *c, struct global *g, const pa_cvolume *volume, bool mute,
+		uint32_t mask)
+{
+	struct global *cg;
+	uint32_t id = SPA_ID_INVALID, card_id, device_id;
+	int res;
+
+	card_id = g->node_info.device_id;
+	device_id = g->node_info.profile_device_id;
+
+	pw_log_info("card:%u global:%u flags:%08x", card_id, g->id, g->node_info.flags);
+
+	if (SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_DEVICE_VOLUME | NODE_FLAG_DEVICE_MUTE) &&
+	    (cg = pa_context_find_global(c, card_id)) != NULL) {
+		if (mask & PA_SUBSCRIPTION_MASK_SINK)
+			id = cg->card_info.active_port_output;
+		else if (mask & PA_SUBSCRIPTION_MASK_SOURCE)
+			id = cg->card_info.active_port_input;
+	}
+	if (id != SPA_ID_INVALID && device_id != SPA_ID_INVALID) {
+		res = set_device_volume(c, g, cg, id, device_id, volume, mute);
+	} else {
+		res = set_node_volume(c, g, volume, mute);
+	}
+	return res;
+}
+
+struct volume_data {
+	pa_context_success_cb_t cb;
+	uint32_t mask;
+	void *userdata;
+	char *name;
+	uint32_t idx;
+	bool have_volume;
+	pa_cvolume volume;
+	int mute;
+};
+
+static void do_node_volume_mute(pa_operation *o, void *userdata)
+{
+	struct volume_data *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error = 0;
+
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, d->mask, d->name);
+		pa_xfree(d->name);
+	} else {
+		if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & d->mask))
+			g = NULL;
+	}
+	if (g) {
+		error = set_volume(c, g,
+				d->have_volume ? &d->volume : NULL,
+				d->have_volume ? g->node_info.mute : d->mute,
+				d->mask);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error ? 0 : 1, d->userdata);
+	pa_operation_done(o);
+}
 
 SPA_EXPORT
 pa_operation* pa_context_set_sink_volume_by_index(pa_context *c, uint32_t idx, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -350,18 +505,18 @@ pa_operation* pa_context_set_sink_volume_by_index(pa_context *c, uint32_t idx, c
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, pa_cvolume_valid(volume), PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SINK)) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->volume = *volume;
+	d->have_volume = true;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -369,9 +524,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_sink_volume_by_name(pa_context *c, const char *name, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -382,17 +535,18 @@ pa_operation* pa_context_set_sink_volume_by_name(pa_context *c, const char *name
 
 	pw_log_debug("context %p: name %s", c, name);
 
-	if ((g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SINK, name)) == NULL) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
 	d->cb = cb;
-	d->error = error;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->volume = *volume;
+	d->have_volume = true;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -400,9 +554,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_sink_mute_by_index(pa_context *c, uint32_t idx, int mute, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -412,17 +564,15 @@ pa_operation* pa_context_set_sink_mute_by_index(pa_context *c, uint32_t idx, int
 
 	pw_log_debug("context %p: index %d", c, idx);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SINK)) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, NULL, mute);
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->mute = mute;
 	pa_operation_sync(o);
 	return o;
 }
@@ -431,9 +581,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_sink_mute_by_name(pa_context *c, const char *name, int mute, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -443,18 +591,17 @@ pa_operation* pa_context_set_sink_mute_by_name(pa_context *c, const char *name, 
 
 	pw_log_debug("context %p: name %s", c, name);
 
-	if ((g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SINK, name)) == NULL) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, NULL, mute);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->mute = mute;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -492,20 +639,121 @@ pa_operation* pa_context_suspend_sink_by_index(pa_context *c, uint32_t idx, int 
 	return o;
 }
 
+static int set_device_route(pa_context *c, struct global *g, const char *port, enum spa_direction direction)
+{
+	struct global *cg;
+	struct param *p;
+	uint32_t id = SPA_ID_INVALID, card_id, device_id;
+	char buf[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+
+	card_id = g->node_info.device_id;
+	device_id = g->node_info.profile_device_id;
+
+	pw_log_info("port \"%s\": card:%u device:%u global:%u", port, card_id, device_id, g->id);
+
+	if ((cg = pa_context_find_global(c, card_id)) == NULL || device_id == SPA_ID_INVALID)
+		return PA_ERR_NOENTITY;
+
+	spa_list_for_each(p, &cg->card_info.ports, link) {
+		uint32_t test_id;
+		const char *name;
+		enum spa_direction test_direction;
+
+		if (spa_pod_parse_object(p->param,
+				SPA_TYPE_OBJECT_ParamRoute, NULL,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(&test_id),
+				SPA_PARAM_ROUTE_direction, SPA_POD_Id(&test_direction),
+				SPA_PARAM_ROUTE_name,  SPA_POD_String(&name)) < 0) {
+			pw_log_warn("device %d: can't parse route", g->id);
+			continue;
+		}
+		pw_log_info("port id:%u name:\"%s\" dir:%d", test_id, name, test_direction);
+		if (test_direction != direction)
+			continue;
+		if (strcmp(name, port) == 0) {
+			id = test_id;
+			break;
+		}
+	}
+	pw_log_info("port %s, id %u", port, id);
+	if (id == SPA_ID_INVALID)
+		return PA_ERR_NOENTITY;
+
+	if (!SPA_FLAG_IS_SET(cg->permissions, PW_PERM_W | PW_PERM_X))
+		return PA_ERR_ACCESS;
+
+	pw_device_set_param((struct pw_device*)cg->proxy,
+		SPA_PARAM_Route, 0,
+		spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_ParamRoute,	SPA_PARAM_Route,
+			SPA_PARAM_ROUTE_index, SPA_POD_Int(id),
+			SPA_PARAM_ROUTE_direction, SPA_POD_Id(direction),
+			SPA_PARAM_ROUTE_device, SPA_POD_Int(device_id)));
+
+	return 0;
+}
+
+struct device_route {
+	uint32_t mask;
+	pa_context_success_cb_t cb;
+	void *userdata;
+	char *name;
+	uint32_t idx;
+	char *port;
+	enum spa_direction direction;
+};
+
+static void do_device_route(pa_operation *o, void *userdata)
+{
+	struct device_route *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
+
+	pw_log_debug("%p", c);
+
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, d->mask, d->name);
+		pa_xfree(d->name);
+	} else {
+		if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & d->mask))
+			g = NULL;
+	}
+	if (g) {
+		error = set_device_route(c, g, d->port, d->direction);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error != 0 ? 0 : 1, d->userdata);
+	pa_operation_done(o);
+	pa_xfree(d->port);
+}
+
 SPA_EXPORT
 pa_operation* pa_context_set_sink_port_by_index(pa_context *c, uint32_t idx, const char*port, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct device_route *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
+
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_device_route, sizeof(struct device_route));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->port = pa_xstrdup(port);
+	d->direction = SPA_DIRECTION_OUTPUT;
 	pa_operation_sync(o);
-
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
@@ -513,25 +761,31 @@ SPA_EXPORT
 pa_operation* pa_context_set_sink_port_by_name(pa_context *c, const char*name, const char*port, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct device_route *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
+
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_device_route, sizeof(struct device_route));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK;
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->port = pa_xstrdup(port);
+	d->direction = SPA_DIRECTION_OUTPUT;
 	pa_operation_sync(o);
-
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
 
 struct source_data {
-	pa_context *context;
 	pa_source_info_cb_t cb;
 	void *userdata;
-	struct global *global;
+	char *name;
+	uint32_t idx;
 };
 
 static pa_source_state_t node_state_to_source(enum pw_node_state s)
@@ -551,27 +805,41 @@ static pa_source_state_t node_state_to_source(enum pw_node_state s)
 		return PA_SOURCE_INVALID_STATE;
 	}
 }
-static void source_callback(struct source_data *d)
+static int source_callback(pa_context *c, struct global *g, struct source_data *d)
 {
-	struct global *g = d->global;
+	struct global *cg;
 	struct pw_node_info *info = g->info;
 	const char *str;
-	uint32_t n;
+	uint32_t n, j;
 	pa_source_info i;
 	pa_format_info ii[1];
 	pa_format_info *ip[1];
 	enum pa_source_flags flags;
+	bool monitor;
 
 	flags = PA_SOURCE_LATENCY | PA_SOURCE_DYNAMIC_LATENCY |
 		  PA_SOURCE_DECIBEL_VOLUME;
 
+	monitor = (g->mask & PA_SUBSCRIPTION_MASK_SINK) != 0;
+
 	spa_zero(i);
-	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_NODE_NAME)))
+
+	i.proplist = pa_proplist_new_dict(info->props);
+
+	if (monitor) {
+		if ((str = spa_dict_lookup(info->props, PW_KEY_NODE_NAME)))
+			pa_proplist_setf(i.proplist, PW_KEY_NODE_NAME, "%s.monitor", str);
+		if ((str = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)))
+			pa_proplist_setf(i.proplist, PW_KEY_NODE_DESCRIPTION, "Monitor or %s", str);
+	}
+
+	if ((str = pa_proplist_gets(i.proplist, PW_KEY_NODE_NAME)))
 		i.name = str;
 	else
 		i.name = "unknown";
+
 	i.index = g->id;
-	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)))
+	if ((str = pa_proplist_gets(i.proplist, PW_KEY_NODE_DESCRIPTION)))
 		i.description = str;
 	else
 		i.description = "unknown";
@@ -587,51 +855,94 @@ static void source_callback(struct source_data *d)
 	for (n = 0; n < i.volume.channels; n++)
 		i.volume.values[n] = g->node_info.volume * g->node_info.channel_volumes[n] * PA_VOLUME_NORM;
 	i.mute = g->node_info.mute;
-	if (g->mask & PA_SUBSCRIPTION_MASK_SINK) {
+	if (monitor) {
 		i.monitor_of_sink = g->id;
-		i.monitor_of_sink_name = "unknown";
+		i.monitor_of_sink_name = pa_context_find_global_name(c, g->id);
 		i.index = g->node_info.monitor;
 	} else {
 		i.monitor_of_sink = PA_INVALID_INDEX;
 		i.monitor_of_sink_name = NULL;
-		flags |= PA_SOURCE_HARDWARE | PA_SOURCE_HW_VOLUME_CTRL | PA_SOURCE_HW_MUTE_CTRL;
+		flags |= PA_SOURCE_HARDWARE;
+		if (SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_HW_VOLUME))
+			flags |= PA_SINK_HW_VOLUME_CTRL;
+		if (SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_HW_MUTE))
+			flags |= PA_SINK_HW_MUTE_CTRL;
 	}
 	i.latency = 0;
 	i.driver = "PipeWire";
 	i.flags = flags;
-	i.proplist = pa_proplist_new_dict(info->props);
 	i.configured_latency = 0;
-	i.base_volume = PA_VOLUME_NORM;
+	i.base_volume = g->node_info.base_volume * PA_VOLUME_NORM;
+	i.n_volume_steps = g->node_info.volume_step * (PA_VOLUME_NORM+1);
 	i.state = node_state_to_source(info->state);
-	i.n_volume_steps = PA_VOLUME_NORM+1;
-	i.card = PA_INVALID_INDEX;
+	i.card = g->node_info.device_id;
 	i.n_ports = 0;
 	i.ports = NULL;
 	i.active_port = NULL;
+	if (!monitor && (cg = pa_context_find_global(c, i.card)) != NULL) {
+		pa_source_port_info *spi;
+		pa_card_info *ci = &cg->card_info.info;
+
+		spi = alloca(ci->n_ports * sizeof(pa_source_port_info));
+		i.ports = alloca((ci->n_ports + 1) * sizeof(pa_source_port_info *));
+
+		for (n = 0,j = 0; n < ci->n_ports; n++) {
+			if (ci->ports[n]->direction != PA_DIRECTION_INPUT)
+				continue;
+			if (!has_profile(ci->ports[n]->profiles2, ci->active_profile2))
+				continue;
+			i.ports[j] = &spi[j];
+			spi[j].name = ci->ports[n]->name;
+			spi[j].description = ci->ports[n]->description;
+			spi[j].priority = ci->ports[n]->priority;
+			spi[j].available = ci->ports[n]->available;
+			if (n == cg->card_info.active_port_input)
+				i.active_port = i.ports[j];
+			j++;
+		}
+		i.n_ports = j;
+		if (i.n_ports == 0)
+			i.ports = NULL;
+		else
+			i.ports[j] = NULL;
+	}
 	i.n_formats = 1;
 	ii[0].encoding = PA_ENCODING_PCM;
 	ii[0].plist = pa_proplist_new();
 	ip[0] = ii;
 	i.formats = ip;
-	d->cb(d->context, &i, 0, d->userdata);
+	d->cb(c, &i, 0, d->userdata);
 	pa_proplist_free(i.proplist);
 	pa_proplist_free(ii[0].plist);
+	return 0;
 }
 
 static void source_info(pa_operation *o, void *userdata)
 {
 	struct source_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		if (wait_global(d->context, d->global, o) < 0)
-			return;
-		source_callback(d);
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SOURCE, d->name);
+		pa_xfree(d->name);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		if (((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE)) &&
+		    (((g = pa_context_find_global(c, d->idx & PA_IDX_MASK_DSP)) == NULL ||
+		    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE))))
+			g = NULL;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
+
+	if (g) {
+		error = source_callback(c, g, d);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+	if (error)
+		pa_context_set_error(c, error);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -639,7 +950,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_source_info_by_name(pa_context *c, const char *name, pa_source_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct source_data *d;
 
 	pa_assert(c);
@@ -649,14 +959,13 @@ pa_operation* pa_context_get_source_info_by_name(pa_context *c, const char *name
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
 
-	g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SOURCE, name);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, source_info, sizeof(struct source_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
+	d->name = pa_xstrdup(name);
 	pa_operation_sync(o);
 
 	return o;
@@ -666,7 +975,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_source_info_by_index(pa_context *c, uint32_t idx, pa_source_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct source_data *d;
 
 	pa_assert(c);
@@ -677,18 +985,13 @@ pa_operation* pa_context_get_source_info_by_index(pa_context *c, uint32_t idx, p
 
 	pw_log_debug("context %p: index %d", c, idx);
 
-	if (((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE)) &&
-	    (((g = pa_context_find_global(c, idx & PA_IDX_MASK_DSP)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE))))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, source_info, sizeof(struct source_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
+	d->idx = idx;
 	pa_operation_sync(o);
 
 	return o;
@@ -697,16 +1000,13 @@ pa_operation* pa_context_get_source_info_by_index(pa_context *c, uint32_t idx, p
 static void source_info_list(pa_operation *o, void *userdata)
 {
 	struct source_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
-	if (wait_globals(c, PA_SUBSCRIPTION_MASK_SOURCE, o) < 0)
-		return;
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_SOURCE))
 			continue;
-		d->global = g;
-		source_callback(d);
+		source_callback(c, g, d);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -724,9 +1024,10 @@ pa_operation* pa_context_get_source_info_list(pa_context *c, pa_source_info_cb_t
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, source_info_list, sizeof(struct source_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -738,9 +1039,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_volume_by_index(pa_context *c, uint32_t idx, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -751,19 +1050,18 @@ pa_operation* pa_context_set_source_volume_by_index(pa_context *c, uint32_t idx,
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, pa_cvolume_valid(volume), PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE)) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->volume = *volume;
+	d->have_volume = true;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -771,9 +1069,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_volume_by_name(pa_context *c, const char *name, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -784,18 +1080,18 @@ pa_operation* pa_context_set_source_volume_by_name(pa_context *c, const char *na
 
 	pw_log_debug("context %p: name %s", c, name);
 
-	if ((g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SOURCE, name)) == NULL) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->volume = *volume;
+	d->have_volume = true;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -803,9 +1099,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_mute_by_index(pa_context *c, uint32_t idx, int mute, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -815,19 +1109,17 @@ pa_operation* pa_context_set_source_mute_by_index(pa_context *c, uint32_t idx, i
 
 	pw_log_debug("context %p: index %d", c, idx);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE)) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, NULL, mute);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->mute = mute;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -835,9 +1127,7 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_mute_by_name(pa_context *c, const char *name, int mute, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
-	struct success_ack *d;
-	int error = 0;
+	struct volume_data *d;
 
 	pa_assert(c);
 	pa_assert(c->refcount >= 1);
@@ -847,18 +1137,17 @@ pa_operation* pa_context_set_source_mute_by_name(pa_context *c, const char *name
 
 	pw_log_debug("context %p: name %s", c, name);
 
-	if ((g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SOURCE, name)) == NULL) {
-		error = PA_ERR_INVALID;
-	} else {
-		set_node_volume(c, g, NULL, mute);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_node_volume_mute, sizeof(struct volume_data));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->mute = mute;
 	pa_operation_sync(o);
+
 	return o;
 }
 
@@ -900,16 +1189,24 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_port_by_index(pa_context *c, uint32_t idx, const char*port, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct device_route *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
+
+	pw_log_debug("context %p: idx %d", c, idx);
+
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_device_route, sizeof(struct device_route));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
+	d->idx = idx;
+	d->port = pa_xstrdup(port);
+	d->direction = SPA_DIRECTION_INPUT;
 	pa_operation_sync(o);
-
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
@@ -917,30 +1214,64 @@ SPA_EXPORT
 pa_operation* pa_context_set_source_port_by_name(pa_context *c, const char*name, const char*port, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct device_route *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
+
+	pw_log_debug("context %p: name %s", c, name);
+
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_device_route, sizeof(struct device_route));
 	d = o->userdata;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE;
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
+	d->name = pa_xstrdup(name);
+	d->port = pa_xstrdup(port);
+	d->direction = SPA_DIRECTION_INPUT;
 	pa_operation_sync(o);
-
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
 struct server_data {
-	pa_context *context;
 	pa_server_info_cb_t cb;
 	void *userdata;
 	struct global *global;
 };
 
-static void server_callback(struct server_data *d)
+static const char *get_default_name(pa_context *c, uint32_t mask)
 {
-	pa_context *c = d->context;
+	struct global *g;
+	const char *str, *name = NULL, *type, *key;
+
+	if (c->metadata) {
+		if (mask & PA_SUBSCRIPTION_MASK_SINK)
+			key = METADATA_DEFAULT_SINK;
+		else if (mask & PA_SUBSCRIPTION_MASK_SOURCE)
+			key = METADATA_DEFAULT_SOURCE;
+		else
+			return NULL;
+
+		if (pa_metadata_get(c->metadata, PW_ID_CORE, key, &type, &name) <= 0)
+			name = NULL;
+	}
+	spa_list_for_each(g, &c->globals, link) {
+		if ((g->mask & mask) != mask)
+			continue;
+		if (g->props != NULL &&
+		    (str = pw_properties_get(g->props, PW_KEY_NODE_NAME)) != NULL &&
+		    (name == NULL || strcmp(name, str) == 0))
+			return str;
+	}
+	return "unknown";
+}
+
+static void server_callback(struct server_data *d, pa_context *c)
+{
 	const struct pw_core_info *info = c->core_info;
+	const char *str;
 	pa_server_info i;
 
 	spa_zero(i);
@@ -948,20 +1279,23 @@ static void server_callback(struct server_data *d)
 	i.host_name = info->host_name;
 	i.server_version = info->version;
 	i.server_name = info->name;
-	i.sample_spec.format = PA_SAMPLE_S16LE;
-	i.sample_spec.rate = 44100;
+	i.sample_spec.format = PA_SAMPLE_FLOAT32NE;
+	if (info->props && (str = spa_dict_lookup(info->props, "default.clock.rate")) != NULL)
+		i.sample_spec.rate = atoi(str);
+	else
+		i.sample_spec.rate = 44100;
 	i.sample_spec.channels = 2;
-	i.default_sink_name = "unknown";
-	i.default_source_name = "unknown";
+	i.default_sink_name = get_default_name(c, PA_SUBSCRIPTION_MASK_SINK);
+	i.default_source_name = get_default_name(c, PA_SUBSCRIPTION_MASK_SOURCE);
 	i.cookie = info->cookie;
         pa_channel_map_init_extend(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
-	d->cb(d->context, &i, d->userdata);
+	d->cb(c, &i, d->userdata);
 }
 
 static void server_info(pa_operation *o, void *userdata)
 {
 	struct server_data *d = userdata;
-	server_callback(d);
+	server_callback(d, o->context);
 	pa_operation_done(o);
 }
 
@@ -975,9 +1309,10 @@ pa_operation* pa_context_get_server_info(pa_context *c, pa_server_info_cb_t cb, 
 	pa_assert(c->refcount >= 1);
 	pa_assert(cb);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, server_info, sizeof(struct server_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -986,31 +1321,36 @@ pa_operation* pa_context_get_server_info(pa_context *c, pa_server_info_cb_t cb, 
 }
 
 struct module_data {
-	pa_context *context;
+	uint32_t idx;
 	pa_module_info_cb_t cb;
 	void *userdata;
-	struct global *global;
 };
 
-static void module_callback(struct module_data *d)
+static int module_callback(pa_context *c, struct module_data *d, struct global *g)
 {
-	struct global *g = d->global;
-	d->cb(d->context, &g->module_info.info, 0, d->userdata);
+	d->cb(c, &g->module_info.info, 0, d->userdata);
+	return 0;
 }
 
 static void module_info(pa_operation *o, void *userdata)
 {
 	struct module_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		module_callback(d);
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_MODULE))
+		g = NULL;
+
+	if (g) {
+		error = module_callback(c, d, g);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		error = PA_ERR_INVALID;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
-
+	if (error)
+		pa_context_set_error(c, error);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -1018,7 +1358,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_module_info(pa_context *c, uint32_t idx, pa_module_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct module_data *d;
 
 	pa_assert(c);
@@ -1027,16 +1366,13 @@ pa_operation* pa_context_get_module_info(pa_context *c, uint32_t idx, pa_module_
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_MODULE))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, module_info, sizeof(struct module_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 
 	return o;
@@ -1045,14 +1381,13 @@ pa_operation* pa_context_get_module_info(pa_context *c, uint32_t idx, pa_module_
 static void module_info_list(pa_operation *o, void *userdata)
 {
 	struct module_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_MODULE))
 			continue;
-		d->global = g;
-		module_callback(d);
+		module_callback(c, d, g);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -1070,9 +1405,10 @@ pa_operation* pa_context_get_module_info_list(pa_context *c, pa_module_info_cb_t
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, module_info_list, sizeof(struct module_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -1105,31 +1441,36 @@ pa_operation* pa_context_unload_module(pa_context *c, uint32_t idx, pa_context_s
 }
 
 struct client_data {
-	pa_context *context;
+	uint32_t idx;
 	pa_client_info_cb_t cb;
 	void *userdata;
-	struct global *global;
 };
 
-static void client_callback(struct client_data *d)
+static int client_callback(pa_context *c, struct client_data *d, struct global *g)
 {
-	struct global *g = d->global;
-	d->cb(d->context, &g->client_info.info, 0, d->userdata);
+	d->cb(c, &g->client_info.info, 0, d->userdata);
+	return 0;
 }
 
 static void client_info(pa_operation *o, void *userdata)
 {
 	struct client_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		client_callback(d);
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_CLIENT))
+		g = NULL;
+
+	if (g) {
+		error = client_callback(c, d, g);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		error = PA_ERR_INVALID;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
-
+	if (error)
+		pa_context_set_error(c, error);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -1137,7 +1478,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_client_info(pa_context *c, uint32_t idx, pa_client_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct client_data *d;
 
 	pa_assert(c);
@@ -1146,16 +1486,13 @@ pa_operation* pa_context_get_client_info(pa_context *c, uint32_t idx, pa_client_
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_CLIENT))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, client_info, sizeof(struct client_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 
 	return o;
@@ -1164,14 +1501,13 @@ pa_operation* pa_context_get_client_info(pa_context *c, uint32_t idx, pa_client_
 static void client_info_list(pa_operation *o, void *userdata)
 {
 	struct client_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_CLIENT))
 			continue;
-		d->global = g;
-		client_callback(d);
+		client_callback(c, d, g);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -1189,9 +1525,10 @@ pa_operation* pa_context_get_client_info_list(pa_context *c, pa_client_info_cb_t
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, client_info_list, sizeof(struct client_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -1199,27 +1536,49 @@ pa_operation* pa_context_get_client_info_list(pa_context *c, pa_client_info_cb_t
 	return o;
 }
 
+struct kill_client {
+	uint32_t idx;
+	pa_context_success_cb_t cb;
+	void *userdata;
+};
+
+static void do_kill_client(pa_operation *o, void *userdata)
+{
+	struct kill_client *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error = 0;
+
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_CLIENT))
+		g = NULL;
+
+	if (g) {
+		pw_registry_destroy(c->registry, g->id);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error ? 0 : 1, d->userdata);
+	pa_operation_done(o);
+}
+
 SPA_EXPORT
 pa_operation* pa_context_kill_client(pa_context *c, uint32_t idx, pa_context_success_cb_t cb, void *userdata)
 {
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct kill_client *d;
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_CLIENT)) {
-		error = PA_ERR_INVALID;
-	} else {
-		pw_registry_destroy(c->registry, g->id);
-	}
+	pa_context_ensure_registry(c);
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_kill_client, sizeof(struct kill_client));
 	d = o->userdata;
+	d->idx = idx;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
@@ -1227,79 +1586,44 @@ pa_operation* pa_context_kill_client(pa_context *c, uint32_t idx, pa_context_suc
 }
 
 struct card_data {
-	pa_context *context;
 	pa_card_info_cb_t cb;
 	pa_context_success_cb_t success_cb;
+	char *name;
+	uint32_t idx;
 	void *userdata;
-	struct global *global;
 	char *profile;
 };
 
-static void card_callback(struct card_data *d)
+static int card_callback(pa_context *c, struct card_data *d, struct global *g)
 {
-	struct global *g = d->global;
 	pa_card_info *i = &g->card_info.info;
-	int n_profiles, j;
-	struct param *p;
-
-	n_profiles = g->card_info.n_profiles;
-
-	i->profiles = alloca(sizeof(pa_card_profile_info) * n_profiles);
-	i->profiles2 = alloca(sizeof(pa_card_profile_info2 *) * n_profiles);
-	i->n_profiles = 0;
-
-	pw_log_debug("context %p: info for %d", g->context, g->id);
-
-	spa_list_for_each(p, &g->card_info.profiles, link) {
-		uint32_t id;
-		const char *name;
-
-		if (spa_pod_parse_object(p->param,
-				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&id),
-				SPA_PARAM_PROFILE_name,  SPA_POD_String(&name)) < 0) {
-			pw_log_warn("device %d: can't parse profile", g->id);
-			continue;
-		}
-
-		j = i->n_profiles++;
-		i->profiles[j].name = name;
-		i->profiles[j].description = name;
-		i->profiles[j].n_sinks = 1;
-		i->profiles[j].n_sources = 1;
-		i->profiles[j].priority = 1;
-
-		i->profiles2[j] = alloca(sizeof(pa_card_profile_info2));
-		i->profiles2[j]->name = i->profiles[j].name;
-		i->profiles2[j]->description = i->profiles[j].description;
-	        i->profiles2[j]->n_sinks = i->profiles[j].n_sinks;
-	        i->profiles2[j]->n_sources = i->profiles[j].n_sources;
-	        i->profiles2[j]->priority = i->profiles[j].priority;
-	        i->profiles2[j]->available = 1;
-
-		if (g->card_info.active_profile == id) {
-			i->active_profile = &i->profiles[j];
-			i->active_profile2 = i->profiles2[j];
-		}
-	}
-	d->cb(d->context, i, 0, d->userdata);
+	d->cb(c, i, 0, d->userdata);
+	return 0;
 }
 
 static void card_info(pa_operation *o, void *userdata)
 {
 	struct card_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		if (wait_global(d->context, d->global, o) < 0)
-			return;
-		card_callback(d);
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_CARD, d->name);
+		pa_xfree(d->name);
+	} else if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_CARD))
+		g = NULL;
+
+	if (g) {
+		error = card_callback(c, d, g);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		error = PA_ERR_INVALID;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
-
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -1307,7 +1631,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_card_info_by_index(pa_context *c, uint32_t idx, pa_card_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct card_data *d;
 
 	pa_assert(c);
@@ -1318,17 +1641,13 @@ pa_operation* pa_context_get_card_info_by_index(pa_context *c, uint32_t idx, pa_
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
 	pw_log_debug("context %p: %u", c, idx);
-
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_CARD))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, card_info, sizeof(struct card_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 	return o;
 }
@@ -1337,7 +1656,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_card_info_by_name(pa_context *c, const char *name, pa_card_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct card_data *d;
 
 	pa_assert(c);
@@ -1348,15 +1666,13 @@ pa_operation* pa_context_get_card_info_by_name(pa_context *c, const char *name, 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
 
 	pw_log_debug("context %p: %s", c, name);
-
-	g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_CARD, name);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, card_info, sizeof(struct card_data));
 	d = o->userdata;
-	d->context = c;
+	d->name = pa_xstrdup(name);
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 	return o;
 }
@@ -1364,16 +1680,13 @@ pa_operation* pa_context_get_card_info_by_name(pa_context *c, const char *name, 
 static void card_info_list(pa_operation *o, void *userdata)
 {
 	struct card_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
-	if (wait_globals(c, PA_SUBSCRIPTION_MASK_CARD, o) < 0)
-		return;
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_CARD))
 			continue;
-		d->global = g;
-		card_callback(d);
+		card_callback(c, d, g);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -1392,10 +1705,10 @@ pa_operation* pa_context_get_card_info_list(pa_context *c, pa_card_info_cb_t cb,
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
 	pw_log_debug("context %p", c);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, card_info_list, sizeof(struct card_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -1406,16 +1719,23 @@ pa_operation* pa_context_get_card_info_list(pa_context *c, pa_card_info_cb_t cb,
 static void card_profile(pa_operation *o, void *userdata)
 {
 	struct card_data *d = userdata;
-	struct global *g = d->global;
-	pa_context *c = d->context;
-	int res = 0;
+	struct global *g;
+	pa_context *c = o->context;
+	int error = 0;
 	uint32_t id = SPA_ID_INVALID;
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct param *p;
 
+	if (d->name) {
+		g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_CARD, d->name);
+		pa_xfree(d->name);
+	} else if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_CARD))
+		g = NULL;
+
 	if (g == NULL) {
-		pa_context_set_error(c, PA_ERR_INVALID);
+		error = PA_ERR_INVALID;
 		goto done;
 	}
 
@@ -1435,18 +1755,26 @@ static void card_profile(pa_operation *o, void *userdata)
 			break;
 		}
 	}
-	if (id == SPA_ID_INVALID)
-		goto done;;
+	if (id == SPA_ID_INVALID) {
+		error = PA_ERR_INVALID;
+		goto done;
+	}
+
+	if (!SPA_FLAG_IS_SET(g->permissions, PW_PERM_W | PW_PERM_X)) {
+		error = PA_ERR_ACCESS;
+		goto done;
+	}
 
 	pw_device_set_param((struct pw_device*)g->proxy,
 			SPA_PARAM_Profile, 0,
 			spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
 				SPA_PARAM_PROFILE_index, SPA_POD_Int(id)));
-	res = 1;
 done:
+	if (error)
+		pa_context_set_error(c, error);
 	if (d->success_cb)
-		d->success_cb(c, res, d->userdata);
+		d->success_cb(c, error ? 0 : 1, d->userdata);
 	pa_operation_done(o);
 	free(d->profile);
 }
@@ -1455,7 +1783,6 @@ SPA_EXPORT
 pa_operation* pa_context_set_card_profile_by_index(pa_context *c, uint32_t idx, const char*profile, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct card_data *d;
 
 	pa_assert(c);
@@ -1464,18 +1791,14 @@ pa_operation* pa_context_set_card_profile_by_index(pa_context *c, uint32_t idx, 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_CARD))
-		g = NULL;
-
 	pw_log_debug("Card set profile %s", profile);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, card_profile, sizeof(struct card_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->success_cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	d->profile = strdup(profile);
 	pa_operation_sync(o);
 
@@ -1486,7 +1809,6 @@ SPA_EXPORT
 pa_operation* pa_context_set_card_profile_by_name(pa_context *c, const char*name, const char*profile, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct card_data *d;
 
 	pa_assert(c);
@@ -1495,16 +1817,14 @@ pa_operation* pa_context_set_card_profile_by_name(pa_context *c, const char*name
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(c, !name || *name, PA_ERR_INVALID);
 
-	g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_CARD, name);
-
 	pw_log_debug("Card set profile %s", profile);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, card_profile, sizeof(struct card_data));
 	d = o->userdata;
-	d->context = c;
+	d->name = pa_xstrdup(name);
 	d->success_cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	d->profile = strdup(profile);
 	pa_operation_sync(o);
 
@@ -1539,15 +1859,14 @@ static pa_stream *find_stream(pa_context *c, uint32_t idx)
 }
 
 struct sink_input_data {
-	pa_context *context;
 	pa_sink_input_info_cb_t cb;
+	uint32_t idx;
 	void *userdata;
-	struct global *global;
 };
 
-static void sink_input_callback(struct sink_input_data *d)
+static int sink_input_callback(pa_context *c, struct sink_input_data *d, struct global *g)
 {
-	struct global *g = d->global, *cl;
+	struct global *cl;
 	struct pw_node_info *info = g->info;
 	const char *name = NULL;
 	uint32_t n;
@@ -1556,9 +1875,9 @@ static void sink_input_callback(struct sink_input_data *d)
 	pa_stream *s;
 
 	if (info == NULL)
-		return;
+		return PA_ERR_INVALID;
 
-	s = find_stream(d->context, g->id);
+	s = find_stream(c, g->id);
 
 	if (info->props) {
 		if ((name = spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME)) == NULL &&
@@ -1569,7 +1888,7 @@ static void sink_input_callback(struct sink_input_data *d)
 	if (name == NULL)
 		name = "unknown";
 
-	cl = pa_context_find_global(d->context, g->node_info.client_id);
+	cl = pa_context_find_global(c, g->node_info.client_id);
 
 	spa_zero(i);
 	i.index = g->id;
@@ -1581,7 +1900,7 @@ static void sink_input_callback(struct sink_input_data *d)
 	}
 	else {
 		struct global *l;
-		l = pa_context_find_linked(d->context, g->id);
+		l = pa_context_find_linked(c, g->id);
 		i.sink = l ? l->id : PA_INVALID_INDEX;
 	}
 	if (s && s->sample_spec.channels > 0) {
@@ -1621,27 +1940,33 @@ static void sink_input_callback(struct sink_input_data *d)
 	i.has_volume = true;
 	i.volume_writable = true;
 
-	pw_log_debug("context %p: sink info for %d sink:%d", g->context, i.index, i.sink);
+	pw_log_debug("context %p: sink info for %d sink:%d", c, i.index, i.sink);
 
-	d->cb(d->context, &i, 0, d->userdata);
+	d->cb(c, &i, 0, d->userdata);
 
 	pa_proplist_free(i.proplist);
+	return 0;
 }
 
 static void sink_input_info(pa_operation *o, void *userdata)
 {
 	struct sink_input_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		if (wait_global(d->context, d->global, o) < 0)
-			return;
-		sink_input_callback(d);
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
+		g = NULL;
+
+	if (g) {
+		error = sink_input_callback(c, d, g);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		error = PA_ERR_INVALID;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
+	if (error)
+		pa_context_set_error(c, PA_ERR_INVALID);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -1649,7 +1974,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_sink_input_info(pa_context *c, uint32_t idx, pa_sink_input_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct sink_input_data *d;
 
 	pa_assert(c);
@@ -1659,17 +1983,13 @@ pa_operation* pa_context_get_sink_input_info(pa_context *c, uint32_t idx, pa_sin
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
 	pw_log_debug("context %p: info for %d", c, idx);
-
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, sink_input_info, sizeof(struct sink_input_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 
 	return o;
@@ -1678,16 +1998,13 @@ pa_operation* pa_context_get_sink_input_info(pa_context *c, uint32_t idx, pa_sin
 static void sink_input_info_list(pa_operation *o, void *userdata)
 {
 	struct sink_input_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
 
-	if (wait_globals(c, PA_SUBSCRIPTION_MASK_SINK_INPUT, o) < 0)
-		return;
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
 			continue;
-		d->global = g;
-		sink_input_callback(d);
+		sink_input_callback(c, d, g);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -1706,10 +2023,10 @@ pa_operation* pa_context_get_sink_input_info_list(pa_context *c, pa_sink_input_i
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
 	pw_log_debug("context %p", c);
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, sink_input_info_list, sizeof(struct sink_input_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -1717,20 +2034,80 @@ pa_operation* pa_context_get_sink_input_info_list(pa_context *c, pa_sink_input_i
 	return o;
 }
 
+struct target_node {
+	uint32_t idx;
+	uint32_t mask;
+	uint32_t target_idx;
+	uint32_t target_mask;
+	char *target_name;
+	pa_context_success_cb_t cb;
+	void *userdata;
+	const char *key;
+	const char *type;
+};
+
+static void do_target_node(pa_operation *o, void *userdata)
+{
+	struct target_node *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error = 0;
+
+	pw_log_debug("%p", c);
+
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & d->mask)) {
+		error = PA_ERR_NOENTITY;
+		goto done;
+	}
+
+	if (d->target_name) {
+		g = pa_context_find_global_by_name(c, d->target_mask, d->target_name);
+	} else {
+		if ((g = pa_context_find_global(c, d->target_idx)) == NULL ||
+		    !(g->mask & d->target_mask))
+			g = NULL;
+		else {
+			d->target_name = spa_aprintf("%d", g->id);
+		}
+	}
+	if (g == NULL) {
+		error = PA_ERR_NOENTITY;
+	} else if (c->metadata) {
+		pw_metadata_set_property(c->metadata->proxy,
+				d->idx, d->key, d->type, d->target_name);
+	} else {
+		error = PA_ERR_NOTIMPLEMENTED;
+	}
+done:
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error != 0 ? 0 : 1, d->userdata);
+	pa_operation_done(o);
+	pa_xfree(d->target_name);
+}
+
 SPA_EXPORT
 pa_operation* pa_context_move_sink_input_by_name(pa_context *c, uint32_t idx, const char *sink_name, pa_context_success_cb_t cb, void* userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct target_node *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_target_node, sizeof(struct target_node));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK_INPUT;
+	d->target_name = pa_xstrdup(sink_name);
+	d->target_mask = PA_SUBSCRIPTION_MASK_SINK;
+	d->key = "target.node.name";
+	d->type = SPA_TYPE_INFO_BASE "String";
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
@@ -1738,46 +2115,83 @@ SPA_EXPORT
 pa_operation* pa_context_move_sink_input_by_index(pa_context *c, uint32_t idx, uint32_t sink_idx, pa_context_success_cb_t cb, void* userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct target_node *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_target_node, sizeof(struct target_node));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK_INPUT;
+	d->target_idx = sink_idx;
+	d->target_mask = PA_SUBSCRIPTION_MASK_SINK;
+	d->key = "target.node";
+	d->type = SPA_TYPE_INFO_BASE "Id";
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
-	pw_log_warn("Not Implemented");
 	return o;
+}
+
+struct stream_volume {
+	uint32_t idx;
+	uint32_t mask;
+	bool have_volume;
+	pa_cvolume volume;
+	int mute;
+	pa_context_success_cb_t cb;
+	void *userdata;
+};
+
+static void do_stream_volume_mute(pa_operation *o, void *userdata)
+{
+	struct stream_volume *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error = 0;
+	pa_stream *s;
+
+	if ((s = find_stream(c, d->idx)) == NULL) {
+		if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & d->mask))
+			g = NULL;
+	}
+	if (s) {
+		error = set_stream_volume(c, s,
+				d->have_volume ? &d->volume : NULL,
+				d->have_volume ? s->mute : d->mute);
+	} else if (g) {
+		error = set_node_volume(c, g,
+				d->have_volume ? &d->volume : NULL,
+				d->have_volume ? g->node_info.mute : d->mute);
+	} else {
+		error = PA_ERR_INVALID;
+	}
+
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error != 0 ? 0 : 1, d->userdata);
+	pa_operation_done(o);
 }
 
 SPA_EXPORT
 pa_operation* pa_context_set_sink_input_volume(pa_context *c, uint32_t idx, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	pa_stream *s;
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct stream_volume *d;
 
 	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
-			g = NULL;
-	}
-	if (s) {
-		set_stream_volume(c, s, volume, s->mute);
-	} else if (g) {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	} else {
-		error = PA_ERR_INVALID;
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_stream_volume_mute, sizeof(struct stream_volume));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK_INPUT;
+	d->volume = *volume;
+	d->have_volume = true;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
@@ -1787,52 +2201,44 @@ pa_operation* pa_context_set_sink_input_volume(pa_context *c, uint32_t idx, cons
 SPA_EXPORT
 pa_operation* pa_context_set_sink_input_mute(pa_context *c, uint32_t idx, int mute, pa_context_success_cb_t cb, void *userdata)
 {
-	pa_stream *s;
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct stream_volume *d;
 
 	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
-			g = NULL;
-	}
-
-	if (s) {
-		set_stream_volume(c, s, NULL, mute);
-	} else if (g) {
-		set_node_volume(c, g, NULL, mute);
-	} else {
-		error = PA_ERR_INVALID;
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_stream_volume_mute, sizeof(struct stream_volume));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK_INPUT;
+	d->mute = mute;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
 	return o;
 }
 
-SPA_EXPORT
-pa_operation* pa_context_kill_sink_input(pa_context *c, uint32_t idx, pa_context_success_cb_t cb, void *userdata)
-{
-	pa_stream *s;
-	struct global *g;
-	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+struct kill_stream {
+	uint32_t idx;
+	uint32_t mask;
+	pa_context_success_cb_t cb;
+	void *userdata;
+};
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SINK_INPUT))
+static void do_kill_stream(pa_operation *o, void *userdata)
+{
+	struct kill_stream *d = userdata;
+	pa_context *c = o->context;
+	struct global *g;
+	int error = 0;
+	pa_stream *s;
+
+	if ((s = find_stream(c, d->idx)) == NULL) {
+		if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+		    !(g->mask & d->mask))
 			g = NULL;
 	}
-
 	if (s) {
 		pw_stream_destroy(s->stream);
 	} else if (g) {
@@ -1840,10 +2246,27 @@ pa_operation* pa_context_kill_sink_input(pa_context *c, uint32_t idx, pa_context
 	} else {
 		error = PA_ERR_INVALID;
 	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	if (error != 0)
+		pa_context_set_error(c, error);
+	if (d->cb)
+		d->cb(c, error != 0 ? 0 : 1, d->userdata);
+	pa_operation_done(o);
+}
+
+SPA_EXPORT
+pa_operation* pa_context_kill_sink_input(pa_context *c, uint32_t idx, pa_context_success_cb_t cb, void *userdata)
+{
+	pa_operation *o;
+	struct kill_stream *d;
+
+	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_kill_stream, sizeof(struct kill_stream));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SINK_INPUT;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
@@ -1851,15 +2274,14 @@ pa_operation* pa_context_kill_sink_input(pa_context *c, uint32_t idx, pa_context
 }
 
 struct source_output_data {
-	pa_context *context;
+	uint32_t idx;
 	pa_source_output_info_cb_t cb;
 	void *userdata;
-	struct global *global;
 };
 
-static void source_output_callback(struct source_output_data *d)
+static int source_output_callback(struct source_output_data *d, pa_context *c, struct global *g)
 {
-	struct global *g = d->global, *l, *cl;
+	struct global *l, *cl;
 	struct pw_node_info *info = g->info;
 	const char *name = NULL;
 	uint32_t n;
@@ -1869,9 +2291,9 @@ static void source_output_callback(struct source_output_data *d)
 
 	pw_log_debug("index %d", g->id);
 	if (info == NULL)
-		return;
+		return PA_ERR_INVALID;
 
-	s = find_stream(d->context, g->id);
+	s = find_stream(c, g->id);
 
 	if (info->props) {
 		if ((name = spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME)) == NULL &&
@@ -1882,7 +2304,7 @@ static void source_output_callback(struct source_output_data *d)
 	if (name == NULL)
 		name = "unknown";
 
-	cl = pa_context_find_global(d->context, g->node_info.client_id);
+	cl = pa_context_find_global(c, g->node_info.client_id);
 
 	spa_zero(i);
 	i.index = g->id;
@@ -1893,7 +2315,7 @@ static void source_output_callback(struct source_output_data *d)
 		i.source = s->device_index;
 	}
 	else {
-		l = pa_context_find_linked(d->context, g->id);
+		l = pa_context_find_linked(c, g->id);
 		i.source = l ? l->id : PA_INVALID_INDEX;
 	}
 	if (s && s->sample_spec.channels > 0) {
@@ -1933,25 +2355,31 @@ static void source_output_callback(struct source_output_data *d)
 	i.has_volume = true;
 	i.volume_writable = true;
 
-	d->cb(d->context, &i, 0, d->userdata);
+	d->cb(c, &i, 0, d->userdata);
 
 	pa_proplist_free(i.proplist);
+	return 0;
 }
 
 static void source_output_info(pa_operation *o, void *userdata)
 {
 	struct source_output_data *d = userdata;
-	int eol = 1;
+	pa_context *c = o->context;
+	struct global *g;
+	int error;
 
-	if (d->global) {
-		if (wait_global(d->context, d->global, o) < 0)
-			return;
-		source_output_callback(d);
+	if ((g = pa_context_find_global(c, d->idx)) == NULL ||
+	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
+		g = NULL;
+
+	if (g) {
+		error = source_output_callback(d, c, g);
 	} else {
-		pa_context_set_error(d->context, PA_ERR_INVALID);
-		eol = -1;
+		error = PA_ERR_INVALID;
 	}
-	d->cb(d->context, NULL, eol, d->userdata);
+	if (error)
+		pa_context_set_error(c, error);
+	d->cb(c, NULL, error ? -1 : 1, d->userdata);
 	pa_operation_done(o);
 }
 
@@ -1959,7 +2387,6 @@ SPA_EXPORT
 pa_operation* pa_context_get_source_output_info(pa_context *c, uint32_t idx, pa_source_output_info_cb_t cb, void *userdata)
 {
 	pa_operation *o;
-	struct global *g;
 	struct source_output_data *d;
 
 	pa_assert(c);
@@ -1968,16 +2395,13 @@ pa_operation* pa_context_get_source_output_info(pa_context *c, uint32_t idx, pa_
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, idx != PA_INVALID_INDEX, PA_ERR_INVALID);
 
-	if ((g = pa_context_find_global(c, idx)) == NULL ||
-	    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
-		g = NULL;
+	pa_context_ensure_registry(c);
 
 	o = pa_operation_new(c, NULL, source_output_info, sizeof(struct source_output_data));
 	d = o->userdata;
-	d->context = c;
+	d->idx = idx;
 	d->cb = cb;
 	d->userdata = userdata;
-	d->global = g;
 	pa_operation_sync(o);
 
 	return o;
@@ -1986,17 +2410,13 @@ pa_operation* pa_context_get_source_output_info(pa_context *c, uint32_t idx, pa_
 static void source_output_info_list(pa_operation *o, void *userdata)
 {
 	struct source_output_data *d = userdata;
-	pa_context *c = d->context;
+	pa_context *c = o->context;
 	struct global *g;
-
-	if (wait_globals(c, PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT, o) < 0)
-		return;
 
 	spa_list_for_each(g, &c->globals, link) {
 		if (!(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
 			continue;
-		d->global = g;
-		source_output_callback(d);
+		source_output_callback(d, c, g);
 	}
 	d->cb(c, NULL, 1, d->userdata);
 	pa_operation_done(o);
@@ -2014,9 +2434,10 @@ pa_operation* pa_context_get_source_output_info_list(pa_context *c, pa_source_ou
 
 	PA_CHECK_VALIDITY_RETURN_NULL(c, c->state == PA_CONTEXT_READY, PA_ERR_BADSTATE);
 
+	pa_context_ensure_registry(c);
+
 	o = pa_operation_new(c, NULL, source_output_info_list, sizeof(struct source_output_data));
 	d = o->userdata;
-	d->context = c;
 	d->cb = cb;
 	d->userdata = userdata;
 	pa_operation_sync(o);
@@ -2028,16 +2449,22 @@ SPA_EXPORT
 pa_operation* pa_context_move_source_output_by_name(pa_context *c, uint32_t idx, const char *source_name, pa_context_success_cb_t cb, void* userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct target_node *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_target_node, sizeof(struct target_node));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
+	d->target_name = pa_xstrdup(source_name);
+	d->target_mask = PA_SUBSCRIPTION_MASK_SOURCE;
+	d->key = "target.node.name";
+	d->type = SPA_TYPE_INFO_BASE "String";
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
@@ -2045,47 +2472,41 @@ SPA_EXPORT
 pa_operation* pa_context_move_source_output_by_index(pa_context *c, uint32_t idx, uint32_t source_idx, pa_context_success_cb_t cb, void* userdata)
 {
 	pa_operation *o;
-	struct success_ack *d;
+	struct target_node *d;
 
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_target_node, sizeof(struct target_node));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
+	d->target_idx = source_idx;
+	d->target_mask = PA_SUBSCRIPTION_MASK_SOURCE;
+	d->key = "target.node";
+	d->type = SPA_TYPE_INFO_BASE "Id";
 	d->cb = cb;
-	d->error = PA_ERR_NOTIMPLEMENTED;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
-	pw_log_warn("Not Implemented");
 	return o;
 }
 
 SPA_EXPORT
 pa_operation* pa_context_set_source_output_volume(pa_context *c, uint32_t idx, const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	pa_stream *s;
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct stream_volume *d;
 
 	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
-			g = NULL;
-	}
-
-	if (s) {
-		set_stream_volume(c, s, volume, s->mute);
-	} else if (g) {
-		set_node_volume(c, g, volume, g->node_info.mute);
-	} else {
-		error = PA_ERR_INVALID;
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_stream_volume_mute, sizeof(struct stream_volume));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
+	d->volume = *volume;
+	d->have_volume = true;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
@@ -2095,28 +2516,18 @@ pa_operation* pa_context_set_source_output_volume(pa_context *c, uint32_t idx, c
 SPA_EXPORT
 pa_operation* pa_context_set_source_output_mute(pa_context *c, uint32_t idx, int mute, pa_context_success_cb_t cb, void *userdata)
 {
-	pa_stream *s;
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct stream_volume *d;
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
-			g = NULL;
-	}
-	if (s) {
-		set_stream_volume(c, s, NULL, mute);
-	} else if (g) {
-		set_node_volume(c, g, NULL, mute);
-	} else {
-		error = PA_ERR_INVALID;
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
+
+	o = pa_operation_new(c, NULL, do_stream_volume_mute, sizeof(struct stream_volume));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
+	d->mute = mute;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 
@@ -2126,29 +2537,17 @@ pa_operation* pa_context_set_source_output_mute(pa_context *c, uint32_t idx, int
 SPA_EXPORT
 pa_operation* pa_context_kill_source_output(pa_context *c, uint32_t idx, pa_context_success_cb_t cb, void *userdata)
 {
-	pa_stream *s;
-	struct global *g;
 	pa_operation *o;
-	struct success_ack *d;
-	int error = 0;
+	struct kill_stream *d;
 
-	if ((s = find_stream(c, idx)) == NULL) {
-		if ((g = pa_context_find_global(c, idx)) == NULL ||
-		    !(g->mask & PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))
-			g = NULL;
-	}
+	pw_log_debug("contex %p: index %d", c, idx);
+	pa_context_ensure_registry(c);
 
-	if (s) {
-		pw_stream_destroy(s->stream);
-	} else if (g) {
-		pw_registry_destroy(c->registry, g->id);
-	} else {
-		error = PA_ERR_INVALID;
-	}
-	o = pa_operation_new(c, NULL, on_success, sizeof(struct success_ack));
+	o = pa_operation_new(c, NULL, do_kill_stream, sizeof(struct kill_stream));
 	d = o->userdata;
+	d->idx = idx;
+	d->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
 	d->cb = cb;
-	d->error = error;
 	d->userdata = userdata;
 	pa_operation_sync(o);
 

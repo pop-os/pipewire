@@ -58,8 +58,16 @@ extern "C" {
 #define PA_MIN			SPA_MIN
 #define PA_MAX			SPA_MAX
 #define pa_assert		spa_assert
-#define pa_assert_se		spa_assert
-#define pa_return_val_if_fail	spa_return_val_if_fail
+#define pa_assert_se		spa_assert_se
+#define pa_return_val_if_fail(expr, val)				\
+	do {								\
+		if (SPA_UNLIKELY(!(expr))) {				\
+			pa_log_debug("Assertion '%s' failed at %s:%u %s()\n",	\
+				#expr , __FILE__, __LINE__, __func__);	\
+			return (val);					\
+		}							\
+	} while(false)
+
 #define pa_assert_not_reached	spa_assert_not_reached
 
 #define PA_INT_TYPE_SIGNED(type) (!!((type) 0 > (type) -1))
@@ -131,7 +139,7 @@ void pa_context_fail(PA_CONST pa_context *c, int error);
 #define PA_CHECK_VALIDITY(context, expression, error)			\
 do {									\
 	if (!(expression)) {						\
-		pw_log_trace("'%s' failed at %s:%u %s()",		\
+		pw_log_debug("'%s' failed at %s:%u %s()",		\
 			#expression, __FILE__, __LINE__, __func__);	\
 		return -pa_context_set_error((context), (error));	\
 	}								\
@@ -140,7 +148,7 @@ do {									\
 #define PA_CHECK_VALIDITY_RETURN_ANY(context, expression, error, value)	\
 do {									\
 	if (!(expression)) {						\
-		pw_log_trace("'%s' failed at %s:%u %s()",		\
+		pw_log_debug("'%s' failed at %s:%u %s()",		\
 			#expression, __FILE__, __LINE__, __func__);	\
 		pa_context_set_error((context), (error));		\
 		return value;						\
@@ -223,9 +231,19 @@ struct param {
 #define PA_IDX_FLAG_DSP		0x800000U
 #define PA_IDX_MASK_DSP		0x7fffffU
 
+struct global;
+
+struct global_info {
+	uint32_t version;
+	const void *events;
+	pw_destroy_t destroy;
+	void (*sync) (struct global *g);
+};
+
 struct global {
 	struct spa_list link;
 	uint32_t id;
+	uint32_t permissions;
 	char *type;
 	struct pw_properties *props;
 
@@ -239,7 +257,7 @@ struct global {
 	int subscribed:1;
 
 	void *info;
-	pw_destroy_t destroy;
+	struct global_info *ginfo;
 
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
@@ -253,13 +271,21 @@ struct global {
 		} link_info;
 		/* for sink/source */
 		struct {
-			uint32_t client_id;
+			uint32_t client_id;	/* if of owner client */
 			uint32_t monitor;
+#define NODE_FLAG_HW_VOLUME	(1 << 0)
+#define NODE_FLAG_DEVICE_VOLUME	(1 << 1)
+#define NODE_FLAG_HW_MUTE	(1 << 4)
+#define NODE_FLAG_DEVICE_MUTE	(1 << 5)
+			uint32_t flags;
 			float volume;
 			bool mute;
 			uint32_t n_channel_volumes;
 			float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
-			uint32_t device_id;
+			uint32_t device_id;		/* id of device (card) */
+			uint32_t profile_device_id;	/* id in profile */
+			float base_volume;
+			float volume_step;
 		} node_info;
 		struct {
 			uint32_t node_id;
@@ -269,7 +295,15 @@ struct global {
 			struct spa_list profiles;
 			uint32_t n_profiles;
 			uint32_t active_profile;
+			struct spa_list ports;
+			uint32_t n_ports;
 			pa_card_info info;
+			pa_card_profile_info2 *card_profiles;
+			unsigned int pending_profiles:1;
+			pa_card_port_info *card_ports;
+			unsigned int pending_ports:1;
+			uint32_t active_port_output;
+			uint32_t active_port_input;
 		} card_info;
 		struct {
 			pa_module_info info;
@@ -277,6 +311,9 @@ struct global {
 		struct {
 			pa_client_info info;
 		} client_info;
+		struct {
+			struct pw_array metadata;
+		} metadata_info;
 	};
 };
 
@@ -317,11 +354,15 @@ struct pa_context {
 
 	int no_fail:1;
 	int disconnect:1;
+
+	struct global *metadata;
 };
 
 struct global *pa_context_find_global(pa_context *c, uint32_t id);
+const char *pa_context_find_global_name(pa_context *c, uint32_t id);
 struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, const char *name);
 struct global *pa_context_find_linked(pa_context *c, uint32_t id);
+void pa_context_ensure_registry(pa_context *c);
 
 struct pa_mem {
 	struct spa_list link;
@@ -439,6 +480,14 @@ struct pa_operation
 pa_operation *pa_operation_new(pa_context *c, pa_stream *s, pa_operation_cb_t cb, size_t userdata_size);
 void pa_operation_done(pa_operation *o);
 int pa_operation_sync(pa_operation *o);
+
+#define METADATA_DEFAULT_SINK		"default.audio.sink.name"
+#define METADATA_DEFAULT_SOURCE		"default.audio.source.name"
+
+int pa_metadata_update(struct global *global, uint32_t subject, const char *key,
+                        const char *type, const char *value);
+int pa_metadata_get(struct global *global, uint32_t subject, const char *key,
+                        const char **type, const char **value);
 
 #ifdef __cplusplus
 }

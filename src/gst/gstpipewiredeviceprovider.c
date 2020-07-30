@@ -297,33 +297,6 @@ static void remove_pending(struct pending *p)
 }
 
 static void
-on_core_info (void *data, const struct pw_core_info *info)
-{
-  GstPipeWireDeviceProvider *self = data;
-  GstDeviceProvider *provider = (GstDeviceProvider*)self;
-  const gchar *value;
-
-  if (info == NULL || info->props == NULL)
-    return;
-
-  value = spa_dict_lookup (info->props, PW_KEY_CORE_MONITORS);
-  if (value) {
-    gchar **monitors = g_strsplit (value, ",", -1);
-    gint i;
-
-    GST_DEBUG_OBJECT (provider, "have hidden providers: %s", value);
-
-    for (i = 0; monitors[i]; i++) {
-      if (strcmp (monitors[i], "v4l2") == 0)
-        gst_device_provider_hide_provider (provider, "v4l2deviceprovider");
-      else if (strcmp (monitors[i], "alsa") == 0)
-        gst_device_provider_hide_provider (provider, "pulsedeviceprovider");
-    }
-    g_strfreev (monitors);
-  }
-}
-
-static void
 on_core_done (void *data, uint32_t id, int seq)
 {
   GstPipeWireDeviceProvider *self = data;
@@ -353,7 +326,7 @@ on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
   pw_log_error("error id:%u seq:%d res:%d (%s): %s",
           id, seq, res, spa_strerror(res), message);
 
-  if (id == 0) {
+  if (id == PW_ID_CORE) {
     self->error = res;
   }
   pw_thread_loop_signal(self->loop, FALSE);
@@ -361,7 +334,6 @@ on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 
 static const struct pw_core_events core_events = {
   PW_VERSION_CORE_EVENTS,
-  .info = on_core_info,
   .done = on_core_done,
   .error = on_core_error,
 };
@@ -405,6 +377,13 @@ static const struct pw_node_events node_events = {
 };
 
 static void
+removed_node (void *data)
+{
+  struct node_data *nd = data;
+  pw_proxy_destroy((struct pw_proxy*)nd->proxy);
+}
+
+static void
 destroy_node (void *data)
 {
   struct node_data *nd = data;
@@ -428,8 +407,16 @@ destroy_node (void *data)
 
 static const struct pw_proxy_events proxy_node_events = {
   PW_VERSION_PROXY_EVENTS,
+  .removed = removed_node,
   .destroy = destroy_node,
 };
+
+static void
+removed_port (void *data)
+{
+  struct port_data *pd = data;
+  pw_proxy_destroy((struct pw_proxy*)pd->proxy);
+}
 
 static void
 destroy_port (void *data)
@@ -442,6 +429,7 @@ destroy_port (void *data)
 
 static const struct pw_proxy_events proxy_port_events = {
         PW_VERSION_PROXY_EVENTS,
+        .removed = removed_port,
         .destroy = destroy_port,
 };
 
@@ -451,7 +439,9 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 {
   struct core_data *rd = data;
   GstPipeWireDeviceProvider *self = rd->self;
+  GstDeviceProvider *provider = (GstDeviceProvider*)self;
   struct node_data *nd;
+  const char *str;
 
   if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
     struct pw_node *node;
@@ -460,6 +450,16 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
                     id, type, PW_VERSION_NODE, sizeof(*nd));
     if (node == NULL)
       goto no_mem;
+
+    if (props != NULL) {
+      str = spa_dict_lookup(props, PW_KEY_OBJECT_PATH);
+      if (str != NULL) {
+	if (g_str_has_prefix(str, "alsa:"))
+          gst_device_provider_hide_provider (provider, "pulsedeviceprovider");
+	else if (g_str_has_prefix(str, "v4l2:"))
+          gst_device_provider_hide_provider (provider, "v4l2deviceprovider");
+      }
+    }
 
     nd = pw_proxy_get_user_data((struct pw_proxy*)node);
     nd->self = self;
@@ -474,7 +474,6 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
   else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
     struct pw_port *port;
     struct port_data *pd;
-    const char *str;
 
     if ((str = spa_dict_lookup(props, PW_KEY_NODE_ID)) == NULL)
       return;
@@ -563,6 +562,7 @@ gst_pipewire_device_provider_probe (GstDeviceProvider * provider)
   }
 
   GST_DEBUG_OBJECT (self, "disconnect");
+  pw_proxy_destroy ((struct pw_proxy*)data->registry);
   pw_core_disconnect (self->core);
   pw_context_destroy (c);
   pw_loop_destroy (l);
@@ -654,7 +654,10 @@ gst_pipewire_device_provider_stop (GstDeviceProvider * provider)
   GstPipeWireDeviceProvider *self = GST_PIPEWIRE_DEVICE_PROVIDER (provider);
 
   GST_DEBUG_OBJECT (self, "stopping provider");
-
+  if (self->registry) {
+    pw_proxy_destroy ((struct pw_proxy*)self->registry);
+    self->registry = NULL;
+  }
   if (self->core) {
     pw_core_disconnect (self->core);
     self->core = NULL;

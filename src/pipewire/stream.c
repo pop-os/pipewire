@@ -54,6 +54,7 @@ struct buffer {
 	uint32_t id;
 #define BUFFER_FLAG_MAPPED	(1 << 0)
 #define BUFFER_FLAG_QUEUED	(1 << 1)
+#define BUFFER_FLAG_ADDED	(1 << 2)
 	uint32_t flags;
 };
 
@@ -184,6 +185,7 @@ static struct param *add_param(struct stream *impl,
 	idx = get_param_index(id);
 	if (idx != -1) {
 		impl->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+		impl->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
 		impl->params[idx].flags |= SPA_PARAM_INFO_READ;
 	}
 
@@ -585,7 +587,8 @@ static void clear_buffers(struct pw_stream *stream)
 	for (i = 0; i < impl->n_buffers; i++) {
 		struct buffer *b = &impl->buffers[i];
 
-		pw_stream_emit_remove_buffer(stream, &b->this);
+		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ADDED))
+			pw_stream_emit_remove_buffer(stream, &b->this);
 
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->this.buffer->n_datas; j++) {
@@ -667,6 +670,7 @@ static int impl_port_use_buffers(void *object,
 				    d->type == SPA_DATA_DmaBuf) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
+					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				}
 				else if (d->data == NULL) {
 					pw_log_error(NAME" %p: invalid buffer mem", stream);
@@ -674,7 +678,6 @@ static int impl_port_use_buffers(void *object,
 				}
 				buf_size += d->maxsize;
 			}
-			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 
 			if (size > 0 && buf_size != size) {
 				pw_log_error(NAME" %p: invalid buffer size %d", stream, buf_size);
@@ -689,8 +692,6 @@ static int impl_port_use_buffers(void *object,
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b = &impl->buffers[i];
 
-		b->flags = 0;
-		b->id = i;
 		b->this.buffer = buffers[i];
 
 		if (impl->direction == SPA_DIRECTION_OUTPUT) {
@@ -698,6 +699,7 @@ static int impl_port_use_buffers(void *object,
 			push_queue(impl, &impl->dequeued, b);
 		}
 
+		SPA_FLAG_SET(b->flags, BUFFER_FLAG_ADDED);
 		pw_stream_emit_add_buffer(stream, &b->this);
 	}
 
@@ -1045,9 +1047,10 @@ static void on_core_error(void *object, uint32_t id, int seq, int res, const cha
 {
 	struct pw_stream *stream = object;
 
-	pw_log_error(NAME" %p: error id:%u seq:%d res:%d (%s): %s", stream,
+	pw_log_debug(NAME" %p: error id:%u seq:%d res:%d (%s): %s", stream,
 			id, seq, res, spa_strerror(res), message);
-	if (id == 0) {
+
+	if (id == PW_ID_CORE && res == -EPIPE) {
 		stream_set_state(stream, PW_STREAM_STATE_UNCONNECTED, message);
 	}
 }
@@ -1357,7 +1360,7 @@ static int find_format(struct stream *impl, enum pw_direction direction,
 				SPA_PARAM_EnumFormat, &state,
 				NULL, &format, &b)) != 1) {
 		pw_log_warn(NAME" %p: no format given", impl);
-		return -ENOENT;
+		return 0;
 	}
 
 	if ((res = spa_format_parse(format, media_type, media_subtype)) < 0)
@@ -1387,9 +1390,9 @@ static const char *get_media_class(struct stream *impl)
 		case SPA_MEDIA_SUBTYPE_midi:
 			return "Midi";
 		}
-		/* fallthrough */
-	default:
 		return "Data";
+	default:
+		return "Unknown";
 	}
 }
 
@@ -1472,9 +1475,10 @@ pw_stream_connect(struct pw_stream *stream,
 	pw_properties_set(stream->properties, "mem.warn-mlock", impl->warn_mlock ? "true" : "false");
 
 	if ((pw_properties_get(stream->properties, PW_KEY_MEDIA_CLASS) == NULL)) {
+		const char *media_type = pw_properties_get(stream->properties, PW_KEY_MEDIA_TYPE);
 		pw_properties_setf(stream->properties, PW_KEY_MEDIA_CLASS, "Stream/%s/%s",
 				direction == PW_DIRECTION_INPUT ? "Input" : "Output",
-				get_media_class(impl));
+				media_type ? media_type : get_media_class(impl));
 	}
 	if ((str = pw_properties_get(stream->properties, PW_KEY_FORMAT_DSP)) != NULL)
 		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, str);
@@ -1499,6 +1503,10 @@ pw_stream_connect(struct pw_stream *stream,
 
 	pw_log_debug(NAME" %p: creating node", stream);
 	props = pw_properties_copy(stream->properties);
+	if (props == NULL) {
+		res = -errno;
+		goto error_node;
+	}
 
 	if ((str = pw_properties_get(props, PW_KEY_STREAM_MONITOR)) &&
 	    pw_properties_parse_bool(str)) {
@@ -1528,6 +1536,7 @@ pw_stream_connect(struct pw_stream *stream,
 				PW_VERSION_NODE,
 				props,
 				0);
+		props = NULL;
 		if (impl->node == NULL) {
 			res = -errno;
 			goto error_node;
@@ -1535,6 +1544,7 @@ pw_stream_connect(struct pw_stream *stream,
 	} else {
 		impl->node = follower;
 		pw_properties_free(props);
+		props = NULL;
 	}
 	if (!SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_INACTIVE))
 		pw_impl_node_set_active(impl->node, true);
@@ -1555,12 +1565,17 @@ pw_stream_connect(struct pw_stream *stream,
 
 error_connect:
 	pw_log_error(NAME" %p: can't connect: %s", stream, spa_strerror(res));
-	return res;
+	goto exit_cleanup;
 error_node:
 	pw_log_error(NAME" %p: can't make node: %s", stream, spa_strerror(res));
-	return res;
+	goto exit_cleanup;
 error_proxy:
 	pw_log_error(NAME" %p: can't make proxy: %s", stream, spa_strerror(res));
+	goto exit_cleanup;
+
+exit_cleanup:
+	if (props)
+		pw_properties_free(props);
 	return res;
 }
 

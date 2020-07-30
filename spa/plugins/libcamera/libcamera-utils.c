@@ -47,8 +47,6 @@ int get_dev_fd(struct spa_libcamera_device *dev) {
 
 int spa_libcamera_open(struct spa_libcamera_device *dev)
 {
-	int refCnt = 0;
-
 	if(!dev) {
 		return -1;
 	}
@@ -69,7 +67,6 @@ int spa_libcamera_is_capture(struct spa_libcamera_device *dev)
 
 int spa_libcamera_close(struct spa_libcamera_device *dev)
 {
-	int refCnt = 0;
 	if(!dev) {
 		spa_log_error(dev->log, "Invalid argument");
 		return -1;
@@ -95,8 +92,6 @@ static int spa_libcamera_buffer_recycle(struct impl *this, uint32_t buffer_id)
 {
 	struct port *port = &this->out_ports[0];
 	struct buffer *b = &port->buffers[buffer_id];
-	struct spa_libcamera_device *dev = &port->dev;
-	int err;
 
 	if (!SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUTSTANDING))
 		return 0;
@@ -329,46 +324,6 @@ static const struct format_info *find_format_info_by_media_type(uint32_t type,
 	return NULL;
 }
 
-static uint32_t
-enum_filter_format(uint32_t media_type, int32_t media_subtype,
-		   const struct spa_pod *filter, uint32_t index)
-{
-	uint32_t video_format = 0;
-
-	switch (media_type) {
-	case SPA_MEDIA_TYPE_video:
-	case SPA_MEDIA_TYPE_image:
-		if (media_subtype == SPA_MEDIA_SUBTYPE_raw) {
-			const struct spa_pod_prop *p;
-			const struct spa_pod *val;
-			uint32_t n_values, choice;
-			const uint32_t *values;
-
-			if (!(p = spa_pod_find_prop(filter, NULL, SPA_FORMAT_VIDEO_format)))
-				return SPA_VIDEO_FORMAT_UNKNOWN;
-
-			val = spa_pod_get_values(&p->value, &n_values, &choice);
-
-			if (val->type != SPA_TYPE_Id)
-				return SPA_VIDEO_FORMAT_UNKNOWN;
-
-			values = SPA_POD_BODY(val);
-
-			if (choice == SPA_CHOICE_None) {
-				if (index == 0)
-					video_format = values[0];
-			} else {
-				if (index + 1 < n_values)
-					video_format = values[index + 1];
-			}
-		} else {
-			if (index == 0)
-				video_format = SPA_VIDEO_FORMAT_ENCODED;
-		}
-	}
-	return video_format;
-}
-
 #define FOURCC_ARGS(f) (f)&0x7f,((f)>>8)&0x7f,((f)>>16)&0x7f,((f)>>24)&0x7f
 
 static int
@@ -377,16 +332,14 @@ spa_libcamera_enum_format(struct impl *this, int seq,
 		     const struct spa_pod *filter)
 {
 	struct port *port = &this->out_ports[0];
-	int res, n_fractions;
+	int res;
 	const struct format_info *info;
-	struct spa_pod_choice *choice;
-	uint32_t filter_media_type, filter_media_subtype, video_format;
+	uint32_t video_format;
 	struct spa_libcamera_device *dev = &port->dev;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = { 0 };
 	struct spa_pod_frame f[2];
 	struct spa_result_node_params result;
-	uint32_t count = 0;
 	uint32_t width = 0, height = 0;
 
 	if ((res = spa_libcamera_open(dev)) < 0) {
@@ -405,7 +358,6 @@ spa_libcamera_enum_format(struct impl *this, int seq,
 next_fmtdesc:
 	port->fmtdesc_index++;
 
-next:
 	result.index = result.next++;
 
 	/* Enumerate all the video formats supported by libcamera */
@@ -434,17 +386,13 @@ next:
 		spa_pod_builder_id(&b, info->format);
 	}
 
-have_size:
 	spa_log_info(this->log, "%s:: In have_size: Got width = %u height = %u\n", __FUNCTION__, width, height);
 
 	spa_pod_builder_prop(&b, SPA_FORMAT_VIDEO_size, 0);
 	spa_pod_builder_rectangle(&b, port->fmt.width, port->fmt.height);
 
-have_framerate:
 	spa_pod_builder_prop(&b, SPA_FORMAT_VIDEO_framerate, 0);
-
 	spa_pod_builder_push_choice(&b, &f[1], SPA_CHOICE_None, 0);
-	choice = (struct spa_pod_choice*)spa_pod_builder_frame(&b, &f[1]);
 
 	/* Below framerates are hardcoded until framerates are queried from libcamera */
 	port->fmt.denominator = 30;
@@ -463,7 +411,7 @@ have_framerate:
 
 enum_end:
 	res = 0;
-exit:
+
 	spa_libcamera_close(dev);
 	return res;
 }
@@ -472,7 +420,7 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 {
 	struct port *port = &this->out_ports[0];
 	struct spa_libcamera_device *dev = &port->dev;
-	int res, cmd;
+	int res;
 	struct camera_fmt fmt;
 	const struct format_info *info = NULL;
 	uint32_t video_format;
@@ -569,20 +517,19 @@ static int mmap_read(struct impl *this)
 {
 	struct port *port = &this->out_ports[0];
 	struct spa_libcamera_device *dev = &port->dev;
-	struct buffer *b;
-	struct spa_data *d;
-	unsigned int sequence;
+	struct buffer *b = NULL;
+	struct spa_data *d = NULL;
+	unsigned int sequence = 0;
 	struct timeval timestamp;
 	int64_t pts;
 	struct OutBuf *pOut = NULL;
 	struct CamData *pDatas = NULL;
-	uint32_t bytesused;
+	uint32_t bytesused = 0;
+
+	timestamp.tv_sec = 0;
+	timestamp.tv_usec = 0;
 
 	if(dev->camera) {
-		if(!libcamera_is_data_available(dev->camera)) {
-			return -1;
-		}
-
 		pOut = (struct OutBuf *)libcamera_get_ring_buffer_data(dev->camera);
 		if(!pOut) {
 			spa_log_debug(this->log, "Exiting %s as pOut is NULL\n", __FUNCTION__);
@@ -672,6 +619,7 @@ static void libcamera_on_fd_events(struct spa_source *source)
 	struct spa_io_buffers *io;
 	struct port *port = &this->out_ports[0];
 	struct buffer *b;
+	uint64_t cnt;
 
 	if (source->rmask & SPA_IO_ERR) {
 		struct port *port = &this->out_ports[0];
@@ -683,6 +631,11 @@ static void libcamera_on_fd_events(struct spa_source *source)
 
 	if (!(source->rmask & SPA_IO_IN)) {
 		spa_log_warn(this->log, "libcamera %p: spurious wakeup %d", this, source->rmask);
+		return;
+	}
+	
+	if (spa_system_eventfd_read(this->system, port->source.fd, &cnt) < 0) {
+		spa_log_error(this->log, "Failed to read on event fd");
 		return;
 	}
 
@@ -727,7 +680,6 @@ static int spa_libcamera_use_buffers(struct impl *this, struct spa_buffer **buff
 
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b;
-		int64_t fd;
 
 		b = &port->buffers[i];
 		b->id = i;
@@ -862,16 +814,6 @@ mmap_init(struct impl *this,
 	return 0;
 }
 
-static int userptr_init(struct impl *this)
-{
-	return -ENOTSUP;
-}
-
-static int read_init(struct impl *this)
-{
-	return -ENOTSUP;
-}
-
 static int
 spa_libcamera_alloc_buffers(struct impl *this,
 		       struct spa_buffer **buffers,
@@ -879,7 +821,6 @@ spa_libcamera_alloc_buffers(struct impl *this,
 {
 	int res;
 	struct port *port = &this->out_ports[0];
-	struct spa_libcamera_device *dev = &port->dev;
 
 	if (port->n_buffers > 0)
 		return -EIO;
@@ -911,10 +852,18 @@ static int spa_libcamera_stream_on(struct impl *this)
 
 	port->source.func = libcamera_on_fd_events;
 	port->source.data = this;
-	port->source.fd = get_dev_fd(dev);
+	port->source.fd = spa_system_eventfd_create(this->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	port->source.mask = SPA_IO_IN | SPA_IO_ERR;
 	port->source.rmask = 0;
-	spa_loop_add_source(this->data_loop, &port->source);
+	if (port->source.fd < 0) {
+		spa_log_error(this->log, "Failed to create eventfd. Exting %s with -EIO\n", __FUNCTION__);
+	} else {
+		spa_loop_add_source(this->data_loop, &port->source);
+		this->have_source = true;
+
+		libcamera_set_spa_system(dev->camera, this->system);
+		libcamera_set_eventfd(dev->camera, port->source.fd);
+	}	
 
 	dev->active = true;
 
