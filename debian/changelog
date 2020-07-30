@@ -82,9 +82,20 @@ pipewire (0.3.7-1) UNRELEASED; urgency=medium
   * Install symlinks to pw-cat(1) for its various aliases
   * d/rules: Update exclusion paths for dh_makeshlibs
   * Set upstream metadata fields: Bug-Database, Bug-Submit
-  * New upstream release
+  * Rename libspa-lib-0.2-dev to libspa-0.2-dev.
+    There used to be a shared library named libspa-lib, but recent versions
+    have moved to a purely header- and plugin-based system, making the -lib
+    postfix meaningless.
+  * Break out SPA modules into libspa-0.2-modules.
+    This will make compatibility more straightforward if PipeWire and SPA
+    break API/ABI out of sync with each other.
+    Thanks to Sjoerd Simons
+  * Document more ways to test bits of PipeWire manually
+  * Disable the Bluetooth plugin for now.
+    Upstream developer George Kiagiadakis says this plugin is not in a
+    good state at the moment.
 
- -- Simon McVittie <smcv@debian.org>  Thu, 30 Jul 2020 08:51:24 +0100
+ -- Simon McVittie <smcv@debian.org>  Thu, 30 Jul 2020 09:48:15 +0100
 
 pipewire (0.2.7-1) unstable; urgency=medium
 
