@@ -33,7 +33,7 @@ extern "C" {
 
 /** properties of SPA_TYPE_OBJECT_PropInfo */
 enum spa_prop_info {
-	SPA_PROP_INFO_START,		/**< id of object, one of enum spa_param_type */
+	SPA_PROP_INFO_START,
 	SPA_PROP_INFO_id,		/**< associated id of the property */
 	SPA_PROP_INFO_name,		/**< name of the property */
 	SPA_PROP_INFO_type,		/**< type and range/enums of property */
@@ -46,7 +46,7 @@ enum spa_prop_info {
 
 /** predefined properties for SPA_TYPE_OBJECT_Props */
 enum spa_prop {
-	SPA_PROP_START,			/**< id of object, one of enum spa_param_type */
+	SPA_PROP_START,
 
 	SPA_PROP_unknown,		/**< an unknown property */
 
@@ -69,12 +69,15 @@ enum spa_prop {
 	SPA_PROP_START_Audio	= 0x10000,	/**< audio related properties */
 	SPA_PROP_waveType,
 	SPA_PROP_frequency,
-	SPA_PROP_volume,
-	SPA_PROP_mute,
+	SPA_PROP_volume,			/**< a volume (Float), 0.0 silence, 1.0 normal */
+	SPA_PROP_mute,				/**< mute (Bool) */
 	SPA_PROP_patternType,
 	SPA_PROP_ditherType,
 	SPA_PROP_truncate,
-	SPA_PROP_channelVolumes,
+	SPA_PROP_channelVolumes,		/**< a volume array, one volume per
+						  *  channel (Array of Float) */
+	SPA_PROP_volumeBase,			/**< a volume base (Float) */
+	SPA_PROP_volumeStep,			/**< a volume step (Float) */
 
 	SPA_PROP_START_Video	= 0x20000,	/**< video related properties */
 	SPA_PROP_brightness,

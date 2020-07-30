@@ -50,8 +50,8 @@ load-module libpipewire-module-spa-device-factory
 load-module libpipewire-module-spa-node-factory
 load-module libpipewire-module-client-node
 load-module libpipewire-module-client-device
-load-module libpipewire-module-access
 load-module libpipewire-module-portal
+load-module libpipewire-module-access # access.allowed=@media_session_path@ access.force=flatpak
 load-module libpipewire-module-adapter
 load-module libpipewire-module-link-factory
 load-module libpipewire-module-session-manager
@@ -74,4 +74,4 @@ create-object spa-node-factory factory.name=support.node.driver node.name=Dummy 
 # Execute the given program. This is usually used to start the
 # session manager. run the session manager with -h for options
 #
-exec pipewire-media-session # -d alsa-seq,alsa-pcm,bluez5,metadata
+exec @media_session_path@ # -d alsa-seq,alsa-pcm,bluez5,metadata

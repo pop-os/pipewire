@@ -101,12 +101,15 @@ struct state {
 	bool have_format;
 	struct spa_audio_info current_format;
 
+	unsigned int default_channels;
+
 	snd_pcm_uframes_t buffer_frames;
 	snd_pcm_uframes_t period_frames;
 	snd_pcm_format_t format;
 	int rate;
 	int channels;
 	size_t frame_size;
+	int blocks;
 	int rate_denom;
 	uint32_t delay;
 	uint32_t read_size;

@@ -98,17 +98,19 @@ void pw_impl_port_update_state(struct pw_impl_port *port, enum pw_impl_port_stat
 {
 	enum pw_impl_port_state old = port->state;
 
-	if (old != state) {
-		pw_log(state == PW_IMPL_PORT_STATE_ERROR ?
-				SPA_LOG_LEVEL_ERROR : SPA_LOG_LEVEL_DEBUG,
-			NAME" %p: state %s -> %s (%s)", port,
-			port_state_as_string(old), port_state_as_string(state), error);
+	port->state = state;
+	free((void*)port->error);
+	port->error = error;
 
-		port->state = state;
-		free((void*)port->error);
-		port->error = error;
-		pw_impl_port_emit_state_changed(port, old, state, error);
-	}
+	if (old == state)
+		return;
+
+	pw_log(state == PW_IMPL_PORT_STATE_ERROR ?
+			SPA_LOG_LEVEL_ERROR : SPA_LOG_LEVEL_DEBUG,
+		NAME" %p: state %s -> %s (%s)", port,
+		port_state_as_string(old), port_state_as_string(state), error);
+
+	pw_impl_port_emit_state_changed(port, old, state, error);
 }
 
 static int tee_process(void *object)
@@ -306,6 +308,11 @@ static void emit_params(struct pw_impl_port *port, uint32_t *changed_ids, uint32
 	for (i = 0; i < n_changed_ids; i++) {
 		struct pw_resource *resource;
 		int subscribed = 0;
+
+		pw_log_debug(NAME" %p: emit param %d/%d: %d", port, i, n_changed_ids,
+				changed_ids[i]);
+
+		pw_impl_port_emit_param_changed(port, changed_ids[i]);
 
 		/* first check if anyone is subscribed */
 		spa_list_for_each(resource, &port->global->resource_list, link) {

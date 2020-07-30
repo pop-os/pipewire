@@ -37,6 +37,7 @@
 #include <spa/debug/pod.h>
 
 #include "pipewire/pipewire.h"
+#include "extensions/metadata.h"
 
 #include "media-session.h"
 
@@ -51,12 +52,17 @@ struct impl {
 	struct sm_media_session *session;
 	struct spa_hook listener;
 
+	struct spa_hook meta_listener;
+
 	struct pw_context *context;
 
 	uint32_t sample_rate;
 
 	struct spa_list node_list;
 	int seq;
+
+	char *default_audio_sink;
+	char *default_audio_source;
 };
 
 struct node {
@@ -221,6 +227,9 @@ handle_node(struct impl *impl, struct sm_object *object)
 			}
 			node->active = true;
 		}
+		else if (strstr(media_class, "Unknown") == media_class) {
+			node->active = true;
+		}
 
 		node->direction = direction;
 		node->type = NODE_TYPE_STREAM;
@@ -279,7 +288,7 @@ static void destroy_node(struct impl *impl, struct node *node)
 	if (node->enabled)
 		spa_hook_remove(&node->listener);
 	free(node->media);
-	if (node->peer)
+	if (node->peer && node->peer->peer == node)
 		node->peer->peer = NULL;
 	sm_object_remove_data((struct sm_object*)node->obj, SESSION_KEY);
 }
@@ -298,8 +307,7 @@ static void session_create(void *data, struct sm_object *object)
 
 	if (res < 0) {
 		pw_log_warn(NAME" %p: can't handle global %d", impl, object->id);
-	}
-	else
+	} else
 		sm_media_session_schedule_rescan(impl->session);
 }
 
@@ -339,6 +347,8 @@ static int find_node(void *data, struct node *node)
 	int priority = 0;
 	uint64_t plugged = 0;
 	struct sm_device *device = node->obj->device;
+	const char *name;
+	bool is_default = false;
 
 	pw_log_debug(NAME " %p: looking at node '%d' enabled:%d state:%d peer:%p exclusive:%d",
 			impl, node->id, node->enabled, node->obj->info->state, node->peer, node->exclusive);
@@ -359,6 +369,16 @@ static int find_node(void *data, struct node *node)
 		pw_log_debug(".. incompatible media %s <-> %s", node->media, find->target->media);
 		return 0;
 	}
+	if ((name = pw_properties_get(node->obj->obj.props, PW_KEY_NODE_NAME)) != NULL) {
+		if (node->media && strcmp(node->media, "Audio") == 0) {
+			if (node->direction == PW_DIRECTION_INPUT &&
+			    impl->default_audio_sink != NULL)
+				is_default = strcmp(impl->default_audio_sink, name) == 0;
+			else if (node->direction == PW_DIRECTION_OUTPUT &&
+			    impl->default_audio_source != NULL)
+				is_default = strcmp(impl->default_audio_source, name) == 0;
+		}
+	}
 
 	plugged = node->plugged;
 	priority = node->priority;
@@ -372,7 +392,7 @@ static int find_node(void *data, struct node *node)
 	pw_log_debug(NAME " %p: found node '%d' %"PRIu64" prio:%d", impl,
 			node->id, plugged, priority);
 
-	if (find->node == NULL ||
+	if (find->node == NULL || is_default ||
 	    priority > find->priority ||
 	    (priority == find->priority && plugged > find->plugged)) {
 		pw_log_debug(NAME " %p: new best %d %" PRIu64, impl, priority, plugged);
@@ -390,8 +410,36 @@ static int link_nodes(struct node *node, struct node *peer)
 
 	pw_log_debug(NAME " %p: link nodes %d %d", impl, node->id, peer->id);
 
-	peer->peer = node;
 	node->peer = peer;
+
+	if (node->direction == PW_DIRECTION_INPUT) {
+		struct node *t = node;
+		node = peer;
+		peer = t;
+	}
+
+	props = pw_properties_new(NULL, NULL);
+	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", node->id);
+	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", peer->id);
+	pw_log_info("linking node %d to node %d", node->id, peer->id);
+
+	sm_media_session_create_links(impl->session, &props->dict);
+
+	pw_properties_free(props);
+
+	return 0;
+}
+
+static int unlink_nodes(struct node *node, struct node *peer)
+{
+	struct impl *impl = node->impl;
+	struct pw_properties *props;
+
+	pw_log_debug(NAME " %p: unlink nodes %d %d", impl, node->id, peer->id);
+
+	if (peer->peer == node)
+		peer->peer = NULL;
+	node->peer = NULL;
 
 	if (node->direction == PW_DIRECTION_INPUT) {
 		struct node *t = node;
@@ -401,10 +449,9 @@ static int link_nodes(struct node *node, struct node *peer)
 	props = pw_properties_new(NULL, NULL);
 	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", node->id);
 	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", peer->id);
-	pw_log_debug(NAME " %p: node %d -> node %d", impl,
-			node->id, peer->id);
+	pw_log_info("unlinking node %d from peer node %d", node->id, peer->id);
 
-	sm_media_session_create_links(impl->session, &props->dict);
+	sm_media_session_remove_links(impl->session, &props->dict);
 
 	pw_properties_free(props);
 
@@ -414,9 +461,9 @@ static int link_nodes(struct node *node, struct node *peer)
 static int rescan_node(struct impl *impl, struct node *n)
 {
 	struct spa_dict *props;
-        const char *str;
-        bool exclusive;
-        struct find_data find;
+	const char *str;
+	bool exclusive, reconnect;
+	struct find_data find;
 	struct pw_node_info *info;
 	struct node *peer;
 	struct sm_object *obj;
@@ -466,12 +513,20 @@ static int rescan_node(struct impl *impl, struct node *n)
 
 	pw_log_debug(NAME " %p: exclusive:%d", impl, exclusive);
 
+	str = spa_dict_lookup(props, PW_KEY_NODE_DONT_RECONNECT);
+	reconnect = str ? !pw_properties_parse_bool(str) : true;
+
 	str = spa_dict_lookup(props, PW_KEY_NODE_TARGET);
+	pw_log_info("trying to link node %d exclusive:%d reconnect:%d target:%s", n->id,
+			exclusive, reconnect, str);
+
 	if (str != NULL) {
 		uint32_t path_id = atoi(str);
 		pw_log_debug(NAME " %p: target:%d", impl, path_id);
 
 		if ((obj = sm_media_session_find_object(impl->session, path_id)) != NULL) {
+			pw_log_debug(NAME " %p: found target:%d type:%s", impl,
+					path_id, obj->type);
 			if (strcmp(obj->type, PW_TYPE_INTERFACE_Node) == 0) {
 				peer = sm_object_get_data(obj, SESSION_KEY);
 				if (peer == NULL)
@@ -479,22 +534,27 @@ static int rescan_node(struct impl *impl, struct node *n)
 				goto do_link;
 			}
 		}
+		pw_log_warn("node %d target:%d not found, find fallback:%d", n->id,
+				path_id, reconnect);
 	}
 
-	spa_list_for_each(peer, &impl->node_list, link)
-		find_node(&find, peer);
+	if (str == NULL || reconnect) {
+		spa_list_for_each(peer, &impl->node_list, link)
+			find_node(&find, peer);
+	}
 
 	if (find.node == NULL) {
 		struct sm_object *obj;
 
-		pw_log_warn(NAME " %p: no node found for %d", impl, n->id);
+		pw_log_warn("no node found for %d", n->id);
 
-		str = spa_dict_lookup(props, PW_KEY_NODE_DONT_RECONNECT);
-		if (str != NULL && pw_properties_parse_bool(str)) {
+		if (!reconnect)
 			sm_media_session_destroy_object(impl->session, n->id);
-		}
 
 		obj = sm_media_session_find_object(impl->session, n->client_id);
+		pw_log_debug(NAME " %p: client_id:%d object:%p type:%s", impl,
+				n->client_id, obj, obj ? obj->type : "None");
+
 		if (obj && strcmp(obj->type, PW_TYPE_INTERFACE_Client) == 0) {
 			pw_client_error((struct pw_client*)obj->proxy,
 				n->id, -ENOENT, "no node available");
@@ -504,7 +564,7 @@ static int rescan_node(struct impl *impl, struct node *n)
 	peer = find.node;
 
 	if (exclusive && peer->obj->info->state == PW_NODE_STATE_RUNNING) {
-		pw_log_warn(NAME" %p: node %d busy, can't get exclusive access", impl, peer->id);
+		pw_log_warn("node %d busy, can't get exclusive access", peer->id);
 		return -EBUSY;
 	}
 	n->exclusive = exclusive;
@@ -545,6 +605,8 @@ static void session_destroy(void *data)
 {
 	struct impl *impl = data;
 	spa_hook_remove(&impl->listener);
+	if (impl->session->metadata)
+		spa_hook_remove(&impl->meta_listener);
 	free(impl);
 }
 
@@ -555,6 +617,137 @@ static const struct sm_media_session_events session_events = {
 	.remove = session_remove,
 	.rescan = session_rescan,
 	.destroy = session_destroy,
+};
+
+static struct node *find_node_by_id(struct impl *impl, uint32_t id)
+{
+	struct node *node;
+	spa_list_for_each(node, &impl->node_list, link) {
+		if (node->id == id)
+			return node;
+	}
+	return NULL;
+}
+
+static struct node *find_node_by_name(struct impl *impl, const char *name)
+{
+	const char *str;
+	struct node *node;
+
+	spa_list_for_each(node, &impl->node_list, link) {
+		str = pw_properties_get(node->obj->obj.props, "node.name");
+		if (str && strcmp(str, name) == 0)
+			return node;
+	}
+	return NULL;
+}
+
+static int move_node(struct impl *impl, const char *source, const char *target)
+{
+	struct node *n, *src_node, *dst_node;
+	const char *str;
+
+	/* find source and dest node */
+	if ((src_node = find_node_by_name(impl, source)) == NULL)
+		return -ENOENT;
+	if ((dst_node = find_node_by_name(impl, target)) == NULL)
+		return -ENOENT;
+
+	if (src_node == dst_node)
+		return 0;
+
+	pw_log_info("move %d -> %d", src_node->id, dst_node->id);
+
+	/* unlink all nodes from source and link to target */
+	spa_list_for_each(n, &impl->node_list, link) {
+		struct pw_node_info *info;
+
+		if (n->peer != src_node)
+			continue;
+
+		if ((info = n->obj->info) == NULL)
+			continue;
+
+		if ((str = spa_dict_lookup(info->props, PW_KEY_NODE_DONT_RECONNECT)) != NULL &&
+		    pw_properties_parse_bool(str))
+			continue;
+
+		unlink_nodes(n, src_node);
+		link_nodes(n, dst_node);
+	}
+	return 0;
+}
+
+static int handle_move(struct impl *impl, struct node *src_node, struct node *dst_node)
+{
+	const char *str;
+	struct pw_node_info *info;
+
+	if (src_node->peer == dst_node)
+		return 0;
+
+	if ((info = src_node->obj->info) == NULL)
+		return -EIO;
+
+	if ((str = spa_dict_lookup(info->props, PW_KEY_NODE_DONT_RECONNECT)) != NULL &&
+		    pw_properties_parse_bool(str)) {
+		pw_log_warn("can't reconnect node %d to %d", src_node->id,
+				dst_node->id);
+		return -EPERM;
+	}
+
+	pw_log_info("move node %d: from peer %d to %d", src_node->id,
+			src_node->peer ? src_node->peer->id : SPA_ID_INVALID,
+			dst_node->id);
+
+	if (src_node->peer)
+		unlink_nodes(src_node, src_node->peer);
+	link_nodes(src_node, dst_node);
+	return 0;
+}
+
+static int metadata_property(void *object, uint32_t subject,
+		const char *key, const char *type, const char *value)
+{
+	struct impl *impl = object;
+
+	if (key == NULL || type == NULL)
+		return 0;
+
+	if (subject == PW_ID_CORE) {
+		if (strcmp(key, "default.audio.sink.name") == 0) {
+			if (impl->default_audio_sink && value)
+				move_node(impl, impl->default_audio_sink, value);
+			free(impl->default_audio_sink);
+			impl->default_audio_sink = value ? strdup(value) : NULL;
+		}
+		else if (strcmp(key, "default.audio.source.name") == 0) {
+			if (impl->default_audio_source && value)
+				move_node(impl, impl->default_audio_source, value);
+			free(impl->default_audio_source);
+			impl->default_audio_source = value ? strdup(value) : NULL;
+		}
+	} else {
+		struct node *src_node, *dst_node = NULL;
+
+		src_node = find_node_by_id(impl, subject);
+
+		if (strcmp(key, "target.node") == 0 && value != NULL) {
+			dst_node = find_node_by_id(impl, atoi(value));
+		}
+		else if (strcmp(key, "target.node.name") == 0 && value != NULL) {
+			dst_node = find_node_by_name(impl, value);
+		}
+		if (src_node && dst_node)
+			handle_move(impl, src_node, dst_node);
+	}
+
+	return 0;
+}
+
+static const struct pw_metadata_events metadata_events = {
+	PW_VERSION_METADATA_EVENTS,
+	.property = metadata_property,
 };
 
 int sm_policy_node_start(struct sm_media_session *session)
@@ -572,7 +765,14 @@ int sm_policy_node_start(struct sm_media_session *session)
 
 	spa_list_init(&impl->node_list);
 
-	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);
+	sm_media_session_add_listener(impl->session,
+			&impl->listener,
+			&session_events, impl);
 
+	if (session->metadata) {
+		pw_metadata_add_listener(session->metadata,
+				&impl->meta_listener,
+				&metadata_events, impl);
+	}
 	return 0;
 }

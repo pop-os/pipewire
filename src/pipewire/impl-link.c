@@ -89,6 +89,10 @@ static void pw_impl_link_update_state(struct pw_impl_link *link, enum pw_link_st
 {
 	enum pw_link_state old = link->info.state;
 
+	link->info.state = state;
+	free((char*)link->info.error);
+	link->info.error = error;
+
 	if (state == old)
 		return;
 
@@ -104,10 +108,6 @@ static void pw_impl_link_update_state(struct pw_impl_link *link, enum pw_link_st
 				pw_link_state_as_string(old),
 				pw_link_state_as_string(state));
 	}
-
-	link->info.state = state;
-	free((char*)link->info.error);
-	link->info.error = error;
 
 	pw_impl_link_emit_state_changed(link, old, state, error);
 
@@ -330,11 +330,11 @@ static int do_negotiate(struct pw_impl_link *this)
 
 error:
 	pw_context_debug_port_params(context, input->node->node, input->direction,
-			input->port_id, SPA_PARAM_EnumFormat,
-			"input format", res);
+			input->port_id, SPA_PARAM_EnumFormat, res,
+			"input format (%s)", error);
 	pw_context_debug_port_params(context, output->node->node, output->direction,
-			output->port_id, SPA_PARAM_EnumFormat,
-			"output format", res);
+			output->port_id, SPA_PARAM_EnumFormat, res,
+			"output format (%s)", error);
 	pw_impl_link_update_state(this, PW_LINK_STATE_ERROR, error);
 	free(format);
 	return res;
@@ -410,6 +410,9 @@ static int do_allocation(struct pw_impl_link *this)
 
 	pw_log_debug(NAME" %p: out-node:%p in-node:%p: out-flags:%08x in-flags:%08x",
 			this, output->node, input->node, out_flags, in_flags);
+
+	this->rt.in_mix.have_buffers = false;
+	this->rt.out_mix.have_buffers = false;
 
 	if (out_flags & SPA_PORT_FLAG_LIVE) {
 		pw_log_debug(NAME" %p: setting link as live", this);
@@ -771,19 +774,61 @@ error_resource:
 static void port_state_changed(struct pw_impl_link *this, struct pw_impl_port *port, struct pw_impl_port *other,
 			enum pw_impl_port_state state, const char *error)
 {
-	pw_log_debug(NAME" %p: port state %d", this, state);
+	pw_log_debug(NAME" %p: port %p state %d", this, port, state);
+
 	switch (state) {
 	case PW_IMPL_PORT_STATE_ERROR:
 		pw_impl_link_update_state(this, PW_LINK_STATE_ERROR, error ? strdup(error) : NULL);
 		break;
-	default:
-		if (state < PW_IMPL_PORT_STATE_PAUSED && this->prepared) {
-			this->preparing = false;
+	case PW_IMPL_PORT_STATE_INIT:
+	case PW_IMPL_PORT_STATE_CONFIGURE:
+		if (this->prepared) {
 			this->prepared = false;
 			pw_impl_link_update_state(this, PW_LINK_STATE_INIT, NULL);
 		}
 		break;
+	case PW_IMPL_PORT_STATE_READY:
+		if (this->prepared) {
+			this->prepared = false;
+			pw_impl_link_update_state(this, PW_LINK_STATE_NEGOTIATING, NULL);
+		}
+		break;
+	case PW_IMPL_PORT_STATE_PAUSED:
+		break;
 	}
+}
+
+static void port_param_changed(struct pw_impl_link *this, uint32_t id,
+		struct pw_impl_port *outport, struct pw_impl_port *inport)
+{
+	enum pw_impl_port_state target;
+
+	pw_log_debug(NAME" %p: outport %p input %p param %d", this,
+		outport, inport, id);
+
+	switch (id) {
+	case SPA_PARAM_EnumFormat:
+		target = PW_IMPL_PORT_STATE_CONFIGURE;
+		break;
+//	case SPA_PARAM_Buffers:
+//		target = PW_IMPL_PORT_STATE_READY;
+//		break;
+	default:
+		return;
+	}
+	if (outport)
+		pw_impl_port_update_state(outport, target, NULL);
+	if (inport)
+		pw_impl_port_update_state(inport, target, NULL);
+
+	pw_impl_link_prepare(this);
+}
+
+static void input_port_param_changed(void *data, uint32_t id)
+{
+	struct impl *impl = data;
+	struct pw_impl_link *this = &impl->this;
+	port_param_changed(this, id, this->output, this->input);
 }
 
 static void input_port_state_changed(void *data, enum pw_impl_port_state old,
@@ -792,6 +837,13 @@ static void input_port_state_changed(void *data, enum pw_impl_port_state old,
 	struct impl *impl = data;
 	struct pw_impl_link *this = &impl->this;
 	port_state_changed(this, this->input, this->output, state, error);
+}
+
+static void output_port_param_changed(void *data, uint32_t id)
+{
+	struct impl *impl = data;
+	struct pw_impl_link *this = &impl->this;
+	port_param_changed(this, id, this->output, this->input);
 }
 
 static void output_port_state_changed(void *data, enum pw_impl_port_state old,
@@ -804,12 +856,14 @@ static void output_port_state_changed(void *data, enum pw_impl_port_state old,
 
 static const struct pw_impl_port_events input_port_events = {
 	PW_VERSION_IMPL_PORT_EVENTS,
+	.param_changed = input_port_param_changed,
 	.state_changed = input_port_state_changed,
 	.destroy = input_port_destroy,
 };
 
 static const struct pw_impl_port_events output_port_events = {
 	PW_VERSION_IMPL_PORT_EVENTS,
+	.param_changed = output_port_param_changed,
 	.state_changed = output_port_state_changed,
 	.destroy = output_port_destroy,
 };
@@ -995,6 +1049,7 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	struct impl *impl;
 	struct pw_impl_link *this;
 	struct pw_impl_node *input_node, *output_node;
+	const char *str;
 	int res;
 
 	if (output == input)
@@ -1037,6 +1092,10 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	this->output = output;
 	this->input = input;
+
+	/* passive means that this link does not make the nodes active */
+	if ((str = pw_properties_get(properties, PW_KEY_LINK_PASSIVE)) != NULL)
+		this->passive = pw_properties_parse_bool(str);
 
 	spa_hook_list_init(&this->listener_list);
 

@@ -134,9 +134,11 @@ struct port {
 struct impl {
 	struct spa_handle handle;
 	struct spa_node node;
+	bool have_source;
 
 	struct spa_log *log;
 	struct spa_loop *data_loop;
+	struct spa_system *system;
 
 	uint64_t info_all;
 	struct spa_node_info info;
@@ -898,10 +900,12 @@ static int impl_clear(struct spa_handle *handle)
 
 	if(port->dev.camera) {
 		deleteLibCamera(port->dev.camera);
-		free(port->dev.camera);
 		port->dev.camera = NULL;
 	}
-
+	if(this->have_source) {
+		spa_system_close(this->system, port->source.fd);
+		this->have_source = false;
+	}
 	return 0;
 }
 
@@ -923,7 +927,6 @@ impl_init(const struct spa_handle_factory *factory,
 	const char *str;
 	struct port *port;
 	int res;
-	int err;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -935,9 +938,15 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	this->system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
 
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data_loop is needed");
+		return -EINVAL;
+	}
+
+	if (this->system == NULL) {
+		spa_log_error(this->log, "a system is needed");
 		return -EINVAL;
 	}
 

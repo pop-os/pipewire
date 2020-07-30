@@ -105,24 +105,66 @@ client_permission_func(struct pw_global *global,
 	return p->permissions;
 }
 
+struct error_data {
+	uint32_t id;
+	int res;
+	const char *error;
+};
+
+static int error_resource(void *object, void *data)
+{
+	struct pw_resource *r = object;
+	struct error_data *d = data;
+	if (r && r->bound_id == d->id)
+		pw_resource_error(r, d->res, d->error);
+	return 0;
+}
+
 static int client_error(void *object, uint32_t id, int res, const char *error)
 {
 	struct pw_resource *resource = object;
 	struct resource_data *data = pw_resource_get_user_data(resource);
 	struct pw_impl_client *client = data->client;
-	struct pw_global *global;
-	struct pw_resource *r, *t;
+	struct error_data d = { id, res, error };
 
-	global = pw_context_find_global(client->context, id);
-	if (global == NULL)
-		return -ENOENT;
-
-	spa_list_for_each_safe(r, t, &global->resource_list, link) {
-		if (t->client != client)
-			continue;
-		pw_resource_error(r, res, error);
-	}
+	pw_log_debug(NAME" %p: error for global %d", client, id);
+	pw_map_for_each(&client->objects, error_resource, &d);
 	return 0;
+}
+
+static int update_properties(struct pw_impl_client *client, const struct spa_dict *dict, bool filter)
+{
+	struct pw_resource *resource;
+	int changed = 0;
+	uint32_t i;
+
+        for (i = 0; i < dict->n_items; i++) {
+		if (filter && strstr(dict->items[i].key, "pipewire.") == dict->items[i].key &&
+		    pw_properties_get(client->properties, dict->items[i].key) != NULL) {
+			pw_log_warn(NAME" %p: refuse property update '%s' to '%s'",
+					client, dict->items[i].key, dict->items[i].value);
+			continue;
+		}
+                changed += pw_properties_set(client->properties, dict->items[i].key, dict->items[i].value);
+	}
+	client->info.props = &client->properties->dict;
+
+	pw_log_debug(NAME" %p: updated %d properties", client, changed);
+
+	if (!changed)
+		return 0;
+
+	client->info.change_mask |= PW_CLIENT_CHANGE_MASK_PROPS;
+
+	pw_impl_client_emit_info_changed(client, &client->info);
+
+	if (client->global)
+		spa_list_for_each(resource, &client->global->resource_list, link)
+			pw_client_resource_info(resource, &client->info);
+
+	client->info.change_mask = 0;
+
+	return changed;
 }
 
 static int client_update_properties(void *object, const struct spa_dict *props)
@@ -130,7 +172,7 @@ static int client_update_properties(void *object, const struct spa_dict *props)
 	struct pw_resource *resource = object;
 	struct resource_data *data = pw_resource_get_user_data(resource);
 	struct pw_impl_client *client = data->client;
-	return pw_impl_client_update_properties(client, props);
+	return update_properties(client, props, true);
 }
 
 static int client_get_permissions(void *object, uint32_t index, uint32_t num)
@@ -266,6 +308,13 @@ static const struct pw_context_events context_events = {
 	.global_removed = context_global_removed,
 };
 
+static void update_busy(struct pw_impl_client *client)
+{
+	struct pw_permission *def;
+	def = find_permission(client, PW_ID_CORE);
+	pw_impl_client_set_busy(client, (def->permissions & PW_PERM_R) ? false : true);
+}
+
 /** Make a new client object
  *
  * \param context a \ref pw_context object to register the client with
@@ -339,6 +388,8 @@ struct pw_impl_client *pw_context_create_client(struct pw_impl_core *core,
 
 	pw_context_emit_check_access(this->context, this);
 
+	update_busy(this);
+
 	return this;
 
 error_clear_array:
@@ -377,6 +428,7 @@ int pw_impl_client_register(struct pw_impl_client *client,
 		PW_KEY_SEC_UID,
 		PW_KEY_SEC_GID,
 		PW_KEY_SEC_LABEL,
+		PW_KEY_ACCESS,
 		NULL
 	};
 
@@ -538,28 +590,7 @@ const struct pw_client_info *pw_impl_client_get_info(struct pw_impl_client *clie
 SPA_EXPORT
 int pw_impl_client_update_properties(struct pw_impl_client *client, const struct spa_dict *dict)
 {
-	struct pw_resource *resource;
-	int changed;
-
-	changed = pw_properties_update(client->properties, dict);
-	client->info.props = &client->properties->dict;
-
-	pw_log_debug(NAME" %p: updated %d properties", client, changed);
-
-	if (!changed)
-		return 0;
-
-	client->info.change_mask |= PW_CLIENT_CHANGE_MASK_PROPS;
-
-	pw_impl_client_emit_info_changed(client, &client->info);
-
-	if (client->global)
-		spa_list_for_each(resource, &client->global->resource_list, link)
-			pw_client_resource_info(resource, &client->info);
-
-	client->info.change_mask = 0;
-
-	return changed;
+	return update_properties(client, dict, false);
 }
 
 SPA_EXPORT
@@ -626,9 +657,7 @@ int pw_impl_client_update_permissions(struct pw_impl_client *client,
 			pw_global_update_permissions(global, client, old_perm, new_perm);
 		}
 	}
-	if (n_permissions > 0)
-		pw_impl_client_set_busy(client, false);
-
+	update_busy(client);
 	return 0;
 }
 
