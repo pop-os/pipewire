@@ -11,12 +11,12 @@ Origin: vendor, Fedora, https://src.fedoraproject.org/rpms/pipewire/tree/master
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/daemon/pipewire.conf.in b/src/daemon/pipewire.conf.in
-index a674b95..f0f9fc9 100644
+index 3a80787..a18343f 100644
 --- a/src/daemon/pipewire.conf.in
 +++ b/src/daemon/pipewire.conf.in
 @@ -74,4 +74,4 @@ create-object spa-node-factory factory.name=support.node.driver node.name=Dummy
  # Execute the given program. This is usually used to start the
  # session manager. run the session manager with -h for options
  #
--exec pipewire-media-session # -d alsa-seq,alsa-pcm,bluez5,metadata
-+exec pipewire-media-session -d bluez5 # -d alsa-seq,alsa-pcm,metadata
+-exec @media_session_path@ # -d alsa-seq,alsa-pcm,bluez5,metadata
++exec @media_session_path@ -d bluez5 # -d alsa-seq,alsa-pcm,metadata
