@@ -2405,11 +2405,10 @@ static int path_verify(pa_alsa_path *p) {
         { "hdmi-output",                      N_("HDMI / DisplayPort"),           PA_DEVICE_PORT_TYPE_HDMI },
         { "iec958-stereo-output",             N_("Digital Output (S/PDIF)"),      PA_DEVICE_PORT_TYPE_SPDIF },
         { "iec958-stereo-input",              N_("Digital Input (S/PDIF)"),       PA_DEVICE_PORT_TYPE_SPDIF },
-        { "iec958-passthrough-output",        N_("Digital Passthrough (S/PDIF)"), PA_DEVICE_PORT_TYPE_SPDIF },
         { "multichannel-input",               N_("Multichannel Input"),           PA_DEVICE_PORT_TYPE_LINE },
         { "multichannel-output",              N_("Multichannel Output"),          PA_DEVICE_PORT_TYPE_LINE },
-        { "steelseries-arctis-5-output-game", N_("Game Output"),                  PA_DEVICE_PORT_TYPE_HEADSET },
-        { "steelseries-arctis-5-output-chat", N_("Chat Output"),                  PA_DEVICE_PORT_TYPE_HEADSET },
+        { "steelseries-arctis-output-game-common", N_("Game Output"),             PA_DEVICE_PORT_TYPE_HEADSET },
+        { "steelseries-arctis-output-chat-common", N_("Chat Output"),             PA_DEVICE_PORT_TYPE_HEADSET },
     };
 
     pa_alsa_element *e;
@@ -2442,12 +2441,17 @@ static int path_verify(pa_alsa_path *p) {
 }
 
 static const char *get_default_paths_dir(void) {
+    const char *str;
 #ifdef HAVE_RUNNING_FROM_BUILD_TREE
     if (pa_run_from_build_tree())
-        return PA_SRCDIR "/modules/alsa/mixer/paths/";
+        return PA_SRCDIR "mixer/paths";
     else
 #endif
-        return PA_ALSA_PATHS_DIR;
+    if (getenv("ACP_BUILDDIR") != NULL)
+        return "mixer/paths";
+    if ((str = getenv("ACP_PATHS_DIR")) != NULL)
+        return str;
+    return PA_ALSA_PATHS_DIR;
 }
 
 pa_alsa_path* pa_alsa_path_new(const char *paths_dir, const char *fname, pa_alsa_direction_t direction) {
@@ -3395,6 +3399,7 @@ static void mapping_free(pa_alsa_mapping *m) {
 
     pa_xfree(m->name);
     pa_xfree(m->description);
+    pa_xfree(m->description_key);
 
     pa_proplist_free(m->proplist);
 
@@ -3421,6 +3426,7 @@ static void profile_free(pa_alsa_profile *p) {
 
     pa_xfree(p->profile.name);
     pa_xfree(p->profile.description);
+    pa_xfree(p->profile.description_key);
     pa_xfree(p->input_name);
     pa_xfree(p->output_name);
 
@@ -3696,6 +3702,30 @@ static int mapping_parse_description(pa_config_parser_state *state) {
 
     return 0;
 }
+
+static int mapping_parse_description_key(pa_config_parser_state *state) {
+    pa_alsa_profile_set *ps;
+    pa_alsa_profile *p;
+    pa_alsa_mapping *m;
+
+    pa_assert(state);
+
+    ps = state->userdata;
+
+    if ((m = pa_alsa_mapping_get(ps, state->section))) {
+        pa_xfree(m->description_key);
+        m->description_key = pa_xstrdup(state->rvalue);
+    } else if ((p = profile_get(ps, state->section))) {
+        pa_xfree(p->profile.description_key);
+        p->profile.description_key = pa_xstrdup(state->rvalue);
+    } else {
+        pa_log("[%s:%u] Section name %s invalid.", state->filename, state->lineno, state->section);
+        return -1;
+    }
+
+    return 0;
+}
+
 
 static int mapping_parse_priority(pa_config_parser_state *state) {
     pa_alsa_profile_set *ps;
@@ -4059,13 +4089,15 @@ static int mapping_verify(pa_alsa_mapping *m, const pa_channel_map *bonus) {
         { "analog-surround-70",     N_("Analog Surround 7.0") },
         { "analog-surround-71",     N_("Analog Surround 7.1") },
         { "iec958-stereo",          N_("Digital Stereo (IEC958)") },
-        { "iec958-passthrough",     N_("Digital Passthrough (IEC958)") },
         { "iec958-ac3-surround-40", N_("Digital Surround 4.0 (IEC958/AC3)") },
         { "iec958-ac3-surround-51", N_("Digital Surround 5.1 (IEC958/AC3)") },
         { "iec958-dts-surround-51", N_("Digital Surround 5.1 (IEC958/DTS)") },
         { "hdmi-stereo",            N_("Digital Stereo (HDMI)") },
         { "hdmi-surround-51",       N_("Digital Surround 5.1 (HDMI)") },
+        { "gaming-headset-chat",    N_("Chat") },
+        { "gaming-headset-game",    N_("Game") },
     };
+    const char *description_key = m->description_key ? m->description_key : m->name;
 
     pa_assert(m);
 
@@ -4086,7 +4118,7 @@ static int mapping_verify(pa_alsa_mapping *m, const pa_channel_map *bonus) {
     }
 
     if (!m->description)
-        m->description = pa_xstrdup(lookup_description(m->name,
+        m->description = pa_xstrdup(lookup_description(description_key,
                                                        well_known_descriptions,
                                                        PA_ELEMENTSOF(well_known_descriptions)));
 
@@ -4204,6 +4236,7 @@ static int profile_verify(pa_alsa_profile *p) {
         { "output:unknown-stereo+input:unknown-stereo", N_("Stereo Duplex") },
         { "off",                                      N_("Off") }
     };
+    const char *description_key = p->profile.description_key ? p->profile.description_key : p->profile.name;
 
     pa_assert(p);
 
@@ -4285,7 +4318,7 @@ static int profile_verify(pa_alsa_profile *p) {
     }
 
     if (!p->profile.description)
-        p->profile.description = pa_xstrdup(lookup_description(p->profile.name,
+        p->profile.description = pa_xstrdup(lookup_description(description_key,
                                                        well_known_descriptions,
                                                        PA_ELEMENTSOF(well_known_descriptions)));
 
@@ -4389,6 +4422,20 @@ void pa_alsa_decibel_fix_dump(pa_alsa_decibel_fix *db_fix) {
     pa_xfree(db_values);
 }
 
+static const char *get_default_profile_dir(void) {
+    const char *str;
+#ifdef HAVE_RUNNING_FROM_BUILD_TREE
+    if (pa_run_from_build_tree())
+        return PA_SRCDIR "mixer/profile-sets";
+    else
+#endif
+    if (getenv("ACP_BUILDDIR") != NULL)
+        return "mixer/profile-sets";
+    if ((str = getenv("ACP_PROFILES_DIR")) != NULL)
+        return str;
+    return PA_ALSA_PROFILE_SETS_DIR;
+}
+
 pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel_map *bonus) {
     pa_alsa_profile_set *ps;
     pa_alsa_profile *p;
@@ -4415,6 +4462,7 @@ pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel
 
         /* Shared by [Mapping ...] and [Profile ...] */
         { "description",            mapping_parse_description,    NULL, NULL },
+        { "description-key",        mapping_parse_description_key,NULL, NULL },
         { "priority",               mapping_parse_priority,       NULL, NULL },
         { "fallback",               mapping_parse_fallback,       NULL, NULL },
 
@@ -4441,10 +4489,7 @@ pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel
         fname = "default.conf";
 
     fn = pa_maybe_prefix_path(fname,
-#ifdef HAVE_RUNNING_FROM_BUILD_TREE
-                              pa_run_from_build_tree() ? PA_SRCDIR "/modules/alsa/mixer/profile-sets/" :
-#endif
-                              PA_ALSA_PROFILE_SETS_DIR);
+		    get_default_profile_dir());
 
     r = pa_config_parse(fn, NULL, items, NULL, false, ps);
     pa_xfree(fn);

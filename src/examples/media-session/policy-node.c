@@ -61,8 +61,9 @@ struct impl {
 	struct spa_list node_list;
 	int seq;
 
-	char *default_audio_sink;
-	char *default_audio_source;
+	uint32_t default_audio_sink;
+	uint32_t default_audio_source;
+	uint32_t default_video_source;
 };
 
 struct node {
@@ -93,18 +94,15 @@ struct node {
 	unsigned int active:1;
 	unsigned int exclusive:1;
 	unsigned int enabled:1;
+	unsigned int configured:1;
+	unsigned int dont_remix:1;
+	unsigned int monitor:1;
 };
 
-static int activate_node(struct node *node)
+static bool find_format(struct node *node)
 {
-	struct impl *impl = node->impl;
 	struct sm_param *p;
-	char buf[1024];
-	struct spa_pod_builder b = { 0, };
-	struct spa_pod *param;
 	bool have_format = false;
-
-	pw_log_debug(NAME" %p: node %p activate", impl, node);
 
 	spa_list_for_each(p, &node->obj->param_list, link) {
 		struct spa_audio_info info = { 0, };
@@ -131,27 +129,43 @@ static int activate_node(struct node *node)
 
 		have_format = true;
 	}
+	return have_format;
+}
 
-	if (have_format) {
-		node->format.info.raw.rate = impl->sample_rate;
+static int configure_node(struct node *node, struct spa_audio_info *info)
+{
+	struct impl *impl = node->impl;
+	char buf[1024];
+	struct spa_pod_builder b = { 0, };
+	struct spa_pod *param;
 
-		spa_pod_builder_init(&b, buf, sizeof(buf));
-		param = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &node->format.info.raw);
-		param = spa_pod_builder_add_object(&b,
-			SPA_TYPE_OBJECT_ParamPortConfig, SPA_PARAM_PortConfig,
-			SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(node->direction),
-			SPA_PARAM_PORT_CONFIG_mode,	 SPA_POD_Id(SPA_PARAM_PORT_CONFIG_MODE_dsp),
-			SPA_PARAM_PORT_CONFIG_monitor,   SPA_POD_Bool(true),
-			SPA_PARAM_PORT_CONFIG_format,    SPA_POD_Pod(param));
+	if (node->configured)
+		return 0;
 
-		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-			spa_debug_pod(2, NULL, param);
-
-		pw_node_set_param((struct pw_node*)node->obj->obj.proxy,
-				SPA_PARAM_PortConfig, 0, param);
+	if (info != NULL) {
+		if (info->info.raw.channels < node->format.info.raw.channels || node->monitor)
+			node->format = *info;
 	}
 
-	node->active = true;
+	node->format.info.raw.rate = impl->sample_rate;
+
+	spa_pod_builder_init(&b, buf, sizeof(buf));
+	param = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &node->format.info.raw);
+	param = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamPortConfig, SPA_PARAM_PortConfig,
+		SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(node->direction),
+		SPA_PARAM_PORT_CONFIG_mode,	 SPA_POD_Id(SPA_PARAM_PORT_CONFIG_MODE_dsp),
+		SPA_PARAM_PORT_CONFIG_monitor,   SPA_POD_Bool(true),
+		SPA_PARAM_PORT_CONFIG_format,    SPA_POD_Pod(param));
+
+	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+		spa_debug_pod(2, NULL, param);
+
+	pw_node_set_param((struct pw_node*)node->obj->obj.proxy,
+			SPA_PARAM_PortConfig, 0, param);
+
+	node->configured = true;
+
 	return 0;
 }
 
@@ -163,8 +177,14 @@ static void object_update(void *data)
 	pw_log_debug(NAME" %p: node %p %08x", impl, node, node->obj->obj.changed);
 
 	if (node->obj->obj.avail & SM_NODE_CHANGE_MASK_PARAMS &&
-	    !node->active)
-		activate_node(node);
+	    !node->active) {
+		if (!find_format(node)) {
+			pw_log_debug(NAME" %p: can't find format %p", impl, node);
+			return;
+		}
+		node->active = true;
+		sm_media_session_schedule_rescan(impl->session);
+	}
 }
 
 static const struct sm_object_events object_events = {
@@ -202,7 +222,7 @@ handle_node(struct impl *impl, struct sm_object *object)
 	spa_list_append(&impl->node_list, &node->link);
 
 	if (role && !strcmp(role, "DSP"))
-		node->active = true;
+		node->active = node->configured = true;
 
 	if (strstr(media_class, "Stream/") == media_class) {
 		media_class += strlen("Stream/");
@@ -225,10 +245,10 @@ handle_node(struct impl *impl, struct sm_object *object)
 				else
 					node->plugged = SPA_TIMESPEC_TO_NSEC(&impl->now);
 			}
-			node->active = true;
+			node->active = node->configured = true;
 		}
 		else if (strstr(media_class, "Unknown") == media_class) {
-			node->active = true;
+			node->active = node->configured = true;
 		}
 
 		node->direction = direction;
@@ -245,7 +265,7 @@ handle_node(struct impl *impl, struct sm_object *object)
 		else if (strstr(media_class, "Video/") == media_class) {
 			media_class += strlen("Video/");
 			media = "Video";
-			node->active = true;
+			node->active = node->configured = true;
 		}
 		else
 			return 0;
@@ -326,6 +346,12 @@ static void session_remove(void *data, struct sm_object *object)
 			if (n->peer == node)
 				n->peer = NULL;
 		}
+		if (impl->default_audio_sink == object->id)
+			impl->default_audio_sink = SPA_ID_INVALID;
+		if (impl->default_audio_source == object->id)
+			impl->default_audio_source = SPA_ID_INVALID;
+		if (impl->default_video_source == object->id)
+			impl->default_video_source = SPA_ID_INVALID;
 	}
 
 	sm_media_session_schedule_rescan(impl->session);
@@ -347,8 +373,6 @@ static int find_node(void *data, struct node *node)
 	int priority = 0;
 	uint64_t plugged = 0;
 	struct sm_device *device = node->obj->device;
-	const char *name;
-	bool is_default = false;
 
 	pw_log_debug(NAME " %p: looking at node '%d' enabled:%d state:%d peer:%p exclusive:%d",
 			impl, node->id, node->enabled, node->obj->info->state, node->peer, node->exclusive);
@@ -369,19 +393,23 @@ static int find_node(void *data, struct node *node)
 		pw_log_debug(".. incompatible media %s <-> %s", node->media, find->target->media);
 		return 0;
 	}
-	if ((name = pw_properties_get(node->obj->obj.props, PW_KEY_NODE_NAME)) != NULL) {
-		if (node->media && strcmp(node->media, "Audio") == 0) {
-			if (node->direction == PW_DIRECTION_INPUT &&
-			    impl->default_audio_sink != NULL)
-				is_default = strcmp(impl->default_audio_sink, name) == 0;
-			else if (node->direction == PW_DIRECTION_OUTPUT &&
-			    impl->default_audio_source != NULL)
-				is_default = strcmp(impl->default_audio_source, name) == 0;
-		}
-	}
-
 	plugged = node->plugged;
 	priority = node->priority;
+
+	if (node->media) {
+		bool is_default = false;
+		if (strcmp(node->media, "Audio") == 0) {
+			if (node->direction == PW_DIRECTION_INPUT)
+				is_default = impl->default_audio_sink == node->id;
+			else if (node->direction == PW_DIRECTION_OUTPUT)
+				is_default = impl->default_audio_source == node->id;
+		} else if (strcmp(node->media, "Video") == 0) {
+			if (node->direction == PW_DIRECTION_OUTPUT)
+				is_default = impl->default_video_source == node->id;
+		}
+		if (is_default)
+			priority += 1000;
+	}
 
 	if ((find->exclusive && node->obj->info->state == PW_NODE_STATE_RUNNING) ||
 	    (node->peer && node->peer->exclusive)) {
@@ -392,7 +420,7 @@ static int find_node(void *data, struct node *node)
 	pw_log_debug(NAME " %p: found node '%d' %"PRIu64" prio:%d", impl,
 			node->id, plugged, priority);
 
-	if (find->node == NULL || is_default ||
+	if (find->node == NULL ||
 	    priority > find->priority ||
 	    (priority == find->priority && plugged > find->plugged)) {
 		pw_log_debug(NAME " %p: new best %d %" PRIu64, impl, priority, plugged);
@@ -409,6 +437,26 @@ static int link_nodes(struct node *node, struct node *peer)
 	struct pw_properties *props;
 
 	pw_log_debug(NAME " %p: link nodes %d %d", impl, node->id, peer->id);
+
+	if (node->dont_remix)
+		configure_node(node, NULL);
+	else {
+#if 0
+		bool configured = node->configured;
+		if (configured) {
+			node->configured = false;
+			pw_node_send_command((struct pw_node*)node->obj->obj.proxy,
+					&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Suspend));
+		}
+#endif
+		configure_node(node, &peer->format);
+#if 0
+		if (configured) {
+			pw_node_send_command((struct pw_node*)node->obj->obj.proxy,
+					&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
+		}
+#endif
+	}
 
 	node->peer = peer;
 
@@ -468,8 +516,10 @@ static int rescan_node(struct impl *impl, struct node *n)
 	struct node *peer;
 	struct sm_object *obj;
 
-	if (n->type == NODE_TYPE_DEVICE)
+	if (n->type == NODE_TYPE_DEVICE) {
+		configure_node(n, NULL);
 		return 0;
+	}
 
 	if (!n->active) {
 		pw_log_debug(NAME " %p: node %d is not active", impl, n->id);
@@ -489,10 +539,17 @@ static int rescan_node(struct impl *impl, struct node *n)
 	info = n->obj->info;
 	props = info->props;
 
+        if ((str = spa_dict_lookup(props, PW_KEY_STREAM_DONT_REMIX)) != NULL)
+		n->dont_remix = pw_properties_parse_bool(str);
+
+        if ((str = spa_dict_lookup(props, PW_KEY_STREAM_MONITOR)) != NULL)
+		n->monitor = pw_properties_parse_bool(str);
+
         str = spa_dict_lookup(props, PW_KEY_NODE_AUTOCONNECT);
         if (str == NULL || !pw_properties_parse_bool(str)) {
 		pw_log_debug(NAME" %p: node %d does not need autoconnect", impl, n->id);
-                return 0;
+		configure_node(n, NULL);
+		return 0;
 	}
 
 	if (n->media == NULL) {
@@ -629,28 +686,15 @@ static struct node *find_node_by_id(struct impl *impl, uint32_t id)
 	return NULL;
 }
 
-static struct node *find_node_by_name(struct impl *impl, const char *name)
-{
-	const char *str;
-	struct node *node;
-
-	spa_list_for_each(node, &impl->node_list, link) {
-		str = pw_properties_get(node->obj->obj.props, "node.name");
-		if (str && strcmp(str, name) == 0)
-			return node;
-	}
-	return NULL;
-}
-
-static int move_node(struct impl *impl, const char *source, const char *target)
+static int move_node(struct impl *impl, uint32_t source, uint32_t target)
 {
 	struct node *n, *src_node, *dst_node;
 	const char *str;
 
 	/* find source and dest node */
-	if ((src_node = find_node_by_name(impl, source)) == NULL)
+	if ((src_node = find_node_by_id(impl, source)) == NULL)
 		return -ENOENT;
-	if ((dst_node = find_node_by_name(impl, target)) == NULL)
+	if ((dst_node = find_node_by_id(impl, target)) == NULL)
 		return -ENOENT;
 
 	if (src_node == dst_node)
@@ -683,6 +727,8 @@ static int handle_move(struct impl *impl, struct node *src_node, struct node *ds
 	const char *str;
 	struct pw_node_info *info;
 
+
+
 	if (src_node->peer == dst_node)
 		return 0;
 
@@ -711,21 +757,23 @@ static int metadata_property(void *object, uint32_t subject,
 {
 	struct impl *impl = object;
 
-	if (key == NULL || type == NULL)
+	if (key == NULL)
 		return 0;
 
 	if (subject == PW_ID_CORE) {
-		if (strcmp(key, "default.audio.sink.name") == 0) {
-			if (impl->default_audio_sink && value)
-				move_node(impl, impl->default_audio_sink, value);
-			free(impl->default_audio_sink);
-			impl->default_audio_sink = value ? strdup(value) : NULL;
+		if (strcmp(key, "default.audio.sink") == 0) {
+			if (impl->default_audio_sink != SPA_ID_INVALID && value)
+				move_node(impl, impl->default_audio_sink, atoi(value));
+			impl->default_audio_sink = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
 		}
-		else if (strcmp(key, "default.audio.source.name") == 0) {
-			if (impl->default_audio_source && value)
-				move_node(impl, impl->default_audio_source, value);
-			free(impl->default_audio_source);
-			impl->default_audio_source = value ? strdup(value) : NULL;
+		else if (strcmp(key, "default.audio.source") == 0) {
+			if (impl->default_audio_source != SPA_ID_INVALID && value)
+				move_node(impl, impl->default_audio_source, atoi(value));
+			impl->default_audio_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		} else if (strcmp(key, "default.video.source") == 0) {
+			if (impl->default_video_source != SPA_ID_INVALID && value)
+				move_node(impl, impl->default_video_source, atoi(value));
+			impl->default_video_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
 		}
 	} else {
 		struct node *src_node, *dst_node = NULL;
@@ -734,9 +782,6 @@ static int metadata_property(void *object, uint32_t subject,
 
 		if (strcmp(key, "target.node") == 0 && value != NULL) {
 			dst_node = find_node_by_id(impl, atoi(value));
-		}
-		else if (strcmp(key, "target.node.name") == 0 && value != NULL) {
-			dst_node = find_node_by_name(impl, value);
 		}
 		if (src_node && dst_node)
 			handle_move(impl, src_node, dst_node);
@@ -762,6 +807,9 @@ int sm_policy_node_start(struct sm_media_session *session)
 	impl->context = session->context;
 
 	impl->sample_rate = 48000;
+	impl->default_audio_sink = SPA_ID_INVALID;
+	impl->default_audio_source = SPA_ID_INVALID;
+	impl->default_video_source = SPA_ID_INVALID;
 
 	spa_list_init(&impl->node_list);
 

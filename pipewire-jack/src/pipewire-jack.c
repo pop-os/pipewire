@@ -108,7 +108,6 @@ struct object {
 	union {
 		struct {
 			char name[JACK_CLIENT_NAME_SIZE+1];
-			char key[JACK_CLIENT_NAME_SIZE+1];
 			int32_t priority;
 			uint32_t client_id;
 		} node;
@@ -121,7 +120,6 @@ struct object {
 			char name[REAL_JACK_PORT_NAME_SIZE+1];
 			char alias1[REAL_JACK_PORT_NAME_SIZE+1];
 			char alias2[REAL_JACK_PORT_NAME_SIZE+1];
-			char key[REAL_JACK_PORT_NAME_SIZE+1];
 			uint32_t type_id;
 			uint32_t node_id;
 			uint32_t port_id;
@@ -234,8 +232,8 @@ struct metadata {
 	struct pw_metadata *proxy;
 	struct spa_hook listener;
 
-	char *default_audio_sink;
-	char *default_audio_source;
+	uint32_t default_audio_sink;
+	uint32_t default_audio_source;
 };
 
 struct client {
@@ -243,7 +241,13 @@ struct client {
 
 	struct context context;
 
+	char *server_name;
+	char *load_name;		/* load module name */
+	char *load_init;		/* initialization string */
+	jack_uuid_t session_id;		/* requested session_id */
+
 	struct pw_data_loop *loop;
+	struct pw_properties *props;
 
 	struct pw_core *core;
 	struct spa_hook core_listener;
@@ -1952,12 +1956,10 @@ static int metadata_property(void *object, uint32_t id,
 	uuid = jack_port_uuid_generate(id);
 	update_property(c, uuid, key, type, value);
 
-	if (strcmp(key, "default.audio.sink.name") == 0) {
-		free(c->metadata->default_audio_sink);
-		c->metadata->default_audio_sink = value ? strdup(value) : NULL;
-	} else if (strcmp(key, "default.audio.source.name") == 0) {
-		free(c->metadata->default_audio_source);
-		c->metadata->default_audio_source = value ? strdup(value) : NULL;
+	if (key && strcmp(key, "default.audio.sink") == 0) {
+		c->metadata->default_audio_sink = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+	} else if (key && strcmp(key, "default.audio.source") == 0) {
+		c->metadata->default_audio_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
 	}
 	return 0;
 }
@@ -2004,10 +2006,6 @@ static void registry_event_global(void *data, uint32_t id,
 		ot = find_node(c, o->node.name);
 		if (ot != NULL && o->node.client_id != ot->node.client_id)
 			snprintf(o->node.name, sizeof(o->node.name), "%s-%d", str, id);
-
-		if ((str = spa_dict_lookup(props, PW_KEY_NODE_NAME)) == NULL)
-			str = o->node.name;
-		snprintf(o->node.key, sizeof(o->node.key), "%s", str);
 
 		if ((str = spa_dict_lookup(props, PW_KEY_PRIORITY_MASTER)) != NULL)
 			o->node.priority = pw_properties_parse_int(str);
@@ -2081,7 +2079,6 @@ static void registry_event_global(void *data, uint32_t id,
 				goto exit_free;
 
 			snprintf(o->port.name, sizeof(o->port.name), "%s:%s", ot->node.name, str);
-			snprintf(o->port.key, sizeof(o->port.key), "%s:%s", ot->node.key, str);
 			o->port.port_id = SPA_ID_INVALID;
 			o->port.priority = ot->node.priority;
 		}
@@ -2112,7 +2109,8 @@ static void registry_event_global(void *data, uint32_t id,
 			snprintf(o->port.name, sizeof(o->port.name), "%.*s-%d",
 					(int)(sizeof(op->port.name)-11), op->port.name, id);
 
-		pw_log_debug(NAME" %p: add port %d %s %d", c, id, o->port.name, type_id);
+		pw_log_debug(NAME" %p: add port %d name:%s %d", c, id,
+				o->port.name, type_id);
 	}
 	else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
 		o = alloc_object(c);
@@ -2144,6 +2142,8 @@ static void registry_event_global(void *data, uint32_t id,
 
 		c->metadata = pw_proxy_get_user_data(proxy);
 		c->metadata->proxy = (struct pw_metadata*)proxy;
+		c->metadata->default_audio_sink = SPA_ID_INVALID;
+		c->metadata->default_audio_source = SPA_ID_INVALID;
 
 		pw_metadata_add_listener(proxy,
 				&c->metadata->listener,
@@ -2198,6 +2198,13 @@ static void registry_event_global_remove(void *object, uint32_t id)
 
 	pw_log_debug(NAME" %p: removed: %u", c, id);
 
+	if (c->metadata) {
+		if (id == c->metadata->default_audio_sink)
+			c->metadata->default_audio_sink = SPA_ID_INVALID;
+		if (id == c->metadata->default_audio_source)
+			c->metadata->default_audio_source = SPA_ID_INVALID;
+	}
+
 	o = pw_map_lookup(&c->context.globals, id);
 	if (o == NULL)
 		return;
@@ -2235,6 +2242,24 @@ static const struct pw_registry_events registry_events = {
         .global_remove = registry_event_global_remove,
 };
 
+static void varargs_parse (struct client *c, jack_options_t options, va_list ap)
+{
+	if ((options & JackServerName))
+		c->server_name = va_arg(ap, char *);
+	if ((options & JackLoadName))
+		c->load_name = va_arg(ap, char *);
+	if ((options & JackLoadInit))
+		c->load_init = va_arg(ap, char *);
+	if ((options & JackSessionID)) {
+		char *sid = va_arg(ap, char *);
+		if (sid) {
+			const long long id = atoll(sid);
+			if (id > 0)
+				c->session_id = id;
+		}
+	}
+}
+
 SPA_EXPORT
 jack_client_t * jack_client_open (const char *client_name,
                                   jack_options_t options,
@@ -2248,6 +2273,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	const char *str;
 	struct spa_cpu *cpu_iface;
 	struct spa_node_info ni;
+	va_list ap;
 
         if (getenv("PIPEWIRE_NOJACK") != NULL)
 		goto disabled;
@@ -2259,6 +2285,10 @@ jack_client_t * jack_client_open (const char *client_name,
 		goto init_failed;
 
 	pw_log_debug(NAME" %p: open '%s' options:%d", client, client_name, options);
+
+	va_start(ap, status);
+	varargs_parse(client, options, ap);
+	va_end(ap);
 
 	client->node_id = SPA_ID_INVALID;
 	strncpy(client->name, client_name, JACK_CLIENT_NAME_SIZE);
@@ -2313,6 +2343,7 @@ jack_client_t * jack_client_open (const char *client_name,
 
         client->core = pw_context_connect(client->context.context,
 				pw_properties_new(
+					PW_KEY_REMOTE_NAME, client->server_name,
 					PW_KEY_CLIENT_NAME, client_name,
 					PW_KEY_CLIENT_API, "jack",
 					NULL),
@@ -2331,6 +2362,13 @@ jack_client_t * jack_client_open (const char *client_name,
 			&client->registry_listener,
 			&registry_events, client);
 
+        if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		client->props = pw_properties_new_string(str);
+	if (client->props == NULL)
+		client->props = pw_properties_new(NULL, NULL);
+	if (client->props == NULL)
+		goto init_failed;
+
 	props = SPA_DICT_INIT(items, 0);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_NAME, client_name);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
@@ -2340,11 +2378,13 @@ jack_client_t * jack_client_open (const char *client_name,
 		items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, str);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_ALWAYS_PROCESS, "true");
 
+	pw_properties_add(client->props, &props);
+
 	client->node = pw_core_create_object(client->core,
 				"client-node",
 				PW_TYPE_INTERFACE_ClientNode,
 				PW_VERSION_CLIENT_NODE,
-				&props,
+				&client->props->dict,
 				0);
 	if (client->node == NULL)
 		goto init_failed;
@@ -2431,8 +2471,6 @@ int jack_client_close (jack_client_t *client)
 		pw_proxy_destroy((struct pw_proxy*)c->registry);
 	if (c->metadata && c->metadata->proxy) {
 		pw_proxy_destroy((struct pw_proxy*)c->metadata->proxy);
-		free(c->metadata->default_audio_sink);
-		free(c->metadata->default_audio_source);
 	}
 	pw_core_disconnect(c->core);
 	pw_context_destroy(c->context.context);
@@ -2442,6 +2480,7 @@ int jack_client_close (jack_client_t *client)
 	pw_log_debug(NAME" %p: free", client);
 	pthread_mutex_destroy(&c->context.lock);
 	pw_data_loop_destroy(c->loop);
+	pw_properties_free(c->props);
 	free(c);
 
 	return res;
@@ -3953,16 +3992,17 @@ static int port_compare_func(const void *v1, const void *v2, void *arg)
 	is_cap1 = ((*o1)->port.flags & JackPortIsOutput) == JackPortIsOutput;
 	is_cap2 = ((*o2)->port.flags & JackPortIsOutput) == JackPortIsOutput;
 
-	if (is_cap1 && c->metadata->default_audio_source != NULL)
-		is_def1 = strstr((*o1)->port.key, c->metadata->default_audio_source) == (*o1)->port.key;
-	else if (!is_cap1 && c->metadata->default_audio_sink != NULL)
-		is_def1 = strstr((*o1)->port.key, c->metadata->default_audio_sink) == (*o1)->port.key;
+	if (c->metadata) {
+		if (is_cap1)
+			is_def1 = (*o1)->port.node_id == c->metadata->default_audio_source;
+		else if (!is_cap1)
+			is_def1 = (*o1)->port.node_id == c->metadata->default_audio_sink;
 
-	if (is_cap2 && c->metadata->default_audio_source != NULL)
-		is_def2 = strstr((*o2)->port.key, c->metadata->default_audio_source) == (*o2)->port.key;
-	else if (!is_cap2 && c->metadata->default_audio_sink != NULL)
-		is_def2 = strstr((*o2)->port.key, c->metadata->default_audio_sink) == (*o2)->port.key;
-
+		if (is_cap2)
+			is_def2 = (*o2)->port.node_id == c->metadata->default_audio_source;
+		else if (!is_cap2)
+			is_def2 = (*o2)->port.node_id == c->metadata->default_audio_sink;
+	}
 	if ((*o1)->port.type_id != (*o2)->port.type_id)
 		res = (*o1)->port.type_id - (*o2)->port.type_id;
 	else if ((is_cap1 || is_cap2) && is_cap1 != is_cap2)
