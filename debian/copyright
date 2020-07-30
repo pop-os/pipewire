@@ -14,7 +14,11 @@ Copyright: 2009 Lennart Poettering
 License: Expat
 
 Files: pipewire-pulseaudio/*
+       plugins/alsa/90-pipewire-alsa.rules
        spa/plugins/alsa/acp/*
+       spa/plugins/alsa/mixer/paths/*
+       spa/plugins/alsa/mixer/profile-sets/*
+       spa/plugins/alsa/mixer/samples/*
 Copyright: 1999 Tom Tromey
            2000 Red Hat, Inc.
            2004-2009 Lennart Poettering
