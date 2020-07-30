@@ -1,4 +1,4 @@
-pipewire (0.3.7-1) UNRELEASED; urgency=medium
+pipewire (0.3.8-1) UNRELEASED; urgency=medium
 
   [ Laurent Bigonville ]
   * New upstream release (Closes: #954022)
