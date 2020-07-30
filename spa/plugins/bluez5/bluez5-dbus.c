@@ -74,6 +74,7 @@ struct spa_bt_monitor {
 	unsigned int filters_added:1;
 
 	struct spa_bt_backend *backend_hsp_native;
+	struct spa_bt_backend *backend_ofono;
 };
 
 static inline void add_dict(struct spa_pod_builder *builder, const char *key, const char *val)
@@ -461,6 +462,15 @@ struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const c
 	return NULL;
 }
 
+struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monitor, const char *remote_address, const char *local_address)
+{
+	struct spa_bt_device *d;
+	spa_list_for_each(d, &monitor->device_list, link)
+		if (strcmp(d->address, remote_address) == 0 && strcmp(d->adapter->address, local_address) == 0)
+			return d;
+	return NULL;
+}
+
 static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const char *path)
 {
 	struct spa_bt_device *d;
@@ -763,7 +773,7 @@ static int device_update_props(struct spa_bt_device *device,
 			}
 			else if (strcmp(key, "ServicesResolved") == 0) {
 				if (value)
-					spa_bt_device_check_profiles(device, true);
+					spa_bt_device_check_profiles(device, false);
 			}
 		}
 		else if (strcmp(key, "UUIDs") == 0) {
@@ -797,7 +807,7 @@ static int device_update_props(struct spa_bt_device *device,
 	return 0;
 }
 
-static struct spa_bt_transport *transport_find(struct spa_bt_monitor *monitor, const char *path)
+struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path)
 {
 	struct spa_bt_transport *t;
 	spa_list_for_each(t, &monitor->transport_list, link)
@@ -1077,7 +1087,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	dbus_message_iter_next(&it[0]);
 	dbus_message_iter_recurse(&it[0], &it[1]);
 
-	transport = transport_find(monitor, transport_path);
+	transport = spa_bt_transport_find(monitor, transport_path);
 	is_new = transport == NULL;
 
 	if (is_new) {
@@ -1127,7 +1137,7 @@ static DBusHandlerResult endpoint_clear_configuration(DBusConnection *conn, DBus
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
 
-	transport = transport_find(monitor, transport_path);
+	transport = spa_bt_transport_find(monitor, transport_path);
 
 	if (transport != NULL) {
 		struct spa_bt_device *device = transport->device;
@@ -1396,11 +1406,6 @@ static void interface_added(struct spa_bt_monitor *monitor,
 	}
 	else if (strcmp(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE) == 0) {
 		backend_hsp_native_register_profiles(monitor->backend_hsp_native);
-		/* HFP Profiles should be managed by an external program */
-		/*
-		register_profile(monitor, PROFILE_HFP_AG, SPA_BT_UUID_HFP_AG);
-		register_profile(monitor, PROFILE_HFP_HS, SPA_BT_UUID_HFP_HF);
-		*/
 	}
 	else if (strcmp(interface_name, BLUEZ_DEVICE_INTERFACE) == 0) {
 		struct spa_bt_device *d;
@@ -1549,7 +1554,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 		else if (strcmp(iface, BLUEZ_MEDIA_TRANSPORT_INTERFACE) == 0) {
 			struct spa_bt_transport *transport;
 
-			transport = transport_find(monitor, path);
+			transport = spa_bt_transport_find(monitor, path);
 			if (transport == NULL) {
 				spa_log_warn(monitor->log,
 						"Properties changed in unknown transport %s", path);
@@ -1626,6 +1631,9 @@ impl_device_add_listener(void *object, struct spa_hook *listener,
 	add_filters(this);
 	get_managed_objects(this);
 
+	if (this->backend_ofono)
+		backend_ofono_add_filters(this->backend_ofono);
+
         spa_hook_list_join(&this->hooks, &save);
 
 	return 0;
@@ -1672,6 +1680,11 @@ static int impl_clear(struct spa_handle *handle)
 	if (monitor->backend_hsp_native) {
 		backend_hsp_native_free(monitor->backend_hsp_native);
 		monitor->backend_hsp_native = NULL;
+	}
+
+	if (monitor->backend_ofono) {
+		backend_ofono_free(monitor->backend_ofono);
+		monitor->backend_ofono = NULL;
 	}
 
 	return 0;
@@ -1729,7 +1742,8 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_list_init(&this->device_list);
 	spa_list_init(&this->transport_list);
 
-	this->backend_hsp_native = backend_hsp_native_new(this, support, n_support);
+	this->backend_hsp_native = backend_hsp_native_new(this, this->conn, support, n_support);
+	this->backend_ofono = backend_ofono_new(this, this->conn, support, n_support);
 
 	return 0;
 }

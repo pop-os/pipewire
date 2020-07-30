@@ -1519,6 +1519,9 @@ int pa_context_connect(pa_context *c, const char *server, pa_context_flags_t fla
 
 	pa_context_set_state(c, PA_CONTEXT_CONNECTING);
 
+	if (server)
+		pw_properties_set(c->props, PW_KEY_REMOTE_NAME, server);
+
 	c->core = pw_context_connect(c->context, pw_properties_copy(c->props), 0);
 	if (c->core == NULL) {
                 pa_context_fail(c, PA_ERR_CONNECTIONREFUSED);
@@ -1619,8 +1622,10 @@ static void do_default_node(pa_operation *o, void *userdata)
 	if (g == NULL) {
 		error = PA_ERR_NOENTITY;
 	} else if (c->metadata) {
+		char buf[16];
+		snprintf(buf, sizeof(buf), "%d", g->id);
 		pw_metadata_set_property(c->metadata->proxy,
-				PW_ID_CORE, d->key, "text/plain", d->name);
+				PW_ID_CORE, d->key, SPA_TYPE_INFO_BASE"Id", buf);
 	} else {
 		error = PA_ERR_NOTIMPLEMENTED;
 	}

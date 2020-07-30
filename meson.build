@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.7',
+  version : '0.3.8',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -52,7 +52,8 @@ else
 endif
 
 spa_plugindir = join_paths(pipewire_libdir, spa_name)
-alsadatadir = join_paths('/usr', 'share', 'pulseaudio', 'alsa-mixer')
+
+alsadatadir = join_paths(pipewire_datadir, 'alsa-card-profile', 'mixer')
 
 pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 
@@ -251,6 +252,15 @@ if get_option('systemd')
     cdata.set('HAVE_SYSTEMD_DAEMON', 1)
   else
     warning('Systemd integration was enabled, but systemd is not available')
+  endif
+endif
+
+if get_option('bluez5')
+  if get_option('bluez5-backend-native')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
+  endif
+  if get_option('bluez5-backend-ofono')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_OFONO', 1)
   endif
 endif
 

@@ -782,6 +782,7 @@ int pw_impl_port_register(struct pw_impl_port *port,
 	const char *keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
+		PW_KEY_AUDIO_CHANNEL,
 		PW_KEY_PORT_NAME,
 		PW_KEY_PORT_DIRECTION,
 		PW_KEY_PORT_PHYSICAL,
@@ -981,6 +982,8 @@ void pw_impl_port_destroy(struct pw_impl_port *port)
 	pw_log_debug(NAME" %p: destroy", port);
 
 	pw_impl_port_emit_destroy(port);
+
+	pw_impl_port_unlink(port);
 
 	pw_log_debug(NAME" %p: control destroy", port);
 	spa_list_consume(control, &port->control_list[0], port_link)

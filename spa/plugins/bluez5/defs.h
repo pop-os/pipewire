@@ -31,6 +31,8 @@ extern "C" {
 
 #include <spa/utils/hook.h>
 
+#include "config.h"
+
 #define BLUEZ_SERVICE "org.bluez"
 #define BLUEZ_PROFILE_MANAGER_INTERFACE BLUEZ_SERVICE ".ProfileManager1"
 #define BLUEZ_PROFILE_INTERFACE BLUEZ_SERVICE ".Profile1"
@@ -102,10 +104,11 @@ extern "C" {
 
 #define PROFILE_HSP_AG	"/Profile/HSPAG"
 #define PROFILE_HSP_HS	"/Profile/HSPHS"
-#define PROFILE_HFP_AG	"/Profile/HFPAG"
-#define PROFILE_HFP_HS	"/Profile/HFPHS"
 
 #define HSP_HS_DEFAULT_CHANNEL  3
+
+#define HFP_AUDIO_CODEC_CVSD    0x01
+#define HFP_AUDIO_CODEC_MSBC    0x02
 
 enum spa_bt_profile {
         SPA_BT_PROFILE_NULL =		0,
@@ -201,6 +204,7 @@ struct spa_bt_device {
 };
 
 struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const char *path);
+struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monitor, const char *remote_address, const char *local_address);
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 
@@ -253,6 +257,7 @@ struct spa_bt_transport {
 
 struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor, char *path, size_t extra);
 void spa_bt_transport_free(struct spa_bt_transport *transport);
+struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path);
 
 #define spa_bt_transport_emit(t,m,v,...)		spa_hook_list_call(&(t)->listener_list, \
 								struct spa_bt_transport_events,	\
@@ -292,11 +297,41 @@ static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(con
 }
 
 
+#ifdef HAVE_BLUEZ_5_BACKEND_NATIVE
 struct spa_bt_backend *backend_hsp_native_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
 		const struct spa_support *support,
-	  uint32_t n_support);
+		uint32_t n_support);
 void backend_hsp_native_free(struct spa_bt_backend *backend);
 void backend_hsp_native_register_profiles(struct spa_bt_backend *backend);
+#else
+static inline struct spa_bt_backend *backend_hsp_native_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_support *support,
+		uint32_t n_support) {
+	return NULL;
+}
+static inline void backend_hsp_native_free(struct spa_bt_backend *backend) {}
+static inline void backend_hsp_native_register_profiles(struct spa_bt_backend *backend) {}
+#endif
+
+#ifdef HAVE_BLUEZ_5_BACKEND_OFONO
+struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_support *support,
+		uint32_t n_support);
+void backend_ofono_free(struct spa_bt_backend *backend);
+void backend_ofono_add_filters(struct spa_bt_backend *backend);
+#else
+static inline struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_support *support,
+		uint32_t n_support) {
+	return NULL;
+}
+static inline void backend_ofono_free(struct spa_bt_backend *backend) {}
+static inline void backend_ofono_add_filters(struct spa_bt_backend *backend) {}
+#endif
 
 #ifdef __cplusplus
 }  /* extern "C" */
