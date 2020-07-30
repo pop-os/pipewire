@@ -14,6 +14,7 @@ Copyright: 2009 Lennart Poettering
 License: Expat
 
 Files: pipewire-pulseaudio/*
+       spa/plugins/alsa/acp/*
 Copyright: 1999 Tom Tromey
            2000 Red Hat, Inc.
            2004-2009 Lennart Poettering
@@ -22,8 +23,10 @@ Copyright: 1999 Tom Tromey
            2011 Intel Corporation
            2011 Collabora Multimedia
            2011 Arun Raghavan
-           2015-2018 Wim Taymans
-License: LGPL-2+ and LGPL-2.1+
+           2011 Wolfson Microelectronics PLC
+           2012 Feng Wei, Freescale Ltd.
+           2015-2020 Wim Taymans
+License: LGPL-2+ and LGPL-2.1+ and Expat
 
 Files: spa/plugins/bluez5/*
 Copyright: 2004-2010 Marcel Holtmann
