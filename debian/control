@@ -5,6 +5,7 @@ Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.
 Uploaders: Jeremy Bicha <jbicha@debian.org>
 Build-Depends: debhelper-compat (= 12),
                libasound2-dev,
+               libbluetooth-dev,
                libdbus-1-dev,
                libglib2.0-dev (>= 2.32.0),
                libgstreamer-plugins-base1.0-dev,
@@ -240,6 +241,26 @@ Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  .
  This package contains a plugin to make devices managed by the PipeWire
  server available as GStreamer sources and sinks.
+
+Package: libspa-0.2-bluetooth
+Architecture: linux-any
+Multi-Arch: same
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         libspa-0.2-modules (= ${binary:Version}),
+Description: libraries for the PipeWire multimedia server - bluetooth plugins
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains a plugin to make Bluetooth audio devices such as
+ speakers and headsets available to the PipeWire server. It is considered
+ to be experimental, and is disabled by default (even if installed) to
+ avoid conflicts with equivalent functionality in PulseAudio.
 
 Package: libspa-0.2-jack
 Architecture: linux-any
