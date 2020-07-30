@@ -91,9 +91,6 @@ pipewire (0.3.8-1) UNRELEASED; urgency=medium
     break API/ABI out of sync with each other.
     Thanks to Sjoerd Simons
   * Document more ways to test bits of PipeWire manually
-  * Disable the Bluetooth plugin for now.
-    Upstream developer George Kiagiadakis says this plugin is not in a
-    good state at the moment.
 
  -- Simon McVittie <smcv@debian.org>  Thu, 30 Jul 2020 09:48:15 +0100
 
