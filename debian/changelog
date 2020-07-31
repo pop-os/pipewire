@@ -2,6 +2,7 @@ pipewire (0.3.8-1) UNRELEASED; urgency=medium
 
   [ Laurent Bigonville ]
   * New upstream release (Closes: #954022)
+    - 0.3.x fixes FTBFS with gcc 10 (Closes: #957685)
     - debian/control: Adjust the build-dependencies
     - Bump the soname of the libraries
     - Ship the new plugins (jack and vulkan) in new packages
