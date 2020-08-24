@@ -1,4 +1,6 @@
-pipewire (0.3.10-1) UNRELEASED; urgency=medium
+pipewire (0.3.10-1) experimental; urgency=medium
+
+  * Team upload.
 
   [ Laurent Bigonville ]
   * New upstream release (Closes: #954022)
@@ -99,7 +101,7 @@ pipewire (0.3.10-1) UNRELEASED; urgency=medium
   * Improve pipewire short description
   * debian/copyright: Add module-portal.c and Red Hat
 
- -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 13:30:20 +0200
+ -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 16:03:42 +0200
 
 pipewire (0.2.7-1) unstable; urgency=medium
 
