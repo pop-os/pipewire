@@ -782,6 +782,7 @@ int pw_impl_port_register(struct pw_impl_port *port,
 	const char *keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
+		PW_KEY_NODE_ID,
 		PW_KEY_AUDIO_CHANNEL,
 		PW_KEY_PORT_NAME,
 		PW_KEY_PORT_DIRECTION,
@@ -794,14 +795,6 @@ int pw_impl_port_register(struct pw_impl_port *port,
 
 	if (node == NULL || node->global == NULL)
 		return -EIO;
-
-	if (properties == NULL)
-		properties = pw_properties_new(NULL, NULL);
-	if (properties == NULL)
-		return -errno;
-
-	pw_properties_setf(properties, PW_KEY_NODE_ID, "%d", node->global->id);
-	pw_properties_update_keys(properties, &port->properties->dict, keys);
 
 	port->global = pw_global_new(node->context,
 				PW_TYPE_INTERFACE_Port,
@@ -818,6 +811,8 @@ int pw_impl_port_register(struct pw_impl_port *port,
 	pw_properties_setf(port->properties, PW_KEY_NODE_ID, "%d", node->global->id);
 	pw_properties_setf(port->properties, PW_KEY_OBJECT_ID, "%d", port->info.id);
 	port->info.props = &port->properties->dict;
+
+	pw_global_update_keys(port->global, &port->properties->dict, keys);
 
 	pw_impl_port_emit_initialized(port);
 
@@ -1292,7 +1287,7 @@ int pw_impl_port_use_buffers(struct pw_impl_port *port, struct pw_impl_port_mix 
 			mix->port.direction, mix->port.port_id, flags,
 			buffers, n_buffers);
 	if (res2 < 0) {
-		if (res2 != -ENOTSUP) {
+		if (res2 != -ENOTSUP && n_buffers > 0) {
 			pw_log_warn(NAME" %p: mix use buffers failed: %d (%s)",
 					port, res2, spa_strerror(res2));
 			return res2;

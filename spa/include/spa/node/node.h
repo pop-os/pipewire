@@ -65,6 +65,8 @@ struct spa_node_info {
 							  *  PortConfig parameter */
 #define SPA_NODE_FLAG_OUT_PORT_CONFIG		(1u<<4)	/**< output ports can be reconfigured with
 							  *  PortConfig parameter */
+#define SPA_NODE_FLAG_NEED_CONFIGURE		(1u<<5)	/**< node needs configuration before it can
+							  *  be started. */
 	uint64_t flags;
 	struct spa_dict *props;			/**< extra node properties */
 	struct spa_param_info *params;		/**< parameter information */
@@ -144,10 +146,10 @@ struct spa_node_events {
 #define SPA_VERSION_NODE_EVENTS	0
 	uint32_t version;	/**< version of this structure */
 
-	/** Emited when info changes */
+	/** Emitted when info changes */
 	void (*info) (void *data, const struct spa_node_info *info);
 
-	/** Emited when port info changes, NULL when port is removed */
+	/** Emitted when port info changes, NULL when port is removed */
 	void (*port_info) (void *data,
 			enum spa_direction direction, uint32_t port,
 			const struct spa_port_info *info);
@@ -173,7 +175,7 @@ struct spa_node_events {
 
 	/**
 	 * \param node a spa_node
-	 * \param event the event that was emited
+	 * \param event the event that was emitted
 	 *
 	 * This will be called when an out-of-bound event is notified
 	 * on \a node.
@@ -333,7 +335,7 @@ struct spa_node_methods {
 	 * The function will emit the result event up to \a max times with
 	 * the result value. The seq in the result will either be the \a seq
 	 * number when executed synchronously or the async return value of
-	 * this function when executed asynchrnously.
+	 * this function when executed asynchronously.
 	 *
 	 * This function must be called from the main thread.
 	 *
@@ -351,7 +353,7 @@ struct spa_node_methods {
 	 *         -ENOTSUP when there are no parameters
 	 *                 implemented on \a node
 	 *         an async return value when the result event will be
-	 *             emited later.
+	 *             emitted later.
 	 */
 	int (*enum_params) (void *object, int seq,
 			    uint32_t id, uint32_t start, uint32_t max,
@@ -480,7 +482,7 @@ struct spa_node_methods {
 	 *         -EINVAL when invalid parameters are given
 	 *         -ENOENT when \a id is unknown
 	 *         an async return value when the result event will be
-	 *             emited later.
+	 *             emitted later.
 	 */
 	int (*port_enum_params) (void *object, int seq,
 				 enum spa_direction direction, uint32_t port_id,

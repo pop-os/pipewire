@@ -38,117 +38,6 @@
 #define MAX_SIZE	(4*1024*1024)
 #define BLOCK_SIZE	(64*1024)
 
-static const uint32_t audio_formats[] = {
-	[PA_SAMPLE_U8] = SPA_AUDIO_FORMAT_U8,
-	[PA_SAMPLE_ALAW] = SPA_AUDIO_FORMAT_UNKNOWN,
-	[PA_SAMPLE_ULAW] = SPA_AUDIO_FORMAT_UNKNOWN,
-	[PA_SAMPLE_S16NE] = SPA_AUDIO_FORMAT_S16,
-	[PA_SAMPLE_S16RE] = SPA_AUDIO_FORMAT_S16_OE,
-	[PA_SAMPLE_FLOAT32NE] = SPA_AUDIO_FORMAT_F32,
-	[PA_SAMPLE_FLOAT32RE] = SPA_AUDIO_FORMAT_F32_OE,
-	[PA_SAMPLE_S32NE] = SPA_AUDIO_FORMAT_S32,
-	[PA_SAMPLE_S32RE] = SPA_AUDIO_FORMAT_S32_OE,
-	[PA_SAMPLE_S24NE] = SPA_AUDIO_FORMAT_S24,
-	[PA_SAMPLE_S24RE] = SPA_AUDIO_FORMAT_S24_OE,
-	[PA_SAMPLE_S24_32NE] = SPA_AUDIO_FORMAT_S24_32,
-	[PA_SAMPLE_S24_32RE] = SPA_AUDIO_FORMAT_S24_32_OE,
-};
-
-static inline uint32_t format_pa2id(pa_stream *s, pa_sample_format_t format)
-{
-	if (format < 0 || (size_t)format >= SPA_N_ELEMENTS(audio_formats))
-		return SPA_AUDIO_FORMAT_UNKNOWN;
-	return audio_formats[format];
-}
-
-static inline pa_sample_format_t format_id2pa(pa_stream *s, uint32_t id)
-{
-	size_t i;
-	for (i = 0; i < SPA_N_ELEMENTS(audio_formats); i++) {
-		if (id == audio_formats[i])
-			return i;
-	}
-	return PA_SAMPLE_INVALID;
-}
-
-static const uint32_t audio_channels[] = {
-	[PA_CHANNEL_POSITION_MONO] = SPA_AUDIO_CHANNEL_MONO,
-
-	[PA_CHANNEL_POSITION_FRONT_LEFT] = SPA_AUDIO_CHANNEL_FL,
-	[PA_CHANNEL_POSITION_FRONT_RIGHT] = SPA_AUDIO_CHANNEL_FR,
-	[PA_CHANNEL_POSITION_FRONT_CENTER] = SPA_AUDIO_CHANNEL_FC,
-
-	[PA_CHANNEL_POSITION_REAR_CENTER] = SPA_AUDIO_CHANNEL_RC,
-	[PA_CHANNEL_POSITION_REAR_LEFT] = SPA_AUDIO_CHANNEL_RL,
-	[PA_CHANNEL_POSITION_REAR_RIGHT] = SPA_AUDIO_CHANNEL_RR,
-
-	[PA_CHANNEL_POSITION_LFE] = SPA_AUDIO_CHANNEL_LFE,
-	[PA_CHANNEL_POSITION_FRONT_LEFT_OF_CENTER] = SPA_AUDIO_CHANNEL_FLC,
-	[PA_CHANNEL_POSITION_FRONT_RIGHT_OF_CENTER] = SPA_AUDIO_CHANNEL_FRC,
-
-	[PA_CHANNEL_POSITION_SIDE_LEFT] = SPA_AUDIO_CHANNEL_SL,
-	[PA_CHANNEL_POSITION_SIDE_RIGHT] = SPA_AUDIO_CHANNEL_SR,
-
-	[PA_CHANNEL_POSITION_AUX0] = SPA_AUDIO_CHANNEL_CUSTOM_START + 1,
-	[PA_CHANNEL_POSITION_AUX1] = SPA_AUDIO_CHANNEL_CUSTOM_START + 2,
-	[PA_CHANNEL_POSITION_AUX2] = SPA_AUDIO_CHANNEL_CUSTOM_START + 3,
-	[PA_CHANNEL_POSITION_AUX3] = SPA_AUDIO_CHANNEL_CUSTOM_START + 4,
-	[PA_CHANNEL_POSITION_AUX4] = SPA_AUDIO_CHANNEL_CUSTOM_START + 5,
-	[PA_CHANNEL_POSITION_AUX5] = SPA_AUDIO_CHANNEL_CUSTOM_START + 6,
-	[PA_CHANNEL_POSITION_AUX6] = SPA_AUDIO_CHANNEL_CUSTOM_START + 7,
-	[PA_CHANNEL_POSITION_AUX7] = SPA_AUDIO_CHANNEL_CUSTOM_START + 8,
-	[PA_CHANNEL_POSITION_AUX8] = SPA_AUDIO_CHANNEL_CUSTOM_START + 9,
-	[PA_CHANNEL_POSITION_AUX9] = SPA_AUDIO_CHANNEL_CUSTOM_START + 10,
-	[PA_CHANNEL_POSITION_AUX10] = SPA_AUDIO_CHANNEL_CUSTOM_START + 11,
-	[PA_CHANNEL_POSITION_AUX11] = SPA_AUDIO_CHANNEL_CUSTOM_START + 12,
-	[PA_CHANNEL_POSITION_AUX12] = SPA_AUDIO_CHANNEL_CUSTOM_START + 13,
-	[PA_CHANNEL_POSITION_AUX13] = SPA_AUDIO_CHANNEL_CUSTOM_START + 14,
-	[PA_CHANNEL_POSITION_AUX14] = SPA_AUDIO_CHANNEL_CUSTOM_START + 15,
-	[PA_CHANNEL_POSITION_AUX15] = SPA_AUDIO_CHANNEL_CUSTOM_START + 16,
-	[PA_CHANNEL_POSITION_AUX16] = SPA_AUDIO_CHANNEL_CUSTOM_START + 17,
-	[PA_CHANNEL_POSITION_AUX17] = SPA_AUDIO_CHANNEL_CUSTOM_START + 18,
-	[PA_CHANNEL_POSITION_AUX18] = SPA_AUDIO_CHANNEL_CUSTOM_START + 19,
-	[PA_CHANNEL_POSITION_AUX19] = SPA_AUDIO_CHANNEL_CUSTOM_START + 20,
-	[PA_CHANNEL_POSITION_AUX20] = SPA_AUDIO_CHANNEL_CUSTOM_START + 21,
-	[PA_CHANNEL_POSITION_AUX21] = SPA_AUDIO_CHANNEL_CUSTOM_START + 22,
-	[PA_CHANNEL_POSITION_AUX22] = SPA_AUDIO_CHANNEL_CUSTOM_START + 23,
-	[PA_CHANNEL_POSITION_AUX23] = SPA_AUDIO_CHANNEL_CUSTOM_START + 24,
-	[PA_CHANNEL_POSITION_AUX24] = SPA_AUDIO_CHANNEL_CUSTOM_START + 25,
-	[PA_CHANNEL_POSITION_AUX25] = SPA_AUDIO_CHANNEL_CUSTOM_START + 26,
-	[PA_CHANNEL_POSITION_AUX26] = SPA_AUDIO_CHANNEL_CUSTOM_START + 27,
-	[PA_CHANNEL_POSITION_AUX27] = SPA_AUDIO_CHANNEL_CUSTOM_START + 28,
-	[PA_CHANNEL_POSITION_AUX28] = SPA_AUDIO_CHANNEL_CUSTOM_START + 29,
-	[PA_CHANNEL_POSITION_AUX29] = SPA_AUDIO_CHANNEL_CUSTOM_START + 30,
-	[PA_CHANNEL_POSITION_AUX30] = SPA_AUDIO_CHANNEL_CUSTOM_START + 31,
-	[PA_CHANNEL_POSITION_AUX31] = SPA_AUDIO_CHANNEL_CUSTOM_START + 32,
-
-	[PA_CHANNEL_POSITION_TOP_CENTER] = SPA_AUDIO_CHANNEL_TC,
-
-	[PA_CHANNEL_POSITION_TOP_FRONT_LEFT] = SPA_AUDIO_CHANNEL_TFL,
-	[PA_CHANNEL_POSITION_TOP_FRONT_RIGHT] = SPA_AUDIO_CHANNEL_TFR,
-	[PA_CHANNEL_POSITION_TOP_FRONT_CENTER] = SPA_AUDIO_CHANNEL_TFC,
-
-	[PA_CHANNEL_POSITION_TOP_REAR_LEFT] = SPA_AUDIO_CHANNEL_TRL,
-	[PA_CHANNEL_POSITION_TOP_REAR_RIGHT] = SPA_AUDIO_CHANNEL_TRR,
-	[PA_CHANNEL_POSITION_TOP_REAR_CENTER] = SPA_AUDIO_CHANNEL_TRC,
-};
-
-static inline uint32_t channel_pa2id(pa_stream *s, pa_channel_position_t channel)
-{
-	if (channel < 0 || (size_t)channel >= SPA_N_ELEMENTS(audio_channels))
-		return SPA_AUDIO_CHANNEL_UNKNOWN;
-	return audio_channels[channel];
-}
-
-static inline pa_channel_position_t channel_id2pa(pa_stream *s, uint32_t id)
-{
-	size_t i;
-	for (i = 0; i < SPA_N_ELEMENTS(audio_channels); i++) {
-		if (id == audio_channels[i])
-			return i;
-	}
-	return PA_CHANNEL_POSITION_INVALID;
-}
 
 static void dump_buffer_attr(pa_stream *s, pa_buffer_attr *attr)
 {
@@ -223,8 +112,6 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		if (!s->disconnecting) {
 			pa_context_set_error(c, PA_ERR_KILLED);
 			pa_stream_set_state(s, PA_STREAM_FAILED);
-		} else {
-			pa_stream_set_state(s, PA_STREAM_TERMINATED);
 		}
 		break;
 	case PW_STREAM_STATE_CONNECTING:
@@ -288,12 +175,25 @@ static const struct spa_pod *get_buffers_param(pa_stream *s, pa_buffer_attr *att
 }
 
 static void patch_buffer_attr(pa_stream *s, pa_buffer_attr *attr, pa_stream_flags_t *flags) {
-	const char *e;
+	const char *e, *str;
+	char buf[100];
 
 	pa_assert(s);
 	pa_assert(attr);
 
-	if ((e = getenv("PULSE_LATENCY_MSEC"))) {
+	e = getenv("PULSE_LATENCY_MSEC");
+	if (e == NULL) {
+		str = getenv("PIPEWIRE_LATENCY");
+		if (str) {
+			int num, denom;
+			if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
+				snprintf(buf, sizeof(buf)-1, PRIu64, num * PA_MSEC_PER_SEC / denom);
+				e = buf;
+			}
+		}
+	}
+
+	if (e) {
 		uint32_t ms;
 		pa_sample_spec ss;
 
@@ -307,7 +207,7 @@ static void patch_buffer_attr(pa_stream *s, pa_buffer_attr *attr, pa_stream_flag
 		if ((ms = atoi(e)) == 0) {
 			pa_log_debug("Failed to parse $PULSE_LATENCY_MSEC: %s", e);
 		}
-		else if (!pa_sample_spec_valid(&s->sample_spec)) {
+		else if (!pa_sample_spec_valid(&ss)) {
 			pa_log_debug("Ignoring $PULSE_LATENCY_MSEC: %s (invalid sample spec)", e);
 		}
 		else {
@@ -347,37 +247,15 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 	uint32_t n_params = 0;
         uint8_t buffer[4096];
         struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-	struct spa_audio_info info = { 0 };
-	unsigned int i;
+	int res;
 
 	if (param == NULL || id != SPA_PARAM_Format)
 		return;
 
-	spa_format_parse(param, &info.media_type, &info.media_subtype);
-
-	if (info.media_type != SPA_MEDIA_TYPE_audio ||
-	    info.media_subtype != SPA_MEDIA_SUBTYPE_raw ||
-	    spa_format_audio_raw_parse(param, &info.info.raw) < 0 ||
-	    !SPA_AUDIO_FORMAT_IS_INTERLEAVED(info.info.raw.format)) {
-		pw_stream_set_error(s->stream, -EINVAL, "unhandled format");
+	if ((res = pa_format_parse_param(param, &s->sample_spec, &s->channel_map)) < 0) {
+		pw_stream_set_error(s->stream, res, "unhandled format");
 		return;
 	}
-
-	s->sample_spec.format = format_id2pa(s, info.info.raw.format);
-	if (s->sample_spec.format == PA_SAMPLE_INVALID) {
-		pw_stream_set_error(s->stream, -EINVAL, "invalid format");
-		return;
-	}
-	s->sample_spec.rate = info.info.raw.rate;
-	s->sample_spec.channels = info.info.raw.channels;
-
-	pa_channel_map_init(&s->channel_map);
-	s->channel_map.channels = info.info.raw.channels;
-	for (i = 0; i < info.info.raw.channels; i++)
-		s->channel_map.map[i] = channel_id2pa(s, info.info.raw.position[i]);
-
-	if (!pa_channel_map_valid(&s->channel_map))
-		pa_channel_map_init_auto(&s->channel_map, info.info.raw.channels, PA_CHANNEL_MAP_DEFAULT);
 
 	if (s->format)
 		pa_format_info_free(s->format);
@@ -423,9 +301,12 @@ static void stream_remove_buffer(void *data, struct pw_buffer *buffer)
 	struct pa_mem *m = buffer->user_data;
 	s->maxsize -= buffer->buffer->datas[0].maxsize;
 	s->maxblock = INT_MAX;
-	if (m != NULL)
+	if (m != NULL) {
 		spa_list_append(&s->free, &m->link);
-	buffer->user_data = NULL;
+		m->user_data = NULL;
+		buffer->user_data = NULL;
+		pw_log_trace("remove %p", m);
+	}
 }
 
 static void update_timing_info(pa_stream *s)
@@ -487,9 +368,13 @@ static void queue_output(pa_stream *s)
 		if (buf == NULL)
 			break;
 
-		if ((old = buf->user_data) != NULL)
+		if ((old = buf->user_data) != NULL) {
+			pw_log_trace("queue %p", old);
 			spa_list_append(&s->free, &old->link);
+			old->user_data = NULL;
+		}
 
+		pw_log_trace("queue %p", m);
 		spa_list_remove(&m->link);
 		s->ready_bytes -= m->size;
 
@@ -498,6 +383,7 @@ static void queue_output(pa_stream *s)
 		buf->buffer->datas[0].chunk->offset = m->offset;
 		buf->buffer->datas[0].chunk->size = m->size;
 		buf->user_data = m;
+		m->user_data = buf;
 
 		pw_stream_queue_buffer(s->stream, buf);
 	}
@@ -514,9 +400,11 @@ struct pa_mem *alloc_mem(pa_stream *s, size_t len)
 			return NULL;
 		m->data = SPA_MEMBER(m, sizeof(struct pa_mem), void);
 		m->maxsize = len;
+		pw_log_trace("alloc %p", m);
 	} else {
 		m = spa_list_first(&s->free, struct pa_mem, link);
 		spa_list_remove(&m->link);
+		pw_log_trace("reuse %p", m);
 	}
 	return m;
 }
@@ -539,6 +427,7 @@ static void pull_input(pa_stream *s)
 		m->user_data = buf;
 		buf->user_data = m;
 
+		pw_log_trace("input %p", m);
 		spa_list_append(&s->ready, &m->link);
 		s->ready_bytes += m->size;
 	}
@@ -552,10 +441,16 @@ static void stream_process(void *data)
 	update_timing_info(s);
 
 	if (s->direction == PA_STREAM_PLAYBACK) {
+		pa_timing_info *i = &s->timing_info;
+		uint64_t queued, writable;
+
 		queue_output(s);
 
-		if (s->write_callback && s->state == PA_STREAM_READY)
-			s->write_callback(s, s->maxblock, s->write_userdata);
+		queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
+		writable = s->maxblock - SPA_MIN(queued, s->maxblock);
+
+		if (s->write_callback && s->state == PA_STREAM_READY && writable > 0)
+			s->write_callback(s, writable, s->write_userdata);
 	}
 	else {
 		pull_input(s);
@@ -722,7 +617,8 @@ static void stream_unlink(pa_stream *s)
 	}
 
 	spa_list_remove(&s->link);
-	pw_stream_set_active(s->stream, false);
+	if (s->stream)
+		pw_stream_set_active(s->stream, false);
 
 	s->context = NULL;
 	pa_stream_unref(s);
@@ -741,6 +637,7 @@ static void stream_free(pa_stream *s)
 	}
 
 	spa_list_consume(m, &s->free, link) {
+		pw_log_trace("free %p", m);
 		spa_list_remove(&m->link);
 		free(m);
 	}
@@ -855,11 +752,9 @@ const char *pa_stream_get_device_name(PA_CONST pa_stream *s)
 
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->state == PA_STREAM_READY, PA_ERR_BADSTATE);
 	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->direction != PA_STREAM_UPLOAD, PA_ERR_BADSTATE);
-//	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->device_name, PA_ERR_BADSTATE);
+	PA_CHECK_VALIDITY_RETURN_NULL(s->context, s->device_name, PA_ERR_BADSTATE);
 
-	if (s->device_name == NULL)
-		return "unnamed";
-
+	pw_log_trace("stream %p: %s %d", s, s->device_name, s->device_index);
 	return s->device_name;
 }
 
@@ -886,22 +781,6 @@ int pa_stream_is_corked(PA_CONST pa_stream *s)
 
 	pw_log_trace("stream %p: corked %d", s, s->corked);
 	return s->corked;
-}
-
-static const struct spa_pod *get_param(pa_stream *s, pa_sample_spec *ss, pa_channel_map *map,
-		struct spa_pod_builder *b)
-{
-	struct spa_audio_info_raw info;
-
-	info = SPA_AUDIO_INFO_RAW_INIT( .format = format_pa2id(s, ss->format),
-		                .channels = ss->channels,
-		                .rate = ss->rate);
-	if (map) {
-		int i;
-		for (i = 0; i < map->channels; i++)
-			info.position[i] = channel_pa2id(s, map->map[i]);
-	}
-	return spa_format_audio_raw_build(b, SPA_PARAM_EnumFormat, &info);
 }
 
 static int create_stream(pa_stream_direction_t direction,
@@ -961,7 +840,7 @@ static int create_stream(pa_stream_direction_t direction,
 	PA_CHECK_VALIDITY(s->context, (flags & (PA_STREAM_ADJUST_LATENCY|PA_STREAM_EARLY_REQUESTS)) != (PA_STREAM_ADJUST_LATENCY|PA_STREAM_EARLY_REQUESTS), PA_ERR_INVALID);
 
 
-	pw_log_debug("stream %p: connect %s %08x", s, dev, flags);
+	pw_log_info("stream %p: connect %s %08x", s, dev, flags);
 
 	name = pa_proplist_gets(s->proplist, PA_PROP_MEDIA_NAME);
 
@@ -1000,7 +879,8 @@ static int create_stream(pa_stream_direction_t direction,
 	no_remix = (flags & PA_STREAM_NO_REMIX_CHANNELS);
 
 	if (pa_sample_spec_valid(&s->sample_spec)) {
-		params[n_params++] = get_param(s, &s->sample_spec, &s->channel_map, &b);
+		params[n_params++] = pa_format_build_param(&b, SPA_PARAM_EnumFormat,
+				&s->sample_spec, &s->channel_map);
 		sample_rate = s->sample_spec.rate;
 		stride = pa_frame_size(&s->sample_spec);
 	}
@@ -1019,7 +899,8 @@ static int create_stream(pa_stream_direction_t direction,
 			if (pa_format_info_get_channel_map(s->req_formats[i], &chmap) < 0)
 				pa_channel_map_init_auto(&chmap, ss.channels, PA_CHANNEL_MAP_DEFAULT);
 
-			params[n_params++] = get_param(s, &ss, &chmap, &b);
+			params[n_params++] = pa_format_build_param(&b, SPA_PARAM_EnumFormat,
+					&ss, &chmap);
 			if (ss.rate > sample_rate) {
 				sample_rate = ss.rate;
 				stride = pa_frame_size(&ss);
@@ -1136,6 +1017,7 @@ int pa_stream_connect_record(
 static void on_disconnected(pa_operation *o, void *userdata)
 {
 	pa_stream *s = o->stream;
+	pw_log_debug("stream %p", s);
 	pa_stream_set_state(s, PA_STREAM_TERMINATED);
 }
 
@@ -1314,6 +1196,7 @@ int pa_stream_peek(pa_stream *s,
 		return 0;
 	}
 	s->mem = spa_list_first(&s->ready, struct pa_mem, link);
+	pw_log_trace("peek %p", s->mem);
 
 	*data = SPA_MEMBER(s->mem->data, s->mem->offset, void);
 	*nbytes = s->mem->size;
@@ -1348,7 +1231,9 @@ int pa_stream_drop(pa_stream *s)
 	pw_stream_queue_buffer(s->stream, buf);
 	buf->user_data = NULL;
 
+	pw_log_trace("drop %p", s->mem);
 	spa_list_append(&s->free, &s->mem->link);
+	s->mem->user_data = NULL;
 	s->mem = NULL;
 
 	return 0;
@@ -1669,8 +1554,13 @@ pa_operation* pa_stream_flush(pa_stream *s, pa_stream_success_cb_t cb, void *use
 	d->userdata = userdata;
 
 	spa_list_consume(m, &s->ready, link) {
+		struct pw_buffer *b = m->user_data;
+		pw_log_trace("flush %p", m);
 		spa_list_remove(&m->link);
 		spa_list_append(&s->free, &m->link);
+		m->user_data = NULL;
+		if (b)
+			b->user_data = NULL;
 	}
 	s->ready_bytes = 0;
 	s->timing_info.write_index = s->timing_info.read_index = 0;
@@ -1842,6 +1732,9 @@ int pa_stream_get_latency(pa_stream *s, pa_usec_t *r_usec, int *negative)
 		*r_usec = time_counter_diff(s, c, t, negative);
 	else
 		*r_usec = time_counter_diff(s, t, c, negative);
+
+	pw_log_debug("stream %p: now:%"PRIu64" stream:%"PRIu64
+			" res:%"PRIu64, s, t, c, *r_usec);
 
 	return 0;
 }

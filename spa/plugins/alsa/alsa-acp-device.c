@@ -99,13 +99,20 @@ static void handle_acp_poll(struct spa_source *source)
 		this->sources[i].rmask = 0;
 }
 
+static void remove_sources(struct impl *this)
+{
+	int i;
+	for (i = 0; i < this->n_pfds; i++) {
+		spa_loop_remove_source(this->loop, &this->sources[i]);
+	}
+	this->n_pfds = 0;
+}
+
 static int setup_sources(struct impl *this)
 {
 	int i;
 
-	for (i = 0; i < this->n_pfds; i++) {
-		spa_loop_remove_source(this->loop, &this->sources[i]);
-	}
+	remove_sources(this);
 
 	this->n_pfds = acp_card_poll_descriptors(this->card, this->pfds, MAX_POLL);
 
@@ -224,15 +231,20 @@ static int impl_add_listener(void *object,
 	spa_return_val_if_fail(events != NULL, -EINVAL);
 
 	card = this->card;
-	profile = card->profiles[card->active_profile_index];
+	if (card->active_profile_index < card->n_profiles)
+		profile = card->profiles[card->active_profile_index];
+	else
+		profile = NULL;
 
 	spa_hook_list_isolate(&this->hooks, &save, listener, events, data);
 
 	if (events->info || events->object_info)
 		emit_info(this, true);
 
-	for (i = 0; i < profile->n_devices; i++)
-		emit_node(this, profile->devices[i]);
+	if (profile) {
+		for (i = 0; i < profile->n_devices; i++)
+			emit_node(this, profile->devices[i]);
+	}
 
 	spa_hook_list_join(&this->hooks, &save);
 
@@ -297,7 +309,7 @@ static struct spa_pod *build_profile(struct spa_pod_builder *b, uint32_t id,
 }
 
 static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
-	struct acp_port *p, struct acp_device *dev)
+	struct acp_port *p, struct acp_device *dev, uint32_t profile)
 {
 	struct spa_pod_frame f[2];
 	const struct acp_dict_item *item;
@@ -373,6 +385,16 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 
 		spa_pod_builder_pop(b, &f[1]);
 	}
+	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
+	spa_pod_builder_push_array(b, &f[1]);
+	for (i = 0; i < p->n_devices; i++)
+		spa_pod_builder_int(b, p->devices[i]->index);
+	spa_pod_builder_pop(b, &f[1]);
+
+	if (profile != SPA_ID_INVALID) {
+		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profile, 0);
+		spa_pod_builder_int(b, profile);
+	}
 	return spa_pod_builder_pop(b, &f[0]);
 }
 
@@ -424,7 +446,7 @@ static int impl_enum_params(void *object, int seq,
 		break;
 
 	case SPA_PARAM_Profile:
-		if (result.index > 0)
+		if (result.index > 0 || card->active_profile_index >= card->n_profiles)
 			return 0;
 
 		pr = card->profiles[card->active_profile_index];
@@ -436,7 +458,7 @@ static int impl_enum_params(void *object, int seq,
 			return 0;
 
 		p = card->ports[result.index];
-		param = build_route(&b, id, p, NULL);
+		param = build_route(&b, id, p, NULL, SPA_ID_INVALID);
 		break;
 
 	case SPA_PARAM_Route:
@@ -454,7 +476,7 @@ static int impl_enum_params(void *object, int seq,
 		if (p == NULL)
 			return 0;
 		result.next = result.index + 1;
-		param = build_route(&b, id, p, dev);
+		param = build_route(&b, id, p, dev, card->active_profile_index);
 		if (param == NULL)
 			return -errno;
 		break;
@@ -774,6 +796,8 @@ static SPA_PRINTF_FUNC(6,0) void impl_acp_log_func(void *data,
 
 static int impl_clear(struct spa_handle *handle)
 {
+	struct impl *this = (struct impl *) handle;
+	remove_sources(this);
 	return 0;
 }
 
@@ -793,7 +817,8 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	const char *str;
-	struct acp_dict_item items[4];
+	struct acp_dict_item *items = NULL;
+	const struct spa_dict_item *it;
 	uint32_t n_items = 0;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -825,10 +850,10 @@ impl_init(const struct spa_handle_factory *factory,
 	if (info) {
 		if ((str = spa_dict_lookup(info, SPA_KEY_API_ALSA_PATH)) != NULL)
 			snprintf(this->props.device, sizeof(this->props.device)-1, "%s", str);
-		if ((str = spa_dict_lookup(info, SPA_KEY_DEVICE_PROFILE_SET)) != NULL)
-			items[n_items++] = ACP_DICT_ITEM_INIT("profile-set", str);
-		if ((str = spa_dict_lookup(info, SPA_KEY_DEVICE_PROFILE)) != NULL)
-			items[n_items++] = ACP_DICT_ITEM_INIT("profile", str);
+
+		items = alloca((info->n_items) * sizeof(*items));
+		spa_dict_for_each(it, info)
+			items[n_items++] = ACP_DICT_ITEM_INIT(it->key, it->value);
 	}
 
 	spa_log_debug(this->log, "probe card %s", this->props.device);

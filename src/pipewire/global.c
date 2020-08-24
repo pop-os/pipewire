@@ -45,7 +45,7 @@ SPA_EXPORT
 uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_client *client)
 {
 	if (client->permission_func == NULL)
-		return PW_PERM_RWX;
+		return PW_PERM_ALL;
 
 	return client->permission_func(global, client, client->permission_data);
 }
@@ -209,6 +209,16 @@ SPA_EXPORT
 const struct pw_properties *pw_global_get_properties(struct pw_global *global)
 {
 	return global->properties;
+}
+
+SPA_EXPORT
+int pw_global_update_keys(struct pw_global *global,
+		     const struct spa_dict *dict, const char *keys[])
+{
+	struct impl *impl = SPA_CONTAINER_OF(global, struct impl, this);
+	if (impl->registered)
+		return -EINVAL;
+	return pw_properties_update_keys(global->properties, dict, keys);
 }
 
 SPA_EXPORT

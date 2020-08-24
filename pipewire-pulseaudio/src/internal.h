@@ -224,12 +224,16 @@ struct pa_mainloop {
 struct param {
 	struct spa_list link;
 	uint32_t id;
-	int seq;
 	void *param;
 };
 
 #define PA_IDX_FLAG_DSP		0x800000U
 #define PA_IDX_MASK_DSP		0x7fffffU
+
+struct port_device {
+	uint32_t n_devices;
+	uint32_t *devices;
+};
 
 struct global;
 
@@ -251,10 +255,9 @@ struct global {
 	pa_subscription_mask_t mask;
 	pa_subscription_event_type_t event;
 
-	int priority_master;
+	int priority_driver;
 	int pending_seq;
 	int init:1;
-	int subscribed:1;
 
 	void *info;
 	struct global_info *ginfo;
@@ -280,12 +283,15 @@ struct global {
 			uint32_t flags;
 			float volume;
 			bool mute;
+			pa_sample_spec sample_spec;
+			pa_channel_map channel_map;
 			uint32_t n_channel_volumes;
 			float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
 			uint32_t device_id;		/* id of device (card) */
 			uint32_t profile_device_id;	/* id in profile */
 			float base_volume;
 			float volume_step;
+			uint32_t active_port;
 		} node_info;
 		struct {
 			uint32_t node_id;
@@ -302,8 +308,7 @@ struct global {
 			unsigned int pending_profiles:1;
 			pa_card_port_info *card_ports;
 			unsigned int pending_ports:1;
-			uint32_t active_port_output;
-			uint32_t active_port_input;
+			struct port_device *port_devices;
 		} card_info;
 		struct {
 			pa_module_info info;
@@ -356,13 +361,14 @@ struct pa_context {
 	int disconnect:1;
 
 	struct global *metadata;
+	uint32_t default_sink;
+	uint32_t default_source;
 };
 
 struct global *pa_context_find_global(pa_context *c, uint32_t id);
 const char *pa_context_find_global_name(pa_context *c, uint32_t id);
 struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, const char *name);
 struct global *pa_context_find_linked(pa_context *c, uint32_t id);
-void pa_context_ensure_registry(pa_context *c);
 
 struct pa_mem {
 	struct spa_list link;
@@ -489,6 +495,11 @@ int pa_metadata_update(struct global *global, uint32_t subject, const char *key,
                         const char *type, const char *value);
 int pa_metadata_get(struct global *global, uint32_t subject, const char *key,
                         const char **type, const char **value);
+
+int pa_format_parse_param(const struct spa_pod *param,
+		pa_sample_spec *spec, pa_channel_map *map);
+const struct spa_pod *pa_format_build_param(struct spa_pod_builder *b,
+		uint32_t id, pa_sample_spec *spec, pa_channel_map *map);
 
 #ifdef __cplusplus
 }

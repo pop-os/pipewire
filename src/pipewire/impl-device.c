@@ -59,6 +59,7 @@ struct resource_data {
 
 	/* for async replies */
 	int seq;
+	int orig_seq;
 	int end;
 	struct result_device_params_data data;
 	struct spa_hook listener;
@@ -299,7 +300,7 @@ static void result_device_params_async(void *data, int seq, int res, uint32_t ty
 	if (seq == d->end)
 		remove_busy_resource(d);
 	if (seq == d->seq)
-		result_device_params(&d->data, seq, res, type, result);
+		result_device_params(&d->data, d->orig_seq, res, type, result);
 
 }
 
@@ -330,6 +331,7 @@ static int device_enum_params(void *object, int seq, uint32_t id, uint32_t start
 		if (data->end == -1)
 			spa_device_add_listener(device->device, &data->listener,
 				&device_events, data);
+		data->orig_seq = seq;
 		data->seq = res;
 		data->end = spa_device_sync(device->device, res);
 	}
@@ -477,13 +479,6 @@ int pw_impl_device_register(struct pw_impl_device *device,
 	if (device->registered)
 		goto error_existed;
 
-	if (properties == NULL)
-		properties = pw_properties_new(NULL, NULL);
-	if (properties == NULL)
-		return -errno;
-
-	pw_properties_update_keys(properties, &device->properties->dict, keys);
-
         device->global = pw_global_new(context,
 				       PW_TYPE_INTERFACE_Device,
 				       PW_VERSION_DEVICE,
@@ -499,6 +494,8 @@ int pw_impl_device_register(struct pw_impl_device *device,
 	device->info.id = device->global->id;
 	pw_properties_setf(device->properties, PW_KEY_OBJECT_ID, "%d", device->info.id);
 	device->info.props = &device->properties->dict;
+
+	pw_global_update_keys(device->global, device->info.props, keys);
 
 	pw_impl_device_emit_initialized(device);
 

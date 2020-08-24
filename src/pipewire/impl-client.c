@@ -437,13 +437,6 @@ int pw_impl_client_register(struct pw_impl_client *client,
 
 	pw_log_debug(NAME" %p: register", client);
 
-	if (properties == NULL)
-		properties = pw_properties_new(NULL, NULL);
-	if (properties == NULL)
-		return -errno;
-
-	pw_properties_update_keys(properties, &client->properties->dict, keys);
-
 	client->global = pw_global_new(context,
 				       PW_TYPE_INTERFACE_Client,
 				       PW_VERSION_CLIENT,
@@ -459,6 +452,8 @@ int pw_impl_client_register(struct pw_impl_client *client,
 	client->info.id = client->global->id;
 	pw_properties_setf(client->properties, PW_KEY_OBJECT_ID, "%d", client->info.id);
 	client->info.props = &client->properties->dict;
+
+	pw_global_update_keys(client->global, client->info.props, keys);
 
 	pw_impl_client_emit_initialized(client);
 
@@ -669,4 +664,21 @@ void pw_impl_client_set_busy(struct pw_impl_client *client, bool busy)
 		client->busy = busy;
 		pw_impl_client_emit_busy_changed(client, busy);
 	}
+}
+SPA_EXPORT
+int pw_impl_client_check_permissions(struct pw_impl_client *client,
+		uint32_t global_id, uint32_t permissions)
+{
+	struct pw_context *context = client->context;
+	struct pw_global *global;
+	uint32_t perms;
+
+	if ((global = pw_context_find_global(context, global_id)) == NULL)
+		return -ENOENT;
+
+	perms = pw_global_get_permissions(global, client);
+	if ((perms & permissions) != permissions)
+		return -EPERM;
+
+	return 0;
 }

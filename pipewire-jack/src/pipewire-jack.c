@@ -210,6 +210,7 @@ struct link {
 };
 
 struct context {
+	struct pw_loop *l;
 	struct pw_thread_loop *loop;	/* thread_lock protects all below */
 	struct pw_context *context;
 
@@ -330,6 +331,8 @@ struct client {
 		struct spa_list target_links;
 	} rt;
 
+	int pending;
+
 	unsigned int started:1;
 	unsigned int active:1;
 	unsigned int destroyed:1;
@@ -337,8 +340,8 @@ struct client {
 	unsigned int thread_entered:1;
 	unsigned int has_transport:1;
 	unsigned int allow_mlock:1;
-	unsigned int timemaster_pending:1;
-	unsigned int timemaster_conditional:1;
+	unsigned int timeowner_pending:1;
+	unsigned int timeowner_conditional:1;
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
@@ -803,6 +806,9 @@ static void *get_buffer_output(struct client *c, struct port *p, uint32_t frames
 	p->io.status = -EPIPE;
 	p->io.buffer_id = SPA_ID_INVALID;
 
+	if (frames == 0)
+		return NULL;
+
 	if (SPA_LIKELY((mix = find_mix(c, p, -1)) != NULL)) {
 		struct buffer *b;
 
@@ -989,25 +995,59 @@ static inline jack_transport_state_t position_to_jack(struct pw_node_activation 
 	return state;
 }
 
-static inline void check_buffer_frames(struct client *c, struct spa_io_position *pos)
+static int
+do_buffer_frames(struct spa_loop *loop,
+		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	uint32_t buffer_frames = *((uint32_t*)data);
+	struct client *c = user_data;
+	if (c->bufsize_callback)
+		c->bufsize_callback(buffer_frames, c->bufsize_arg);
+	ATOMIC_DEC(c->pending);
+	return 0;
+}
+
+static inline void check_buffer_frames(struct client *c, struct spa_io_position *pos, bool rt)
 {
 	uint32_t buffer_frames = pos->clock.duration;
 	if (SPA_UNLIKELY(buffer_frames != c->buffer_frames)) {
 		pw_log_info(NAME" %p: bufferframes %d", c, buffer_frames);
+		ATOMIC_INC(c->pending);
 		c->buffer_frames = buffer_frames;
-		if (c->bufsize_callback)
-			c->bufsize_callback(c->buffer_frames, c->bufsize_arg);
+		if (rt)
+			pw_loop_invoke(c->context.l, do_buffer_frames, 0,
+					&buffer_frames, sizeof(buffer_frames), false, c);
+		else
+			do_buffer_frames(c->context.l->loop, false, 0,
+					&buffer_frames, sizeof(buffer_frames), c);
 	}
 }
 
-static inline void check_sample_rate(struct client *c, struct spa_io_position *pos)
+static int
+do_sample_rate(struct spa_loop *loop,
+		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	uint32_t sample_rate = *((uint32_t*)data);
+	if (c->srate_callback)
+		c->srate_callback(sample_rate, c->srate_arg);
+	ATOMIC_DEC(c->pending);
+	return 0;
+}
+
+static inline void check_sample_rate(struct client *c, struct spa_io_position *pos, bool rt)
 {
 	uint32_t sample_rate = pos->clock.rate.denom;
 	if (SPA_UNLIKELY(sample_rate != c->sample_rate)) {
 		pw_log_info(NAME" %p: sample_rate %d", c, sample_rate);
+		ATOMIC_INC(c->pending);
 		c->sample_rate = sample_rate;
-		if (c->srate_callback)
-			c->srate_callback(c->sample_rate, c->srate_arg);
+		if (rt)
+			pw_loop_invoke(c->context.l, do_sample_rate, 0,
+					&sample_rate, sizeof(sample_rate), false, c);
+		else
+			do_sample_rate(c->context.l->loop, false, 0,
+					&sample_rate, sizeof(sample_rate), c);
 	}
 }
 
@@ -1043,8 +1083,8 @@ static inline uint32_t cycle_run(struct client *c)
 		return 0;
 	}
 
-	check_buffer_frames(c, pos);
-	check_sample_rate(c, pos);
+	check_buffer_frames(c, pos, true);
+	check_sample_rate(c, pos, true);
 
 	if (SPA_LIKELY(driver)) {
 		c->jack_state = position_to_jack(driver, &c->jack_position);
@@ -1159,11 +1199,12 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 		}
 	} else if (SPA_LIKELY(mask & SPA_IO_IN)) {
 		uint32_t buffer_frames;
-		int status;
+		int status = 0;
 
 		buffer_frames = cycle_run(c);
 
-		status = c->process_callback ? c->process_callback(buffer_frames, c->process_arg) : 0;
+		if (!ATOMIC_LOAD(c->pending) && c->process_callback)
+			status = c->process_callback(buffer_frames, c->process_arg);
 
 		cycle_signal(c, status);
 	}
@@ -1243,12 +1284,12 @@ static int client_node_set_param(void *object,
 	return -ENOTSUP;
 }
 
-static int install_timemaster(struct client *c)
+static int install_timeowner(struct client *c)
 {
 	struct pw_node_activation *a;
 	uint32_t owner;
 
-	if (!c->timemaster_pending)
+	if (!c->timeowner_pending)
 		return 0;
 
 	if ((a = c->driver_activation) == NULL)
@@ -1261,8 +1302,8 @@ static int install_timemaster(struct client *c)
 	if (owner == c->node_id)
 		return 0;
 
-	/* try to become master */
-	if (c->timemaster_conditional) {
+	/* try to become owner */
+	if (c->timeowner_conditional) {
 		if (!ATOMIC_CAS(a->segment_owner[0], 0, c->node_id)) {
 			pw_log_debug(NAME" %p: owner:%u id:%u", c, owner, c->node_id);
 			return -EBUSY;
@@ -1272,7 +1313,7 @@ static int install_timemaster(struct client *c)
 	}
 
 	pw_log_debug(NAME" %p: timebase installed for id:%u", c, c->node_id);
-	c->timemaster_pending = false;
+	c->timeowner_pending = false;
 
 	return 0;
 }
@@ -1296,7 +1337,7 @@ static int update_driver_activation(struct client *c)
 	c->driver_activation = link ? link->activation : NULL;
 	pw_data_loop_invoke(c->loop,
                        do_update_driver_activation, SPA_ID_INVALID, NULL, 0, true, c);
-	install_timemaster(c);
+	install_timeowner(c);
 
 	return 0;
 }
@@ -1335,7 +1376,7 @@ static int client_node_set_io(void *object,
 		c->driver_id = ptr ? c->position->clock.id : SPA_ID_INVALID;
 		update_driver_activation(c);
 		if (ptr)
-			check_sample_rate(c, c->position);
+			check_sample_rate(c, c->position, false);
 		break;
 	default:
 		break;
@@ -1945,15 +1986,37 @@ static const char* type_to_string(jack_port_type_id_t type_id)
 	}
 }
 
+static jack_uuid_t client_make_uuid(uint32_t id)
+{
+	jack_uuid_t uuid = 0x2; /* JackUUIDClient */
+	uuid = (uuid << 32) | (id + 1);
+	pw_log_debug("uuid %d -> %"PRIu64, id, uuid);
+	return uuid;
+}
+
 static int metadata_property(void *object, uint32_t id,
 		const char *key, const char *type, const char *value)
 {
 	struct client *c = (struct client *) object;
+	struct object *o;
 	jack_uuid_t uuid;
 
 	pw_log_info("set id:%u '%s' to '%s@%s'", id, key, value, type);
 
-	uuid = jack_port_uuid_generate(id);
+	o = pw_map_lookup(&c->context.globals, id);
+	if (o == NULL)
+		return -EINVAL;
+
+	switch (o->type) {
+	case INTERFACE_Node:
+		uuid = client_make_uuid(id);
+		break;
+	case INTERFACE_Port:
+		uuid = jack_port_uuid_generate(id);
+		break;
+	default:
+		return -EINVAL;
+	}
 	update_property(c, uuid, key, type, value);
 
 	if (key && strcmp(key, "default.audio.sink") == 0) {
@@ -1983,7 +2046,7 @@ static void registry_event_global(void *data, uint32_t id,
 		return;
 
 	if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
-		const char *app;
+		const char *app, *node_name;
 
 		o = alloc_object(c);
 		object_type = INTERFACE_Node;
@@ -1991,15 +2054,23 @@ static void registry_event_global(void *data, uint32_t id,
 		if ((str = spa_dict_lookup(props, PW_KEY_CLIENT_ID)) != NULL)
 			o->node.client_id = atoi(str);
 
+		node_name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+
+		if (id == c->node_id) {
+			pw_log_debug(NAME" %p: add our node %d", c, id);
+			if (node_name != NULL)
+				strncpy(c->name, node_name, JACK_CLIENT_NAME_SIZE);
+		}
+
 		app = spa_dict_lookup(props, PW_KEY_APP_NAME);
 
-		if ((str = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION)) == NULL &&
-		    (str = spa_dict_lookup(props, PW_KEY_NODE_NICK)) == NULL &&
-		    (str = spa_dict_lookup(props, PW_KEY_NODE_NAME)) == NULL) {
+		if ((str = spa_dict_lookup(props, PW_KEY_NODE_NICK)) == NULL &&
+		    (str = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION)) == NULL &&
+		    (str = node_name) == NULL) {
 			str = "node";
 		}
-		if (app)
-			snprintf(o->node.name, sizeof(o->node.name), "%s:%s", app, str);
+		if (app && strcmp(app, str) != 0)
+			snprintf(o->node.name, sizeof(o->node.name), "%s/%s", app, str);
 		else
 			snprintf(o->node.name, sizeof(o->node.name), "%s", str);
 
@@ -2007,7 +2078,7 @@ static void registry_event_global(void *data, uint32_t id,
 		if (ot != NULL && o->node.client_id != ot->node.client_id)
 			snprintf(o->node.name, sizeof(o->node.name), "%s-%d", str, id);
 
-		if ((str = spa_dict_lookup(props, PW_KEY_PRIORITY_MASTER)) != NULL)
+		if ((str = spa_dict_lookup(props, PW_KEY_PRIORITY_DRIVER)) != NULL)
 			o->node.priority = pw_properties_parse_int(str);
 
 		pw_log_debug(NAME" %p: add node %d", c, id);
@@ -2267,7 +2338,7 @@ jack_client_t * jack_client_open (const char *client_name,
 {
 	struct client *client;
 	struct spa_dict props;
-	struct spa_dict_item items[6];
+	struct spa_dict_item items[1];
 	const struct spa_support *support;
 	uint32_t n_support;
 	const char *str;
@@ -2293,8 +2364,9 @@ jack_client_t * jack_client_open (const char *client_name,
 	client->node_id = SPA_ID_INVALID;
 	strncpy(client->name, client_name, JACK_CLIENT_NAME_SIZE);
 	client->context.loop = pw_thread_loop_new(client_name, NULL);
+	client->context.l = pw_thread_loop_get_loop(client->context.loop),
 	client->context.context = pw_context_new(
-			pw_thread_loop_get_loop(client->context.loop),
+			client->context.l,
 			pw_properties_new(
 				PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
 				NULL),
@@ -2369,16 +2441,21 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (client->props == NULL)
 		goto init_failed;
 
-	props = SPA_DICT_INIT(items, 0);
-	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_NAME, client_name);
-	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
-	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_CATEGORY, "Duplex");
-	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_ROLE, "DSP");
-	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
-		items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, str);
-	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_ALWAYS_PROCESS, "true");
-
-	pw_properties_add(client->props, &props);
+	if (pw_properties_get(client->props, PW_KEY_NODE_NAME) == NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_NAME, client_name);
+	if (pw_properties_get(client->props, PW_KEY_NODE_DESCRIPTION) == NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_DESCRIPTION, client_name);
+	if (pw_properties_get(client->props, PW_KEY_MEDIA_TYPE) == NULL)
+		pw_properties_set(client->props, PW_KEY_MEDIA_TYPE, "Audio");
+	if (pw_properties_get(client->props, PW_KEY_MEDIA_CATEGORY) == NULL)
+		pw_properties_set(client->props, PW_KEY_MEDIA_CATEGORY, "Duplex");
+	if (pw_properties_get(client->props, PW_KEY_MEDIA_ROLE) == NULL)
+		pw_properties_set(client->props, PW_KEY_MEDIA_ROLE, "DSP");
+	if (pw_properties_get(client->props, PW_KEY_NODE_LATENCY) == NULL &&
+	    (str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_LATENCY, str);
+	if (pw_properties_get(client->props, PW_KEY_NODE_ALWAYS_PROCESS) == NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_ALWAYS_PROCESS, "true");
 
 	client->node = pw_core_create_object(client->core,
 				"client-node",
@@ -2404,6 +2481,9 @@ jack_client_t * jack_client_open (const char *client_name,
                                     PW_CLIENT_NODE_UPDATE_INFO,
 				    0, NULL, &ni);
 
+	if (status)
+		*status = 0;
+
 	while (true) {
 	        pw_thread_loop_wait(client->context.loop);
 
@@ -2414,10 +2494,13 @@ jack_client_t * jack_client_open (const char *client_name,
 			break;
 	}
 
+	if (strcmp(client->name, client_name) != 0) {
+		if (status)
+			*status |= JackNameNotUnique;
+		if (options & JackUseExactName)
+			goto exit;
+	}
 	pw_thread_loop_unlock(client->context.loop);
-
-	if (status)
-		*status = 0;
 
 	pw_log_debug(NAME" %p: new", client);
 	return (jack_client_t *)client;
@@ -2501,8 +2584,6 @@ char * jack_get_client_name (jack_client_t *client)
 	return c->name;
 }
 
-static jack_uuid_t cuuid = 0x2;
-
 SPA_EXPORT
 char *jack_get_uuid_for_client_name (jack_client_t *client,
                                      const char    *client_name)
@@ -2518,7 +2599,7 @@ char *jack_get_uuid_for_client_name (jack_client_t *client,
 
 	spa_list_for_each(o, &c->context.nodes, link) {
 		if (strcmp(o->node.name, client_name) == 0) {
-			uuid = spa_aprintf( "%" PRIu64, (cuuid << 32) | o->id);
+			uuid = spa_aprintf( "%" PRIu64, client_make_uuid(o->id));
 			pw_log_debug(NAME" %p: name %s -> %s",
 					client, client_name, uuid);
 			break;
@@ -2535,7 +2616,6 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 	struct client *c = (struct client *) client;
 	struct object *o;
 	jack_uuid_t uuid;
-	jack_uuid_t cuuid = 0x2;
 	char *name = NULL;
 
 	spa_return_val_if_fail(c != NULL, NULL);
@@ -2546,7 +2626,7 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 
 	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if ((cuuid << 32 | o->id) == uuid) {
+		if (client_make_uuid(o->id) == uuid) {
 			pw_log_debug(NAME" %p: uuid %s (%"PRIu64")-> %s",
 					client, client_uuid, uuid, o->node.name);
 			name = strdup(o->node.name);
@@ -2609,7 +2689,7 @@ int jack_activate (jack_client_t *client)
 	c->active = true;
 
 	if (c->position)
-		check_buffer_frames(c, c->position);
+		check_buffer_frames(c, c->position, false);
 
 	return 0;
 }
@@ -3982,10 +4062,10 @@ int jack_recompute_total_latency (jack_client_t *client, jack_port_t* port)
 	return 0;
 }
 
-static int port_compare_func(const void *v1, const void *v2, void *arg)
+static int port_compare_func(const void *v1, const void *v2)
 {
-	struct client *c = arg;
 	const struct object *const*o1 = v1, *const*o2 = v2;
+	struct client *c = (*o1)->client;
 	int res;
 	bool is_cap1, is_cap2, is_def1 = false, is_def2 = false;
 
@@ -4083,7 +4163,7 @@ const char ** jack_get_ports (jack_client_t *client,
 	pthread_mutex_unlock(&c->context.lock);
 
 	if (count > 0) {
-		qsort_r(tmp, count, sizeof(struct object *), port_compare_func, c);
+		qsort(tmp, count, sizeof(struct object *), port_compare_func);
 
 		res = malloc(sizeof(char*) * (count + 1));
 		for (i = 0; i < count; i++)
@@ -4310,7 +4390,7 @@ int jack_release_timebase (jack_client_t *client)
 	c->timebase_callback = NULL;
 	c->timebase_arg = NULL;
 	c->activation->pending_new_pos = false;
-	c->timemaster_pending = false;
+	c->timeowner_pending = false;
 
 	return 0;
 }
@@ -4366,9 +4446,9 @@ int  jack_set_timebase_callback (jack_client_t *client,
 
 	c->timebase_callback = timebase_callback;
 	c->timebase_arg = arg;
-	c->timemaster_pending = true;
-	c->timemaster_conditional = conditional;
-	install_timemaster(c);
+	c->timeowner_pending = true;
+	c->timeowner_conditional = conditional;
+	install_timeowner(c);
 
 	pw_log_debug(NAME" %p: timebase set id:%u", c, c->node_id);
 
@@ -4545,7 +4625,7 @@ char *jack_client_get_uuid (jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, NULL);
 
-	return spa_aprintf("%d", c->node_id);
+	return spa_aprintf("%"PRIu64, client_make_uuid(c->node_id));
 }
 
 SPA_EXPORT

@@ -575,7 +575,7 @@ static inline void insert_driver(struct pw_context *context, struct pw_impl_node
 	struct pw_impl_node *n, *t;
 
 	spa_list_for_each_safe(n, t, &context->driver_list, driver_link) {
-		if (n->priority_master < node->priority_master)
+		if (n->priority_driver < node->priority_driver)
 			break;
 	}
 	spa_list_append(&n->driver_link, &node->driver_link);
@@ -616,7 +616,7 @@ int pw_impl_node_register(struct pw_impl_node *this,
 		PW_KEY_CLIENT_ID,
 		PW_KEY_DEVICE_ID,
 		PW_KEY_PRIORITY_SESSION,
-		PW_KEY_PRIORITY_MASTER,
+		PW_KEY_PRIORITY_DRIVER,
 		PW_KEY_APP_NAME,
 		PW_KEY_NODE_DESCRIPTION,
 		PW_KEY_NODE_NAME,
@@ -633,13 +633,6 @@ int pw_impl_node_register(struct pw_impl_node *this,
 
 	if (this->registered)
 		goto error_existed;
-
-	if (properties == NULL)
-		properties = pw_properties_new(NULL, NULL);
-	if (properties == NULL)
-		return -errno;
-
-	pw_properties_update_keys(properties, &this->properties->dict, keys);
 
 	this->global = pw_global_new(context,
 				     PW_TYPE_INTERFACE_Node,
@@ -660,6 +653,8 @@ int pw_impl_node_register(struct pw_impl_node *this,
 	this->info.id = this->global->id;
 	pw_properties_setf(this->properties, PW_KEY_OBJECT_ID, "%d", this->info.id);
 	this->info.props = &this->properties->dict;
+
+	pw_global_update_keys(this->global, &this->properties->dict, keys);
 
 	pw_impl_node_initialized(this);
 
@@ -711,7 +706,7 @@ do_move_nodes(struct spa_loop *loop,
 	return 0;
 }
 
-static void remove_segment_master(struct pw_impl_node *driver, uint32_t node_id)
+static void remove_segment_owner(struct pw_impl_node *driver, uint32_t node_id)
 {
 	struct pw_node_activation *a = driver->rt.activation;
 	ATOMIC_CAS(a->segment_owner[0], node_id, 0);
@@ -734,11 +729,11 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 	if (old == driver)
 		return 0;
 
-	remove_segment_master(old, node->info.id);
+	remove_segment_owner(old, node->info.id);
 
-	node->master = node->driver && driver == node;
-	pw_log_debug(NAME" %p: driver %p master:%u", node,
-		driver, node->master);
+	node->driving = node->driver && driver == node;
+	pw_log_debug(NAME" %p: driver %p driving:%u", node,
+		driver, node->driving);
 	pw_log_info("(%s-%u) -> change driver (%s-%d -> %s-%d)",
 			node->name, node->info.id,
 			old->name, old->info.id, driver->name, driver->info.id);
@@ -779,10 +774,23 @@ static void check_properties(struct pw_impl_node *node)
 	struct pw_context *context = node->context;
 	const char *str;
 	bool driver, do_recalc = false;
+	uint32_t group_id;
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_MASTER))) {
-		node->priority_master = pw_properties_parse_int(str);
-		pw_log_debug(NAME" %p: priority master %d", node, node->priority_master);
+	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
+		node->priority_driver = pw_properties_parse_int(str);
+		pw_log_debug(NAME" %p: priority driver %d", node, node->priority_driver);
+	}
+
+	/* group_id defines what nodes are scheduled together */
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)))
+		group_id = pw_properties_parse_int(str);
+	else
+		group_id = SPA_ID_INVALID;
+
+	if (group_id != node->group_id) {
+		pw_log_debug(NAME" %p: group %u->%u", node, node->group_id, group_id);
+		node->group_id = group_id;
+		do_recalc = true;
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_NAME)) &&
@@ -802,11 +810,6 @@ static void check_properties(struct pw_impl_node *node)
 	else
 		driver = false;
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS)))
-		node->want_driver = pw_properties_parse_bool(str);
-	else
-		node->want_driver = false;
-
 	if (node->driver != driver) {
 		pw_log_debug(NAME" %p: driver %d -> %d", node, node->driver, driver);
 		node->driver = driver;
@@ -816,7 +819,13 @@ static void check_properties(struct pw_impl_node *node)
 			else
 				spa_list_remove(&node->driver_link);
 		}
+		do_recalc = true;
 	}
+
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS)))
+		node->want_driver = pw_properties_parse_bool(str);
+	else
+		node->want_driver = false;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_LATENCY))) {
 		uint32_t num, denom;
@@ -831,13 +840,14 @@ static void check_properties(struct pw_impl_node *node)
 				pw_log_info("(%s-%u) quantum %u/%u", node->name, node->info.id,
 						quantum_size, context->defaults.clock_rate);
 				node->quantum_size = quantum_size;
-				do_recalc |= node->active;
+				do_recalc = true;
 			}
 		}
 	}
-	pw_log_debug(NAME" %p: driver:%d recalc:%d", node, node->driver, do_recalc);
+	pw_log_debug(NAME" %p: driver:%d recalc:%d active:%d", node, node->driver,
+			do_recalc, node->active);
 
-	if (do_recalc)
+	if (do_recalc && node->active)
 		pw_context_recalc_graph(context, "quantum change");
 }
 
@@ -1048,6 +1058,7 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	this = &impl->this;
 	this->context = context;
 	this->name = strdup("node");
+	this->group_id = SPA_ID_INVALID;
 
 	if (user_data_size > 0)
                 this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
@@ -1127,7 +1138,7 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 
 	this->driver_node = this;
 	spa_list_append(&this->follower_list, &this->follower_link);
-	this->master = true;
+	this->driving = true;
 
 	return this;
 
@@ -1202,16 +1213,20 @@ static void node_info(void *data, const struct spa_node_info *info)
 {
 	struct pw_impl_node *node = data;
 	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
+	bool recalc = false;
 
 	node->info.max_input_ports = info->max_input_ports;
 	node->info.max_output_ports = info->max_output_ports;
 
-	pw_log_debug(NAME" %p: change_mask %08"PRIx64" max_in:%u max_out:%u",
-			node, info->change_mask, info->max_input_ports,
+	pw_log_debug(NAME" %p: flags:%08"PRIx64" change_mask:%08"PRIx64" max_in:%u max_out:%u",
+			node, info->flags, info->change_mask, info->max_input_ports,
 			info->max_output_ports);
 
 	if (info->change_mask & SPA_NODE_CHANGE_MASK_FLAGS) {
-		node->spa_flags = info->flags;
+		if ((recalc = node->spa_flags != info->flags)) {
+			node->spa_flags = info->flags;
+			node->info.change_mask |= PW_NODE_CHANGE_MASK_PROPS;
+		}
 	}
 	if (info->change_mask & SPA_NODE_CHANGE_MASK_PROPS) {
 		update_properties(node, info->props);
@@ -1239,6 +1254,9 @@ static void node_info(void *data, const struct spa_node_info *info)
 
 	if (n_changed_ids > 0)
 		emit_params(node, changed_ids, n_changed_ids);
+
+	if (recalc)
+		pw_context_recalc_graph(node->context, "node info changed");
 }
 
 static void node_port_info(void *data, enum spa_direction direction, uint32_t port_id,
@@ -1283,7 +1301,8 @@ static void node_result(void *data, int seq, int res, uint32_t type, const void 
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 
 	pw_log_trace(NAME" %p: result seq:%d res:%d type:%u", node, seq, res, type);
-	impl->last_error = res;
+	if (res < 0)
+		impl->last_error = res;
 
 	if (SPA_RESULT_IS_ASYNC(seq))
 	        pw_work_queue_complete(impl->work, &impl->this, SPA_RESULT_ASYNC_SEQ(seq), res);
@@ -1479,7 +1498,7 @@ static int node_ready(void *data, int status)
 
 		update_position(node, all_ready);
 	}
-	if (SPA_UNLIKELY(node->driver && !node->master))
+	if (SPA_UNLIKELY(node->driver && !node->driving))
 		return 0;
 
 	if (status & SPA_STATUS_HAVE_DATA) {
@@ -1503,15 +1522,23 @@ static int node_reuse_buffer(void *data, uint32_t port_id, uint32_t buffer_id)
 	return 0;
 }
 
-static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_pod *info)
+static void update_xrun_stats(struct pw_node_activation *a, uint64_t trigger, uint64_t delay)
 {
-	struct pw_impl_node *this = data;
-	struct pw_node_activation *a = this->rt.activation;
-
 	a->xrun_count++;
 	a->xrun_time = trigger;
 	a->xrun_delay = delay;
 	a->max_delay = SPA_MAX(a->max_delay, delay);
+}
+
+static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_pod *info)
+{
+	struct pw_impl_node *this = data;
+	struct pw_node_activation *a = this->rt.activation;
+	struct pw_node_activation *da = this->rt.driver_target.activation;
+
+	update_xrun_stats(a, trigger, delay);
+	if (da && da != a)
+		update_xrun_stats(da, trigger, delay);
 
 	if (ratelimit_test(&this->rt.rate_limit, a->signal_time)) {
 		pw_log_error("(%s-%d) XRun! count:%u time:%"PRIu64" delay:%"PRIu64" max:%"PRIu64,
@@ -1599,7 +1626,7 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 
 	/* remove ourself as a follower from the driver node */
 	spa_list_remove(&node->follower_link);
-	remove_segment_master(node->driver_node, node->info.id);
+	remove_segment_owner(node->driver_node, node->info.id);
 
 	spa_list_consume(follower, &node->follower_list, follower_link) {
 		pw_log_debug(NAME" %p: reassign follower %p", impl, follower);
@@ -1821,13 +1848,22 @@ error:
 static void on_state_complete(void *obj, void *data, int res, uint32_t seq)
 {
 	struct pw_impl_node *node = obj;
+	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	enum pw_node_state state = SPA_PTR_TO_INT(data);
 	char *error = NULL;
 
-	pw_log_debug(NAME" %p: state complete %d", node, res);
+	pw_log_debug(NAME" %p: state complete res:%d seq:%d", node, res, seq);
+	if (impl->last_error < 0) {
+		res = impl->last_error;
+		impl->last_error = 0;
+	}
 	if (SPA_RESULT_IS_ERROR(res)) {
-		error = spa_aprintf("error changing node state: %s", spa_strerror(res));
-		state = PW_NODE_STATE_ERROR;
+		if (node->info.state == PW_NODE_STATE_SUSPENDED) {
+			state = PW_NODE_STATE_SUSPENDED;
+		} else {
+			error = spa_aprintf("error changing node state: %s", spa_strerror(res));
+			state = PW_NODE_STATE_ERROR;
+		}
 	}
 	node_update_state(node, state, error);
 }

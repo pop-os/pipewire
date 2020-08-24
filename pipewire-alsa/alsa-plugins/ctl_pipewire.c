@@ -102,8 +102,6 @@ struct global {
 	uint32_t permissions;
 	struct pw_properties *props;
 
-	int priority_master;
-
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
 	struct spa_hook object_listener;
@@ -905,7 +903,7 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 	else
 		g->node.device_id = SPA_ID_INVALID;
 
-	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_PRIORITY_MASTER)))
+	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_PRIORITY_DRIVER)))
 		g->node.priority = atoi(str);
 	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_MEDIA_CLASS))) {
 		if (strcmp(str, "Audio/Sink") == 0)
@@ -1209,6 +1207,10 @@ SND_CTL_PLUGIN_DEFINE_FUNC(pipewire)
 		return -EINVAL;
 	}
 
+	str = getenv("PIPEWIRE_REMOTE");
+	if (str != NULL)
+		server = str;
+
 	if (fallback_name && name && !strcmp(name, fallback_name))
 		fallback_name = NULL; /* no fallback for the same name */
 
@@ -1269,6 +1271,9 @@ SND_CTL_PLUGIN_DEFINE_FUNC(pipewire)
 		pw_properties_setf(props, PW_KEY_APP_NAME, "ALSA plug-in [%s]", str);
 	else
 		pw_properties_set(props, PW_KEY_APP_NAME, "ALSA plug-in");
+
+	if (server)
+		pw_properties_set(props, PW_KEY_REMOTE_NAME, server);
 
 	if ((err = pw_thread_loop_start(ctl->mainloop)) < 0)
 		goto error;

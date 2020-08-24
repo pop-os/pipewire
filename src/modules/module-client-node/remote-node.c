@@ -315,7 +315,7 @@ static int add_node_update(struct node_data *data, uint32_t change_mask)
 		ni.change_mask = SPA_NODE_CHANGE_MASK_FLAGS |
 			SPA_NODE_CHANGE_MASK_PROPS |
 			SPA_NODE_CHANGE_MASK_PARAMS;
-		ni.flags = 0;
+		ni.flags = node->spa_flags;
 		ni.props = node->info.props;
 		ni.params = node->info.params;
 		ni.n_params = node->info.n_params;
@@ -401,7 +401,23 @@ client_node_set_param(void *object, uint32_t id, uint32_t flags,
 		      const struct spa_pod *param)
 {
 	struct node_data *data = object;
-	return spa_node_set_param(data->node->node, id, flags, param);
+	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
+	int res;
+
+	pw_log_debug("node %p: set_param %s:", proxy,
+			spa_debug_type_find_name(spa_type_param, id));
+
+	res = spa_node_set_param(data->node->node, id, flags, param);
+
+	if (res < 0) {
+		pw_log_error("node %p: set_param %s (%d) %p: %s", proxy,
+				spa_debug_type_find_name(spa_type_param, id),
+				id, param, spa_strerror(res));
+		pw_proxy_errorf(proxy, res, "node_set_param(%s) failed: %s",
+				spa_debug_type_find_name(spa_type_param, id),
+				spa_strerror(res));
+	}
+	return res;
 }
 
 static int
@@ -559,7 +575,8 @@ client_node_port_set_param(void *object,
 		goto error_exit;
 	}
 
-	pw_log_debug("port %p: set param %d %p", port, id, param);
+	pw_log_debug("port %p: set_param %s %p", port,
+			spa_debug_type_find_name(spa_type_param, id), param);
 
 	res = pw_impl_port_set_param(port, id, flags, param);
 	if (res < 0)
@@ -572,12 +589,13 @@ client_node_port_set_param(void *object,
 				clear_buffers(data, mix);
 		}
 	}
-
 	return res;
 
 error_exit:
 	pw_log_error("port %p: set_param %d %p: %s", port, id, param, spa_strerror(res));
-	pw_proxy_errorf(proxy, res, "port_set_param: %s", spa_strerror(res));
+	pw_proxy_errorf(proxy, res, "port_set_param(%s) failed: %s",
+				spa_debug_type_find_name(spa_type_param, id),
+				spa_strerror(res));
 	return res;
 }
 
@@ -922,7 +940,7 @@ static void do_node_init(struct node_data *data)
 {
 	struct pw_impl_port *port;
 
-	pw_log_debug("%p: init", data);
+	pw_log_debug("%p: node %p init", data, data->node);
 	add_node_update(data, PW_CLIENT_NODE_UPDATE_PARAMS |
 				PW_CLIENT_NODE_UPDATE_INFO);
 
@@ -1173,7 +1191,7 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 			&node->properties->dict,
 			user_data_size + sizeof(struct node_data));
 	if (client_node == NULL)
-		return NULL;
+		goto error;
 
 	data = pw_proxy_get_user_data(client_node);
 	data = SPA_MEMBER(data, user_data_size, struct node_data);
@@ -1216,6 +1234,11 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 	do_node_init(data);
 
 	return client_node;
+error:
+	if (do_free)
+		pw_impl_node_destroy(node);
+	return NULL;
+
 }
 
 struct pw_proxy *pw_core_node_export(struct pw_core *core,
@@ -1234,6 +1257,7 @@ struct pw_proxy *pw_core_spa_node_export(struct pw_core *core,
 		size_t user_data_size)
 {
 	struct pw_impl_node *node;
+	struct pw_proxy *proxy;
 
 	node = pw_context_create_node(pw_core_get_context(core),
 			props ? pw_properties_new_dict(props) : NULL, 0);
@@ -1242,7 +1266,10 @@ struct pw_proxy *pw_core_spa_node_export(struct pw_core *core,
 
 	pw_impl_node_set_implementation(node, (struct spa_node*)object);
 	pw_impl_node_register(node, NULL);
-	pw_impl_node_set_active(node, true);
 
-	return node_export(core, node, true, user_data_size);
+	proxy = node_export(core, node, true, user_data_size);
+	if (proxy)
+		pw_impl_node_set_active(node, true);
+
+	return proxy;
 }

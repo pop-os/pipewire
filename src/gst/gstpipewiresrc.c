@@ -60,7 +60,7 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_src_debug);
 #define GST_CAT_DEFAULT pipewire_src_debug
 
 #define DEFAULT_ALWAYS_COPY     false
-#define DEFAULT_MIN_BUFFERS     1
+#define DEFAULT_MIN_BUFFERS     8
 #define DEFAULT_MAX_BUFFERS     INT32_MAX
 #define DEFAULT_RESEND_LAST     false
 #define DEFAULT_KEEPALIVE_TIME  0
@@ -452,6 +452,7 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
   GstBuffer *buf;
   GstPipeWirePoolData *data;
   struct spa_meta_header *h;
+  struct spa_meta_region *crop;
   guint i;
 
   b = pw_stream_dequeue_buffer (pwsrc->stream);
@@ -481,6 +482,16 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
         GST_BUFFER_DTS (buf) = GST_BUFFER_PTS (buf) + h->dts_offset;
     }
     GST_BUFFER_OFFSET (buf) = h->seq;
+  }
+  crop = data->crop;
+  if (crop) {
+    GstVideoCropMeta *meta = gst_buffer_get_video_crop_meta(buf);
+    if (meta) {
+      meta->x = crop->region.position.x;
+      meta->y = crop->region.position.y;
+      meta->width = crop->region.size.width;
+      meta->height = crop->region.size.height;
+    }
   }
   for (i = 0; i < b->buffer->n_datas; i++) {
     struct spa_data *d = &b->buffer->datas[i];
@@ -550,6 +561,7 @@ static gboolean
 gst_pipewire_src_stream_start (GstPipeWireSrc *pwsrc)
 {
   const char *error = NULL;
+
   pw_thread_loop_lock (pwsrc->core->loop);
   GST_DEBUG_OBJECT (pwsrc, "doing stream start");
   while (TRUE) {
@@ -582,7 +594,7 @@ start_error:
 }
 
 static enum pw_stream_state
-wait_negotiated (GstPipeWireSrc *this)
+wait_started (GstPipeWireSrc *this)
 {
   enum pw_stream_state state;
   const char *error = NULL;
@@ -671,6 +683,7 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   }
 
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s", pwsrc->path);
+  pwsrc->negotiated = FALSE;
   pw_stream_connect (pwsrc->stream,
                      PW_DIRECTION_INPUT,
                      pwsrc->path ? (uint32_t)atoi(pwsrc->path) : PW_ID_ANY,
@@ -682,21 +695,31 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream, &error);
 
-    GST_DEBUG_OBJECT (basesrc, "waiting for PAUSED, now %s", pw_stream_state_as_string (state));
-    if (state == PW_STREAM_STATE_PAUSED ||
-        state == PW_STREAM_STATE_STREAMING)
-      break;
-
+    GST_DEBUG_OBJECT (basesrc, "waiting for NEGOTIATED, now %s", pw_stream_state_as_string (state));
     if (state == PW_STREAM_STATE_ERROR)
       goto connect_error;
 
+    if (pwsrc->negotiated)
+      break;
+
     pw_thread_loop_wait (pwsrc->core->loop);
   }
+  caps = pwsrc->caps;
+  pwsrc->caps = NULL;
   pw_thread_loop_unlock (pwsrc->core->loop);
+
+  if (caps == NULL)
+    goto no_caps;
+
+  gst_pipewire_clock_reset (GST_PIPEWIRE_CLOCK (pwsrc->clock), 0);
+
+  GST_DEBUG_OBJECT (pwsrc, "set format %" GST_PTR_FORMAT, caps);
+  result = gst_base_src_set_caps (GST_BASE_SRC (pwsrc), caps);
+  gst_caps_unref (caps);
 
   result = gst_pipewire_src_stream_start (pwsrc);
 
-  pwsrc->negotiated = result;
+  pwsrc->started = result;
 
   return result;
 
@@ -737,23 +760,20 @@ on_param_changed (void *data, uint32_t id,
                    const struct spa_pod *param)
 {
   GstPipeWireSrc *pwsrc = data;
-  GstCaps *caps;
-  gboolean res;
 
   if (param == NULL || id != SPA_PARAM_Format) {
     GST_DEBUG_OBJECT (pwsrc, "clear format");
     return;
   }
+  if (pwsrc->caps)
+	  gst_caps_unref(pwsrc->caps);
+  pwsrc->caps = gst_caps_from_format (param);
+  GST_DEBUG_OBJECT (pwsrc, "we got format %" GST_PTR_FORMAT, pwsrc->caps);
 
-  gst_pipewire_clock_reset (GST_PIPEWIRE_CLOCK (pwsrc->clock), 0);
+  pwsrc->negotiated = pwsrc->caps != NULL;
 
-  caps = gst_caps_from_format (param);
-  GST_DEBUG_OBJECT (pwsrc, "we got format %" GST_PTR_FORMAT, caps);
-  res = gst_base_src_set_caps (GST_BASE_SRC (pwsrc), caps);
-  gst_caps_unref (caps);
-
-  if (res) {
-    const struct spa_pod *params[2];
+  if (pwsrc->negotiated) {
+    const struct spa_pod *params[3];
     struct spa_pod_builder b = { NULL };
     uint8_t buffer[512];
     uint32_t buffers = CLAMP (16, pwsrc->min_buffers, pwsrc->max_buffers);
@@ -773,13 +793,18 @@ on_param_changed (void *data, uint32_t id,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
         SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
+    params[2] = spa_pod_builder_add_object (&b,
+        SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+        SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
+        SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_region)));
 
     GST_DEBUG_OBJECT (pwsrc, "doing finish format");
-    pw_stream_update_params (pwsrc->stream, params, 2);
+    pw_stream_update_params (pwsrc->stream, params, 3);
   } else {
     GST_WARNING_OBJECT (pwsrc, "finish format with error");
     pw_stream_set_error (pwsrc->stream, -EINVAL, "unhandled format");
   }
+  pw_thread_loop_signal (pwsrc->core->loop, FALSE);
 }
 
 static gboolean
@@ -1006,6 +1031,7 @@ gst_pipewire_src_stop (GstBaseSrc * basesrc)
   pw_thread_loop_lock (pwsrc->core->loop);
   pwsrc->eos = false;
   gst_buffer_replace (&pwsrc->last_buffer, NULL);
+  gst_caps_replace(&pwsrc->caps, NULL);
   pw_thread_loop_unlock (pwsrc->core->loop);
 
   return TRUE;
@@ -1017,11 +1043,17 @@ copy_properties (GQuark field_id,
                  gpointer user_data)
 {
   struct pw_properties *properties = user_data;
+  GValue dst = { 0 };
 
-  if (G_VALUE_HOLDS_STRING (value))
-    pw_properties_set (properties,
-                       g_quark_to_string (field_id),
-                       g_value_get_string (value));
+  if (g_value_type_transformable (G_VALUE_TYPE(value), G_TYPE_STRING)) {
+    g_value_init(&dst, G_TYPE_STRING);
+    if (g_value_transform(value, &dst)) {
+      pw_properties_set (properties,
+                         g_quark_to_string (field_id),
+                         g_value_get_string (&dst));
+    }
+    g_value_unset(&dst);
+  }
   return TRUE;
 }
 
@@ -1164,7 +1196,7 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_READY_TO_PAUSED:
-      if (wait_negotiated (this) == PW_STREAM_STATE_ERROR)
+      if (wait_started (this) == PW_STREAM_STATE_ERROR)
         goto open_failed;
 
       if (gst_base_src_is_live (GST_BASE_SRC (element)))

@@ -144,7 +144,7 @@ static void *create_object(void *_data,
 
 		res = pw_global_bind(pw_impl_device_get_global(device),
 				client,
-				PW_PERM_RWX, version,
+				PW_PERM_ALL, version,
 				new_id);
 		if (res < 0)
 			goto error_bind;
@@ -164,7 +164,7 @@ error_properties:
 				"usage: "FACTORY_USAGE);
 	goto error_exit;
 error_device:
-	pw_log_error("can't create device: %s", spa_strerror(res));
+	pw_log_debug("can't create device: %s", spa_strerror(res));
 	if (resource)
 		pw_resource_errorf_id(resource, new_id, res,
 				"can't create device: %s", spa_strerror(res));

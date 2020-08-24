@@ -645,7 +645,8 @@ impl_node_port_set_param(void *object,
 	struct mix *mix;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+	if(!CHECK_PORT(this, direction, port_id))
+		return param == NULL ? 0 : -EINVAL;
 
 	pw_log_debug(NAME" %p: port %d.%d set param %s %d", this,
 			direction, port_id,
@@ -748,7 +749,8 @@ do_port_use_buffers(struct impl *impl,
 	uint32_t i, j;
 	struct pw_client_node_buffer *mb;
 
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+	if (!CHECK_PORT(this, direction, port_id))
+		return n_buffers == 0 ? 0 : -EINVAL;
 
 	p = GET_PORT(this, direction, port_id);
 
@@ -1023,6 +1025,8 @@ client_node_port_update(void *data,
 static int client_node_set_active(void *data, bool active)
 {
 	struct impl *impl = data;
+	struct node *this = &impl->node;
+	spa_log_debug(this->log, NAME" %p: active:%d", this, active);
 	return pw_impl_node_set_active(impl->this.node, active);
 }
 
@@ -1280,7 +1284,7 @@ void pw_impl_client_node_registered(struct pw_impl_client_node *this, struct pw_
 					  sizeof(struct pw_node_activation));
 
 	if (impl->bind_node_id) {
-		pw_global_bind(global, client, PW_PERM_RWX,
+		pw_global_bind(global, client, PW_PERM_ALL,
 				impl->bind_node_version, impl->bind_node_id);
 	}
 }

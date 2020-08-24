@@ -193,7 +193,7 @@ static int global_bind(void *_data, struct pw_impl_client *client,
 
 	pw_global_add_resource(impl->global, resource);
 
-	/* resource methods -> implemention */
+	/* resource methods -> implementation */
 	pw_resource_add_object_listener(resource,
 			&data->object_listener,
 			&stream_methods, data);
@@ -430,7 +430,7 @@ static void *create_object(void *data,
 	void *result;
 	int res;
 
-	impl_resource = pw_resource_new(client, new_id, PW_PERM_RWX, type, version, 0);
+	impl_resource = pw_resource_new(client, new_id, PW_PERM_ALL, type, version, 0);
 	if (impl_resource == NULL) {
 		res = -errno;
 		goto error_resource;
