@@ -254,7 +254,7 @@ int pa_alsa_set_hw_params(
             (id = snd_pcm_info_get_id(pcm_info))) {
             /* This horrible hack makes sure we don't disable tsched on USB
              * devices, which have a low enough transfer size for timer-based
-             * scheduling to work. This can go away when the ALSA API supprots
+             * scheduling to work. This can go away when the ALSA API supports
              * querying the block transfer size. */
             if (pa_streq(id, "USB Audio"))
                 is_usb = true;
@@ -532,7 +532,7 @@ snd_pcm_t *pa_alsa_open_by_device_id_auto(
         if (!pa_channel_map_superset(&m->channel_map, map))
             continue;
 
-        pa_log_debug("Checking for superset %s (%s)", m->device.name, m->device.device_strings[0]);
+        pa_log_debug("Checking for superset %s (%s)", m->name, m->device_strings[0]);
 
         pcm_handle = pa_alsa_open_by_device_id_mapping(
                 dev_id,
@@ -1443,7 +1443,7 @@ snd_mixer_t *pa_alsa_open_mixer_by_name(pa_hashmap *mixers, const char *dev, boo
     if (!pm && pa_strneq(dev, "hw:", 3)) {
         const char *s = dev + 3;
         int card_index;
-        while (*s && *s >= 0 && *s <= '9') s++;
+        while (*s && *s >= '0' && *s <= '9') s++;
         if (*s == '\0' && pa_atoi(dev + 3, &card_index) >= 0) {
             PA_HASHMAP_FOREACH_KV(dev2, pm, mixers, state) {
                 if (pm->card_index == card_index) {

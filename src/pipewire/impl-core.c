@@ -169,7 +169,7 @@ static int core_hello(void *object, uint32_t version)
 
 	if (version >= 3) {
 		if ((res = pw_global_bind(client->global, client,
-				PW_PERM_RWX, PW_VERSION_CLIENT, 1)) < 0)
+				PW_PERM_ALL, PW_VERSION_CLIENT, 1)) < 0)
 			return res;
 	}
 	return 0;
@@ -226,7 +226,7 @@ static struct pw_registry * core_get_registry(void *object, uint32_t version, si
 
 	registry_resource = pw_resource_new(client,
 					    new_id,
-					    PW_PERM_RWX,
+					    PW_PERM_ALL,
 					    PW_TYPE_INTERFACE_Registry,
 					    version,
 					    sizeof(*data));
@@ -564,13 +564,6 @@ int pw_impl_core_register(struct pw_impl_core *core,
 	if (core->registered)
 		goto error_existed;
 
-	if (properties == NULL)
-		properties = pw_properties_new(NULL, NULL);
-	if (properties == NULL)
-		return -errno;
-
-	pw_properties_update_keys(properties, &core->properties->dict, keys);
-
         core->global = pw_global_new(context,
 					PW_TYPE_INTERFACE_Core,
 					PW_VERSION_CORE,
@@ -587,16 +580,18 @@ int pw_impl_core_register(struct pw_impl_core *core,
 	pw_properties_setf(core->properties, PW_KEY_OBJECT_ID, "%d", core->info.id);
 	core->info.props = &core->properties->dict;
 
+	pw_global_update_keys(core->global, core->info.props, keys);
+
 	pw_impl_core_emit_initialized(core);
 
 	pw_global_add_listener(core->global, &core->global_listener, &global_events, core);
 	pw_global_register(core->global);
 
 	return 0;
+
 error_existed:
 	res = -EEXIST;
 	goto error_exit;
-
 error_exit:
 	if (properties)
 		pw_properties_free(properties);

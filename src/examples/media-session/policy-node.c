@@ -101,6 +101,7 @@ struct node {
 
 static bool find_format(struct node *node)
 {
+	struct impl *impl = node->impl;
 	struct sm_param *p;
 	bool have_format = false;
 
@@ -121,8 +122,14 @@ static bool find_format(struct node *node)
 		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 			spa_debug_pod(2, NULL, p->param);
 
-		if (spa_format_audio_raw_parse(p->param, &info.info.raw) < 0)
-			continue;
+		/* defaults */
+		info.info.raw.format = SPA_AUDIO_FORMAT_F32;
+		info.info.raw.rate = impl->sample_rate;
+		info.info.raw.channels = 2;
+		info.info.raw.position[0] = SPA_AUDIO_CHANNEL_FL;
+		info.info.raw.position[1] = SPA_AUDIO_CHANNEL_FR;
+
+		spa_format_audio_raw_parse(p->param, &info.info.raw);
 
 		if (node->format.info.raw.channels < info.info.raw.channels)
 			node->format = info;
@@ -435,6 +442,7 @@ static int link_nodes(struct node *node, struct node *peer)
 {
 	struct impl *impl = node->impl;
 	struct pw_properties *props;
+	struct node *output, *input;
 
 	pw_log_debug(NAME " %p: link nodes %d %d", impl, node->id, peer->id);
 
@@ -458,20 +466,20 @@ static int link_nodes(struct node *node, struct node *peer)
 #endif
 	}
 
-	node->peer = peer;
-
 	if (node->direction == PW_DIRECTION_INPUT) {
-		struct node *t = node;
-		node = peer;
-		peer = t;
+		output = peer;
+		input = node;
+	} else {
+		output = node;
+		input = peer;
 	}
-
 	props = pw_properties_new(NULL, NULL);
-	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", node->id);
-	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", peer->id);
-	pw_log_info("linking node %d to node %d", node->id, peer->id);
+	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", output->id);
+	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", input->id);
+	pw_log_info("linking node %d to node %d", output->id, input->id);
 
-	sm_media_session_create_links(impl->session, &props->dict);
+	if (sm_media_session_create_links(impl->session, &props->dict) > 0)
+		node->peer = peer;
 
 	pw_properties_free(props);
 
@@ -516,13 +524,13 @@ static int rescan_node(struct impl *impl, struct node *n)
 	struct node *peer;
 	struct sm_object *obj;
 
-	if (n->type == NODE_TYPE_DEVICE) {
-		configure_node(n, NULL);
+	if (!n->active) {
+		pw_log_debug(NAME " %p: node %d is not active", impl, n->id);
 		return 0;
 	}
 
-	if (!n->active) {
-		pw_log_debug(NAME " %p: node %d is not active", impl, n->id);
+	if (n->type == NODE_TYPE_DEVICE) {
+		configure_node(n, NULL);
 		return 0;
 	}
 
@@ -776,17 +784,16 @@ static int metadata_property(void *object, uint32_t subject,
 			impl->default_video_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
 		}
 	} else {
-		struct node *src_node, *dst_node = NULL;
-
-		src_node = find_node_by_id(impl, subject);
-
 		if (strcmp(key, "target.node") == 0 && value != NULL) {
-			dst_node = find_node_by_id(impl, atoi(value));
-		}
-		if (src_node && dst_node)
-			handle_move(impl, src_node, dst_node);
-	}
+			struct node *src_node, *dst_node;
 
+			dst_node = find_node_by_id(impl, atoi(value));
+			src_node = dst_node ? find_node_by_id(impl, subject) : NULL;
+
+			if (dst_node && src_node)
+				handle_move(impl, src_node, dst_node);
+		}
+	}
 	return 0;
 }
 

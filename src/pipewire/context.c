@@ -313,7 +313,10 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 
 	this->sc_pagesize = sysconf(_SC_PAGESIZE);
 
-	if ((str = pw_properties_get(properties, PW_KEY_CONTEXT_PROFILE_MODULES)) == NULL)
+	str = pw_properties_get(properties, PW_KEY_CONTEXT_PROFILE_MODULES);
+	if (str == NULL)
+		str = getenv("PIPEWIRE_PROFILE_MODULES");
+	if (str == NULL)
 		str = "default";
 
 	load_module_profile(this, str);
@@ -787,14 +790,14 @@ error:
 static int ensure_state(struct pw_impl_node *node, bool running)
 {
 	enum pw_node_state state = node->info.state;
-	if (node->active && running)
+	if (node->active && !SPA_FLAG_IS_SET(node->spa_flags, SPA_NODE_FLAG_NEED_CONFIGURE) && running)
 		state = PW_NODE_STATE_RUNNING;
 	else if (state > PW_NODE_STATE_IDLE)
 		state = PW_NODE_STATE_IDLE;
 	return pw_impl_node_set_state(node, state);
 }
 
-static int collect_nodes(struct pw_impl_node *driver)
+static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver)
 {
 	struct spa_list queue;
 	struct pw_impl_node *n, *t;
@@ -808,10 +811,13 @@ static int collect_nodes(struct pw_impl_node *driver)
 
 	pw_log_debug("driver %p: '%s'", driver, driver->name);
 
+	/* start with driver in the queue */
 	spa_list_init(&queue);
 	spa_list_append(&queue, &driver->sort_link);
 	driver->visited = true;
 
+	/* now follow all the links from the nodes in the queue
+	 * and add the peers to the queue. */
 	spa_list_consume(n, &queue, sort_link) {
 		spa_list_remove(&n->sort_link);
 		pw_impl_node_set_driver(n, driver);
@@ -847,6 +853,19 @@ static int collect_nodes(struct pw_impl_node *driver)
 				}
 			}
 		}
+		/* now go through all the followers of this driver and add the
+		 * nodes that have the same group and that are not yet visited */
+		if (n->group_id == SPA_ID_INVALID)
+			continue;
+
+		spa_list_for_each(t, &context->node_list, link) {
+			if (t->exported || t == n || !t->active || t->visited)
+				continue;
+			if (t->group_id != n->group_id)
+				continue;
+			t->visited = true;
+			spa_list_append(&queue, &t->sort_link);
+		}
 	}
 	return 0;
 }
@@ -865,7 +884,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 
 	/* start from all drivers and group all nodes that are linked
 	 * to it. Some nodes are not (yet) linked to anything and they
-	 * will end up 'unassigned' to a master. Other nodes are master
+	 * will end up 'unassigned' to a driver. Other nodes are drivers
 	 * and if they have active followers, we can use them to schedule
 	 * the unassigned nodes. */
 	target = fallback = NULL;
@@ -874,36 +893,36 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 			continue;
 
 		if (!n->visited)
-			collect_nodes(n);
+			collect_nodes(context, n);
 
-		/* from now on we are only interested in active master nodes.
+		/* from now on we are only interested in active driving nodes.
 		 * We're going to see if there are active followers. */
-		if (!n->master || !n->active || n->passive)
+		if (!n->driving || !n->active || n->passive)
 			continue;
 
-		/* first active master node is fallback */
+		/* first active driving node is fallback */
 		if (fallback == NULL)
 			fallback = n;
 
 		spa_list_for_each(s, &n->follower_list, follower_link) {
-			pw_log_debug(NAME" %p: driver %p: follower %p %s: %d",
+			pw_log_debug(NAME" %p: driver %p: follower %p %s: active:%d",
 					context, n, s, s->name, s->active);
 			if (s != n && s->active) {
-				/* if the master has active followers, it is a target for our
-				 * unassigned nodes */
+				/* if the driving node has active followers, it
+				 * is a target for our unassigned nodes */
 				if (target == NULL)
 					target = n;
 				break;
 			}
 		}
 	}
-	/* no active node, use fallback master */
+	/* no active node, use fallback driving node */
 	if (target == NULL)
 		target = fallback;
 
 	/* now go through all available nodes. The ones we didn't visit
-	 * in collect_nodes() are not linked to any master. We assign them
-	 * to either an active master of the first master */
+	 * in collect_nodes() are not linked to any driver. We assign them
+	 * to either an active driver of the first driver */
 	spa_list_for_each(n, &context->node_list, link) {
 		if (n->exported)
 			continue;
@@ -911,8 +930,8 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 		if (!n->visited) {
 			struct pw_impl_node *t;
 
-			pw_log_debug(NAME" %p: unassigned node %p: '%s' %d %d", context,
-					n, n->name, n->active, n->want_driver);
+			pw_log_debug(NAME" %p: unassigned node %p: '%s' active:%d want_driver:%d",
+					context, n, n->name, n->active, n->want_driver);
 
 			t = n->active && n->want_driver ? target : NULL;
 
@@ -923,14 +942,14 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 		n->visited = false;
 	}
 
-	/* assign final quantum and set state for followers and master */
+	/* assign final quantum and set state for followers and drivers */
 	spa_list_for_each(n, &context->driver_list, driver_link) {
 		bool running = false;
 		uint32_t max_quantum = 0;
 		uint32_t min_quantum = 0;
 		uint32_t quantum;
 
-		if (!n->master || n->exported)
+		if (!n->driving || n->exported)
 			continue;
 
 		/* collect quantum and count active nodes */
@@ -961,8 +980,8 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 			n->rt.position->clock.duration = quantum;
 		}
 
-		pw_log_debug(NAME" %p: master %p running:%d passive:%d quantum:%u '%s'", context, n,
-				running, n->passive, quantum, n->name);
+		pw_log_debug(NAME" %p: driving %p running:%d passive:%d quantum:%u '%s'",
+				context, n, running, n->passive, quantum, n->name);
 
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 			if (s == n)

@@ -1116,7 +1116,11 @@ stream_new(struct pw_context *context, const char *name,
 			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
 		if (str == NULL)
 			str = name;
-		pw_properties_set(props, PW_KEY_NODE_NAME, name);
+		pw_properties_set(props, PW_KEY_NODE_NAME, str);
+	}
+	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL) {
+		if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+			pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
 	}
 
 	spa_hook_list_init(&impl->hooks);
@@ -1462,6 +1466,8 @@ pw_stream_connect(struct pw_stream *stream,
 
 	if (target_id != PW_ID_ANY)
 		pw_properties_setf(stream->properties, PW_KEY_NODE_TARGET, "%d", target_id);
+	else if ((str = getenv("PIPEWIRE_NODE")) != NULL)
+		pw_properties_set(stream->properties, PW_KEY_NODE_TARGET, str);
 	if (flags & PW_STREAM_FLAG_AUTOCONNECT)
 		pw_properties_set(stream->properties, PW_KEY_NODE_AUTOCONNECT, "true");
 	if (flags & PW_STREAM_FLAG_DRIVER)

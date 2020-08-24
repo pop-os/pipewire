@@ -47,12 +47,16 @@
 #include <spa/pod/builder.h>
 #include <spa/utils/result.h>
 
+#include <gst/video/video.h>
+
 #include "gstpipewireformat.h"
 
 GST_DEBUG_CATEGORY_STATIC (pipewire_sink_debug);
 #define GST_CAT_DEFAULT pipewire_sink_debug
 
 #define DEFAULT_PROP_MODE GST_PIPEWIRE_SINK_MODE_DEFAULT
+
+#define MIN_BUFFERS     8u
 
 enum
 {
@@ -225,7 +229,7 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
   guint size;
   guint min_buffers;
   guint max_buffers;
-  const struct spa_pod *port_params[2];
+  const struct spa_pod *port_params[3];
   struct spa_pod_builder b = { NULL };
   uint8_t buffer[1024];
   struct spa_pod_frame f;
@@ -246,8 +250,10 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
 
   spa_pod_builder_add (&b,
       SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
-      SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(min_buffers, min_buffers,
-                                               max_buffers ? max_buffers : INT32_MAX),
+      SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(
+	      SPA_MAX(MIN_BUFFERS, min_buffers),
+	      SPA_MAX(MIN_BUFFERS, min_buffers),
+	      max_buffers ? max_buffers : INT32_MAX),
       SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16),
       0);
   port_params[0] = spa_pod_builder_pop (&b, &f);
@@ -257,9 +263,13 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
       SPA_PARAM_META_type, SPA_POD_Int(SPA_META_Header),
       SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
 
+  port_params[2] = spa_pod_builder_add_object (&b,
+      SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+      SPA_PARAM_META_type, SPA_POD_Int(SPA_META_VideoCrop),
+      SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_region)));
 
   pw_thread_loop_lock (sink->core->loop);
-  pw_stream_update_params (sink->stream, port_params, 2);
+  pw_stream_update_params (sink->stream, port_params, 3);
   pw_thread_loop_unlock (sink->core->loop);
 }
 
@@ -423,6 +433,15 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
     data->header->pts = GST_BUFFER_PTS (buffer);
     data->header->dts_offset = GST_BUFFER_DTS (buffer);
   }
+  if (data->crop) {
+    GstVideoCropMeta *meta = gst_buffer_get_video_crop_meta (buffer);
+    if (meta) {
+      data->crop->region.position.x = meta->x;
+      data->crop->region.position.y = meta->y;
+      data->crop->region.size.width = meta->width;
+      data->crop->region.size.height = meta->width;
+    }
+  }
   for (i = 0; i < b->n_datas; i++) {
     struct spa_data *d = &b->datas[i];
     GstMemory *mem = gst_buffer_peek_memory (buffer, i);
@@ -568,13 +587,14 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   if (buffer->pool != GST_BUFFER_POOL_CAST (pwsink->pool)) {
     GstBuffer *b = NULL;
     GstMapInfo info = { 0, };
+    GstBufferPoolAcquireParams params = { 0, };
 
     pw_thread_loop_unlock (pwsink->core->loop);
 
     if (!gst_buffer_pool_is_active (GST_BUFFER_POOL_CAST (pwsink->pool)))
       gst_buffer_pool_set_active (GST_BUFFER_POOL_CAST (pwsink->pool), TRUE);
 
-    if ((res = gst_buffer_pool_acquire_buffer (GST_BUFFER_POOL_CAST (pwsink->pool), &b, NULL)) != GST_FLOW_OK)
+    if ((res = gst_buffer_pool_acquire_buffer (GST_BUFFER_POOL_CAST (pwsink->pool), &b, &params)) != GST_FLOW_OK)
       goto done;
 
     gst_buffer_map (b, &info, GST_MAP_WRITE);
@@ -608,11 +628,17 @@ copy_properties (GQuark field_id,
                  gpointer user_data)
 {
   struct pw_properties *properties = user_data;
+  GValue dst = { 0 };
 
-  if (G_VALUE_HOLDS_STRING (value))
-    pw_properties_set (properties,
-                       g_quark_to_string (field_id),
-                       g_value_get_string (value));
+  if (g_value_type_transformable (G_VALUE_TYPE(value), G_TYPE_STRING)) {
+    g_value_init(&dst, G_TYPE_STRING);
+    if (g_value_transform(value, &dst)) {
+      pw_properties_set (properties,
+                         g_quark_to_string (field_id),
+                         g_value_get_string (&dst));
+    }
+    g_value_unset(&dst);
+  }
   return TRUE;
 }
 
@@ -740,6 +766,7 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
       pw_thread_loop_lock (this->core->loop);
       pw_stream_set_active(this->stream, false);
       pw_thread_loop_unlock (this->core->loop);
+      gst_buffer_pool_set_flushing(GST_BUFFER_POOL_CAST(this->pool), TRUE);
       break;
     default:
       break;
@@ -751,6 +778,7 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      gst_buffer_pool_set_active(GST_BUFFER_POOL_CAST(this->pool), FALSE);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       gst_pipewire_sink_close (this);

@@ -238,7 +238,7 @@ pw_core_resource_errorv(struct pw_resource *resource, uint32_t id, int seq,
 	char buffer[1024];
 	vsnprintf(buffer, sizeof(buffer), message, args);
 	buffer[1023] = '\0';
-	pw_log_error("resource %p: id:%d seq:%d res:%d (%s) msg:\"%s\"",
+	pw_log_debug("resource %p: id:%d seq:%d res:%d (%s) msg:\"%s\"",
 			resource, id, seq, res, spa_strerror(res), buffer);
 	pw_core_resource_error(resource, id, seq, res, buffer);
 }
@@ -535,7 +535,8 @@ struct pw_impl_node {
 
 	char *name;				/** for debug */
 
-	uint32_t priority_master;	/** priority for being master driver */
+	uint32_t priority_driver;	/** priority for being driver */
+	uint32_t group_id;		/** group to schedule this node in */
 	uint32_t spa_flags;
 
 	unsigned int registered:1;
@@ -544,7 +545,7 @@ struct pw_impl_node {
 	unsigned int driver:1;		/**< if the node can drive the graph */
 	unsigned int exported:1;	/**< if the node is exported */
 	unsigned int remote:1;		/**< if the node is implemented remotely */
-	unsigned int master:1;		/**< a master node is one of the driver nodes that
+	unsigned int driving:1;		/**< a driving node is one of the driver nodes that
 					  *  is selected to drive the graph */
 	unsigned int visited:1;		/**< for sorting */
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */

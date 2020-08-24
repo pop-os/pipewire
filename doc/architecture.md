@@ -6,7 +6,7 @@ There are 2 main components that make up the PipeWire library:
  2) An asynchronous IPC mechanism to manipulate and introspect
     a graph in another process.
 
-There is usually a daemon that implements the master graph and
+There is usually a daemon that implements the global graph and
 clients that operate on this graph.
 
 The IPC mechanism in PipeWire is inspired by wayland in that it
@@ -24,7 +24,7 @@ The PipeWire API is, a object oriented asynchronous protocol.
 All requests and replies are method invocations on some object.
 
 Objects are identified with a unique ID. Each object implements an
-interface and requestes result in invocations of methods on the
+interface and requests result in invocations of methods on the
 interface.
 
 The protocol is message based. A message sent by a client to the
@@ -37,7 +37,7 @@ objects or even protocols when required.
 Messages are encoded with [SPA PODs](spa/pod.md), which make it
 possible to encode complex objects with right types.
 
-Events from the server can be a reply to a method or can be emited
+Events from the server can be a reply to a method or can be emitted
 when the server state changes.
 
 Upon connecting to a server, it will broadcast its state. Clients
@@ -123,7 +123,7 @@ A core proxy can be used to receive errors from the remote daemon
 or to perform a roundtrip message to flush out pending requests.
 
 Other core methods and events are used internally for the object
-life cycle management internally.
+life cycle management.
 
 ### `struct pw_registry`
 
@@ -193,16 +193,19 @@ do the connection for the client and then hands the connection socket
 to the client.
 
 All objects in PipeWire have per client permission bits, currently
-READ, WRITE and EXECUTE. A client can not see an objects unless it
-has READ permissions. Similarly, a client can only execute methods
-on an object when the EXECUTE bit is set and to modify the state of
-an object, the client needs WRITE permissions.
+READ, WRITE, EXECUTE and METADATA. A client can not see an objects
+unless it has READ permissions. Similarly, a client can only execute
+methods on an object when the EXECUTE bit is set and to modify the
+state of an object, the client needs WRITE permissions.
 
 A client (the portal after it makes a connection) can drop permissions
 on an object. Once dropped, it can never reacquire the permission.
 
 Clients with WRITE/EXECUTE permissions on another client can
 add and remove permissions for the client at will.
+
+Clients with MODIFY permissions on another object can set or remove
+metadata on that object.
 
 Clients that need permissions assigned to them can be started in
 blocked mode and resume when perrmissions are assigned to them by

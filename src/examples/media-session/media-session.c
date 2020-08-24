@@ -22,15 +22,23 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 #include <math.h>
 #include <getopt.h>
 #include <time.h>
+#include <unistd.h>
+#include <limits.h>
+#include <fcntl.h>
 #include <signal.h>
-
-#include "config.h"
+#include <sys/stat.h>
+#include <sys/types.h>
+#if HAVE_PWD_H
+#include <pwd.h>
+#endif
 
 #include <spa/node/node.h>
 #include <spa/utils/hook.h>
@@ -69,6 +77,10 @@
 int sm_access_flatpak_start(struct sm_media_session *sess);
 int sm_access_portal_start(struct sm_media_session *sess);
 int sm_metadata_start(struct sm_media_session *sess);
+int sm_default_nodes_start(struct sm_media_session *sess);
+int sm_default_profile_start(struct sm_media_session *sess);
+int sm_default_routes_start(struct sm_media_session *sess);
+int sm_restore_stream_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
 int sm_libcamera_monitor_start(struct sm_media_session *sess);
@@ -128,6 +140,9 @@ struct impl {
 	struct spa_list sync_list;		/** list of struct sync */
 	int rescan_seq;
 	int last_seq;
+
+	int state_dir_fd;
+	char state_dir[PATH_MAX];
 };
 
 struct endpoint_link {
@@ -415,16 +430,31 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 {
 	struct sm_device *device = object;
 	struct impl *impl = SPA_CONTAINER_OF(device->obj.session, struct impl, this);
+	uint32_t i;
 
 	pw_log_debug(NAME" %p: device %d info", impl, device->obj.id);
-	device->info = pw_device_info_update(device->info, info);
+	info = device->info = pw_device_info_update(device->info, info);
 
 	device->obj.avail |= SM_DEVICE_CHANGE_MASK_INFO;
 	device->obj.changed |= SM_DEVICE_CHANGE_MASK_INFO;
 
 	if (info->change_mask & PW_DEVICE_CHANGE_MASK_PARAMS) {
-		pw_device_enum_params((struct pw_device*)device->obj.proxy,
-				1, SPA_PARAM_Profile, 0, UINT32_MAX, NULL);
+		for (i = 0; i < info->n_params; i++) {
+			uint32_t id = info->params[i].id;
+
+			if (info->params[i].user == 0)
+				continue;
+
+			device->n_params -= clear_params(&device->param_list, id);
+
+			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
+				pw_log_debug(NAME" %p: device %d enum params %d", impl,
+						device->obj.id, id);
+				pw_device_enum_params((struct pw_device*)device->obj.proxy,
+						1, id, 0, UINT32_MAX, NULL);
+			}
+			info->params[i].user = 0;
+		}
 	}
 	sm_object_sync_update(&device->obj);
 }
@@ -437,8 +467,6 @@ static void device_event_param(void *object, int seq,
 	struct impl *impl = SPA_CONTAINER_OF(device->obj.session, struct impl, this);
 
 	pw_log_debug(NAME" %p: device %p param %d index:%d", impl, device, id, index);
-	device->n_params -= clear_params(&device->param_list, id);
-
 	if (add_param(&device->param_list, id, param) != NULL)
 		device->n_params++;
 
@@ -504,37 +532,30 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 	uint32_t i;
 
 	pw_log_debug(NAME" %p: node %d info", impl, node->obj.id);
-	node->info = pw_node_info_update(node->info, info);
+	info = node->info = pw_node_info_update(node->info, info);
 
 	node->obj.avail |= SM_NODE_CHANGE_MASK_INFO;
 	node->obj.changed |= SM_NODE_CHANGE_MASK_INFO;
 
 	if (info->change_mask & PW_NODE_CHANGE_MASK_PARAMS &&
-	    (node->obj.mask & SM_NODE_CHANGE_MASK_PARAMS) &&
-	    !node->subscribe) {
-		uint32_t subscribe[info->n_params], n_subscribe = 0;
-
+	    (node->obj.mask & SM_NODE_CHANGE_MASK_PARAMS)) {
 		for (i = 0; i < info->n_params; i++) {
-			switch (info->params[i].id) {
-			case SPA_PARAM_PropInfo:
-			case SPA_PARAM_Props:
-			case SPA_PARAM_EnumFormat:
-				if (info->params[i].flags & SPA_PARAM_INFO_READ)
-					subscribe[n_subscribe++] = info->params[i].id;
-				break;
-			default:
-				break;
+			uint32_t id = info->params[i].id;
+
+			if (info->params[i].user == 0)
+				continue;
+
+			node->n_params -= clear_params(&node->param_list, id);
+
+			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
+				pw_log_debug(NAME" %p: node %d enum params %d", impl,
+						node->obj.id, id);
+				pw_node_enum_params((struct pw_node*)node->obj.proxy,
+						1, id, 0, UINT32_MAX, NULL);
 			}
-		}
-		if (n_subscribe > 0) {
-			pw_log_debug(NAME" %p: node %d subscribe %d params", impl,
-					node->obj.id, n_subscribe);
-			pw_node_subscribe_params((struct pw_node*)node->obj.proxy,
-					subscribe, n_subscribe);
-			node->subscribe = true;
+			info->params[i].user = 0;
 		}
 	}
-	node->last_id = SPA_ID_INVALID;
 	sm_object_sync_update(&node->obj);
 }
 
@@ -546,13 +567,6 @@ static void node_event_param(void *object, int seq,
 	struct impl *impl = SPA_CONTAINER_OF(node->obj.session, struct impl, this);
 
 	pw_log_debug(NAME" %p: node %p param %d index:%d", impl, node, id, index);
-
-	if (node->last_id != id) {
-		pw_log_debug(NAME" %p: node %p clear param %d", impl, node, id);
-		node->n_params -= clear_params(&node->param_list, id);
-		node->last_id = id;
-	}
-
 	if (add_param(&node->param_list, id, param) != NULL)
 		node->n_params++;
 
@@ -1315,16 +1329,16 @@ int sm_media_session_roundtrip(struct sm_media_session *sess)
 {
 	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
 	struct pw_loop *loop = impl->this.loop;
-	int done, res;
+	int done, res, seq;
 
 	if (impl->policy_core == NULL)
 		return -EIO;
 
 	done = 0;
-	if ((res = sm_media_session_sync(sess, roundtrip_callback, &done)) < 0)
-		return res;
+	if ((seq = sm_media_session_sync(sess, roundtrip_callback, &done)) < 0)
+		return seq;
 
-	pw_log_debug(NAME" %p: roundtrip %d", impl, res);
+	pw_log_debug(NAME" %p: roundtrip %d", impl, seq);
 
 	pw_loop_enter(loop);
 	while (!done) {
@@ -1336,7 +1350,7 @@ int sm_media_session_roundtrip(struct sm_media_session *sess)
 	}
         pw_loop_leave(loop);
 
-	pw_log_debug(NAME" %p: roundtrip done", impl);
+	pw_log_debug(NAME" %p: roundtrip %d done", impl, seq);
 
 	return 0;
 }
@@ -1550,6 +1564,7 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 {
 	struct pw_properties *props;
 	struct sm_port *outport, *inport;
+	int count = 0;
 
 	pw_log_debug(NAME" %p: linking %d -> %d", impl, outnode->obj.id, innode->obj.id);
 
@@ -1597,6 +1612,7 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 		l->input_node = innode->obj.id;
 		l->input_port = inport->obj.id;
 		pw_proxy_add_listener(p, &l->listener, &proxy_link_events, l);
+		count++;
 
 		if (link) {
 			l->endpoint_link = link;
@@ -1607,7 +1623,7 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 	}
 	pw_properties_free(props);
 
-	return 0;
+	return count;
 }
 
 
@@ -1719,6 +1735,126 @@ int sm_media_session_remove_links(struct sm_media_session *sess,
 		if (l->output_node == outnode->obj.id && l->input_node == innode->obj.id) {
 			pw_proxy_destroy(l->proxy);
 		}
+	}
+	return 0;
+}
+
+static int state_dir(struct sm_media_session *sess)
+{
+	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
+	const char *home_dir;
+	int res;
+
+	if (impl->state_dir_fd != -1)
+		return impl->state_dir_fd;
+
+	home_dir = getenv("HOME");
+	if (home_dir == NULL)
+		home_dir = getenv("USERPROFILE");
+	if (home_dir == NULL) {
+		struct passwd pwd, *result = NULL;
+		char buffer[4096];
+		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
+			home_dir = result ? result->pw_dir : NULL;
+	}
+	if (home_dir == NULL) {
+		pw_log_error("Can't determine home directory");
+		return -ENOTSUP;
+	}
+	snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
+			"%s/.pipewire-media-session/", home_dir);
+
+	if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
+		if (errno == ENOENT) {
+			pw_log_info("creating state directory %s", impl->state_dir);
+			if (mkdir(impl->state_dir, 0700) < 0) {
+				pw_log_info("Can't create state directory %s: %m", impl->state_dir);
+				return -errno;
+			}
+		} else {
+			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
+			return -errno;
+		}
+		if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
+			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
+			return -EINVAL;
+		}
+	}
+	impl->state_dir_fd = res;
+	return res;
+}
+int sm_media_session_load_state(struct sm_media_session *sess,
+		const char *name, struct pw_properties *props)
+{
+	int sfd, fd, count = 0;
+	FILE *f;
+	char line[1024];
+
+	pw_log_info(NAME" %p: loading state '%s'", sess, name);
+	if ((sfd = state_dir(sess)) < 0)
+		return sfd;
+
+	if ((fd = openat(sfd, name,  O_CLOEXEC | O_RDONLY)) < 0) {
+		pw_log_debug("can't open file %s: %m", name);
+		return -errno;
+	}
+	f = fdopen(fd, "r");
+	while (fgets(line, sizeof(line)-1, f)) {
+		char *val, *key, *k, *p;
+		val = strrchr(line, '\n');
+		if (val)
+			*val = '\0';
+
+		key = k = p = line;
+		while (*p) {
+			if (*p == ' ')
+				break;
+			if (*p == '\\')
+				p++;
+			*k++ = *p++;
+		}
+		*k = '\0';
+		val = ++p;
+		count += pw_properties_set(props, key, val);
+	}
+	fclose(f);
+	return count;
+}
+
+int sm_media_session_save_state(struct sm_media_session *sess,
+		const char *name, const struct pw_properties *props)
+{
+	const struct spa_dict_item *it;
+	char *tmp_name;
+	int sfd, fd;
+	FILE *f;
+
+	pw_log_info(NAME" %p: saving state '%s'", sess, name);
+	if ((sfd = state_dir(sess)) < 0)
+		return sfd;
+
+	tmp_name = alloca(strlen(name)+5);
+	sprintf(tmp_name, "%s.tmp", name);
+	if ((fd = openat(sfd, tmp_name,  O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC, 0700)) < 0) {
+		pw_log_error("can't open file %s: %m", tmp_name);
+		return -errno;
+	}
+
+	f = fdopen(fd, "w");
+	spa_dict_for_each(it, &props->dict) {
+		const char *p = it->key;
+		while (*p) {
+			if (*p == ' ' || *p == '\\')
+				fputc('\\', f);
+			fprintf(f, "%c", *p++);
+		}
+		fprintf(f, " %s\n", it->value);
+	}
+	fclose(f);
+
+	if (renameat(sfd, tmp_name, sfd, name) < 0) {
+		pw_log_error("can't rename temp file: %m");
+		return -errno;
 	}
 	return 0;
 }
@@ -1876,7 +2012,19 @@ static void do_quit(void *data, int signal_number)
 	pw_main_loop_quit(impl->loop);
 }
 
-#define DEFAULT_ENABLED		"flatpak,portal,metadata,alsa-acp,alsa-seq,v4l2,bluez5,suspend-node,policy-node"
+#define DEFAULT_ENABLED		"flatpak,"		\
+				"portal,"		\
+				"metadata,"		\
+				"default-nodes,"	\
+				"default-profile,"	\
+				"default-routes,"	\
+				"restore-stream,"	\
+				"alsa-acp,"		\
+				"alsa-seq,"		\
+				"v4l2,"			\
+				"bluez5,"		\
+				"suspend-node,"		\
+				"policy-node"
 #define DEFAULT_DISABLED	""
 
 static const struct {
@@ -1889,6 +2037,10 @@ static const struct {
 	{ "flatpak", "manage flatpak access", sm_access_flatpak_start, NULL },
 	{ "portal", "manage portal permissions", sm_access_portal_start, NULL },
 	{ "metadata", "export metadata API", sm_metadata_start, NULL },
+	{ "default-nodes", "restore default nodes", sm_default_nodes_start, NULL },
+	{ "default-profile", "restore default profiles", sm_default_profile_start, NULL },
+	{ "default-routes", "restore default route", sm_default_routes_start, NULL },
+	{ "restore-stream", "restore stream settings", sm_restore_stream_start, NULL },
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
 	{ "alsa-pcm", "alsa pcm udev detection", sm_alsa_monitor_start, NULL },
 	{ "alsa-acp", "alsa card profile udev detection", sm_alsa_monitor_start, "alsa.use-acp=true" },
@@ -1981,6 +2133,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	impl.state_dir_fd = -1;
+
 	impl.this.props = pw_properties_new_string(opt_properties ? opt_properties : "");
 	if (impl.this.props == NULL)
 		return -1;
@@ -2060,6 +2214,9 @@ exit:
 	pw_map_clear(&impl.endpoint_links);
 	pw_map_clear(&impl.globals);
 	pw_properties_free(impl.this.props);
+
+	if (impl.state_dir_fd != -1)
+		close(impl.state_dir_fd);
 
 	pw_deinit();
 

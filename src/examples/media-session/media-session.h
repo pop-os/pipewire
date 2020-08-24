@@ -120,7 +120,6 @@ struct sm_client {
 struct sm_device {
 	struct sm_object obj;
 
-	unsigned int subscribe:1;	/**< if we subscribed to param changes */
 	unsigned int locked:1;		/**< if the device is locked by someone else right now */
 
 #define SM_DEVICE_CHANGE_MASK_INFO	(SM_OBJECT_CHANGE_MASK_LAST<<0)
@@ -137,8 +136,6 @@ struct sm_node {
 
 	struct sm_device *device;	/**< optional device */
 	struct spa_list link;		/**< link in device node_list */
-	unsigned int subscribe:1;	/**< if we subscribed to param changes */
-	uint32_t last_id;
 
 #define SM_NODE_CHANGE_MASK_INFO	(SM_OBJECT_CHANGE_MASK_LAST<<0)
 #define SM_NODE_CHANGE_MASK_PARAMS	(SM_OBJECT_CHANGE_MASK_LAST<<1)
@@ -285,6 +282,11 @@ int sm_media_session_create_links(struct sm_media_session *sess,
 		const struct spa_dict *dict);
 int sm_media_session_remove_links(struct sm_media_session *sess,
 		const struct spa_dict *dict);
+
+int sm_media_session_load_state(struct sm_media_session *sess,
+		const char *name, struct pw_properties *props);
+int sm_media_session_save_state(struct sm_media_session *sess,
+		const char *name, const struct pw_properties *props);
 
 #ifdef __cplusplus
 }

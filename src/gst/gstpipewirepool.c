@@ -33,6 +33,8 @@
 #include <gst/allocators/gstfdmemory.h>
 #include <gst/allocators/gstdmabuf.h>
 
+#include <gst/video/gstvideometa.h>
+
 #include "gstpipewirepool.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_pipewire_pool_debug_category);
@@ -101,7 +103,7 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
       data->offset = d->mapoffset;
     }
     else if (d->type == SPA_DATA_MemPtr) {
-      gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, 0,
+      gmem = gst_memory_new_wrapped (GST_MEMORY_FLAG_NO_SHARE, d->data, d->maxsize, 0,
                                      d->maxsize, NULL, NULL);
       data->offset = 0;
     }
@@ -115,6 +117,9 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
   data->flags = GST_BUFFER_FLAGS (buf);
   data->b = b;
   data->buf = buf;
+  data->crop = spa_buffer_find_meta_data (b->buffer, SPA_META_VideoCrop, sizeof(*data->crop));
+  if (data->crop)
+	  gst_buffer_add_video_crop_meta(buf);
 
   gst_mini_object_set_qdata (GST_MINI_OBJECT_CAST (buf),
                              pool_data_quark,
@@ -175,6 +180,9 @@ acquire_buffer (GstBufferPool * pool, GstBuffer ** buffer,
     if ((b = pw_stream_dequeue_buffer(p->stream)))
       break;
 
+    if (params && (params->flags & GST_BUFFER_POOL_ACQUIRE_FLAG_DONTWAIT))
+      goto no_more_buffers;
+
     GST_WARNING ("queue empty");
     g_cond_wait (&p->cond, GST_OBJECT_GET_LOCK (pool));
   }
@@ -191,6 +199,12 @@ flushing:
   {
     GST_OBJECT_UNLOCK (pool);
     return GST_FLOW_FLUSHING;
+  }
+no_more_buffers:
+  {
+    GST_LOG_OBJECT (pool, "no more buffers");
+    GST_OBJECT_UNLOCK (pool);
+    return GST_FLOW_EOS;
   }
 }
 

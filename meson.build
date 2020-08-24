@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.8',
+  version : '0.3.10',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -204,6 +204,7 @@ check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
   ['sys/types.h', 'HAVE_SYS_TYPES_H'],
   ['sys/utsname.h', 'HAVE_SYS_UTSNAME_H'],
   ['sys/wait.h', 'HAVE_SYS_WAIT_H'],
+  ['pwd.h', 'HAVE_PWD_H'],
   ['ucontext.h', 'HAVE_UCONTEXT_H'],
   ['unistd.h', 'HAVE_UNISTD_H'],
   ['valgrind/valgrind.h', 'HAVE_VALGRIND_VALGRIND_H'],
@@ -359,5 +360,5 @@ if get_option('man')
 endif
 
 setenv = find_program('pw-uninstalled.sh')
-run_target('uninstalled', command : [setenv,
+run_target('pw-uninstalled', command : [setenv,
     '-b@0@'.format(meson.build_root()), '-v@0@'.format(pipewire_version)])

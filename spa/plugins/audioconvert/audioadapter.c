@@ -82,7 +82,7 @@ struct impl {
 	unsigned int add_listener:1;
 	unsigned int have_format:1;
 	unsigned int started:1;
-	unsigned int master:1;
+	unsigned int driver:1;
 };
 
 /** \endcond */
@@ -250,7 +250,7 @@ static int negotiate_buffers(struct impl *this)
 	struct spa_data *datas;
 	uint32_t follower_flags, conv_flags;
 
-	spa_log_debug(this->log, "%p: %d", this, this->n_buffers);
+	spa_log_debug(this->log, NAME" %p: %d", this, this->n_buffers);
 
 	if (this->n_buffers > 0)
 		return 0;
@@ -452,7 +452,7 @@ static int negotiate_format(struct impl *this)
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 
-	spa_log_debug(this->log, NAME "%p: negiotiate", this);
+	spa_log_debug(this->log, NAME " %p: negiotiate", this);
 
 	state = 0;
 	format = NULL;
@@ -511,7 +511,6 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 			return res;
 		if ((res = negotiate_buffers(this)) < 0)
 			return res;
-		this->started = true;
 		break;
 	case SPA_NODE_COMMAND_Suspend:
 		configure_format(this, 0, NULL);
@@ -536,6 +535,11 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 			return res;
 		}
 	}
+	switch (SPA_NODE_COMMAND_ID(command)) {
+	case SPA_NODE_COMMAND_Start:
+		this->started = true;
+		break;
+	}
 	return res;
 }
 
@@ -544,20 +548,26 @@ static void convert_node_info(void *data, const struct spa_node_info *info)
 	struct impl *this = data;
 	uint32_t i;
 
-	for (i = 0; i < info->n_params; i++) {
-		uint32_t idx = SPA_ID_INVALID;
+	if (info->change_mask & SPA_NODE_CHANGE_MASK_FLAGS) {
+		this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS;
+		this->info.flags = info->flags;
+	}
+	if (info->change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
+		for (i = 0; i < info->n_params; i++) {
+			uint32_t idx = SPA_ID_INVALID;
 
-		switch (info->params[i].id) {
-		case SPA_PARAM_PropInfo:
-			idx = 1;
-			break;
-		case SPA_PARAM_Props:
-			idx = 2;
-			break;
-		}
-		if (idx != SPA_ID_INVALID) {
-			this->params[idx] = info->params[i];
-			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			switch (info->params[i].id) {
+			case SPA_PARAM_PropInfo:
+				idx = 1;
+				break;
+			case SPA_PARAM_Props:
+				idx = 2;
+				break;
+			}
+			if (idx != SPA_ID_INVALID) {
+				this->params[idx] = info->params[i];
+				this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			}
 		}
 	}
 	emit_node_info(this, false);
@@ -655,7 +665,7 @@ static int follower_ready(void *data, int status)
 
 	spa_log_trace_fp(this->log, NAME " %p: ready %d", this, status);
 
-	this->master = true;
+	this->driver = true;
 
 	if (this->direction == SPA_DIRECTION_OUTPUT)
 		status = spa_node_process(this->convert);
@@ -880,8 +890,8 @@ static int impl_node_process(void *object)
 	struct impl *this = object;
 	int status = 0;
 
-	spa_log_trace_fp(this->log, "%p: process convert:%p master:%d",
-			this, this->convert, this->master);
+	spa_log_trace_fp(this->log, "%p: process convert:%p driver:%d",
+			this, this->convert, this->driver);
 
 	if (this->direction == SPA_DIRECTION_INPUT) {
 		if (this->convert)
@@ -892,7 +902,7 @@ static int impl_node_process(void *object)
 		status = spa_node_process(this->follower);
 
 	if (this->direction == SPA_DIRECTION_OUTPUT &&
-	    !this->master && this->convert) {
+	    !this->driver && this->convert) {
 		while (status > 0) {
 			status = spa_node_process(this->convert);
 			if (status & (SPA_STATUS_HAVE_DATA | SPA_STATUS_DRAINED))
@@ -906,7 +916,7 @@ static int impl_node_process(void *object)
 	}
 	spa_log_trace_fp(this->log, "%p: process status:%d", this, status);
 
-	this->master = false;
+	this->driver = false;
 
 	return status;
 }
@@ -1048,8 +1058,13 @@ impl_init(const struct spa_handle_factory *factory,
 	this->convert = iface;
 	this->target = this->convert;
 
-	this->info_all = SPA_NODE_CHANGE_MASK_PARAMS;
+	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS |
+		SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info = SPA_NODE_INFO_INIT();
+	this->info.flags = SPA_NODE_FLAG_RT |
+		SPA_NODE_FLAG_IN_PORT_CONFIG |
+		SPA_NODE_FLAG_OUT_PORT_CONFIG |
+		SPA_NODE_FLAG_NEED_CONFIGURE;
 	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
 	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
 	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
