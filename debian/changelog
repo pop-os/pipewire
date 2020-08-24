@@ -1,4 +1,4 @@
-pipewire (0.3.8-1) UNRELEASED; urgency=medium
+pipewire (0.3.10-1) UNRELEASED; urgency=medium
 
   [ Laurent Bigonville ]
   * New upstream release (Closes: #954022)
@@ -93,7 +93,10 @@ pipewire (0.3.8-1) UNRELEASED; urgency=medium
     Thanks to Sjoerd Simons
   * Document more ways to test bits of PipeWire manually
 
- -- Simon McVittie <smcv@debian.org>  Thu, 30 Jul 2020 09:48:15 +0100
+  [ Andreas Henriksson ]
+  * New upstream release (0.3.10)
+
+ -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 12:24:31 +0200
 
 pipewire (0.2.7-1) unstable; urgency=medium
 
