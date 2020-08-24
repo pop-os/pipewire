@@ -149,7 +149,7 @@ Depends: ${misc:Depends},
          ${shlibs:Depends},
          libpipewire-0.3-modules (= ${binary:Version}),
          pipewire-bin (= ${binary:Version}),
-Description: PipeWire multimedia server
+Description: audio and video processing engine multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
