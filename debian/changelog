@@ -95,8 +95,11 @@ pipewire (0.3.10-1) UNRELEASED; urgency=medium
 
   [ Andreas Henriksson ]
   * New upstream release (0.3.10)
+  * Update libpipewire-0.3-0.symbols with new additions
+  * Improve pipewire short description
+  * debian/copyright: Add module-portal.c and Red Hat
 
- -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 12:24:31 +0200
+ -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 13:30:20 +0200
 
 pipewire (0.2.7-1) unstable; urgency=medium
 
