@@ -115,8 +115,10 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_global_is_type@Base 0.3.1
  pw_global_new@Base 0.3.1
  pw_global_register@Base 0.3.1
+ pw_global_update_keys@Base 0.3.10
  pw_global_update_permissions@Base 0.3.1
  pw_impl_client_add_listener@Base 0.3.1
+ pw_impl_client_check_permissions@Base 0.3.10
  pw_impl_client_destroy@Base 0.3.1
  pw_impl_client_find_resource@Base 0.3.1
  pw_impl_client_get_context@Base 0.3.1
