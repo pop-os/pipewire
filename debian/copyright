@@ -42,7 +42,9 @@ License: Expat and LGPL-2.1+
 
 Files: src/modules/module-client-node/v0/*
        src/modules/module-protocol-native/v0/*
+       src/modules/module-portal.c
 Copyright: 2015-2017 Wim Taymans
+           2019 Red Hat Inc.
 License: LGPL-2+
 
 License: Expat
