@@ -19,6 +19,18 @@ override_dh_auto_configure:
 		-Dman=true \
 		-Ddocs=true
 
+test_timeout_multiplier = 1
+
+ifneq ($(filter arm hppa m68k mips% riscv64 sh4 sparc%,$(DEB_HOST_ARCH_CPU)),)
+test_timeout_multiplier = 5
+endif
+
+override_dh_auto_test:
+	dh_auto_test \
+		-- \
+		--timeout-multiplier $(test_timeout_multiplier) \
+		$(NULL)
+
 override_dh_missing:
 	dh_missing --fail-missing
 
