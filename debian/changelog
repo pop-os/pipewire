@@ -1,3 +1,18 @@
+pipewire (0.3.10-2) experimental; urgency=medium
+
+  * Team upload
+  * Use debhelper compat level 13.
+    This runs 'meson test' rather than 'ninja test', which will make it
+    easier to expand the test timeout.
+  * Increase test timeout on slower architectures.
+    The resampling tests can be a bit slow, particularly on architectures
+    without a real FPU.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Add patch to fix FTBFS on armel (and hopefully also mipsel) by
+    explicitly linking to libatomic where needed.
+
+ -- Simon McVittie <smcv@debian.org>  Sun, 06 Sep 2020 21:03:55 +0100
+
 pipewire (0.3.10-1) experimental; urgency=medium
 
   * Team upload.
