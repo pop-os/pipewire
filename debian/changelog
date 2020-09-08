@@ -1,3 +1,13 @@
+pipewire (0.3.10-3) UNRELEASED; urgency=medium
+
+  * d/rules: Adjust test timeouts again, based on feedback from the buildds.
+    mips* now get 10 times as long as fast architectures, and ia64
+    is added to the list of slowish architectures that get 5 times as long.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Update patch to the version that was applied upstream
+
+ -- Simon McVittie <smcv@debian.org>  Tue, 08 Sep 2020 20:16:16 +0100
+
 pipewire (0.3.10-2) experimental; urgency=medium
 
   * Team upload
