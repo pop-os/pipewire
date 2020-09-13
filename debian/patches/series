@@ -1,2 +1,1 @@
 conf-disable-bluez5.patch
-Link-pipewire-jack-to-libatomic-if-required.patch
