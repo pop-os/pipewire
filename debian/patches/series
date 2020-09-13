@@ -1,1 +1,2 @@
 conf-disable-bluez5.patch
+audioconvert-tests-Default-to-using-an-installed-libspa-s.patch
