@@ -1,6 +1,13 @@
 pipewire (0.3.11-1) UNRELEASED; urgency=medium
 
   * New upstream release
+    - Configuration in ~/.pipewire-media-session is no longer used.
+      If you have configuration in that location, please move it into
+      $XDG_CONFIG_HOME/pipewire-media-session, defaulting to
+      $HOME/.config/pipewire-media-session if $XDG_CONFIG_HOME is not
+      set. It will not be migrated automatically.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Drop, applied upstream
 
  -- Simon McVittie <smcv@debian.org>  Sun, 13 Sep 2020 13:55:39 +0100
 
