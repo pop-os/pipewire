@@ -258,6 +258,9 @@ struct spa_bt_transport {
 struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor, char *path, size_t extra);
 void spa_bt_transport_free(struct spa_bt_transport *transport);
 struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path);
+struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monitor,
+                                                    bool (*callback) (struct spa_bt_transport *t, const void *data),
+                                                    const void *data);
 
 #define spa_bt_transport_emit(t,m,v,...)		spa_hook_list_call(&(t)->listener_list, \
 								struct spa_bt_transport_events,	\
@@ -331,6 +334,24 @@ static inline struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *mo
 }
 static inline void backend_ofono_free(struct spa_bt_backend *backend) {}
 static inline void backend_ofono_add_filters(struct spa_bt_backend *backend) {}
+#endif
+
+#ifdef HAVE_BLUEZ_5_BACKEND_HSPHFPD
+struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_support *support,
+		uint32_t n_support);
+void backend_hsphfpd_free(struct spa_bt_backend *backend);
+void backend_hsphfpd_add_filters(struct spa_bt_backend *backend);
+#else
+static inline struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_support *support,
+		uint32_t n_support) {
+	return NULL;
+}
+static inline void backend_hsphfpd_free(struct spa_bt_backend *backend) {}
+static inline void backend_hsphfpd_add_filters(struct spa_bt_backend *backend) {}
 #endif
 
 #ifdef __cplusplus

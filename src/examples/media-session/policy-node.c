@@ -139,25 +139,34 @@ static bool find_format(struct node *node)
 	return have_format;
 }
 
-static int configure_node(struct node *node, struct spa_audio_info *info)
+static int configure_node(struct node *node, struct spa_audio_info *info, bool force)
 {
 	struct impl *impl = node->impl;
 	char buf[1024];
 	struct spa_pod_builder b = { 0, };
 	struct spa_pod *param;
+	struct spa_audio_info format;
 
-	if (node->configured)
+	if (node->configured && !force)
 		return 0;
 
-	if (info != NULL) {
-		if (info->info.raw.channels < node->format.info.raw.channels || node->monitor)
-			node->format = *info;
-	}
+	if (strcmp(node->media, "Audio") != 0)
+		return 0;
 
-	node->format.info.raw.rate = impl->sample_rate;
+	format = node->format;
+
+	if (info != NULL && info->info.raw.channels > 0) {
+		if (node->monitor || info->info.raw.channels < format.info.raw.channels) {
+			pw_log_info("node %d monitor:%d channelmix %d:%d",
+					node->id, node->monitor, format.info.raw.channels,
+					info->info.raw.channels);
+			format = *info;
+		}
+	}
+	format.info.raw.rate = impl->sample_rate;
 
 	spa_pod_builder_init(&b, buf, sizeof(buf));
-	param = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &node->format.info.raw);
+	param = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &format.info.raw);
 	param = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamPortConfig, SPA_PARAM_PortConfig,
 		SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(node->direction),
@@ -444,26 +453,13 @@ static int link_nodes(struct node *node, struct node *peer)
 	struct pw_properties *props;
 	struct node *output, *input;
 
-	pw_log_debug(NAME " %p: link nodes %d %d", impl, node->id, peer->id);
+	pw_log_debug(NAME " %p: link nodes %d %d remix:%d", impl,
+			node->id, peer->id, !node->dont_remix);
 
 	if (node->dont_remix)
-		configure_node(node, NULL);
+		configure_node(node, NULL, false);
 	else {
-#if 0
-		bool configured = node->configured;
-		if (configured) {
-			node->configured = false;
-			pw_node_send_command((struct pw_node*)node->obj->obj.proxy,
-					&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Suspend));
-		}
-#endif
-		configure_node(node, &peer->format);
-#if 0
-		if (configured) {
-			pw_node_send_command((struct pw_node*)node->obj->obj.proxy,
-					&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
-		}
-#endif
+		configure_node(node, &peer->format, true);
 	}
 
 	if (node->direction == PW_DIRECTION_INPUT) {
@@ -530,7 +526,7 @@ static int rescan_node(struct impl *impl, struct node *n)
 	}
 
 	if (n->type == NODE_TYPE_DEVICE) {
-		configure_node(n, NULL);
+		configure_node(n, NULL, false);
 		return 0;
 	}
 
@@ -556,7 +552,7 @@ static int rescan_node(struct impl *impl, struct node *n)
         str = spa_dict_lookup(props, PW_KEY_NODE_AUTOCONNECT);
         if (str == NULL || !pw_properties_parse_bool(str)) {
 		pw_log_debug(NAME" %p: node %d does not need autoconnect", impl, n->id);
-		configure_node(n, NULL);
+		configure_node(n, NULL, false);
 		return 0;
 	}
 
@@ -699,6 +695,9 @@ static int move_node(struct impl *impl, uint32_t source, uint32_t target)
 	struct node *n, *src_node, *dst_node;
 	const char *str;
 
+	if (source == SPA_ID_INVALID || target == SPA_ID_INVALID)
+		return 0;
+
 	/* find source and dest node */
 	if ((src_node = find_node_by_id(impl, source)) == NULL)
 		return -ENOENT;
@@ -764,30 +763,26 @@ static int metadata_property(void *object, uint32_t subject,
 		const char *key, const char *type, const char *value)
 {
 	struct impl *impl = object;
-
-	if (key == NULL)
-		return 0;
+	uint32_t val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
 
 	if (subject == PW_ID_CORE) {
-		if (strcmp(key, "default.audio.sink") == 0) {
-			if (impl->default_audio_sink != SPA_ID_INVALID && value)
-				move_node(impl, impl->default_audio_sink, atoi(value));
-			impl->default_audio_sink = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		if (key == NULL || strcmp(key, "default.audio.sink") == 0) {
+			move_node(impl, impl->default_audio_sink, val);
+			impl->default_audio_sink = val;
 		}
-		else if (strcmp(key, "default.audio.source") == 0) {
-			if (impl->default_audio_source != SPA_ID_INVALID && value)
-				move_node(impl, impl->default_audio_source, atoi(value));
-			impl->default_audio_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		} else if (strcmp(key, "default.video.source") == 0) {
-			if (impl->default_video_source != SPA_ID_INVALID && value)
-				move_node(impl, impl->default_video_source, atoi(value));
-			impl->default_video_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		if (key == NULL || strcmp(key, "default.audio.source") == 0) {
+			move_node(impl, impl->default_audio_source, val);
+			impl->default_audio_source = val;
+		}
+		if (key == NULL || strcmp(key, "default.video.source") == 0) {
+			move_node(impl, impl->default_video_source, val);
+			impl->default_video_source = val;
 		}
 	} else {
-		if (strcmp(key, "target.node") == 0 && value != NULL) {
+		if (val != SPA_ID_INVALID && strcmp(key, "target.node") == 0) {
 			struct node *src_node, *dst_node;
 
-			dst_node = find_node_by_id(impl, atoi(value));
+			dst_node = find_node_by_id(impl, val);
 			src_node = dst_node ? find_node_by_id(impl, subject) : NULL;
 
 			if (dst_node && src_node)

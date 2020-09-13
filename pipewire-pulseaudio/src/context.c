@@ -35,7 +35,7 @@
 int pa_context_set_error(PA_CONST pa_context *c, int error) {
 	pa_assert(error >= 0);
 	pa_assert(error < PA_ERR_MAX);
-	if (c && c->error != error) {
+	if (c) {
 		pw_log_debug("context %p: error %d %s", c, error, pa_strerror(error));
 		((pa_context*)c)->error = error;
 	}
@@ -64,6 +64,7 @@ static void context_unlink(pa_context *c)
 	pa_stream *s, *t;
 	struct global *g;
 	pa_operation *o;
+	struct module_info *m;
 
 	pw_log_debug("context %p: unlink %d", c, c->state);
 
@@ -88,6 +89,8 @@ static void context_unlink(pa_context *c)
 
 	spa_list_consume(o, &c->operations, link)
 		pa_operation_cancel(o);
+	spa_list_consume(m, &c->modules, link)
+		pw_proxy_destroy(m->proxy);
 }
 
 void pa_context_set_state(pa_context *c, pa_context_state_t st) {
@@ -128,6 +131,16 @@ pa_context *pa_context_new(pa_mainloop_api *mainloop, const char *name)
 	return pa_context_new_with_proplist(mainloop, name, NULL);
 }
 
+pa_stream *pa_context_find_stream(pa_context *c, uint32_t idx)
+{
+	pa_stream *s;
+	spa_list_for_each(s, &c->streams, link) {
+		if (s->stream_index == idx)
+			return s;
+	}
+	return NULL;
+}
+
 struct global *pa_context_find_global(pa_context *c, uint32_t id)
 {
 	struct global *g;
@@ -143,7 +156,7 @@ const char *pa_context_find_global_name(pa_context *c, uint32_t id)
 	struct global *g;
 	const char *name = NULL;
 
-	g = pa_context_find_global(c, id & PA_IDX_MASK_DSP);
+	g = pa_context_find_global(c, id & PA_IDX_MASK_MONITOR);
 	if (g == NULL)
 		return "unknown object";
 
@@ -180,7 +193,7 @@ struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, cons
 			    strncmp(str, name, strlen(name) - 8) == 0)
 				return g;
 		}
-		if (g->id == id || (g->id == (id & PA_IDX_MASK_DSP)))
+		if (g->id == id || (g->id == (id & PA_IDX_MASK_MONITOR)))
 			return g;
 	}
 	return NULL;
@@ -257,16 +270,6 @@ static const char *str_efac(pa_subscription_event_type_t event)
 	return "invalid";
 }
 
-static void global_sync(struct global *g)
-{
-	pa_operation *o;
-	pa_context *c = g->context;
-
-	g->pending_seq = pw_proxy_sync(g->proxy, 0);
-	spa_list_for_each(o, &c->operations, link)
-		o->seq = g->pending_seq;
-}
-
 static void emit_event(pa_context *c, struct global *g, pa_subscription_event_type_t event)
 {
 	if (c->subscribe_callback && (c->subscribe_mask & g->mask)) {
@@ -286,6 +289,36 @@ static void emit_event(pa_context *c, struct global *g, pa_subscription_event_ty
 					c->subscribe_userdata);
 		}
 	}
+}
+
+static void do_global_sync(struct global *g)
+{
+	pa_subscription_event_type_t event;
+
+	pw_log_debug("global %p sync", g);
+	if (g->ginfo && g->ginfo->sync)
+		g->ginfo->sync(g);
+
+	if (g->init) {
+		if ((g->mask & (PA_SUBSCRIPTION_MASK_SINK_INPUT | PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))) {
+		    if (g->node_info.device_index == SPA_ID_INVALID ||
+		        (g->stream && g->stream->state != PA_STREAM_READY))
+				return;
+		}
+		g->init = false;
+		event = PA_SUBSCRIPTION_EVENT_NEW;
+	} else {
+		event = PA_SUBSCRIPTION_EVENT_CHANGE;
+	}
+	emit_event(g->context, g, event);
+}
+
+
+static void global_sync(struct global *g)
+{
+	pa_context *c = g->context;
+	c->pending_seq = pw_core_sync(c->core, PW_ID_CORE, c->pending_seq);
+	g->sync = true;
 }
 
 static struct param *add_param(struct spa_list *params, uint32_t id, const struct spa_pod *param)
@@ -381,8 +414,11 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 				remove_params(&g->card_info.ports, id);
 				g->card_info.n_ports = 0;
 				break;
-			case SPA_PARAM_Profile:
 			case SPA_PARAM_Route:
+				remove_params(&g->card_info.routes, id);
+				g->card_info.n_routes = 0;
+				break;
+			case SPA_PARAM_Profile:
 				break;
 			default:
 				do_enum = false;
@@ -401,6 +437,7 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 					g->card_info.pending_ports = true;
 					break;
 				}
+				pw_log_debug("global %p: do enum:%d", g, id);
 				pw_device_enum_params((struct pw_device*)g->proxy,
 						0, id, 0, -1, NULL);
 			}
@@ -411,40 +448,62 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 	global_sync(g);
 }
 
-static void parse_props(struct global *g, const struct spa_pod *param, bool device)
+static int parse_props(struct global *g, const struct spa_pod *param, bool device)
 {
+	int changed = 0;
 	struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {
 		case SPA_PROP_volume:
-			spa_pod_get_float(&prop->value, &g->node_info.volume);
+		{
+			float vol;
+			if (spa_pod_get_float(&prop->value, &vol) >= 0 &&
+			    g->node_info.volume != vol) {
+				g->node_info.volume = vol;
+				changed++;
+			}
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_DEVICE_VOLUME, device);
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_HW_VOLUME,
 					prop->flags & SPA_POD_PROP_FLAG_HARDWARE);
 			break;
+		}
 		case SPA_PROP_mute:
-			spa_pod_get_bool(&prop->value, &g->node_info.mute);
+		{
+			bool mute;
+			if (spa_pod_get_bool(&prop->value, &mute) >= 0 &&
+			    g->node_info.mute != mute) {
+				g->node_info.mute = mute;
+				changed++;
+			}
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_DEVICE_MUTE, device);
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_HW_MUTE,
 					prop->flags & SPA_POD_PROP_FLAG_HARDWARE);
 			break;
+		}
 		case SPA_PROP_channelVolumes:
 		{
 			uint32_t n_vals;
+			float vol[SPA_AUDIO_MAX_CHANNELS];
 
 			n_vals = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					g->node_info.channel_volumes, SPA_AUDIO_MAX_CHANNELS);
+					vol, SPA_AUDIO_MAX_CHANNELS);
 
 			if (n_vals != g->node_info.n_channel_volumes) {
 				pw_log_debug("channel change %d->%d, trigger remove",
 						g->node_info.n_channel_volumes, n_vals);
-				emit_event(g->context, g, PA_SUBSCRIPTION_EVENT_REMOVE);
+				if (!g->init)
+					emit_event(g->context, g, PA_SUBSCRIPTION_EVENT_REMOVE);
 				g->node_info.n_channel_volumes = n_vals;
 				/* mark as init, this will emit the NEW event when the
 				 * params are updated */
-				g->init = true;
+				g->init = g->sync = true;
+				changed++;
+			}
+			if (memcmp(g->node_info.channel_volumes, vol, n_vals * sizeof(float)) != 0) {
+				memcpy(g->node_info.channel_volumes, vol, n_vals * sizeof(float));
+				changed++;
 			}
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_DEVICE_VOLUME, device);
 			SPA_FLAG_UPDATE(g->node_info.flags, NODE_FLAG_HW_VOLUME,
@@ -461,6 +520,7 @@ static void parse_props(struct global *g, const struct spa_pod *param, bool devi
 			break;
 		}
 	}
+	return changed;
 }
 
 static struct global *find_node_for_route(pa_context *c, struct global *card, uint32_t device)
@@ -486,7 +546,6 @@ static void device_event_param(void *object, int seq,
 		const struct spa_pod *param)
 {
 	struct global *g = object;
-	pa_context *c = g->context;
 
 	switch (id) {
 	case SPA_PARAM_EnumProfile:
@@ -543,29 +602,21 @@ static void device_event_param(void *object, int seq,
 	{
 		uint32_t index, device;
 		enum spa_direction direction;
-		struct spa_pod *props = NULL;
-		struct global *ng;
 
 		if (spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
 				SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
 				SPA_PARAM_ROUTE_direction, SPA_POD_Id(&direction),
-				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
-				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props)) < 0) {
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device)) < 0) {
 			pw_log_warn("device %d: can't parse route", g->id);
 			return;
 		}
+		if (add_param(&g->card_info.routes, id, param))
+			g->card_info.n_routes++;
 
-		pw_log_debug("device %d: active %s route %d", g->id,
+		pw_log_debug("device %d: active %s route %d device %d", g->id,
 				direction == SPA_DIRECTION_OUTPUT ? "output" : "input",
-				index);
-
-		ng = find_node_for_route(c, g, device);
-		if (props && ng && ng->node_info.active_port != index) {
-			ng->node_info.active_port = index;
-			parse_props(ng, props, true);
-			emit_event(c, ng, PA_SUBSCRIPTION_EVENT_CHANGE);
-		}
+				index, device);
 		break;
 	}
 	default:
@@ -683,11 +734,14 @@ static void device_clear_ports(struct global *g)
 	i->ports = NULL;
 	free(g->card_info.card_ports);
 	g->card_info.card_ports = NULL;
+	free(g->card_info.port_devices);
+	g->card_info.port_devices = NULL;
 }
 
 static void device_sync_ports(struct global *g)
 {
 	pa_card_info *i = &g->card_info.info;
+	pa_context *c = g->context;
 	uint32_t n_ports, j;
 	struct param *p;
 
@@ -726,6 +780,8 @@ static void device_sync_ports(struct global *g)
 			pw_log_warn("device %d: can't parse route", g->id);
 			continue;
 		}
+
+		pw_log_debug("port %d: name:%s available:%d", j, name, available);
 
 		pi = i->ports[j] = &g->card_info.card_ports[j];
 		spa_zero(*pi);
@@ -786,6 +842,43 @@ static void device_sync_ports(struct global *g)
 	i->n_ports = j;
 	if (i->n_ports == 0)
 		i->ports = NULL;
+
+	spa_list_for_each(p, &g->card_info.routes, link) {
+		struct global *ng;
+		uint32_t index, device;
+		enum spa_param_availability available = SPA_PARAM_AVAILABILITY_unknown;
+		struct spa_pod *props = NULL;
+		const char *name;
+
+		if (spa_pod_parse_object(p->param,
+				SPA_TYPE_OBJECT_ParamRoute, NULL,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
+				SPA_PARAM_ROUTE_name,  SPA_POD_String(&name),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
+				SPA_PARAM_ROUTE_available,  SPA_POD_OPT_Id(&available),
+				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props)) < 0) {
+			pw_log_warn("device %d: can't parse route", g->id);
+			continue;
+		}
+		ng = find_node_for_route(c, g, device);
+		if (ng) {
+			int changed = 0;
+			pw_log_debug("device: %d port:%d: name:%s available:%d", ng->id,
+					index, name, available);
+			if (ng->node_info.active_port != index) {
+				ng->node_info.active_port = index;
+				changed++;
+			}
+			if (ng->node_info.available_port != available) {
+				ng->node_info.available_port = available;
+				changed++;
+			}
+			if (props)
+				changed += parse_props(ng, props, true);
+			if (changed)
+				global_sync(ng);
+		}
+	}
 }
 
 static void device_sync(struct global *g)
@@ -817,6 +910,7 @@ static void device_destroy(void *data)
 	device_clear_ports(global);
 	device_clear_profiles(global);
 
+	remove_params(&global->card_info.routes, SPA_ID_INVALID);
 	remove_params(&global->card_info.ports, SPA_ID_INVALID);
 	remove_params(&global->card_info.profiles, SPA_ID_INVALID);
 
@@ -1013,14 +1107,16 @@ static int metadata_property(void *object,
 	uint32_t val;
 	bool changed = false;
 
-	if (key && strcmp(key, METADATA_DEFAULT_SINK) == 0) {
-		val = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		changed = c->default_sink != val;
-		c->default_sink = val;
-	} else if (key && strcmp(key, METADATA_DEFAULT_SOURCE) == 0) {
-		val = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		changed = c->default_source != val;
-		c->default_source = val;
+	if (subject == PW_ID_CORE) {
+		val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		if (key == NULL || strcmp(key, METADATA_DEFAULT_SINK) == 0) {
+			changed = c->default_sink != val;
+			c->default_sink = val;
+		}
+		if (key == NULL || strcmp(key, METADATA_DEFAULT_SOURCE) == 0) {
+			changed = c->default_source != val;
+			c->default_source = val;
+		}
 	}
 	if (changed)
 		emit_event(global->context, global, PA_SUBSCRIPTION_EVENT_CHANGE);
@@ -1062,36 +1158,40 @@ static void proxy_destroy(void *data)
 	g->proxy = NULL;
 }
 
-static void proxy_done(void *data, int seq)
-{
-	struct global *g = data;
-	pa_subscription_event_type_t event;
-
-	if (g->pending_seq == seq) {
-		if (g->ginfo && g->ginfo->sync)
-			g->ginfo->sync(g);
-		if (g->init) {
-			g->init = false;
-			event = PA_SUBSCRIPTION_EVENT_NEW;
-		} else {
-			event = PA_SUBSCRIPTION_EVENT_CHANGE;
-		}
-		pw_log_debug("emit because of pending");
-		emit_event(g->context, g, event);
-	}
-}
-
 static const struct pw_proxy_events proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
 	.removed = proxy_removed,
 	.destroy = proxy_destroy,
-	.done = proxy_done,
 };
+
+static void update_link(pa_context *c, uint32_t src_node_id, uint32_t dst_node_id)
+{
+	struct global *s, *d;
+
+	s = pa_context_find_global(c, src_node_id);
+	d = pa_context_find_global(c, dst_node_id);
+
+	if (s == NULL || d == NULL)
+		return;
+
+	if ((s->mask & (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE)) &&
+	    (d->mask & (PA_SUBSCRIPTION_MASK_SINK_INPUT | PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT))) {
+		pw_log_debug("node %d linked to device %d", dst_node_id, src_node_id);
+		d->node_info.device_index = src_node_id;
+		if (!d->init)
+			emit_event(c, d, PA_SUBSCRIPTION_EVENT_CHANGE);
+	} else if ((s->mask & (PA_SUBSCRIPTION_MASK_SINK_INPUT | PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT)) &&
+	    (d->mask & (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE))) {
+		pw_log_debug("node %d linked to device %d", src_node_id, dst_node_id);
+		s->node_info.device_index = dst_node_id;
+		if (!s->init)
+			emit_event(c, s, PA_SUBSCRIPTION_EVENT_CHANGE);
+	}
+}
 
 static int set_mask(pa_context *c, struct global *g)
 {
 	const char *str;
-	struct global *f;
 	struct global_info *ginfo = NULL;
 
 	if (strcmp(g->type, PW_TYPE_INTERFACE_Device) == 0) {
@@ -1108,6 +1208,7 @@ static int set_mask(pa_context *c, struct global *g)
 		ginfo = &device_info;
 		spa_list_init(&g->card_info.profiles);
 		spa_list_init(&g->card_info.ports);
+		spa_list_init(&g->card_info.routes);
 	} else if (strcmp(g->type, PW_TYPE_INTERFACE_Node) == 0) {
 		if (g->props == NULL)
 			return 0;
@@ -1124,7 +1225,7 @@ static int set_mask(pa_context *c, struct global *g)
 			pw_log_debug("found sink %d", g->id);
 			g->mask = PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE;
 			g->event = PA_SUBSCRIPTION_EVENT_SINK;
-			g->node_info.monitor = g->id | PA_IDX_FLAG_DSP;
+			g->node_info.monitor = g->id | PA_IDX_FLAG_MONITOR;
 		}
 		else if (strcmp(str, "Audio/Source") == 0) {
 			pw_log_debug("found source %d", g->id);
@@ -1141,6 +1242,9 @@ static int set_mask(pa_context *c, struct global *g)
 			g->mask = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT;
 			g->event = PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT;
 		}
+		g->stream = pa_context_find_stream(c, g->id);
+		if (g->stream)
+			g->stream->global = g;
 
 		if ((str = pw_properties_get(g->props, PW_KEY_CLIENT_ID)) != NULL)
 			g->node_info.client_id = atoi(str);
@@ -1153,6 +1257,7 @@ static int set_mask(pa_context *c, struct global *g)
 			g->node_info.device_id = SPA_ID_INVALID;
 
 		ginfo = &node_info;
+		g->node_info.device_index = SPA_ID_INVALID;
 		g->node_info.sample_spec.format = PA_SAMPLE_S16NE;
 		g->node_info.sample_spec.rate = 44100;
 		g->node_info.volume = 1.0f;
@@ -1160,6 +1265,7 @@ static int set_mask(pa_context *c, struct global *g)
 		g->node_info.base_volume = 1.0f;
 		g->node_info.volume_step = 1.0f / (PA_VOLUME_NORM+1);
 		g->node_info.active_port = SPA_ID_INVALID;
+		g->node_info.available_port = SPA_PARAM_AVAILABILITY_unknown;
 	} else if (strcmp(g->type, PW_TYPE_INTERFACE_Port) == 0) {
 		if (g->props == NULL)
 			return 0;
@@ -1181,6 +1287,8 @@ static int set_mask(pa_context *c, struct global *g)
 		g->event = PA_SUBSCRIPTION_EVENT_CLIENT;
 		ginfo = &client_info;
 	} else if (strcmp(g->type, PW_TYPE_INTERFACE_Link) == 0) {
+		uint32_t src_node_id, dst_node_id;
+
                 if ((str = pw_properties_get(g->props, PW_KEY_LINK_OUTPUT_PORT)) == NULL)
 			return 0;
 		g->link_info.src = pa_context_find_global(c, pw_properties_parse_int(str));
@@ -1191,19 +1299,14 @@ static int set_mask(pa_context *c, struct global *g)
 		if (g->link_info.src == NULL || g->link_info.dst == NULL)
 			return 0;
 
+		src_node_id = g->link_info.src->port_info.node_id;
+		dst_node_id = g->link_info.dst->port_info.node_id;
+
 		pw_log_debug("link %d:%d->%d:%d",
-				g->link_info.src->port_info.node_id,
-				g->link_info.src->id,
-				g->link_info.dst->port_info.node_id,
-				g->link_info.dst->id);
+				src_node_id, g->link_info.src->id,
+				dst_node_id, g->link_info.dst->id);
 
-		if ((f = pa_context_find_global(c, g->link_info.src->port_info.node_id)) != NULL &&
-		    !f->init)
-			emit_event(c, f, PA_SUBSCRIPTION_EVENT_CHANGE);
-		if ((f = pa_context_find_global(c, g->link_info.dst->port_info.node_id)) != NULL &&
-		    !f->init)
-			emit_event(c, f, PA_SUBSCRIPTION_EVENT_CHANGE);
-
+		update_link(c, src_node_id, dst_node_id);
 	} else if (strcmp(g->type, PW_TYPE_INTERFACE_Metadata) == 0) {
 		if (c->metadata == NULL) {
 			ginfo = &metadata_info;
@@ -1301,19 +1404,6 @@ static const struct pw_registry_events registry_events =
 	.global_remove = registry_event_global_remove,
 };
 
-static void complete_operations(pa_context *c, int seq)
-{
-	pa_operation *o, *t;
-	spa_list_for_each_safe(o, t, &c->operations, link) {
-		if (o->seq != seq)
-			continue;
-		pa_operation_ref(o);
-		if (o->callback)
-			o->callback(o, o->userdata);
-		pa_operation_unref(o);
-	}
-}
-
 static void core_info(void *data, const struct pw_core_info *info)
 {
 	pa_context *c = data;
@@ -1348,8 +1438,36 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 static void core_done(void *data, uint32_t id, int seq)
 {
 	pa_context *c = data;
-	pw_log_debug("done id:%u seq:%d", id, seq);
-	complete_operations(c, seq);
+	pa_operation *o, *t;
+	struct global *g;
+	struct spa_list ops;
+
+	pw_log_debug("done id:%u seq:%d/%d", id, seq, c->pending_seq);
+	if (c->pending_seq != seq)
+		return;
+
+	spa_list_init(&ops);
+	spa_list_consume(o, &c->operations, link) {
+		spa_list_remove(&o->link);
+		spa_list_append(&ops, &o->link);
+	}
+	spa_list_for_each(g, &c->globals, link) {
+		if (g->sync) {
+			do_global_sync(g);
+			g->sync = false;
+		}
+	}
+	spa_list_for_each_safe(o, t, &ops, link) {
+		pa_operation_ref(o);
+		pw_log_debug("operation %p complete", o);
+		if (o->callback)
+			o->callback(o, o->userdata);
+		pa_operation_unref(o);
+	}
+	spa_list_consume(o, &ops, link) {
+		pw_log_warn("operation %p canceled", o);
+		pa_operation_cancel(o);
+	}
 }
 
 static const struct pw_core_events core_events = {
@@ -1446,6 +1564,7 @@ pa_context *pa_context_new_with_proplist(pa_mainloop_api *mainloop, const char *
 
 	spa_list_init(&c->streams);
 	spa_list_init(&c->operations);
+	spa_list_init(&c->modules);
 
 	return c;
 }
@@ -1615,9 +1734,12 @@ static void on_notify(pa_operation *o, void *userdata)
 {
 	struct notify_data *d = userdata;
 	pa_context *c = o->context;
-	pa_operation_done(o);
+
+	pw_log_debug("%p", c);
+
 	if (d->cb)
 		d->cb(c, d->userdata);
+	pa_operation_done(o);
 }
 
 SPA_EXPORT
@@ -1667,7 +1789,7 @@ static void do_default_node(pa_operation *o, void *userdata)
 	struct global *g;
 	int error = 0;
 
-	pw_log_debug("%p", c);
+	pw_log_debug("%p mask:%d name:%s", c, d->mask, d->name);
 
 	g = pa_context_find_global_by_name(c, d->mask, d->name);
 	if (g == NULL) {
@@ -1687,8 +1809,8 @@ static void do_default_node(pa_operation *o, void *userdata)
 		pa_context_set_error(c, error);
 	if (d->cb)
 		d->cb(c, error != 0 ? 0 : 1, d->userdata);
-	pa_operation_done(o);
 	pa_xfree(d->name);
+	pa_operation_done(o);
 }
 
 SPA_EXPORT

@@ -2001,29 +2001,32 @@ static int metadata_property(void *object, uint32_t id,
 	struct object *o;
 	jack_uuid_t uuid;
 
-	pw_log_info("set id:%u '%s' to '%s@%s'", id, key, value, type);
+	pw_log_info("set id:%u key:'%s' value:'%s' type:'%s'", id, key, value, type);
 
-	o = pw_map_lookup(&c->context.globals, id);
-	if (o == NULL)
-		return -EINVAL;
+	if (id == PW_ID_CORE) {
+		uint32_t val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		if (key == NULL || strcmp(key, "default.audio.sink") == 0)
+			c->metadata->default_audio_sink = val;
+		if (key == NULL || strcmp(key, "default.audio.source") == 0)
+			c->metadata->default_audio_source = val;
+	} else {
+		o = pw_map_lookup(&c->context.globals, id);
+		if (o == NULL)
+			return -EINVAL;
 
-	switch (o->type) {
-	case INTERFACE_Node:
-		uuid = client_make_uuid(id);
-		break;
-	case INTERFACE_Port:
-		uuid = jack_port_uuid_generate(id);
-		break;
-	default:
-		return -EINVAL;
+		switch (o->type) {
+		case INTERFACE_Node:
+			uuid = client_make_uuid(id);
+			break;
+		case INTERFACE_Port:
+			uuid = jack_port_uuid_generate(id);
+			break;
+		default:
+			return -EINVAL;
+		}
+		update_property(c, uuid, key, type, value);
 	}
-	update_property(c, uuid, key, type, value);
 
-	if (key && strcmp(key, "default.audio.sink") == 0) {
-		c->metadata->default_audio_sink = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-	} else if (key && strcmp(key, "default.audio.source") == 0) {
-		c->metadata->default_audio_source = value ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-	}
 	return 0;
 }
 
@@ -2168,13 +2171,6 @@ static void registry_event_global(void *data, uint32_t id,
 		o->port.type_id = type_id;
 		o->port.node_id = node_id;
 
-		if (o->port.flags & JackPortIsOutput) {
-			o->port.capture_latency.min = 1024;
-			o->port.capture_latency.max = 1024;
-		} else {
-			o->port.playback_latency.min = 1024;
-			o->port.playback_latency.max = 1024;
-		}
 		op = find_port(c, o->port.name);
 		if (op != NULL && op != o)
 			snprintf(o->port.name, sizeof(o->port.name), "%.*s-%d",
@@ -2756,10 +2752,10 @@ SPA_EXPORT
 jack_nframes_t jack_cycle_wait (jack_client_t* client)
 {
 	struct client *c = (struct client *) client;
+	jack_nframes_t res;
 
 	spa_return_val_if_fail(c != NULL, 0);
 
-	jack_nframes_t res;
 	res = cycle_wait(c);
 	pw_log_trace(NAME" %p: result:%d", c, res);
 	return res;
@@ -3999,8 +3995,21 @@ SPA_EXPORT
 void jack_port_get_latency_range (jack_port_t *port, jack_latency_callback_mode_t mode, jack_latency_range_t *range)
 {
 	struct object *o = (struct object *) port;
+	struct client *c;
 
 	spa_return_if_fail(o != NULL);
+	c = o->client;
+
+	if (o->port.flags & JackPortIsTerminal) {
+		jack_nframes_t nframes = jack_get_buffer_size((jack_client_t*)c);
+		if (o->port.flags & JackPortIsOutput) {
+			o->port.capture_latency.min = nframes;
+			o->port.capture_latency.max = nframes;
+		} else {
+			o->port.playback_latency.min = nframes;
+			o->port.playback_latency.max = nframes;
+		}
+	}
 
 	if (mode == JackCaptureLatency) {
 		*range = o->port.capture_latency;
@@ -4071,6 +4080,7 @@ static int port_compare_func(const void *v1, const void *v2)
 
 	is_cap1 = ((*o1)->port.flags & JackPortIsOutput) == JackPortIsOutput;
 	is_cap2 = ((*o2)->port.flags & JackPortIsOutput) == JackPortIsOutput;
+
 
 	if (c->metadata) {
 		if (is_cap1)

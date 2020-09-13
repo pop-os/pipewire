@@ -27,6 +27,7 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/param/audio/format-utils.h>
 
+#include <pulse/mainloop.h>
 #include <pulse/stream.h>
 #include <pulse/format.h>
 #include <pulse/subscribe.h>
@@ -219,6 +220,10 @@ struct pa_mainloop {
 
 	int timeout;
 	int n_events;
+
+	int fd;
+	pa_poll_func poll_func;
+	void *poll_func_userdata;
 };
 
 struct param {
@@ -227,8 +232,8 @@ struct param {
 	void *param;
 };
 
-#define PA_IDX_FLAG_DSP		0x800000U
-#define PA_IDX_MASK_DSP		0x7fffffU
+#define PA_IDX_FLAG_MONITOR		0x800000U
+#define PA_IDX_MASK_MONITOR		0x7fffffU
 
 struct port_device {
 	uint32_t n_devices;
@@ -256,8 +261,8 @@ struct global {
 	pa_subscription_event_type_t event;
 
 	int priority_driver;
-	int pending_seq;
 	int init:1;
+	int sync:1;
 
 	void *info;
 	struct global_info *ginfo;
@@ -265,6 +270,8 @@ struct global {
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
         struct spa_hook object_listener;
+
+	pa_stream *stream;
 
 	union {
 		/* for links */
@@ -292,6 +299,8 @@ struct global {
 			float base_volume;
 			float volume_step;
 			uint32_t active_port;
+			enum spa_param_availability available_port;
+			uint32_t device_index;
 		} node_info;
 		struct {
 			uint32_t node_id;
@@ -303,6 +312,8 @@ struct global {
 			uint32_t active_profile;
 			struct spa_list ports;
 			uint32_t n_ports;
+			struct spa_list routes;
+			uint32_t n_routes;
 			pa_card_info info;
 			pa_card_profile_info2 *card_profiles;
 			unsigned int pending_profiles:1;
@@ -320,6 +331,13 @@ struct global {
 			struct pw_array metadata;
 		} metadata_info;
 	};
+};
+
+struct module_info {
+	struct spa_list link;	/* link in context modules */
+	uint32_t id;
+	struct pw_proxy *proxy;
+	struct spa_hook listener;
 };
 
 struct pa_context {
@@ -356,15 +374,19 @@ struct pa_context {
 
 	struct spa_list streams;
 	struct spa_list operations;
+	struct spa_list modules;
 
 	int no_fail:1;
 	int disconnect:1;
+
+	int pending_seq;
 
 	struct global *metadata;
 	uint32_t default_sink;
 	uint32_t default_source;
 };
 
+pa_stream *pa_context_find_stream(pa_context *c, uint32_t idx);
 struct global *pa_context_find_global(pa_context *c, uint32_t id);
 const char *pa_context_find_global_name(pa_context *c, uint32_t id);
 struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, const char *name);
@@ -404,6 +426,7 @@ struct pa_stream {
 	pa_format_info *format;
 
 	uint32_t stream_index;
+	struct global *global;
 
 	pa_buffer_attr buffer_attr;
 
@@ -472,7 +495,6 @@ struct pa_operation
 	pa_context *context;
 	pa_stream *stream;
 
-	int seq;
 	pa_operation_state_t state;
 
 	pa_operation_cb_t callback;

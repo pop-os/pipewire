@@ -166,7 +166,6 @@ static int make_matrix(struct channelmix *mix)
 	float clev = SQRT1_2;
 	float slev = SQRT1_2;
 	float llev = 0.5f;
-	float max;
 
 	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64,
 			src_mask, dst_mask);
@@ -176,9 +175,16 @@ static int make_matrix(struct channelmix *mix)
 	if ((dst_mask & _MASK(MONO)) == _MASK(MONO))
 		dst_mask = _MASK(FC);
 
-	for (i = 0; i < NUM_CHAN; i++) {
-		if (src_mask & dst_mask & (1ULL << (i + 2)))
+	if (src_mask == 0 || dst_mask == 0) {
+		src_mask = dst_mask = ~0LU;
+		for (i = 0; i < NUM_CHAN; i++)
 			matrix[i][i]= 1.0f;
+		goto done;
+	} else {
+		for (i = 0; i < NUM_CHAN; i++) {
+			if ((src_mask & dst_mask & (1ULL << (i + 2))))
+				matrix[i][i]= 1.0f;
+		}
 	}
 
 	unassigned = src_mask & ~dst_mask;
@@ -319,7 +325,8 @@ static int make_matrix(struct channelmix *mix)
 			spa_log_warn(mix->log, "can't assign FLC");
 		}
 	}
-	if (unassigned & _MASK(LFE)) {
+	if (unassigned & _MASK(LFE) &&
+	    SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_MIX_LFE)) {
 		if (dst_mask & _MASK(FC)) {
 			matrix[FC][LFE] += llev;
 		} else if (dst_mask & _MASK(FL)) {
@@ -329,8 +336,7 @@ static int make_matrix(struct channelmix *mix)
 			spa_log_warn(mix->log, "can't assign LFE");
 		}
 	}
-
-	max = 0.0f;
+done:
 	for (ic = 0, i = 0; i < NUM_CHAN; i++) {
 		float sum = 0.0f;
 		if ((dst_mask & (1UL << (i + 2))) == 0)
@@ -341,8 +347,10 @@ static int make_matrix(struct channelmix *mix)
 			mix->matrix_orig[ic][jc++] = matrix[i][j];
 			sum += fabs(matrix[i][j]);
 		}
+		if (sum > 1.0f)
+			for (j = 0; j < jc; j++)
+		                mix->matrix_orig[ic][j] /= sum;
 		ic++;
-		max = SPA_MAX(max, sum);
 	}
 	return 0;
 }
@@ -351,21 +359,16 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 		uint32_t n_channel_volumes, float *channel_volumes)
 {
 	float volumes[SPA_AUDIO_MAX_CHANNELS];
-	float vol = mute ? 0.0f : volume, sum, t;
+	float vol = mute ? 0.0f : volume, t;
 	uint32_t i, j;
 	uint32_t src_chan = mix->src_chan;
 	uint32_t dst_chan = mix->dst_chan;
 
 	/** apply global volume to channels */
-	sum = 0.0;
-	mix->norm = true;
-	for (i = 0; i < n_channel_volumes; i++) {
+	for (i = 0; i < n_channel_volumes; i++)
 		volumes[i] = channel_volumes[i] * vol;
-		if (volumes[i] != 1.0f)
-			mix->norm = false;
-		sum += volumes[i];
-	}
 
+	/** apply volumes per channel */
 	if (n_channel_volumes == src_chan) {
 		for (i = 0; i < dst_chan; i++) {
 			for (j = 0; j < src_chan; j++) {
@@ -380,11 +383,11 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 		}
 	}
 
-	mix->zero = true;
-	mix->equal = true;
-	mix->identity = dst_chan == src_chan;
-	t = 0.0;
+	SPA_FLAG_SET(mix->flags, CHANNELMIX_FLAG_ZERO);
+	SPA_FLAG_SET(mix->flags, CHANNELMIX_FLAG_EQUAL);
+	SPA_FLAG_SET(mix->flags, CHANNELMIX_FLAG_COPY);
 
+	t = 0.0;
 	for (i = 0; i < dst_chan; i++) {
 		for (j = 0; j < src_chan; j++) {
 			float v = mix->matrix[i][j];
@@ -392,15 +395,18 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 			if (i == 0 && j == 0)
 				t = v;
 			else if (t != v)
-				mix->equal = false;
+				SPA_FLAG_CLEAR(mix->flags, CHANNELMIX_FLAG_EQUAL);
 			if (v != 0.0)
-				mix->zero = false;
+				SPA_FLAG_CLEAR(mix->flags, CHANNELMIX_FLAG_ZERO);
 			if ((i == j && v != 1.0f) ||
 			    (i != j && v != 0.0f))
-				mix->identity = false;
+				SPA_FLAG_CLEAR(mix->flags, CHANNELMIX_FLAG_COPY);
 		}
 	}
-	spa_log_debug(mix->log, "zero:%d norm:%d identity:%d", mix->zero, mix->norm, mix->identity);
+	SPA_FLAG_UPDATE(mix->flags, CHANNELMIX_FLAG_IDENTITY,
+			dst_chan == src_chan && SPA_FLAG_IS_SET(mix->flags, CHANNELMIX_FLAG_COPY));
+
+	spa_log_debug(mix->log, "flags:%08x", mix->flags);
 }
 
 static void impl_channelmix_free(struct channelmix *mix)

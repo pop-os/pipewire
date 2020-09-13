@@ -38,6 +38,7 @@
 #include <alsa/pcm_external.h>
 
 #include <spa/param/audio/format-utils.h>
+#include <spa/debug/types.h>
 #include <spa/param/props.h>
 #include <spa/utils/result.h>
 
@@ -45,7 +46,7 @@
 
 #define NAME "alsa-plugin"
 
-#define MIN_BUFFERS	3u
+#define MIN_BUFFERS	2u
 #define MAX_BUFFERS	64u
 
 #define MAX_CHANNELS	64
@@ -70,6 +71,8 @@ typedef struct {
 	snd_pcm_uframes_t boundary;
 	snd_pcm_uframes_t min_avail;
 	unsigned int sample_bits;
+	uint32_t blocks;
+	uint32_t stride;
 
 	struct spa_system *system;
 	struct pw_thread_loop *main_loop;
@@ -165,6 +168,8 @@ static snd_pcm_sframes_t snd_pcm_pipewire_pointer(snd_pcm_ioplug_t *io)
 		return -EPIPE;
 	if (pw->error < 0)
 		return pw->error;
+	if (io->buffer_size == 0)
+		return 0;
 #ifdef SND_PCM_IOPLUG_FLAG_BOUNDARY_WA
 	return pw->hw_ptr;
 #else
@@ -173,157 +178,95 @@ static snd_pcm_sframes_t snd_pcm_pipewire_pointer(snd_pcm_ioplug_t *io)
 }
 
 static int
-snd_pcm_pipewire_process_playback(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uframes_t *hw_avail)
+snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uframes_t *hw_avail)
 {
 	snd_pcm_ioplug_t *io = &pw->io;
-	const snd_pcm_channel_area_t *areas;
 	snd_pcm_channel_area_t *pwareas;
-	snd_pcm_uframes_t xfer = 0;
-	unsigned int channel, bps, bpf;
+        snd_pcm_uframes_t xfer = 0;
 	snd_pcm_uframes_t nframes;
-	uint32_t offset, index = 0, nbytes, avail, maxsize;
-	int32_t filled;
-	void *ptr;
-	struct spa_data *d;
-
-	bps = io->channels * pw->sample_bits;
-	bpf = bps / 8;
-
-	pwareas = alloca(io->channels * sizeof(snd_pcm_channel_area_t));
-
-	d = b->buffer->datas;
-
-	maxsize = d[0].maxsize;
-
-	filled = 0;
-	index = 0;
-	avail = maxsize - filled;
-	avail = SPA_MIN(avail, pw->min_avail * bpf);
-	avail = SPA_MIN(avail, *hw_avail * bpf);
-
-	do {
-	offset = index % maxsize;
-	nbytes = SPA_MIN(avail, maxsize - offset);
-
-	ptr = SPA_MEMBER(d[0].data, offset, void);
-
-	nframes = nbytes / bpf;
-	pw_log_trace(NAME" %p: %d %d %lu %d %d %p %d", pw, nbytes, avail, nframes, filled, offset, ptr, io->state);
-
-	for (channel = 0; channel < io->channels; channel++) {
-		pwareas[channel].addr = ptr;
-		pwareas[channel].first = channel * pw->sample_bits;
-		pwareas[channel].step = bps;
-	}
-
-	if (io->state != SND_PCM_STATE_RUNNING && io->state != SND_PCM_STATE_DRAINING) {
-		pw_log_trace(NAME" %p: silence %lu frames %d", pw, nframes, io->state);
-		for (channel = 0; channel < io->channels; channel++)
-			snd_pcm_area_silence(&pwareas[channel], 0, nframes, io->format);
-		goto done;
-	}
-
-	areas = snd_pcm_ioplug_mmap_areas(io);
-
-	xfer = 0;
-	while (xfer < nframes) {
-		snd_pcm_uframes_t frames = nframes - xfer;
-		snd_pcm_uframes_t offset = pw->hw_ptr % io->buffer_size;
-		snd_pcm_uframes_t cont = io->buffer_size - offset;
-
-		if (cont < frames)
-			frames = cont;
-
-		snd_pcm_areas_copy(pwareas, xfer,
-				   areas, offset,
-				   io->channels, frames, io->format);
-
-		pw->hw_ptr += frames;
-		if (pw->hw_ptr > pw->boundary)
-			pw->hw_ptr -= pw->boundary;
-		xfer += frames;
-	}
-	*hw_avail -= xfer;
-
-      done:
-	index += nbytes;
-	avail -= nbytes;
-	} while (avail > 0);
-
-	d[0].chunk->offset = 0;
-	d[0].chunk->size = index;
-	d[0].chunk->stride = 0;
-
-	return 0;
-}
-
-static int
-snd_pcm_pipewire_process_record(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uframes_t *hw_avail)
-{
-	snd_pcm_ioplug_t *io = &pw->io;
-	const snd_pcm_channel_area_t *areas;
-	snd_pcm_channel_area_t *pwareas;
-	snd_pcm_uframes_t xfer = 0;
-	unsigned int channel, bps, bpf;
-	snd_pcm_uframes_t nframes;
-	uint32_t offset, index = 0, nbytes, avail, maxsize;
+        unsigned int channel;
 	struct spa_data *d;
 	void *ptr;
 
-	bps = io->channels * pw->sample_bits;
-	bpf = bps / 8;
-
+	d = b->buffer->datas;
 	pwareas = alloca(io->channels * sizeof(snd_pcm_channel_area_t));
 
-	d = b->buffer->datas;
+	if (io->stream == SND_PCM_STREAM_PLAYBACK) {
+		nframes = d[0].maxsize - SPA_MIN(d[0].maxsize, d[0].chunk->offset);
+		nframes /= pw->stride;
+		nframes = SPA_MIN(nframes, pw->min_avail);
+	} else {
+		nframes = d[0].chunk->size / pw->stride;
+	}
+	nframes = SPA_MIN(nframes, *hw_avail);
 
-	maxsize = d[0].chunk->size;
-	avail = SPA_MIN(maxsize, *hw_avail * bpf);
-	index = d[0].chunk->offset;
-
-	if (avail < maxsize)
-		pw->xrun_detected = true;
-
-	do {
-	avail = SPA_MIN(avail, pw->min_avail * bpf);
-	offset = index % maxsize;
-	nbytes = SPA_MIN(avail, maxsize - offset);
-	ptr = SPA_MEMBER(d[0].data, offset, void);
-
-	pw_log_trace(NAME" %p: %d %ld %d %d %d %p", pw, maxsize, *hw_avail, nbytes, avail, offset, ptr);
-	nframes = nbytes / bpf;
-
-	for (channel = 0; channel < io->channels; channel++) {
-		pwareas[channel].addr = ptr;
-		pwareas[channel].first = channel * pw->sample_bits;
-		pwareas[channel].step = bps;
+	if (pw->blocks == 1) {
+		ptr = SPA_MEMBER(d[0].data, d[0].chunk->offset, void);
+		for (channel = 0; channel < io->channels; channel++) {
+			pwareas[channel].addr = ptr;
+			pwareas[channel].first = channel * pw->sample_bits;
+			pwareas[channel].step = io->channels * pw->sample_bits;
+		}
+		if (io->stream == SND_PCM_STREAM_PLAYBACK)
+			d[0].chunk->size = nframes * pw->stride;
+        } else {
+		for (channel = 0; channel < io->channels; channel++) {
+			ptr = SPA_MEMBER(d[channel].data, d[channel].chunk->offset, void);
+			pwareas[channel].addr = ptr;
+			pwareas[channel].first = 0;
+			pwareas[channel].step = pw->sample_bits;
+			if (io->stream == SND_PCM_STREAM_PLAYBACK)
+				d[channel].chunk->size = nframes * pw->stride;
+		}
 	}
 
-	areas = snd_pcm_ioplug_mmap_areas(io);
+	if (io->state == SND_PCM_STATE_RUNNING ||
+	    io->state == SND_PCM_STATE_DRAINING) {
+		snd_pcm_uframes_t hw_ptr = pw->hw_ptr;
+                if (*hw_avail > 0) {
+                        const snd_pcm_channel_area_t *areas = snd_pcm_ioplug_mmap_areas(io);
+                        const snd_pcm_uframes_t offset = hw_ptr % io->buffer_size;
 
-	xfer = 0;
-	while (xfer < nframes) {
-		snd_pcm_uframes_t frames = nframes - xfer;
-		snd_pcm_uframes_t offset = pw->hw_ptr % io->buffer_size;
-		snd_pcm_uframes_t cont = io->buffer_size - offset;
+                        xfer = nframes;
+                        if (xfer > *hw_avail)
+                                xfer = *hw_avail;
 
-		if (cont < frames)
-			frames = cont;
+                        if (io->stream == SND_PCM_STREAM_PLAYBACK)
+                                snd_pcm_areas_copy_wrap(pwareas, 0, nframes,
+                                                        areas, offset,
+                                                        io->buffer_size,
+                                                        io->channels, xfer,
+                                                        io->format);
+                        else
+                                snd_pcm_areas_copy_wrap(areas, offset,
+                                                        io->buffer_size,
+                                                        pwareas, 0, nframes,
+                                                        io->channels, xfer,
+                                                        io->format);
 
-		snd_pcm_areas_copy(areas, offset,
-				   pwareas, xfer,
-				   io->channels, frames, io->format);
+                        hw_ptr += xfer;
+                        if (hw_ptr > pw->boundary)
+                                hw_ptr -= pw->boundary;
+                        pw->hw_ptr = hw_ptr;
+                }
+        }
+        /* check if requested frames were copied */
+	if (xfer < nframes) {
+		/* always fill the not yet written JACK buffer with silence */
+		if (io->stream == SND_PCM_STREAM_PLAYBACK) {
+			const snd_pcm_uframes_t frames = nframes - xfer;
 
-		pw->hw_ptr += frames;
-		if (pw->hw_ptr > pw->boundary)
-			pw->hw_ptr -= pw->boundary;
-		xfer += frames;
+			snd_pcm_areas_silence(pwareas, xfer, io->channels,
+                                              frames, io->format);
+			xfer += frames;
+                }
+		if (io->state == SND_PCM_STATE_RUNNING ||
+		    io->state == SND_PCM_STATE_DRAINING) {
+			/* report Xrun to user application */
+			pw->xrun_detected = true;
+		}
 	}
 	*hw_avail -= xfer;
-	avail -= nbytes;
-	index += nbytes;
-	} while (avail > 0);
-
 	return 0;
 }
 
@@ -333,28 +276,27 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 	snd_pcm_ioplug_t *io = &pw->io;
 	const struct spa_pod *params[4];
 	uint32_t n_params = 0;
-        uint8_t buffer[4096];
-        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-	uint32_t stride = (io->channels * pw->sample_bits) / 8;
-	uint32_t buffers;
-	uint32_t size;
+	uint8_t buffer[4096];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	uint32_t buffers, size;
 
 	if (param == NULL || id != SPA_PARAM_Format)
 		return;
 
 	io->period_size = pw->min_avail;
-	buffers = SPA_CLAMP(io->buffer_size / io->period_size, MIN_BUFFERS, MAX_BUFFERS);
-	size = io->period_size * stride;
 
-	pw_log_info(NAME" %p: buffer_size:%lu period_size:%lu buffers:%u stride:%u size:%u min_avail:%lu",
-			pw, io->buffer_size, io->period_size, buffers, stride, size, pw->min_avail);
+	buffers = SPA_CLAMP(io->buffer_size / io->period_size, MIN_BUFFERS, MAX_BUFFERS);
+	size = io->period_size * pw->stride;
+
+	pw_log_info(NAME" %p: buffer_size:%lu period_size:%lu buffers:%u size:%u min_avail:%lu",
+			pw, io->buffer_size, io->period_size, buffers, size, pw->min_avail);
 
 	params[n_params++] = spa_pod_builder_add_object(&b,
 	                SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(buffers, MIN_BUFFERS, MAX_BUFFERS),
-			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
+			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(pw->blocks),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(size, size, INT_MAX),
-			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(stride),
+			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(pw->stride),
 			SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
 
 	pw_stream_update_params(pw->stream, params, n_params);
@@ -378,10 +320,7 @@ static void on_stream_process(void *data)
 	if (b == NULL)
 		return;
 
-	if (io->stream == SND_PCM_STREAM_PLAYBACK)
-		snd_pcm_pipewire_process_playback(pw, b, &hw_avail);
-	else
-		snd_pcm_pipewire_process_record(pw, b, &hw_avail);
+	snd_pcm_pipewire_process(pw, b, &hw_avail);
 
 	pw_stream_queue_buffer(pw->stream, b);
 
@@ -430,6 +369,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 	snd_pcm_pipewire_t *pw = io->private_data;
 	snd_pcm_sw_params_t *swparams;
 	const struct spa_pod *params[1];
+	const char *str;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	struct pw_properties *props;
@@ -460,14 +400,27 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 		pw->stream = NULL;
 	}
 
-	props = pw_properties_new(PW_KEY_CLIENT_API, "alsa", NULL);
+	props = NULL;
+        if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		props = pw_properties_new_string(str);
+	if (props == NULL)
+		props = pw_properties_new(NULL, NULL);
+	if (props == NULL)
+		goto error;
 
-	pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%lu/%u", pw->min_avail, io->rate);
-	pw_properties_set(props, PW_KEY_MEDIA_TYPE, "Audio");
-	pw_properties_set(props, PW_KEY_MEDIA_CATEGORY,
-			io->stream == SND_PCM_STREAM_PLAYBACK ?
-			"Playback" : "Capture");
-	pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Music");
+	pw_properties_set(props, PW_KEY_CLIENT_API, "alsa");
+
+	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%lu/%u", pw->min_avail, io->rate);
+
+	if (pw_properties_get(props, PW_KEY_MEDIA_TYPE) == NULL)
+		pw_properties_set(props, PW_KEY_MEDIA_TYPE, "Audio");
+	if (pw_properties_get(props, PW_KEY_MEDIA_CATEGORY) == NULL)
+		pw_properties_set(props, PW_KEY_MEDIA_CATEGORY,
+				io->stream == SND_PCM_STREAM_PLAYBACK ?
+				"Playback" : "Capture");
+	if (pw_properties_get(props, PW_KEY_MEDIA_ROLE) == NULL)
+		pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Music");
 
 	pw->stream = pw_stream_new(pw->core, pw->node_name, props);
 	if (pw->stream == NULL)
@@ -646,6 +599,16 @@ static int snd_pcm_pipewire_hw_params(snd_pcm_ioplug_t * io,
 	set_default_channels(&pw->format);
 
 	pw->sample_bits = snd_pcm_format_physical_width(io->format);
+	if (planar) {
+		pw->blocks = io->channels;
+		pw->stride = pw->sample_bits / 8;
+	} else {
+		pw->blocks = 1;
+		pw->stride = (io->channels * pw->sample_bits) / 8;
+	}
+	pw_log_info(NAME" %p: format:%s channels:%d rate:%d stride:%d blocks:%d", pw,
+			spa_debug_type_find_name(spa_type_audio_format, pw->format.format),
+			io->channels, io->rate, pw->stride, pw->blocks);
 
 	return 0;
 }
@@ -834,24 +797,29 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
 						   min_period_bytes,
 						   max_period_bytes)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_PERIODS,
-						   3, 64)) < 0)
+						   MIN_BUFFERS, MAX_BUFFERS)) < 0) {
+		pw_log_warn("Can't set param list: %s", snd_strerror(err));
 		return err;
+	}
 
 	if (format != SND_PCM_FORMAT_UNKNOWN) {
 		err = snd_pcm_ioplug_set_param_list(&pw->io,
 				SND_PCM_IOPLUG_HW_FORMAT,
 				1, (unsigned int *)&format);
-		if (err < 0)
+		if (err < 0) {
+			pw_log_warn("Can't set param list: %s", snd_strerror(err));
 			return err;
+		}
 	} else {
 		err = snd_pcm_ioplug_set_param_list(&pw->io,
 				SND_PCM_IOPLUG_HW_FORMAT,
 				SPA_N_ELEMENTS(format_list),
 				format_list);
-		if (err < 0)
+		if (err < 0) {
+			pw_log_warn("Can't set param list: %s", snd_strerror(err));
 			return err;
+		}
 	}
-
 	return 0;
 }
 
@@ -1015,7 +983,9 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 	uint32_t flags = 0;
 	int err;
 
-        pw_init(NULL, NULL);
+	pw_init(NULL, NULL);
+	if (strstr(pw_get_library_version(), "0.2") != NULL)
+		return -ENOTSUP;
 
 	snd_config_for_each(i, next, conf) {
 		snd_config_t *n = snd_config_iterator_entry(i);
