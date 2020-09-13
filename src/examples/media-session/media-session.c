@@ -1748,21 +1748,27 @@ static int state_dir(struct sm_media_session *sess)
 	if (impl->state_dir_fd != -1)
 		return impl->state_dir_fd;
 
-	home_dir = getenv("HOME");
-	if (home_dir == NULL)
-		home_dir = getenv("USERPROFILE");
-	if (home_dir == NULL) {
-		struct passwd pwd, *result = NULL;
-		char buffer[4096];
-		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
-			home_dir = result ? result->pw_dir : NULL;
+	home_dir = getenv("XDG_CONFIG_HOME");
+	if (home_dir != NULL)
+		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
+				"%s/pipewire-media-session/", home_dir);
+	else {
+		home_dir = getenv("HOME");
+		if (home_dir == NULL)
+			home_dir = getenv("USERPROFILE");
+		if (home_dir == NULL) {
+			struct passwd pwd, *result = NULL;
+			char buffer[4096];
+			if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
+				home_dir = result ? result->pw_dir : NULL;
+		}
+		if (home_dir == NULL) {
+			pw_log_error("Can't determine home directory");
+			return -ENOTSUP;
+		}
+		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
+				"%s/.config/pipewire-media-session/", home_dir);
 	}
-	if (home_dir == NULL) {
-		pw_log_error("Can't determine home directory");
-		return -ENOTSUP;
-	}
-	snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
-			"%s/.pipewire-media-session/", home_dir);
 
 	if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
 		if (errno == ENOENT) {
@@ -1836,7 +1842,7 @@ int sm_media_session_save_state(struct sm_media_session *sess,
 	tmp_name = alloca(strlen(name)+5);
 	sprintf(tmp_name, "%s.tmp", name);
 	if ((fd = openat(sfd, tmp_name,  O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC, 0700)) < 0) {
-		pw_log_error("can't open file %s: %m", tmp_name);
+		pw_log_error("can't open file '%s': %m", tmp_name);
 		return -errno;
 	}
 
@@ -1853,7 +1859,7 @@ int sm_media_session_save_state(struct sm_media_session *sess,
 	fclose(f);
 
 	if (renameat(sfd, tmp_name, sfd, name) < 0) {
-		pw_log_error("can't rename temp file: %m");
+		pw_log_error("can't rename temp file '%s': %m", tmp_name);
 		return -errno;
 	}
 	return 0;

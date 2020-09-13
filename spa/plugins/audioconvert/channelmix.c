@@ -168,14 +168,17 @@ static uint64_t default_mask(uint32_t channels)
 {
 	uint64_t mask = 0;
 	switch (channels) {
+	case 7:
 	case 8:
 		mask |= _MASK(RL);
 		mask |= _MASK(RR);
 		/* fallthrough */
+	case 5:
 	case 6:
 		mask |= _MASK(SL);
 		mask |= _MASK(SR);
-		mask |= _MASK(LFE);
+		if ((channels & 1) == 0)
+			mask |= _MASK(LFE);
 		/* fallthrough */
 	case 3:
 		mask |= _MASK(FC);
@@ -256,11 +259,11 @@ static int setup_convert(struct impl *this,
 
 	emit_params_changed(this);
 
-	spa_log_debug(this->log, NAME " %p: got channelmix features %08x:%08x identity:%d",
+	spa_log_debug(this->log, NAME " %p: got channelmix features %08x:%08x flags:%08x",
 			this, this->cpu_flags, this->mix.cpu_flags,
-			this->mix.identity);
+			this->mix.flags);
 
-	this->is_passthrough = this->mix.identity;
+	this->is_passthrough = SPA_FLAG_IS_SET(this->mix.flags, CHANNELMIX_FLAG_IDENTITY);
 
 	return 0;
 }
@@ -1057,7 +1060,9 @@ static int impl_node_process(void *object)
 		void *dst_datas[n_dst_datas];
 		bool is_passthrough;
 
-		is_passthrough = this->is_passthrough && this->mix.identity && ctrlport->ctrl == NULL;
+		is_passthrough = this->is_passthrough &&
+			SPA_FLAG_IS_SET(this->mix.flags, CHANNELMIX_FLAG_IDENTITY) &&
+			ctrlport->ctrl == NULL;
 
 		n_samples = sb->datas[0].chunk->size / inport->stride;
 

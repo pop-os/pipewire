@@ -26,6 +26,14 @@ option('systemd',
        description: 'Enable systemd integration',
        type: 'boolean',
        value: true)
+option('systemd-system-service',
+       description: 'Install systemd system service file',
+       type: 'boolean',
+       value: false)
+option('systemd-user-service',
+       description: 'Install systemd user service file',
+       type: 'boolean',
+       value: true)
 option('pipewire-alsa',
        description: 'Enable pipewire-alsa integration',
        type: 'boolean',
@@ -72,6 +80,10 @@ option('bluez5-backend-ofono',
        description: 'Enable oFono HFP backend in bluez5 spa plugin',
        type: 'boolean',
        value: true)
+option('bluez5-backend-hsphfpd',
+       description: 'Enable hsphfpd backend in bluez5 spa plugin',
+       type: 'boolean',
+       value: false)
 option('control',
        description: 'Enable control spa plugin integration',
        type: 'boolean',

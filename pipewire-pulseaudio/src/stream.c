@@ -61,13 +61,13 @@ static void configure_device(pa_stream *s)
 {
 	struct global *g;
 	const char *str;
+	uint32_t old = s->device_index;
 
 	g = pa_context_find_linked(s->context, pa_stream_get_index(s));
 	if (g == NULL) {
 		s->device_index = PA_INVALID_INDEX;
 		s->device_name = NULL;
-	}
-	else {
+	} else {
 		if (s->direction == PA_STREAM_RECORD) {
 			if (g->mask == (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE))
 				s->device_index = g->node_info.monitor;
@@ -78,12 +78,16 @@ static void configure_device(pa_stream *s)
 			s->device_index = g->id;
 		}
 
+		free(s->device_name);
 		if ((str = pw_properties_get(g->props, PW_KEY_NODE_NAME)) == NULL)
 			s->device_name = strdup("unknown");
 		else
 			s->device_name = strdup(str);
 	}
 	pw_log_debug("stream %p: linked to %d '%s'", s, s->device_index, s->device_name);
+
+	if (old != s->device_index && s->moved_callback)
+		s->moved_callback(s, s->moved_userdata);
 }
 
 static void stream_destroy(void *data)
@@ -118,19 +122,22 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		pa_stream_set_state(s, PA_STREAM_CREATING);
 		break;
 	case PW_STREAM_STATE_PAUSED:
-		if (!s->suspended && !c->disconnect && s->suspended_callback) {
-			s->suspended_callback(s, s->suspended_userdata);
+		s->stream_index = pw_stream_get_node_id(s->stream);
+		if (!s->suspended) {
+			s->suspended = true;
+			if (!c->disconnect && s->state == PA_STREAM_READY && s->suspended_callback)
+				s->suspended_callback(s, s->suspended_userdata);
 		}
-		s->suspended = true;
 		break;
 	case PW_STREAM_STATE_STREAMING:
-		if (s->suspended && !c->disconnect && s->suspended_callback) {
-			s->suspended_callback(s, s->suspended_userdata);
-		}
-		s->suspended = false;
 		configure_device(s);
 		configure_buffers(s);
 		pa_stream_set_state(s, PA_STREAM_READY);
+		if (s->suspended) {
+			s->suspended = false;
+			if (!c->disconnect && s->started_callback)
+				s->started_callback(s, s->started_userdata);
+		}
 		break;
 	}
 }
@@ -352,7 +359,7 @@ static void update_timing_info(pa_stream *s)
 	s->timing_info_valid = true;
 	s->queued_bytes = pwt.queued;
 
-	pw_log_debug("stream %p: %"PRIu64" rate:%d/%d ticks:%"PRIu64" pos:%"PRIu64" delay:%"PRIi64 " read:%"PRIu64
+	pw_log_trace("stream %p: %"PRIu64" rate:%d/%d ticks:%"PRIu64" pos:%"PRIu64" delay:%"PRIi64 " read:%"PRIu64
 			" write:%"PRIu64" queued:%"PRIi64,
 			s, pwt.queued, s->sample_spec.rate, pwt.rate.denom, pwt.ticks, pos, delay,
 			ti->read_index, ti->write_index, ti->read_index - ti->write_index);
@@ -620,6 +627,7 @@ static void stream_unlink(pa_stream *s)
 	if (s->stream)
 		pw_stream_set_active(s->stream, false);
 
+	s->stream_index = PA_INVALID_INDEX;
 	s->context = NULL;
 	pa_stream_unref(s);
 }
@@ -700,7 +708,7 @@ uint32_t pa_stream_get_index(PA_CONST pa_stream *s)
 	spa_assert(s);
 	spa_assert(s->refcount >= 1);
 
-	idx = s->stream ? pw_stream_get_node_id(s->stream) : PA_INVALID_INDEX;
+	idx = s->stream_index;
 	pw_log_debug("stream %p: index %u", s, idx);
 	return idx;
 }
@@ -1019,6 +1027,7 @@ static void on_disconnected(pa_operation *o, void *userdata)
 	pa_stream *s = o->stream;
 	pw_log_debug("stream %p", s);
 	pa_stream_set_state(s, PA_STREAM_TERMINATED);
+	pa_operation_done(o);
 }
 
 SPA_EXPORT
@@ -1171,7 +1180,7 @@ int pa_stream_write_ext_free(pa_stream *s,
 		free_cb(free_cb_data);
 
 	s->timing_info.write_index += nbytes;
-	pw_log_debug("stream %p: written %zd bytes", s, nbytes);
+	pw_log_trace("stream %p: written %zd bytes", s, nbytes);
 
 	return 0;
 }
@@ -1190,6 +1199,7 @@ int pa_stream_peek(pa_stream *s,
 	PA_CHECK_VALIDITY(s->context, s->direction == PA_STREAM_RECORD, PA_ERR_BADSTATE);
 
 	if (spa_list_is_empty(&s->ready)) {
+		errno = EPIPE;
 		pw_log_error("stream %p: no buffer: %m", s);
 		*data = NULL;
 		*nbytes = 0;
@@ -1243,7 +1253,7 @@ SPA_EXPORT
 size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 {
 	const pa_timing_info *i;
-	uint64_t now, queued, writable, elapsed;
+	uint64_t now, then, queued, writable, elapsed;
 	struct timespec ts;
 
 	spa_assert(s);
@@ -1259,7 +1269,8 @@ size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 	if (s->have_time) {
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		now = SPA_TIMESPEC_TO_USEC(&ts);
-		elapsed = pa_usec_to_bytes(now - SPA_TIMEVAL_TO_USEC(&i->timestamp), &s->sample_spec);
+		then = SPA_TIMEVAL_TO_USEC(&i->timestamp);
+		elapsed = now > then ? pa_usec_to_bytes(now - then, &s->sample_spec) : 0;
 	} else {
 		elapsed = 0;
 	}
@@ -1268,7 +1279,7 @@ size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 	queued -= SPA_MIN(queued, elapsed);
 
 	writable = s->maxblock - SPA_MIN(queued, s->maxblock);
-	pw_log_debug("stream %p: %"PRIu64, s, writable);
+	pw_log_trace("stream %p: %"PRIu64, s, writable);
 	return writable;
 }
 
@@ -1332,10 +1343,14 @@ static void on_timing_success(pa_operation *o, void *userdata)
 	pa_stream *s = o->stream;
 
 	update_timing_info(s);
-	pa_operation_done(o);
+
+	if (s->latency_update_callback)
+		s->latency_update_callback(s, s->latency_update_userdata);
 
 	if (d->cb)
 		d->cb(s, s->timing_info_valid, d->userdata);
+
+	pa_operation_done(o);
 }
 
 SPA_EXPORT
@@ -1648,7 +1663,7 @@ SPA_EXPORT
 int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 {
 	struct timespec ts;
-	uint64_t now, res;
+	uint64_t now, then, res;
 	pa_timing_info *i;
 
 	spa_assert(s);
@@ -1672,13 +1687,14 @@ int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	now = SPA_TIMESPEC_TO_USEC(&ts);
-	if (s->have_time)
-		res += now - SPA_TIMEVAL_TO_USEC(&i->timestamp);
+	then = SPA_TIMEVAL_TO_USEC(&i->timestamp);
+	if (s->have_time && now > then)
+		res += now - then;
 
 	if (r_usec)
 		*r_usec = res;
 
-	pw_log_debug("stream %p: now:%"PRIu64" diff:%"PRIi64
+	pw_log_trace("stream %p: now:%"PRIu64" diff:%"PRIi64
 			" write-index:%"PRIi64" read_index:%"PRIi64" res:%"PRIu64,
 			s, now, now - res, i->write_index, i->read_index, res);
 
@@ -1733,7 +1749,7 @@ int pa_stream_get_latency(pa_stream *s, pa_usec_t *r_usec, int *negative)
 	else
 		*r_usec = time_counter_diff(s, t, c, negative);
 
-	pw_log_debug("stream %p: now:%"PRIu64" stream:%"PRIu64
+	pw_log_trace("stream %p: now:%"PRIu64" stream:%"PRIu64
 			" res:%"PRIu64, s, t, c, *r_usec);
 
 	return 0;
