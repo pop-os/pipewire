@@ -8,8 +8,16 @@ pipewire (0.3.12-1) UNRELEASED; urgency=medium
       set. It will not be migrated automatically.
   * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
     Drop, applied upstream
+  * Move libspa-0.2-modules dependency from -modules to shared library.
+    The shared library calls into the support module, as seen in the
+    autopkgtest.
+  * Stop pipewire-audio-client-libraries depending on libpulse.
+    If we are using PipeWire's emulation of libpulse-simple.so.0, we'll
+    also be using PipeWire's emulation of libpulse.so.0, so there's no
+    point in depending on the real PulseAudio libpulse.so.0.
+  * d/rules: Sort Meson options alphabetically
 
- -- Simon McVittie <smcv@debian.org>  Sat, 19 Sep 2020 15:00:50 +0100
+ -- Simon McVittie <smcv@debian.org>  Sat, 19 Sep 2020 15:22:32 +0100
 
 pipewire (0.3.10-4) unstable; urgency=medium
 
