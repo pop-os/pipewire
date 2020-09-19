@@ -45,5 +45,18 @@ override_dh_makeshlibs:
 		--exclude=/usr/lib/$(DEB_HOST_MULTIARCH)/spa-0.2 \
 		-- -c4
 
-override_dh_shlibdeps:
-	dh_shlibdeps -l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 -Xlibpulse-mainloop-glib -- -dRecommends -edebian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/pulse/libpulse-mainloop-glib.so.0 -dDepends
+override_dh_shlibdeps-arch:
+	dh_shlibdeps \
+		-ppipewire-audio-client-libraries \
+		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
+		-Xlibpulse-mainloop-glib \
+		-- \
+		-Ldebian/pipewire-audio-client-libraries.shlibs.local \
+		-dRecommends \
+		-edebian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/pulse/libpulse-mainloop-glib.so.0 \
+		-dDepends \
+		$(NULL)
+	dh_shlibdeps \
+		--remaining-packages \
+		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
+		$(NULL)
