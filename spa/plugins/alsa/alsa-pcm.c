@@ -341,6 +341,13 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 	CHECK(snd_pcm_hw_params_get_rate_min(params, &min, &dir), "get_rate_min");
 	CHECK(snd_pcm_hw_params_get_rate_max(params, &max, &dir), "get_rate_max");
 
+	if (state->default_rate != 0) {
+		if (min < state->default_rate)
+			min = state->default_rate;
+		if (max > state->default_rate)
+			max = state->default_rate;
+	}
+
 	spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_rate, 0);
 
 	spa_pod_builder_push_choice(&b, &f[1], SPA_CHOICE_None, 0);
@@ -369,7 +376,7 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 
 	spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_channels, 0);
 
-	if ((maps = snd_pcm_query_chmaps(hndl)) != NULL) {
+	if (state->props.use_chmap && (maps = snd_pcm_query_chmaps(hndl)) != NULL) {
 		uint32_t channel;
 		snd_pcm_chmap_t* map;
 
@@ -664,7 +671,6 @@ static int alsa_recover(struct state *state, int err)
 		state->alsa_started = false;
 		spa_alsa_write(state, state->threshold * 2);
 	}
-
 	return 0;
 }
 
@@ -688,6 +694,7 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 
 	*target = state->last_threshold;
 
+#define MARGIN 48
 	if (state->resample && state->rate_match) {
 		state->delay = state->rate_match->delay * 2;
 		state->read_size = state->rate_match->size;
@@ -695,9 +702,10 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 		 * by moving a little closer to the device read/write pointers.
 		 * Don't try to get closer than 48 samples but instead increase the
 		 * reported latency on the port (TODO). */
-		if (*target <= state->delay + 48)
-			state->delay = SPA_MAX(0, (int)(*target - 48 - state->delay));
-		*target -= state->delay;
+		if (*target <= state->delay + MARGIN)
+			*target -= SPA_MAX(0, (int)(*target - MARGIN - state->delay));
+		else
+			*target -= state->delay;
 	} else {
 		state->delay = state->read_size = 0;
 	}
@@ -1290,6 +1298,7 @@ int spa_alsa_start(struct state *state)
 
 	reset_buffers(state);
 	state->alsa_sync = true;
+	state->alsa_recovering = false;
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK) {
 		state->alsa_started = false;

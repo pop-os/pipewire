@@ -46,6 +46,7 @@ struct impl {
 	struct pw_impl_node this;
 
 	enum pw_node_state pending;
+	uint32_t pending_id;
 
 	struct pw_work_queue *work;
 
@@ -883,7 +884,12 @@ static void dump_states(struct pw_impl_node *driver)
 		struct pw_node_activation_state *state = &a->state[0];
 		if (t->node == NULL)
 			continue;
-		pw_log_warn("(%s-%u) state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
+		if (a->status == PW_NODE_ACTIVATION_TRIGGERED ||
+		    a->status == PW_NODE_ACTIVATION_AWAKE) {
+			pw_log_warn("(%s-%u) client too slow! status:%s",
+				t->node->name, t->node->info.id, str_status(a->status));
+		}
+		pw_log_debug("(%s-%u) state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 				" waiting:%"PRIu64" process:%"PRIu64" status:%s sync:%d",
 				t->node->name, t->node->info.id, state,
 				state->pending, state->required,
@@ -1015,7 +1021,8 @@ static void node_on_fd_events(struct spa_source *source)
 		if (SPA_UNLIKELY(spa_system_eventfd_read(data_system, this->source.fd, &cmd) < 0))
 			pw_log_warn(NAME" %p: read failed %m", this);
 		else if (SPA_UNLIKELY(cmd > 1))
-			pw_log_warn(NAME" %p: missed %"PRIu64" wakeups", this, cmd - 1);
+			pw_log_warn("(%s-%u) client missed %"PRIu64" wakeups",
+				this->name, this->info.id, cmd - 1);
 
 		pw_log_trace_fp(NAME" %p: got process", this);
 		this->rt.target.signal(this->rt.target.data);
@@ -1108,6 +1115,7 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 		res = -errno;
 		goto error_clean;
 	}
+	impl->pending_id = SPA_ID_INVALID;
 
 	this->data_loop = context->data_loop;
 
@@ -1454,7 +1462,7 @@ static int node_ready(void *data, int status)
 		if (SPA_UNLIKELY(state->pending > 0)) {
 			pw_context_driver_emit_incomplete(node->context, node);
 			if (ratelimit_test(&node->rt.rate_limit, a->signal_time)) {
-				pw_log_warn("(%s-%u) graph not finished: state:%p quantum:%"PRIu64
+				pw_log_debug("(%s-%u) graph not finished: state:%p quantum:%"PRIu64
 						" pending %d/%d", node->name, node->info.id,
 						state, a->position.clock.duration,
 						state->pending, state->required);
@@ -1861,6 +1869,8 @@ static void on_state_complete(void *obj, void *data, int res, uint32_t seq)
 	enum pw_node_state state = SPA_PTR_TO_INT(data);
 	char *error = NULL;
 
+	impl->pending_id = SPA_ID_INVALID;
+
 	pw_log_debug(NAME" %p: state complete res:%d seq:%d", node, res, seq);
 	if (impl->last_error < 0) {
 		res = impl->last_error;
@@ -1948,12 +1958,14 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 	if (SPA_RESULT_IS_ASYNC(res)) {
 		res = spa_node_sync(node->node, res);
 	}
-	impl->pending = state;
 
-	if (old != state)
-		pw_work_queue_add(impl->work,
+	if (old != state) {
+		impl->pending = state;
+		if (impl->pending_id != SPA_ID_INVALID)
+			pw_work_queue_cancel(impl->work, node, impl->pending_id);
+		impl->pending_id = pw_work_queue_add(impl->work,
 				node, res, on_state_complete, SPA_INT_TO_PTR(state));
-
+	}
 	return res;
 }
 
