@@ -8,16 +8,17 @@ export DEB_LDFLAGS_MAINT_APPEND = -Wl,-z,defs -Wl,--as-needed
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
-		-Dauto_features=enabled \
 		-Daudiotestsrc=true \
+		-Dauto_features=enabled \
+		-Ddocs=true \
 		-Dffmpeg=false \
 		-Dinstalled_tests=true \
+		-Dman=true \
+		-Dtest=true \
 		-Dvideotestsrc=true \
 		-Dvolume=true \
 		-Dvulkan=false \
-		-Dtest=true \
-		-Dman=true \
-		-Ddocs=true
+		$(NULL)
 
 test_timeout_multiplier = 1
 
