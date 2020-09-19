@@ -180,7 +180,14 @@ struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, cons
 {
 	struct global *g;
 	const char *str;
-	uint32_t id = atoi(name);
+	uint32_t id;
+
+	if (strcmp(name, "@DEFAULT_SINK@") == 0 || strcmp("@DEFAULT_MONITOR@", name) == 0)
+		id = c->default_sink;
+	else if (strcmp(name, "@DEFAULT_SOURCE@") == 0)
+		id = c->default_sink;
+	else
+		id = atoi(name);
 
 	spa_list_for_each(g, &c->globals, link) {
 		if ((g->mask & mask) == 0)
@@ -193,7 +200,7 @@ struct global *pa_context_find_global_by_name(pa_context *c, uint32_t mask, cons
 			    strncmp(str, name, strlen(name) - 8) == 0)
 				return g;
 		}
-		if (g->id == id || (g->id == (id & PA_IDX_MASK_MONITOR)))
+		if (id == SPA_ID_INVALID || g->id == id || (g->id == (id & PA_IDX_MASK_MONITOR)))
 			return g;
 	}
 	return NULL;
@@ -726,8 +733,13 @@ static void device_clear_ports(struct global *g)
 	pa_card_info *i = &g->card_info.info;
 	uint32_t n;
 
-	for (n = 0; n < i->n_ports; i++)
-		free(i->ports[n]->profiles2);
+	pw_log_debug("device %d clear ports %d", g->id, i->n_ports);
+
+	for (n = 0; n < i->n_ports; n++) {
+		pa_card_port_info *pi = i->ports[n];
+		pa_proplist_free(pi->proplist);
+		free(pi->profiles2);
+	}
 
 	i->n_ports = 0;
 	free(i->ports);
@@ -753,7 +765,7 @@ static void device_sync_ports(struct global *g)
 	g->card_info.port_devices = calloc(n_ports, sizeof(struct port_device));
 	i->n_ports = 0;
 
-	pw_log_debug("context %p: info for %d", g->context, g->id);
+	pw_log_debug("context %p: info for %d n_ports:%d", g->context, g->id, n_ports);
 
 	j = 0;
 
@@ -840,8 +852,9 @@ static void device_sync_ports(struct global *g)
 	}
 	i->ports[j] = NULL;
 	i->n_ports = j;
-	if (i->n_ports == 0)
-		i->ports = NULL;
+	if (i->n_ports == 0) {
+		device_clear_ports(g);
+	}
 
 	spa_list_for_each(p, &g->card_info.routes, link) {
 		struct global *ng;
@@ -904,6 +917,8 @@ static void device_destroy(void *data)
 {
 	struct global *global = data;
 
+	pw_log_debug("device %d destroy", global->id);
+
 	if (global->card_info.info.proplist)
 		pa_proplist_free(global->card_info.info.proplist);
 
@@ -924,6 +939,13 @@ struct global_info device_info = {
 	.destroy = device_destroy,
 	.sync = device_sync,
 };
+
+static void clear_node_formats(struct global *g)
+{
+	pa_format_info *f;
+	pw_array_for_each(f, &g->node_info.formats)
+		pa_format_info_free(f);
+}
 
 static void node_event_info(void *object, const struct pw_node_info *info)
 {
@@ -949,6 +971,9 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 				continue;
 
 			switch (info->params[i].id) {
+			case SPA_PARAM_EnumFormat:
+				clear_node_formats(g);
+				/* fallthrough */
 			case SPA_PARAM_Props:
 			case SPA_PARAM_Format:
 				pw_device_enum_params((struct pw_device*)g->proxy,
@@ -974,6 +999,25 @@ static void node_event_param(void *object, int seq,
 		if (!SPA_FLAG_IS_SET(g->node_info.flags, NODE_FLAG_DEVICE_VOLUME | NODE_FLAG_DEVICE_MUTE))
 			parse_props(g, param, false);
 		break;
+	case SPA_PARAM_EnumFormat:
+	{
+		pa_format_info *f = pa_format_info_from_param(param);
+		if (f) {
+			pw_array_add_ptr(&g->node_info.formats, f);
+
+			if (g->node_info.channel_map.channels == 0)
+				pa_format_info_get_channel_map(f, &g->node_info.channel_map);
+
+			if (g->node_info.sample_spec.format == 0 ||
+			    g->node_info.sample_spec.rate == 0 ||
+			    g->node_info.sample_spec.channels == 0) {
+				pa_format_info_get_sample_format(f, &g->node_info.sample_spec.format);
+				pa_format_info_get_rate(f, &g->node_info.sample_spec.rate);
+				pa_format_info_get_channels(f, &g->node_info.sample_spec.channels);
+			}
+		}
+		break;
+	}
 	case SPA_PARAM_Format:
 		pa_format_parse_param(param, &g->node_info.sample_spec, &g->node_info.channel_map);
 		break;
@@ -991,6 +1035,7 @@ static const struct pw_node_events node_events = {
 static void node_destroy(void *data)
 {
 	struct global *global = data;
+	clear_node_formats(global);
 	if (global->info)
 		pw_node_info_free(global->info);
 }
@@ -1266,6 +1311,7 @@ static int set_mask(pa_context *c, struct global *g)
 		g->node_info.volume_step = 1.0f / (PA_VOLUME_NORM+1);
 		g->node_info.active_port = SPA_ID_INVALID;
 		g->node_info.available_port = SPA_PARAM_AVAILABILITY_unknown;
+		pw_array_init(&g->node_info.formats, sizeof(void*) * 4);
 	} else if (strcmp(g->type, PW_TYPE_INTERFACE_Port) == 0) {
 		if (g->props == NULL)
 			return 0;
@@ -1458,13 +1504,20 @@ static void core_done(void *data, uint32_t id, int seq)
 		}
 	}
 	spa_list_for_each_safe(o, t, &ops, link) {
+		if (!o->sync)
+			continue;
 		pa_operation_ref(o);
-		pw_log_debug("operation %p complete", o);
+		pw_log_debug("sync operation %p complete", o);
 		if (o->callback)
 			o->callback(o, o->userdata);
 		pa_operation_unref(o);
 	}
 	spa_list_consume(o, &ops, link) {
+		if (!o->sync) {
+			spa_list_remove(&o->link);
+			spa_list_append(&c->operations, &o->link);
+			continue;
+		}
 		pw_log_warn("operation %p canceled", o);
 		pa_operation_cancel(o);
 	}
@@ -1569,12 +1622,6 @@ pa_context *pa_context_new_with_proplist(pa_mainloop_api *mainloop, const char *
 	return c;
 }
 
-static void do_context_destroy(pa_mainloop_api*m, void *userdata)
-{
-	pa_context *c = userdata;
-	pw_context_destroy(c->context);
-}
-
 static void context_free(pa_context *c)
 {
 	pw_log_debug("context %p: free", c);
@@ -1587,7 +1634,7 @@ static void context_free(pa_context *c)
 	if (c->core_info)
 		pw_core_info_free(c->core_info);
 
-	pa_mainloop_api_once(c->mainloop, do_context_destroy, c);
+	pw_context_destroy(c->context);
 }
 
 SPA_EXPORT

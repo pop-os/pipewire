@@ -102,8 +102,6 @@ static int sink_callback(pa_context *c, struct global *g, struct sink_data *d)
 	uint32_t n, j;
 	char monitor_name[1024];
 	pa_sink_info i;
-	pa_format_info ii[1];
-	pa_format_info *ip[1];
 
 	spa_zero(i);
 	if (info->props && (str = spa_dict_lookup(info->props, PW_KEY_NODE_NAME)))
@@ -125,7 +123,8 @@ static int sink_callback(pa_context *c, struct global *g, struct sink_data *d)
 	if (i.sample_spec.channels == g->node_info.channel_map.channels)
 		i.channel_map = g->node_info.channel_map;
 	else
-		pa_channel_map_init_auto(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+		pa_channel_map_init_extend(&i.channel_map,
+				i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 	i.owner_module = g->id;
 	i.volume.channels = i.sample_spec.channels;
 	for (n = 0; n < i.volume.channels; n++)
@@ -183,14 +182,10 @@ static int sink_callback(pa_context *c, struct global *g, struct sink_data *d)
 		else
 			i.ports[j] = NULL;
 	}
-	i.n_formats = 1;
-	ii[0].encoding = PA_ENCODING_PCM;
-	ii[0].plist = pa_proplist_new();
-	ip[0] = ii;
-	i.formats = ip;
+	i.n_formats = pw_array_get_len(&g->node_info.formats, pa_format_info *);
+	i.formats = g->node_info.formats.data;
 	d->cb(c, &i, 0, d->userdata);
 	pa_proplist_free(i.proplist);
-	pa_proplist_free(ii[0].plist);
 	return 0;
 }
 
@@ -201,6 +196,8 @@ static void sink_info(pa_operation *o, void *userdata)
 	pa_context *c = o->context;
 	int error = 0;
 
+	pw_log_debug("%p name:%s idx:%u", c, d->name, d->idx);
+
 	if (d->name) {
 		g = pa_context_find_global_by_name(c, PA_SUBSCRIPTION_MASK_SINK, d->name);
 		pa_xfree(d->name);
@@ -209,8 +206,6 @@ static void sink_info(pa_operation *o, void *userdata)
 		    !(g->mask & PA_SUBSCRIPTION_MASK_SINK))
 			g = NULL;
 	}
-
-	pw_log_debug("%p", c);
 
 	if (g) {
 		error = sink_callback(c, g, d);
@@ -816,8 +811,6 @@ static int source_callback(pa_context *c, struct global *g, struct source_data *
 	const char *str;
 	uint32_t n, j;
 	pa_source_info i;
-	pa_format_info ii[1];
-	pa_format_info *ip[1];
 	enum pa_source_flags flags;
 	bool monitor;
 
@@ -855,7 +848,8 @@ static int source_callback(pa_context *c, struct global *g, struct source_data *
 	if (i.sample_spec.channels == g->node_info.channel_map.channels)
 		i.channel_map = g->node_info.channel_map;
 	else
-		pa_channel_map_init_auto(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+		pa_channel_map_init_extend(&i.channel_map,
+				i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 	i.owner_module = g->id;
 	i.volume.channels = i.sample_spec.channels;
 	for (n = 0; n < i.volume.channels; n++)
@@ -915,14 +909,10 @@ static int source_callback(pa_context *c, struct global *g, struct source_data *
 		else
 			i.ports[j] = NULL;
 	}
-	i.n_formats = 1;
-	ii[0].encoding = PA_ENCODING_PCM;
-	ii[0].plist = pa_proplist_new();
-	ip[0] = ii;
-	i.formats = ip;
+	i.n_formats = pw_array_get_len(&g->node_info.formats, pa_format_info *);
+	i.formats = g->node_info.formats.data;
 	d->cb(c, &i, 0, d->userdata);
 	pa_proplist_free(i.proplist);
-	pa_proplist_free(ii[0].plist);
 	return 0;
 }
 
@@ -1284,7 +1274,7 @@ static void server_callback(struct server_data *d, pa_context *c)
 	i.default_sink_name = get_default_name(c, PA_SUBSCRIPTION_MASK_SINK);
 	i.default_source_name = get_default_name(c, PA_SUBSCRIPTION_MASK_SOURCE);
 	i.cookie = info->cookie;
-        pa_channel_map_init_extend(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+	pa_channel_map_init_extend(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 	d->cb(c, &i, d->userdata);
 }
 
@@ -2061,8 +2051,8 @@ static int sink_input_callback(pa_context *c, struct sink_input_data *d, struct 
 		if (s->channel_map.channels == s->sample_spec.channels)
 			i.channel_map = s->channel_map;
 		else
-			pa_channel_map_init_auto(&i.channel_map,
-					i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+			pa_channel_map_init_extend(&i.channel_map,
+					i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 		i.format = s->format;
 	}
 	else {
@@ -2074,7 +2064,8 @@ static int sink_input_callback(pa_context *c, struct sink_input_data *d, struct 
 		if (i.sample_spec.channels == g->node_info.channel_map.channels)
 			i.channel_map = g->node_info.channel_map;
 		else
-			pa_channel_map_init_auto(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+			pa_channel_map_init_extend(&i.channel_map,
+					i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 		ii[0].encoding = PA_ENCODING_PCM;
 		ii[0].plist = pa_proplist_new();
 		i.format = ii;
@@ -2463,8 +2454,8 @@ static int source_output_callback(struct source_output_data *d, pa_context *c, s
 		if (s->channel_map.channels == s->sample_spec.channels)
 			i.channel_map = s->channel_map;
 		else
-			pa_channel_map_init_auto(&i.channel_map,
-					i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+			pa_channel_map_init_extend(&i.channel_map,
+					i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 		i.format = s->format;
 	}
 	else {
@@ -2476,7 +2467,8 @@ static int source_output_callback(struct source_output_data *d, pa_context *c, s
 		if (i.sample_spec.channels == g->node_info.channel_map.channels)
 			i.channel_map = g->node_info.channel_map;
 		else
-			pa_channel_map_init_auto(&i.channel_map, i.sample_spec.channels, PA_CHANNEL_MAP_OSS);
+			pa_channel_map_init_extend(&i.channel_map,
+					i.sample_spec.channels, PA_CHANNEL_MAP_DEFAULT);
 		ii[0].encoding = PA_ENCODING_PCM;
 		ii[0].plist = pa_proplist_new();
 		i.format = ii;

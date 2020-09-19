@@ -347,6 +347,8 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	case SPA_NODE_COMMAND_Start:
 		this->started = true;
 		break;
+	case SPA_NODE_COMMAND_Suspend:
+		/* fallthrough */
 	case SPA_NODE_COMMAND_Pause:
 		this->started = false;
 		break;
@@ -975,7 +977,11 @@ static int impl_node_process(void *object)
 	dd = &dbuf->buf->datas[0];
 
 	maxsize = dd->maxsize;
-	n_samples = maxsize / outport->stride;
+
+	if (SPA_LIKELY(this->io_position))
+		n_samples = this->io_position->clock.duration;
+	else
+		n_samples = maxsize / outport->stride;
 
 	src_datas = alloca(sizeof(void*) * this->port_count);
 

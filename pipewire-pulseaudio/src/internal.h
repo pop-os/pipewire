@@ -301,6 +301,7 @@ struct global {
 			uint32_t active_port;
 			enum spa_param_availability available_port;
 			uint32_t device_index;
+			struct pw_array formats;
 		} node_info;
 		struct {
 			uint32_t node_id;
@@ -401,9 +402,6 @@ struct pa_mem {
 	void *user_data;
 };
 
-#define MAX_BUFFERS     64u
-#define MASK_BUFFERS    (MAX_BUFFERS-1)
-
 struct pa_stream {
 	struct spa_list link;
 	int refcount;
@@ -494,6 +492,7 @@ struct pa_operation
 	int refcount;
 	pa_context *context;
 	pa_stream *stream;
+	unsigned int sync:1;
 
 	pa_operation_state_t state;
 
@@ -518,10 +517,15 @@ int pa_metadata_update(struct global *global, uint32_t subject, const char *key,
 int pa_metadata_get(struct global *global, uint32_t subject, const char *key,
                         const char **type, const char **value);
 
+void pw_channel_map_from_positions(pa_channel_map *map, uint32_t n_pos, const uint32_t *pos);
+void pw_channel_map_to_positions(const pa_channel_map *map, uint32_t *pos);
+
 int pa_format_parse_param(const struct spa_pod *param,
 		pa_sample_spec *spec, pa_channel_map *map);
 const struct spa_pod *pa_format_build_param(struct spa_pod_builder *b,
 		uint32_t id, pa_sample_spec *spec, pa_channel_map *map);
+
+pa_format_info* pa_format_info_from_param(const struct spa_pod *param);
 
 #ifdef __cplusplus
 }
