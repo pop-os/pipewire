@@ -75,6 +75,7 @@ struct rd_device {
 
 	unsigned int filtering:1;
 	unsigned int registered:1;
+	unsigned int acquiring:1;
 	unsigned int owning:1;
 };
 
@@ -259,7 +260,7 @@ static DBusHandlerResult filter_handler(DBusConnection *c, DBusMessage *m, void 
 		if (strcmp(name, d->service_name) != 0)
 			goto invalid;
 
-		pw_log_debug(NAME" %p: acquired %s", d, name);
+		pw_log_debug(NAME" %p: acquired %s, %s", d, name, d->service_name);
 
 		d->owning = true;
 
@@ -270,10 +271,13 @@ static DBusHandlerResult filter_handler(DBusConnection *c, DBusMessage *m, void 
 							d)))
 				goto invalid;
 
-			if (d->callbacks->acquired)
-				d->callbacks->acquired(d->data, d);
+			if (strcmp(name, d->service_name) != 0)
+				goto invalid;
 
 			d->registered = true;
+
+			if (d->callbacks->acquired)
+				d->callbacks->acquired(d->data, d);
 		}
 	} else if (dbus_message_is_signal(m, "org.freedesktop.DBus", "NameLost")) {
 		if (!dbus_message_get_args( m, &error,
@@ -303,17 +307,17 @@ static DBusHandlerResult filter_handler(DBusConnection *c, DBusMessage *m, void 
 			    DBUS_TYPE_INVALID))
 			goto invalid;
 
-		if (strcmp(name, d->service_name) != 0)
+		if (strcmp(name, d->service_name) != 0 || d->owning)
 			goto invalid;
 
 		pw_log_debug(NAME" %p: changed %s: %s -> %s", d, name, old, new);
 
 		if (old == NULL || *old == 0) {
-			if (d->callbacks->busy)
-				d->callbacks->busy(d->data, d, new, 0);
+			if (d->callbacks->busy && !d->acquiring)
+				d->callbacks->busy(d->data, d, name, 0);
 		} else {
 			if (d->callbacks->available)
-				d->callbacks->available(d->data, d, old);
+				d->callbacks->available(d->data, d, name);
 		}
 	}
 
@@ -389,14 +393,21 @@ int rd_device_acquire(struct rd_device *d)
 
 	dbus_error_init(&error);
 
+	pw_log_debug(NAME"%p: reserve %s", d, d->service_name);
+
+	d->acquiring = true;
+
 	if ((res = dbus_bus_request_name(d->connection,
 					d->service_name,
 					(d->priority < INT32_MAX ? DBUS_NAME_FLAG_ALLOW_REPLACEMENT : 0),
 					&error)) < 0) {
 			dbus_error_free(&error);
-			res = -EBUSY;
 	}
-	return res;
+
+	if (res != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
+		return -EBUSY;
+
+	return 0;
 }
 
 int rd_device_request_release(struct rd_device *d)
@@ -453,6 +464,8 @@ exit:
 
 void rd_device_release(struct rd_device *d)
 {
+	pw_log_debug(NAME" %p: release %d", d, d->owning);
+
 	if (d->owning) {
 		DBusError error;
 		dbus_error_init(&error);
@@ -461,6 +474,7 @@ void rd_device_release(struct rd_device *d)
 				d->service_name, &error);
 		dbus_error_free(&error);
 	}
+	d->acquiring = false;
 }
 
 void rd_device_destroy(struct rd_device *d)

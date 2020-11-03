@@ -566,6 +566,8 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 
 	while (port->next_fmtdesc) {
 		if (filter) {
+			struct v4l2_format fmt;
+
 			video_format = enum_filter_format(filter_media_type,
 					    filter_media_subtype,
 					    filter, port->fmtdesc.index);
@@ -580,6 +582,25 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 				goto next_fmtdesc;
 
 			port->fmtdesc.pixelformat = info->fourcc;
+
+			fmt.type = port->fmtdesc.type;
+			fmt.fmt.pix.pixelformat = info->fourcc;
+			fmt.fmt.pix.field = V4L2_FIELD_ANY;
+			fmt.fmt.pix.width = 0;
+			fmt.fmt.pix.height = 0;
+
+			if ((res = xioctl(dev->fd, VIDIOC_TRY_FMT, &fmt)) < 0) {
+				spa_log_debug(this->log, "v4l2: '%s' VIDIOC_TRY_FMT %08x: %m",
+						this->props.device, info->fourcc);
+				goto next_fmtdesc;
+			}
+			if (fmt.fmt.pix.pixelformat != info->fourcc) {
+				spa_log_debug(this->log, "v4l2: '%s' VIDIOC_TRY_FMT wanted %.4s gave %.4s",
+						this->props.device, (char*)&info->fourcc,
+						(char*)&fmt.fmt.pix.pixelformat);
+				goto next_fmtdesc;
+			}
+
 		} else {
 			if ((res = xioctl(dev->fd, VIDIOC_ENUM_FMT, &port->fmtdesc)) < 0) {
 				if (errno == EINVAL)
@@ -936,7 +957,7 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 
 	port->fmt = fmt;
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_FLAGS | SPA_PORT_CHANGE_MASK_RATE;
-	port->info.flags = (port->export_buf ? SPA_PORT_FLAG_CAN_ALLOC_BUFFERS : 0) |
+	port->info.flags = (port->alloc_buffers ? SPA_PORT_FLAG_CAN_ALLOC_BUFFERS : 0) |
 		SPA_PORT_FLAG_LIVE |
 		SPA_PORT_FLAG_PHYSICAL |
 		SPA_PORT_FLAG_TERMINAL;
@@ -1391,8 +1412,6 @@ mmap_init(struct impl *this,
 				this->props.device, reqbuf.count);
 		return -ENOMEM;
 	}
-	if (port->export_buf)
-		spa_log_debug(this->log, "v4l2: using EXPBUF");
 
 	for (i = 0; i < reqbuf.count; i++) {
 		struct buffer *b;
@@ -1427,7 +1446,7 @@ mmap_init(struct impl *this,
 		d[0].chunk->stride = port->fmt.fmt.pix.bytesperline;
 		d[0].chunk->flags = 0;
 
-		if (port->export_buf) {
+		if (port->have_expbuf) {
 			struct v4l2_exportbuffer expbuf;
 
 			spa_zero(expbuf);
@@ -1435,8 +1454,14 @@ mmap_init(struct impl *this,
 			expbuf.index = i;
 			expbuf.flags = O_CLOEXEC | O_RDONLY;
 			if (xioctl(dev->fd, VIDIOC_EXPBUF, &expbuf) < 0) {
+				if (errno == ENOTTY || errno == EINVAL) {
+					spa_log_debug(this->log, "v4l2: '%s' VIDIOC_EXPBUF not supported: %m",
+							this->props.device);
+					port->have_expbuf = false;
+					goto fallback;
+				}
 				spa_log_error(this->log, "v4l2: '%s' VIDIOC_EXPBUF: %m", this->props.device);
-				continue;
+				return -errno;
 			}
 			d[0].type = SPA_DATA_DmaBuf;
 			d[0].flags = SPA_DATA_FLAG_READABLE;
@@ -1445,24 +1470,18 @@ mmap_init(struct impl *this,
 			SPA_FLAG_SET(b->flags, BUFFER_FLAG_ALLOCATED);
 			spa_log_debug(this->log, "v4l2: EXPBUF fd:%d", expbuf.fd);
 		} else {
-			d[0].type = SPA_DATA_MemPtr;
+fallback:
+			d[0].type = SPA_DATA_MemFd;
 			d[0].flags = SPA_DATA_FLAG_READABLE;
-			d[0].fd = -1;
-			d[0].data = mmap(NULL,
-					 b->v4l2_buffer.length,
-					 PROT_READ, MAP_SHARED,
-					 dev->fd,
-					 b->v4l2_buffer.m.offset);
-			if (d[0].data == MAP_FAILED) {
-				spa_log_error(this->log, "v4l2: '%s' mmap: %m", this->props.device);
-				continue;
-			}
-			b->ptr = d[0].data;
-			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
-			spa_log_debug(this->log, "v4l2: mmap ptr:%p", d[0].data);
+			d[0].fd = dev->fd;
+			d[0].mapoffset = b->v4l2_buffer.m.offset;
+			spa_log_debug(this->log, "v4l2: mmap offset:%u", d[0].mapoffset);
 		}
 		spa_v4l2_buffer_recycle(this, i);
 	}
+	spa_log_info(this->log, "v4l2: have %u buffers using %s", reqbuf.count,
+			port->have_expbuf ? "EXPBUF" : "MMAP");
+
 	port->n_buffers = reqbuf.count;
 
 	return 0;

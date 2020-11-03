@@ -297,6 +297,7 @@ struct pa_alsa_device {
     unsigned decibel_volume:1;
     pa_cvolume real_volume;
     pa_cvolume hardware_volume;
+    pa_cvolume soft_volume;
 
     pa_volume_t base_volume;
     unsigned n_volume_steps;
@@ -369,7 +370,6 @@ struct pa_alsa_profile {
     bool supported:1;
     bool fallback_input:1;
     bool fallback_output:1;
-    bool is_off:1;
 
     char **input_mapping_names;
     char **output_mapping_names;
