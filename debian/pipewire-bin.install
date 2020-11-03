@@ -13,6 +13,7 @@ usr/bin/pw-mon
 usr/bin/pw-play
 usr/bin/pw-profiler
 usr/bin/pw-record
+usr/bin/pw-reserve
 usr/bin/spa-*
 usr/share/alsa-card-profile
 usr/share/man/man1/pipewire.*
