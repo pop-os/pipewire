@@ -117,7 +117,7 @@ static void add_profiles(pa_card *impl)
 	ap->profile.name = ap->name = pa_xstrdup("off");
 	ap->profile.description = ap->description = pa_xstrdup(_("Off"));
 	ap->profile.available = ACP_AVAILABLE_YES;
-	ap->is_off = true;
+	ap->profile.flags = ACP_PROFILE_OFF;
 	pa_hashmap_put(impl->profiles, ap->name, ap);
 
 	PA_HASHMAP_FOREACH(ap, impl->profile_set->profiles, state) {
@@ -565,6 +565,7 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 		changed |= (old_monitor_name == NULL) || (strcmp(old_monitor_name, eld.monitor_name) != 0);
 		pa_proplist_sets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME, eld.monitor_name);
 	}
+	pa_proplist_as_dict(p->proplist, &p->port.props);
 
 	if (changed && mask != 0 && impl->events && impl->events->props_changed)
 		impl->events->props_changed(impl);
@@ -622,10 +623,11 @@ static void init_eld_ctls(pa_card *impl)
 uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *name)
 {
 	uint32_t i;
-	uint32_t best, best2, best3;
+	uint32_t best, best2, best3, off;
 	struct acp_card_profile **profiles = card->profiles;
 
 	best = best2 = best3 = ACP_INVALID_INDEX;
+	off = 0;
 
 	for (i = 0; i < card->n_profiles; i++) {
 		struct acp_card_profile *p = profiles[i];
@@ -635,7 +637,9 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 				best = i;
 			continue;
 		}
-		if (p->available == ACP_AVAILABLE_YES) {
+		if (p->flags & ACP_PROFILE_OFF) {
+			off = i;
+		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > profiles[best]->priority)
 				best = i;
 		} else if (p->available != ACP_AVAILABLE_NO) {
@@ -651,7 +655,7 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 	if (best == ACP_INVALID_INDEX)
 		best = best3;
 	if (best == ACP_INVALID_INDEX)
-		best = 0;
+		best = off;
 	return best;
 }
 
@@ -781,12 +785,19 @@ static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 				pa_cvolume_max(&new_soft_volume),
 				pa_yes_no(accurate_enough));
 
-		if (!accurate_enough && impl->events && impl->events->set_soft_volume) {
-			uint32_t i, n_volumes = new_soft_volume.channels;
-			float volumes[n_volumes];
-			for (i = 0; i < n_volumes; i++)
-				volumes[i] = ((float)new_soft_volume.values[i]) / PA_VOLUME_NORM;
-			impl->events->set_soft_volume(impl->user_data, &dev->device, volumes, n_volumes);
+		if (accurate_enough)
+			pa_cvolume_reset(&new_soft_volume, new_soft_volume.channels);
+
+		if (!pa_cvolume_equal(&dev->soft_volume, &new_soft_volume)) {
+			dev->soft_volume = new_soft_volume;
+
+			if (impl->events && impl->events->set_soft_volume) {
+				uint32_t i, n_volumes = new_soft_volume.channels;
+				float volumes[n_volumes];
+				for (i = 0; i < n_volumes; i++)
+					volumes[i] = ((float)new_soft_volume.values[i]) / PA_VOLUME_NORM;
+				impl->events->set_soft_volume(impl->user_data, &dev->device, volumes, n_volumes);
+			}
 		}
 
 	} else {
@@ -1046,7 +1057,8 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 
 	/* if UCM is available for this card then update the verb */
 	if (impl->use_ucm) {
-		if ((res = pa_alsa_ucm_set_profile(&impl->ucm, impl, np->is_off ? NULL : np->profile.name,
+		if ((res = pa_alsa_ucm_set_profile(&impl->ucm, impl,
+		    np->profile.flags & ACP_PROFILE_OFF ? NULL : np->profile.name,
 		    op ? op->profile.name : NULL)) < 0) {
 			return res;
 		}
@@ -1412,6 +1424,7 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 		d->set_volume(d, &v);
 	} else {
 		d->real_volume = v;
+		d->soft_volume = v;
 		if (impl->events && impl->events->set_soft_volume)
 			impl->events->set_soft_volume(impl->user_data, dev, volume, n_volume);
 	}

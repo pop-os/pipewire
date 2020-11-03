@@ -33,6 +33,7 @@
 #include "core-format.h"
 #include "internal.h"
 
+#define MIN_SAMPLES     24u
 #define MIN_BUFFERS     8u
 #define MAX_BUFFERS     64u
 
@@ -147,7 +148,7 @@ static const struct spa_pod *get_buffers_param(pa_stream *s, pa_buffer_attr *att
 	size = attr->minreq;
 	buffers = SPA_CLAMP(maxsize / size, MIN_BUFFERS, MAX_BUFFERS);
 
-	pw_log_debug("stream %p: stride %d maxsize %d size %u buffers %d", s, stride, maxsize,
+	pw_log_info("stream %p: stride %d maxsize %d size %u buffers %d", s, stride, maxsize,
 			size, buffers);
 
 	param = spa_pod_builder_add_object(b,
@@ -214,25 +215,34 @@ static void patch_buffer_attr(pa_stream *s, pa_buffer_attr *attr, pa_stream_flag
 	stride  = pa_frame_size(&s->sample_spec);
 	if (attr->maxlength == (uint32_t) -1 || attr->maxlength == 0)
 		attr->maxlength = MAX_SIZE; /* 4MB is the maximum queue length PulseAudio <= 0.9.9 supported. */
+	attr->maxlength -= attr->maxlength % stride;
+	attr->maxlength = SPA_MAX(attr->maxlength, stride);
 
-	if (attr->tlength == (uint32_t) -1 || attr->tlength == 0)
+	if (attr->tlength == (uint32_t) -1)
 		attr->tlength = (uint32_t) pa_usec_to_bytes(2*PA_USEC_PER_SEC, &s->sample_spec);
 	attr->tlength = SPA_MIN(attr->tlength, attr->maxlength);
+	attr->tlength -= attr->tlength % stride;
 
-	if (attr->minreq == (uint32_t) -1 || attr->minreq == 0)
-		attr->minreq = pa_usec_to_bytes(25*PA_USEC_PER_MSEC, &s->sample_spec);
-	attr->minreq = SPA_MIN(attr->minreq, attr->tlength / MIN_BUFFERS);
+	if (attr->minreq == (uint32_t) -1)
+		attr->minreq = pa_usec_to_bytes(20*PA_USEC_PER_MSEC, &s->sample_spec);
+	attr->minreq = SPA_MIN(attr->minreq, attr->tlength / 4);
+	attr->minreq = SPA_MAX(attr->minreq, MIN_SAMPLES * stride);
+	attr->minreq -= attr->minreq % stride;
 	attr->minreq = SPA_MAX(attr->minreq, stride);
 
-	if (attr->fragsize == (uint32_t) -1 || attr->fragsize == 0)
-		attr->fragsize = pa_usec_to_bytes(25*PA_USEC_PER_MSEC, &s->sample_spec);
-	attr->fragsize = SPA_MIN(attr->fragsize, attr->tlength / MIN_BUFFERS);
-	attr->fragsize = SPA_MAX(attr->fragsize, stride);
+	attr->tlength = SPA_MAX(attr->tlength, attr->minreq * 4);
 
-	if (attr->prebuf == (uint32_t) -1 || attr->prebuf == 0)
+	if (attr->prebuf == (uint32_t) -1)
 		attr->prebuf = attr->tlength - attr->minreq;
 	attr->prebuf = SPA_MIN(attr->prebuf, attr->tlength - attr->minreq);
+	attr->prebuf -= attr->prebuf % stride;
 	attr->prebuf = SPA_MAX(attr->prebuf, stride);
+
+	if (attr->fragsize == (uint32_t) -1)
+		attr->fragsize = pa_usec_to_bytes(20*PA_USEC_PER_MSEC, &s->sample_spec);
+	attr->fragsize = SPA_MIN(attr->fragsize, attr->tlength / 4);
+	attr->fragsize -= attr->fragsize % stride;
+	attr->fragsize = SPA_MAX(attr->fragsize, stride);
 
 	dump_buffer_attr(s, attr);
 }
@@ -287,9 +297,10 @@ static void stream_control_info(void *data, uint32_t id, const struct pw_stream_
 static void stream_add_buffer(void *data, struct pw_buffer *buffer)
 {
 	pa_stream *s = data;
-	buffer->size = buffer->buffer->datas[0].maxsize;
-	s->maxsize += buffer->size;
-	s->maxblock = SPA_MIN(buffer->size, s->maxblock);
+	uint32_t maxsize = buffer->buffer->datas[0].maxsize;
+	buffer->size = 0;
+	s->maxsize += maxsize;
+	s->maxblock = SPA_MIN(maxsize, s->maxblock);
 }
 
 static void stream_remove_buffer(void *data, struct pw_buffer *buffer)
@@ -324,10 +335,11 @@ static void update_timing_info(pa_stream *s)
 	ti->read_index_corrupt = false;
 
 	if (pwt.rate.denom > 0) {
+		uint64_t ticks = pwt.ticks;
 		if (!s->have_time)
-			s->ticks_base = pwt.ticks + pwt.delay;
-		if (pwt.ticks > s->ticks_base)
-			pos = ((pwt.ticks - s->ticks_base) * s->sample_spec.rate / pwt.rate.denom) * stride;
+			s->ticks_base = ticks;
+		if (ticks > s->ticks_base)
+			pos = ((ticks - s->ticks_base) * s->sample_spec.rate / pwt.rate.denom) * stride;
 		else
 			pos = 0;
 		delay = pwt.delay * SPA_USEC_PER_SEC / pwt.rate.denom;
@@ -345,12 +357,12 @@ static void update_timing_info(pa_stream *s)
 		ti->configured_source_usec = delay;
 		ti->write_index = pos;
 	}
-	s->timing_info_valid = true;
 	s->queued_bytes = pwt.queued;
+	s->timing_info_valid = true;
 
 	pw_log_trace("stream %p: %"PRIu64" rate:%d/%d ticks:%"PRIu64" pos:%"PRIu64" delay:%"PRIi64 " read:%"PRIu64
 			" write:%"PRIu64" queued:%"PRIi64,
-			s, pwt.queued, s->sample_spec.rate, pwt.rate.denom, pwt.ticks, pos, delay,
+			s, pwt.queued, s->sample_spec.rate, pwt.rate.denom, pwt.ticks, pos, pwt.delay,
 			ti->read_index, ti->write_index, ti->read_index - ti->write_index);
 }
 
@@ -373,12 +385,14 @@ static void queue_output(pa_stream *s)
 		pw_log_trace("queue %p", m);
 		spa_list_remove(&m->link);
 		s->ready_bytes -= m->size;
+		s->queued_bytes += m->size;
 
 		buf->buffer->datas[0].maxsize = m->maxsize;
 		buf->buffer->datas[0].data = m->data;
 		buf->buffer->datas[0].chunk->offset = m->offset;
 		buf->buffer->datas[0].chunk->size = m->size;
 		buf->user_data = m;
+		buf->size = m->size;
 		m->user_data = buf;
 
 		pw_stream_queue_buffer(s->stream, buf);
@@ -423,10 +437,39 @@ static void pull_input(pa_stream *s)
 		m->user_data = buf;
 		buf->user_data = m;
 
-		pw_log_trace("input %p", m);
+		pw_log_trace("input %p, size:%zd ready:%zd", m, m->size, s->ready_bytes);
 		spa_list_append(&s->ready, &m->link);
 		s->ready_bytes += m->size;
 	}
+}
+
+
+static inline uint32_t queued_size(const pa_stream *s, uint64_t elapsed)
+{
+	uint64_t queued;
+	const pa_timing_info *i = &s->timing_info;
+	queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
+	queued -= SPA_MIN(queued, elapsed);
+	return queued;
+}
+static inline uint32_t target_queue(const pa_stream *s)
+{
+	return s->buffer_attr.tlength;
+}
+
+static inline uint32_t wanted_size(const pa_stream *s, uint32_t queued, uint32_t target)
+{
+	return target - SPA_MIN(queued, target);
+}
+
+static inline uint32_t writable_size(const pa_stream *s, uint64_t queued)
+{
+	return s->maxblock - SPA_MIN(queued, s->maxblock);
+}
+
+static inline uint32_t required_size(const pa_stream *s)
+{
+	return s->buffer_attr.minreq;
 }
 
 static void stream_process(void *data)
@@ -437,17 +480,22 @@ static void stream_process(void *data)
 	update_timing_info(s);
 
 	if (s->direction == PA_STREAM_PLAYBACK) {
-		pa_timing_info *i = &s->timing_info;
-		uint64_t queued, writable, required;
+		uint32_t queued, target, wanted, required;
 
 		queue_output(s);
 
-		queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
-		writable = s->maxblock - SPA_MIN(queued, s->maxblock);
-		required = SPA_MIN(s->maxblock, s->buffer_attr.minreq);
+		queued = queued_size(s, 0);
+		target = target_queue(s);
+		wanted = wanted_size(s, queued, target);
+		required = required_size(s);
 
-		if (s->write_callback && s->state == PA_STREAM_READY && writable >= required)
-			s->write_callback(s, writable, s->write_userdata);
+		pw_log_trace("stream %p, queued:%u target:%u wanted:%u required:%u",
+				s, queued, target, wanted, required);
+
+		if (s->write_callback && s->state == PA_STREAM_READY &&
+				queued < wanted &&
+				wanted >= required)
+			s->write_callback(s, wanted, s->write_userdata);
 	}
 	else {
 		pull_input(s);
@@ -951,7 +999,10 @@ static int create_stream(pa_stream_direction_t direction,
 		str = "Music";
 
 	stride = pa_frame_size(&s->sample_spec);
-	sprintf(latency, "%u/%u", s->buffer_attr.minreq / stride, s->sample_spec.rate);
+	if (direction == PA_STREAM_RECORD)
+		sprintf(latency, "%u/%u", s->buffer_attr.fragsize / stride, s->sample_spec.rate);
+	else
+		sprintf(latency, "%u/%u", s->buffer_attr.minreq * 2 / stride, s->sample_spec.rate);
 	n_items = 0;
 	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
 	items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_TYPE, "Audio");
@@ -1254,14 +1305,13 @@ size_t pa_stream_writable_size(PA_CONST pa_stream *s)
 		elapsed = 0;
 	}
 
-	queued = i->write_index - SPA_MIN(i->read_index, i->write_index);
-	queued -= SPA_MIN(queued, elapsed);
+	queued = queued_size(s, elapsed);
+	writable = writable_size(s, queued);
+	required = required_size(s);
 
-	writable = s->maxblock - SPA_MIN(queued, s->maxblock);
-	required = SPA_MIN(s->maxblock, s->buffer_attr.minreq);
+	pw_log_debug("stream %p: writable:%"PRIu64" queued:%"PRIu64" required:%"PRIu64, s,
+			writable, queued, required);
 
-	pw_log_debug("stream %p: %"PRIu64" minreq:%u maxblock:%zu", s,
-			writable, s->buffer_attr.minreq, s->maxblock);
 	if (writable < required)
 		writable = 0;
 
@@ -1567,6 +1617,7 @@ pa_operation* pa_stream_flush(pa_stream *s, pa_stream_success_cb_t cb, void *use
 			b->user_data = NULL;
 	}
 	s->ready_bytes = 0;
+	s->queued_bytes = 0;
 	s->timing_info.write_index = s->timing_info.read_index = 0;
 	s->have_time = false;
 	pa_operation_sync(o);
@@ -1665,10 +1716,7 @@ int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 
 	if (s->direction == PA_STREAM_PLAYBACK) {
 		res = pa_bytes_to_usec((uint64_t) i->read_index, &s->sample_spec);
-		if (res > i->sink_usec)
-			res -= i->sink_usec;
-		else
-			res = 0;
+		res -= SPA_MIN(res, i->sink_usec);
 	} else {
 		res = pa_bytes_to_usec((uint64_t) i->write_index, &s->sample_spec);
 		res += i->source_usec;
@@ -1684,9 +1732,9 @@ int pa_stream_get_time(pa_stream *s, pa_usec_t *r_usec)
 		*r_usec = res;
 
 	pw_log_trace("stream %p: now:%"PRIu64" diff:%"PRIi64
-			" write-index:%"PRIi64" read_index:%"PRIi64" res:%"PRIu64,
-			s, now, now - res, i->write_index, i->read_index, res);
-
+			" write-index:%"PRIi64" read_index:%"PRIi64" rw-diff:%"PRIi64" res:%"PRIu64,
+			s, now, now - res, i->write_index, i->read_index,
+			i->write_index - i->read_index, res);
 	return 0;
 }
 
@@ -1738,8 +1786,8 @@ int pa_stream_get_latency(pa_stream *s, pa_usec_t *r_usec, int *negative)
 	else
 		*r_usec = time_counter_diff(s, t, c, negative);
 
-	pw_log_trace("stream %p: now:%"PRIu64" stream:%"PRIu64
-			" res:%"PRIu64, s, t, c, *r_usec);
+	pw_log_trace("stream %p: now:%"PRIu64" stream:%"PRIu64" cindex:%"PRIi64
+			" res:%"PRIu64, s, t, c, cindex, *r_usec);
 
 	return 0;
 }
