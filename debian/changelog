@@ -1,3 +1,9 @@
+pipewire (0.3.13-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Simon McVittie <smcv@debian.org>  Tue, 03 Nov 2020 19:05:55 +0000
+
 pipewire (0.3.12-1) unstable; urgency=medium
 
   * Team upload
