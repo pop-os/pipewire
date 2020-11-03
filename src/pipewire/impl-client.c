@@ -36,6 +36,7 @@ struct impl {
 	struct spa_hook context_listener;
 	struct pw_array permissions;
 	struct spa_hook pool_listener;
+	unsigned int registered:1;
 };
 
 #define pw_client_resource(r,m,v,...)		pw_resource_call(r,struct pw_client_events,m,v,__VA_ARGS__)
@@ -137,12 +138,15 @@ static int update_properties(struct pw_impl_client *client, const struct spa_dic
 	struct pw_resource *resource;
 	int changed = 0;
 	uint32_t i;
+	const char *old;
 
         for (i = 0; i < dict->n_items; i++) {
 		if (filter && strstr(dict->items[i].key, "pipewire.") == dict->items[i].key &&
-		    pw_properties_get(client->properties, dict->items[i].key) != NULL) {
-			pw_log_warn(NAME" %p: refuse property update '%s' to '%s'",
-					client, dict->items[i].key, dict->items[i].value);
+		    (old = pw_properties_get(client->properties, dict->items[i].key)) != NULL &&
+		    (dict->items[i].value == NULL || strcmp(old, dict->items[i].value) != 0)) {
+			pw_log_warn(NAME" %p: refuse property update '%s' from '%s' to '%s'",
+					client, dict->items[i].key, old,
+					dict->items[i].value);
 			continue;
 		}
                 changed += pw_properties_set(client->properties, dict->items[i].key, dict->items[i].value);
@@ -167,12 +171,44 @@ static int update_properties(struct pw_impl_client *client, const struct spa_dic
 	return changed;
 }
 
+static void update_busy(struct pw_impl_client *client)
+{
+	struct pw_permission *def;
+	def = find_permission(client, PW_ID_CORE);
+	pw_impl_client_set_busy(client, (def->permissions & PW_PERM_R) ? false : true);
+}
+
+static int finish_register(struct pw_impl_client *client)
+{
+	struct impl *impl = SPA_CONTAINER_OF(client, struct impl, this);
+	const char *keys[] = {
+		PW_KEY_ACCESS,
+		PW_KEY_CLIENT_ACCESS,
+		PW_KEY_APP_NAME,
+		NULL
+	};
+	if (impl->registered)
+		return 0;
+
+	impl->registered = true;
+
+	pw_context_emit_check_access(client->context, client);
+	update_busy(client);
+
+	pw_global_update_keys(client->global, client->info.props, keys);
+	pw_global_register(client->global);
+
+	return 0;
+}
+
 static int client_update_properties(void *object, const struct spa_dict *props)
 {
 	struct pw_resource *resource = object;
 	struct resource_data *data = pw_resource_get_user_data(resource);
 	struct pw_impl_client *client = data->client;
-	return update_properties(client, props, true);
+	int res = update_properties(client, props, true);
+	finish_register(client);
+	return res;
 }
 
 static int client_get_permissions(void *object, uint32_t index, uint32_t num)
@@ -251,7 +287,7 @@ global_bind(void *_data, struct pw_impl_client *client, uint32_t permissions,
 	if (resource->id == 1)
 		client->client_resource = resource;
 
-	this->info.change_mask = ~0;
+	this->info.change_mask = PW_CLIENT_CHANGE_MASK_ALL;
 	pw_client_resource_info(resource, &this->info);
 	this->info.change_mask = 0;
 
@@ -307,13 +343,6 @@ static const struct pw_context_events context_events = {
 	PW_VERSION_CONTEXT_EVENTS,
 	.global_removed = context_global_removed,
 };
-
-static void update_busy(struct pw_impl_client *client)
-{
-	struct pw_permission *def;
-	def = find_permission(client, PW_ID_CORE);
-	pw_impl_client_set_busy(client, (def->permissions & PW_PERM_R) ? false : true);
-}
 
 /** Make a new client object
  *
@@ -386,10 +415,6 @@ struct pw_impl_client *pw_context_create_client(struct pw_impl_core *core,
 
 	this->info.props = &this->properties->dict;
 
-	pw_context_emit_check_access(this->context, this);
-
-	update_busy(this);
-
 	return this;
 
 error_clear_array:
@@ -428,7 +453,6 @@ int pw_impl_client_register(struct pw_impl_client *client,
 		PW_KEY_SEC_UID,
 		PW_KEY_SEC_GID,
 		PW_KEY_SEC_LABEL,
-		PW_KEY_ACCESS,
 		NULL
 	};
 
@@ -452,13 +476,11 @@ int pw_impl_client_register(struct pw_impl_client *client,
 	client->info.id = client->global->id;
 	pw_properties_setf(client->properties, PW_KEY_OBJECT_ID, "%d", client->info.id);
 	client->info.props = &client->properties->dict;
+	pw_global_add_listener(client->global, &client->global_listener, &global_events, client);
 
 	pw_global_update_keys(client->global, client->info.props, keys);
 
 	pw_impl_client_emit_initialized(client);
-
-	pw_global_add_listener(client->global, &client->global_listener, &global_events, client);
-	pw_global_register(client->global);
 
 	return 0;
 
@@ -585,7 +607,9 @@ const struct pw_client_info *pw_impl_client_get_info(struct pw_impl_client *clie
 SPA_EXPORT
 int pw_impl_client_update_properties(struct pw_impl_client *client, const struct spa_dict *dict)
 {
-	return update_properties(client, dict, false);
+	int res = update_properties(client, dict, false);
+	finish_register(client);
+	return res;
 }
 
 SPA_EXPORT

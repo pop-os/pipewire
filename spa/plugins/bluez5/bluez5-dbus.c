@@ -84,205 +84,36 @@ static inline void add_dict(struct spa_pod_builder *builder, const char *key, co
 	spa_pod_builder_string(builder, val);
 }
 
-static uint8_t a2dp_default_bitpool(struct spa_bt_monitor *monitor, uint8_t freq, uint8_t mode) {
-	/* These bitpool values were chosen based on the A2DP spec recommendation */
-	switch (freq) {
-	case SBC_SAMPLING_FREQ_16000:
-        case SBC_SAMPLING_FREQ_32000:
-		return 53;
-
-	case SBC_SAMPLING_FREQ_44100:
-		switch (mode) {
-		case SBC_CHANNEL_MODE_MONO:
-		case SBC_CHANNEL_MODE_DUAL_CHANNEL:
-			return 31;
-
-		case SBC_CHANNEL_MODE_STEREO:
-		case SBC_CHANNEL_MODE_JOINT_STEREO:
-			return 53;
-		}
-
-		spa_log_warn(monitor->log, "Invalid channel mode %u", mode);
-		return 53;
-	case SBC_SAMPLING_FREQ_48000:
-		switch (mode) {
-		case SBC_CHANNEL_MODE_MONO:
-		case SBC_CHANNEL_MODE_DUAL_CHANNEL:
-			return 29;
-
-		case SBC_CHANNEL_MODE_STEREO:
-		case SBC_CHANNEL_MODE_JOINT_STEREO:
-			return 51;
-		}
-
-		spa_log_warn(monitor->log, "Invalid channel mode %u", mode);
-		return 51;
-	}
-	spa_log_warn(monitor->log, "Invalid sampling freq %u", freq);
-	return 53;
-}
-
-static int select_configuration_sbc(struct spa_bt_monitor *monitor, void *capabilities, size_t size, void *config)
+static const struct a2dp_codec *a2dp_endpoint_to_codec(const char *endpoint)
 {
-	a2dp_sbc_t *cap, conf;
-	int bitpool;
+	const char *codec_name;
+	int i;
 
-	if (size < sizeof(conf)) {
-		spa_log_error(monitor->log, "Capabilities array has invalid size");
-		return -ENOSPC;
+	if (strstr(endpoint, A2DP_SINK_ENDPOINT "/") == endpoint)
+		codec_name = endpoint + strlen(A2DP_SINK_ENDPOINT "/");
+	else if (strstr(endpoint, A2DP_SOURCE_ENDPOINT "/") == endpoint)
+		codec_name = endpoint + strlen(A2DP_SOURCE_ENDPOINT "/");
+	else
+		return NULL;
+
+	for (i = 0; a2dp_codecs[i]; i++) {
+		const struct a2dp_codec *codec = a2dp_codecs[i];
+		if (strcmp(codec->name, codec_name) == 0)
+			return codec;
 	}
-	cap = capabilities;
-	conf = *cap;
-
-	if (conf.frequency & SBC_SAMPLING_FREQ_48000)
-		conf.frequency = SBC_SAMPLING_FREQ_48000;
-	else if (conf.frequency & SBC_SAMPLING_FREQ_44100)
-		conf.frequency = SBC_SAMPLING_FREQ_44100;
-	else if (conf.frequency & SBC_SAMPLING_FREQ_32000)
-		conf.frequency = SBC_SAMPLING_FREQ_32000;
-	else if (conf.frequency & SBC_SAMPLING_FREQ_16000)
-		conf.frequency = SBC_SAMPLING_FREQ_16000;
-	else {
-		spa_log_error(monitor->log, "No supported sampling frequencies: 0x%x", conf.frequency);
-		return -ENOTSUP;
-	}
-
-	if (conf.channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
-		conf.channel_mode = SBC_CHANNEL_MODE_JOINT_STEREO;
-	else if (conf.channel_mode & SBC_CHANNEL_MODE_STEREO)
-		conf.channel_mode = SBC_CHANNEL_MODE_STEREO;
-	else if (conf.channel_mode & SBC_CHANNEL_MODE_DUAL_CHANNEL)
-		conf.channel_mode = SBC_CHANNEL_MODE_DUAL_CHANNEL;
-	else if (conf.channel_mode & SBC_CHANNEL_MODE_MONO)
-		conf.channel_mode = SBC_CHANNEL_MODE_MONO;
-	else {
-		spa_log_error(monitor->log, "No supported channel modes: 0x%x", conf.channel_mode);
-		return -ENOTSUP;
-	}
-
-	if (conf.block_length & SBC_BLOCK_LENGTH_16)
-		conf.block_length = SBC_BLOCK_LENGTH_16;
-	else if (conf.block_length & SBC_BLOCK_LENGTH_12)
-		conf.block_length = SBC_BLOCK_LENGTH_12;
-	else if (conf.block_length & SBC_BLOCK_LENGTH_8)
-		conf.block_length = SBC_BLOCK_LENGTH_8;
-	else if (conf.block_length & SBC_BLOCK_LENGTH_4)
-		conf.block_length = SBC_BLOCK_LENGTH_4;
-	else {
-		spa_log_error(monitor->log, "No supported block lengths: 0x%x", conf.block_length);
-		return -ENOTSUP;
-	}
-
-	if (conf.subbands & SBC_SUBBANDS_8)
-		conf.subbands = SBC_SUBBANDS_8;
-	else if (conf.subbands & SBC_SUBBANDS_4)
-		conf.subbands = SBC_SUBBANDS_4;
-	else {
-		spa_log_error(monitor->log, "No supported subbands: 0x%x", conf.subbands);
-		return -ENOTSUP;
-	}
-
-	if (conf.allocation_method & SBC_ALLOCATION_LOUDNESS)
-		conf.allocation_method = SBC_ALLOCATION_LOUDNESS;
-	else if (conf.allocation_method & SBC_ALLOCATION_SNR)
-		conf.allocation_method = SBC_ALLOCATION_SNR;
-	else {
-		spa_log_error(monitor->log, "No supported allocation: 0x%x", conf.allocation_method);
-		return -ENOTSUP;
-	}
-
-	bitpool = a2dp_default_bitpool(monitor, conf.frequency, conf.channel_mode);
-
-	conf.min_bitpool = SPA_MAX(MIN_BITPOOL, conf.min_bitpool);
-	conf.max_bitpool = SPA_MIN(bitpool, conf.max_bitpool);
-	memcpy(config, &conf, size);
-
-	spa_log_debug(monitor->log, "SelectConfiguration(): %d %d %d %d ",
-			conf.frequency, conf.channel_mode, conf.min_bitpool, conf.max_bitpool);
-
-	return 0;
-}
-
-static int select_configuration_aac(struct spa_bt_monitor *monitor, void *capabilities, size_t size, void *config)
-{
-	a2dp_aac_t *cap, conf;
-	int freq;
-
-	if (size < sizeof(conf)) {
-		spa_log_error(monitor->log, "Capabilities array has invalid size");
-		return -ENOSPC;
-	}
-	cap = capabilities;
-	conf = *cap;
-
-	if (conf.object_type & AAC_OBJECT_TYPE_MPEG2_AAC_LC)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG2_AAC_LC;
-	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LC)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_LC;
-	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LTP)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_LTP;
-	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_SCA)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_SCA;
-	else {
-		spa_log_error(monitor->log, "No supported object type: 0x%x", conf.object_type);
-		return -ENOTSUP;
-	}
-
-	freq = AAC_GET_FREQUENCY(conf);
-	if (freq & AAC_SAMPLING_FREQ_48000)
-		freq = AAC_SAMPLING_FREQ_48000;
-	else if (freq & AAC_SAMPLING_FREQ_44100)
-		freq = AAC_SAMPLING_FREQ_44100;
-	else if (freq & AAC_SAMPLING_FREQ_64000)
-		freq = AAC_SAMPLING_FREQ_64000;
-	else if (freq & AAC_SAMPLING_FREQ_32000)
-		freq = AAC_SAMPLING_FREQ_32000;
-	else if (freq & AAC_SAMPLING_FREQ_88200)
-		freq = AAC_SAMPLING_FREQ_88200;
-	else if (freq & AAC_SAMPLING_FREQ_96000)
-		freq = AAC_SAMPLING_FREQ_96000;
-	else if (freq & AAC_SAMPLING_FREQ_24000)
-		freq = AAC_SAMPLING_FREQ_24000;
-	else if (freq & AAC_SAMPLING_FREQ_22050)
-		freq = AAC_SAMPLING_FREQ_22050;
-	else if (freq & AAC_SAMPLING_FREQ_16000)
-		freq = AAC_SAMPLING_FREQ_16000;
-	else if (freq & AAC_SAMPLING_FREQ_12000)
-		freq = AAC_SAMPLING_FREQ_12000;
-	else if (freq & AAC_SAMPLING_FREQ_11025)
-		freq = AAC_SAMPLING_FREQ_11025;
-	else if (freq & AAC_SAMPLING_FREQ_8000)
-		freq = AAC_SAMPLING_FREQ_8000;
-	else {
-		spa_log_error(monitor->log, "No supported sampling frequency: 0x%0x", freq);
-		return -ENOTSUP;
-	}
-	AAC_SET_FREQUENCY(conf, freq);
-
-	if (conf.channels & AAC_CHANNELS_2)
-		conf.channels = AAC_CHANNELS_2;
-	else if (conf.channels & AAC_CHANNELS_1)
-		conf.channels = AAC_CHANNELS_1;
-	else {
-		spa_log_error(monitor->log, "No supported channels: 0x%0x", conf.channels);
-		return -ENOTSUP;
-	}
-	memcpy(config, &conf, size);
-
-	spa_log_debug(monitor->log, "SelectConfiguration() %d %d %d", conf.object_type, freq, conf.channels);
-
-	return 0;
+	return NULL;
 }
 
 static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
 	struct spa_bt_monitor *monitor = userdata;
 	const char *path;
-	uint8_t *cap, config[16];
+	uint8_t *cap, config[A2DP_MAX_CAPS_SIZE];
 	uint8_t *pconf = (uint8_t *) config;
 	DBusMessage *r;
 	DBusError err;
 	int size, res;
+	const struct a2dp_codec *codec;
 
 	dbus_error_init(&err);
 
@@ -294,12 +125,12 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 		dbus_error_free(&err);
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
+	spa_log_info(monitor->log, "%p: select conf %d", monitor, size);
 
-	if (strstr(path, "/A2DP/SBC/") == path) {
-		res = select_configuration_sbc(monitor, cap, size, config);
-	} else if (strstr(path, "/A2DP/MPEG24/") == path) {
-		res = select_configuration_aac(monitor, cap, size, config);
-	} else
+	codec = a2dp_endpoint_to_codec(path);
+	if (codec != NULL)
+		res = codec->select_config(0, cap, size, NULL, config);
+	else
 		res = -ENOTSUP;
 
 	if (res < 0) {
@@ -308,6 +139,7 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		goto exit_send;
 	}
+	size = res;
 
 	if ((r = dbus_message_new_method_return(m)) == NULL)
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
@@ -1085,14 +917,22 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 		const char *path, DBusMessage *m, void *userdata)
 {
 	struct spa_bt_monitor *monitor = userdata;
-	const char *transport_path;
+	const char *transport_path, *endpoint;
 	DBusMessageIter it[2];
 	DBusMessage *r;
 	struct spa_bt_transport *transport;
 	bool is_new = false;
+	const struct a2dp_codec *codec;
 
 	if (!dbus_message_has_signature(m, "oa{sv}")) {
 		spa_log_warn(monitor->log, "invalid SetConfiguration() signature");
+		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+	}
+	endpoint = dbus_message_get_path(m);
+
+	codec = a2dp_endpoint_to_codec(endpoint);
+	if (codec == NULL) {
+		spa_log_warn(monitor->log, "unknown SetConfiguration() codec");
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
 
@@ -1112,6 +952,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 		spa_bt_transport_set_implementation(transport, &transport_impl, transport);
 	}
 	transport_update_props(transport, &it[1], NULL);
+	transport->a2dp_codec = codec;
 
 	if (transport->device == NULL) {
 		spa_log_warn(monitor->log, "no device found for transport");
@@ -1255,14 +1096,9 @@ static void register_endpoint_reply(DBusPendingCall *pending, void *user_data)
 }
 
 static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
-				  const char *path,
-				  const char *uuid,
-				  enum spa_bt_profile profile,
-				  uint16_t codec,
-				  const void *configuration,
-				  size_t configuration_size)
+		const char *path, const char *uuid,
+		const struct a2dp_codec *codec, const char *endpoint)
 {
-	const char *profile_path;
 	char *object_path, *str;
 	const DBusObjectPathVTable vtable_endpoint = {
 		.message_function = endpoint_handler,
@@ -1270,46 +1106,20 @@ static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
 	DBusMessage *m;
 	DBusMessageIter it[5];
 	DBusPendingCall *call;
+	uint8_t caps[A2DP_MAX_CAPS_SIZE];
+	uint8_t *pcaps = (uint8_t *) caps;
+	int caps_size;
+	uint16_t codec_id = codec->codec_id;
 
-	switch (profile) {
-	case SPA_BT_PROFILE_A2DP_SOURCE:
-		switch (codec) {
-		case A2DP_CODEC_SBC:
-			profile_path = "/A2DP/SBC/Source";
-			break;
-		case A2DP_CODEC_MPEG24:
-			/* We don't support MPEG24 for now */
-			return -ENOTSUP;
-			/* profile_path = "/A2DP/MPEG24/Source";
-			break; */
-		default:
-			return -ENOTSUP;
-		}
-		break;
-	case SPA_BT_PROFILE_A2DP_SINK:
-		switch (codec) {
-		case A2DP_CODEC_SBC:
-			profile_path = "/A2DP/SBC/Sink";
-			break;
+	caps_size = codec->fill_caps(0, caps);
+	if (caps_size < 0)
+		return caps_size;
 
-		case A2DP_CODEC_MPEG24:
-			/* We don't support MPEG24 for now */
-			return -ENOTSUP;
-			/* profile_path = "/A2DP/MPEG24/Sink";
-			break; */
-		default:
-			return -ENOTSUP;
-		}
-		break;
-	default:
-		return -ENOTSUP;
-	}
-
-	object_path = spa_aprintf("%s/%d", profile_path, monitor->count++);
+	object_path = spa_aprintf("%s/%s", endpoint, codec->name);
 	if (object_path == NULL)
 		return -errno;
 
-	spa_log_debug(monitor->log, "Registering endpoint: %s", object_path);
+	spa_log_info(monitor->log, "Registering endpoint: %s", object_path);
 
 	if (!dbus_connection_register_object_path(monitor->conn,
 						  object_path,
@@ -1340,7 +1150,7 @@ static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
 	str = "Codec";
 	dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 	dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "y", &it[3]);
-	dbus_message_iter_append_basic(&it[3], DBUS_TYPE_BYTE, &codec);
+	dbus_message_iter_append_basic(&it[3], DBUS_TYPE_BYTE, &codec_id);
 	dbus_message_iter_close_container(&it[2], &it[3]);
 	dbus_message_iter_close_container(&it[1], &it[2]);
 
@@ -1350,7 +1160,7 @@ static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
 	dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "ay", &it[3]);
 	dbus_message_iter_open_container(&it[3], DBUS_TYPE_ARRAY, "y", &it[4]);
 	dbus_message_iter_append_fixed_array (&it[4], DBUS_TYPE_BYTE,
-			&configuration, configuration_size);
+			&pcaps, caps_size);
 	dbus_message_iter_close_container(&it[3], &it[4]);
 	dbus_message_iter_close_container(&it[2], &it[3]);
 	dbus_message_iter_close_container(&it[1], &it[2]);
@@ -1367,31 +1177,19 @@ static int register_a2dp_endpoint(struct spa_bt_monitor *monitor,
 static int adapter_register_endpoints(struct spa_bt_adapter *a)
 {
 	struct spa_bt_monitor *monitor = a->monitor;
+	int i;
 
-	/* We don't support MPEG24 for now */
-	/*
-	register_a2dp_endpoint(monitor, a->path,
-			       SPA_BT_UUID_A2DP_SOURCE,
-			       SPA_BT_PROFILE_A2DP_SOURCE,
-			       A2DP_CODEC_MPEG24,
-			       &bluez_a2dp_aac, sizeof(bluez_a2dp_aac));
-	register_a2dp_endpoint(monitor, a->path,
-			       SPA_BT_UUID_A2DP_SINK,
-			       SPA_BT_PROFILE_A2DP_SINK,
-			       A2DP_CODEC_MPEG24,
-			       &bluez_a2dp_aac, sizeof(bluez_a2dp_aac));
-	*/
-
-	register_a2dp_endpoint(monitor, a->path,
-			       SPA_BT_UUID_A2DP_SOURCE,
-			       SPA_BT_PROFILE_A2DP_SOURCE,
-			       A2DP_CODEC_SBC,
-			       &bluez_a2dp_sbc, sizeof(bluez_a2dp_sbc));
-	register_a2dp_endpoint(monitor, a->path,
-			       SPA_BT_UUID_A2DP_SINK,
-			       SPA_BT_PROFILE_A2DP_SINK,
-			       A2DP_CODEC_SBC,
-			       &bluez_a2dp_sbc, sizeof(bluez_a2dp_sbc));
+	for (i = 0; a2dp_codecs[i]; i++) {
+		const struct a2dp_codec *codec = a2dp_codecs[i];
+		register_a2dp_endpoint(monitor, a->path,
+				SPA_BT_UUID_A2DP_SOURCE,
+				codec,
+				A2DP_SOURCE_ENDPOINT);
+		register_a2dp_endpoint(monitor, a->path,
+				SPA_BT_UUID_A2DP_SINK,
+				codec,
+				A2DP_SINK_ENDPOINT);
+	}
 	return 0;
 }
 

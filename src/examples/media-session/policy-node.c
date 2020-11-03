@@ -97,6 +97,8 @@ struct node {
 	unsigned int configured:1;
 	unsigned int dont_remix:1;
 	unsigned int monitor:1;
+	unsigned int moving:1;
+	unsigned int capture_sink:1;
 };
 
 static bool find_format(struct node *node)
@@ -329,6 +331,41 @@ static void destroy_node(struct impl *impl, struct node *node)
 	sm_object_remove_data((struct sm_object*)node->obj, SESSION_KEY);
 }
 
+static struct node *find_node_by_id(struct impl *impl, uint32_t id)
+{
+	struct node *node;
+	spa_list_for_each(node, &impl->node_list, link) {
+		if (node->id == id)
+			return node;
+	}
+	return NULL;
+}
+
+static const char *get_device_name(struct node *node)
+{
+	if (node->type != NODE_TYPE_DEVICE ||
+	    node->obj->obj.props == NULL)
+		return NULL;
+	return pw_properties_get(node->obj->obj.props, PW_KEY_NODE_NAME);
+}
+
+static uint32_t find_device_for_name(struct impl *impl, const char *name)
+{
+	struct node *node;
+	const char *str;
+	uint32_t id = atoi(name);
+
+	spa_list_for_each(node, &impl->node_list, link) {
+		if (id == node->obj->obj.id)
+			return id;
+		if ((str = get_device_name(node)) == NULL)
+			continue;
+		if (strcmp(str, name) == 0)
+			return node->obj->obj.id;
+	}
+	return SPA_ID_INVALID;
+}
+
 static void session_create(void *data, struct sm_object *object)
 {
 	struct impl *impl = data;
@@ -401,7 +438,8 @@ static int find_node(void *data, struct node *node)
 		return 0;
 	}
 
-	if (node->direction == find->target->direction) {
+	if ((find->target->capture_sink && node->direction != PW_DIRECTION_INPUT) ||
+	    (!find->target->capture_sink && node->direction == find->target->direction)) {
 		pw_log_debug(".. same direction");
 		return 0;
 	}
@@ -514,14 +552,19 @@ static int rescan_node(struct impl *impl, struct node *n)
 {
 	struct spa_dict *props;
 	const char *str;
-	bool exclusive, reconnect;
+	bool exclusive, reconnect, autoconnect;
 	struct find_data find;
 	struct pw_node_info *info;
 	struct node *peer;
 	struct sm_object *obj;
+	uint32_t path_id;
 
 	if (!n->active) {
 		pw_log_debug(NAME " %p: node %d is not active", impl, n->id);
+		return 0;
+	}
+	if (n->moving) {
+		pw_log_debug(NAME " %p: node %d is moving", impl, n->id);
 		return 0;
 	}
 
@@ -543,14 +586,25 @@ static int rescan_node(struct impl *impl, struct node *n)
 	info = n->obj->info;
 	props = info->props;
 
-        if ((str = spa_dict_lookup(props, PW_KEY_STREAM_DONT_REMIX)) != NULL)
+	if ((str = spa_dict_lookup(props, PW_KEY_STREAM_DONT_REMIX)) != NULL)
 		n->dont_remix = pw_properties_parse_bool(str);
 
-        if ((str = spa_dict_lookup(props, PW_KEY_STREAM_MONITOR)) != NULL)
+	if ((str = spa_dict_lookup(props, PW_KEY_STREAM_MONITOR)) != NULL)
 		n->monitor = pw_properties_parse_bool(str);
 
-        str = spa_dict_lookup(props, PW_KEY_NODE_AUTOCONNECT);
-        if (str == NULL || !pw_properties_parse_bool(str)) {
+	if (n->direction == PW_DIRECTION_INPUT &&
+	    (str = spa_dict_lookup(props, PW_KEY_STREAM_CAPTURE_SINK)) != NULL)
+		n->capture_sink = pw_properties_parse_bool(str);
+
+	autoconnect = false;
+	if ((str = spa_dict_lookup(props, PW_KEY_NODE_AUTOCONNECT)) != NULL)
+		autoconnect = pw_properties_parse_bool(str);
+
+	if ((str = spa_dict_lookup(props, PW_KEY_DEVICE_API)) != NULL &&
+	    strcmp(str, "bluez5") == 0)
+		autoconnect = true;
+
+	if (!autoconnect) {
 		pw_log_debug(NAME" %p: node %d does not need autoconnect", impl, n->id);
 		configure_node(n, NULL, false);
 		return 0;
@@ -561,28 +615,30 @@ static int rescan_node(struct impl *impl, struct node *n)
 		return 0;
 	}
 
+	str = spa_dict_lookup(props, PW_KEY_NODE_EXCLUSIVE);
+	exclusive = str ? pw_properties_parse_bool(str) : false;
+
+	pw_log_debug(NAME " %p: exclusive:%d", impl, exclusive);
+
 	spa_zero(find);
-
-	if ((str = spa_dict_lookup(props, PW_KEY_NODE_EXCLUSIVE)) != NULL)
-		exclusive = pw_properties_parse_bool(str);
-	else
-		exclusive = false;
-
 	find.impl = impl;
 	find.target = n;
 	find.exclusive = exclusive;
 
-	pw_log_debug(NAME " %p: exclusive:%d", impl, exclusive);
-
 	str = spa_dict_lookup(props, PW_KEY_NODE_DONT_RECONNECT);
 	reconnect = str ? !pw_properties_parse_bool(str) : true;
 
-	str = spa_dict_lookup(props, PW_KEY_NODE_TARGET);
-	pw_log_info("trying to link node %d exclusive:%d reconnect:%d target:%s", n->id,
-			exclusive, reconnect, str);
+	/* we always honour the target node asked for by the client */
+	path_id = SPA_ID_INVALID;
+	if ((str = spa_dict_lookup(props, PW_KEY_NODE_TARGET)) != NULL)
+		path_id = find_device_for_name(impl, str);
+	if (path_id == SPA_ID_INVALID && n->obj->target_node != NULL)
+		path_id = find_device_for_name(impl, n->obj->target_node);
 
-	if (str != NULL) {
-		uint32_t path_id = atoi(str);
+	pw_log_info("trying to link node %d exclusive:%d reconnect:%d target:%d", n->id,
+			exclusive, reconnect, path_id);
+
+	if (path_id != SPA_ID_INVALID) {
 		pw_log_debug(NAME " %p: target:%d", impl, path_id);
 
 		if ((obj = sm_media_session_find_object(impl->session, path_id)) != NULL) {
@@ -598,8 +654,7 @@ static int rescan_node(struct impl *impl, struct node *n)
 		pw_log_warn("node %d target:%d not found, find fallback:%d", n->id,
 				path_id, reconnect);
 	}
-
-	if (str == NULL || reconnect) {
+	if (path_id == SPA_ID_INVALID || reconnect) {
 		spa_list_for_each(peer, &impl->node_list, link)
 			find_node(&find, peer);
 	}
@@ -680,14 +735,15 @@ static const struct sm_media_session_events session_events = {
 	.destroy = session_destroy,
 };
 
-static struct node *find_node_by_id(struct impl *impl, uint32_t id)
+static int do_move_node(struct node *n, struct node *src, struct node *dst)
 {
-	struct node *node;
-	spa_list_for_each(node, &impl->node_list, link) {
-		if (node->id == id)
-			return node;
-	}
-	return NULL;
+	n->moving = true;
+	if (src)
+		unlink_nodes(n, src);
+	if (dst)
+		link_nodes(n, dst);
+	n->moving = false;
+	return 0;
 }
 
 static int move_node(struct impl *impl, uint32_t source, uint32_t target)
@@ -723,8 +779,7 @@ static int move_node(struct impl *impl, uint32_t source, uint32_t target)
 		    pw_properties_parse_bool(str))
 			continue;
 
-		unlink_nodes(n, src_node);
-		link_nodes(n, dst_node);
+		do_move_node(n, src_node, dst_node);
 	}
 	return 0;
 }
@@ -733,8 +788,6 @@ static int handle_move(struct impl *impl, struct node *src_node, struct node *ds
 {
 	const char *str;
 	struct pw_node_info *info;
-
-
 
 	if (src_node->peer == dst_node)
 		return 0;
@@ -753,10 +806,11 @@ static int handle_move(struct impl *impl, struct node *src_node, struct node *ds
 			src_node->peer ? src_node->peer->id : SPA_ID_INVALID,
 			dst_node->id);
 
-	if (src_node->peer)
-		unlink_nodes(src_node, src_node->peer);
-	link_nodes(src_node, dst_node);
-	return 0;
+	free(src_node->obj->target_node);
+	str = get_device_name(dst_node);
+	src_node->obj->target_node = str ? strdup(str) : NULL;
+
+	return do_move_node(src_node, src_node->peer, dst_node);
 }
 
 static int metadata_property(void *object, uint32_t subject,

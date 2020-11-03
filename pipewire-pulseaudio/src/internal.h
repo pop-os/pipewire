@@ -264,6 +264,7 @@ struct global {
 	int init:1;
 	int sync:1;
 
+	int changed;
 	void *info;
 	struct global_info *ginfo;
 
@@ -328,9 +329,6 @@ struct global {
 		struct {
 			pa_client_info info;
 		} client_info;
-		struct {
-			struct pw_array metadata;
-		} metadata_info;
 	};
 };
 
@@ -345,6 +343,8 @@ struct pa_context {
 	int refcount;
 	uint32_t client_index;
 
+	pa_io_event *io;
+	bool fallback_loop;
 	struct pw_loop *loop;
 	struct pw_context *context;
 
@@ -503,6 +503,14 @@ struct pa_operation
 	void *state_userdata;
 };
 
+bool pa_mainloop_api_is_our_api(pa_mainloop_api *api);
+
+#define PA_TIMEVAL_RTCLOCK ((time_t) (1LU << 30))
+struct timeval* pa_rtclock_from_wallclock(struct timeval *tv);
+struct timeval* pa_rtclock_to_wallclock(struct timeval *tv);
+struct timeval* pa_timeval_rtstore(struct timeval *tv, pa_usec_t v, bool rtclock);
+
+bool pa_endswith(const char *s, const char *sfx);
 
 pa_operation *pa_operation_new(pa_context *c, pa_stream *s, pa_operation_cb_t cb, size_t userdata_size);
 void pa_operation_done(pa_operation *o);

@@ -42,82 +42,6 @@ struct data {
 	bool quit;
 };
 
-static const char *str_available(enum acp_available status)
-{
-	switch (status) {
-	case ACP_AVAILABLE_UNKNOWN:
-		return "unknown";
-	case ACP_AVAILABLE_NO:
-		return "no";
-	case ACP_AVAILABLE_YES:
-		return "yes";
-	}
-	return "error";
-}
-
-static const char *str_direction(enum acp_direction direction)
-{
-	switch (direction) {
-	case ACP_DIRECTION_CAPTURE:
-		return "capture";
-	case ACP_DIRECTION_PLAYBACK:
-		return "playback";
-	}
-	return "error";
-}
-static const char *str_port_type(enum acp_port_type type)
-{
-	switch (type) {
-	case ACP_PORT_TYPE_UNKNOWN:
-		return "unknown";
-	case ACP_PORT_TYPE_AUX:
-		return "aux";
-	case ACP_PORT_TYPE_SPEAKER:
-		return "speaker";
-	case ACP_PORT_TYPE_HEADPHONES:
-		return "headphones";
-	case ACP_PORT_TYPE_LINE:
-		return "line";
-	case ACP_PORT_TYPE_MIC:
-		return "mic";
-	case ACP_PORT_TYPE_HEADSET:
-		return "headset";
-	case ACP_PORT_TYPE_HANDSET:
-		return "handset";
-	case ACP_PORT_TYPE_EARPIECE:
-		return "earpiece";
-	case ACP_PORT_TYPE_SPDIF:
-		return "spdif";
-	case ACP_PORT_TYPE_HDMI:
-		return "hdmi";
-	case ACP_PORT_TYPE_TV:
-		return "tv";
-	case ACP_PORT_TYPE_RADIO:
-		return "radio";
-	case ACP_PORT_TYPE_VIDEO:
-		return "video";
-	case ACP_PORT_TYPE_USB:
-		return "usb";
-	case ACP_PORT_TYPE_BLUETOOTH:
-		return "bluetooth";
-	case ACP_PORT_TYPE_PORTABLE:
-		return "portable";
-	case ACP_PORT_TYPE_HANDSFREE:
-		return "handsfree";
-	case ACP_PORT_TYPE_CAR:
-		return "car";
-	case ACP_PORT_TYPE_HIFI:
-		return "hifi";
-	case ACP_PORT_TYPE_PHONE:
-		return "phone";
-	case ACP_PORT_TYPE_NETWORK:
-		return "network";
-	case ACP_PORT_TYPE_ANALOG:
-		return "analog";
-	}
-	return "error";
-}
-
 static void acp_debug_dict(struct acp_dict *dict, int indent)
 {
 	const struct acp_dict_item *it;
@@ -182,7 +106,7 @@ static void card_profile_available(void *data, uint32_t index,
 	struct data *d = data;
 	struct acp_card *card = d->card;
 	struct acp_card_profile *p = card->profiles[index];
-	fprintf(stderr, "*** profile %s available %s\n", p->name, str_available(available));
+	fprintf(stderr, "*** profile %s available %s\n", p->name, acp_available_str(available));
 }
 
 static void card_port_available(void *data, uint32_t index,
@@ -191,7 +115,7 @@ static void card_port_available(void *data, uint32_t index,
 	struct data *d = data;
 	struct acp_card *card = d->card;
 	struct acp_port *p = card->ports[index];
-	fprintf(stderr, "*** port %s available %s\n", p->name, str_available(available));
+	fprintf(stderr, "*** port %s available %s\n", p->name, acp_available_str(available));
 }
 
 static void on_volume_changed(void *data, struct acp_device *dev)
@@ -255,11 +179,10 @@ static void print_port(struct data *data, struct acp_port *p, int indent, int le
 {
 	uint32_t i;
 
-	fprintf(stderr, "%*s  %c port %u: name:\"%s\" direction:%s prio:%d group:%s type:%s (available: %s)\n",
+	fprintf(stderr, "%*s  %c port %u: name:\"%s\" direction:%s prio:%d (available: %s)\n",
 			indent, "", p->flags & ACP_PORT_ACTIVE ? '*' : ' ', p->index,
-			p->name, str_direction(p->direction), p->priority,
-			p->availability_group, str_port_type(p->type),
-			str_available(p->available));
+			p->name, acp_direction_str(p->direction), p->priority,
+			acp_available_str(p->available));
 	if (level > 0) {
 		acp_debug_dict(&p->props, indent + 8);
 	}
@@ -284,7 +207,7 @@ static void print_device(struct data *data, struct acp_device *d, int indent, in
 
 	fprintf(stderr, "%*s  %c device %u: direction:%s name:\"%s\" prio:%d flags:%08x devices: ",
 			indent, "", d->flags & ACP_DEVICE_ACTIVE ? '*' : ' ', d->index,
-			str_direction(d->direction), d->name, d->priority, d->flags);
+			acp_direction_str(d->direction), d->name, d->priority, d->flags);
 	for (s = d->device_strings; *s; s++)
 		fprintf(stderr, "\"%s\" ", *s);
 	fprintf(stderr, "\n");
@@ -308,7 +231,7 @@ static void print_profile(struct data *data, struct acp_card_profile *p, int ind
 
 	fprintf(stderr, "%*s  %c profile %u: name:\"%s\" prio:%d (available: %s)\n",
 			indent, "", p->flags & ACP_PROFILE_ACTIVE ? '*' : ' ', p->index,
-			p->name, p->priority, str_available(p->available));
+			p->name, p->priority, acp_available_str(p->available));
 	if (level > 0) {
 		fprintf(stderr, "%*sdescription:\"%s\"\n",
 				indent+8, "", p->description);

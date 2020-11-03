@@ -53,13 +53,15 @@
 #include "rtp.h"
 #include "a2dp-codecs.h"
 
+struct codec;
+
 struct props {
 	uint32_t min_latency;
 	uint32_t max_latency;
 };
 
 #define FILL_FRAMES 2
-#define MAX_FRAME_COUNT 32
+#define MAX_FRAME_COUNT 16
 #define MAX_BUFFERS 32
 
 struct buffer {
@@ -88,7 +90,6 @@ struct port {
 	struct spa_list ready;
 
 	size_t ready_offset;
-	unsigned int need_data:1;
 };
 
 struct impl {
@@ -122,34 +123,24 @@ struct impl {
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
 
-	sbc_t sbc;
-	int read_size;
-	int write_size;
-	int write_samples;
-	int frame_length;
-	int codesize;
+	uint64_t current_time;
+	uint64_t next_time;
+	uint64_t last_error;
+
+	const struct a2dp_codec *codec;
+	void *codec_data;
+	struct spa_audio_info codec_format;
+
+	int block_size;
+	int num_blocks;
 	uint8_t buffer[4096];
 	int buffer_used;
 	int frame_count;
 	uint16_t seqnum;
 	uint32_t timestamp;
+	uint64_t sample_count;
 	uint8_t tmp_buffer[512];
 	int tmp_buffer_used;
-
-	int min_bitpool;
-	int max_bitpool;
-
-	uint64_t last_time;
-	uint64_t last_error;
-
-	struct timespec now;
-	uint64_t start_time;
-	uint64_t sample_count;
-	uint64_t sample_time;
-	uint64_t last_ticks;
-	uint64_t last_monotonic;
-
-	uint64_t underrun;
 };
 
 #define NAME "a2dp-sink"
@@ -242,24 +233,25 @@ static int impl_node_enum_params(void *object, int seq,
 	return 0;
 }
 
-static int set_timers(struct impl *this)
+static int set_timeout(struct impl *this, uint64_t time)
 {
 	struct itimerspec ts;
-	int res;
-
-	ts.it_value.tv_sec = 0;
-	if (this->following) {
-		ts.it_value.tv_nsec = 0;
-	} else {
-		ts.it_value.tv_nsec = 1;
-	}
+	ts.it_value.tv_sec = time / SPA_NSEC_PER_SEC;
+	ts.it_value.tv_nsec = time % SPA_NSEC_PER_SEC;
 	ts.it_interval.tv_sec = 0;
 	ts.it_interval.tv_nsec = 0;
+	return spa_system_timerfd_settime(this->data_system,
+			this->timerfd, SPA_FD_TIMER_ABSTIME, &ts, NULL);
+}
 
-	res = spa_system_timerfd_settime(this->data_system, this->timerfd, 0, &ts, NULL);
-	this->source.mask = SPA_IO_IN;
-	spa_loop_update_source(this->data_loop, &this->source);
-	return res;
+static int set_timers(struct impl *this)
+{
+	struct timespec now;
+
+	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
+	this->next_time = SPA_TIMESPEC_TO_NSEC(&now);
+
+	return set_timeout(this, this->following ? 0 : this->next_time);
 }
 
 static int do_reassign_follower(struct spa_loop *loop,
@@ -335,61 +327,29 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	return 0;
 }
 
-static inline void calc_timeout(size_t target, size_t current,
-				size_t rate, struct timespec *now,
-				struct timespec *ts)
-{
-	ts->tv_sec = now->tv_sec;
-	ts->tv_nsec = now->tv_nsec;
-	if (target > current)
-		ts->tv_nsec += ((target - current) * SPA_NSEC_PER_SEC) / rate;
-
-	while (ts->tv_nsec >= SPA_NSEC_PER_SEC) {
-		ts->tv_sec++;
-		ts->tv_nsec -= SPA_NSEC_PER_SEC;
-	}
-}
-
 static int reset_buffer(struct impl *this)
 {
-	this->buffer_used = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
 	this->frame_count = 0;
+	this->buffer_used = this->codec->start_encode(this->codec_data,
+			this->buffer, sizeof(this->buffer),
+			this->seqnum++, this->timestamp);
+	this->timestamp = this->sample_count;
 	return 0;
 }
 
 static int send_buffer(struct impl *this)
 {
-	int val, written;
-	struct rtp_header *header;
-	struct rtp_payload *payload;
+	int written;
 
-	spa_return_val_if_fail(this->transport, -EIO);
+	spa_log_trace(this->log, NAME " %p: send %d %u %u %u",
+			this, this->frame_count, this->seqnum, this->timestamp, this->buffer_used);
 
-	header = (struct rtp_header *)this->buffer;
-	payload = (struct rtp_payload *)(this->buffer + sizeof(struct rtp_header));
-	memset(this->buffer, 0, sizeof(struct rtp_header)+sizeof(struct rtp_payload));
+	written = send(this->transport->fd, this->buffer, this->buffer_used, MSG_DONTWAIT | MSG_NOSIGNAL);
+	reset_buffer(this);
 
-	payload->frame_count = this->frame_count;
-	header->v = 2;
-	header->pt = 1;
-	header->sequence_number = htons(this->seqnum);
-	header->timestamp = htonl(this->timestamp);
-	header->ssrc = htonl(1);
-
-	ioctl(this->transport->fd, TIOCOUTQ, &val);
-
-	spa_log_trace(this->log, NAME " %p: send %d %u %u %u %"PRIu64" %d",
-			this, this->frame_count, this->seqnum, this->timestamp, this->buffer_used,
-			this->sample_time, val);
-
-	written = write(this->transport->fd, this->buffer, this->buffer_used);
-	spa_log_trace(this->log, NAME " %p: send %d", this, written);
+	spa_log_debug(this->log, NAME " %p: send %d: %m", this, written);
 	if (written < 0)
 		return -errno;
-
-	this->timestamp = this->sample_count;
-	this->seqnum++;
-	reset_buffer(this);
 
 	return written;
 }
@@ -403,33 +363,33 @@ static int encode_buffer(struct impl *this, const void *data, int size)
 	int from_size = size;
 
 	spa_log_trace(this->log, NAME " %p: encode %d used %d, %d %d %d/%d",
-			this, size, this->buffer_used, port->frame_size, this->write_size,
+			this, size, this->buffer_used, port->frame_size, this->block_size,
 			this->frame_count, MAX_FRAME_COUNT);
 
 	if (this->frame_count > MAX_FRAME_COUNT)
 		return -ENOSPC;
 
-	if (size < this->codesize - this->tmp_buffer_used) {
+	if (size < this->block_size - this->tmp_buffer_used) {
 		memcpy(this->tmp_buffer + this->tmp_buffer_used, data, size);
 		this->tmp_buffer_used += size;
 		return size;
 	} else if (this->tmp_buffer_used > 0) {
-		memcpy(this->tmp_buffer + this->tmp_buffer_used, data, this->codesize - this->tmp_buffer_used);
+		memcpy(this->tmp_buffer + this->tmp_buffer_used, data, this->block_size - this->tmp_buffer_used);
 		from_data = this->tmp_buffer;
-		from_size = this->codesize;
-		this->tmp_buffer_used = this->codesize - this->tmp_buffer_used;
+		from_size = this->block_size;
+		this->tmp_buffer_used = this->block_size - this->tmp_buffer_used;
 	}
 
-	processed = sbc_encode(&this->sbc, from_data, from_size,
-			       this->buffer + this->buffer_used,
-			       this->write_size - this->buffer_used,
-			       &out_encoded);
+	processed = this->codec->encode(this->codec_data,
+				from_data, from_size,
+				this->buffer + this->buffer_used,
+				sizeof(this->buffer) - this->buffer_used,
+				&out_encoded);
 	if (processed < 0)
 		return processed;
 
 	this->sample_count += processed / port->frame_size;
-	this->sample_time += processed / port->frame_size;
-	this->frame_count += processed / this->codesize;
+	this->frame_count += processed / this->block_size;
 	this->buffer_used += out_encoded;
 
 	spa_log_trace(this->log, NAME " %p: processed %d %zd used %d",
@@ -439,51 +399,21 @@ static int encode_buffer(struct impl *this, const void *data, int size)
 		processed = this->tmp_buffer_used;
 		this->tmp_buffer_used = 0;
 	}
-
 	return processed;
 }
 
 static bool need_flush(struct impl *this)
 {
-	return (this->buffer_used + this->frame_length > this->write_size) ||
-		this->frame_count > MAX_FRAME_COUNT;
+	return (this->frame_count + 1 >= this->num_blocks);
 }
 
 static int flush_buffer(struct impl *this, bool force)
 {
-	spa_log_trace(this->log, NAME" %p: %d %d %d", this,
-			this->buffer_used, this->frame_length, this->write_size);
+	spa_log_trace(this->log, NAME" %p: used:%d num_blocks:%d block_size%d", this,
+			this->buffer_used, this->num_blocks, this->block_size);
 
 	if (force || need_flush(this))
 		return send_buffer(this);
-
-	return 0;
-}
-
-static int fill_socket(struct impl *this, uint64_t now_time)
-{
-	static const uint8_t zero_buffer[1024 * 4] = { 0, };
-	int frames = 0;
-
-	while (frames < FILL_FRAMES) {
-		int processed, written;
-
-		processed = encode_buffer(this, zero_buffer, sizeof(zero_buffer));
-		if (processed < 0)
-			return processed;
-		if (processed == 0)
-			break;
-
-		written = flush_buffer(this, false);
-		if (written == -EAGAIN)
-			break;
-		else if (written < 0)
-			return written;
-		else if (written > 0)
-			frames++;
-	}
-	reset_buffer(this);
-	this->sample_count = this->timestamp;
 
 	return 0;
 }
@@ -505,57 +435,18 @@ static int add_data(struct impl *this, const void *data, int size)
 	return total;
 }
 
-static int set_bitpool(struct impl *this, int bitpool)
+static void enable_flush(struct impl *this, bool enabled)
 {
-	struct port *port = &this->port;
-
-	spa_return_val_if_fail(this->transport, -EIO);
-
-	if (bitpool < this->min_bitpool)
-		bitpool = this->min_bitpool;
-	if (bitpool > this->max_bitpool)
-		bitpool = this->max_bitpool;
-
-	if (this->sbc.bitpool == bitpool)
-		return 0;
-
-	this->sbc.bitpool = bitpool;
-
-	spa_log_debug(this->log, NAME" %p: set bitpool %d", this, this->sbc.bitpool);
-
-	this->codesize = sbc_get_codesize(&this->sbc);
-	/* make sure there's enough space in this->tmp_buffer */
-	spa_assert(this->codesize <= 512);
-
-	this->frame_length = sbc_get_frame_length(&this->sbc);
-
-	this->read_size = this->transport->read_mtu
-		- sizeof(struct rtp_header) - sizeof(struct rtp_payload) - 24;
-	this->write_size = this->transport->write_mtu
-		- sizeof(struct rtp_header) - sizeof(struct rtp_payload) - 24;
-	this->write_samples = (this->write_size / this->frame_length) *
-		(this->codesize / port->frame_size);
-
-	return 0;
-}
-
-static int reduce_bitpool(struct impl *this)
-{
-	return set_bitpool(this, this->sbc.bitpool - 2);
-}
-
-static int increase_bitpool(struct impl *this)
-{
-	return set_bitpool(this, this->sbc.bitpool + 1);
+	if (SPA_FLAG_IS_SET(this->flush_source.mask, SPA_IO_OUT) != enabled) {
+		SPA_FLAG_UPDATE(this->flush_source.mask, SPA_IO_OUT, enabled);
+		spa_loop_update_source(this->data_loop, &this->flush_source);
+	}
 }
 
 static int flush_data(struct impl *this, uint64_t now_time)
 {
 	int written;
 	uint32_t total_frames;
-	uint64_t elapsed;
-	int64_t queued;
-	struct itimerspec ts;
 	struct port *port = &this->port;
 
 	total_frames = 0;
@@ -587,15 +478,11 @@ again:
 		if (written > 0 && l1 > 0)
 			written += add_data(this, src, l1);
 		if (written <= 0) {
-		        /* only request new data when the current buffer will be fully processed in the next iteration */
-			if (port->ready_offset + (this->frame_count * this->codesize) >= d[0].chunk->size)
-			        port->need_data = true;
-
 			if (written < 0 && written != -ENOSPC) {
 				spa_list_remove(&b->link);
 				SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
 				this->port.io->buffer_id = b->id;
-				spa_log_trace(this->log, NAME " %p: error %s, reuse buffer %u",
+				spa_log_warn(this->log, NAME " %p: error %s, reuse buffer %u",
 						this, spa_strerror(written), b->id);
 				spa_node_call_reuse_buffer(&this->callbacks, 0, b->id);
 				port->ready_offset = 0;
@@ -621,16 +508,14 @@ again:
 		spa_log_trace(this->log, NAME " %p: written %u frames", this, total_frames);
 	}
 
-	written = flush_buffer(this, false);
+	written = flush_buffer(this, true);
 	if (written == -EAGAIN) {
-		spa_log_trace(this->log, NAME" %p: delay flush %"PRIu64, this, this->sample_time);
-		if ((this->flush_source.mask & SPA_IO_OUT) == 0) {
-			this->flush_source.mask = SPA_IO_OUT;
-			spa_loop_update_source(this->data_loop, &this->flush_source);
-			this->source.mask = 0;
-			spa_loop_update_source(this->data_loop, &this->source);
-			return 0;
+		spa_log_trace(this->log, NAME" %p: delay flush", this);
+		if (now_time - this->last_error > SPA_NSEC_PER_SEC / 2) {
+			this->codec->reduce_bitpool(this->codec_data);
+			this->last_error = now_time;
 		}
+		enable_flush(this, true);
 	}
 	else if (written < 0) {
 		spa_log_trace(this->log, NAME" %p: error flushing %s", this,
@@ -638,62 +523,14 @@ again:
 		return written;
 	}
 	else if (written > 0) {
-		if (now_time - this->last_error > SPA_NSEC_PER_SEC * 3) {
-			increase_bitpool(this);
+		if (now_time - this->last_error > SPA_NSEC_PER_SEC) {
+			this->codec->increase_bitpool(this->codec_data);
 			this->last_error = now_time;
 		}
 		if (!spa_list_is_empty(&port->ready))
 			goto again;
-	}
 
-	this->flush_source.mask = 0;
-	spa_loop_update_source(this->data_loop, &this->flush_source);
-
-	if (now_time > this->start_time)
-		elapsed = now_time - this->start_time;
-	else
-		elapsed = 0;
-
-	elapsed = elapsed * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC;
-
-	queued = this->sample_time - elapsed;
-
-	spa_log_trace(this->log, NAME" %p: %"PRIu64" %"PRIi64" %"PRIu64" %"PRIu64" %d", this,
-			now_time, queued, this->sample_time, elapsed, this->write_samples);
-
-	if (!this->following) {
-		if (queued < FILL_FRAMES * this->write_samples) {
-			queued = (FILL_FRAMES + 1) * this->write_samples;
-			if (this->sample_time < elapsed) {
-				this->sample_time = queued;
-				this->start_time = now_time;
-			}
-			if (!spa_list_is_empty(&port->ready) &&
-			    now_time - this->last_error > SPA_NSEC_PER_SEC / 2) {
-				reduce_bitpool(this);
-				this->last_error = now_time;
-			}
-		}
-		calc_timeout(queued,
-			     FILL_FRAMES * this->write_samples,
-			     port->current_format.info.raw.rate,
-			     &this->now, &ts.it_value);
-		ts.it_interval.tv_sec = 0;
-		ts.it_interval.tv_nsec = 0;
-		spa_system_timerfd_settime(this->data_system, this->timerfd, SPA_FD_TIMER_ABSTIME, &ts, NULL);
-		this->source.mask = SPA_IO_IN;
-		spa_loop_update_source(this->data_loop, &this->source);
-
-		if (this->clock) {
-			this->clock->nsec = now_time;
-			this->clock->position = this->sample_count;
-			this->clock->delay = queued;
-			this->clock->rate_diff = 1.0f;
-			this->clock->next_nsec = SPA_TIMESPEC_TO_NSEC(&ts.it_value);
-		}
-	} else {
-		this->start_time = now_time;
-		this->sample_time = 0;
+		enable_flush(this, false);
 	}
 	return 0;
 }
@@ -701,139 +538,60 @@ again:
 static void a2dp_on_flush(struct spa_source *source)
 {
 	struct impl *this = source->data;
-	uint64_t now_time;
 
 	spa_log_trace(this->log, NAME" %p: flushing", this);
 
-	if ((source->rmask & SPA_IO_OUT) == 0) {
+	if (!SPA_FLAG_IS_SET(source->rmask, SPA_IO_OUT)) {
 		spa_log_warn(this->log, NAME" %p: error %d", this, source->rmask);
 		if (this->flush_source.loop)
 			spa_loop_remove_source(this->data_loop, &this->flush_source);
-		this->source.mask = 0;
-		spa_loop_update_source(this->data_loop, &this->source);
 		return;
 	}
-
-	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &this->now);
-	now_time = this->now.tv_sec * SPA_NSEC_PER_SEC + this->now.tv_nsec;
-
-	flush_data(this, now_time);
+	flush_data(this, this->current_time);
 }
 
 static void a2dp_on_timeout(struct spa_source *source)
 {
 	struct impl *this = source->data;
 	struct port *port = &this->port;
-	int err;
-	uint64_t exp, now_time;
+	uint64_t exp, duration;
+	uint32_t rate;
 	struct spa_io_buffers *io = port->io;
+	uint64_t prev_time, now_time;
 
 	if (this->started && spa_system_timerfd_read(this->data_system, this->timerfd, &exp) < 0)
 		spa_log_warn(this->log, "error reading timerfd: %s", strerror(errno));
 
-	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &this->now);
-	now_time = SPA_TIMESPEC_TO_NSEC(&this->now);
+	prev_time = this->current_time;
+	now_time = this->current_time = this->next_time;
 
-	spa_log_trace(this->log, NAME" %p: timeout %"PRIu64" %"PRIu64"", this,
-			now_time, now_time - this->last_time);
-	this->last_time = now_time;
-
-	if (this->start_time == 0) {
-		if ((err = fill_socket(this, now_time)) < 0)
-			spa_log_error(this->log, "error fill socket %s", spa_strerror(err));
-		this->start_time = now_time;
+	if (SPA_LIKELY(this->position)) {
+		duration = this->position->clock.duration;
+		rate = this->position->clock.rate.denom;
+	} else {
+		duration = 1024;
+		rate = 48000;
 	}
 
-	if (spa_list_is_empty(&port->ready) || port->need_data) {
-		spa_log_trace(this->log, NAME " %p: %d", this, io->status);
+	this->next_time = now_time + duration * SPA_NSEC_PER_SEC / rate;
 
-		io->status = SPA_STATUS_NEED_DATA;
-
-		spa_node_call_ready(&this->callbacks, SPA_STATUS_NEED_DATA);
-	}
-	flush_data(this, now_time);
-}
-
-
-static int init_sbc(struct impl *this)
-{
-        struct spa_bt_transport *transport = this->transport;
-	a2dp_sbc_t *conf;
-
-	spa_return_val_if_fail(transport, -EIO);
-
-	conf = transport->configuration;
-
-	sbc_init(&this->sbc, 0);
-	this->sbc.endian = SBC_LE;
-
-	if (conf->frequency & SBC_SAMPLING_FREQ_48000)
-		this->sbc.frequency = SBC_FREQ_48000;
-	else if (conf->frequency & SBC_SAMPLING_FREQ_44100)
-		this->sbc.frequency = SBC_FREQ_44100;
-	else if (conf->frequency & SBC_SAMPLING_FREQ_32000)
-		this->sbc.frequency = SBC_FREQ_32000;
-	else if (conf->frequency & SBC_SAMPLING_FREQ_16000)
-		this->sbc.frequency = SBC_FREQ_16000;
-	else
-		return -EINVAL;
-
-	if (conf->channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
-		this->sbc.mode = SBC_MODE_JOINT_STEREO;
-	else if (conf->channel_mode & SBC_CHANNEL_MODE_STEREO)
-		this->sbc.mode = SBC_MODE_STEREO;
-	else if (conf->channel_mode & SBC_CHANNEL_MODE_DUAL_CHANNEL)
-		this->sbc.mode = SBC_MODE_DUAL_CHANNEL;
-	else if (conf->channel_mode & SBC_CHANNEL_MODE_MONO)
-		this->sbc.mode = SBC_MODE_MONO;
-	else
-		return -EINVAL;
-
-	switch (conf->subbands) {
-	case SBC_SUBBANDS_4:
-		this->sbc.subbands = SBC_SB_4;
-		break;
-	case SBC_SUBBANDS_8:
-		this->sbc.subbands = SBC_SB_8;
-		break;
-	default:
-		return -EINVAL;
+	if (SPA_LIKELY(this->clock)) {
+		this->clock->nsec = now_time;
+		this->clock->position += duration;
+		this->clock->duration = duration;
+		this->clock->delay = 0;
+		this->clock->rate_diff = 1.0f;
+		this->clock->next_nsec = this->next_time;
 	}
 
-	if (conf->allocation_method & SBC_ALLOCATION_LOUDNESS)
-		this->sbc.allocation = SBC_AM_LOUDNESS;
-	else
-		this->sbc.allocation = SBC_AM_SNR;
+	spa_log_debug(this->log, NAME" %p: timeout %"PRIu64" %"PRIu64"", this,
+			now_time, now_time - prev_time);
 
-	switch (conf->block_length) {
-	case SBC_BLOCK_LENGTH_4:
-		this->sbc.blocks = SBC_BLK_4;
-		break;
-	case SBC_BLOCK_LENGTH_8:
-		this->sbc.blocks = SBC_BLK_8;
-		break;
-	case SBC_BLOCK_LENGTH_12:
-		this->sbc.blocks = SBC_BLK_12;
-		break;
-	case SBC_BLOCK_LENGTH_16:
-		this->sbc.blocks = SBC_BLK_16;
-		break;
-	default:
-		return -EINVAL;
-	}
+	spa_log_trace(this->log, NAME " %p: %d", this, io->status);
+	io->status = SPA_STATUS_NEED_DATA;
+	spa_node_call_ready(&this->callbacks, SPA_STATUS_NEED_DATA);
 
-	this->min_bitpool = SPA_MAX(conf->min_bitpool, 12);
-	this->max_bitpool = conf->max_bitpool;
-
-	set_bitpool(this, conf->max_bitpool);
-
-	this->seqnum = 0;
-
-        spa_log_debug(this->log, NAME " %p: codesize %d frame_length %d size %d:%d %d",
-			this, this->codesize, this->frame_length, this->read_size, this->write_size,
-			this->sbc.bitpool);
-
-	return 0;
+	set_timeout(this, this->next_time);
 }
 
 static int do_start(struct impl *this)
@@ -853,7 +611,14 @@ static int do_start(struct impl *this)
 	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0)
 		return res;
 
-	init_sbc(this);
+	this->seqnum = 0;
+
+	this->block_size = this->codec->get_block_size(this->codec_data);
+	this->num_blocks = this->codec->get_num_blocks(this->codec_data,
+			this->transport->write_mtu);
+
+        spa_log_debug(this->log, NAME " %p: block_size %d num_blocks:%d", this,
+			this->block_size, this->num_blocks);
 
 	val = FILL_FRAMES * this->transport->write_mtu;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0)
@@ -975,6 +740,7 @@ static const struct spa_dict_item node_info_items[] = {
 	{ SPA_KEY_DEVICE_API, "bluez5" },
 	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
 	{ SPA_KEY_NODE_DRIVER, "true" },
+	{ SPA_KEY_NODE_LATENCY, "512/48000" },
 };
 
 static void emit_node_info(struct impl *this, bool full)
@@ -1088,47 +854,19 @@ impl_node_port_enum_params(void *object, int seq,
 	case SPA_PARAM_EnumFormat:
 		if (result.index > 0)
 			return 0;
-		if (this->transport == NULL)
+		if (this->codec_data == NULL)
 			return -EIO;
 
 		switch (this->transport->codec) {
 		case A2DP_CODEC_SBC:
-		{
-			a2dp_sbc_t *config = this->transport->configuration;
-			struct spa_audio_info_raw info = { 0, };
-			int res;
-
-			info.format = SPA_AUDIO_FORMAT_S16;
-			if ((res = a2dp_sbc_get_frequency(config)) < 0)
-				return -EIO;
-			info.rate = res;
-			if ((res = a2dp_sbc_get_channels(config)) < 0)
-				return -EIO;
-			info.channels = res;
-
-			switch (info.channels) {
-			case 1:
-				info.position[0] = SPA_AUDIO_CHANNEL_MONO;
-				break;
-			case 2:
-				info.position[0] = SPA_AUDIO_CHANNEL_FL;
-				info.position[1] = SPA_AUDIO_CHANNEL_FR;
-				break;
-			default:
-				return -EIO;
-			}
-
-			param = spa_format_audio_raw_build(&b, id, &info);
+			param = spa_format_audio_raw_build(&b, id, &this->codec_format.info.raw);
 			break;
-		}
 		case A2DP_CODEC_MPEG24:
-		{
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_Format, id,
 				SPA_FORMAT_mediaType,     SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,  SPA_POD_Id(SPA_MEDIA_SUBTYPE_aac));
 			break;
-		}
 		default:
 			return -EIO;
 		}
@@ -1344,19 +1082,12 @@ static int impl_node_process(void *object)
 	struct impl *this = object;
 	struct port *port;
 	struct spa_io_buffers *io;
-	uint64_t now_time;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
 	port = &this->port;
 	io = port->io;
 	spa_return_val_if_fail(io != NULL, -EIO);
-
-	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &this->now);
-	now_time = SPA_TIMESPEC_TO_NSEC(&this->now);
-
-	if (!spa_list_is_empty(&port->ready))
-		flush_data(this, now_time);
 
 	if (io->status == SPA_STATUS_HAVE_DATA && io->buffer_id < port->n_buffers) {
 		struct buffer *b = &port->buffers[io->buffer_id];
@@ -1371,12 +1102,13 @@ static int impl_node_process(void *object)
 
 		spa_list_append(&port->ready, &b->link);
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
-		port->need_data = false;
 
-		flush_data(this, now_time);
-
+		io->buffer_id = SPA_ID_INVALID;
 		io->status = SPA_STATUS_OK;
 	}
+	if (!spa_list_is_empty(&port->ready))
+		flush_data(this, this->current_time);
+
 	return SPA_STATUS_HAVE_DATA;
 }
 
@@ -1431,6 +1163,9 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *this = (struct impl *) handle;
+
+	if (this->codec_data)
+		this->codec->deinit(this->codec_data);
 	if (this->transport)
 		spa_hook_remove(&this->transport_listener);
 	spa_system_close(this->data_system, this->timerfd);
@@ -1517,11 +1252,21 @@ impl_init(const struct spa_handle_factory *factory,
 		spa_log_error(this->log, "a transport is needed");
 		return -EINVAL;
 	}
+	if (this->transport->a2dp_codec == NULL) {
+		spa_log_error(this->log, "a transport codec is needed");
+		return -EINVAL;
+	}
+	this->codec = this->transport->a2dp_codec;
+
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);
 
 	this->timerfd = spa_system_timerfd_create(this->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+
+	this->codec_data = this->codec->init(0, this->transport->configuration,
+			this->transport->configuration_len,
+			&this->codec_format);
 
 	return 0;
 }

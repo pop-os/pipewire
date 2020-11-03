@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.13',
+  version : '0.3.14',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -296,6 +296,12 @@ if get_option('bluez5')
   endif
 endif
 
+if get_option('gstreamer')
+  if get_option('gstreamer-device-provider')
+    cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', 1)
+  endif
+endif
+
 configure_file(input : 'config.h.meson',
   output : 'config.h',
   configuration : cdata)
@@ -365,6 +371,7 @@ endif
 if get_option('pipewire-pulseaudio')
   pulseaudio_dep = dependency('libpulse', version : '>= 11.1')
   subdir('pipewire-pulseaudio/src')
+  subdir('pipewire-pulseaudio/test')
 endif
 
 if get_option('pipewire-alsa')

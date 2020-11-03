@@ -36,6 +36,30 @@ extern "C" {
 #include <stddef.h>
 #include <stdio.h>
 
+/**
+ * SPA_FALLTHROUGH is an annotation to suppress compiler warnings about switch
+ * cases that fall through without a break or return statement. SPA_FALLTHROUGH
+ * is only needed on cases that have code:
+ *
+ * switch (foo) {
+ *   case 1: // These cases have no code. No fallthrough annotations are needed.
+ *   case 2:
+ *   case 3:
+ *     foo = 4; // This case has code, so a fallthrough annotation is needed:
+ *     SPA_FALLTHROUGH;
+ *   default:
+ *     return foo;
+ * }
+ */
+#if defined(__clang__) && __cplusplus >= 201103L
+   /* clang's fallthrough annotations are only available starting in C++11. */
+#  define SPA_FALLTHROUGH [[clang::fallthrough]];
+#elif defined(__GNUC__) && __GNUC__ >= 7
+ #define SPA_FALLTHROUGH __attribute__ ((fallthrough));
+#else
+#  define SPA_FALLTHROUGH /* FALLTHROUGH */
+#endif
+
 #define SPA_FLAG_MASK(field,mask,flag)	(((field) & (mask)) == (flag))
 #define SPA_FLAG_IS_SET(field,flag)	SPA_FLAG_MASK(field,flag,flag)
 #define SPA_FLAG_SET(field,flag)	((field) |= (flag))
@@ -77,15 +101,15 @@ struct spa_fraction {
 
 #define SPA_MIN(a,b)		\
 ({				\
-	__typeof__(a) _a = (a);	\
-	__typeof__(b) _b = (b);	\
-	SPA_LIKELY(_a < _b) ? _a : _b;	\
+	__typeof__(a) _min_a = (a);	\
+	__typeof__(b) _min_b = (b);	\
+	SPA_LIKELY(_min_a < _min_b) ? _min_a : _min_b;	\
 })
 #define SPA_MAX(a,b)		\
 ({				\
-	__typeof__(a) _a = (a);	\
-	__typeof__(b) _b = (b);	\
-	SPA_LIKELY(_a > _b) ? _a : _b;	\
+	__typeof__(a) _max_a = (a);	\
+	__typeof__(b) _max_b = (b);	\
+	SPA_LIKELY(_max_a > _max_b) ? _max_a : _max_b;	\
 })
 #define SPA_CLAMP(v,low,high)				\
 ({							\

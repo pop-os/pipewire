@@ -127,6 +127,7 @@ struct object {
 			jack_latency_range_t capture_latency;
 			jack_latency_range_t playback_latency;
 			int32_t priority;
+			struct port *port;
 		} port;
 	};
 };
@@ -191,12 +192,15 @@ struct port {
 
 	struct spa_io_buffers io;
 	struct spa_list mix;
+	struct mix *global_mix;
 
 	unsigned int empty_out:1;
 	unsigned int zeroed:1;
 
 	float *emptyptr;
 	float empty[MAX_BUFFER_FRAMES + MAX_ALIGN];
+
+	void *(*get_buffer) (struct port *p, jack_nframes_t frames);
 };
 
 struct link {
@@ -386,6 +390,17 @@ static void free_object(struct client *c, struct object *o)
 	spa_list_append(&c->context.free_objects, &o->link);
 }
 
+static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port)
+{
+	mix->id = mix_id;
+	mix->port = port;
+	mix->io = NULL;
+	mix->n_buffers = 0;
+	spa_list_init(&mix->queue);
+	if (mix_id == SPA_ID_INVALID)
+		port->global_mix = mix;
+}
+
 static struct mix *find_mix(struct client *c, struct port *port, uint32_t mix_id)
 {
 	struct mix *mix;
@@ -417,11 +432,7 @@ static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_
 
 	spa_list_append(&port->mix, &mix->port_link);
 
-	mix->id = mix_id;
-	mix->port = port;
-	mix->io = NULL;
-	mix->n_buffers = 0;
-	spa_list_init(&mix->queue);
+	init_mix(mix, mix_id, port);
 
 	return mix;
 }
@@ -451,6 +462,8 @@ static void free_mix(struct client *c, struct mix *mix)
 {
 	clear_buffers(c, mix);
 	spa_list_remove(&mix->port_link);
+	if (mix->id == SPA_ID_INVALID)
+		mix->port->global_mix = NULL;
 	spa_list_append(&c->free_mix, &mix->link);
 }
 
@@ -483,6 +496,7 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	o->id = SPA_ID_INVALID;
 	o->port.node_id = c->node_id;
 	o->port.port_id = p->id;
+	o->port.port = p;
 
 	p->valid = true;
 	p->zeroed = false;
@@ -625,7 +639,7 @@ jack_get_version_string(void)
 static void on_sync_reply(void *data, uint32_t id, int seq)
 {
 	struct client *client = data;
-	if (id != 0)
+	if (id != PW_ID_CORE)
 		return;
 	client->last_sync = seq;
 	pw_thread_loop_signal(client->context.loop, false);
@@ -728,14 +742,14 @@ static void unhandle_socket(struct client *c)
 			do_remove_sources, 1, NULL, 0, true, c);
 }
 
-static void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
+static inline void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
 {
 	struct buffer *b;
 
 	b = &mix->buffers[id];
 
 	if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUT)) {
-		pw_log_trace(NAME" %p: port %p: recycle buffer %d", c, mix->port, id);
+		pw_log_trace_fp(NAME" %p: port %p: recycle buffer %d", c, mix->port, id);
 		spa_list_append(&mix->queue, &b->link);
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
 	}
@@ -800,9 +814,10 @@ static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void 
 }
 
 
-static void *get_buffer_output(struct client *c, struct port *p, uint32_t frames, uint32_t stride)
+static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t stride)
 {
 	struct mix *mix;
+	struct client *c = p->client;
 	void *ptr = NULL;
 
 	p->io.status = -EPIPE;
@@ -811,13 +826,13 @@ static void *get_buffer_output(struct client *c, struct port *p, uint32_t frames
 	if (frames == 0)
 		return NULL;
 
-	if (SPA_LIKELY((mix = find_mix(c, p, -1)) != NULL)) {
+	if (SPA_LIKELY((mix = p->global_mix) != NULL)) {
 		struct buffer *b;
 
 		if (SPA_UNLIKELY(mix->n_buffers == 0))
 			goto done;
 
-		pw_log_trace(NAME" %p: port %p %d get buffer %d n_buffers:%d",
+		pw_log_trace_fp(NAME" %p: port %p %d get buffer %d n_buffers:%d",
 				c, p, p->id, frames, mix->n_buffers);
 
 		if (SPA_UNLIKELY((b = dequeue_buffer(mix)) == NULL)) {
@@ -839,7 +854,7 @@ done:
 		struct spa_io_buffers *mio = mix->io;
 		if (SPA_UNLIKELY(mio == NULL))
 			continue;
-		pw_log_trace(NAME" %p: port %p tee %d.%d get buffer %d io:%p",
+		pw_log_trace_fp(NAME" %p: port %p tee %d.%d get buffer %d io:%p",
 				c, p, p->id, mix->id, frames, mio);
 		*mio = p->io;
 	}
@@ -858,12 +873,12 @@ static void process_tee(struct client *c, uint32_t frames)
 
 		switch (p->object->port.type_id) {
 		case TYPE_ID_AUDIO:
-			ptr = get_buffer_output(c, p, frames, sizeof(float));
+			ptr = get_buffer_output(p, frames, sizeof(float));
 			if (SPA_LIKELY(ptr != NULL))
 				memcpy(ptr, p->emptyptr, frames * sizeof(float));
 			break;
 		case TYPE_ID_MIDI:
-			ptr = get_buffer_output(c, p, MAX_BUFFER_FRAMES, 1);
+			ptr = get_buffer_output(p, MAX_BUFFER_FRAMES, 1);
 			if (SPA_LIKELY(ptr != NULL))
 				convert_from_midi(p->emptyptr, ptr, MAX_BUFFER_FRAMES * sizeof(float));
 			break;
@@ -1101,7 +1116,7 @@ static inline uint32_t cycle_run(struct client *c)
 			c->xrun_callback(c->xrun_arg);
 		c->xrun_count = driver->xrun_count;
 	}
-	pw_log_trace(NAME" %p: wait %"PRIu64" frames:%d rate:%d pos:%d delay:%"PRIi64" corr:%f", c,
+	pw_log_trace_fp(NAME" %p: wait %"PRIu64" frames:%d rate:%d pos:%d delay:%"PRIi64" corr:%f", c,
 			activation->awake_time, c->buffer_frames, c->sample_rate,
 			c->jack_position.frame, pos->clock.delay, pos->clock.rate_diff);
 
@@ -1143,14 +1158,14 @@ static inline void signal_sync(struct client *c)
 
 		state = &l->activation->state[0];
 
-		pw_log_trace(NAME" %p: link %p %p %d/%d", c, l, state,
+		pw_log_trace_fp(NAME" %p: link %p %p %d/%d", c, l, state,
 				state->pending, state->required);
 
 		if (pw_node_activation_state_dec(state, 1)) {
 			l->activation->status = PW_NODE_ACTIVATION_TRIGGERED;
 			l->activation->signal_time = nsec;
 
-			pw_log_trace(NAME" %p: signal %p %p", c, l, state);
+			pw_log_trace_fp(NAME" %p: signal %p %p", c, l, state);
 
 			if (SPA_UNLIKELY(write(l->signalfd, &cmd, sizeof(cmd)) != sizeof(cmd)))
 				pw_log_warn(NAME" %p: write failed %m", c);
@@ -1636,7 +1651,7 @@ static int client_node_port_set_param(void *object,
 					 NULL);
 }
 
-static void *init_buffer(struct port *p)
+static inline void *init_buffer(struct port *p)
 {
 	void *data = p->emptyptr;
 	if (p->zeroed)
@@ -3139,6 +3154,13 @@ float jack_cpu_load (jack_client_t *client)
 
 #include "statistics.c"
 
+static void *get_buffer_input_float(struct port *p, jack_nframes_t frames);
+static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames);
+static void *get_buffer_input_empty(struct port *p, jack_nframes_t frames);
+static void *get_buffer_output_float(struct port *p, jack_nframes_t frames);
+static void *get_buffer_output_midi(struct port *p, jack_nframes_t frames);
+static void *get_buffer_output_empty(struct port *p, jack_nframes_t frames);
+
 SPA_EXPORT
 jack_port_t * jack_port_register (jack_client_t *client,
                                   const char *port_name,
@@ -3187,6 +3209,34 @@ jack_port_t * jack_port_register (jack_client_t *client,
 	o->port.type_id = type_id;
 
 	init_buffer(p);
+
+	if (direction == SPA_DIRECTION_INPUT) {
+		switch (type_id) {
+		case TYPE_ID_AUDIO:
+		case TYPE_ID_VIDEO:
+			p->get_buffer = get_buffer_input_float;
+			break;
+		case TYPE_ID_MIDI:
+			p->get_buffer = get_buffer_input_midi;
+			break;
+		default:
+			p->get_buffer = get_buffer_input_empty;
+			break;
+		}
+	} else {
+		switch (type_id) {
+		case TYPE_ID_AUDIO:
+		case TYPE_ID_VIDEO:
+			p->get_buffer = get_buffer_output_float;
+			break;
+		case TYPE_ID_MIDI:
+			p->get_buffer = get_buffer_output_midi;
+			break;
+		default:
+			p->get_buffer = get_buffer_output_empty;
+			break;
+		}
+	}
 
 	pw_log_debug(NAME" %p: port %p", c, p);
 
@@ -3269,7 +3319,7 @@ int jack_port_unregister (jack_client_t *client, jack_port_t *port)
 	return res;
 }
 
-static inline void *get_buffer_input_float(struct client *c, struct port *p, jack_nframes_t frames)
+static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	struct buffer *b;
@@ -3278,8 +3328,8 @@ static inline void *get_buffer_input_float(struct client *c, struct port *p, jac
 	void *ptr = NULL;
 
 	spa_list_for_each(mix, &p->mix, port_link) {
-		pw_log_trace(NAME" %p: port %p mix %d.%d get buffer %d",
-				c, p, p->id, mix->id, frames);
+		pw_log_trace_fp(NAME" %p: port %p mix %d.%d get buffer %d",
+				p->client, p, p->id, mix->id, frames);
 		io = mix->io;
 		if (io == NULL ||
 		    io->status != SPA_STATUS_HAVE_DATA ||
@@ -3296,10 +3346,12 @@ static inline void *get_buffer_input_float(struct client *c, struct port *p, jac
 			p->zeroed = false;
 		}
 	}
+	if (ptr == NULL)
+		ptr = init_buffer(p);
 	return ptr;
 }
 
-static inline void *get_buffer_input_midi(struct client *c, struct port *p, jack_nframes_t frames)
+static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	struct spa_io_buffers *io;
@@ -3313,8 +3365,8 @@ static inline void *get_buffer_input_midi(struct client *c, struct port *p, jack
 		struct spa_data *d;
 		void *pod;
 
-		pw_log_trace(NAME" %p: port %p mix %d.%d get buffer %d",
-				c, p, p->id, mix->id, frames);
+		pw_log_trace_fp(NAME" %p: port %p mix %d.%d get buffer %d",
+				p->client, p, p->id, mix->id, frames);
 
 		io = mix->io;
 		if (io == NULL ||
@@ -3337,68 +3389,45 @@ static inline void *get_buffer_input_midi(struct client *c, struct port *p, jack
 	return ptr;
 }
 
-static inline void *get_buffer_output_float(struct client *c, struct port *p, jack_nframes_t frames)
+static void *get_buffer_output_float(struct port *p, jack_nframes_t frames)
 {
 	void *ptr;
 
-	ptr = get_buffer_output(c, p, frames, sizeof(float));
-	if (SPA_UNLIKELY(ptr == NULL)) {
-		p->empty_out = true;
+	ptr = get_buffer_output(p, frames, sizeof(float));
+	if (SPA_UNLIKELY(p->empty_out = (ptr == NULL)))
 		ptr = p->emptyptr;
-	} else {
-		p->empty_out = false;
-	}
 	return ptr;
 }
 
-static inline void *get_buffer_output_midi(struct client *c, struct port *p, jack_nframes_t frames)
+static void *get_buffer_output_midi(struct port *p, jack_nframes_t frames)
 {
 	p->empty_out = true;
 	return p->emptyptr;
+}
+
+static void *get_buffer_output_empty(struct port *p, jack_nframes_t frames)
+{
+	p->empty_out = true;
+	return p->emptyptr;
+}
+
+static void *get_buffer_input_empty(struct port *p, jack_nframes_t frames)
+{
+	return init_buffer(p);
 }
 
 SPA_EXPORT
 void * jack_port_get_buffer (jack_port_t *port, jack_nframes_t frames)
 {
 	struct object *o = (struct object *) port;
-	struct client *c;
 	struct port *p;
-	void *ptr = NULL;
+	void *ptr;
 
 	spa_return_val_if_fail(o != NULL, NULL);
 
-	c = o->client;
-	p = GET_PORT(c, GET_DIRECTION(o->port.flags), o->port.port_id);
-
-	if (p->direction == SPA_DIRECTION_INPUT) {
-		switch (p->object->port.type_id) {
-		case TYPE_ID_AUDIO:
-			ptr = get_buffer_input_float(c, p, frames);
-			break;
-		case TYPE_ID_MIDI:
-			ptr = get_buffer_input_midi(c, p, frames);
-			break;
-		case TYPE_ID_VIDEO:
-			ptr = get_buffer_input_float(c, p, frames);
-			break;
-		}
-		if (ptr == NULL) {
-			ptr = init_buffer(p);
-		}
-	} else {
-		switch (p->object->port.type_id) {
-		case TYPE_ID_AUDIO:
-			ptr = get_buffer_output_float(c, p, frames);
-			break;
-		case TYPE_ID_MIDI:
-			ptr = get_buffer_output_midi(c, p, frames);
-			break;
-		case TYPE_ID_VIDEO:
-			ptr = get_buffer_output_float(c, p, frames);
-			break;
-		}
-	}
-	pw_log_trace(NAME" %p: port %p buffer %p empty:%u", c, p, ptr, p->empty_out);
+	p = o->port.port;
+	ptr = p->get_buffer(p, frames);
+	pw_log_trace_fp(NAME" %p: port %p buffer %p empty:%u", p->client, p, ptr, p->empty_out);
 	return ptr;
 }
 
@@ -4768,6 +4797,8 @@ int jack_midi_event_get(jack_midi_event_t *event,
 	struct midi_event *ev = SPA_MEMBER(mb, sizeof(*mb), struct midi_event);
 	spa_return_val_if_fail(mb != NULL, -EINVAL);
 	spa_return_val_if_fail(ev != NULL, -EINVAL);
+	if (event_index >= mb->event_count)
+		return -ENOBUFS;
 	ev += event_index;
 	event->time = ev->time;
 	event->size = ev->size;
