@@ -172,17 +172,17 @@ static uint64_t default_mask(uint32_t channels)
 	case 8:
 		mask |= _MASK(RL);
 		mask |= _MASK(RR);
-		/* fallthrough */
+		SPA_FALLTHROUGH
 	case 5:
 	case 6:
 		mask |= _MASK(SL);
 		mask |= _MASK(SR);
 		if ((channels & 1) == 0)
 			mask |= _MASK(LFE);
-		/* fallthrough */
+		SPA_FALLTHROUGH
 	case 3:
 		mask |= _MASK(FC);
-		/* fallthrough */
+		SPA_FALLTHROUGH
 	case 2:
 		mask |= _MASK(FL);
 		mask |= _MASK(FR);
@@ -198,6 +198,28 @@ static uint64_t default_mask(uint32_t channels)
 		break;
 	}
 	return mask;
+}
+
+static int remap_volumes(struct props *p, uint32_t target)
+{
+	float s;
+	uint32_t i;
+
+	if (target == 0 || p->n_channel_volumes == target)
+		return 0;
+
+	if (p->n_channel_volumes > 0) {
+		s = 0.0f;
+		for (i = 0; i < p->n_channel_volumes; i++)
+			s += p->channel_volumes[i];
+		s /= p->n_channel_volumes;
+	} else {
+		s = 1.0f;
+	}
+	p->n_channel_volumes = target;
+	for (i = 0; i < p->n_channel_volumes; i++)
+		p->channel_volumes[i] = s;
+	return 1;
 }
 
 static int setup_convert(struct impl *this,
@@ -252,7 +274,7 @@ static int setup_convert(struct impl *this,
 	if ((res = channelmix_init(&this->mix)) < 0)
 		return res;
 
-	this->props.n_channel_volumes = SPA_MAX(src_chan, dst_chan);
+	remap_volumes(&this->props, this->mix.src_chan);
 
 	channelmix_set_volume(&this->mix, this->props.volume, this->props.mute,
 			this->props.n_channel_volumes, this->props.channel_volumes);
@@ -374,9 +396,10 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 				changed++;
 			break;
 		case SPA_PROP_channelVolumes:
-			if (spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					p->channel_volumes, SPA_AUDIO_MAX_CHANNELS) > 0)
+			if ((p->n_channel_volumes = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
+					p->channel_volumes, SPA_AUDIO_MAX_CHANNELS)) > 0)
 				changed++;
+			remap_volumes(p, this->mix.src_chan);
 			break;
 		default:
 			break;
@@ -443,7 +466,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		this->started = true;
 		break;
 	case SPA_NODE_COMMAND_Suspend:
-		/* fallthrough */
+		SPA_FALLTHROUGH
 	case SPA_NODE_COMMAND_Pause:
 		this->started = false;
 		break;
@@ -1158,6 +1181,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -1174,6 +1198,15 @@ impl_init(const struct spa_handle_factory *factory,
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);
 
 	spa_hook_list_init(&this->hooks);
+
+	if (info != NULL) {
+		if ((str = spa_dict_lookup(info, "channelmix.normalize")) != NULL &&
+		    (strcmp(str, "true") == 0 || atoi(str) != 0))
+			this->mix.options |= CHANNELMIX_OPTION_NORMALIZE;
+		if ((str = spa_dict_lookup(info, "channelmix.mix-lfe")) != NULL &&
+		    (strcmp(str, "true") == 0 || atoi(str) != 0))
+			this->mix.options |= CHANNELMIX_OPTION_MIX_LFE;
+	}
 
 	this->node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,

@@ -41,6 +41,8 @@ extern "C" {
  */
 #define PW_KEY_PROTOCOL			"pipewire.protocol"	/**< protocol used for connection */
 #define PW_KEY_ACCESS			"pipewire.access"	/**< how the client access is controlled */
+#define PW_KEY_CLIENT_ACCESS		"pipewire.client.access"/**< how the client wants to be access
+								  *  controlled */
 
 /** Various keys related to the identity of a client process and its security.
  * Must be obtained from trusted sources by the protocol and placed as
@@ -226,6 +228,8 @@ extern "C" {
 								  *  and might select a less accurate but faster
 								  *  conversion algorithm. */
 #define PW_KEY_STREAM_DONT_REMIX	"stream.dont-remix"	/**< don't remix channels */
+#define PW_KEY_STREAM_CAPTURE_SINK	"stream.capture.sink"	/**< Try to capture the sink output instead of
+								  *  source output */
 
 /** object properties */
 #define PW_KEY_OBJECT_LINGER		"object.linger"		/**< the object lives on even after the client
@@ -252,6 +256,9 @@ extern "C" {
 								  *  PNG image data */
 #define PW_KEY_MEDIA_ICON_NAME		"media.icon-name"	/**< an XDG icon name for the media.
 								  *  Ex: "audio-x-mp3" */
+#define PW_KEY_MEDIA_COMMENT		"media.comment"		/**< extra comment */
+#define PW_KEY_MEDIA_DATE		"media.date"		/**< date of the media */
+#define PW_KEY_MEDIA_FORMAT		"media.format"		/**< format of the media */
 
 /** format related properties */
 #define PW_KEY_FORMAT_DSP		"format.dsp"		/**< a dsp format.

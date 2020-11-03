@@ -26,6 +26,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <regex.h>
+#include <limits.h>
 
 #include <pipewire/log.h>
 
@@ -75,15 +76,13 @@ struct factory_entry {
 	char *lib;
 };
 
-static int load_module_profile(struct pw_context *this, const char *profile)
+static int load_module_profiles(struct pw_context *this, char **profiles)
 {
-	const char *str, *state = NULL;
-	size_t len;
+	int i;
 
-	pw_log_debug(NAME" %p: module profile %s", this, profile);
-
-	while ((str = pw_split_walk(profile, ", ", &len, &state)) != NULL) {
-		if (strncmp(str, "default", len) == 0) {
+	for (i = 0; profiles[i]; i++) {
+		const char *str = profiles[i];
+		if (strcmp(str, "default") == 0) {
 			pw_log_debug(NAME" %p: loading default profile", this);
 			pw_context_load_module(this, "libpipewire-module-protocol-native", NULL, NULL);
 			pw_context_load_module(this, "libpipewire-module-client-node", NULL, NULL);
@@ -91,11 +90,11 @@ static int load_module_profile(struct pw_context *this, const char *profile)
 			pw_context_load_module(this, "libpipewire-module-adapter", NULL, NULL);
 			pw_context_load_module(this, "libpipewire-module-metadata", NULL, NULL);
 			pw_context_load_module(this, "libpipewire-module-session-manager", NULL, NULL);
-		} else if (strncmp(str, "rtkit", len) == 0) {
+		} else if (strcmp(str, "rtkit") == 0) {
 			pw_log_debug(NAME" %p: loading rtkit profile", this);
 			pw_context_load_module(this, "libpipewire-module-rtkit", NULL, NULL);
-		} else if (strncmp(str, "none", len) != 0) {
-			pw_log_warn(NAME" %p: unknown profile %.*s", this, (int) len, str);
+		} else if (strcmp(str, "none") != 0) {
+			pw_log_warn(NAME" %p: unknown profile %s", this, str);
 		}
 	}
 	return 0;
@@ -199,6 +198,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	struct impl *impl;
 	struct pw_context *this;
 	const char *lib, *str;
+	char **profiles;
 	void *dbus_iface = NULL;
 	uint32_t n_support;
 	struct pw_properties *pr;
@@ -319,7 +319,12 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	if (str == NULL)
 		str = "default";
 
-	load_module_profile(this, str);
+	pw_log_debug(NAME" %p: module profile %s", this, str);
+
+	/* make a copy, in case the properties get changed when loading a module */
+	profiles = pw_split_strv(str, ", ", INT_MAX, &res);
+	load_module_profiles(this, profiles);
+	pw_free_strv(profiles);
 
 	pw_log_debug(NAME" %p: created", this);
 
@@ -347,6 +352,7 @@ void pw_context_destroy(struct pw_context *context)
 {
 	struct impl *impl = SPA_CONTAINER_OF(context, struct impl, this);
 	struct pw_global *global;
+	struct pw_impl_client *client;
 	struct pw_impl_module *module;
 	struct pw_impl_device *device;
 	struct pw_core *core;
@@ -360,6 +366,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	spa_list_consume(core, &context->core_list, link)
 		pw_core_disconnect(core);
+
+	spa_list_consume(client, &context->client_list, link)
+		pw_impl_client_destroy(client);
 
 	spa_list_consume(node, &context->node_list, link)
 		pw_impl_node_destroy(node);
@@ -959,16 +968,16 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 
 		/* collect quantum and count active nodes */
 		spa_list_for_each(s, &n->follower_list, follower_link) {
-			if (s == n)
-				continue;
-			if (s->active)
-				running = !n->passive;
 			if (s->quantum_size > 0) {
 				if (min_quantum == 0 || s->quantum_size < min_quantum)
 					min_quantum = s->quantum_size;
 				if (s->quantum_size > max_quantum)
 					max_quantum = s->quantum_size;
 			}
+			if (s == n)
+				continue;
+			if (s->active)
+				running = !n->passive;
 		}
 		quantum = min_quantum;
 		if (quantum == 0)

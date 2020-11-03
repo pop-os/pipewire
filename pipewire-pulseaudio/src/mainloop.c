@@ -116,48 +116,59 @@ static void source_timer_func(void *data, uint64_t expirations)
 		ev->cb(&ev->mainloop->api, ev, &tv, ev->userdata);
 }
 
+static void set_timer(pa_time_event *ev, const struct timeval *tv)
+{
+	pa_mainloop *mainloop = ev->mainloop;
+	struct timespec ts;
+
+	if (tv == NULL) {
+		ts.tv_sec = 0;
+		ts.tv_nsec = 1;
+	} else {
+		struct timeval ttv = *tv;
+
+		if ((ttv.tv_usec & PA_TIMEVAL_RTCLOCK) != 0)
+			ttv.tv_usec &= ~PA_TIMEVAL_RTCLOCK;
+		else
+			pa_rtclock_from_wallclock(&ttv);
+
+		/* something strange, probably not wallclock time, try to
+		 * use the timeval directly */
+		if (ttv.tv_sec == 0 && ttv.tv_usec == 0)
+			ttv = *tv;
+
+		ts.tv_sec = ttv.tv_sec;
+		ts.tv_nsec = ttv.tv_usec * SPA_NSEC_PER_USEC;
+
+		/* make sure we never disable the timer */
+		if (ts.tv_sec == 0 && ts.tv_nsec == 0)
+			ts.tv_nsec++;
+	}
+	pw_log_debug("set timer %p %ld %ld", ev, ts.tv_sec, ts.tv_nsec);
+	pw_loop_update_timer(mainloop->loop, ev->source, &ts, NULL, true);
+}
+
 static pa_time_event* api_time_new(pa_mainloop_api*a, const struct timeval *tv, pa_time_event_cb_t cb, void *userdata)
 {
 	pa_mainloop *mainloop = SPA_CONTAINER_OF(a, pa_mainloop, api);
 	pa_time_event *ev;
-	struct timespec ts;
 
 	ev = calloc(1, sizeof(pa_time_event));
 	ev->source = pw_loop_add_timer(mainloop->loop, source_timer_func, ev);
 	ev->mainloop = mainloop;
 	ev->cb = cb;
 	ev->userdata = userdata;
+	pw_log_debug("new timer %p", ev);
 
-	if (tv == NULL) {
-		ts.tv_sec = 0;
-		ts.tv_nsec = 1;
-	}
-	else {
-		ts.tv_sec = tv->tv_sec;
-		ts.tv_nsec = tv->tv_usec * 1000LL;
-	}
-	pw_log_debug("new timer %p %ld %ld", ev, ts.tv_sec, ts.tv_nsec);
-	pw_loop_update_timer(mainloop->loop, ev->source, &ts, NULL, true);
+	set_timer(ev, tv);
 
 	return ev;
 }
 
 static void api_time_restart(pa_time_event* e, const struct timeval *tv)
 {
-	struct timespec ts;
-
 	pa_assert(e);
-
-	if (tv == NULL) {
-		ts.tv_sec = 0;
-		ts.tv_nsec = 1;
-	}
-	else {
-		ts.tv_sec = tv->tv_sec;
-		ts.tv_nsec = tv->tv_usec * 1000LL;
-	}
-	pw_log_debug("io %p", e);
-	pw_loop_update_timer(e->mainloop->loop, e->source, &ts, NULL, true);
+	set_timer(e, tv);
 }
 
 static void api_time_free(pa_time_event* e)
@@ -272,6 +283,8 @@ pa_mainloop *pa_mainloop_new(void)
 	loop->api = api;
 	loop->api.userdata = loop->loop;
 
+	pw_log_debug("%p: %p fd:%d", loop, loop->loop, loop->fd);
+
 	return loop;
 
       no_loop:
@@ -279,9 +292,16 @@ pa_mainloop *pa_mainloop_new(void)
 	return NULL;
 }
 
+bool pa_mainloop_api_is_our_api(pa_mainloop_api *api)
+{
+	pa_assert(api);
+	return api->io_new == api_io_new;
+}
+
 SPA_EXPORT
 void pa_mainloop_free(pa_mainloop* m)
 {
+	pw_log_debug("%p", m);
 	pw_loop_destroy(m->loop);
 	free(m);
 }
@@ -307,7 +327,7 @@ static int usec_to_timeout(pa_usec_t u)
 SPA_EXPORT
 int pa_mainloop_poll(pa_mainloop *m)
 {
-	int res;
+	int res, timeout;
 	bool do_iterate;
 
 	if (m->quit)
@@ -324,13 +344,15 @@ int pa_mainloop_poll(pa_mainloop *m)
 				usec_to_timeout(m->timeout),
 				m->poll_func_userdata);
 		do_iterate = res == 1 && SPA_FLAG_IS_SET(fds[0].revents, POLLIN);
+		timeout = 0;
 	} else {
 		do_iterate = true;
+		timeout = m->timeout;
 	}
 
 	if (do_iterate) {
 		pw_loop_enter(m->loop);
-		res = pw_loop_iterate(m->loop, m->timeout);
+		res = pw_loop_iterate(m->loop, timeout);
 		pw_loop_leave(m->loop);
 	}
 
@@ -475,3 +497,4 @@ void pa_mainloop_api_once(pa_mainloop_api* m, void (*callback)(pa_mainloop_api *
 	pa_assert_se(e = m->defer_new(m, once_callback, i));
 	m->defer_set_destroy(e, free_callback);
 }
+

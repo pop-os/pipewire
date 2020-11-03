@@ -624,6 +624,8 @@ static void node_destroy(void *object)
 		pw_node_info_free(node->info);
 		node->info = NULL;
 	}
+	free(node->target_node);
+	node->target_node = NULL;
 }
 
 static const struct object_info node_info = {
@@ -2022,6 +2024,15 @@ static void session_shutdown(struct impl *impl)
 		pw_core_info_free(impl->this.info);
 }
 
+static int sm_pulse_bridge_start(struct sm_media_session *sess)
+{
+	if (pw_context_load_module(sess->context,
+			"libpipewire-module-protocol-pulse",
+			NULL, NULL) == NULL)
+		return -errno;
+	return 0;
+}
+
 static void do_quit(void *data, int signal_number)
 {
 	struct impl *impl = data;
@@ -2040,8 +2051,10 @@ static void do_quit(void *data, int signal_number)
 				"v4l2,"			\
 				"bluez5,"		\
 				"suspend-node,"		\
-				"policy-node"
-#define DEFAULT_DISABLED	""
+				"policy-node,"		\
+				"pulse-bridge"
+#define EXTRA_ENABLED		""
+#define EXTRA_DISABLED		""
 
 static const struct {
 	const char *name;
@@ -2065,6 +2078,7 @@ static const struct {
 	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start, NULL },
 	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start, NULL },
 	{ "policy-node", "configure and link nodes", sm_policy_node_start, NULL },
+	{ "pulse-bridge", "accept pulseaudio clients", sm_pulse_bridge_start, NULL },
 };
 
 static int opt_contains(const char *opt, const char *val)
@@ -2078,24 +2092,29 @@ static int opt_contains(const char *opt, const char *val)
 	return 0;
 }
 
-static void show_help(const char *name)
+static bool is_opt_enabled(const char *enabled, const char *disabled, const char *val)
+{
+	return (opt_contains(DEFAULT_ENABLED, val) || opt_contains(enabled, val)) &&
+			!opt_contains(disabled, val);
+}
+
+static void show_help(const char *name, const char *enabled, const char *disabled)
 {
 	size_t i;
 
         fprintf(stdout, "%s [options]\n"
              "  -h, --help                            Show this help\n"
              "      --version                         Show version\n"
-             "  -e, --enabled                         Enabled options (default '%s')\n"
-             "  -d, --disabled                        Disabled options (default '%s')\n"
+             "  -e, --enabled                         Extra enabled options ('%s')\n"
+             "  -d, --disabled                        Extra disabled options ('%s')\n"
              "  -p, --properties                      Extra properties as 'key=value { key=value }'\n",
-	     name, DEFAULT_ENABLED, DEFAULT_DISABLED);
+	     name, enabled, disabled);
 
         fprintf(stdout,
              "\noptions: (*=enabled)\n");
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
 		fprintf(stdout, "\t  %c %-15.15s: %s\n",
-				opt_contains(DEFAULT_ENABLED, modules[i].name) &&
-				!opt_contains(DEFAULT_DISABLED, modules[i].name) ? '*' : ' ',
+				is_opt_enabled(enabled, disabled, modules[i].name) ? '*' : ' ',
 				modules[i].name, modules[i].desc);
 	}
 }
@@ -2106,8 +2125,8 @@ int main(int argc, char *argv[])
 	const struct spa_support *support;
 	uint32_t n_support;
 	int res = 0, c;
-	const char *opt_enabled = DEFAULT_ENABLED;
-	const char *opt_disabled = DEFAULT_DISABLED;
+	const char *opt_enabled = EXTRA_ENABLED;
+	const char *opt_disabled = EXTRA_DISABLED;
 	const char *opt_properties = NULL;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
@@ -2125,7 +2144,7 @@ int main(int argc, char *argv[])
 	while ((c = getopt_long(argc, argv, "hVe:d:p:", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
-			show_help(argv[0]);
+			show_help(argv[0], opt_enabled, opt_disabled);
 			return 0;
 		case 'V':
 			fprintf(stdout, "%s\n"
@@ -2166,7 +2185,12 @@ int main(int argc, char *argv[])
 	pw_loop_add_signal(impl.this.loop, SIGINT, do_quit, &impl);
 	pw_loop_add_signal(impl.this.loop, SIGTERM, do_quit, &impl);
 
-	impl.this.context = pw_context_new(impl.this.loop, NULL, 0);
+	impl.this.context = pw_context_new(impl.this.loop,
+				pw_properties_new(
+					PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
+					NULL),
+				0);
+
 	if (impl.this.context == NULL)
 		return -1;
 
@@ -2202,8 +2226,7 @@ int main(int argc, char *argv[])
 
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
 		const char *name = modules[i].name;
-		if (opt_contains(opt_enabled, name) &&
-		    !opt_contains(opt_disabled, name)) {
+		if (is_opt_enabled(opt_enabled, opt_disabled, name)) {
 			if (modules[i].props) {
 				struct pw_properties *props;
 				props = pw_properties_new_string(modules[i].props);

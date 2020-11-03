@@ -162,8 +162,7 @@ static int spa_v4l2_clear_buffers(struct impl *this)
 			spa_v4l2_buffer_recycle(this, i);
 		}
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
-			munmap(SPA_MEMBER(b->ptr, -d[0].mapoffset, void),
-					d[0].maxsize - d[0].mapoffset);
+			munmap(b->ptr, d[0].maxsize);
 		}
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ALLOCATED)) {
 			spa_log_debug(this->log, "v4l2: close %d", (int) d[0].fd);
@@ -583,6 +582,7 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 
 			port->fmtdesc.pixelformat = info->fourcc;
 
+			spa_zero(fmt);
 			fmt.type = port->fmtdesc.type;
 			fmt.fmt.pix.pixelformat = info->fourcc;
 			fmt.fmt.pix.field = V4L2_FIELD_ANY;
@@ -978,6 +978,7 @@ static int query_ext_ctrl_ioctl(struct port *port, struct v4l2_query_ext_ctrl *q
 			return res;
 		port->have_query_ext_ctrl = false;
 	}
+	spa_zero(qc);
 	qc.id = qctrl->id;
 	res = xioctl(dev->fd, VIDIOC_QUERYCTRL, &qc);
 	if (res == 0) {
@@ -1354,14 +1355,14 @@ static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, 
 				void *data;
 
 				data = mmap(NULL,
-					    d[0].maxsize + d[0].mapoffset,
+					    d[0].maxsize,
 					    PROT_READ | PROT_WRITE, MAP_SHARED,
 					    d[0].fd,
-					    0);
+					    d[0].mapoffset);
 				if (data == MAP_FAILED)
 					return -errno;
 
-				b->ptr = SPA_MEMBER(data, d[0].mapoffset, void);
+				b->ptr = data;
 				SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 			}
 			else
@@ -1407,13 +1408,13 @@ mmap_init(struct impl *this,
 	spa_log_debug(this->log, "v4l2: got %d buffers", reqbuf.count);
 	n_buffers = reqbuf.count;
 
-	if (reqbuf.count < 2) {
+	if (n_buffers < 2) {
 		spa_log_error(this->log, "v4l2: '%s' can't allocate enough buffers (%d)",
-				this->props.device, reqbuf.count);
+				this->props.device, n_buffers);
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < reqbuf.count; i++) {
+	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b;
 		struct spa_data *d;
 
@@ -1436,6 +1437,13 @@ mmap_init(struct impl *this,
 		if (xioctl(dev->fd, VIDIOC_QUERYBUF, &b->v4l2_buffer) < 0) {
 			spa_log_error(this->log, "v4l2: '%s' VIDIOC_QUERYBUF: %m", this->props.device);
 			return -errno;
+		}
+
+		if (b->v4l2_buffer.flags & V4L2_BUF_FLAG_QUEUED) {
+			/* some drivers can give us an already queued buffer. */
+			spa_log_warn(this->log, "v4l2: buffer %d was already queued", i);
+			n_buffers = i;
+			break;
 		}
 
 		d = buffers[i]->datas;
@@ -1475,14 +1483,25 @@ fallback:
 			d[0].flags = SPA_DATA_FLAG_READABLE;
 			d[0].fd = dev->fd;
 			d[0].mapoffset = b->v4l2_buffer.m.offset;
-			spa_log_debug(this->log, "v4l2: mmap offset:%u", d[0].mapoffset);
+			d[0].data = mmap(NULL,
+					b->v4l2_buffer.length,
+					PROT_READ, MAP_SHARED,
+					dev->fd,
+					b->v4l2_buffer.m.offset);
+			if (d[0].data == MAP_FAILED) {
+				spa_log_error(this->log, "v4l2: '%s' mmap: %m", this->props.device);
+				return -errno;
+			}
+			b->ptr = d[0].data;
+			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
+			spa_log_debug(this->log, "v4l2: mmap offset:%u data:%p", d[0].mapoffset, b->ptr);
 		}
 		spa_v4l2_buffer_recycle(this, i);
 	}
-	spa_log_info(this->log, "v4l2: have %u buffers using %s", reqbuf.count,
+	spa_log_info(this->log, "v4l2: have %u buffers using %s", n_buffers,
 			port->have_expbuf ? "EXPBUF" : "MMAP");
 
-	port->n_buffers = reqbuf.count;
+	port->n_buffers = n_buffers;
 
 	return 0;
 }

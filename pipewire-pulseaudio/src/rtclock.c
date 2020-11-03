@@ -23,7 +23,9 @@
 
 #include <pipewire/log.h>
 
+#include <pulse/timeval.h>
 #include <pulse/rtclock.h>
+#include "internal.h"
 
 SPA_EXPORT
 pa_usec_t pa_rtclock_now(void)
@@ -36,3 +38,69 @@ pa_usec_t pa_rtclock_now(void)
 	return res;
 }
 
+static struct timeval *pa_rtclock_get(struct timeval *tv)
+{
+	struct timespec ts;
+
+	pa_assert(tv);
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = ts.tv_nsec / PA_NSEC_PER_USEC;
+	return tv;
+}
+
+struct timeval* pa_rtclock_from_wallclock(struct timeval *tv)
+{
+	struct timeval wc_now, rt_now;
+
+	pa_assert(tv);
+
+	pa_gettimeofday(&wc_now);
+	pa_rtclock_get(&rt_now);
+
+	if (pa_timeval_cmp(&wc_now, tv) < 0)
+		pa_timeval_add(&rt_now, pa_timeval_diff(tv, &wc_now));
+	else
+		pa_timeval_sub(&rt_now, pa_timeval_diff(&wc_now, tv));
+
+	*tv = rt_now;
+
+	return tv;
+}
+
+struct timeval* pa_rtclock_to_wallclock(struct timeval *tv)
+{
+	struct timeval wc_now, rt_now;
+
+	pa_assert(tv);
+
+	pa_gettimeofday(&wc_now);
+	pa_rtclock_get(&rt_now);
+
+	if (pa_timeval_cmp(&rt_now, tv) < 0)
+		pa_timeval_add(&wc_now, pa_timeval_diff(tv, &rt_now));
+	else
+		pa_timeval_sub(&wc_now, pa_timeval_diff(&rt_now, tv));
+
+	*tv = wc_now;
+
+	return tv;
+}
+
+struct timeval* pa_timeval_rtstore(struct timeval *tv, pa_usec_t v, bool rtclock)
+{
+	pa_assert(tv);
+
+	if (v == PA_USEC_INVALID)
+		return NULL;
+
+	pa_timeval_store(tv, v);
+
+	if (rtclock)
+		tv->tv_usec |= PA_TIMEVAL_RTCLOCK;
+	else
+		pa_rtclock_to_wallclock(tv);
+
+	return tv;
+}

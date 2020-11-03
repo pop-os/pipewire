@@ -32,6 +32,30 @@ void *_acp_log_data;
 
 #define VOLUME_ACCURACY (PA_VOLUME_NORM/100)  /* don't require volume adjustments to be perfectly correct. don't necessarily extend granularity in software unless the differences get greater than this level */
 
+const char *acp_available_str(enum acp_available status)
+{
+	switch (status) {
+	case ACP_AVAILABLE_UNKNOWN:
+		return "unknown";
+	case ACP_AVAILABLE_NO:
+		return "no";
+	case ACP_AVAILABLE_YES:
+		return "yes";
+	}
+	return "error";
+}
+
+const char *acp_direction_str(enum acp_direction direction)
+{
+	switch (direction) {
+	case ACP_DIRECTION_CAPTURE:
+		return "capture";
+	case ACP_DIRECTION_PLAYBACK:
+		return "playback";
+	}
+	return "error";
+}
+
 static void profile_free(void *data)
 {
 }
@@ -264,19 +288,18 @@ static pa_available_t calc_port_state(pa_device_port *p, pa_card *impl)
 }
 
 static void profile_set_available(pa_card *impl, uint32_t index,
-		enum acp_available status)
+		enum acp_available status, bool emit)
 {
 	struct acp_card_profile *p = impl->card.profiles[index];
 	enum acp_available old = p->available;
 
-	pa_log_debug("Setting profile %s to availability status %d",
-			p->name, status);
-	if (old == status)
-		return;
+	if (old != status)
+		pa_log_info("Profile %s available %s -> %s", p->name,
+				acp_available_str(old), acp_available_str(status));
 
 	p->available = status;
 
-	if (impl && impl->events && impl->events->profile_available)
+	if (emit && impl && impl->events && impl->events->profile_available)
 		impl->events->profile_available(impl->user_data, index,
 				old, status);
 }
@@ -411,6 +434,9 @@ static int report_jack_state(snd_mixer_elem_t *melem, unsigned int mask)
 		bool found_available_output_port = false;
 		enum acp_available available = ACP_AVAILABLE_UNKNOWN;
 
+		if (profile->profile.flags & ACP_PROFILE_OFF)
+			continue;
+
 		PA_HASHMAP_FOREACH(port, impl->ports, state2) {
 			if (!pa_hashmap_get(port->profiles, profile->profile.name))
 				continue;
@@ -421,7 +447,6 @@ static int report_jack_state(snd_mixer_elem_t *melem, unsigned int mask)
 					found_available_input_port = true;
 			} else {
 				has_output_port = true;
-
 				if (port->port.available != ACP_AVAILABLE_NO)
 					found_available_output_port = true;
 			}
@@ -444,11 +469,11 @@ static int report_jack_state(snd_mixer_elem_t *melem, unsigned int mask)
 		if (profile->profile.index == impl->card.active_profile_index)
 			active_available = available;
 		else
-			profile_set_available(impl, profile->profile.index, available);
+			profile_set_available(impl, profile->profile.index, available, false);
 	}
 
 	if (impl->card.active_profile_index != ACP_INVALID_INDEX)
-		profile_set_available(impl, impl->card.active_profile_index, active_available);
+		profile_set_available(impl, impl->card.active_profile_index, active_available, true);
 
 	return 0;
 }
@@ -568,7 +593,7 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 	pa_proplist_as_dict(p->proplist, &p->port.props);
 
 	if (changed && mask != 0 && impl->events && impl->events->props_changed)
-		impl->events->props_changed(impl);
+		impl->events->props_changed(impl->user_data);
 	return 0;
 }
 
@@ -623,10 +648,10 @@ static void init_eld_ctls(pa_card *impl)
 uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *name)
 {
 	uint32_t i;
-	uint32_t best, best2, best3, off;
+	uint32_t best, best2, off;
 	struct acp_card_profile **profiles = card->profiles;
 
-	best = best2 = best3 = ACP_INVALID_INDEX;
+	best = best2 = ACP_INVALID_INDEX;
 	off = 0;
 
 	for (i = 0; i < card->n_profiles; i++) {
@@ -645,15 +670,10 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 		} else if (p->available != ACP_AVAILABLE_NO) {
 			if (best2 == ACP_INVALID_INDEX || p->priority > profiles[best2]->priority)
 				best2 = i;
-		} else {
-			if (best3 == ACP_INVALID_INDEX || p->priority > profiles[best3]->priority)
-				best3 = i;
 		}
 	}
 	if (best == ACP_INVALID_INDEX)
 		best = best2;
-	if (best == ACP_INVALID_INDEX)
-		best = best3;
 	if (best == ACP_INVALID_INDEX)
 		best = off;
 	return best;
@@ -795,7 +815,7 @@ static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 				uint32_t i, n_volumes = new_soft_volume.channels;
 				float volumes[n_volumes];
 				for (i = 0; i < n_volumes; i++)
-					volumes[i] = ((float)new_soft_volume.values[i]) / PA_VOLUME_NORM;
+					volumes[i] = pa_sw_volume_to_linear(new_soft_volume.values[i]);
 				impl->events->set_soft_volume(impl->user_data, &dev->device, volumes, n_volumes);
 			}
 		}
@@ -879,7 +899,7 @@ static void mixer_volume_init(pa_alsa_device *dev)
 		pa_log_info("Using hardware volume control. Hardware dB scale %s.",
 				dev->mixer_path->has_dB ? "supported" : "not supported");
 	}
-	dev->device.base_volume = (float)dev->base_volume / PA_VOLUME_NORM;
+	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);;
 	dev->device.volume_step = 1.0f / dev->n_volume_steps;
 
 	if (!dev->mixer_path || !dev->mixer_path->has_mute) {
@@ -1005,8 +1025,10 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 	find_mixer(impl, dev, NULL, ignore_dB);
 
 	port_index = acp_device_find_best_port_index(&dev->device, NULL);
-
-	dev->active_port = (pa_device_port*)impl->card.ports[port_index];
+	if (port_index == ACP_INVALID_INDEX)
+		dev->active_port = NULL;
+	else
+		dev->active_port = (pa_device_port*)impl->card.ports[port_index];
 	if (dev->active_port)
 		dev->active_port->port.flags |= ACP_PORT_ACTIVE;
 
@@ -1035,6 +1057,11 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 
 	op = old_index != ACP_INVALID_INDEX ? (pa_alsa_profile*)profiles[old_index] : NULL;
 	np = (pa_alsa_profile*)profiles[new_index];
+
+	if (op == np)
+		return 0;
+
+	pa_log_info("activate profile: %s (%d)", np->profile.name, new_index);
 
 	if (op && op->output_mappings) {
 		PA_IDXSET_FOREACH(am, op->output_mappings, idx) {
@@ -1080,8 +1107,6 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 	np->profile.flags |= ACP_PROFILE_ACTIVE;
 	impl->card.active_profile_index = new_index;
 
-	pa_log_info("active_profile: %s (%d)", np->profile.name, new_index);
-
 	if (impl->events && impl->events->profile_changed)
 		impl->events->profile_changed(impl->user_data, old_index,
 				new_index);
@@ -1106,6 +1131,7 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	char device_id[16];
 	bool ignore_dB = false;
 	uint32_t profile_index;
+	int res;
 
 	impl = calloc(1, sizeof(*impl));
 	if (impl == NULL)
@@ -1154,15 +1180,22 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 
 	snd_config_update_free_global();
 
-	if (impl->use_ucm && !pa_alsa_ucm_query_profiles(&impl->ucm, card->index)) {
+	res = impl->use_ucm ? pa_alsa_ucm_query_profiles(&impl->ucm, card->index) : -1;
+	if (res == -PA_ALSA_ERR_UCM_LINKED) {
+		res = -ENOENT;
+		goto error;
+	}
+	if (res == 0) {
 		pa_log_info("Found UCM profiles");
 		impl->profile_set = pa_alsa_ucm_add_profile_set(&impl->ucm, &impl->ucm.default_channel_map);
 	} else {
 		impl->use_ucm = false;
 		impl->profile_set = pa_alsa_profile_set_new(profile_set, &impl->ucm.default_channel_map);
 	}
-	if (impl->profile_set == NULL)
-		return NULL;
+	if (impl->profile_set == NULL) {
+		res = -ENOTSUP;
+		goto error;
+	}
 
 	impl->profile_set->ignore_dB = ignore_dB;
 
@@ -1197,6 +1230,11 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	init_eld_ctls(impl);
 
 	return &impl->card;
+error:
+	pa_alsa_refcnt_dec();
+	free(impl);
+	errno = -res;
+	return NULL;
 }
 
 void acp_card_add_listener(struct acp_card *card,
@@ -1209,7 +1247,9 @@ void acp_card_add_listener(struct acp_card *card,
 
 void acp_card_destroy(struct acp_card *card)
 {
+	pa_card *impl = (pa_card *)card;
 	pa_alsa_refcnt_dec();
+	free(impl);
 }
 
 int acp_card_poll_descriptors_count(struct acp_card *card)
@@ -1344,7 +1384,10 @@ uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *nam
 		best = best3;
 	if (best == ACP_INVALID_INDEX)
 		best = 0;
-	return ports[best]->index;
+	if (best < dev->n_ports)
+		return ports[best]->index;
+	else
+		return ACP_INVALID_INDEX;
 }
 
 int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
@@ -1414,7 +1457,7 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 
 	v.channels = d->mapping->channel_map.channels;
 	for (i = 0; i < v.channels; i++)
-		v.values[i] = volume[i % n_volume] * PA_VOLUME_NORM;
+		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);;
 
 	pa_log_info("Set %s volume: %d", d->set_volume ? "hardware" : "software", pa_cvolume_max(&v));
 	for (i = 0; i < v.channels; i++)
@@ -1443,7 +1486,7 @@ int acp_device_get_volume(struct acp_device *dev, float *volume, uint32_t n_volu
 	if (v.channels == 0)
 		return -EIO;
 	for (i = 0; i < n_volume; i++)
-		volume[i] = ((float)v.values[i % v.channels]) / PA_VOLUME_NORM;
+		volume[i] = pa_sw_volume_to_linear(v.values[i % v.channels]);
 	return 0;
 }
 

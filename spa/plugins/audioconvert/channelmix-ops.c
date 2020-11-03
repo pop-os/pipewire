@@ -166,6 +166,7 @@ static int make_matrix(struct channelmix *mix)
 	float clev = SQRT1_2;
 	float slev = SQRT1_2;
 	float llev = 0.5f;
+	float maxsum = 0.0f;
 
 	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64,
 			src_mask, dst_mask);
@@ -193,6 +194,7 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & _MASK(FC)){
 		if ((dst_mask & STEREO) == STEREO){
+			spa_log_debug(mix->log, "assign FC to STEREO");
 			if(src_mask & STEREO) {
 				matrix[FL][FC] += clev;
 				matrix[FR][FC] += clev;
@@ -207,6 +209,7 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & STEREO){
 		if (dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign STEREO to FC");
 			matrix[FC][FL] += SQRT1_2;
 			matrix[FC][FR] += SQRT1_2;
 			if (src_mask & _MASK(FC))
@@ -218,12 +221,15 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & _MASK(RC)) {
 		if (dst_mask & _MASK(RL)){
+			spa_log_debug(mix->log, "assign RC to RL+RR");
 			matrix[RL][RC] += SQRT1_2;
 			matrix[RR][RC] += SQRT1_2;
 		} else if (dst_mask & _MASK(SL)) {
+			spa_log_debug(mix->log, "assign RC to SL+SR");
 			matrix[SL][RC] += SQRT1_2;
 			matrix[SR][RC] += SQRT1_2;
 		} else if(dst_mask & _MASK(FL)) {
+			spa_log_debug(mix->log, "assign RC to FL+FR");
 			if (matrix_encoding == MATRIX_DOLBY ||
 			    matrix_encoding == MATRIX_DPLII) {
 				if (unassigned & (_MASK(RL)|_MASK(RR))) {
@@ -238,6 +244,7 @@ static int make_matrix(struct channelmix *mix)
 				matrix[FR][RC] += slev * SQRT1_2;
 			}
 		} else if (dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign RC to FC");
 			matrix[FC][RC] += slev * SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign RC");
@@ -246,9 +253,11 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & _MASK(RL)) {
 		if (dst_mask & _MASK(RC)) {
+			spa_log_debug(mix->log, "assign RL+RR to RC");
 			matrix[RC][RL] += SQRT1_2;
 			matrix[RC][RR] += SQRT1_2;
 		} else if (dst_mask & _MASK(SL)) {
+			spa_log_debug(mix->log, "assign RL+RR to SL+SR");
 			if (src_mask & _MASK(SL)) {
 				matrix[SL][RL] += SQRT1_2;
 				matrix[SR][RR] += SQRT1_2;
@@ -257,6 +266,7 @@ static int make_matrix(struct channelmix *mix)
 				matrix[SR][RR] += 1.0f;
 			}
 		} else if (dst_mask & _MASK(FL)) {
+			spa_log_debug(mix->log, "assign RL+RR to FL+FR %f", slev);
 			if (matrix_encoding == MATRIX_DOLBY) {
 				matrix[FL][RL] -= slev * SQRT1_2;
 				matrix[FL][RR] -= slev * SQRT1_2;
@@ -272,6 +282,7 @@ static int make_matrix(struct channelmix *mix)
 				matrix[FR][RR] += slev;
 			}
 		} else if (dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign RL+RR to FC");
 			matrix[FC][RL]+= slev * SQRT1_2;
 			matrix[FC][RR]+= slev * SQRT1_2;
 		} else {
@@ -281,6 +292,7 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & _MASK(SL)) {
 		if (dst_mask & _MASK(RL)) {
+			spa_log_debug(mix->log, "assign SL+SR to RL+RR");
 			if (src_mask & _MASK(RL)) {
 				matrix[RL][SL] += SQRT1_2;
 				matrix[RR][SR] += SQRT1_2;
@@ -289,9 +301,11 @@ static int make_matrix(struct channelmix *mix)
 				matrix[RR][SR] += 1.0f;
 			}
 		} else if (dst_mask & _MASK(RC)) {
+			spa_log_debug(mix->log, "assign SL+SR to RC");
 			matrix[RC][SL]+= SQRT1_2;
 			matrix[RC][SR]+= SQRT1_2;
 		} else if (dst_mask & _MASK(FL)) {
+			spa_log_debug(mix->log, "assign SL+SR to FL+FR");
 			if (matrix_encoding == MATRIX_DOLBY) {
 				matrix[FL][SL] -= slev * SQRT1_2;
 				matrix[FL][SR] -= slev * SQRT1_2;
@@ -307,6 +321,7 @@ static int make_matrix(struct channelmix *mix)
 				matrix[FR][SR] += slev;
 			}
 		} else if (dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign SL+SR to FC");
 			matrix[FC][SL] += slev * SQRT1_2;
 			matrix[FC][SR] += slev * SQRT1_2;
 		} else {
@@ -316,9 +331,11 @@ static int make_matrix(struct channelmix *mix)
 
 	if (unassigned & _MASK(FLC)) {
 		if (dst_mask & _MASK(FL)) {
-			matrix[FC][FLC]+= 1.0f;
-			matrix[FC][FRC]+= 1.0f;
+			spa_log_debug(mix->log, "assign FLC+FRC to FL+FR");
+			matrix[FL][FLC]+= 1.0f;
+			matrix[FR][FRC]+= 1.0f;
 		} else if(dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign FLC+FRC to FC");
 			matrix[FC][FLC]+= SQRT1_2;
 			matrix[FC][FRC]+= SQRT1_2;
 		} else {
@@ -328,8 +345,10 @@ static int make_matrix(struct channelmix *mix)
 	if (unassigned & _MASK(LFE) &&
 	    SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_MIX_LFE)) {
 		if (dst_mask & _MASK(FC)) {
+			spa_log_debug(mix->log, "assign LFE to FC");
 			matrix[FC][LFE] += llev;
 		} else if (dst_mask & _MASK(FL)) {
+			spa_log_debug(mix->log, "assign LFE to FL+FR");
 			matrix[FL][LFE] += llev * SQRT1_2;
 			matrix[FR][LFE] += llev * SQRT1_2;
 		} else {
@@ -337,7 +356,7 @@ static int make_matrix(struct channelmix *mix)
 		}
 	}
 done:
-	for (ic = 0, i = 0; i < NUM_CHAN; i++) {
+	for (jc = 0, ic = 0, i = 0; i < NUM_CHAN; i++) {
 		float sum = 0.0f;
 		if ((dst_mask & (1UL << (i + 2))) == 0)
 			continue;
@@ -347,10 +366,14 @@ done:
 			mix->matrix_orig[ic][jc++] = matrix[i][j];
 			sum += fabs(matrix[i][j]);
 		}
-		if (sum > 1.0f)
-			for (j = 0; j < jc; j++)
-		                mix->matrix_orig[ic][j] /= sum;
+		maxsum = SPA_MAX(maxsum, sum);
 		ic++;
+	}
+	if (SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_NORMALIZE) &&
+	    maxsum > 1.0f) {
+		for (i = 0; i < ic; i++)
+			for (j = 0; j < jc; j++)
+		                mix->matrix_orig[i][j] /= maxsum;
 	}
 	return 0;
 }
@@ -364,9 +387,13 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 	uint32_t src_chan = mix->src_chan;
 	uint32_t dst_chan = mix->dst_chan;
 
+	spa_log_debug(mix->log, "volume:%f mute:%d n_volumes:%d", volume, mute, n_channel_volumes);
+
 	/** apply global volume to channels */
-	for (i = 0; i < n_channel_volumes; i++)
+	for (i = 0; i < n_channel_volumes; i++) {
 		volumes[i] = channel_volumes[i] * vol;
+		spa_log_debug(mix->log, "%d: %f * %f = %f", i, channel_volumes[i], vol, volumes[i]);
+	}
 
 	/** apply volumes per channel */
 	if (n_channel_volumes == src_chan) {

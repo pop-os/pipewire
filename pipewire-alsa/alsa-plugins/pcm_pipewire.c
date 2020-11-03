@@ -58,7 +58,7 @@ typedef struct {
 	snd_pcm_ioplug_t io;
 
 	char *node_name;
-	uint32_t target;
+	char *target;
 
 	int fd;
 	int error;
@@ -132,6 +132,7 @@ static void snd_pcm_pipewire_free(snd_pcm_pipewire_t *pw)
 		spa_system_close(pw->system, pw->fd);
 	if (pw->main_loop)
 		pw_thread_loop_destroy(pw->main_loop);
+	free(pw->target);
 	free(pw);
 }
 
@@ -412,6 +413,9 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 
 	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%lu/%u", pw->min_avail, io->rate);
+	if (pw->target != NULL &&
+	    pw_properties_get(props, PW_KEY_NODE_TARGET) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_TARGET, "%s", pw->target);
 
 	if (pw_properties_get(props, PW_KEY_MEDIA_TYPE) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_TYPE, "Audio");
@@ -419,8 +423,6 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 		pw_properties_set(props, PW_KEY_MEDIA_CATEGORY,
 				io->stream == SND_PCM_STREAM_PLAYBACK ?
 				"Playback" : "Capture");
-	if (pw_properties_get(props, PW_KEY_MEDIA_ROLE) == NULL)
-		pw_properties_set(props, PW_KEY_MEDIA_ROLE, "Music");
 
 	pw->stream = pw_stream_new(pw->core, pw->node_name, props);
 	if (pw->stream == NULL)
@@ -435,7 +437,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 			  io->stream == SND_PCM_STREAM_PLAYBACK ?
 				  PW_DIRECTION_OUTPUT :
 				  PW_DIRECTION_INPUT,
-			  pw->target,
+			  PW_ID_ANY,
 			  pw->flags |
 			  PW_STREAM_FLAG_AUTOCONNECT |
 			  PW_STREAM_FLAG_MAP_BUFFERS |
@@ -499,7 +501,7 @@ static int set_default_channels(struct spa_audio_info_raw *info)
 	case 7:
 		info->position[5] = SPA_AUDIO_CHANNEL_SL;
 		info->position[6] = SPA_AUDIO_CHANNEL_SR;
-		/* Fall through */
+		SPA_FALLTHROUGH
 	case 5:
 		info->position[3] = SPA_AUDIO_CHANNEL_RL;
 		info->position[4] = SPA_AUDIO_CHANNEL_RR;
@@ -510,17 +512,17 @@ static int set_default_channels(struct spa_audio_info_raw *info)
 	case 8:
 		info->position[6] = SPA_AUDIO_CHANNEL_SL;
 		info->position[7] = SPA_AUDIO_CHANNEL_SR;
-		/* Fall through */
+		SPA_FALLTHROUGH
 	case 6:
 		info->position[4] = SPA_AUDIO_CHANNEL_RL;
 		info->position[5] = SPA_AUDIO_CHANNEL_RR;
-		/* Fall through */
+		SPA_FALLTHROUGH
 	case 4:
 		info->position[3] = SPA_AUDIO_CHANNEL_LFE;
-		/* Fall through */
+		SPA_FALLTHROUGH
 	case 3:
 		info->position[2] = SPA_AUDIO_CHANNEL_FC;
-		/* Fall through */
+		SPA_FALLTHROUGH
 	case 2:
 		info->position[0] = SPA_AUDIO_CHANNEL_FL;
 		info->position[1] = SPA_AUDIO_CHANNEL_FR;
@@ -893,14 +895,14 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 		goto error;
 	}
 
-	pw->target = PW_ID_ANY;
+	pw->target = NULL;
 	if (str != NULL)
-		pw->target = atoi(str);
+		pw->target = strdup(str);
 	else {
 		if (stream == SND_PCM_STREAM_PLAYBACK)
-			pw->target = playback_node ? (uint32_t)atoi(playback_node) : PW_ID_ANY;
+			pw->target = playback_node ? strdup(playback_node) : NULL;
 		else
-			pw->target = capture_node ? (uint32_t)atoi(capture_node) : PW_ID_ANY;
+			pw->target = capture_node ? strdup(capture_node) : NULL;
 	}
 
 	pw->main_loop = pw_thread_loop_new("alsa-pipewire", NULL);
@@ -909,11 +911,9 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	pw->context = pw_context_new(loop, NULL, 0);
 
 	props = pw_properties_new(NULL, NULL);
-	str = pw_get_prgname();
-	if (str)
-		pw_properties_setf(props, PW_KEY_APP_NAME, "ALSA plug-in [%s]", str);
-	else
-		pw_properties_set(props, PW_KEY_APP_NAME, "ALSA plug-in");
+
+	pw_properties_setf(props, PW_KEY_APP_NAME, "PipeWire ALSA [%s]",
+			pw_get_prgname());
 
 	if (server_name)
 		pw_properties_set(props, PW_KEY_REMOTE_NAME, server_name);
@@ -946,6 +946,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 #else
 #warning hw_ptr updates of buffer_size will not be recognized by the ALSA library. Consider to update your ALSA library.
 #endif
+	pw->io.flags |= SND_PCM_IOPLUG_FLAG_MONOTONIC;
 
 	if ((err = snd_pcm_ioplug_create(&pw->io, name, stream, mode)) < 0)
 		goto error;

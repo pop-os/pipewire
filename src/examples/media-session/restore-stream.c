@@ -74,12 +74,6 @@ struct stream {
 	struct spa_hook listener;
 };
 
-struct find_data {
-	struct impl *impl;
-	const char *name;
-	uint32_t id;
-};
-
 static void remove_idle_timeout(struct impl *impl)
 {
 	struct pw_loop *main_loop = pw_context_get_main_loop(impl->context);
@@ -129,7 +123,6 @@ static char *serialize_props(struct stream *str, const struct spa_pod *param)
 	float val = 0.0f;
 	bool b = false;
 	char *ptr;
-	const char *v;
 	size_t size;
 	FILE *f;
 
@@ -156,15 +149,16 @@ static char *serialize_props(struct stream *str, const struct spa_pod *param)
 			fprintf(f, "volumes:%d", n_vals);
 			for (i = 0; i < n_vals; i++)
 				fprintf(f, ",%f", vals[i]);
+			fprintf(f, " ");
 			break;
 		}
 		default:
 			break;
 		}
 	}
-	if ((v = pw_properties_get(str->obj->obj.props, PW_KEY_NODE_TARGET)) != NULL) {
-		fprintf(f, "target-node:%s", v);
-	}
+	if (str->obj->target_node != NULL)
+		fprintf(f, "target-node:%s", str->obj->target_node);
+
         fclose(f);
 	return ptr;
 }
@@ -192,7 +186,7 @@ static int restore_stream(struct stream *str, const char *val)
 {
 	const char *p;
 	char *end;
-	char buf[1024], target[256];
+	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct spa_pod_frame f[2];
 	struct spa_pod *param;
@@ -202,9 +196,13 @@ static int restore_stream(struct stream *str, const char *val)
 
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
-	for (p = val; *p; p++) {
+	p = val;
+	while (*p) {
 		if (strstr(p, "volume:") == p) {
-			vol = strtof(p+7, &end);
+			p += 7;
+			vol = strtof(p, &end);
+			if (end == p)
+				continue;
 			spa_pod_builder_prop(&b, SPA_PROP_volume, 0);
 			spa_pod_builder_float(&b, vol);
 			p = end;
@@ -216,28 +214,35 @@ static int restore_stream(struct stream *str, const char *val)
 			p+=6;
 		}
 		else if (strstr(p, "volumes:") == p) {
-			n_vols = strtol(p+8, &end, 10);
-			if (n_vols >= SPA_AUDIO_MAX_CHANNELS)
+			p += 8;
+			n_vols = strtol(p, &end, 10);
+			if (end == p)
 				continue;
 			p = end;
+			if (n_vols >= SPA_AUDIO_MAX_CHANNELS)
+				continue;
 			vols = alloca(n_vols * sizeof(float));
-			for (i = 0; i < n_vols; i++) {
-				vols[i] = strtof(p+1, &end);
+			for (i = 0; i < n_vols && *p == ','; i++) {
+				p++;
+				vols[i] = strtof(p, &end);
+				if (end == p)
+					break;
 				p = end;
 			}
+			if (i != n_vols)
+				continue;
 			spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, vols);
 		}
 		else if (strstr(p, "target-node:") == p) {
 			p += 12;
-			end = strstr(p, " ");
-			if (end == NULL)
-				continue;
-
-			i = end - p;
-			strncpy(target, p, i);
-			target[i-1] = 0;
+			i = strlen(p);
+			pw_log_info("stream %d: target '%s'", str->obj->obj.id, p);
+			free(str->obj->target_node);
+			str->obj->target_node = i > 0 ? strndup(p, i) : NULL;
+		} else {
+			p++;
 		}
 	}
 	param = spa_pod_builder_pop(&b, &f[0]);
