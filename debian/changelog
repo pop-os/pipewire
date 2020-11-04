@@ -1,10 +1,11 @@
-pipewire (0.3.14-1) UNRELEASED; urgency=medium
+pipewire (0.3.14-1) unstable; urgency=medium
 
+  * Team upload
   * New upstream release
     - Avoid colliding with PulseAudio (Closes: #970760)
   * d/pipewire-bin.install: Install pw-reserve
 
- -- Simon McVittie <smcv@debian.org>  Tue, 03 Nov 2020 20:50:10 +0000
+ -- Simon McVittie <smcv@debian.org>  Wed, 04 Nov 2020 09:48:08 +0000
 
 pipewire (0.3.12-1) unstable; urgency=medium
 
