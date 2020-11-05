@@ -42,6 +42,10 @@
 #include <pwd.h>
 #endif
 
+#include <pipewire/log.h>
+
+#define spa_debug pw_log_debug
+
 #include <spa/utils/result.h>
 #include <spa/debug/dict.h>
 #include <spa/debug/mem.h>
@@ -62,6 +66,8 @@
 #include "manager.h"
 
 #define NAME	"pulse-server"
+
+static bool debug_messages = false;
 
 struct impl;
 struct server;
@@ -267,6 +273,8 @@ static int flush_messages(struct client *client)
 			res = send(client->source->fd, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
 			if (res < 0) {
 				pw_log_info("send channel:%d %zu, res %d: %m", m->channel, size, res);
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
+					break;
 				if (errno == EINTR)
 					continue;
 				else
@@ -297,6 +305,10 @@ static int send_message(struct client *client, struct message *m)
 
 	m->offset = 0;
 	spa_list_append(&client->out_messages, &m->link);
+
+	if (debug_messages)
+		message_dump(m);
+
 	res = flush_messages(client);
 	if (res == -EAGAIN) {
 		int mask = client->source->mask;
@@ -329,13 +341,19 @@ static int reply_simple_ack(struct client *client, uint32_t tag)
 	return send_message(client, reply);
 }
 
-static int reply_error(struct client *client, uint32_t tag, int res)
+static int reply_error(struct client *client, uint32_t command, uint32_t tag, int res)
 {
 	struct message *reply;
 	uint32_t error = res_to_err(res);
+	const char *name;
 
-	pw_log_warn(NAME" %p: ERROR tag:%u error:%u (%s)",
-			client, tag, error, spa_strerror(res));
+	if (command < COMMAND_MAX)
+		name = commands[command].name;
+	else
+		name = "invalid";
+
+	pw_log_warn(NAME" %p: ERROR command:%d (%s) tag:%u error:%u (%s)",
+			client, command, name, tag, error, spa_strerror(res));
 
 	reply = message_alloc(client, -1, 0);
 	message_put(reply,
@@ -447,15 +465,18 @@ static int do_command_auth(struct client *client, uint32_t command, uint32_t tag
 	struct message *reply;
 	uint32_t version;
 	const void *cookie;
+	size_t len;
 
 	if (message_get(m,
 			TAG_U32, &version,
-			TAG_ARBITRARY, &cookie, NATIVE_COOKIE_LENGTH,
+			TAG_ARBITRARY, &cookie, &len,
 			TAG_INVALID) < 0) {
 		return -EPROTO;
 	}
 	if (version < 8)
 		return -EPROTO;
+	if (len != NATIVE_COOKIE_LENGTH)
+		return -EINVAL;
 
 	if ((version & PROTOCOL_VERSION_MASK) >= 13)
 		version &= PROTOCOL_VERSION_MASK;
@@ -1087,7 +1108,7 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 
 	switch (state) {
 	case PW_STREAM_STATE_ERROR:
-		reply_error(client, -1, -EIO);
+		reply_error(client, -1, -1, -EIO);
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
 		if (!client->disconnecting)
@@ -1276,13 +1297,15 @@ static void stream_process(void *data)
 		int32_t avail = spa_ringbuffer_get_read_index(&stream->ring, &pd.read_index);
 		if (avail <= 0) {
 			/* underrun */
-			if (stream->drain_tag)
-				pw_stream_flush(stream->stream, true);
-
 			size = buf->datas[0].maxsize;
 			memset(p, 0, size);
-			pd.underrun_for = size;
-			pd.underrun = true;
+
+			if (stream->drain_tag)
+				pw_stream_flush(stream->stream, true);
+			else {
+				pd.underrun_for = size;
+				pd.underrun = true;
+			}
 		} else if (avail > MAXLENGTH) {
 			/* overrun, handled by other side */
 			pw_log_warn(NAME" %p: overrun", stream);
@@ -1554,6 +1577,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	stream->attr = attr;
 	stream->is_underrun = true;
 
+	if (no_remix)
+		pw_properties_set(props, PW_KEY_STREAM_DONT_REMIX, "true");
 	flags = 0;
 	if (no_move)
 		flags |= PW_STREAM_FLAG_DONT_RECONNECT;
@@ -1772,6 +1797,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 
 	if (peak_detect)
 		pw_properties_set(props, PW_KEY_STREAM_MONITOR, "true");
+	if (no_remix)
+		pw_properties_set(props, PW_KEY_STREAM_DONT_REMIX, "true");
 	flags = 0;
 	if (no_move)
 		flags |= PW_STREAM_FLAG_DONT_RECONNECT;
@@ -2011,14 +2038,14 @@ static int do_error_access(struct client *client, uint32_t command, uint32_t tag
 {
 	struct impl *impl = client->impl;
 	pw_log_debug(NAME" %p: %s access denied", impl, commands[command].name);
-	return reply_error(client, tag, -EACCES);
+	return reply_error(client, command, tag, -EACCES);
 }
 
 static int do_error_not_implemented(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	struct impl *impl = client->impl;
 	pw_log_debug(NAME" %p: %s not implemented", impl, commands[command].name);
-	return reply_error(client, tag, -ENOSYS);
+	return reply_error(client, command, tag, -ENOSYS);
 }
 
 static int set_node_volume_mute(struct pw_manager_object *o,
@@ -3881,8 +3908,13 @@ static int handle_packet(struct client *client, struct message *msg)
 	if (command >= COMMAND_MAX) {
 		res = -EINVAL;
 		goto finish;
-
 	}
+
+	if (debug_messages) {
+		pw_log_debug(NAME" %p: command %s", impl, commands[command].name);
+		message_dump(msg);
+	}
+
 	if (commands[command].run == NULL) {
 		res = -ENOTSUP;
 		goto finish;
@@ -3892,9 +3924,7 @@ static int handle_packet(struct client *client, struct message *msg)
 finish:
 	message_free(client, msg, false, false);
 	if (res < 0) {
-		pw_log_error(NAME" %p: command %d (%s) error: %s",
-				impl, command, commands[command].name, spa_strerror(res));
-		reply_error(client, tag, res);
+		reply_error(client, command, tag, res);
 	}
 	return res;
 }
@@ -3972,7 +4002,10 @@ static int do_read(struct client *client)
 		size = client->message->length - idx;
 	}
 	while (true) {
-		if ((r = recv(client->source->fd, data, size, 0)) < 0) {
+		if ((r = recv(client->source->fd, data, size, MSG_DONTWAIT)) < 0) {
+			pw_log_info("recv client:%p res %d: %m", client, res);
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				goto exit;
 			if (errno == EINTR)
 		                continue;
 			res = -errno;
@@ -4048,7 +4081,7 @@ on_client_data(void *data, int fd, uint32_t mask)
 			int mask = client->source->mask;
 			SPA_FLAG_CLEAR(mask, SPA_IO_OUT);
 			pw_loop_update_io(impl->loop, client->source, mask);
-		} else if (res != EAGAIN)
+		} else if (res != -EAGAIN)
 			goto error;
 	}
 	if (mask & SPA_IO_IN) {
@@ -4119,10 +4152,12 @@ error:
 	return;
 }
 
-static const char *
-get_runtime_dir(void)
+static int
+get_runtime_dir(char *buf, size_t buflen, const char *dir)
 {
 	const char *runtime_dir;
+	struct stat stat_buf;
+	int res, size;
 
 	runtime_dir = getenv("PULSE_RUNTIME_PATH");
 	if (runtime_dir == NULL)
@@ -4135,7 +4170,28 @@ get_runtime_dir(void)
 		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
 			runtime_dir = result ? result->pw_dir : NULL;
 	}
-	return runtime_dir;
+	size = snprintf(buf, buflen-1, "%s/%s", runtime_dir, dir) + 1;
+	if (size > (int) buflen) {
+		pw_log_error(NAME": path %s/%s too long", runtime_dir, dir);
+		return -ENAMETOOLONG;
+	}
+	if (stat(buf, &stat_buf) < 0) {
+		res = -errno;
+		if (res != -ENOENT) {
+			pw_log_error(NAME": stat %s failed with error: %m", buf);
+			return res;
+		}
+		if (mkdir(buf, 0700) < 0) {
+			res = -errno;
+			pw_log_error(NAME": mkdir %s failed with error: %m", buf);
+			return res;
+		}
+		pw_log_info(NAME": created %s", buf);
+	} else if ((stat_buf.st_mode & S_IFMT) != S_IFDIR) {
+		pw_log_error(NAME": %s is not a directory", buf);
+		return -ENOTDIR;
+	}
+	return 0;
 }
 
 static void server_free(struct server *server)
@@ -4157,23 +4213,24 @@ static void server_free(struct server *server)
 
 static int make_local_socket(struct server *server, char *name)
 {
-	const char *runtime_dir;
+	char runtime_dir[PATH_MAX];
 	socklen_t size;
 	int name_size, fd, res;
 	struct stat socket_stat;
 
-	runtime_dir = get_runtime_dir();
+	if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir), "pulse")) < 0)
+		goto error;
 
 	server->addr.sun_family = AF_LOCAL;
 	name_size = snprintf(server->addr.sun_path, sizeof(server->addr.sun_path),
-                             "%s/pulse/%s", runtime_dir, name) + 1;
+                             "%s/%s", runtime_dir, name) + 1;
+
 	if (name_size > (int) sizeof(server->addr.sun_path)) {
 		pw_log_error(NAME" %p: %s/%s too long",
 					server, runtime_dir, name);
 		res = -ENAMETOOLONG;
 		goto error;
 	}
-
 	if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
 		res = -errno;
 		goto error;
@@ -4192,12 +4249,14 @@ static int make_local_socket(struct server *server, char *name)
 	size = offsetof(struct sockaddr_un, sun_path) + strlen(server->addr.sun_path);
 	if (bind(fd, (struct sockaddr *) &server->addr, size) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: bind() failed with error: %m", server);
+		pw_log_error(NAME" %p: bind() to %s failed with error: %m", server,
+				server->addr.sun_path);
 		goto error_close;
 	}
 	if (listen(fd, 128) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: listen() failed with error: %m", server);
+		pw_log_error(NAME" %p: listen() on %s failed with error: %m", server,
+				server->addr.sun_path);
 		goto error_close;
 	}
 	pw_log_info(NAME" listening on unix:%s", server->addr.sun_path);
@@ -4349,6 +4408,8 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
 		return NULL;
+
+	debug_messages = pw_debug_is_category_enabled("connection");
 
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);

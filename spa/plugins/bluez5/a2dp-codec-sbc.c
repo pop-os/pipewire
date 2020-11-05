@@ -374,7 +374,7 @@ static int codec_encode(void *data,
 	int res;
 
 	res = sbc_encode(&this->sbc, src, src_size,
-			dst, dst_size, dst_out);
+			dst, dst_size, (ssize_t*)dst_out);
 
 	if (res >= this->codesize)
 		this->payload->frame_count += res / this->codesize;
@@ -397,7 +397,7 @@ static int codec_decode(void *data,
 }
 
 struct a2dp_codec a2dp_codec_sbc = {
-	.codec_id = A2DP_CODEC_SBC,
+	.id = {.codec_id = A2DP_CODEC_SBC},
 	.name = "sbc",
 	.description = "SBC",
 	.fill_caps = codec_fill_caps,

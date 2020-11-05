@@ -297,11 +297,11 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 	node->info.state = state;
 	impl->pending = state;
 
-	if (old == state)
-		return;
-
 	pw_log_debug(NAME" %p: (%s) %s -> %s (%s)", node, node->name,
 		     pw_node_state_as_string(old), pw_node_state_as_string(state), error);
+
+	if (old == state)
+		return;
 
 	if (state == PW_NODE_STATE_ERROR) {
 		pw_log_error("(%s-%u) %s -> error (%s)", node->name, node->info.id,
@@ -1921,7 +1921,8 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	enum pw_node_state old = impl->pending;
 
-	pw_log_debug(NAME" %p: set state %s -> %s, active %d", node,
+	pw_log_debug(NAME" %p: set state (%s) %s -> %s, active %d", node,
+			pw_node_state_as_string(node->info.state),
 			pw_node_state_as_string(old),
 			pw_node_state_as_string(state),
 			node->active);
@@ -1960,9 +1961,11 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 	}
 
 	if (old != state) {
-		impl->pending = state;
-		if (impl->pending_id != SPA_ID_INVALID)
+		if (impl->pending_id != SPA_ID_INVALID) {
 			pw_work_queue_cancel(impl->work, node, impl->pending_id);
+			node->info.state = impl->pending;
+		}
+		impl->pending = state;
 		impl->pending_id = pw_work_queue_add(impl->work,
 				node, res, on_state_complete, SPA_INT_TO_PTR(state));
 	}
