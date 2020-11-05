@@ -1,5 +1,6 @@
-pipewire (0.3.15-1) UNRELEASED; urgency=medium
+pipewire (0.3.15-1) unstable; urgency=medium
 
+  * Team upload
   * New upstream release
     - Disable the pulse-bridge module by default.
       This should only be used if completely replacing PulseAudio
@@ -8,8 +9,12 @@ pipewire (0.3.15-1) UNRELEASED; urgency=medium
       Fedora patch). This should also only be used if completely
       replacing PulseAudio with PipeWire.
     - Various other bug fixes
+  * Drop patch to disable bluez5 plugin.
+    This should no longer be necessary.
+  * d/p/protocol-native-do-version-check-on-HELLO.patch:
+    Add patch (from upstream, via Fedora) to fix interop with older clients
 
- -- Simon McVittie <smcv@debian.org>  Thu, 05 Nov 2020 16:19:47 +0000
+ -- Simon McVittie <smcv@debian.org>  Thu, 05 Nov 2020 18:10:32 +0000
 
 pipewire (0.3.14-1) unstable; urgency=medium
 
