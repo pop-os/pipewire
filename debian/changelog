@@ -1,3 +1,16 @@
+pipewire (0.3.15-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+    - Disable the pulse-bridge module by default.
+      This should only be used if completely replacing PulseAudio
+      with PipeWire, which Debian is definitely not ready to do.
+    - Disable the bluez5 module by default (previously a Debian and
+      Fedora patch). This should also only be used if completely
+      replacing PulseAudio with PipeWire.
+    - Various other bug fixes
+
+ -- Simon McVittie <smcv@debian.org>  Thu, 05 Nov 2020 16:19:47 +0000
+
 pipewire (0.3.14-1) unstable; urgency=medium
 
   * Team upload
