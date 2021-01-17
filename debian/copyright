@@ -15,7 +15,7 @@ Copyright: 2009 Lennart Poettering
            2020 Georges Basile Stavracas Neto
 License: Expat
 
-Files: plugins/alsa/90-pipewire-alsa.rules
+Files: spa/plugins/alsa/90-pipewire-alsa.rules
        spa/plugins/alsa/acp/*
        spa/plugins/alsa/mixer/paths/*
        spa/plugins/alsa/mixer/profile-sets/*
