@@ -72,7 +72,6 @@ struct impl {
 
 	uint32_t version;
 	size_t hdr_size;
-	unsigned int checked:1;
 };
 
 /** \endcond */
@@ -293,6 +292,8 @@ void pw_protocol_native_connection_destroy(struct pw_protocol_native_connection 
 
 	spa_hook_list_call(&conn->listener_list, struct pw_protocol_native_connection_events, destroy, 0);
 
+	spa_hook_list_clean(&conn->listener_list);
+
 	clear_buffer(&impl->out, true);
 	clear_buffer(&impl->in, true);
 	free(impl->out.buffer_data);
@@ -319,7 +320,7 @@ static int prepare_packet(struct pw_protocol_native_connection *conn, struct buf
 	buf->msg.opcode = p[1] >> 24;
 	len = p[1] & 0xffffff;
 
-	if (!impl->checked) {
+	if (buf->msg.id == 0 && buf->msg.opcode == 1) {
 		if (p[3] >= 4) {
 			pw_log_warn("old version detected");
 			impl->version = 0;
@@ -331,7 +332,6 @@ static int prepare_packet(struct pw_protocol_native_connection *conn, struct buf
 		spa_hook_list_call(&conn->listener_list,
 				struct pw_protocol_native_connection_events,
 				start, 0, impl->version);
-		impl->checked = 1;
 	}
 	if (impl->version >= 3) {
 		buf->msg.seq = p[2];

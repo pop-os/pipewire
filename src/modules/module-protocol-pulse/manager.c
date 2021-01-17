@@ -25,6 +25,7 @@
 #include "manager.h"
 
 #include <spa/pod/iter.h>
+#include <spa/pod/parser.h>
 #include <extensions/metadata.h>
 
 #define manager_emit_sync(m) spa_hook_list_call(&m->hooks, struct pw_manager_events, sync, 0)
@@ -64,8 +65,6 @@ struct object {
 
 	struct spa_hook proxy_listener;
 	struct spa_hook object_listener;
-
-	unsigned int new:1;
 };
 
 static void core_sync(struct manager *m)
@@ -116,6 +115,8 @@ static struct object *find_object(struct manager *m, uint32_t id)
 {
 	struct object *o;
 	spa_list_for_each(o, &m->this.object_list, this.link) {
+		if (o->this.creating)
+			continue;
 		if (o->this.id == id)
 			return o;
 	}
@@ -129,7 +130,6 @@ static void object_destroy(struct object *o)
 	m->this.n_objects--;
 	if (o->this.proxy)
 		pw_proxy_destroy(o->this.proxy);
-	free(o->this.type);
 	if (o->this.props)
 		pw_properties_free(o->this.props);
 	clear_params(&o->this.param_list, SPA_ID_INVALID);
@@ -237,7 +237,15 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 				continue;
 			info->params[i].user = 0;
 
-			changed++;
+			switch (id) {
+			case SPA_PARAM_EnumProfile:
+			case SPA_PARAM_Profile:
+			case SPA_PARAM_EnumRoute:
+				changed++;
+				break;
+			case SPA_PARAM_Route:
+				break;
+			}
 			clear_params(&o->this.param_list, id);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
@@ -251,13 +259,49 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 		core_sync(o->manager);
 	}
 }
+static struct object *find_device(struct manager *m, uint32_t card_id, uint32_t device)
+{
+	struct object *o;
+
+	spa_list_for_each(o, &m->this.object_list, this.link) {
+		struct pw_node_info *info;
+		const char *str;
+
+		if (strcmp(o->this.type, PW_TYPE_INTERFACE_Node) != 0)
+			continue;
+
+		if ((info = o->this.info) != NULL &&
+		    (str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL &&
+		    (uint32_t)atoi(str) == card_id &&
+		    (str = spa_dict_lookup(info->props, "card.profile.device")) != NULL &&
+		    (uint32_t)atoi(str) == device)
+			return o;
+	}
+	return NULL;
+}
 
 static void device_event_param(void *object, int seq,
 		uint32_t id, uint32_t index, uint32_t next,
 		const struct spa_pod *param)
 {
-	struct object *o = object;
+	struct object *o = object, *dev;
+	struct manager *m = o->manager;
+
 	add_param(&o->this.param_list, id, param);
+
+	if (id == SPA_PARAM_Route) {
+		uint32_t id, device;
+		if (spa_pod_parse_object(param,
+				SPA_TYPE_OBJECT_ParamRoute, NULL,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(&id),
+				SPA_PARAM_ROUTE_device,  SPA_POD_Int(&device)) < 0)
+			return;
+
+		if ((dev = find_device(m, o->this.id, device)) != NULL) {
+			dev->this.changed++;
+			core_sync(o->manager);
+		}
+	}
 }
 
 static const struct pw_device_events device_events = {
@@ -425,6 +469,10 @@ destroy_proxy(void *data)
 {
 	struct object *o = data;
 
+	if (o->info->events)
+		spa_hook_remove(&o->object_listener);
+	spa_hook_remove(&o->proxy_listener);
+
 	if (o->info && o->info->destroy)
                 o->info->destroy(o);
 
@@ -463,11 +511,11 @@ static void registry_event_global(void *data, uint32_t id,
 	}
 	o->this.id = id;
 	o->this.permissions = permissions;
-	o->this.type = strdup(type);
+	o->this.type = info->type;
 	o->this.version = version;
 	o->this.props = props ? pw_properties_new_dict(props) : NULL;
 	o->this.proxy = proxy;
-	o->new = true;
+	o->this.creating = true;
 	spa_list_init(&o->this.param_list);
 
 	o->manager = m;
@@ -508,6 +556,12 @@ static const struct pw_registry_events registry_events = {
 	.global_remove = registry_event_global_remove,
 };
 
+static void on_core_info(void *data, const struct pw_core_info *info)
+{
+	struct manager *m = data;
+	m->this.info = pw_core_info_update(m->this.info, info);
+}
+
 static void on_core_done(void *data, uint32_t id, int seq)
 {
 	struct manager *m = data;
@@ -518,8 +572,8 @@ static void on_core_done(void *data, uint32_t id, int seq)
 			manager_emit_sync(m);
 
 		spa_list_for_each(o, &m->this.object_list, this.link) {
-			if (o->new) {
-				o->new = false;
+			if (o->this.creating) {
+				o->this.creating = false;
 				manager_emit_added(m, &o->this);
 			} else if (o->this.changed > 0) {
 				manager_emit_updated(m, &o->this);
@@ -532,6 +586,7 @@ static void on_core_done(void *data, uint32_t id, int seq)
 static const struct pw_core_events core_events = {
 	PW_VERSION_CORE_EVENTS,
 	.done = on_core_done,
+	.info = on_core_info,
 };
 
 struct pw_manager *pw_manager_new(struct pw_core *core)
@@ -543,6 +598,13 @@ struct pw_manager *pw_manager_new(struct pw_core *core)
 		return NULL;
 
 	m->this.core = core;
+	m->this.registry = pw_core_get_registry(m->this.core,
+			PW_VERSION_REGISTRY, 0);
+	if (m->this.registry == NULL) {
+		free(m);
+		return NULL;
+	}
+
 	spa_hook_list_init(&m->hooks);
 
 	spa_list_init(&m->this.object_list);
@@ -550,8 +612,6 @@ struct pw_manager *pw_manager_new(struct pw_core *core)
 	pw_core_add_listener(m->this.core,
 			&m->core_listener,
 			&core_events, m);
-	m->this.registry = pw_core_get_registry(m->this.core,
-			PW_VERSION_REGISTRY, 0);
 	pw_registry_add_listener(m->this.registry,
 			&m->registry_listener,
 			&registry_events, m);
@@ -605,13 +665,15 @@ int pw_manager_for_each_object(struct pw_manager *manager,
 	int res;
 
 	spa_list_for_each(o, &m->this.object_list, this.link) {
+		if (o->this.creating)
+			continue;
 		if ((res = callback(data, &o->this)) != 0)
 			return res;
 	}
 	return 0;
 }
 
-void  pw_manager_destroy(struct pw_manager *manager)
+void pw_manager_destroy(struct pw_manager *manager)
 {
 	struct manager *m = SPA_CONTAINER_OF(manager, struct manager, this);
 	struct object *o;
@@ -621,9 +683,11 @@ void  pw_manager_destroy(struct pw_manager *manager)
 	spa_list_consume(o, &m->this.object_list, this.link)
 		object_destroy(o);
 
-	if (m->this.registry) {
-		spa_hook_remove(&m->registry_listener);
-		pw_proxy_destroy((struct pw_proxy*)m->this.registry);
-	}
+	spa_hook_remove(&m->registry_listener);
+	pw_proxy_destroy((struct pw_proxy*)m->this.registry);
+
+	if (m->this.info)
+		pw_core_info_free(m->this.info);
+
 	free(m);
 }

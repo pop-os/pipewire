@@ -98,6 +98,7 @@ static void node_free(void *data)
 {
 	struct node_data *nd = data;
 	pw_log_debug(NAME" %p: free %p", nd, nd->follower);
+	spa_hook_remove(&nd->adapter_listener);
 	pw_impl_node_destroy(nd->follower);
 }
 

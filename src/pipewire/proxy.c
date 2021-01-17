@@ -256,6 +256,10 @@ void pw_proxy_destroy(struct pw_proxy *proxy)
 		proxy->zombie = true;
 		pw_proxy_emit_destroy(proxy);
 	}
+
+	spa_hook_list_clean(&proxy->listener_list);
+	spa_hook_list_clean(&proxy->object_listener_list);
+
 	pw_proxy_unref(proxy);
 }
 

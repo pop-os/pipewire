@@ -517,6 +517,9 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	case SPA_NODE_COMMAND_Suspend:
 		configure_format(this, 0, NULL);
 		SPA_FALLTHROUGH
+	case SPA_NODE_COMMAND_Flush:
+		this->io_buffers.status = SPA_STATUS_OK;
+		SPA_FALLTHROUGH
 	case SPA_NODE_COMMAND_Pause:
 		this->started = false;
 		break;
@@ -966,6 +969,9 @@ static int impl_node_process(void *object)
 			if (done)
 				break;
 		}
+		if (!(status & SPA_STATUS_HAVE_DATA))
+			spa_node_call_xrun(&this->callbacks, 0, 0, NULL);
+
 	} else {
 		status = spa_node_process(this->follower);
 	}
