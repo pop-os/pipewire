@@ -90,12 +90,17 @@ struct impl {
 	struct spa_list device_list;
 };
 
-static struct node *v4l2_find_node(struct device *dev, uint32_t id)
+static struct node *v4l2_find_node(struct device *dev, uint32_t id, const char *name)
 {
 	struct node *node;
+	const char *str;
 
 	spa_list_for_each(node, &dev->node_list, link) {
 		if (node->id == id)
+			return node;
+		if (name != NULL &&
+		    (str = pw_properties_get(node->props, PW_KEY_NODE_NAME)) != NULL &&
+		    strcmp(name, str) == 0)
 			return node;
 	}
 	return NULL;
@@ -117,8 +122,8 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 {
 	struct node *node;
 	struct impl *impl = dev->impl;
-	int res;
-	const char *str;
+	int i, res;
+	const char *str, *d;
 
 	pw_log_debug("new node %u", id);
 
@@ -144,6 +149,17 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 	if (str == NULL)
 		str = "v4l2-device";
 	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s", info->factory_name, str);
+
+	for (i = 2; i <= 99; i++) {
+		if ((d = pw_properties_get(node->props, PW_KEY_NODE_NAME)) == NULL)
+			break;
+
+		if (v4l2_find_node(dev, SPA_ID_INVALID, d) == NULL)
+			break;
+
+		pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s.%d",
+				info->factory_name, str, i);
+	}
 
 	str = pw_properties_get(dev->props, SPA_KEY_DEVICE_DESCRIPTION);
 	if (str == NULL)
@@ -203,7 +219,7 @@ static void v4l2_device_object_info(void *data, uint32_t id,
 	struct device *dev = data;
 	struct node *node;
 
-	node = v4l2_find_node(dev, id);
+	node = v4l2_find_node(dev, id, NULL);
 
 	if (info == NULL) {
 		if (node == NULL) {
@@ -224,12 +240,17 @@ static const struct spa_device_events v4l2_device_events = {
 	.object_info = v4l2_device_object_info
 };
 
-static struct device *v4l2_find_device(struct impl *impl, uint32_t id)
+static struct device *v4l2_find_device(struct impl *impl, uint32_t id, const char *name)
 {
 	struct device *dev;
+	const char *str;
 
 	spa_list_for_each(dev, &impl->device_list, link) {
 		if (dev->id == id)
+			return dev;
+		if (name != NULL &&
+		    (str = pw_properties_get(dev->props, PW_KEY_DEVICE_NAME)) != NULL &&
+		    strcmp(str, name) == 0)
 			return dev;
 	}
 	return NULL;
@@ -251,6 +272,7 @@ static int v4l2_update_device_props(struct device *dev)
 	struct pw_properties *p = dev->props;
 	const char *s, *d;
 	char temp[32];
+	int i;
 
 	if ((s = pw_properties_get(p, SPA_KEY_DEVICE_NAME)) == NULL) {
 		if ((s = pw_properties_get(p, SPA_KEY_DEVICE_BUS_ID)) == NULL) {
@@ -261,6 +283,18 @@ static int v4l2_update_device_props(struct device *dev)
 		}
 	}
 	pw_properties_setf(p, PW_KEY_DEVICE_NAME, "v4l2_device.%s", s);
+
+	for (i = 2; i <= 99; i++) {
+		if ((d = pw_properties_get(p, PW_KEY_DEVICE_NAME)) == NULL)
+			break;
+
+		if (v4l2_find_device(dev->impl, SPA_ID_INVALID,  d) == NULL)
+			break;
+
+		pw_properties_setf(p, PW_KEY_DEVICE_NAME, "v4l2_device.%s.%d", s, i);
+	}
+	if (i == 99)
+		return -EEXIST;
 
 	if (pw_properties_get(p, PW_KEY_DEVICE_DESCRIPTION) == NULL) {
 		d = pw_properties_get(p, PW_KEY_DEVICE_PRODUCT_NAME);
@@ -425,7 +459,7 @@ static void v4l2_udev_object_info(void *data, uint32_t id,
 	struct impl *impl = data;
 	struct device *dev;
 
-	dev = v4l2_find_device(impl, id);
+	dev = v4l2_find_device(impl, id, NULL);
 
 	if (info == NULL) {
 		if (dev == NULL)

@@ -211,7 +211,7 @@ static void test_new_string(void)
 {
 	struct pw_properties *props;
 
-	props = pw_properties_new_string("foo=bar bar=baz ignore him=too empty= =gg");
+	props = pw_properties_new_string("foo=bar bar=baz \"#ignore\"=ignore him=too empty=\"\" =gg");
 	spa_assert(props != NULL);
 	spa_assert(props->flags == 0);
 	spa_assert(props->dict.n_items == 4);
@@ -220,6 +220,26 @@ static void test_new_string(void)
 	spa_assert(!strcmp(pw_properties_get(props, "bar"), "baz"));
 	spa_assert(!strcmp(pw_properties_get(props, "him"), "too"));
 	spa_assert(!strcmp(pw_properties_get(props, "empty"), ""));
+
+	pw_properties_free(props);
+
+	props = pw_properties_new_string("foo=bar bar=baz");
+	spa_assert(props != NULL);
+	spa_assert(props->flags == 0);
+	spa_assert(props->dict.n_items == 2);
+
+	spa_assert(!strcmp(pw_properties_get(props, "foo"), "bar"));
+	spa_assert(!strcmp(pw_properties_get(props, "bar"), "baz"));
+
+	pw_properties_free(props);
+
+	props = pw_properties_new_string("foo=bar bar=\"baz");
+	spa_assert(props != NULL);
+	spa_assert(props->flags == 0);
+	spa_assert(props->dict.n_items == 2);
+
+	spa_assert(!strcmp(pw_properties_get(props, "foo"), "bar"));
+	spa_assert(!strcmp(pw_properties_get(props, "bar"), "baz"));
 
 	pw_properties_free(props);
 }
@@ -317,7 +337,7 @@ static void test_new_json(void)
 	props = pw_properties_new_string("{ \"foo\": \"bar\\n\\t\", \"bar\": 1.8, \"empty\": [ \"foo\", \"bar\" ], \"\": \"gg\"");
 	spa_assert(props != NULL);
 	spa_assert(props->flags == 0);
-	spa_assert(props->dict.n_items == 4);
+	spa_assert(props->dict.n_items == 3);
 
 	spa_assert(!strcmp(pw_properties_get(props, "foo"), "bar\n\t"));
 	spa_assert(!strcmp(pw_properties_get(props, "bar"), "1.8"));

@@ -119,7 +119,8 @@ struct impl {
 
 	struct port ports[2][1];
 
-	uint32_t remap[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t src_remap[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t dst_remap[SPA_AUDIO_MAX_CHANNELS];
 
 	uint32_t cpu_flags;
 	struct convert conv;
@@ -177,7 +178,8 @@ static int setup_convert(struct impl *this)
 			if (informat.info.raw.position[i] !=
 			    outformat.info.raw.position[j])
 				continue;
-			this->remap[i] = j;
+			this->src_remap[j] = i;
+			this->dst_remap[i] = j;
 			spa_log_debug(this->log, NAME " %p: channel %d -> %d (%s -> %s)", this,
 					i, j,
 					spa_debug_type_find_short_name(spa_type_audio_channel,
@@ -196,10 +198,10 @@ static int setup_convert(struct impl *this)
 	if ((res = convert_init(&this->conv)) < 0)
 		return res;
 
-	spa_log_debug(this->log, NAME " %p: got converter features %08x:%08x", this,
-			this->cpu_flags, this->conv.cpu_flags);
-
 	this->is_passthrough = this->conv.is_passthrough;
+
+	spa_log_debug(this->log, NAME " %p: got converter features %08x:%08x passthrough:%d", this,
+			this->cpu_flags, this->conv.cpu_flags, this->is_passthrough);
 
 	return 0;
 }
@@ -824,7 +826,7 @@ static int impl_node_process(void *object)
 	struct buffer *inbuf, *outbuf;
 	struct spa_buffer *inb, *outb;
 	const void **src_datas;
-	void **dst_datas, *ptr;
+	void **dst_datas;
 	uint32_t i, n_src_datas, n_dst_datas;
 	uint32_t n_samples, size, maxsize, offs;
 
@@ -867,19 +869,20 @@ static int impl_node_process(void *object)
 	n_src_datas = inb->n_datas;
 	src_datas = alloca(sizeof(void*) * n_src_datas);
 
-	size = UINT32_MAX;
-	for (i = 0; i < n_src_datas; i++) {
-		offs = SPA_MIN(inb->datas[i].chunk->offset, inb->datas[i].maxsize);
-		size = SPA_MIN(size, SPA_MIN(inb->datas[i].maxsize - offs, inb->datas[i].chunk->size));
-		ptr = SPA_MEMBER(inb->datas[i].data, offs, void);
-		src_datas[SPA_CLAMP(this->remap[i], 0u, n_src_datas-1)] = ptr;
-	}
-	n_samples = size / inport->stride;
-
 	outb = outbuf->outbuf;
 
 	n_dst_datas = outb->n_datas;
 	dst_datas = alloca(sizeof(void*) * n_dst_datas);
+
+	size = UINT32_MAX;
+	for (i = 0; i < n_src_datas; i++) {
+		struct spa_data *sd = &inb->datas[i];
+		uint32_t src_remap = n_src_datas > 1 ? this->src_remap[i] : 0;
+		offs = SPA_MIN(sd->chunk->offset, sd->maxsize);
+		size = SPA_MIN(size, SPA_MIN(sd->maxsize - offs, sd->chunk->size));
+		src_datas[src_remap] = SPA_MEMBER(sd->data, offs, void);
+	}
+	n_samples = size / inport->stride;
 
 	maxsize = outb->datas[0].maxsize;
 	n_samples = SPA_MIN(n_samples, maxsize / outport->stride);
@@ -889,13 +892,18 @@ static int impl_node_process(void *object)
 			this->is_passthrough);
 
 	for (i = 0; i < n_dst_datas; i++) {
-		ptr = this->is_passthrough ?  (void*)src_datas[i] : outbuf->datas[i];
-		outb->datas[i].data = ptr;
-		outb->datas[i].chunk->offset = 0;
-		outb->datas[i].chunk->size = n_samples * outport->stride;
-		dst_datas[SPA_CLAMP(this->remap[i], 0u, n_dst_datas-1)] = ptr;
-	}
+		uint32_t dst_remap = n_dst_datas > 1 ? this->dst_remap[i] : 0;
+		uint32_t src_remap = n_src_datas > 1 ? i : 0;
+		struct spa_data *dd = outb->datas;
 
+		if (this->is_passthrough)
+			dd[i].data = (void *)src_datas[src_remap];
+		else
+			dst_datas[dst_remap] = dd[i].data = outbuf->datas[i];
+
+		dd[i].chunk->offset = 0;
+		dd[i].chunk->size = n_samples * outport->stride;
+	}
 	if (!this->is_passthrough)
 		convert_process(&this->conv, dst_datas, src_datas, n_samples);
 

@@ -1488,11 +1488,12 @@ static void stream_process(void *data)
 					stream, client->name, pd.write_index, filled,
 					size, stream->attr.maxlength);
 		}
+
 		spa_ringbuffer_write_data(&stream->ring,
 				stream->buffer, stream->attr.maxlength,
 				pd.write_index % stream->attr.maxlength,
 				SPA_MEMBER(p, buf->datas[0].chunk->offset, void),
-				size);
+				SPA_MIN(size, stream->attr.maxlength));
 
 		pd.write_index += size;
 		spa_ringbuffer_write_update(&stream->ring, pd.write_index);
@@ -2311,27 +2312,24 @@ static void sample_play_ready(void *data, uint32_t index)
 	send_message(client, reply);
 }
 
-static void sample_play_done(void *data)
+static void sample_play_done(void *data, int res)
 {
 	struct pending_sample *ps = data;
 	struct client *client = ps->client;
 	struct impl *impl = client->impl;
-	pw_log_info(NAME" %p: sample done tag:%u", client, ps->tag);
+
+	if (res < 0)
+		reply_error(client, COMMAND_PLAY_SAMPLE, ps->tag, res);
+	else
+		pw_log_info(NAME" %p: PLAY_SAMPLE done tag:%u", client, ps->tag);
+
 	ps->done = true;
 	pw_loop_signal_event(impl->loop, client->cleanup);
-}
-
-static void sample_play_error(void *data, int err)
-{
-	struct pending_sample *ps = data;
-	struct client *client = ps->client;
-	reply_error(client, COMMAND_PLAY_SAMPLE, ps->tag, err);
 }
 
 static const struct sample_play_events sample_play_events = {
 	VERSION_SAMPLE_PLAY_EVENTS,
 	.ready = sample_play_ready,
-	.error = sample_play_error,
 	.done = sample_play_done,
 };
 
@@ -3457,7 +3455,10 @@ static int fill_sink_info(struct client *client, struct message *m,
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
 	    !volume_valid(&dev_info.volume_info.volume)) {
-		pw_log_warn("%d: not ready", o->id);
+		pw_log_warn("%d: sink not ready: sample:%d map:%d volume:%d",
+				o->id, sample_spec_valid(&dev_info.ss),
+				channel_map_valid(&dev_info.map),
+				volume_valid(&dev_info.volume_info.volume));
 		return -ENOENT;
 	}
 
@@ -3597,7 +3598,10 @@ static int fill_source_info(struct client *client, struct message *m,
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
 	    !volume_valid(&dev_info.volume_info.volume)) {
-		pw_log_warn("%d: not ready", o->id);
+		pw_log_warn("%d: source not ready: sample:%d map:%d volume:%d",
+				o->id, sample_spec_valid(&dev_info.ss),
+				channel_map_valid(&dev_info.map),
+				volume_valid(&dev_info.volume_info.volume));
 		return -ENOENT;
 	}
 
@@ -3889,8 +3893,14 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 	if (sel.id != SPA_ID_INVALID && sel.value != NULL)
 		goto error_invalid;
 
-	if (sel.value == NULL || (def != NULL && strcmp(sel.value, def)) == 0)
-		sel.value = get_default(client, command == COMMAND_GET_SINK_INFO);
+	if (command == COMMAND_GET_SINK_INFO || command == COMMAND_GET_SOURCE_INFO) {
+		if ((sel.value == NULL && sel.id == SPA_ID_INVALID) ||
+		    (sel.value != NULL && strcmp(sel.value, def) == 0))
+			sel.value = get_default(client, command == COMMAND_GET_SINK_INFO);
+	} else {
+		if (sel.value == NULL && sel.id == SPA_ID_INVALID)
+			goto error_invalid;
+	}
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u idx:%u name:%s", impl, client->name,
 			commands[command].name, tag, sel.id, sel.value);
@@ -4754,16 +4764,11 @@ static int handle_memblock(struct client *client, struct message *msg)
 	offset = (int64_t) (
              (((uint64_t) ntohl(client->desc.offset_hi)) << 32) |
              (((uint64_t) ntohl(client->desc.offset_lo))));
-	flags = ntohl(client->desc.flags) & FLAG_SEEKMASK;
+	flags = ntohl(client->desc.flags);
 
 	pw_log_debug(NAME" %p: Received memblock channel:%d offset:%"PRIi64
 			" flags:%08x size:%u", impl, channel, offset,
 			flags, msg->length);
-
-	if (flags != 0)
-		pw_log_warn(NAME" %p: unhandled seek flags:%02x", impl, flags);
-	if (offset != 0)
-		pw_log_warn(NAME" %p: unhandled offset:%08"PRIx64, impl, offset);
 
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_RECORD) {
@@ -4772,8 +4777,24 @@ static int handle_memblock(struct client *client, struct message *msg)
 	}
 
 	filled = spa_ringbuffer_get_write_index(&stream->ring, &index);
-	pw_log_debug("new block %p %p/%u filled:%d index:%d", msg,
-			msg->data, msg->length, filled, index);
+	pw_log_debug("new block %p %p/%u filled:%d index:%d flags:%02x offset:%08"PRIx64,
+			msg, msg->data, msg->length, filled, index, flags, offset);
+
+	switch (flags & FLAG_SEEKMASK) {
+	case SEEK_RELATIVE:
+		index += offset;
+		filled -= offset;
+		break;
+	case SEEK_ABSOLUTE:
+		filled -= (int32_t)(offset - (uint64_t)index);
+		index = offset;
+		break;
+	case SEEK_RELATIVE_ON_READ:
+	case SEEK_RELATIVE_END:
+		index = index - filled + offset;
+		filled = 0;
+		break;
+	}
 
 	if (filled < 0) {
 		/* underrun, reported on reader side */
@@ -4781,12 +4802,14 @@ static int handle_memblock(struct client *client, struct message *msg)
 		/* overrun */
 		send_overflow(stream);
 	}
+
 	/* always write data to ringbuffer, we expect the other side
 	 * to recover */
 	spa_ringbuffer_write_data(&stream->ring,
 			stream->buffer, stream->attr.maxlength,
 			index % stream->attr.maxlength,
-			msg->data, msg->length);
+			msg->data,
+			SPA_MIN(msg->length, stream->attr.maxlength));
 	stream->write_index = index + msg->length;
 	spa_ringbuffer_write_update(&stream->ring, stream->write_index);
 	stream->requested -= msg->length;

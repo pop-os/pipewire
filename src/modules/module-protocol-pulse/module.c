@@ -134,6 +134,8 @@ static void add_props(struct pw_properties *props, const char *str)
 		}
 		e = strchr(p, f);
 		if (e == NULL)
+			e = strchr(p, '\0');
+		if (e == NULL)
 			break;
 		*e = '\0';
 		v = p;
@@ -156,27 +158,29 @@ static int load_module(struct client *client, const char *name, const char *argu
 			res = -EINVAL;
 			goto out;
 		}
-		props = pw_properties_new_string(argument);
+		props = pw_properties_new(NULL, NULL);
 		if (props == NULL) {
 			res = -EINVAL;
 			goto out;
 		}
+		add_props(props, argument);
+
 		if ((str = pw_properties_get(props, "sink_name")) != NULL) {
-			pw_properties_set(props, "node.name", str);
+			pw_properties_set(props, PW_KEY_NODE_NAME, str);
 			pw_properties_set(props, "sink_name", NULL);
 		} else {
-			pw_properties_set(props, "node.name", "null");
+			pw_properties_set(props, PW_KEY_NODE_NAME, "null");
 		}
 		if ((str = pw_properties_get(props, "sink_properties")) != NULL) {
 			add_props(props, str);
 			pw_properties_set(props, "sink_properties", NULL);
 		}
 		if ((str = pw_properties_get(props, "channels")) != NULL) {
-			pw_properties_set(props, "audio.channels", str);
+			pw_properties_set(props, SPA_KEY_AUDIO_CHANNELS, str);
 			pw_properties_set(props, "channels", NULL);
 		}
 		if ((str = pw_properties_get(props, "rate")) != NULL) {
-			pw_properties_set(props, "audio.rate", str);
+			pw_properties_set(props, SPA_KEY_AUDIO_RATE, str);
 			pw_properties_set(props, "rate", NULL);
 		}
 		if ((str = pw_properties_get(props, "channel_map")) != NULL) {
@@ -190,14 +194,14 @@ static int load_module(struct client *client, const char *name, const char *argu
 			for (i = 0; i < map.channels; i++)
 				p += snprintf(p, 6, "%s%s", i == 0 ? "" : ",",
 						channel_id2name(map.map[i]));
-			pw_properties_set(props, "audio.position", s);
+			pw_properties_set(props, SPA_KEY_AUDIO_POSITION, s);
 			pw_properties_set(props, "channel_map", NULL);
 		}
 		if ((str = pw_properties_get(props, "device.description")) != NULL) {
-			pw_properties_set(props, "node.description", str);
+			pw_properties_set(props, PW_KEY_NODE_DESCRIPTION, str);
 			pw_properties_set(props, "device.description", NULL);
 		}
-		pw_properties_set(props, "factory.name", "support.null-audio-sink");
+		pw_properties_set(props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
 
 		module = calloc(1, sizeof(struct module));
 		module->client = client;
@@ -207,7 +211,6 @@ static int load_module(struct client *client, const char *name, const char *argu
 		if ((res = load_null_sink_module(client, module, props)) < 0)
 			goto out;
 	}
-
 out:
 	if (res < 0) {
 		free(module);

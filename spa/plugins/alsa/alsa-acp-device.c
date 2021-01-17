@@ -141,9 +141,10 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 {
 	struct spa_dict_item *items;
 	const struct acp_dict_item *it;
-	uint32_t n_items;
-	char device_name[128], path[180], channels[16];
+	uint32_t n_items, i;
+	char device_name[128], path[180], channels[16], ch[12];
 	char card_id[16], *p;
+	char positions[SPA_AUDIO_MAX_CHANNELS * 12];
 	struct spa_device_object_info info;
 	struct acp_card *card = this->card;
 	const char *stream, *devstr;;
@@ -161,7 +162,7 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 
 	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
 
-	n_items = dev->props.n_items + 5;
+	n_items = dev->props.n_items + 6;
 	items = alloca(n_items * sizeof(*items));
 
 	snprintf(card_id, sizeof(card), "%d", card->index);
@@ -181,9 +182,17 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_CARD,       card_id);
 	items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_STREAM,     stream);
 
-	snprintf(channels, sizeof(channels), "%d", dev->format.channels);
+	snprintf(channels, sizeof(channels)-1, "%d", dev->format.channels);
 	items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_CHANNELS, channels);
-	n_items = 5;
+
+	p = positions;
+	for (i = 0; i < dev->format.channels; i++) {
+		p += snprintf(p, 12, "%s%s", i == 0 ? "" : ",",
+				acp_channel_str(ch, sizeof(ch), dev->format.map[i]));
+	}
+
+	items[5] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_POSITION, positions);
+	n_items = 6;
 	acp_dict_for_each(it, &dev->props)
 		items[n_items++] = SPA_DICT_ITEM_INIT(it->key, it->value);
 
@@ -347,7 +356,7 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 		SPA_PARAM_ROUTE_priority,  SPA_POD_Int(p->priority),
 		SPA_PARAM_ROUTE_available,  SPA_POD_Id(p->available),
 		0);
-	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_info, 0);
+	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_info, SPA_POD_PROP_FLAG_HINT_DICT);
 	spa_pod_builder_push_struct(b, &f[1]);
 	spa_pod_builder_int(b, p->props.n_items);
 	acp_dict_for_each(item, &p->props) {
@@ -481,14 +490,12 @@ static int impl_enum_params(void *object, int seq,
 				return 0;
 
 			dev = card->devices[result.index];
-			if (SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_ACTIVE))
+			if (SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_ACTIVE) &&
+			    (p = find_port_for_device(card, dev)) != NULL)
 				break;
 
 			result.index++;
 		}
-		p = find_port_for_device(card, dev);
-		if (p == NULL)
-			return 0;
 		result.next = result.index + 1;
 		param = build_route(&b, id, p, dev, card->active_profile_index);
 		if (param == NULL)
@@ -518,6 +525,9 @@ static int apply_device_props(struct impl *this, struct acp_device *dev, struct 
 	struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) props;
 	int changed = 0;
+	float volumes[ACP_MAX_CHANNELS];
+	uint32_t channels[ACP_MAX_CHANNELS];
+	uint32_t n_volumes = 0, n_channels = 0;
 
 	if (!spa_pod_is_object_type(props, SPA_TYPE_OBJECT_Props))
 		return -EINVAL;
@@ -537,20 +547,23 @@ static int apply_device_props(struct impl *this, struct acp_device *dev, struct 
 			}
 			break;
 		case SPA_PROP_channelVolumes:
-		{
-			float volumes[64];
-			uint32_t n_volumes;
-
 			if ((n_volumes = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					volumes, 64)) > 0) {
-				acp_device_set_volume(dev, volumes, n_volumes);
+					volumes, ACP_MAX_CHANNELS)) > 0) {
+				changed++;
+			}
+			break;
+		case SPA_PROP_channelMap:
+			if ((n_channels = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					channels, ACP_MAX_CHANNELS)) > 0) {
 				changed++;
 			}
 			break;
 		}
-		}
 	}
-	return 0;
+	if (n_volumes > 0)
+		acp_device_set_volume(dev, volumes, n_volumes);
+
+	return changed;
 }
 
 static int impl_set_param(void *object,
@@ -765,7 +778,10 @@ static void on_set_soft_volume(void *data, struct acp_device *dev,
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
 			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
-						SPA_TYPE_Float, n_volume, volume));
+						SPA_TYPE_Float, n_volume, volume),
+			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
+						SPA_TYPE_Id, dev->format.channels,
+						dev->format.map));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
@@ -895,6 +911,10 @@ impl_init(const struct spa_handle_factory *factory,
 	if (info) {
 		if ((str = spa_dict_lookup(info, SPA_KEY_API_ALSA_PATH)) != NULL)
 			snprintf(this->props.device, sizeof(this->props.device)-1, "%s", str);
+		if ((str = spa_dict_lookup(info, "api.acp.auto-port")) != NULL)
+			this->props.auto_port = strcmp(str, "true") == 0 || atoi(str) != 0;
+		if ((str = spa_dict_lookup(info, "api.acp.auto-profile")) != NULL)
+			this->props.auto_profile = strcmp(str, "true") == 0 || atoi(str) != 0;
 
 		items = alloca((info->n_items) * sizeof(*items));
 		spa_dict_for_each(it, info)

@@ -58,7 +58,6 @@ struct props {
 };
 
 #define MAX_BUFFERS 32
-#define MSBC_BUFFER_SIZE 2 * MSBC_ENCODED_SIZE
 
 struct buffer {
 	uint32_t id;
@@ -107,13 +106,10 @@ struct impl {
 
 	struct spa_bt_transport *transport;
 	struct spa_hook transport_listener;
-	int sock_fd;
 
 	struct port port;
 
 	unsigned int started:1;
-
-	struct spa_source source;
 
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
@@ -122,12 +118,12 @@ struct impl {
 	sbc_t msbc;
 	bool msbc_seq_initialized;
 	uint8_t msbc_seq;
-	uint8_t msbc_buffer[MSBC_BUFFER_SIZE];
-	uint8_t *msbc_buffer_head;
-	uint8_t *msbc_buffer_tail;
+
+	/* mSBC frame parsing */
+	uint8_t msbc_buffer[MSBC_ENCODED_SIZE];
+	uint8_t msbc_buffer_pos;
 
 	struct timespec now;
-	uint32_t sample_count;
 };
 
 #define NAME "sco-source"
@@ -276,33 +272,13 @@ static void reset_buffers(struct port *port)
 	spa_list_init(&port->free);
 	spa_list_init(&port->ready);
 
+	port->current_buffer = NULL;
+
 	for (i = 0; i < port->n_buffers; i++) {
 		struct buffer *b = &port->buffers[i];
 		spa_list_append(&port->free, &b->link);
 		b->outstanding = false;
 	}
-}
-
-static int read_data(struct impl *this, uint8_t *data, uint32_t data_size)
-{
-	int res = 0;
-
-again:
-	res = read(this->sock_fd, data, data_size);
-	if (res <= 0) {
-		/* retry if interrupted */
-		if (errno == EINTR)
-			goto again;
-
-		/* return socked has no data */
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-		    return res;
-
-		/* error */
-		return -errno;
-	}
-
-	return res;
 }
 
 static void recycle_buffer(struct impl *this, struct port *port, uint32_t buffer_id)
@@ -316,36 +292,61 @@ static void recycle_buffer(struct impl *this, struct port *port, uint32_t buffer
 	}
 }
 
-static uint8_t* find_h2_header(uint8_t *data, size_t len)
+/* Append data to msbc buffer, syncing buffer start to frame headers */
+static void msbc_buffer_append_byte(struct impl *this, uint8_t byte)
 {
-	while (len >= 2) {
-		if (data[0] == 0x01 && (data[1] & 0x0F) == 0x08 &&
-		    ((data[1] >> 4) & 1) == ((data[1] >> 5) & 1) &&
-		    ((data[1] >> 6) & 1) == ((data[1] >> 7) & 1) ) {
-			return data;
-		}
-		data++;
-		len--;
-	}
-
-	return NULL;
+        /* Parse mSBC frame header */
+        if (this->msbc_buffer_pos == 0) {
+                if (byte != 0x01) {
+                        this->msbc_buffer_pos = 0;
+                        return;
+                }
+        }
+        else if (this->msbc_buffer_pos == 1) {
+                if (!((byte & 0x0F) == 0x08 &&
+                      ((byte >> 4) & 1) == ((byte >> 5) & 1) &&
+                      ((byte >> 6) & 1) == ((byte >> 7) & 1))) {
+                        this->msbc_buffer_pos = 0;
+                        return;
+                }
+        }
+        else if (this->msbc_buffer_pos == 2) {
+                /* .. and beginning of MSBC frame: SYNCWORD + 2 nul bytes */
+                if (byte != 0xAD) {
+                        this->msbc_buffer_pos = 0;
+                        return;
+                }
+        }
+        else if (this->msbc_buffer_pos == 3) {
+                if (byte != 0x00) {
+                        this->msbc_buffer_pos = 0;
+                        return;
+                }
+        }
+        else if (this->msbc_buffer_pos == 4) {
+                if (byte != 0x00) {
+                        this->msbc_buffer_pos = 0;
+                        return;
+                }
+        }
+        else if (this->msbc_buffer_pos >= MSBC_ENCODED_SIZE) {
+                /* Packet completed. Reset. */
+                this->msbc_buffer_pos = 0;
+                msbc_buffer_append_byte(this, byte);
+                return;
+        }
+        this->msbc_buffer[this->msbc_buffer_pos] = byte;
+        ++this->msbc_buffer_pos;
 }
 
-static void sco_on_ready_read(struct spa_source *source)
+static int sco_source_cb(void *userdata, uint8_t *read_data, int size_read)
 {
-	struct impl *this = source->data;
+	struct impl *this = userdata;
 	struct port *port = &this->port;
 	struct spa_io_buffers *io = port->io;
-	int size_read;
 	struct spa_data *datas;
 	uint32_t max_out_size;
-	uint8_t *packet;
 
-	/* make sure the source has input data */
-	if ((source->rmask & SPA_IO_IN) == 0) {
-		spa_log_error(this->log, "source has no input data, rmask=%d", source->rmask);
-		goto stop;
-	}
 	if (this->transport == NULL) {
 		spa_log_debug(this->log, "no transport, stop reading");
 		goto stop;
@@ -355,7 +356,7 @@ static void sco_on_ready_read(struct spa_source *source)
 	if (!port->current_buffer) {
 		if (spa_list_is_empty(&port->free)) {
 			spa_log_warn(this->log, "buffer not available");
-			return;
+			return 0;
 		}
 		port->current_buffer = spa_list_first(&port->free, struct buffer, link);
 		spa_list_remove(&port->current_buffer->link);
@@ -365,114 +366,79 @@ static void sco_on_ready_read(struct spa_source *source)
 
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
 		max_out_size = MSBC_DECODED_SIZE;
-		packet = this->msbc_buffer_head;
 	} else {
 		max_out_size = this->transport->read_mtu;
-		packet = (uint8_t *)datas[0].data + port->ready_offset;
 	}
 
 	/* update the current pts */
 	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &this->now);
 
-	/* read */
-	size_read = read_data(this, packet, this->transport->read_mtu);
-	if (size_read < 0) {
-		spa_log_error(this->log, "failed to read data");
-		goto stop;
-	}
+	/* handle data read from socket */
 	spa_log_debug(this->log, "read socket data %d", size_read);
 
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
-		uint8_t seq;
-		uint8_t *next_header;
-		size_t written;
+		int i;
 
-		this->msbc_buffer_head += size_read;
-		if (this->msbc_buffer_head - this->msbc_buffer >= MSBC_BUFFER_SIZE) {
-			spa_log_error(this->log, "buffer overrun");
-			goto stop;
+		for (i = 0; i < size_read; ++i) {
+			msbc_buffer_append_byte(this, read_data[i]);
+
+			/* Handle found mSBC packets.
+			 *
+			 * XXX: if there's no space for the decoded audio in
+			 * XXX: the current buffer, we'll drop data.
+			 */
+			if (this->msbc_buffer_pos == MSBC_ENCODED_SIZE &&
+			    port->ready_offset + MSBC_DECODED_SIZE <= datas[0].maxsize) {
+				int seq, processed;
+				size_t written;
+
+				/* Check sequence number */
+				seq = ((this->msbc_buffer[1] >> 4) & 1) | ((this->msbc_buffer[1] >> 6) & 2);
+				if (!this->msbc_seq_initialized) {
+					this->msbc_seq_initialized = true;
+					this->msbc_seq = seq;
+				} else if (seq != this->msbc_seq) {
+					spa_log_info(this->log, "missing mSBC packet: %u != %u", seq, this->msbc_seq);
+					this->msbc_seq = seq;
+					/* TODO: Implement PLC. */
+				}
+				this->msbc_seq = (this->msbc_seq + 1) % 4;
+
+				/* decode frame */
+				processed = sbc_decode(&this->msbc, this->msbc_buffer + 2, MSBC_ENCODED_SIZE - 3,
+						       (uint8_t *)datas[0].data + port->ready_offset, MSBC_DECODED_SIZE, &written);
+				if (processed < 0) {
+					spa_log_warn(this->log, "sbc_decode failed: %d", processed);
+					/* TODO: manage errors */
+					continue;
+				}
+
+				port->ready_offset += written;
+			}
 		}
-
-		this->msbc_buffer_tail = find_h2_header(this->msbc_buffer_tail, this->msbc_buffer_head - this->msbc_buffer_tail);
-		if (!this->msbc_buffer_tail) {
-			this->msbc_buffer_head = this->msbc_buffer_tail = this->msbc_buffer;
-			spa_log_trace(this->log, "void packet");
-			return;
-		}
-
-		if (this->msbc_buffer_head - this->msbc_buffer_tail < MSBC_ENCODED_SIZE) {
-			spa_log_trace(this->log, "partial packet");
-			return;
-		}
-
-		next_header = find_h2_header(this->msbc_buffer_tail + 2, this->msbc_buffer_head - this->msbc_buffer_tail - 2);
-		if (next_header && (next_header - this->msbc_buffer_tail) != MSBC_ENCODED_SIZE) {
-			spa_log_trace(this->log, "incomplete packet");
-			this->msbc_seq = (this->msbc_seq + 1) % 4;
-
-			/* Drop the incomplete packet and compact msbc_buffer to keep it under 2 * MSBC_ENCODED_SIZE */
-			spa_memmove(this->msbc_buffer, next_header, this->msbc_buffer_head - next_header);
-			this->msbc_buffer_head = this->msbc_buffer + (this->msbc_buffer_head - next_header);
-			this->msbc_buffer_tail = this->msbc_buffer;
-			/* TODO: Implement PLC? */
-			return;
-		}
-
-		seq = ((this->msbc_buffer_tail[1] >> 4) & 1) | ((this->msbc_buffer_tail[1] >> 6) & 2);
-		if (!this->msbc_seq_initialized) {
-			this->msbc_seq_initialized = true;
-			this->msbc_seq = seq;
-		} else if (seq != this->msbc_seq) {
-			spa_log_warn(this->log, "missing mSBC packet: %u != %u", seq, this->msbc_seq);
-			this->msbc_seq = seq;
-			/* TODO: Implement PLC. */
-		}
-
-		/* decode frame */
-		int processed = sbc_decode(&this->msbc, this->msbc_buffer_tail + 2, MSBC_ENCODED_SIZE - 3,
-		                           (uint8_t *)datas[0].data + port->ready_offset, MSBC_DECODED_SIZE, &written);
-		if (processed < 0) {
-			spa_log_warn(this->log, "sbc_decode failed: %d", processed);
-
-			/* TODO: manage errors */
-
-			this->msbc_buffer_tail += MSBC_ENCODED_SIZE;
-			if (this->msbc_buffer_head != this->msbc_buffer_tail) {
-				/* Compact msbc_buffer to keep it under 2 * MSBC_ENCODED_SIZE */
-				spa_memmove(this->msbc_buffer, this->msbc_buffer_tail, this->msbc_buffer_head - this->msbc_buffer_tail);
-				this->msbc_buffer_head = this->msbc_buffer + (this->msbc_buffer_head - this->msbc_buffer_tail);
-				this->msbc_buffer_tail = this->msbc_buffer;
-			} else
-				this->msbc_buffer_head = this->msbc_buffer_tail = this->msbc_buffer;
-			return;
-		}
-
-		port->ready_offset += written;
-		this->msbc_seq = (this->msbc_seq + 1) % 4;
-		this->msbc_buffer_tail += MSBC_ENCODED_SIZE;
-		if (this->msbc_buffer_head != this->msbc_buffer_tail) {
-			/* Compact msbc_buffer to keep it under 2 * MSBC_ENCODED_SIZE */
-			spa_memmove(this->msbc_buffer, this->msbc_buffer_tail, this->msbc_buffer_head - this->msbc_buffer_tail);
-			this->msbc_buffer_head = this->msbc_buffer + (this->msbc_buffer_head - this->msbc_buffer_tail);
-			this->msbc_buffer_tail = this->msbc_buffer;
-		} else
-			this->msbc_buffer_head = this->msbc_buffer_tail = this->msbc_buffer;
-	} else
+	} else {
+		uint8_t *packet;
+		packet = (uint8_t *)datas[0].data + port->ready_offset;
+		spa_memmove(packet, read_data, size_read);
 		port->ready_offset += size_read;
+	}
 
 	/* send buffer if full */
 	if ((max_out_size + port->ready_offset) > (this->props.max_latency * port->frame_size)) {
+		uint64_t sample_count;
+
 		datas[0].chunk->offset = 0;
 		datas[0].chunk->size = port->ready_offset;
 		datas[0].chunk->stride = port->frame_size;
 
-		this->sample_count += datas[0].chunk->size / port->frame_size;
+		sample_count = datas[0].chunk->size / port->frame_size;
 		spa_list_append(&port->ready, &port->current_buffer->link);
 		port->current_buffer = NULL;
 
 		if (this->clock) {
 			this->clock->nsec = SPA_TIMESPEC_TO_NSEC(&this->now);
-			this->clock->position = this->sample_count;
+			this->clock->duration = sample_count * this->clock->rate.denom / port->current_format.info.raw.rate;
+			this->clock->position += this->clock->duration;
 			this->clock->delay = 0;
 			this->clock->rate_diff = 1.0f;
 			this->clock->next_nsec = this->clock->nsec;
@@ -481,7 +447,7 @@ static void sco_on_ready_read(struct spa_source *source)
 
 	/* done if there are no buffers ready */
 	if (spa_list_is_empty(&port->ready))
-		return;
+		return 0;
 
 	/* process the buffer if IO does not have any */
 	if (io->status != SPA_STATUS_HAVE_DATA) {
@@ -500,16 +466,30 @@ static void sco_on_ready_read(struct spa_source *source)
 
 	/* notify ready */
 	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
-	return;
+	return 0;
 
 stop:
-	if (this->source.loop)
-		spa_loop_remove_source(this->data_loop, &this->source);
+	return 1;
+}
+
+static int do_add_source(struct spa_loop *loop,
+			 bool async,
+			 uint32_t seq,
+			 const void *data,
+			 size_t size,
+			 void *user_data)
+{
+	struct impl *this = user_data;
+
+	spa_bt_sco_io_set_source_cb(this->transport->sco_io, sco_source_cb, this);
+
+	return 0;
 }
 
 static int do_start(struct impl *this)
 {
 	bool do_accept;
+	int res;
 
 	/* Dont do anything if the node has already started */
 	if (this->started)
@@ -522,13 +502,11 @@ static int do_start(struct impl *this)
 	do_accept = this->transport->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY;
 
 	/* acquire the socked fd (false -> connect | true -> accept) */
-	this->sock_fd = spa_bt_transport_acquire(this->transport, do_accept);
-	if (this->sock_fd < 0)
-		return -1;
+	if ((res = spa_bt_transport_acquire(this->transport, do_accept)) < 0)
+		return res;
 
 	/* Reset the buffers and sample count */
 	reset_buffers(&this->port);
-	this->sample_count = 0;
 
 	/* Init mSBC if needed */
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
@@ -536,16 +514,13 @@ static int do_start(struct impl *this)
 		/* Libsbc expects audio samples by default in host endianity, mSBC requires little endian */
 		this->msbc.endian = SBC_LE;
 		this->msbc_seq_initialized = false;
-		this->msbc_buffer_head = this->msbc_buffer_tail = this->msbc_buffer;
+
+		this->msbc_buffer_pos = 0;
 	}
 
-	/* Add the ready read callback */
-	this->source.data = this;
-	this->source.fd = this->sock_fd;
-	this->source.func = sco_on_ready_read;
-	this->source.mask = SPA_IO_IN;
-	this->source.rmask = 0;
-	spa_loop_add_source(this->data_loop, &this->source);
+	/* Start socket i/o */
+	spa_bt_transport_ensure_sco_io(this->transport, this->data_loop);
+	spa_loop_invoke(this->data_loop, do_add_source, 0, NULL, 0, true, this);
 
 	/* Set the started flag */
 	this->started = true;
@@ -562,8 +537,8 @@ static int do_remove_source(struct spa_loop *loop,
 {
 	struct impl *this = user_data;
 
-	if (this->source.loop)
-		spa_loop_remove_source(this->data_loop, &this->source);
+	if (this->transport)
+		spa_bt_sco_io_set_source_cb(this->transport->sco_io, NULL, NULL);
 
 	return 0;
 }
@@ -582,13 +557,8 @@ static int do_stop(struct impl *this)
 	this->started = false;
 
 	if (this->transport) {
-		/* Release the transport */
+		/* Release the transport; it is responsible for closing the fd */
 		res = spa_bt_transport_release(this->transport);
-
-		/* Shutdown and close the socket */
-		shutdown(this->sock_fd, SHUT_RDWR);
-		close(this->sock_fd);
-		this->sock_fd = -1;
 	}
 
 	return res;
@@ -845,6 +815,7 @@ static int clear_buffers(struct impl *this, struct port *port)
 		spa_list_init(&port->ready);
 		port->n_buffers = 0;
 	}
+	port->current_buffer = NULL;
 	return 0;
 }
 
@@ -1041,7 +1012,7 @@ static int impl_node_process(void *object)
 	/* Get the new buffer from the ready list */
 	buffer = spa_list_first(&port->ready, struct buffer, link);
 	spa_list_remove(&buffer->link);
-	buffer->outstanding = false;
+	buffer->outstanding = true;
 
 	/* Set the new buffer in IO */
 	io->buffer_id = buffer->id;
@@ -1070,11 +1041,23 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static int do_transport_destroy(struct spa_loop *loop,
+				bool async,
+				uint32_t seq,
+				const void *data,
+				size_t size,
+				void *user_data)
+{
+	struct impl *this = user_data;
+	this->transport = NULL;
+	return 0;
+}
+
 static void transport_destroy(void *data)
 {
 	struct impl *this = data;
 	spa_log_debug(this->log, "transport %p destroy", this->transport);
-	this->transport = NULL;
+	spa_loop_invoke(this->data_loop, do_transport_destroy, 0, NULL, 0, true, this);
 }
 
 static const struct spa_bt_transport_events transport_events = {
@@ -1195,7 +1178,6 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);
-	this->sock_fd = -1;
 
 	return 0;
 }

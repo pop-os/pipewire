@@ -851,6 +851,7 @@ static void check_properties(struct pw_impl_node *node)
                 if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
 			uint32_t quantum_size;
 
+			node->latency = SPA_FRACTION(num, denom);
 			quantum_size = flp2((num * context->defaults.clock_rate / denom));
 
 			if (quantum_size != node->quantum_size) {
@@ -889,6 +890,8 @@ static const char *str_status(uint32_t status)
 static void dump_states(struct pw_impl_node *driver)
 {
 	struct pw_node_target *t;
+	struct pw_node_activation *na = driver->rt.activation;
+	struct spa_io_clock *cl = &na->position.clock;
 
 	spa_list_for_each(t, &driver->rt.target_list, link) {
 		struct pw_node_activation *a = t->activation;
@@ -897,8 +900,10 @@ static void dump_states(struct pw_impl_node *driver)
 			continue;
 		if (a->status == PW_NODE_ACTIVATION_TRIGGERED ||
 		    a->status == PW_NODE_ACTIVATION_AWAKE) {
-			pw_log_warn("(%s-%u) client too slow! status:%s",
-				t->node->name, t->node->info.id, str_status(a->status));
+			pw_log_warn("(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s",
+				t->node->name, t->node->info.id,
+				(uint32_t)(cl->rate.num * cl->duration), cl->rate.denom,
+				cl->position, str_status(a->status));
 		}
 		pw_log_debug("(%s-%u) state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 				" waiting:%"PRIu64" process:%"PRIu64" status:%s sync:%d",
@@ -1003,7 +1008,7 @@ static inline int process_node(void *data)
 				a->signal_time - a->prev_signal_time,
 				a->cpu_load[0], a->cpu_load[1], a->cpu_load[2]);
 
-		pw_context_driver_emit_start(this->context, this);
+		pw_context_driver_emit_complete(this->context, this);
 
 	} else if (status == SPA_STATUS_OK) {
 		pw_log_trace_fp(NAME" %p: async continue", this);
@@ -1276,6 +1281,7 @@ static void node_info(void *data, const struct spa_node_info *info)
 					id, spa_debug_type_find_name(spa_type_param, id),
 					node->info.params[i].flags, info->params[i].flags);
 
+			node->info.params[i].id = info->params[i].id;
 			if (node->info.params[i].flags == info->params[i].flags)
 				continue;
 
@@ -1536,6 +1542,8 @@ static int node_ready(void *data, int status)
 			do_reposition(node, reposition_node);
 
 		update_position(node, all_ready);
+
+		pw_context_driver_emit_start(node->context, node);
 	}
 	if (SPA_UNLIKELY(node->driver && !node->driving))
 		return 0;
@@ -1808,7 +1816,6 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 		struct spa_pod_builder b = { 0 };
 	        struct spa_result_node_params result;
 		uint32_t count = 0;
-		bool found = false;
 
 		result.id = param_id;
 		result.next = 0;
@@ -1817,8 +1824,6 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 			result.index = result.next++;
 			if (p->id != param_id)
 				continue;
-
-			found = true;
 
 			if (result.index < index)
 				continue;
@@ -1833,7 +1838,7 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 			if (++count == max)
 				break;
 		}
-		res = found ? 0 : -ENOENT;
+		res = 0;
 	} else {
 		user_data.cache = impl->cache_params && filter == NULL;
 

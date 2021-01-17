@@ -84,23 +84,22 @@ struct spa_bt_backend {
 
 static void ofono_transport_get_mtu(struct spa_bt_backend *backend, struct spa_bt_transport *t)
 {
-	if (t->codec == HFP_AUDIO_CODEC_CVSD) {
-		t->read_mtu = 48;
-		t->write_mtu = 48;
-	} else {
-		struct sco_options sco_opt;
-		socklen_t len;
+	struct sco_options sco_opt;
+	socklen_t len;
 
-		len = sizeof(sco_opt);
-		memset(&sco_opt, 0, len);
+	/* Fallback values */
+	t->read_mtu = 48;
+	t->write_mtu = 48;
 
-		if (getsockopt(t->fd, SOL_SCO, SCO_OPTIONS, &sco_opt, &len) < 0)
-			spa_log_warn(backend->log, NAME": getsockopt(SCO_OPTIONS) failed, loading defaults");
-		else {
-			spa_log_debug(backend->log, NAME" : autodetected mtu = %u", sco_opt.mtu);
-			t->read_mtu = sco_opt.mtu;
-			t->write_mtu = sco_opt.mtu;
-		}
+	len = sizeof(sco_opt);
+	memset(&sco_opt, 0, len);
+
+	if (getsockopt(t->fd, SOL_SCO, SCO_OPTIONS, &sco_opt, &len) < 0)
+		spa_log_warn(backend->log, NAME": getsockopt(SCO_OPTIONS) failed, loading defaults");
+	else {
+		spa_log_debug(backend->log, NAME" : autodetected mtu = %u", sco_opt.mtu);
+		t->read_mtu = sco_opt.mtu;
+		t->write_mtu = sco_opt.mtu;
 	}
 }
 
@@ -217,7 +216,7 @@ static int ofono_audio_acquire(void *data, bool optional)
 			transport->path, transport->fd, transport->codec);
 
 	ofono_transport_get_mtu(backend, transport);
-	ret = transport->fd;
+	ret = 0;
 
 finish:
 	return ret;
@@ -228,13 +227,13 @@ static int ofono_audio_release(void *data)
 	struct spa_bt_transport *transport = data;
 	struct spa_bt_backend *backend = transport->backend;
 
-	if (transport->fd < 0) {
-		spa_log_info(backend->log, NAME": transport %s already released", transport->path);
-		return 0;
-	}
-
 	spa_log_debug(backend->log, NAME": transport %p: Release %s",
 			transport, transport->path);
+
+	if (transport->sco_io) {
+		spa_bt_sco_io_destroy(transport->sco_io);
+		transport->sco_io = NULL;
+	}
 
 	/* shutdown to make sure connection is dropped immediately */
 	shutdown(transport->fd, SHUT_RDWR);

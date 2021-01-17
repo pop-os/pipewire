@@ -64,7 +64,7 @@ static inline void spa_json_enter(struct spa_json * iter, struct spa_json * sub)
 static inline int spa_json_next(struct spa_json * iter, const char **value)
 {
 	int utf8_remain = 0;
-	enum { __NONE, __STRUCT, __BARE, __STRING, __UTF8, __ESC };
+	enum { __NONE, __STRUCT, __BARE, __STRING, __UTF8, __ESC, __COMMENT };
 
 	for (; iter->cur < iter->end; iter->cur++) {
 		unsigned char cur = (unsigned char)*iter->cur;
@@ -76,7 +76,10 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 			goto again;
 		case __STRUCT:
 			switch (cur) {
-			case '\t': case ' ': case '\r': case '\n': case ':': case ',':
+			case '\t': case ' ': case '\r': case '\n': case ':': case '=': case ',':
+				continue;
+			case '#':
+				iter->state = __COMMENT;
 				continue;
 			case '"':
 				*value = iter->cur;
@@ -96,25 +99,21 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 				}
 				--iter->depth;
 				continue;
-			case '-': case '+': case 'a' ... 'z': case 'A' ... 'Z': case '0' ... '9':
+			default:
 				*value = iter->cur;
 				iter->state = __BARE;
-				continue;
 			}
-			return -1;
+			continue;
 		case __BARE:
 			switch (cur) {
 			case '\t': case ' ': case '\r': case '\n':
-			case ':': case ',': case ']': case '}':
+			case ':': case ',': case '=': case ']': case '}':
 				iter->state = __STRUCT;
 				if (iter->depth > 0)
 					goto again;
 				return iter->cur - *value;
-			default:
-				if (cur >= 32 && cur <= 126)
-					continue;
 			}
-			return -1;
+			continue;
 		case __STRING:
 			switch (cur) {
 			case '\\':
@@ -157,9 +156,21 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 				continue;
 			}
 			return -1;
+		case __COMMENT:
+			switch (cur) {
+			case '\n': case '\r':
+				iter->state = __STRUCT;
+			}
 		}
+
 	}
-	return (iter->depth == 0 ? (iter->state == __BARE ? iter->cur - *value : 0) : -1);
+	if (iter->depth != 0)
+		return -1;
+	if (iter->state != __STRUCT) {
+		iter->state = __STRUCT;
+		return iter->cur - *value;
+	}
+	return 0;
 }
 
 static inline int spa_json_enter_container(struct spa_json *iter, struct spa_json *sub, char type)
@@ -274,9 +285,12 @@ static inline bool spa_json_is_string(const char *val, int len)
 static inline int spa_json_parse_string(const char *val, int len, char *result)
 {
 	const char *p;
-	if (!spa_json_is_string(val, len))
-		return -1;
-	for (p = val+1; p < val + len-1; p++) {
+	if (!spa_json_is_string(val, len)) {
+		strncpy(result, val, len);
+		result[len] = '\0';
+		return 1;
+	}
+	for (p = val+1; p < val + len; p++) {
 		if (*p == '\\') {
 			p++;
 			if (*p == 'n')
@@ -291,6 +305,8 @@ static inline int spa_json_parse_string(const char *val, int len, char *result)
 				*result++ = '\f';
 			else
 				*result++ = *p;
+		} else if (*p == '\"') {
+			break;
 		} else
 			*result++ = *p;
 	}
