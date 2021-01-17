@@ -43,6 +43,7 @@ struct impl {
 	struct rtp_header *header;
 	struct rtp_payload *payload;
 
+	size_t mtu;
 	int codesize;
 	int frame_length;
 
@@ -50,7 +51,8 @@ struct impl {
 	int max_bitpool;
 };
 
-static int codec_fill_caps(uint32_t flags, uint8_t caps[A2DP_MAX_CAPS_SIZE])
+static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
+		uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	const a2dp_sbc_t a2dp_sbc = {
 		.frequency =
@@ -115,8 +117,9 @@ static uint8_t default_bitpool(uint8_t freq, uint8_t mode)
 	return 53;
 }
 
-static int codec_select_config(uint32_t flags, const void *caps, size_t caps_size,
-			const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
+static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
+		const void *caps, size_t caps_size,
+		const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_sbc_t conf;
 	int bitpool;
@@ -190,6 +193,85 @@ static int codec_set_bitpool(struct impl *this, int bitpool)
 	return this->sbc.bitpool;
 }
 
+static int codec_enum_config(const struct a2dp_codec *codec,
+		const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
+		struct spa_pod_builder *b, struct spa_pod **param)
+{
+	a2dp_sbc_t conf;
+        struct spa_pod_frame f[2];
+	struct spa_pod_choice *choice;
+	uint32_t i = 0;
+	uint32_t position[SPA_AUDIO_MAX_CHANNELS];
+
+	if (caps_size < sizeof(conf))
+		return -EINVAL;
+
+	memcpy(&conf, caps, sizeof(conf));
+
+	if (idx > 0)
+		return 0;
+
+	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_Format, id);
+	spa_pod_builder_add(b,
+			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+			SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_S16),
+			0);
+	spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_rate, 0);
+
+	spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_None, 0);
+	choice = (struct spa_pod_choice*)spa_pod_builder_frame(b, &f[1]);
+	i = 0;
+	if (conf.frequency & SBC_SAMPLING_FREQ_48000) {
+		if (i++ == 0)
+			spa_pod_builder_int(b, 48000);
+		spa_pod_builder_int(b, 48000);
+	}
+	if (conf.frequency & SBC_SAMPLING_FREQ_44100) {
+		if (i++ == 0)
+			spa_pod_builder_int(b, 44100);
+		spa_pod_builder_int(b, 44100);
+	}
+	if (conf.frequency & SBC_SAMPLING_FREQ_32000) {
+		if (i++ == 0)
+			spa_pod_builder_int(b, 32000);
+		spa_pod_builder_int(b, 32000);
+	}
+	if (conf.frequency & SBC_SAMPLING_FREQ_16000) {
+		if (i++ == 0)
+			spa_pod_builder_int(b, 16000);
+		spa_pod_builder_int(b, 16000);
+	}
+	if (i > 1)
+		choice->body.type = SPA_CHOICE_Enum;
+	spa_pod_builder_pop(b, &f[1]);
+
+	if (conf.channel_mode & SBC_CHANNEL_MODE_MONO &&
+	    conf.channel_mode & (SBC_CHANNEL_MODE_JOINT_STEREO |
+		    SBC_CHANNEL_MODE_STEREO | SBC_CHANNEL_MODE_DUAL_CHANNEL)) {
+		spa_pod_builder_add(b,
+				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(2, 1, 2),
+				0);
+	} else if (conf.channel_mode & SBC_CHANNEL_MODE_MONO) {
+		position[0] = SPA_AUDIO_CHANNEL_MONO;
+		spa_pod_builder_add(b,
+				SPA_FORMAT_AUDIO_channels, SPA_POD_Int(1),
+				SPA_FORMAT_AUDIO_position, SPA_POD_Array(sizeof(uint32_t),
+					SPA_TYPE_Id, 1, position),
+				0);
+	} else {
+		position[0] = SPA_AUDIO_CHANNEL_FL;
+		position[1] = SPA_AUDIO_CHANNEL_FR;
+		spa_pod_builder_add(b,
+				SPA_FORMAT_AUDIO_channels, SPA_POD_Int(2),
+				SPA_FORMAT_AUDIO_position, SPA_POD_Array(sizeof(uint32_t),
+					SPA_TYPE_Id, 2, position),
+				0);
+	}
+	*param = spa_pod_builder_pop(b, &f[0]);
+	return 1;
+}
+
 static int codec_reduce_bitpool(void *data)
 {
 	struct impl *this = data;
@@ -202,11 +284,11 @@ static int codec_increase_bitpool(void *data)
 	return codec_set_bitpool(this, this->sbc.bitpool + 1);
 }
 
-static int codec_get_num_blocks(void *data, size_t mtu)
+static int codec_get_num_blocks(void *data)
 {
 	struct impl *this = data;
 	size_t rtp_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
-	size_t frame_count = (mtu - rtp_size) / this->frame_length;
+	size_t frame_count = (this->mtu - rtp_size) / this->frame_length;
 
 	/* frame_count is only 4 bit number */
 	if (frame_count > 15)
@@ -220,7 +302,8 @@ static int codec_get_block_size(void *data)
 	return this->codesize;
 }
 
-static void *codec_init(uint32_t flags, void *config, size_t config_len, struct spa_audio_info *info)
+static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
+		void *config, size_t config_len, const struct spa_audio_info *info, size_t mtu)
 {
 	struct impl *this;
 	a2dp_sbc_t *conf = config;
@@ -234,28 +317,27 @@ static void *codec_init(uint32_t flags, void *config, size_t config_len, struct 
 
 	sbc_init(&this->sbc, 0);
 	this->sbc.endian = SBC_LE;
+	this->mtu = mtu;
 
-	spa_zero(*info);
-	info->media_type = SPA_MEDIA_TYPE_audio;
-	info->media_subtype = SPA_MEDIA_SUBTYPE_raw;
-	info->info.raw.format = SPA_AUDIO_FORMAT_S16;
+	if (info->media_type != SPA_MEDIA_TYPE_audio ||
+	    info->media_subtype != SPA_MEDIA_SUBTYPE_raw ||
+	    info->info.raw.format != SPA_AUDIO_FORMAT_S16) {
+		res = -EINVAL;
+		goto error;
+	}
 
 	switch (conf->frequency) {
 	case SBC_SAMPLING_FREQ_16000:
 		this->sbc.frequency = SBC_FREQ_16000;
-                info->info.raw.rate = 16000;
 		break;
 	case SBC_SAMPLING_FREQ_32000:
 		this->sbc.frequency = SBC_FREQ_32000;
-                info->info.raw.rate = 32000;
 		break;
 	case SBC_SAMPLING_FREQ_44100:
 		this->sbc.frequency = SBC_FREQ_44100;
-                info->info.raw.rate = 44100;
 		break;
 	case SBC_SAMPLING_FREQ_48000:
 		this->sbc.frequency = SBC_FREQ_48000;
-                info->info.raw.rate = 48000;
 		break;
 	default:
 		res = -EINVAL;
@@ -265,34 +347,20 @@ static void *codec_init(uint32_t flags, void *config, size_t config_len, struct 
 	switch (conf->channel_mode) {
 	case SBC_CHANNEL_MODE_MONO:
 		this->sbc.mode = SBC_MODE_MONO;
-                info->info.raw.channels = 1;
                 break;
 	case SBC_CHANNEL_MODE_DUAL_CHANNEL:
 		this->sbc.mode = SBC_MODE_DUAL_CHANNEL;
-                info->info.raw.channels = 2;
 		break;
 	case SBC_CHANNEL_MODE_STEREO:
 		this->sbc.mode = SBC_MODE_STEREO;
-                info->info.raw.channels = 2;
 		break;
 	case SBC_CHANNEL_MODE_JOINT_STEREO:
 		this->sbc.mode = SBC_MODE_JOINT_STEREO;
-                info->info.raw.channels = 2;
                 break;
 	default:
 		res = -EINVAL;
                 goto error;
         }
-
-	switch (info->info.raw.channels) {
-	case 1:
-		info->info.raw.position[0] = SPA_AUDIO_CHANNEL_MONO;
-		break;
-	case 2:
-		info->info.raw.position[0] = SPA_AUDIO_CHANNEL_FL;
-		info->info.raw.position[1] = SPA_AUDIO_CHANNEL_FR;
-		break;
-	}
 
 	switch (conf->subbands) {
 	case SBC_SUBBANDS_4:
@@ -382,6 +450,21 @@ static int codec_encode(void *data,
 	return res;
 }
 
+static int codec_start_decode (void *data,
+		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp)
+{
+	const struct rtp_header *header = src;
+	size_t header_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
+
+	spa_return_val_if_fail (src_size > header_size, -EINVAL);
+
+	if (seqnum)
+		*seqnum = ntohs(header->sequence_number);
+	if (timestamp)
+		*timestamp = ntohl(header->timestamp);
+	return header_size;
+}
+
 static int codec_decode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
@@ -396,18 +479,20 @@ static int codec_decode(void *data,
 	return res;
 }
 
-struct a2dp_codec a2dp_codec_sbc = {
-	.id = {.codec_id = A2DP_CODEC_SBC},
+const struct a2dp_codec a2dp_codec_sbc = {
+	.codec_id = A2DP_CODEC_SBC,
 	.name = "sbc",
 	.description = "SBC",
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
+	.enum_config = codec_enum_config,
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
 	.get_num_blocks = codec_get_num_blocks,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,
+	.start_decode = codec_start_decode,
 	.decode = codec_decode,
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,

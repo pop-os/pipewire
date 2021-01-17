@@ -49,7 +49,7 @@
 
 #define DEFAULT_SAMPLES	8192
 #define MAX_BUFFERS	32
-#define MAX_DATAS	64
+#define MAX_DATAS	SPA_AUDIO_MAX_CHANNELS
 
 #define DEFAULT_CONTROL_BUFFER_SIZE	32768
 
@@ -345,14 +345,16 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelVolumes),
 				SPA_PROP_INFO_name, SPA_POD_String("Channel Volumes"),
-				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0));
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
+				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
 		case 3:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelMap),
 				SPA_PROP_INFO_name, SPA_POD_String("Channel Map"),
-				SPA_PROP_INFO_type, SPA_POD_Id(SPA_AUDIO_CHANNEL_UNKNOWN));
+				SPA_PROP_INFO_type, SPA_POD_Id(SPA_AUDIO_CHANNEL_UNKNOWN),
+				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
 		default:
 			return 0;

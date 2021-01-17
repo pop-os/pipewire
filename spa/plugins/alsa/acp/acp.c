@@ -249,9 +249,12 @@ static void add_profiles(pa_card *impl)
 					init_device(impl, dev, PA_ALSA_DIRECTION_OUTPUT, m, n_devices++);
 					pa_dynarray_append(&impl->out.devices, dev);
 				}
-				if (impl->use_ucm)
-					pa_alsa_ucm_add_ports_combination(dev->ports, &m->ucm_context,
+				if (impl->use_ucm) {
+					pa_alsa_ucm_add_ports_combination(NULL, &m->ucm_context,
 						true, impl->ports, ap, NULL);
+					pa_alsa_ucm_add_ports(&dev->ports, m->proplist, &m->ucm_context,
+						true, impl, dev->pcm_handle, impl->profile_set->ignore_dB);
+				}
 				else
 					pa_alsa_path_set_add_ports(m->output_path_set, ap, impl->ports,
 							dev->ports, NULL);
@@ -268,10 +271,12 @@ static void add_profiles(pa_card *impl)
 					pa_dynarray_append(&impl->out.devices, dev);
 				}
 
-				if (impl->use_ucm)
-					pa_alsa_ucm_add_ports_combination(dev->ports, &m->ucm_context,
-							false, impl->ports, ap, NULL);
-				else
+				if (impl->use_ucm) {
+					pa_alsa_ucm_add_ports_combination(NULL, &m->ucm_context,
+						false, impl->ports, ap, NULL);
+					pa_alsa_ucm_add_ports(&dev->ports, m->proplist, &m->ucm_context,
+						false, impl, dev->pcm_handle, impl->profile_set->ignore_dB);
+				} else
 					pa_alsa_path_set_add_ports(m->input_path_set, ap, impl->ports,
 							dev->ports, NULL);
 
@@ -943,11 +948,11 @@ static void set_mute(pa_alsa_device *dev, bool mute)
 	pa_alsa_path_set_mute(dev->mixer_path, dev->mixer_handle, mute);
 }
 
-static void mixer_volume_init(pa_alsa_device *dev)
+static void mixer_volume_init(pa_card *impl, pa_alsa_device *dev)
 {
 	pa_assert(dev);
 
-	if (!dev->mixer_path || !dev->mixer_path->has_volume) {
+	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_volume) {
 		dev->read_volume = NULL;
 		dev->set_volume = NULL;
 		pa_log_info("Driver does not support hardware volume control, "
@@ -990,7 +995,7 @@ static void mixer_volume_init(pa_alsa_device *dev)
 	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);;
 	dev->device.volume_step = 1.0f / dev->n_volume_steps;
 
-	if (!dev->mixer_path || !dev->mixer_path->has_mute) {
+	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_mute) {
 		dev->read_mute = NULL;
 		dev->set_mute = NULL;
 		pa_log_info("Driver does not support hardware mute control, falling back to software mute control.");
@@ -1055,7 +1060,7 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 			return 0;
 	}
 
-	mixer_volume_init(dev);
+	mixer_volume_init(impl, dev);
 
 	/* Will we need to register callbacks? */
 	if (dev->mixer_path_set && dev->mixer_path_set->paths) {
@@ -1070,7 +1075,7 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 	else if (dev->mixer_path)
 		need_mixer_callback = dev->mixer_path->has_volume || dev->mixer_path->has_mute;
 
-	if (need_mixer_callback) {
+	if (!impl->soft_mixer && need_mixer_callback) {
 		pa_alsa_mixer_use_for_poll(impl->ucm.mixers, dev->mixer_handle);
 		if (dev->mixer_path_set)
 			pa_alsa_path_set_set_callback(dev->mixer_path_set, dev->mixer_handle, mixer_callback, dev);
@@ -1240,6 +1245,8 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
 			impl->use_ucm = (strcmp(s, "true") == 0 || atoi(s) == 1);
+		if ((s = acp_dict_lookup(props, "api.alsa.soft-mixer")) != NULL)
+			impl->soft_mixer = (strcmp(s, "true") == 0 || atoi(s) == 1);
 		if ((s = acp_dict_lookup(props, "api.alsa.ignore-dB")) != NULL)
 			ignore_dB = (strcmp(s, "true") == 0 || atoi(s) == 1);
 		if ((s = acp_dict_lookup(props, "device.profile-set")) != NULL)
@@ -1520,7 +1527,7 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 
 		data = PA_DEVICE_PORT_DATA(p);
 		d->mixer_path = data->path;
-		mixer_volume_init(d);
+		mixer_volume_init(impl, d);
 
 		sync_mixer(d, p);
 		res = pa_alsa_ucm_set_port(d->ucm_context, p, true);
@@ -1529,7 +1536,7 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 
 		data = PA_DEVICE_PORT_DATA(p);
 		d->mixer_path = data->path;
-		mixer_volume_init(d);
+		mixer_volume_init(impl, d);
 
 		sync_mixer(d, p);
 		res = 0;

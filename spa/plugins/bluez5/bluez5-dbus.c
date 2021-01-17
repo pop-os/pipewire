@@ -45,6 +45,7 @@
 #include <spa/utils/type.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/result.h>
 
 #include "a2dp-codecs.h"
 #include "defs.h"
@@ -112,7 +113,7 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 	uint8_t *pconf = (uint8_t *) config;
 	DBusMessage *r;
 	DBusError err;
-	int size, res;
+	int i, size, res;
 	const struct a2dp_codec *codec;
 
 	dbus_error_init(&err);
@@ -125,21 +126,26 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 		dbus_error_free(&err);
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
-	spa_log_info(monitor->log, "%p: select conf %d", monitor, size);
+	spa_log_info(monitor->log, "%p: %s select conf %d", monitor, path, size);
+	for (i = 0; i < size; i++)
+		spa_log_debug(monitor->log, "  %d: %02x", i, cap[i]);
 
 	codec = a2dp_endpoint_to_codec(path);
 	if (codec != NULL)
-		res = codec->select_config(0, cap, size, NULL, config);
+		res = codec->select_config(codec, 0, cap, size, NULL, config);
 	else
 		res = -ENOTSUP;
 
-	if (res < 0) {
+	if (res < 0 || res != size) {
+		spa_log_error(monitor->log, "can't select config: %d (%s)",
+				res, spa_strerror(res));
 		if ((r = dbus_message_new_error(m, "org.bluez.Error.InvalidArguments",
 				"Unable to select configuration")) == NULL)
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		goto exit_send;
 	}
-	size = res;
+	for (i = 0; i < size; i++)
+		spa_log_debug(monitor->log, "  %d: %02x", i, pconf[i]);
 
 	if ((r = dbus_message_new_method_return(m)) == NULL)
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
@@ -784,8 +790,8 @@ static int transport_update_props(struct spa_bt_transport *transport,
 		}
 		else if (strcmp(key, "Configuration") == 0) {
 			DBusMessageIter iter;
-			char *value;
-			int len;
+			uint8_t *value;
+			int i, len;
 
 			if (!check_iter_signature(&it[1], "ay"))
 				goto next;
@@ -794,6 +800,8 @@ static int transport_update_props(struct spa_bt_transport *transport,
 			dbus_message_iter_get_fixed_array(&iter, &value, &len);
 
 			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, len);
+			for (i = 0; i < len; i++)
+				spa_log_debug(monitor->log, "  %d: %02x", i, value[i]);
 
 			free(transport->configuration);
 			transport->configuration_len = 0;
@@ -961,8 +969,8 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 
 		spa_bt_transport_set_implementation(transport, &transport_impl, transport);
 	}
-	transport_update_props(transport, &it[1], NULL);
 	transport->a2dp_codec = codec;
+	transport_update_props(transport, &it[1], NULL);
 
 	if (transport->device == NULL) {
 		spa_log_warn(monitor->log, "no device found for transport");
@@ -1138,9 +1146,9 @@ static int bluez_register_endpoint(struct spa_bt_monitor *monitor,
 	DBusPendingCall *call;
 	uint8_t caps[A2DP_MAX_CAPS_SIZE];
 	int caps_size;
-	uint16_t codec_id = codec->id.codec_id;
+	uint16_t codec_id = codec->codec_id;
 
-	caps_size = codec->fill_caps(0, caps);
+	caps_size = codec->fill_caps(codec, 0, caps);
 	if (caps_size < 0)
 		return caps_size;
 
@@ -1215,7 +1223,7 @@ static int adapter_register_endpoints(struct spa_bt_adapter *a)
 	for (i = 0; a2dp_codecs[i]; i++) {
 		const struct a2dp_codec *codec = a2dp_codecs[i];
 
-		if (codec->id.codec_id != A2DP_CODEC_SBC)
+		if (codec->codec_id != A2DP_CODEC_SBC)
 			continue;
 
 		if ((err = register_a2dp_endpoint(monitor, codec, A2DP_SOURCE_ENDPOINT, &endpoint_path)))
@@ -1325,19 +1333,26 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 			const struct a2dp_codec *codec = a2dp_codecs[i];
 			uint8_t caps[A2DP_MAX_CAPS_SIZE];
 			int caps_size;
-			uint16_t codec_id = codec->id.codec_id;
+			uint16_t codec_id = codec->codec_id;
 
-			caps_size = codec->fill_caps(0, caps);
+			caps_size = codec->fill_caps(codec, 0, caps);
 			if (caps_size < 0)
 				continue;
 
-			endpoint = spa_aprintf("%s/%s", A2DP_SINK_ENDPOINT, codec->name);
-			append_a2dp_object(&array, endpoint, SPA_BT_UUID_A2DP_SINK, codec_id, caps, caps_size);
-			free(endpoint);
+			if (codec->decode != NULL) {
+				spa_log_info(monitor->log, "register A2DP codec %s", a2dp_codecs[i]->name);
+				endpoint = spa_aprintf("%s/%s", A2DP_SINK_ENDPOINT, codec->name);
+				append_a2dp_object(&array, endpoint, SPA_BT_UUID_A2DP_SINK,
+						codec_id, caps, caps_size);
+				free(endpoint);
+			}
 
-			endpoint = spa_aprintf("%s/%s", A2DP_SOURCE_ENDPOINT, codec->name);
-			append_a2dp_object(&array, endpoint, SPA_BT_UUID_A2DP_SOURCE, codec_id, caps, caps_size);
-			free(endpoint);
+			if (codec->encode != NULL) {
+				endpoint = spa_aprintf("%s/%s", A2DP_SOURCE_ENDPOINT, codec->name);
+				append_a2dp_object(&array, endpoint, SPA_BT_UUID_A2DP_SOURCE,
+						codec_id, caps, caps_size);
+				free(endpoint);
+			}
 		}
 
 		dbus_message_iter_close_container(&iter, &array);
@@ -1471,7 +1486,8 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		if (d == NULL) {
 			d = device_create(monitor, object_path);
 			if (d == NULL) {
-				spa_log_warn(monitor->log, "can't create device: %m");
+				spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
+						object_path);
 				return;
 			}
 		}
@@ -1600,7 +1616,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 
 			d = spa_bt_device_find(monitor, path);
 			if (d == NULL) {
-				spa_log_warn(monitor->log,
+				spa_log_debug(monitor->log,
 						"Properties changed in unknown device %s", path);
 				goto fail;
 			}
@@ -1808,7 +1824,7 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_list_init(&this->transport_list);
 
 	this->backend_hsp_native = backend_hsp_native_new(this, this->conn, support, n_support);
-	this->backend_ofono = backend_ofono_new(this, this->conn, support, n_support);
+	this->backend_ofono = backend_ofono_new(this, this->conn, info, support, n_support);
 	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, info, support, n_support);
 
 	return 0;

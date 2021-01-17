@@ -17,7 +17,7 @@
 
 #define CHECK(s,msg,...) if ((err = (s)) < 0) { spa_log_error(state->log, msg ": %s", ##__VA_ARGS__, snd_strerror(err)); return err; }
 
-static int spa_alsa_open(struct state *state)
+int spa_alsa_open(struct state *state)
 {
 	int err;
 	struct props *props = &state->props;
@@ -28,7 +28,7 @@ static int spa_alsa_open(struct state *state)
 
 	CHECK(snd_output_stdio_attach(&state->output, stderr, 0), "attach failed");
 
-	spa_log_debug(state->log, NAME" %p: ALSA device open '%s' %s", state, props->device,
+	spa_log_info(state->log, NAME" %p: ALSA device open '%s' %s", state, props->device,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback");
 	CHECK(snd_pcm_open(&state->hndl,
 			   props->device,
@@ -73,7 +73,7 @@ int spa_alsa_close(struct state *state)
 	if (!state->opened)
 		return 0;
 
-	spa_log_debug(state->log, NAME" %p: Device '%s' closing", state, state->props.device);
+	spa_log_info(state->log, NAME" %p: Device '%s' closing", state, state->props.device);
 	if ((err = snd_pcm_close(state->hndl)) < 0)
 		spa_log_warn(state->log, "%s: close failed: %s", state->props.device,
 				snd_strerror(err));
@@ -102,10 +102,10 @@ static const struct format_info format_info[] = {
 	{ SPA_AUDIO_FORMAT_S32_BE, SPA_AUDIO_FORMAT_S32P, SND_PCM_FORMAT_S32_BE},
 	{ SPA_AUDIO_FORMAT_S24_32_LE, SPA_AUDIO_FORMAT_S24_32P, SND_PCM_FORMAT_S24_LE},
 	{ SPA_AUDIO_FORMAT_S24_32_BE, SPA_AUDIO_FORMAT_S24_32P, SND_PCM_FORMAT_S24_BE},
-	{ SPA_AUDIO_FORMAT_S16_LE, SPA_AUDIO_FORMAT_S16P, SND_PCM_FORMAT_S16_LE},
-	{ SPA_AUDIO_FORMAT_S16_BE, SPA_AUDIO_FORMAT_S16P, SND_PCM_FORMAT_S16_BE},
 	{ SPA_AUDIO_FORMAT_S24_LE, SPA_AUDIO_FORMAT_S24P, SND_PCM_FORMAT_S24_3LE},
 	{ SPA_AUDIO_FORMAT_S24_BE, SPA_AUDIO_FORMAT_S24P, SND_PCM_FORMAT_S24_3BE},
+	{ SPA_AUDIO_FORMAT_S16_LE, SPA_AUDIO_FORMAT_S16P, SND_PCM_FORMAT_S16_LE},
+	{ SPA_AUDIO_FORMAT_S16_BE, SPA_AUDIO_FORMAT_S16P, SND_PCM_FORMAT_S16_BE},
 	{ SPA_AUDIO_FORMAT_S8, SPA_AUDIO_FORMAT_UNKNOWN, SND_PCM_FORMAT_S8},
 	{ SPA_AUDIO_FORMAT_U8, SPA_AUDIO_FORMAT_U8P, SND_PCM_FORMAT_U8},
 	{ SPA_AUDIO_FORMAT_U16_LE, SPA_AUDIO_FORMAT_UNKNOWN, SND_PCM_FORMAT_U16_LE},
@@ -325,13 +325,15 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 		const struct format_info *fi = &format_info[i];
 
 		if (snd_pcm_format_mask_test(fmask, fi->format)) {
-			if (snd_pcm_access_mask_test(amask, SND_PCM_ACCESS_MMAP_INTERLEAVED)) {
+			if (snd_pcm_access_mask_test(amask, SND_PCM_ACCESS_MMAP_INTERLEAVED) &&
+			    (state->default_format == 0 || state->default_format == fi->spa_format)) {
 				if (j++ == 0)
 					spa_pod_builder_id(&b, fi->spa_format);
 				spa_pod_builder_id(&b, fi->spa_format);
 			}
 			if (snd_pcm_access_mask_test(amask, SND_PCM_ACCESS_MMAP_NONINTERLEAVED) &&
-					fi->spa_pformat != SPA_AUDIO_FORMAT_UNKNOWN) {
+			    fi->spa_pformat != SPA_AUDIO_FORMAT_UNKNOWN &&
+			    (state->default_format == 0 || state->default_format == fi->spa_pformat)) {
 				if (j++ == 0)
 					spa_pod_builder_id(&b, fi->spa_pformat);
 				spa_pod_builder_id(&b, fi->spa_pformat);
@@ -418,7 +420,7 @@ skip_channels:
 
 		spa_pod_builder_push_choice(&b, &f[1], SPA_CHOICE_None, 0);
 		choice = (struct spa_pod_choice*)spa_pod_builder_frame(&b, &f[1]);
-		spa_pod_builder_int(&b, SPA_CLAMP(DEFAULT_CHANNELS, min, max));
+		spa_pod_builder_int(&b, max);
 		if (min != max) {
 			spa_pod_builder_int(&b, min);
 			spa_pod_builder_int(&b, max);
@@ -465,7 +467,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	struct spa_audio_info_raw *info = &fmt->info.raw;
 	snd_pcm_t *hndl;
 	unsigned int periods;
-	bool match = true, planar;
+	bool match = true, planar, is_batch;
 
 	if ((err = spa_alsa_open(state)) < 0)
 		return err;
@@ -536,10 +538,32 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	dir = 0;
 	period_size = 1024;
+	is_batch = snd_pcm_hw_params_is_batch(params);
+	if (is_batch) {
+		const char *id;
+		snd_pcm_info_t* pcm_info;
+		snd_pcm_info_alloca(&pcm_info);
+		if (snd_pcm_info(hndl, pcm_info) == 0 &&
+		    (id = snd_pcm_info_get_id(pcm_info)) != NULL) {
+			/* usb devices have low enough transfer size */
+			if (strcmp(id, "USB Audio") == 0)
+				is_batch = false;
+		}
+	}
+	if (is_batch) {
+		/* batch devices get their hw pointers updated every period. Make
+		 * the period smaller and add one period of headroom */
+		period_size /= 2;
+		spa_log_info(state->log, NAME" %s: batch mode, period_size:%ld headroom:%u",
+				state->props.device, period_size, state->headroom);
+	}
+
 	CHECK(snd_pcm_hw_params_set_period_size_near(hndl, params, &period_size, &dir), "set_period_size_near");
 	CHECK(snd_pcm_hw_params_get_buffer_size_max(params, &state->buffer_frames), "get_buffer_size_max");
 	CHECK(snd_pcm_hw_params_set_buffer_size_near(hndl, params, &state->buffer_frames), "set_buffer_size_near");
+
 	state->period_frames = period_size;
+	state->headroom = is_batch ? period_size : 0;
 	periods = state->buffer_frames / state->period_frames;
 
 	spa_log_info(state->log, NAME" %s (%s): format:%s %s rate:%d channels:%d "
@@ -600,21 +624,6 @@ static int set_timeout(struct state *state, uint64_t time)
 	return 0;
 }
 
-static void init_loop(struct state *state)
-{
-	state->bw = 0.0;
-	state->z1 = state->z2 = state->z3 = 0.0;
-}
-
-static void set_loop(struct state *state, double bw)
-{
-	double w = 2 * M_PI * bw * state->threshold / state->rate;
-	state->w0 = 1.0 - exp (-20.0 * w);
-	state->w1 = w * 1.5 / state->threshold;
-	state->w2 = w / 1.5;
-	state->bw = bw;
-}
-
 static int alsa_recover(struct state *state, int err)
 {
 	int res, st;
@@ -666,7 +675,7 @@ recover:
 				state, snd_strerror(res));
 		return res;
 	}
-	init_loop(state);
+	spa_dll_init(&state->dll);
 	state->alsa_recovering = true;
 
 	if (state->stream == SND_PCM_STREAM_CAPTURE) {
@@ -701,7 +710,7 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 	}
 
 
-	*target = state->last_threshold;
+	*target = state->last_threshold + state->headroom;
 
 #define MARGIN 48
 	if (state->resample && state->rate_match) {
@@ -740,16 +749,12 @@ static int update_time(struct state *state, uint64_t nsec, snd_pcm_sframes_t del
 	else
 		err = (target + 128) - delay;
 
-	if (SPA_UNLIKELY(state->bw == 0.0)) {
-		set_loop(state, BW_MAX);
+	if (SPA_UNLIKELY(state->dll.bw == 0.0)) {
+		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold, state->rate);
 		state->next_time = nsec;
 		state->base_time = nsec;
 	}
-	state->z1 += state->w0 * (state->w1 * err - state->z1);
-	state->z2 += state->w0 * (state->z1 - state->z2);
-	state->z3 += state->w2 * state->z2;
-
-	corr = 1.0 - (state->z2 + state->z3);
+	corr = spa_dll_update(&state->dll, err);
 
 	if (SPA_UNLIKELY(state->last_threshold != state->threshold)) {
 		int32_t diff = (int32_t) (state->last_threshold - state->threshold);
@@ -761,14 +766,14 @@ static int update_time(struct state *state, uint64_t nsec, snd_pcm_sframes_t del
 
 	if (SPA_UNLIKELY((state->next_time - state->base_time) > BW_PERIOD)) {
 		state->base_time = state->next_time;
-		if (state->bw == BW_MAX)
-			set_loop(state, BW_MED);
-		else if (state->bw == BW_MED)
-			set_loop(state, BW_MIN);
+		if (state->dll.bw > SPA_DLL_BW_MIN)
+			spa_dll_set_bw(&state->dll, state->dll.bw / 2.0, state->threshold, state->rate);
 
-		spa_log_debug(state->log, NAME" %p: follower:%d match:%d rate:%f bw:%f del:%d target:%ld err:%f (%f %f %f)",
-				state, follower, state->matching, corr, state->bw, state->delay, target,
-				err, state->z1, state->z2, state->z3);
+		spa_log_debug(state->log, NAME" %p: follower:%d match:%d rate:%f "
+				"bw:%f thr:%d del:%ld target:%ld err:%f (%f %f %f)",
+				state, follower, state->matching, corr, state->dll.bw,
+				state->threshold, delay, target,
+				err, state->dll.z1, state->dll.z2, state->dll.z3);
 	}
 
 	if (state->rate_match) {
@@ -819,8 +824,8 @@ int spa_alsa_write(struct state *state, snd_pcm_uframes_t silence)
 
 		if (SPA_UNLIKELY(!state->alsa_recovering && delay > target + state->threshold)) {
 			spa_log_warn(state->log, NAME" %p: follower delay:%ld resync %f %f %f",
-					state, delay, state->z1, state->z2, state->z3);
-			init_loop(state);
+					state, delay, state->dll.z1, state->dll.z2, state->dll.z3);
+			spa_dll_init(&state->dll);
 			state->alsa_sync = true;
 		}
 		if (SPA_UNLIKELY(state->alsa_sync)) {
@@ -1051,8 +1056,8 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 
 		if (!state->alsa_recovering && (delay < target || delay > target * 2)) {
 			spa_log_warn(state->log, NAME" %p: follower delay:%lu target:%lu resync %f %f %f",
-					state, delay, target, state->z1, state->z2, state->z3);
-			init_loop(state);
+					state, delay, target, state->dll.z1, state->dll.z2, state->dll.z3);
+			spa_dll_init(&state->dll);
 			state->alsa_sync = true;
 		}
 		if (state->alsa_sync) {
@@ -1282,7 +1287,7 @@ int spa_alsa_start(struct state *state)
 	state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
 	state->last_threshold = state->threshold;
 
-	init_loop(state);
+	spa_dll_init(&state->dll);
 	state->safety = 0.0;
 
 	spa_log_debug(state->log, NAME" %p: start %d duration:%d rate:%d follower:%d match:%d resample:%d",
@@ -1338,7 +1343,7 @@ static int do_reassign_follower(struct spa_loop *loop,
 {
 	struct state *state = user_data;
 	set_timers(state);
-	init_loop(state);
+	spa_dll_init(&state->dll);
 	return 0;
 }
 

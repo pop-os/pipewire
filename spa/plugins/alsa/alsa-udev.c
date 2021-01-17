@@ -68,6 +68,7 @@ struct impl {
 	uint32_t n_cards;
 
 	struct spa_source source;
+	unsigned int use_acp:1;
 };
 
 static int impl_udev_open(struct impl *this)
@@ -225,7 +226,9 @@ static int emit_object_info(struct impl *this, uint32_t id, struct udev_device *
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 
 	info.type = SPA_TYPE_INTERFACE_Device;
-	info.factory_name = SPA_NAME_API_ALSA_PCM_DEVICE;
+	info.factory_name = this->use_acp ?
+		SPA_NAME_API_ALSA_ACP_DEVICE :
+		SPA_NAME_API_ALSA_PCM_DEVICE;
 	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_FLAGS |
 		SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
 	info.flags = 0;
@@ -236,10 +239,10 @@ static int emit_object_info(struct impl *this, uint32_t id, struct udev_device *
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PATH, path);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_CARD, str);
 
-	if ((str = udev_device_get_property_value(dev, "PULSE_NAME")) && *str)
+	if ((str = udev_device_get_property_value(dev, "ACP_NAME")) && *str)
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, str);
 
-	if ((str = udev_device_get_property_value(dev, "PULSE_PROFILE_SET")) && *str)
+	if ((str = udev_device_get_property_value(dev, "ACP_PROFILE_SET")) && *str)
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_PROFILE_SET, str);
 
 	if ((str = udev_device_get_property_value(dev, "SOUND_CLASS")) && *str)
@@ -319,7 +322,7 @@ static int need_notify(struct impl *this, struct udev_device *dev, uint32_t acti
 	const char *str;
 	uint32_t idx, i, found = SPA_ID_INVALID;
 
-	if (udev_device_get_property_value(dev, "PULSE_IGNORE"))
+	if (udev_device_get_property_value(dev, "ACP_IGNORE"))
 		return 0;
 
 	if ((str = udev_device_get_property_value(dev, "SOUND_CLASS")) && strcmp(str, "modem") == 0)
@@ -583,6 +586,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -610,6 +614,11 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info_all = SPA_DEVICE_CHANGE_MASK_FLAGS |
 			SPA_DEVICE_CHANGE_MASK_PROPS;
 	this->info.flags = 0;
+
+	if (info) {
+		if ((str = spa_dict_lookup(info, "alsa.use-acp")) != NULL)
+			this->use_acp = strcmp(str, "true") == 0 || atoi(str) != 0;
+	}
 
 	return 0;
 }

@@ -171,6 +171,28 @@ static int load_module(struct client *client, const char *name, const char *argu
 			add_props(props, str);
 			pw_properties_set(props, "sink_properties", NULL);
 		}
+		if ((str = pw_properties_get(props, "channels")) != NULL) {
+			pw_properties_set(props, "audio.channels", str);
+			pw_properties_set(props, "channels", NULL);
+		}
+		if ((str = pw_properties_get(props, "rate")) != NULL) {
+			pw_properties_set(props, "audio.rate", str);
+			pw_properties_set(props, "rate", NULL);
+		}
+		if ((str = pw_properties_get(props, "channel_map")) != NULL) {
+			struct channel_map map = CHANNEL_MAP_INIT;
+			uint32_t i;
+			char *s, *p;
+
+			channel_map_parse(str, &map);
+			p = s = alloca(map.channels * 6);
+
+			for (i = 0; i < map.channels; i++)
+				p += snprintf(p, 6, "%s%s", i == 0 ? "" : ",",
+						channel_id2name(map.map[i]));
+			pw_properties_set(props, "audio.position", s);
+			pw_properties_set(props, "channel_map", NULL);
+		}
 		if ((str = pw_properties_get(props, "device.description")) != NULL) {
 			pw_properties_set(props, "node.description", str);
 			pw_properties_set(props, "device.description", NULL);
