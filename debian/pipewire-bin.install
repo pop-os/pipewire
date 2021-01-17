@@ -2,6 +2,7 @@ etc/pipewire
 lib/udev/rules.d
 usr/bin/pipewire
 usr/bin/pipewire-media-session
+usr/bin/pipewire-pulse
 usr/bin/pw-cat
 usr/bin/pw-cli
 usr/bin/pw-dot
