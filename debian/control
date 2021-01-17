@@ -29,7 +29,7 @@ Build-Depends: debhelper-compat (= 13),
 Build-Conflicts: libfdk-aac-dev
 Build-Depends-Indep: doxygen <!nodoc>,
                      graphviz <!nodoc>,
-Standards-Version: 4.5.0
+Standards-Version: 4.5.1
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/

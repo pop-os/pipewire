@@ -23,6 +23,7 @@ pipewire (0.3.19-1) UNRELEASED; urgency=medium
   * d/copyright: Update
   * d/pipewire-bin.install: Install pw-dump and pw-top
   * Don't automatically start pipewire for root logins (Closes: #979791)
+  * Standards-Version: 4.5.1 (no changes required)
 
  -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 11:40:33 +0000
 
