@@ -1,8 +1,29 @@
 pipewire (0.3.19-1) UNRELEASED; urgency=medium
 
-  * New upstream release
+  * New upstream release (Closes: #979309)
+    - Fix cleanup of acp card objects (Closes: #979537)
+    - Provide pipewire-pulse, pipewire's replacement for the PulseAudio
+      daemon (Closes: #976654). Note that this is not enabled by default
+      for bullseye. systemd user units to start it can be found in
+      /usr/share/doc/pipewire/examples/systemd/user.
+  * Drop patch, applied upstream
+  * Remove pw-pulse from pipewire-audio-client-libraries, no longer
+    supported upstream
+  * Fix installation path for example 99-pipewire-default.conf
+  * Install example ld.so.conf.d fragments into
+    /usr/share/doc/pipewire/examples/ld.so.conf.d to replace libjack with
+    Pipewire as suggested by upstream. These can be copied into
+    /etc/ld.so.conf.d if desired. This is not done by default and is
+    considered to be experimental
+  * Add Build-Conflicts with non-free libfdk-aac-dev.
+    This makes the build more predictable by not compiling a plugin that
+    would depend on that library.
+  * d/control: Add new dependencies for Bluetooth codecs
+  * Build-depend on libncurses-dev for the new pw-top utility
+  * d/copyright: Update
+  * d/pipewire-bin.install: Install pw-dump and pw-top
 
- -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 10:36:38 +0000
+ -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 11:25:09 +0000
 
 pipewire (0.3.15-1) unstable; urgency=medium
 
