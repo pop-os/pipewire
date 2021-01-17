@@ -323,7 +323,6 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 		struct spa_pod_builder b = { 0 };
 	        struct spa_result_device_params result;
 		uint32_t count = 0;
-		bool found = false;
 
 		result.id = param_id;
 		result.next = 0;
@@ -332,8 +331,6 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 			result.index = result.next++;
 			if (p->id != param_id)
 				continue;
-
-			found = true;
 
 			if (result.index < index)
 				continue;
@@ -348,7 +345,7 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 			if (++count == max)
 				break;
 		}
-		res = found ? 0 : -ENOENT;
+		res = 0;
 	} else {
 		user_data.cache = impl->cache_params && filter == NULL;
 
@@ -736,19 +733,20 @@ static void device_info(void *data, const struct spa_device_info *info)
 			uint32_t id = info->params[i].id;
 
 			pw_log_debug(NAME" %p: param %d id:%d (%s) %08x:%08x", device, i,
-                                        id, spa_debug_type_find_name(spa_type_param, id),
-                                        device->info.params[i].flags, info->params[i].flags);
+					id, spa_debug_type_find_name(spa_type_param, id),
+					device->info.params[i].flags, info->params[i].flags);
 
-                        if (device->info.params[i].flags == info->params[i].flags)
+			device->info.params[i].id = device->params[i].id;
+			if (device->info.params[i].flags == info->params[i].flags)
 				continue;
 
 			pw_log_debug(NAME" %p: update param %d", device, id);
 			pw_param_clear(&impl->pending_list, id);
-                        device->info.params[i] = info->params[i];
-                        device->info.params[i].user = 0;
+			device->info.params[i] = info->params[i];
+			device->info.params[i].user = 0;
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ)
-                                changed_ids[n_changed_ids++] = id;
+				changed_ids[n_changed_ids++] = id;
                 }
 	}
 	emit_info_changed(device);

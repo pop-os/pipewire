@@ -110,7 +110,6 @@ struct impl {
 	/* Transport */
 	struct spa_bt_transport *transport;
 	struct spa_hook transport_listener;
-	int sock_fd;
 
 	/* Port */
 	struct port port;
@@ -132,6 +131,7 @@ struct impl {
 	uint8_t *buffer;
 	uint8_t *buffer_head;
 	uint8_t *buffer_next;
+	int buffer_size;
 
 	/* Times */
 	uint64_t start_time;
@@ -316,6 +316,9 @@ static void flush_data(struct impl *this)
 	uint32_t min_in_size;
 	uint8_t *packet;
 
+	if (this->transport == NULL)
+		return;
+
 	/* get buffer */
 	if (!port->current_buffer) {
 		spa_return_if_fail(!spa_list_is_empty(&port->ready));
@@ -345,11 +348,25 @@ static void flush_data(struct impl *this)
 
 	/* otherwise request a new buffer */
 	else {
-		spa_list_remove(&port->current_buffer->link);
-		port->current_buffer->outstanding = true;
+		struct buffer *b;
+
+		b = port->current_buffer;
 		port->current_buffer = NULL;
+
+		/* reuse buffer */
+		spa_list_remove(&b->link);
+		b->outstanding = true;
+		spa_log_trace(this->log, "sco-sink %p: reuse buffer %u", this, b->id);
+		port->io->buffer_id = b->id;
+		spa_node_call_reuse_buffer(&this->callbacks, 0, b->id);
+
+		/* notify we need more data */
 		port->io->status = SPA_STATUS_NEED_DATA;
 		spa_node_call_ready(&this->callbacks, SPA_STATUS_NEED_DATA);
+
+		next_timeout = (this->transport->write_mtu / port->frame_size
+				* SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
+		set_timeout(this, next_timeout);
 		return;
 	}
 
@@ -367,6 +384,12 @@ static void flush_data(struct impl *this)
 			this->start_time = now_time;
 
 		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+			/* Encode */
+			if (this->buffer_next + MSBC_ENCODED_SIZE > this->buffer + this->buffer_size) {
+				/* Buffer overrun; shouldn't usually happen. Drop data and reset. */
+				this->buffer_head = this->buffer_next = this->buffer;
+				spa_log_warn(this->log, "sco-sink: mSBC buffer overrun, dropping data");
+			}
 			this->buffer_next[0] = 0x01;
 			this->buffer_next[1] = sntable[sn];
 			this->buffer_next[59] = 0x00;
@@ -378,31 +401,51 @@ static void flush_data(struct impl *this)
 				return;
 			}
 			this->buffer_next += out_encoded + 3;
-		}
+			port->write_buffer_size = 0;
 
-next_write:
-		written = write(this->sock_fd, packet, this->transport->write_mtu);
-		if (written <= 0) {
-			spa_log_debug(this->log, "failed to write data");
-			goto stop;
-		}
-		port->write_buffer_size = 0;
-		spa_log_debug(this->log, "wrote socket data %d", written);
-
-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
-			this->buffer_head += written;
-			if (this->buffer_next - this->buffer_head >= this->transport->write_mtu) {
-				packet = this->buffer_head;
-				goto next_write;
+			/* Write */
+			written = spa_bt_sco_io_write(this->transport->sco_io, packet, this->buffer_next - this->buffer_head);
+			if (written < 0) {
+				spa_log_warn(this->log, "failed to write data");
+				goto stop;
 			}
+			spa_log_trace(this->log, "wrote socket data %d", written);
+
+			this->buffer_head += written;
+
 			if (this->buffer_head == this->buffer_next)
 				this->buffer_head = this->buffer_next = this->buffer;
-		} else
+			else if (this->buffer_next + MSBC_ENCODED_SIZE > this->buffer + this->buffer_size) {
+				/* Written bytes is not necessarily commensurate
+				 * with MSBC_ENCODED_SIZE. If this occurs, copy data.
+				 */
+				int size = this->buffer_next - this->buffer_head;
+				spa_memmove(this->buffer, this->buffer_head, size);
+				this->buffer_next = this->buffer + size;
+				this->buffer_head = this->buffer;
+			}
+		} else {
+			written = spa_bt_sco_io_write(this->transport->sco_io, packet, port->write_buffer_size);
+			if (written < 0) {
+				spa_log_warn(this->log, "sco-sink: write failure: %d", written);
+				goto stop;
+			}
+
 			processed = written;
+			port->write_buffer_size -= written;
+
+			if (port->write_buffer_size > 0 && written > 0) {
+				spa_memmove(port->write_buffer, port->write_buffer + written, port->write_buffer_size);
+			}
+		}
 
 		next_timeout = get_next_timeout(this, now_time, processed / port->frame_size);
-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC && next_timeout < 7500000)
-			next_timeout = 7500000;
+
+		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+			uint64_t min_delay = (this->transport->write_mtu / port->frame_size
+					      * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
+			next_timeout = SPA_MAX(next_timeout, min_delay);
+		}
 
 		if (this->clock) {
 			this->clock->nsec = now_time;
@@ -427,6 +470,9 @@ static void sco_on_timeout(struct spa_source *source)
 	struct impl *this = source->data;
 	struct port *port = &this->port;
 	uint64_t exp;
+
+	if (this->transport == NULL)
+		return;
 
 	/* Read the timerfd */
 	if (this->started && spa_system_timerfd_read(this->data_system, this->timerfd, &exp) < 0)
@@ -468,6 +514,7 @@ static int lcm(int a, int b) {
 static int do_start(struct impl *this)
 {
 	bool do_accept;
+	int res;
 
 	/* Dont do anything if the node has already started */
 	if (this->started)
@@ -480,9 +527,8 @@ static int do_start(struct impl *this)
 	do_accept = this->transport->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY;
 
 	/* acquire the socked fd (false -> connect | true -> accept) */
-	this->sock_fd = spa_bt_transport_acquire(this->transport, do_accept);
-	if (this->sock_fd < 0)
-		return -1;
+	if ((res = spa_bt_transport_acquire(this->transport, do_accept)) < 0)
+		return res;
 
 	/* Init mSBC if needed */
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
@@ -490,14 +536,21 @@ static int do_start(struct impl *this)
 		/* Libsbc expects audio samples by default in host endianity, mSBC requires little endian */
 		this->msbc.endian = SBC_LE;
 
-		if (this->transport->write_mtu > MSBC_ENCODED_SIZE)
-			this->transport->write_mtu = MSBC_ENCODED_SIZE;
-
-		this->buffer = calloc(lcm(this->transport->write_mtu, MSBC_ENCODED_SIZE), sizeof(uint8_t));
+		/* write_mtu might not be correct at this point, so we'll throw
+		 * in some common ones, at the cost of a potentially larger
+		 * allocation (size <= 120 * write_mtu). If it still fails to be
+		 * commensurate, we may end up doing memmoves, but nothing worse
+		 * is going to happen.
+		 */
+		this->buffer_size = lcm(24, lcm(60, lcm(this->transport->write_mtu, 2 * MSBC_ENCODED_SIZE)));
+		this->buffer = calloc(this->buffer_size, sizeof(uint8_t));
 		this->buffer_head = this->buffer_next = this->buffer;
 	}
 
 	spa_return_val_if_fail(this->transport->write_mtu <= sizeof(this->port.write_buffer), -EINVAL);
+
+	/* start socket i/o */
+	spa_bt_transport_ensure_sco_io(this->transport, this->data_loop);
 
 	/* Add the timeout callback */
 	this->source.data = this;
@@ -516,6 +569,25 @@ static int do_start(struct impl *this)
 	return 0;
 }
 
+/* Drop any buffered data remaining in the port */
+static void drop_port_output(struct impl *this)
+{
+	struct port *port = &this->port;
+
+	port->write_buffer_size = 0;
+	port->current_buffer = NULL;
+
+	while (!spa_list_is_empty(&port->ready)) {
+		struct buffer *b;
+		b = spa_list_first(&port->ready, struct buffer, link);
+
+		spa_list_remove(&b->link);
+		b->outstanding = true;
+		port->io->buffer_id = b->id;
+		spa_node_call_reuse_buffer(&this->callbacks, 0, b->id);
+	}
+}
+
 static int do_remove_source(struct spa_loop *loop,
 			    bool async,
 			    uint32_t seq,
@@ -529,6 +601,9 @@ static int do_remove_source(struct spa_loop *loop,
 	set_timeout(this, 0);
 	if (this->source.loop)
 		spa_loop_remove_source(this->data_loop, &this->source);
+
+	/* Drop buffered data in the ready queue. Ideally there shouldn't be any. */
+	drop_port_output(this);
 
 	return 0;
 }
@@ -553,13 +628,8 @@ static int do_stop(struct impl *this)
 	}
 
 	if (this->transport) {
-		/* Release the transport */
+		/* Release the transport; it is responsible for closing the fd */
 		res = spa_bt_transport_release(this->transport);
-
-		/* Shutdown and close the socket */
-		shutdown(this->sock_fd, SHUT_RDWR);
-		close(this->sock_fd);
-		this->sock_fd = -1;
 	}
 
 	return res;
@@ -973,9 +1043,6 @@ static int impl_node_process(void *object)
 	io = port->io;
 	spa_return_val_if_fail(io != NULL, -EIO);
 
-	if (!spa_list_is_empty(&port->ready))
-		flush_data(this);
-
 	if (io->status == SPA_STATUS_HAVE_DATA && io->buffer_id < port->n_buffers) {
 		struct buffer *b = &port->buffers[io->buffer_id];
 
@@ -989,11 +1056,12 @@ static int impl_node_process(void *object)
 
 		spa_list_append(&port->ready, &b->link);
 		b->outstanding = false;
-
-		flush_data(this);
-
+		io->buffer_id = SPA_ID_INVALID;
 		io->status = SPA_STATUS_OK;
 	}
+
+	if (!spa_list_is_empty(&port->ready))
+		flush_data(this);
 
 	return SPA_STATUS_HAVE_DATA;
 }
@@ -1017,11 +1085,23 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static int do_transport_destroy(struct spa_loop *loop,
+				bool async,
+				uint32_t seq,
+				const void *data,
+				size_t size,
+				void *user_data)
+{
+	struct impl *this = user_data;
+	this->transport = NULL;
+	return 0;
+}
+
 static void transport_destroy(void *data)
 {
 	struct impl *this = data;
 	spa_log_debug(this->log, "transport %p destroy", this->transport);
-	this->transport = NULL;
+	spa_loop_invoke(this->data_loop, do_transport_destroy, 0, NULL, 0, true, this);
 }
 
 static const struct spa_bt_transport_events transport_events = {
@@ -1137,7 +1217,6 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);
-	this->sock_fd = -1;
 
 	this->timerfd = spa_system_timerfd_create(this->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);

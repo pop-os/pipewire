@@ -53,6 +53,8 @@
 static float empty[MAX_SAMPLES];
 static bool mlock_warned = false;
 
+static uint32_t mappable_dataTypes = (1<<SPA_DATA_MemFd);
+
 struct buffer {
 	struct pw_buffer this;
 	uint32_t id;
@@ -185,6 +187,28 @@ static struct param *add_param(struct filter *impl, struct port *port,
 	p = malloc(sizeof(struct param) + SPA_POD_SIZE(param));
 	if (p == NULL)
 		return NULL;
+
+	if (id == SPA_PARAM_Buffers && SPA_FLAG_IS_SET(port->flags, PW_FILTER_PORT_FLAG_MAP_BUFFERS) &&
+		port->direction == SPA_DIRECTION_INPUT)
+	{
+		const struct spa_pod_prop *pod_param;
+		uint32_t dataType = 0;
+
+		pod_param = spa_pod_find_prop(param, NULL, SPA_PARAM_BUFFERS_dataType);
+		if (pod_param != NULL)
+		{
+			spa_pod_get_int(&pod_param->value, (int32_t*)&dataType);
+			pw_log_debug(NAME" dataType: %d", dataType);
+			if ((dataType & (1<<SPA_DATA_MemPtr)) > 0)
+			{
+				pw_log_debug(NAME" Change dataType");
+				struct spa_pod_int *int_pod = (struct spa_pod_int*)&pod_param->value;
+				dataType = dataType | mappable_dataTypes;
+				pw_log_debug(NAME" dataType: %d", dataType);
+				int_pod->value = dataType;
+			}
+		}
+	}
 
 	p->id = id;
 	p->flags = flags;
@@ -679,12 +703,12 @@ static int impl_port_use_buffers(void *object,
 		if (SPA_FLAG_IS_SET(impl_flags, PW_FILTER_PORT_FLAG_MAP_BUFFERS)) {
 			for (j = 0; j < buffers[i]->n_datas; j++) {
 				struct spa_data *d = &buffers[i]->datas[j];
-				if (d->type == SPA_DATA_MemFd) {
+				if ((mappable_dataTypes & (1<<d->type)) > 0) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				}
-				else if (d->data == NULL) {
+				else if (d->type == SPA_DATA_MemPtr && d->data == NULL) {
 					pw_log_error(NAME" %p: invalid buffer mem", filter);
 					return -EINVAL;
 				}

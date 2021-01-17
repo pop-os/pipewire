@@ -94,6 +94,47 @@ static const uint32_t channel_table[PA_CHANNEL_POSITION_MAX] = {
 	[PA_CHANNEL_POSITION_TOP_REAR_CENTER] = ACP_CHANNEL_TRC,
 };
 
+static const char *channel_names[] = {
+	[ACP_CHANNEL_UNKNOWN] = "UNK",
+	[ACP_CHANNEL_NA] = "NA",
+	[ACP_CHANNEL_MONO] = "MONO",
+	[ACP_CHANNEL_FL] = "FL",
+	[ACP_CHANNEL_FR] = "FR",
+	[ACP_CHANNEL_FC] = "FC",
+	[ACP_CHANNEL_LFE] = "LFE",
+	[ACP_CHANNEL_SL] = "SL",
+	[ACP_CHANNEL_SR] = "SR",
+	[ACP_CHANNEL_FLC] = "FLC",
+	[ACP_CHANNEL_FRC] = "FRC",
+	[ACP_CHANNEL_RC] = "RC",
+	[ACP_CHANNEL_RL] = "RL",
+	[ACP_CHANNEL_RR] = "RR",
+	[ACP_CHANNEL_TC] = "TC",
+	[ACP_CHANNEL_TFL] = "TFL",
+	[ACP_CHANNEL_TFC] = "TFC",
+	[ACP_CHANNEL_TFR] = "TFR",
+	[ACP_CHANNEL_TRL] = "TRL",
+	[ACP_CHANNEL_TRC] = "TRC",
+	[ACP_CHANNEL_TRR] = "TRR",
+	[ACP_CHANNEL_RLC] = "RLC",
+	[ACP_CHANNEL_RRC] = "RRC",
+	[ACP_CHANNEL_FLW] = "FLW",
+	[ACP_CHANNEL_FRW] = "FRW",
+	[ACP_CHANNEL_LFE2] = "LFE2",
+	[ACP_CHANNEL_FLH] = "FLH",
+	[ACP_CHANNEL_FCH] = "FCH",
+	[ACP_CHANNEL_FRH] = "FRH",
+	[ACP_CHANNEL_TFLC] = "TFLC",
+	[ACP_CHANNEL_TFRC] = "TFRC",
+	[ACP_CHANNEL_TSL] = "TSL",
+	[ACP_CHANNEL_TSR] = "TSR",
+	[ACP_CHANNEL_LLFE] = "LLFE",
+	[ACP_CHANNEL_RLFE] = "RLFE",
+	[ACP_CHANNEL_BC] = "BC",
+	[ACP_CHANNEL_BLC] = "BLC",
+	[ACP_CHANNEL_BRC] = "BRC",
+};
+
 #define ACP_N_ELEMENTS(arr)	(sizeof(arr) / sizeof((arr)[0]))
 
 static inline uint32_t channel_pa2acp(pa_channel_position_t channel)
@@ -102,6 +143,19 @@ static inline uint32_t channel_pa2acp(pa_channel_position_t channel)
 		return ACP_CHANNEL_UNKNOWN;
 	return channel_table[channel];
 }
+
+char *acp_channel_str(char *buf, size_t len, enum acp_channel ch)
+{
+	if (ch >= ACP_CHANNEL_CUSTOM_START) {
+		snprintf(buf, len, "AUX%d", ch - ACP_CHANNEL_CUSTOM_START);
+	} else if (ch >= ACP_CHANNEL_UNKNOWN && ch <= ACP_CHANNEL_BRC) {
+		snprintf(buf, len, "%s", channel_names[ch]);
+	} else {
+		snprintf(buf, len, "UNK");
+	}
+	return buf;
+}
+
 
 const char *acp_available_str(enum acp_available status)
 {
@@ -576,6 +630,7 @@ static void init_jacks(pa_card *impl)
 	void *state;
 	pa_alsa_path* path;
 	pa_alsa_jack* jack;
+	char buf[64];
 
 	impl->jacks = pa_hashmap_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
 
@@ -619,9 +674,10 @@ static void init_jacks(pa_card *impl)
 		}
 
 		pa_alsa_mixer_use_for_poll(impl->ucm.mixers, jack->mixer_handle);
-		jack->melem = pa_alsa_mixer_find_card(jack->mixer_handle, jack->alsa_name, 0);
+		jack->melem = pa_alsa_mixer_find_card(jack->mixer_handle, &jack->alsa_id, 0);
 		if (!jack->melem) {
-			pa_log_warn("Jack '%s' seems to have disappeared.", jack->alsa_name);
+			pa_alsa_mixer_id_to_string(buf, sizeof(buf), &jack->alsa_id);
+			pa_log_warn("Jack '%s' seems to have disappeared.", buf);
 			pa_alsa_jack_set_has_control(jack, false);
 			continue;
 		}
@@ -1206,6 +1262,41 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 	return 0;
 }
 
+static void prune_singleton_availability_groups(pa_hashmap *ports) {
+    pa_device_port *p;
+    pa_hashmap *group_counts;
+    void *state, *count;
+    const char *group;
+
+    /* Collect groups and erase those that don't have more than 1 path */
+    group_counts = pa_hashmap_new(pa_idxset_string_hash_func, pa_idxset_string_compare_func);
+
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        if (p->availability_group) {
+            count = pa_hashmap_get(group_counts, p->availability_group);
+            pa_hashmap_remove(group_counts, p->availability_group);
+            pa_hashmap_put(group_counts, p->availability_group, PA_UINT_TO_PTR(PA_PTR_TO_UINT(count) + 1));
+        }
+    }
+
+    /* Now we have an availability_group -> count map, let's drop all groups
+     * that have only one member */
+    PA_HASHMAP_FOREACH_KV(group, count, group_counts, state) {
+        if (count == PA_UINT_TO_PTR(1))
+            pa_hashmap_remove(group_counts, group);
+    }
+
+    PA_HASHMAP_FOREACH(p, ports, state) {
+        if (p->availability_group && !pa_hashmap_get(group_counts, p->availability_group)) {
+            pa_log_debug("Pruned singleton availability group %s from port %s", p->availability_group, p->name);
+            pa_xfree(p->availability_group);
+            p->availability_group = NULL;
+        }
+    }
+
+    pa_hashmap_free(group_counts);
+}
+
 static const char *acp_dict_lookup(const struct acp_dict *dict, const char *key)
 {
 	const struct acp_dict_item *it;
@@ -1305,6 +1396,7 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	pa_alsa_init_description(impl->proplist, NULL);
 
 	add_profiles(impl);
+	prune_singleton_availability_groups(impl->ports);
 
 	card->n_profiles = pa_dynarray_size(&impl->out.profiles);
 	card->profiles = impl->out.profiles.array.data;

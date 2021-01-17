@@ -145,41 +145,43 @@ struct pw_properties *pw_properties_new_dict(const struct spa_dict *dict)
 	return &impl->this;
 }
 
-static struct pw_properties *
-properties_new_string(const char *str)
+SPA_EXPORT
+int pw_properties_update_string(struct pw_properties *props, const char *str, size_t size)
 {
-	struct properties *impl;
-	const char *state = NULL, *s = NULL;
-	size_t len;
-	int res;
+	struct properties *impl = SPA_CONTAINER_OF(props, struct properties, this);
+	struct spa_json it[2];
+	char key[1024], *val;
+	int count = 0;
 
-	impl = properties_new(16);
-	if (impl == NULL)
-		return NULL;
+	spa_json_init(&it[0], str, size);
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		spa_json_init(&it[1], str, size);
 
-	s = pw_split_walk(str, " \t\n\r", &len, &state);
-	while (s) {
-		char *val, *eq;
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1)) {
+		int len;
+		const char *value;
 
-		if ((val = strndup(s, len)) == NULL)
-			goto error_errno;
+		if ((len = spa_json_next(&it[1], &value)) <= 0)
+			break;
 
-		eq = strchr(val, '=');
-		if (eq && eq != val) {
-			*eq = '\0';
-			add_func(&impl->this, val, strdup(eq+1));
-		} else {
-			free(val);
+		if (key[0] == '#')
+			continue;
+		if (spa_json_is_null(value, len))
+			val = NULL;
+		else {
+			if (spa_json_is_container(value, len))
+				len = spa_json_container_len(&it[1], value, len);
+
+			if ((val = strndup(value, len)) == NULL)
+				return -errno;
+
+			if (spa_json_is_string(value, len))
+				spa_json_parse_string(value, len, val);
 		}
-		s = pw_split_walk(str, " \t\n\r", &len, &state);
+		count += pw_properties_set(&impl->this, key, val);
+		free(val);
 	}
-	return &impl->this;
-
-error_errno:
-	res = -errno;
-	pw_properties_free(&impl->this);
-	errno = -res;
-	return NULL;
+	return count;
 }
 
 /** Make a new properties object from the given str
@@ -197,39 +199,17 @@ struct pw_properties *
 pw_properties_new_string(const char *object)
 {
 	struct properties *impl;
-	struct spa_json it[2];
-	char key[256], *val;
 	int res;
-
-	spa_json_init(&it[0], object, strlen(object));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
-		return properties_new_string(object);
 
 	impl = properties_new(16);
 	if (impl == NULL)
 		return NULL;
 
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1)) {
-		int len;
-		const char *value;
+	if ((res = pw_properties_update_string(&impl->this, object, strlen(object))) < 0)
+		goto error;
 
-		if ((len = spa_json_next(&it[1], &value)) <= 0)
-			break;
-
-		if (spa_json_is_container(value, len))
-			len = spa_json_container_len(&it[1], value, len);
-
-		if ((val = strndup(value, len)) == NULL)
-			goto error_errno;
-
-		if (spa_json_is_string(value, len))
-			spa_json_parse_string(value, len, val);
-
-		add_func(&impl->this, strdup(key), val);
-	}
 	return &impl->this;
-error_errno:
-	res = errno;
+error:
 	pw_properties_free(&impl->this);
 	errno = -res;
 	return NULL;
@@ -387,7 +367,7 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 	int index;
 
 	if (key == NULL || key[0] == 0)
-		return 0;
+		goto exit_noupdate;
 
 	index = find_index(properties, key);
 
@@ -399,11 +379,8 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		struct spa_dict_item *item =
 		    pw_array_get_unchecked(&impl->items, index, struct spa_dict_item);
 
-		if (value && strcmp(item->value, value) == 0) {
-			if (!copy)
-				free(value);
-			return 0;
-		}
+		if (value && strcmp(item->value, value) == 0)
+			goto exit_noupdate;
 
 		if (value == NULL) {
 			struct spa_dict_item *last = pw_array_get_unchecked(&impl->items,
@@ -420,6 +397,10 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		}
 	}
 	return 1;
+exit_noupdate:
+	if (!copy)
+		free(value);
+	return 0;
 }
 
 /** Set a property value

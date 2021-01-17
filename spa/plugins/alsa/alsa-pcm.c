@@ -198,12 +198,7 @@ static const struct def_mask default_layouts[] = {
 
 #define _C(ch)	(SPA_AUDIO_CHANNEL_ ##ch)
 
-struct def_map {
-	uint32_t channels;
-	uint32_t pos[SPA_AUDIO_MAX_CHANNELS];
-};
-
-static const struct def_map default_map[] = {
+static const struct channel_map default_map[] = {
 	{ 0, { 0, } } ,
 	{ 1, { _C(MONO), } },
 	{ 2, { _C(FL), _C(FR), } },
@@ -340,6 +335,25 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 			}
 		}
 	}
+	if (j == 0) {
+		char buf[1024];
+		int i, offs;
+
+		for (i = 0, offs = 0; i <= SND_PCM_FORMAT_LAST; i++) {
+			if (snd_pcm_format_mask_test(fmask, (snd_pcm_format_t)i))
+				offs += snprintf(&buf[offs], sizeof(buf) - offs,
+						"%s ", snd_pcm_format_name((snd_pcm_format_t)i));
+		}
+		spa_log_warn(state->log, "unsupported card: formats:%s", buf);
+
+		for (i = 0, offs = 0; i <= SND_PCM_ACCESS_LAST; i++) {
+			if (snd_pcm_access_mask_test(amask, (snd_pcm_access_t)i))
+				offs += snprintf(&buf[offs], sizeof(buf) - offs,
+						"%s ", snd_pcm_access_name((snd_pcm_access_t)i));
+		}
+		spa_log_warn(state->log, "unsupported card: access:%s", buf);
+		return -ENOTSUP;
+	}
 	if (j > 1)
 		choice->body.type = SPA_CHOICE_Enum;
 	spa_pod_builder_pop(&b, &f[1]);
@@ -379,6 +393,8 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 		if (max > state->default_channels)
 			max = state->default_channels;
 	}
+	min = SPA_MIN(min, SPA_AUDIO_MAX_CHANNELS);
+	max = SPA_MIN(max, SPA_AUDIO_MAX_CHANNELS);
 
 	spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_channels, 0);
 
@@ -415,6 +431,8 @@ skip_channels:
 		snd_pcm_free_chmaps(maps);
 	}
 	else {
+		const struct channel_map *map = NULL;
+
 		if (result.index > 0)
 			goto enum_end;
 
@@ -428,8 +446,13 @@ skip_channels:
 		}
 		spa_pod_builder_pop(&b, &f[1]);
 
-		if (min == max && min <= 8) {
-			const struct def_map *map = &default_map[min];
+		if (min == max) {
+			if (state->default_pos.channels == min)
+				map = &state->default_pos;
+			else if (min == max && min <= 8)
+				map = &default_map[min];
+		}
+		if (map) {
 			spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_position, 0);
 			spa_pod_builder_push_array(&b, &f[1]);
 			for (j = 0; j < map->channels; j++) {
@@ -537,7 +560,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		state->frame_size *= info->channels;
 
 	dir = 0;
-	period_size = 1024;
+	period_size = state->default_period_size ? state->default_period_size : 1024;
 	is_batch = snd_pcm_hw_params_is_batch(params);
 	if (is_batch) {
 		const char *id;
@@ -554,8 +577,8 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		/* batch devices get their hw pointers updated every period. Make
 		 * the period smaller and add one period of headroom */
 		period_size /= 2;
-		spa_log_info(state->log, NAME" %s: batch mode, period_size:%ld headroom:%u",
-				state->props.device, period_size, state->headroom);
+		spa_log_info(state->log, NAME" %s: batch mode, period_size:%ld",
+				state->props.device, period_size);
 	}
 
 	CHECK(snd_pcm_hw_params_set_period_size_near(hndl, params, &period_size, &dir), "set_period_size_near");
@@ -808,6 +831,7 @@ int spa_alsa_write(struct state *state, snd_pcm_uframes_t silence)
 	snd_pcm_t *hndl = state->hndl;
 	const snd_pcm_channel_area_t *my_areas;
 	snd_pcm_uframes_t written, frames, offset, off, to_write, total_written;
+	snd_pcm_sframes_t commitres;
 	int res;
 
 	if (SPA_LIKELY(state->position && state->duration != state->position->clock.duration)) {
@@ -922,11 +946,16 @@ again:
 			state, offset, written, state->sample_count);
 	total_written += written;
 
-	if (SPA_UNLIKELY((res = snd_pcm_mmap_commit(hndl, offset, written)) < 0)) {
+	if (SPA_UNLIKELY((commitres = snd_pcm_mmap_commit(hndl, offset, written)) < 0)) {
 		spa_log_error(state->log, NAME" %p: snd_pcm_mmap_commit error: %s",
-				state, snd_strerror(res));
-		if (res != -EPIPE && res != -ESTRPIPE)
+				state, snd_strerror(commitres));
+		if (commitres != -EPIPE && commitres != -ESTRPIPE)
 			return res;
+	}
+
+	if (commitres > 0 && written != (snd_pcm_uframes_t) commitres) {
+		spa_log_warn(state->log, NAME" %p: mmap_commit wrote %ld instead of %ld",
+			     state, commitres, written);
 	}
 
 	if (!spa_list_is_empty(&state->ready) && written > 0)
@@ -1025,6 +1054,7 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 	snd_pcm_uframes_t total_read = 0, to_read;
 	const snd_pcm_channel_area_t *my_areas;
 	snd_pcm_uframes_t read, frames, offset;
+	snd_pcm_sframes_t commitres;
 	int res;
 
 	if (state->position) {
@@ -1098,11 +1128,16 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 			offset, read, state->sample_count);
 	total_read += read;
 
-	if ((res = snd_pcm_mmap_commit(hndl, offset, read)) < 0) {
+	if ((commitres = snd_pcm_mmap_commit(hndl, offset, read)) < 0) {
 		spa_log_error(state->log, NAME" %p: snd_pcm_mmap_commit error: %s",
-				state, snd_strerror(res));
-		if (res != -EPIPE && res != -ESTRPIPE)
+				state, snd_strerror(commitres));
+		if (commitres != -EPIPE && commitres != -ESTRPIPE)
 			return res;
+	}
+
+	if (commitres > 0 && read != (snd_pcm_uframes_t) commitres) {
+		spa_log_warn(state->log, NAME" %p: mmap_commit read %ld instead of %ld",
+			     state, commitres, read);
 	}
 
 	state->sample_count += total_read;
