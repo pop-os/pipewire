@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2020 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -30,9 +30,8 @@
 #include <pipewire/impl.h>
 
 #include "config.h"
-#include "daemon-config.h"
 
-static const char *daemon_name;
+static const char *address;
 
 static void do_quit(void *data, int signal_number)
 {
@@ -42,45 +41,41 @@ static void do_quit(void *data, int signal_number)
 
 static void show_help(const char *name)
 {
-	fprintf(stdout, "%s [options]\n"
+	fprintf(stdout, "%s [options]\n\n"
+		"Start a pulseaudio compatible daemon.\n\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
-		"  -n, --name                            Daemon name (Default %s)\n",
+		"  -a  --address                         comma separated list of addresses (Default %s)\n"
+		"                                           unix:<socket-name>\n"
+		"                                           tcp:[<ip>][:<port>]\n",
 		name,
-		daemon_name);
+		address);
 }
 
 int main(int argc, char *argv[])
 {
 	struct pw_context *context;
 	struct pw_main_loop *loop;
-	struct pw_daemon_config *config;
 	struct pw_properties *properties;
-	char *err = NULL;
+	char *args;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
 		{ "version",	no_argument,		NULL, 'V' },
-		{ "name",	required_argument,	NULL, 'n' },
-
+		{ "address",	required_argument,	NULL, 'a' },
 		{ NULL, 0, NULL, 0}
 	};
-	int c, res;
+	int c;
 
 	pw_init(&argc, &argv);
 
-	if (setenv("PIPEWIRE_INTERNAL", "1", 1) < 0)
-		fprintf(stderr, "can't PIPEWIRE_INTERNAL env: %m");
+	address = "unix:native";
 
-	daemon_name = getenv("PIPEWIRE_CORE");
-	if (daemon_name == NULL)
-		daemon_name = PW_DEFAULT_REMOTE;
-
-	while ((c = getopt_long(argc, argv, "hVn:", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVa:", long_options, NULL)) != -1) {
 		switch (c) {
-		case 'h' :
+		case 'h':
 			show_help(argv[0]);
 			return 0;
-		case 'V' :
+		case 'V':
 			fprintf(stdout, "%s\n"
 				"Compiled with libpipewire %s\n"
 				"Linked with libpipewire %s\n",
@@ -88,9 +83,9 @@ int main(int argc, char *argv[])
 				pw_get_headers_version(),
 				pw_get_library_version());
 			return 0;
-		case 'n' :
-			daemon_name = optarg;
-			fprintf(stdout, "set name %s\n", daemon_name);
+		case 'a':
+			address = optarg;
+			fprintf(stdout, "set address %s\n", address);
 			break;
 		default:
 			return -1;
@@ -98,18 +93,8 @@ int main(int argc, char *argv[])
 	}
 
 	properties = pw_properties_new(
-                                PW_KEY_CORE_NAME, daemon_name,
-                                PW_KEY_CONTEXT_PROFILE_MODULES, "none",
-                                PW_KEY_CORE_DAEMON, "true", NULL);
-
-	/* parse configuration */
-	config = pw_daemon_config_new(properties);
-	if (pw_daemon_config_load(config, &err) < 0) {
-		pw_log_error("failed to parse config: %s", err);
-		free(err);
-		return -1;
-	}
-
+				PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
+				NULL);
 
 	loop = pw_main_loop_new(&properties->dict);
 	if (loop == NULL) {
@@ -126,9 +111,11 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	if ((res = pw_daemon_config_run_commands(config, context)) < 0) {
-		pw_log_error("failed to run config commands: %s", spa_strerror(res));
-		pw_main_loop_quit(loop);
+	args = spa_aprintf("server.address=%s", address);
+	if (pw_context_load_module(context,
+				"libpipewire-module-protocol-pulse",
+				args, NULL) == NULL) {
+		pw_log_error("failed to create pulse module: %m");
 		return -1;
 	}
 
@@ -136,7 +123,7 @@ int main(int argc, char *argv[])
 	pw_main_loop_run(loop);
 	pw_log_info("leave main loop");
 
-	pw_daemon_config_free(config);
+	free(args);
 	pw_context_destroy(context);
 	pw_main_loop_destroy(loop);
 	pw_deinit();

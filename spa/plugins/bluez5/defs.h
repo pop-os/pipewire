@@ -141,6 +141,11 @@ extern "C" {
 #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
 #define A2DP_SOURCE_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSource"
 
+/* HFP uses SBC encoding with precisely defined parameters. Hence, the size
+ * of the input (number of PCM samples) and output is known up front. */
+#define MSBC_DECODED_SIZE       240
+#define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
+
 enum spa_bt_profile {
         SPA_BT_PROFILE_NULL =		0,
         SPA_BT_PROFILE_A2DP_SINK =	(1 << 0),
@@ -373,6 +378,7 @@ static inline void backend_ofono_add_filters(struct spa_bt_backend *backend) {}
 #ifdef HAVE_BLUEZ_5_BACKEND_HSPHFPD
 struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
 void backend_hsphfpd_free(struct spa_bt_backend *backend);
@@ -380,6 +386,7 @@ void backend_hsphfpd_add_filters(struct spa_bt_backend *backend);
 #else
 static inline struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support) {
 	return NULL;

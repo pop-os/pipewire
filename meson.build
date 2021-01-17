@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.15',
+  version : '0.3.16',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -267,6 +267,10 @@ if cc.has_type('ptrdiff_t', prefix : '#include <stddef.h>')
   cdata.set('HAVE_PTRDIFF_T', 1)
 endif
 
+if cc.has_function('strndupa', prefix : '#include <string.h>', args : [ '-D_GNU_SOURCE' ])
+  cdata.set('HAVE_STRNDUPA', 1)
+endif
+
 if cc.has_function('mkstemp', prefix : '#include <stdlib.h>')
   cdata.set('HAVE_MKSTEMP', 1)
 endif
@@ -279,9 +283,9 @@ if get_option('systemd')
   systemd = dependency('systemd', required: false)
   systemd_dep = dependency('libsystemd', required: false)
   if systemd.found() and systemd_dep.found()
-    cdata.set('HAVE_SYSTEMD_DAEMON', 1)
+    cdata.set('HAVE_SYSTEMD', 1)
   else
-    warning('Systemd integration was enabled, but systemd is not available')
+    warning('systemd integration was enabled, but systemd is not available')
   endif
 endif
 

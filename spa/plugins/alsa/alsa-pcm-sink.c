@@ -681,6 +681,10 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 static int impl_clear(struct spa_handle *handle)
 {
+	struct state *this;
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+	this = (struct state *) handle;
+	spa_alsa_close(this);
 	return 0;
 }
 
@@ -757,6 +761,8 @@ impl_init(const struct spa_handle_factory *factory,
 	this->port_info.n_params = 5;
 
 	spa_list_init(&this->ready);
+
+	snd_config_update_free_global();
 
 	for (i = 0; info && i < info->n_items; i++) {
 		if (!strcmp(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {

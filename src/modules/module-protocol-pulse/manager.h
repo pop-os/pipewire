@@ -58,6 +58,8 @@ struct pw_manager {
 	struct pw_core *core;
 	struct pw_registry *registry;
 
+	struct pw_core_info *info;
+
 	uint32_t n_objects;
 	struct spa_list object_list;
 };
@@ -72,7 +74,7 @@ struct pw_manager_object {
 	struct spa_list link;           /**< link in manager object_list */
 	uint32_t id;
 	uint32_t permissions;
-	char *type;
+	const char *type;
 	uint32_t version;
 	struct pw_properties *props;
 	struct pw_proxy *proxy;
@@ -80,6 +82,7 @@ struct pw_manager_object {
 	int changed;
 	void *info;
 	struct spa_list param_list;
+	unsigned int creating:1;
 };
 
 struct pw_manager *pw_manager_new(struct pw_core *core);

@@ -49,6 +49,8 @@
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 #define MAX_PORTS	1
 
+static bool mlock_warned = false;
+
 struct buffer {
 	struct pw_buffer this;
 	uint32_t id;
@@ -386,6 +388,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Suspend:
+	case SPA_NODE_COMMAND_Flush:
 	case SPA_NODE_COMMAND_Pause:
 		pw_loop_invoke(impl->context->main_loop,
 			NULL, 0, NULL, 0, false, impl);
@@ -561,12 +564,15 @@ static int map_data(struct stream *impl, struct spa_data *data, int prot)
 			range.offset, range.size, data->data);
 
 	if (impl->allow_mlock && mlock(data->data, data->maxsize) < 0) {
-		pw_log(impl->process_rt ? SPA_LOG_LEVEL_WARN : SPA_LOG_LEVEL_DEBUG,
-				NAME" %p: Failed to mlock memory %p %u: %s", impl,
-				data->data, data->maxsize,
-				errno == ENOMEM ?
-				"This is not a problem but for best performance, "
-				"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+		if (errno != ENOMEM || !mlock_warned) {
+			pw_log(impl->process_rt ? SPA_LOG_LEVEL_WARN : SPA_LOG_LEVEL_DEBUG,
+					NAME" %p: Failed to mlock memory %p %u: %s", impl,
+					data->data, data->maxsize,
+					errno == ENOMEM ?
+					"This is not a problem but for best performance, "
+					"consider increasing RLIMIT_MEMLOCK" : strerror(errno));
+			mlock_warned |= errno == ENOMEM;
+		}
 	}
 	return 0;
 }
@@ -1305,6 +1311,9 @@ void pw_stream_destroy(struct pw_stream *stream)
 		free(c);
 	}
 
+	spa_hook_list_clean(&impl->hooks);
+	spa_hook_list_clean(&stream->listener_list);
+
 	spa_hook_remove(&impl->context_listener);
 
 	if (impl->data.context)
@@ -1867,8 +1876,8 @@ do_flush(struct spa_loop *loop,
 	}
 	while (b);
 
-	impl->time.queued = impl->queued.outcount = impl->dequeued.incount =
-		impl->dequeued.outcount = impl->queued.incount;
+	impl->queued.outcount = impl->dequeued.incount =
+		impl->dequeued.outcount = impl->queued.incount = 0;
 
 	return 0;
 }
@@ -1889,5 +1898,8 @@ int pw_stream_flush(struct pw_stream *stream, bool drain)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	pw_loop_invoke(impl->context->data_loop,
 			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
+	if (!drain)
+		spa_node_send_command(impl->node->node,
+				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Flush));
 	return 0;
 }

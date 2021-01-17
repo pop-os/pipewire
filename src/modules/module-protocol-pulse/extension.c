@@ -22,33 +22,43 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PIPEWIRE_PROTOCOL_PULSE_H
-#define PIPEWIRE_PROTOCOL_PULSE_H
+struct extension_sub {
+	const char *name;
+	uint32_t command;
+	int (*process)(struct client *client, uint32_t command, uint32_t tag, struct message *m);
+};
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+struct extension {
+	const char *name;
+	uint32_t idx;
+	int (*process)(struct client *client, uint32_t tag, struct message *m);
+};
 
-#include <spa/utils/defs.h>
-#include <spa/utils/hook.h>
+#include "ext-stream-restore.c"
 
-#define PW_PROTOCOL_PULSE_DEFAULT_PORT 4713
-#define PW_PROTOCOL_PULSE_DEFAULT_SOCKET "native"
+static int do_extension_device_restore(struct client *client, uint32_t tag, struct message *m)
+{
+	return -ENOTSUP;
+}
 
-#define PW_PROTOCOL_PULSE_DEFAULT_SERVER "unix:"PW_PROTOCOL_PULSE_DEFAULT_SOCKET
+static int do_extension_device_manager(struct client *client, uint32_t tag, struct message *m)
+{
+	return -ENOTSUP;
+}
 
-#define PW_PROTOCOL_PULSE_USAGE	"[ server.address=(tcp:[<ip>:]<port>|unix:<path>)[,...] ] "		\
+struct extension extensions[] = {
+	{ "module-stream-restore", 0 | EXTENSION_FLAG, do_extension_stream_restore, },
+	{ "module-device-restore", 1 | EXTENSION_FLAG, do_extension_device_restore, },
+	{ "module-device-manager", 2 | EXTENSION_FLAG, do_extension_device_manager, },
+};
 
-struct pw_protocol_pulse;
-struct pw_protocol_pulse_server;
-
-struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
-		struct pw_properties *props, size_t user_data_size);
-void *pw_protocol_pulse_get_user_data(struct pw_protocol_pulse *pulse);
-void pw_protocol_pulse_destroy(struct pw_protocol_pulse *pulse);
-
-#ifdef __cplusplus
-}  /* extern "C" */
-#endif
-
-#endif /* PIPEWIRE_PROTOCOL_PULSE_H */
+static struct extension *find_extension(uint32_t idx, const char *name)
+{
+	uint32_t i;
+	for (i = 0; i < SPA_N_ELEMENTS(extensions); i++) {
+		if (idx == extensions[i].idx ||
+		    (name && strcmp(name, extensions[i].name) == 0))
+			return &extensions[i];
+	}
+	return 0;
+}

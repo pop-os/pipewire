@@ -43,6 +43,48 @@ static inline float volume_to_linear(uint32_t vol)
 	return v * v * v;
 }
 
+struct str_map {
+	const char *pw_str;
+	const char *pa_str;
+	const struct str_map *child;
+};
+
+const struct str_map media_role_map[] = {
+	{ "Movie", "video", },
+	{ "Music", "music", },
+	{ "Game", "game", },
+	{ "Notification", "event", },
+	{ "Communication", "phone", },
+	{ "Movie", "animation", },
+	{ "Production", "production", },
+	{ "Accessibility", "a11y", },
+	{ "Test", "test", },
+	{ NULL, NULL },
+};
+
+const struct str_map key_table[] = {
+	{ PW_KEY_DEVICE_BUS_PATH, "device.bus_path" },
+	{ PW_KEY_DEVICE_FORM_FACTOR, "device.form_factor" },
+	{ PW_KEY_DEVICE_ICON_NAME, "device.icon_name" },
+	{ PW_KEY_DEVICE_INTENDED_ROLES, "device.intended_roles" },
+	{ PW_KEY_MEDIA_ICON_NAME, "media.icon_name" },
+	{ PW_KEY_APP_ICON_NAME, "application.icon_name" },
+	{ PW_KEY_APP_PROCESS_MACHINE_ID, "application.process.machine_id" },
+	{ PW_KEY_APP_PROCESS_SESSION_ID, "application.process.session_id" },
+	{ PW_KEY_MEDIA_ROLE, "media.role", media_role_map },
+	{ NULL, NULL },
+};
+
+static inline const struct str_map *str_map_find(const struct str_map *map, const char *pw, const char *pa)
+{
+	uint32_t i;
+	for (i = 0; map[i].pw_str; i++)
+		if ((pw && strcmp(map[i].pw_str, pw) == 0) ||
+		    (pa && strcmp(map[i].pa_str, pa) == 0))
+			return &map[i];
+	return NULL;
+}
+
 struct descriptor {
 	uint32_t length;
 	uint32_t channel;
@@ -75,6 +117,7 @@ enum {
 
 struct message {
 	struct spa_list link;
+	uint32_t extra[4];
 	uint32_t channel;
 	uint32_t allocated;
 	uint32_t length;
@@ -127,15 +170,16 @@ static int read_sample_spec(struct message *m, struct sample_spec *ss)
 	return read_u32(m, &ss->rate);
 }
 
-static int read_props(struct message *m, struct pw_properties *props)
+static int read_props(struct message *m, struct pw_properties *props, bool remap)
 {
 	int res;
 
 	while (true) {
-		char *key;
-		void *data;
+		const char *key;
+		const void *data;
 		uint32_t length;
 		size_t size;
+		const struct str_map *map;
 
 		if ((res = message_get(m,
 				TAG_STRING, &key,
@@ -157,6 +201,12 @@ static int read_props(struct message *m, struct pw_properties *props)
 				TAG_INVALID)) < 0)
 			return res;
 
+		if (remap && (map = str_map_find(key_table, NULL, key)) != NULL) {
+			key = map->pw_str;
+			if (map->child != NULL &&
+			    (map = str_map_find(map->child, NULL, data)) != NULL)
+				data = map->pw_str;
+		}
 		pw_properties_set(props, key, data);
 	}
 	return 0;
@@ -249,6 +299,7 @@ static int read_format_info(struct message *m, struct format_info *info)
 	int res;
 	uint8_t tag, encoding;
 
+	spa_zero(*info);
 	if ((res = read_u8(m, &tag)) < 0)
 		return res;
 	if (tag != TAG_U8)
@@ -265,7 +316,9 @@ static int read_format_info(struct message *m, struct format_info *info)
 	info->props = pw_properties_new(NULL, NULL);
 	if (info->props == NULL)
 		return -errno;
-	return read_props(m, info->props);
+	if ((res = read_props(m, info->props, false)) < 0)
+		format_info_clear(info);
+	return res;
 }
 
 static int message_get(struct message *m, ...)
@@ -363,7 +416,7 @@ static int message_get(struct message *m, ...)
 		case TAG_PROPLIST:
 			if (dtag != tag)
 				return -EINVAL;
-			if ((res = read_props(m, va_arg(va, struct pw_properties*))) < 0)
+			if ((res = read_props(m, va_arg(va, struct pw_properties*), true)) < 0)
 				return res;
 			break;
 		case TAG_VOLUME:
@@ -495,17 +548,74 @@ static void write_cvolume(struct message *m, struct volume *vol)
 		write_32(m, volume_from_linear(vol->values[i]));
 }
 
-static void write_dict(struct message *m, struct spa_dict *dict)
+static void add_stream_group(struct message *m, struct spa_dict *dict, const char *key,
+		const char *media_class, const char *media_role)
+{
+	const char *str, *fmt, *prefix;
+	char *b;
+	int l;
+
+	if (media_class == NULL)
+		return;
+	if (strcmp(media_class, "Stream/Output/Audio") == 0)
+		prefix = "sink-input";
+	else if (strcmp(media_class, "Stream/Input/Audio") == 0)
+		prefix = "source-output";
+	else
+		return;
+
+	if ((str = media_role) != NULL)
+		fmt = "%s-by-media-role:%s";
+	else if ((str = spa_dict_lookup(dict, PW_KEY_APP_ID)) != NULL)
+		fmt = "%s-by-application-id:%s";
+	else if ((str = spa_dict_lookup(dict, PW_KEY_APP_NAME)) != NULL)
+		fmt = "%s-by-application-name:%s";
+	else if ((str = spa_dict_lookup(dict, PW_KEY_MEDIA_NAME)) != NULL)
+		fmt = "%s-by-media-name:%s";
+	else
+		return;
+
+	write_string(m, key);
+	l = strlen(fmt) + strlen(prefix) + strlen(str) - 3;
+	b = alloca(l);
+	snprintf(b, l, fmt, prefix, str);
+	write_u32(m, l);
+	write_arbitrary(m, b, l);
+}
+
+static void write_dict(struct message *m, struct spa_dict *dict, bool remap)
 {
 	const struct spa_dict_item *it;
+
 	write_8(m, TAG_PROPLIST);
 	if (dict != NULL) {
+		const char *media_class = NULL, *media_role = NULL;
 		spa_dict_for_each(it, dict) {
-			int l = strlen(it->value);
-			write_string(m, it->key);
-			write_u32(m, l+1);
-			write_arbitrary(m, it->value, l+1);
+			const char *key = it->key;
+			const char *val = it->value;
+			int l;
+			const struct str_map *map;
+
+			if (remap && (map = str_map_find(key_table, key, NULL)) != NULL) {
+				key = map->pa_str;
+				if (map->child != NULL &&
+				    (map = str_map_find(map->child, val, NULL)) != NULL)
+					val = map->pa_str;
+			}
+			if (strcmp(key, "media.class") == 0)
+				media_class = val;
+			if (strcmp(key, "media.role") == 0)
+				media_role = val;
+
+			write_string(m, key);
+			l = strlen(val) + 1;
+			write_u32(m, l);
+			write_arbitrary(m, val, l);
+
 		}
+		if (remap)
+			add_stream_group(m, dict, "module-stream-restore.id",
+					media_class, media_role);
 	}
 	write_string(m, NULL);
 }
@@ -514,7 +624,7 @@ static void write_format_info(struct message *m, struct format_info *info)
 {
 	write_8(m, TAG_FORMAT_INFO);
 	write_u8(m, (uint8_t) info->encoding);
-	write_dict(m, info->props ? &info->props->dict : NULL);
+	write_dict(m, info->props ? &info->props->dict : NULL, false);
 }
 
 static int message_put(struct message *m, ...)
@@ -569,7 +679,7 @@ static int message_put(struct message *m, ...)
 			write_cvolume(m, va_arg(va, struct volume*));
 			break;
 		case TAG_PROPLIST:
-			write_dict(m, va_arg(va, struct spa_dict*));
+			write_dict(m, va_arg(va, struct spa_dict*), true);
 			break;
 		case TAG_VOLUME:
 			write_volume(m, va_arg(va, double));
@@ -587,14 +697,16 @@ static int message_put(struct message *m, ...)
 	return 0;
 }
 
-static int message_dump(struct message *m)
+static int message_dump(enum spa_log_level level, struct message *m)
 {
 	int res;
-	uint32_t i, offset = m->offset;
+	uint32_t i, offset = m->offset, o;
 
+	pw_log(level, "message: len:%d alloc:%u", m->length, m->allocated);
 	while (true) {
 		uint8_t tag;
 
+		o = m->offset;
 		if (read_u8(m, &tag) < 0)
 			break;
 
@@ -604,18 +716,18 @@ static int message_dump(struct message *m)
 			char *val;
 			if ((res = read_string(m, &val)) < 0)
 				return res;
-			pw_log_debug("string: '%s'", val);
+			pw_log(level, "%u: string: '%s'", o, val);
 			break;
 			}
 		case TAG_STRING_NULL:
-			pw_log_debug("string: NULL");
+			pw_log(level, "%u: string: NULL", o);
 			break;
 		case TAG_U8:
 		{
 			uint8_t val;
 			if ((res = read_u8(m, &val)) < 0)
 				return res;
-			pw_log_debug("u8: %u", val);
+			pw_log(level, "%u: u8: %u", o, val);
 			break;
 		}
 		case TAG_U32:
@@ -623,7 +735,7 @@ static int message_dump(struct message *m)
 			uint32_t val;
 			if ((res = read_u32(m, &val)) < 0)
 				return res;
-			pw_log_debug("u32: %u", val);
+			pw_log(level, "%u: u32: %u", o, val);
 			break;
 		}
 		case TAG_S64:
@@ -631,7 +743,7 @@ static int message_dump(struct message *m)
 			uint64_t val;
 			if ((res = read_u64(m, &val)) < 0)
 				return res;
-			pw_log_debug("s64: %"PRIi64"", (int64_t)val);
+			pw_log(level, "%u: s64: %"PRIi64"", o, (int64_t)val);
 			break;
 		}
 		case TAG_U64:
@@ -639,7 +751,7 @@ static int message_dump(struct message *m)
 			uint64_t val;
 			if ((res = read_u64(m, &val)) < 0)
 				return res;
-			pw_log_debug("u64: %"PRIu64"", val);
+			pw_log(level, "%u: u64: %"PRIu64"", o, val);
 			break;
 		}
 		case TAG_USEC:
@@ -647,7 +759,7 @@ static int message_dump(struct message *m)
 			uint64_t val;
 			if ((res = read_u64(m, &val)) < 0)
 				return res;
-			pw_log_debug("u64: %"PRIu64"", val);
+			pw_log(level, "%u: u64: %"PRIu64"", o, val);
 			break;
 		}
 		case TAG_SAMPLE_SPEC:
@@ -655,7 +767,7 @@ static int message_dump(struct message *m)
 			struct sample_spec ss;
 			if ((res = read_sample_spec(m, &ss)) < 0)
 				return res;
-			pw_log_debug("ss: format:%s rate:%d channels:%u",
+			pw_log(level, "%u: ss: format:%s rate:%d channels:%u", o,
 					format_pa2name(ss.format), ss.rate,
 					ss.channels);
 			break;
@@ -670,17 +782,17 @@ static int message_dump(struct message *m)
 			break;
 		}
 		case TAG_BOOLEAN_TRUE:
-			pw_log_debug("bool: true");
+			pw_log(level, "%u: bool: true", o);
 			break;
 		case TAG_BOOLEAN_FALSE:
-			pw_log_debug("bool: false");
+			pw_log(level, "%u: bool: false", o);
 			break;
 		case TAG_TIMEVAL:
 		{
 			struct timeval tv;
 			if ((res = read_timeval(m, &tv)) < 0)
 				return res;
-			pw_log_debug("timeval: %lu:%lu", tv.tv_sec, tv.tv_usec);
+			pw_log(level, "%u: timeval: %lu:%lu", o, tv.tv_sec, tv.tv_usec);
 			break;
 		}
 		case TAG_CHANNEL_MAP:
@@ -688,9 +800,9 @@ static int message_dump(struct message *m)
 			struct channel_map map;
 			if ((res = read_channel_map(m, &map)) < 0)
 				return res;
-			pw_log_debug("channelmap: channels:%u", map.channels);
+			pw_log(level, "%u: channelmap: channels:%u", o, map.channels);
 			for (i = 0; i < map.channels; i++)
-				pw_log_debug("    %d: %s", i, channel_pa2name(map.map[i]));
+				pw_log(level, "    %d: %s", i, channel_pa2name(map.map[i]));
 			break;
 		}
 		case TAG_CVOLUME:
@@ -698,20 +810,20 @@ static int message_dump(struct message *m)
 			struct volume vol;
 			if ((res = read_cvolume(m, &vol)) < 0)
 				return res;
-			pw_log_debug("cvolume: channels:%u", vol.channels);
+			pw_log(level, "%u: cvolume: channels:%u", o, vol.channels);
 			for (i = 0; i < vol.channels; i++)
-				pw_log_debug("    %d: %f", i, vol.values[i]);
+				pw_log(level, "    %d: %f", i, vol.values[i]);
 			break;
 		}
 		case TAG_PROPLIST:
 		{
 			struct pw_properties *props = pw_properties_new(NULL, NULL);
 			const struct spa_dict_item *it;
-			if ((res = read_props(m, props)) < 0)
+			if ((res = read_props(m, props, false)) < 0)
 				return res;
-			pw_log_debug("props: n_items:%u", props->dict.n_items);
+			pw_log(level, "%u: props: n_items:%u", o, props->dict.n_items);
 			spa_dict_for_each(it, &props->dict)
-				pw_log_debug("     '%s': '%s'", it->key, it->value);
+				pw_log(level, "     '%s': '%s'", it->key, it->value);
 			pw_properties_free(props);
 			break;
 		}
@@ -720,7 +832,7 @@ static int message_dump(struct message *m)
 			float vol;
 			if ((res = read_volume(m, &vol)) < 0)
 				return res;
-			pw_log_debug("volume: %f", vol);
+			pw_log(level, "%u: volume: %f", o, vol);
 			break;
 		}
 		case TAG_FORMAT_INFO:
@@ -729,9 +841,9 @@ static int message_dump(struct message *m)
 			const struct spa_dict_item *it;
 			if ((res = read_format_info(m, &info)) < 0)
 				return res;
-			pw_log_debug("format-info: n_items:%u", info.props->dict.n_items);
+			pw_log(level, "%u: format-info: n_items:%u", o, info.props->dict.n_items);
 			spa_dict_for_each(it, &info.props->dict)
-				pw_log_debug("     '%s': '%s'", it->key, it->value);
+				pw_log(level, "     '%s': '%s'", it->key, it->value);
 			break;
 		}
 		}

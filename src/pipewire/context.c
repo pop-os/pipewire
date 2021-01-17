@@ -66,11 +66,6 @@ struct impl {
 };
 
 
-struct resource_data {
-	struct spa_hook resource_listener;
-	struct spa_hook object_listener;
-};
-
 struct factory_entry {
 	regex_t regex;
 	char *lib;
@@ -410,6 +405,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	pw_map_clear(&context->globals);
 
+	spa_hook_list_clean(&context->listener_list);
+	spa_hook_list_clean(&context->driver_listener_list);
+
 	free(context);
 }
 
@@ -498,7 +496,7 @@ struct pw_global *pw_context_find_global(struct pw_context *context, uint32_t id
 	struct pw_global *global;
 
 	global = pw_map_lookup(&context->globals, id);
-	if (global == NULL) {
+	if (global == NULL || global->destroyed) {
 		errno = ENOENT;
 		return NULL;
 	}

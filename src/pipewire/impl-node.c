@@ -509,6 +509,8 @@ static void resource_destroy(void *data)
 {
 	struct resource_data *d = data;
 	remove_busy_resource(d);
+	spa_hook_remove(&d->resource_listener);
+	spa_hook_remove(&d->object_listener);
 }
 
 static void resource_pong(void *data, int seq)
@@ -1677,6 +1679,8 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 
 	pw_log_debug(NAME" %p: free", node);
 	pw_impl_node_emit_free(node);
+
+	spa_hook_list_clean(&node->listener_list);
 
 	pw_memblock_unref(node->activation);
 

@@ -165,6 +165,16 @@ static struct spa_bt_adapter *adapter_find(struct spa_bt_monitor *monitor, const
 	return NULL;
 }
 
+static bool check_iter_signature(DBusMessageIter *it, const char *sig)
+{
+	char *v;
+	int res;
+	v = dbus_message_iter_get_signature(it);
+	res = strcmp(v, sig);
+	dbus_free(v);
+	return res == 0;
+}
+
 static int adapter_update_props(struct spa_bt_adapter *adapter,
 				DBusMessageIter *props_iter,
 				DBusMessageIter *invalidated_iter)
@@ -228,7 +238,7 @@ static int adapter_update_props(struct spa_bt_adapter *adapter,
 		else if (strcmp(key, "UUIDs") == 0) {
 			DBusMessageIter iter;
 
-			if (strcmp(dbus_message_iter_get_signature(&it[1]), "as") != 0)
+			if (!check_iter_signature(&it[1], "as"))
 				goto next;
 
 			dbus_message_iter_recurse(&it[1], &iter);
@@ -612,7 +622,7 @@ static int device_update_props(struct spa_bt_device *device,
 		else if (strcmp(key, "UUIDs") == 0) {
 			DBusMessageIter iter;
 
-			if (strcmp(dbus_message_iter_get_signature(&it[1]), "as") != 0)
+			if (!check_iter_signature(&it[1], "as"))
 				goto next;
 
 			dbus_message_iter_recurse(&it[1], &iter);
@@ -777,7 +787,7 @@ static int transport_update_props(struct spa_bt_transport *transport,
 			char *value;
 			int len;
 
-			if (strcmp(dbus_message_iter_get_signature(&it[1]), "ay") != 0)
+			if (!check_iter_signature(&it[1], "ay"))
 				goto next;
 
 			dbus_message_iter_recurse(&it[1], &iter);
@@ -1245,7 +1255,9 @@ static int adapter_register_endpoints(struct spa_bt_adapter *a)
 	return err;
 }
 
-static void append_a2dp_object(DBusMessageIter *iter, const char *endpoint, const char *uuid, uint8_t codec_id, uint8_t *caps, size_t caps_size) {
+static void append_a2dp_object(DBusMessageIter *iter, const char *endpoint,
+		const char *uuid, uint8_t codec_id, uint8_t *caps, size_t caps_size)
+{
 	char* str;
 	const char *interface_name = BLUEZ_MEDIA_ENDPOINT_INTERFACE;
 	DBusMessageIter object, array, entry, dict;
@@ -1319,7 +1331,7 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 			if (caps_size < 0)
 				continue;
 
-  			endpoint = spa_aprintf("%s/%s", A2DP_SINK_ENDPOINT, codec->name);
+			endpoint = spa_aprintf("%s/%s", A2DP_SINK_ENDPOINT, codec->name);
 			append_a2dp_object(&array, endpoint, SPA_BT_UUID_A2DP_SINK, codec_id, caps, caps_size);
 			free(endpoint);
 
@@ -1797,7 +1809,7 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->backend_hsp_native = backend_hsp_native_new(this, this->conn, support, n_support);
 	this->backend_ofono = backend_ofono_new(this, this->conn, support, n_support);
-	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, support, n_support);
+	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, info, support, n_support);
 
 	return 0;
 }
