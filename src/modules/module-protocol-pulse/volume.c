@@ -28,13 +28,25 @@ struct volume {
 };
 
 #define VOLUME_INIT	(struct volume) {		\
+				.channels = 0,		\
+			}
+
+#define VOLUME_DEFAULT	(struct volume) {		\
 				.channels = 2,		\
 				.values[0] = 1.0f,	\
 				.values[1] = 1.0f,	\
 			}
 
+static inline bool volume_valid(const struct volume *vol)
+{
+	if (vol->channels == 0 || vol->channels > CHANNELS_MAX)
+		return false;
+	return true;
+}
+
 struct volume_info {
 	struct volume volume;
+	struct channel_map map;
 	bool mute;
 	float level;
 	float base;
@@ -87,6 +99,10 @@ static int volume_parse_param(const struct spa_pod *param, struct volume_info *i
 				info->steps = 0x10000u * step;
 			break;
 		}
+		case SPA_PROP_channelMap:
+			info->map.channels = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					info->map.map, SPA_AUDIO_MAX_CHANNELS);
+			break;
 		default:
 			break;
 		}

@@ -42,9 +42,11 @@
 #include "extensions/metadata.h"
 
 #include "media-session.h"
+#include "json.h"
 
 #define NAME		"restore-stream"
 #define SESSION_KEY	"restore-stream"
+#define PREFIX		"restore.stream."
 
 #define SAVE_INTERVAL	1
 
@@ -57,9 +59,12 @@ struct impl {
 	struct pw_context *context;
 	struct spa_source *idle_timeout;
 
-	struct spa_hook meta_listener;
+	struct pw_metadata *metadata;
+	struct spa_hook metadata_listener;
 
 	struct pw_properties *props;
+
+	unsigned int sync:1;
 };
 
 struct stream {
@@ -80,7 +85,8 @@ static void remove_idle_timeout(struct impl *impl)
 	int res;
 
 	if (impl->idle_timeout) {
-		if ((res = sm_media_session_save_state(impl->session, SESSION_KEY, impl->props)) < 0)
+		if ((res = sm_media_session_save_state(impl->session,
+						SESSION_KEY, PREFIX, impl->props)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -116,27 +122,48 @@ static void session_destroy(void *data)
 	free(impl);
 }
 
+static uint32_t channel_from_name(const char *name)
+{
+	int i;
+	for (i = 0; spa_type_audio_channel[i].name; i++) {
+		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+			return spa_type_audio_channel[i].type;
+	}
+	return SPA_AUDIO_CHANNEL_UNKNOWN;
+}
+
+static const char *channel_to_name(uint32_t channel)
+{
+	int i;
+	for (i = 0; spa_type_audio_channel[i].name; i++) {
+		if (spa_type_audio_channel[i].type == channel)
+			return spa_debug_type_short_name(spa_type_audio_channel[i].name);
+	}
+	return "UNK";
+}
+
 static char *serialize_props(struct stream *str, const struct spa_pod *param)
 {
 	struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
 	float val = 0.0f;
-	bool b = false;
+	bool b = false, comma = false;
 	char *ptr;
 	size_t size;
 	FILE *f;
 
         f = open_memstream(&ptr, &size);
+	fprintf(f, "{ ");
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {
 		case SPA_PROP_volume:
 			spa_pod_get_float(&prop->value, &val);
-			fprintf(f, "volume:%f ", val);
+			fprintf(f, "%s\"volume\": %f", (comma ? ", " : ""), val);
 			break;
 		case SPA_PROP_mute:
 			spa_pod_get_bool(&prop->value, &b);
-			fprintf(f, "mute:%d ", b ? 1 : 0);
+			fprintf(f, "%s\"mute\": %s", (comma ? ", " : ""), b ? "true" : "false");
 			break;
 		case SPA_PROP_channelVolumes:
 		{
@@ -145,28 +172,87 @@ static char *serialize_props(struct stream *str, const struct spa_pod *param)
 
 			n_vals = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
 					vals, SPA_AUDIO_MAX_CHANNELS);
+			if (n_vals == 0)
+				continue;
 
-			fprintf(f, "volumes:%d", n_vals);
+			fprintf(f, "%s\"volumes\": [", (comma ? ", " : ""));
 			for (i = 0; i < n_vals; i++)
-				fprintf(f, ",%f", vals[i]);
-			fprintf(f, " ");
+				fprintf(f, "%s%f", (i == 0 ? " ":", "), vals[i]);
+			fprintf(f, " ]");
+			break;
+		}
+		case SPA_PROP_channelMap:
+		{
+			uint32_t i, n_ch;
+			uint32_t map[SPA_AUDIO_MAX_CHANNELS];
+
+			n_ch = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					map, SPA_AUDIO_MAX_CHANNELS);
+			if (n_ch == 0)
+				continue;
+
+			fprintf(f, "%s\"channels\": [", (comma ? ", " : ""));
+			for (i = 0; i < n_ch; i++)
+				fprintf(f, "%s\"%s\"", (i == 0 ? " ":", "), channel_to_name(map[i]));
+			fprintf(f, " ]");
 			break;
 		}
 		default:
-			break;
+			continue;
 		}
+		comma = true;
 	}
 	if (str->obj->target_node != NULL)
-		fprintf(f, "target-node:%s", str->obj->target_node);
+		fprintf(f, "%s\"target-node\": \"%s\"",
+				(comma ? ", " : ""), str->obj->target_node);
 
+	fprintf(f, " }");
         fclose(f);
 	return ptr;
 }
+
+static void sync_metadata(struct impl *impl)
+{
+	const struct spa_dict_item *it;
+
+	impl->sync = true;
+	spa_dict_for_each(it, &impl->props->dict)
+		pw_metadata_set_property(impl->metadata, 0, it->key, "Spa:String:JSON", it->value);
+	impl->sync = false;
+}
+
+static int metadata_property(void *object, uint32_t subject,
+		const char *key, const char *type, const char *value)
+{
+	struct impl *impl = object;
+	bool changed = false;
+
+	if (impl->sync)
+		return 0;
+
+	if (subject == PW_ID_CORE) {
+		if (key == NULL)
+			pw_properties_clear(impl->props);
+		else if (strstr(key, PREFIX) == key) {
+			changed = pw_properties_set(impl->props, key, value);
+		}
+	}
+	if (changed)
+		add_idle_timeout(impl);
+
+	return 0;
+}
+
+static const struct pw_metadata_events metadata_events = {
+	PW_VERSION_METADATA_EVENTS,
+	.property = metadata_property,
+};
 
 static int handle_props(struct stream *str, struct sm_param *p)
 {
 	struct impl *impl = str->impl;
 	const char *key;
+	int changed = 0;
 
 	key = str->key;
 	if (key == NULL)
@@ -175,74 +261,98 @@ static int handle_props(struct stream *str, struct sm_param *p)
 	if (p->param) {
 		char *val = serialize_props(str, p->param);
 		pw_log_debug("stream %d: current props %s %s", str->id, key, val);
-		pw_properties_set(impl->props, key, val);
+		changed += pw_properties_set(impl->props, key, val);
 		free(val);
 		add_idle_timeout(impl);
 	}
+	if (changed)
+		sync_metadata(impl);
 	return 0;
 }
 
 static int restore_stream(struct stream *str, const char *val)
 {
-	const char *p;
-	char *end;
+	struct spa_json it[3];
+	const char *value;
+	int len;
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct spa_pod_frame f[2];
 	struct spa_pod *param;
-	bool mute = false;
-	uint32_t i, n_vols = 0;
-	float *vols, vol;
+
+	spa_json_init(&it[0], val, strlen(val));
+
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+                return -EINVAL;
 
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
-	p = val;
-	while (*p) {
-		if (strstr(p, "volume:") == p) {
-			p += 7;
-			vol = strtof(p, &end);
-			if (end == p)
-				continue;
+
+	while ((len = spa_json_next(&it[1], &value)) > 0) {
+		if (strncmp(value, "\"volume\"", len) == 0) {
+			float vol;
+			if (spa_json_get_float(&it[1], &vol) <= 0)
+                                continue;
 			spa_pod_builder_prop(&b, SPA_PROP_volume, 0);
 			spa_pod_builder_float(&b, vol);
-			p = end;
 		}
-		else if (strstr(p, "mute:") == p) {
-			mute = p[5] == '0' ? false : true;
+		else if (strncmp(value, "\"mute\"", len) == 0) {
+			bool mute;
+			if (spa_json_get_bool(&it[1], &mute) <= 0)
+                                continue;
 			spa_pod_builder_prop(&b, SPA_PROP_mute, 0);
 			spa_pod_builder_bool(&b, mute);
-			p+=6;
 		}
-		else if (strstr(p, "volumes:") == p) {
-			p += 8;
-			n_vols = strtol(p, &end, 10);
-			if (end == p)
+		else if (strncmp(value, "\"volumes\"", len) == 0) {
+			uint32_t n_vols;
+			float vols[SPA_AUDIO_MAX_CHANNELS];
+
+			if (spa_json_enter_array(&it[1], &it[2]) <= 0)
 				continue;
-			p = end;
-			if (n_vols >= SPA_AUDIO_MAX_CHANNELS)
+
+			for (n_vols = 0; n_vols < SPA_AUDIO_MAX_CHANNELS; n_vols++) {
+                                if (spa_json_get_float(&it[2], &vols[n_vols]) <= 0)
+                                        break;
+                        }
+			if (n_vols == 0)
 				continue;
-			vols = alloca(n_vols * sizeof(float));
-			for (i = 0; i < n_vols && *p == ','; i++) {
-				p++;
-				vols[i] = strtof(p, &end);
-				if (end == p)
-					break;
-				p = end;
-			}
-			if (i != n_vols)
-				continue;
+
 			spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, vols);
 		}
-		else if (strstr(p, "target-node:") == p) {
-			p += 12;
-			i = strlen(p);
-			pw_log_info("stream %d: target '%s'", str->obj->obj.id, p);
+		else if (strncmp(value, "\"channels\"", len) == 0) {
+			uint32_t n_ch;
+			uint32_t map[SPA_AUDIO_MAX_CHANNELS];
+
+			if (spa_json_enter_array(&it[1], &it[2]) <= 0)
+				continue;
+
+			for (n_ch = 0; n_ch < SPA_AUDIO_MAX_CHANNELS; n_ch++) {
+				char chname[16];
+                                if (spa_json_get_string(&it[2], chname, sizeof(chname)) <= 0)
+                                        break;
+				map[n_ch] = channel_from_name(chname);
+                        }
+			if (n_ch == 0)
+				continue;
+
+			spa_pod_builder_prop(&b, SPA_PROP_channelMap, 0);
+			spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id,
+					n_ch, map);
+		}
+		else if (strncmp(value, "\"target-node\"", len) == 0) {
+			char name[1024];
+
+			if (spa_json_get_string(&it[1], name, sizeof(name)) <= 0)
+                                continue;
+
+			pw_log_info("stream %d: target '%s'", str->obj->obj.id, name);
 			free(str->obj->target_node);
-			str->obj->target_node = i > 0 ? strndup(p, i) : NULL;
+			str->obj->target_node = strdup(name);
 		} else {
-			p++;
+			if (spa_json_next(&it[1], &value) <= 0)
+                                break;
 		}
 	}
 	param = spa_pod_builder_pop(&b, &f[0]);
@@ -272,7 +382,7 @@ static void update_key(struct stream *str)
 	key = NULL;
 	for (i = 0; i < SPA_N_ELEMENTS(keys); i++) {
 		if ((p = pw_properties_get(obj->props, keys[i]))) {
-			key = spa_aprintf("%s-%s:%s", str->media_class, keys[i], p);
+			key = spa_aprintf(PREFIX"%s.%s:%s", str->media_class, keys[i], p);
 			break;
 		}
 	}
@@ -402,19 +512,30 @@ int sm_restore_stream_start(struct sm_media_session *session)
 	impl->context = session->context;
 
 	impl->props = pw_properties_new(NULL, NULL);
-	if (impl->props == NULL) {
-		res = -errno;
-		goto exit_free;
-	}
+	if (impl->props == NULL)
+		goto exit_errno;
 
-	if ((res = sm_media_session_load_state(impl->session, SESSION_KEY, impl->props)) < 0)
+	impl->metadata = sm_media_session_export_metadata(session, "route-settings");
+	if (impl->metadata == NULL)
+		goto exit_errno;
+
+	pw_metadata_add_listener(impl->metadata, &impl->metadata_listener,
+			&metadata_events, impl);
+
+	if ((res = sm_media_session_load_state(impl->session,
+					SESSION_KEY, PREFIX, impl->props)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
+
+	sync_metadata(impl);
 
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);
 
 	return 0;
 
-exit_free:
+exit_errno:
+	res = -errno;
+	if (impl->props)
+		pw_properties_free(impl->props);
 	free(impl);
 	return res;
 }

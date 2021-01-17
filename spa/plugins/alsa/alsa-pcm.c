@@ -74,11 +74,15 @@ int spa_alsa_close(struct state *state)
 		return 0;
 
 	spa_log_debug(state->log, NAME" %p: Device '%s' closing", state, state->props.device);
-	CHECK(snd_pcm_close(state->hndl), "%s: close failed", state->props.device);
+	if ((err = snd_pcm_close(state->hndl)) < 0)
+		spa_log_warn(state->log, "%s: close failed: %s", state->props.device,
+				snd_strerror(err));
 
-	CHECK(snd_output_close(state->output), "output close failed");
+	if ((err = snd_output_close(state->output)) < 0)
+		spa_log_warn(state->log, "output close failed: %s", snd_strerror(err));
 
 	spa_system_close(state->data_system, state->timerfd);
+
 	state->opened = false;
 
 	return err;
@@ -646,9 +650,13 @@ static int alsa_recover(struct state *state, int err)
 		state->sample_count += missing ? missing : state->threshold;
 		break;
 	}
+	case SND_PCM_STATE_SUSPENDED:
+		spa_log_info(state->log, NAME" %p: recover from state %s",
+				state, snd_pcm_state_name(st));
+		break;
 	default:
-		spa_log_error(state->log, NAME" %p: recover from error state %d",
-				state, st);
+		spa_log_error(state->log, NAME" %p: recover from error state %s",
+				state, snd_pcm_state_name(st));
 		break;
 	}
 

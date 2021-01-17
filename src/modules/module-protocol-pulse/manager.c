@@ -32,7 +32,7 @@
 #define manager_emit_added(m,o) spa_hook_list_call(&m->hooks, struct pw_manager_events, added, 0, o)
 #define manager_emit_updated(m,o) spa_hook_list_call(&m->hooks, struct pw_manager_events, updated, 0, o)
 #define manager_emit_removed(m,o) spa_hook_list_call(&m->hooks, struct pw_manager_events, removed, 0, o)
-#define manager_emit_metadata(m,s,k,t,v) spa_hook_list_call(&m->hooks, struct pw_manager_events, metadata,0,s,k,t,v)
+#define manager_emit_metadata(m,o,s,k,t,v) spa_hook_list_call(&m->hooks, struct pw_manager_events, metadata,0,o,s,k,t,v)
 
 struct object;
 
@@ -42,8 +42,6 @@ struct manager {
 	struct spa_hook core_listener;
 	struct spa_hook registry_listener;
 	int sync_seq;
-
-	struct object *metadata;
 
 	struct spa_hook_list hooks;
 };
@@ -63,6 +61,8 @@ struct object {
 
 	const struct object_info *info;
 
+	struct spa_list pending_list;
+
 	struct spa_hook proxy_listener;
 	struct spa_hook object_listener;
 };
@@ -70,6 +70,7 @@ struct object {
 static void core_sync(struct manager *m)
 {
 	m->sync_seq = pw_core_sync(m->this.core, PW_ID_CORE, m->sync_seq);
+	pw_log_debug("sync start %u", m->sync_seq);
 }
 
 static struct pw_manager_param *add_param(struct spa_list *params, uint32_t id, const struct spa_pod *param)
@@ -93,6 +94,18 @@ static struct pw_manager_param *add_param(struct spa_list *params, uint32_t id, 
 	spa_list_append(params, &p->link);
 
 	return p;
+}
+
+static bool has_param(struct spa_list *param_list, struct pw_manager_param *p)
+{
+	struct pw_manager_param *t;
+	spa_list_for_each(t, param_list, link) {
+		if (p->id == t->id &&
+		   SPA_POD_SIZE(p->param) == SPA_POD_SIZE(t->param) &&
+		   memcmp(p->param, t->param, SPA_POD_SIZE(p->param)) == 0)
+			return true;
+	}
+	return false;
 }
 
 static uint32_t clear_params(struct spa_list *param_list, uint32_t id)
@@ -123,6 +136,19 @@ static struct object *find_object(struct manager *m, uint32_t id)
 	return NULL;
 }
 
+static void object_update_params(struct object *o)
+{
+	struct pw_manager_param *p;
+
+	spa_list_for_each(p, &o->pending_list, link)
+		clear_params(&o->this.param_list, p->id);
+
+	spa_list_consume(p, &o->pending_list, link) {
+		spa_list_remove(&p->link);
+		spa_list_append(&o->this.param_list, &p->link);
+	}
+}
+
 static void object_destroy(struct object *o)
 {
 	struct manager *m = o->manager;
@@ -133,6 +159,7 @@ static void object_destroy(struct object *o)
 	if (o->this.props)
 		pw_properties_free(o->this.props);
 	clear_params(&o->this.param_list, SPA_ID_INVALID);
+	clear_params(&o->pending_list, SPA_ID_INVALID);
 	free(o);
 }
 
@@ -168,8 +195,10 @@ static const struct pw_client_events client_events = {
 
 static void client_destroy(struct object *o)
 {
-	if (o->this.info)
+	if (o->this.info) {
 		pw_client_info_free(o->this.info);
+		o->this.info = NULL;
+	}
 }
 
 static const struct object_info client_info = {
@@ -205,8 +234,10 @@ static const struct pw_module_events module_events = {
 
 static void module_destroy(struct object *o)
 {
-	if (o->this.info)
+	if (o->this.info) {
 		pw_module_info_free(o->this.info);
+		o->this.info = NULL;
+	}
 }
 
 static const struct object_info module_info = {
@@ -246,7 +277,7 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 			case SPA_PARAM_Route:
 				break;
 			}
-			clear_params(&o->this.param_list, id);
+			clear_params(&o->pending_list, id);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
 
@@ -286,10 +317,11 @@ static void device_event_param(void *object, int seq,
 {
 	struct object *o = object, *dev;
 	struct manager *m = o->manager;
+	struct pw_manager_param *p;
 
-	add_param(&o->this.param_list, id, param);
+	p = add_param(&o->pending_list, id, param);
 
-	if (id == SPA_PARAM_Route) {
+	if (id == SPA_PARAM_Route && !has_param(&o->this.param_list, p)) {
 		uint32_t id, device;
 		if (spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
@@ -312,8 +344,10 @@ static const struct pw_device_events device_events = {
 
 static void device_destroy(struct object *o)
 {
-	if (o->this.info)
+	if (o->this.info) {
 		pw_device_info_free(o->this.info);
+		o->this.info = NULL;
+	}
 }
 
 static const struct object_info device_info = {
@@ -348,7 +382,7 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 			info->params[i].user = 0;
 
 			changed++;
-			clear_params(&o->this.param_list, id);
+			clear_params(&o->pending_list, id);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
 
@@ -367,7 +401,7 @@ static void node_event_param(void *object, int seq,
 		const struct spa_pod *param)
 {
 	struct object *o = object;
-	add_param(&o->this.param_list, id, param);
+	add_param(&o->pending_list, id, param);
 }
 
 static const struct pw_node_events node_events = {
@@ -378,8 +412,10 @@ static const struct pw_node_events node_events = {
 
 static void node_destroy(struct object *o)
 {
-	if (o->this.info)
+	if (o->this.info) {
 		pw_node_info_free(o->this.info);
+		o->this.info = NULL;
+	}
 }
 
 static const struct object_info node_info = {
@@ -404,8 +440,8 @@ static int metadata_property(void *object,
 {
 	struct object *o = object;
 	struct manager *m = o->manager;
-	manager_emit_metadata(m, subject, key, type, value);
-        return 0;
+	manager_emit_metadata(m, &o->this, subject, key, type, value);
+	return 0;
 }
 
 static const struct pw_metadata_events metadata_events = {
@@ -413,18 +449,12 @@ static const struct pw_metadata_events metadata_events = {
 	.property = metadata_property,
 };
 
-static void metadata_init(struct object *o)
+static void metadata_init(struct object *object)
 {
+	struct object *o = object;
 	struct manager *m = o->manager;
-	if (m->metadata == NULL)
-		m->metadata = o;
-}
-
-static void metadata_destroy(struct object *o)
-{
-	struct manager *m = o->manager;
-	if (m->metadata == o)
-		m->metadata = NULL;
+	o->this.creating = false;
+	manager_emit_added(m, &o->this);
 }
 
 static const struct object_info metadata_info = {
@@ -432,7 +462,6 @@ static const struct object_info metadata_info = {
 	.version = PW_VERSION_METADATA,
 	.events = &metadata_events,
 	.init = metadata_init,
-	.destroy = metadata_destroy,
 };
 
 static const struct object_info *objects[] =
@@ -517,6 +546,7 @@ static void registry_event_global(void *data, uint32_t id,
 	o->this.proxy = proxy;
 	o->this.creating = true;
 	spa_list_init(&o->this.param_list);
+	spa_list_init(&o->pending_list);
 
 	o->manager = m;
 	o->info = info;
@@ -568,13 +598,21 @@ static void on_core_done(void *data, uint32_t id, int seq)
 	struct object *o;
 
 	if (id == PW_ID_CORE) {
-		if (m->sync_seq == seq)
-			manager_emit_sync(m);
+		if (m->sync_seq != seq)
+			return;
+
+		pw_log_debug("sync end %u/%u", m->sync_seq, seq);
+
+		manager_emit_sync(m);
+
+		spa_list_for_each(o, &m->this.object_list, this.link)
+			object_update_params(o);
 
 		spa_list_for_each(o, &m->this.object_list, this.link) {
 			if (o->this.creating) {
 				o->this.creating = false;
 				manager_emit_added(m, &o->this);
+				o->this.changed = 0;
 			} else if (o->this.changed > 0) {
 				manager_emit_updated(m, &o->this);
 				o->this.changed = 0;
@@ -629,6 +667,7 @@ void pw_manager_add_listener(struct pw_manager *manager,
 }
 
 int pw_manager_set_metadata(struct pw_manager *manager,
+		struct pw_manager_object *metadata,
 		uint32_t subject, const char *key, const char *type,
 		const char *format, ...)
 {
@@ -642,16 +681,16 @@ int pw_manager_set_metadata(struct pw_manager *manager,
 	if (!SPA_FLAG_IS_SET(s->this.permissions, PW_PERM_M))
 		return -EACCES;
 
-	if (m->metadata == NULL)
+	if (metadata == NULL)
 		return -ENOTSUP;
-	if (!SPA_FLAG_IS_SET(m->metadata->this.permissions, PW_PERM_W|PW_PERM_X))
+	if (!SPA_FLAG_IS_SET(metadata->permissions, PW_PERM_W|PW_PERM_X))
 		return -EACCES;
 
         va_start(args, format);
 	vsnprintf(buf, sizeof(buf)-1, format, args);
         va_end(args);
 
-	pw_metadata_set_property(m->metadata->this.proxy,
+	pw_metadata_set_property(metadata->proxy,
 			subject, key, type, buf);
 	return 0;
 }
