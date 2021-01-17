@@ -1,4 +1,4 @@
-/* Spa A2DP SBC codec
+/* Spa A2DP AAC codec
  *
  * Copyright © 2020 Wim Taymans
  *
@@ -37,14 +37,13 @@ struct impl {
 	struct rtp_header *header;
 	struct rtp_payload *payload;
 
+	size_t mtu;
 	int codesize;
 	int frame_length;
-
-	int min_bitpool;
-	int max_bitpool;
 };
 
-static int codec_fill_caps(uint32_t flags, uint8_t caps[A2DP_MAX_CAPS_SIZE])
+static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
+		uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	const a2dp_aac_t a2dp_aac = {
 		.object_type =
@@ -75,8 +74,9 @@ static int codec_fill_caps(uint32_t flags, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 	return sizeof(a2dp_aac);
 }
 
-static int codec_select_config(uint32_t flags, const void *caps, size_t caps_size,
-			const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
+static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
+		const void *caps, size_t caps_size,
+		const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_aac_t conf;
 	int freq;
@@ -139,7 +139,8 @@ static int codec_select_config(uint32_t flags, const void *caps, size_t caps_siz
 	return sizeof(conf);
 }
 
-static void *codec_init(uint32_t flags, void *config, size_t config_len, struct spa_audio_info *info)
+static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
+		void *config, size_t config_len, const struct spa_audio_info *info, size_t mtu)
 {
 	struct impl *this;
 	int res;
@@ -149,10 +150,7 @@ static void *codec_init(uint32_t flags, void *config, size_t config_len, struct 
 		res = -errno;
 		goto error;
 	}
-
-	spa_zero(*info);
-	info->media_type = SPA_MEDIA_TYPE_audio;
-	info->media_subtype = SPA_MEDIA_SUBTYPE_aac;
+	this->mtu = mtu;
 
 	return this;
 error:
@@ -166,8 +164,8 @@ static void codec_deinit(void *data)
 	free(this);
 }
 
-struct a2dp_codec a2dp_codec_aac = {
-	.id = {.codec_id = A2DP_CODEC_MPEG24},
+const struct a2dp_codec a2dp_codec_aac = {
+	.codec_id = A2DP_CODEC_MPEG24,
 	.name = "aac",
 	.description = "AAC",
 	.fill_caps = codec_fill_caps,

@@ -29,6 +29,8 @@
 #include <stddef.h>
 
 #include <spa/param/audio/format.h>
+#include <spa/pod/pod.h>
+#include <spa/pod/builder.h>
 
 #define A2DP_CODEC_SBC			0x00
 #define A2DP_CODEC_MPEG12		0x01
@@ -147,15 +149,24 @@
 #define APTX_VENDOR_ID			0x0000004f
 #define APTX_CODEC_ID			0x0001
 
-#define APTX_CHANNEL_MODE_MONO		0x08
-#define APTX_CHANNEL_MODE_DUAL_CHANNEL	0x04
+#define APTX_CHANNEL_MODE_MONO		0x01
 #define APTX_CHANNEL_MODE_STEREO	0x02
-#define APTX_CHANNEL_MODE_JOINT_STEREO	0x01
 
 #define APTX_SAMPLING_FREQ_16000	0x08
 #define APTX_SAMPLING_FREQ_32000	0x04
 #define APTX_SAMPLING_FREQ_44100	0x02
 #define APTX_SAMPLING_FREQ_48000	0x01
+
+#define APTX_HD_VENDOR_ID               0x000000D7
+#define APTX_HD_CODEC_ID                0x0024
+
+#define APTX_HD_CHANNEL_MODE_MONO       0x1
+#define APTX_HD_CHANNEL_MODE_STEREO     0x2
+
+#define APTX_HD_SAMPLING_FREQ_16000     0x8
+#define APTX_HD_SAMPLING_FREQ_32000     0x4
+#define APTX_HD_SAMPLING_FREQ_44100     0x2
+#define APTX_HD_SAMPLING_FREQ_48000     0x1
 
 #define LDAC_VENDOR_ID			0x0000012d
 #define LDAC_CODEC_ID			0x00aa
@@ -175,6 +186,12 @@ typedef struct {
 	uint32_t vendor_id;
 	uint16_t codec_id;
 } __attribute__ ((packed)) a2dp_vendor_codec_t;
+
+typedef struct {
+	a2dp_vendor_codec_t info;
+	uint8_t frequency;
+	uint8_t channel_mode;
+} __attribute__ ((packed)) a2dp_ldac_t;
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 
@@ -215,11 +232,6 @@ typedef struct {
 	uint8_t channel_mode:4;
 	uint8_t frequency:4;
 } __attribute__ ((packed)) a2dp_aptx_t;
-
-typedef struct {
-	a2dp_vendor_codec_t info;
-	uint8_t unknown[2];
-} __attribute__ ((packed)) a2dp_ldac_t;
 
 #elif __BYTE_ORDER == __BIG_ENDIAN
 
@@ -268,14 +280,6 @@ typedef struct {
 	uint32_t rfa;
 } __attribute__ ((packed)) a2dp_aptx_hd_t;
 
-typedef struct {
-	a2dp_vendor_codec_t info;
-	uint8_t rfa1:2;
-	uint8_t frequency:6;
-	uint8_t rfa2:5;
-	uint8_t channel_mode:3;
-} __attribute__ ((packed)) a2dp_ldac_t;
-
 
 #else
 #error "Unknown byte order"
@@ -311,29 +315,32 @@ static inline int a2dp_sbc_get_frequency(a2dp_sbc_t *config)
         }
 }
 
-struct a2dp_codec_id {
-	uint8_t codec_id;
-	uint32_t vendor_id;
-	uint16_t vendor_codec_id;
-};
+struct a2dp_codec_handle;
 
 struct a2dp_codec {
 	uint32_t flags;
 
-	struct a2dp_codec_id id;
+	uint8_t codec_id;
+	a2dp_vendor_codec_t vendor;
 
 	const char *name;
 	const char *description;
 
-	int (*fill_caps) (uint32_t flags, uint8_t caps[A2DP_MAX_CAPS_SIZE]);
-	int (*select_config) (uint32_t flags, const void *caps, size_t caps_size,
+	int (*fill_caps) (const struct a2dp_codec *codec, uint32_t flags,
+			uint8_t caps[A2DP_MAX_CAPS_SIZE]);
+	int (*select_config) (const struct a2dp_codec *codec, uint32_t flags,
+			const void *caps, size_t caps_size,
 			const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE]);
+	int (*enum_config) (const struct a2dp_codec *codec,
+			const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
+			struct spa_pod_builder *builder, struct spa_pod **param);
 
-	void *(*init) (uint32_t flags, void *config, size_t config_size, struct spa_audio_info *info);
+	void *(*init) (const struct a2dp_codec *codec, uint32_t flags, void *config, size_t config_size,
+			const struct spa_audio_info *info, size_t mtu);
 	void (*deinit) (void *data);
 
 	int (*get_block_size) (void *data);
-	int (*get_num_blocks) (void *data, size_t mtu);
+	int (*get_num_blocks) (void *data);
 
 	int (*start_encode) (void *data,
 		void *dst, size_t dst_size, uint16_t seqnum, uint32_t timestamp);
@@ -342,6 +349,8 @@ struct a2dp_codec {
 		void *dst, size_t dst_size,
 		size_t *dst_out);
 
+	int (*start_decode) (void *data,
+		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp);
 	int (*decode) (void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,

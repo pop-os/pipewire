@@ -72,7 +72,7 @@ struct buffer {
 
 struct port {
 	struct spa_audio_info current_format;
-	int frame_size;
+	uint32_t frame_size;
 	unsigned int have_format:1;
 
 	uint64_t info_all;
@@ -321,7 +321,7 @@ static int32_t read_data(struct impl *this) {
 
 again:
 	/* read data from socket */
-	size_read = read(this->transport->fd, this->buffer_read, b_size);
+	size_read = read(this->source.fd, this->buffer_read, b_size);
 
 	if (size_read == 0)
 		return 0;
@@ -345,21 +345,21 @@ again:
 static int32_t decode_data(struct impl *this, uint8_t *src, uint32_t src_size,
 			   uint8_t *dst, uint32_t dst_size)
 {
-	const uint32_t header_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
 	ssize_t processed;
 	size_t written, avail;
 
-	/* skip the header */
-	spa_return_val_if_fail (src_size > header_size, -EINVAL);
-	src += header_size;
-	src_size -= header_size;
+	if ((processed = this->codec->start_decode(this->codec_data,
+				src, src_size, NULL, NULL)) < 0)
+		return processed;
+
+	src += processed;
+	src_size -= processed;
 
 	/* decode */
 	avail = dst_size;
 	while (src_size > 0) {
-		processed = this->codec->decode(this->codec_data,
-				src, src_size, dst, avail, &written);
-		if (processed <= 0)
+		if ((processed = this->codec->decode(this->codec_data,
+				src, src_size, dst, avail, &written)) <= 0)
 			return processed;
 
 		/* update source and dest pointers */
@@ -400,7 +400,7 @@ static void a2dp_on_ready_read(struct spa_source *source)
 	if (size_read == 0)
 		return;
 	if (size_read < 0) {
-		spa_log_error(this->log, "failed to read data");
+		spa_log_error(this->log, "failed to read data: %s", spa_strerror(size_read));
 		goto stop;
 	}
 	spa_log_debug(this->log, "read socket data %d", size_read);
@@ -408,10 +408,13 @@ static void a2dp_on_ready_read(struct spa_source *source)
 	/* decode */
 	decoded = decode_data(this, this->buffer_read, size_read,
 			read_decoded, sizeof (read_decoded));
-	if (decoded <= 0) {
-		spa_log_error(this->log, "failed to decode data");
+	if (decoded < 0) {
+		spa_log_error(this->log, "failed to decode data: %d", decoded);
 		goto stop;
 	}
+	if (decoded == 0)
+		return;
+
 	spa_log_debug(this->log, "decoded socket data %d", decoded);
 
 	/* discard when not started */
@@ -492,11 +495,22 @@ stop:
 static int transport_start(struct impl *this)
 {
 	int res, val;
+	struct port *port = &this->port;
 
 	spa_log_debug(this->log, NAME" %p: transport %p acquire", this,
 			this->transport);
 	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0)
 		return res;
+
+	this->codec_data = this->codec->init(this->codec, 0,
+			this->transport->configuration,
+			this->transport->configuration_len,
+			&port->current_format,
+			this->transport->read_mtu);
+	if (this->codec_data == NULL)
+		return -EIO;
+
+        spa_log_info(this->log, NAME " %p: using A2DP codec %s", this, this->codec->description);
 
 	val = fcntl(this->transport->fd, F_GETFL);
 	if (fcntl(this->transport->fd, F_SETFL, val | O_NONBLOCK) < 0)
@@ -582,6 +596,10 @@ static int do_stop(struct impl *this)
 		res = spa_bt_transport_release(this->transport);
 	else
 		res = 0;
+
+	if (this->codec_data)
+		this->codec->deinit(this->codec_data);
+	this->codec_data = NULL;
 
 	return res;
 }
@@ -718,6 +736,7 @@ impl_node_port_enum_params(void *object, int seq,
 	uint8_t buffer[1024];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
+	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
@@ -736,22 +755,14 @@ impl_node_port_enum_params(void *object, int seq,
 	case SPA_PARAM_EnumFormat:
 		if (result.index > 0)
 			return 0;
-		if (this->codec_data == NULL)
+		if (this->codec == NULL)
 			return -EIO;
 
-		switch (this->transport->codec) {
-		case A2DP_CODEC_SBC:
-			param = spa_format_audio_raw_build(&b, id, &this->codec_format.info.raw);
-			break;
-		case A2DP_CODEC_MPEG24:
-			param = spa_pod_builder_add_object(&b,
-				SPA_TYPE_OBJECT_Format, id,
-				SPA_FORMAT_mediaType,     SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-				SPA_FORMAT_mediaSubtype,  SPA_POD_Id(SPA_MEDIA_SUBTYPE_aac));
-			break;
-		default:
-			return -EIO;
-		}
+		if ((res = this->codec->enum_config(this->codec,
+					this->transport->configuration,
+					this->transport->configuration_len,
+					id, result.index, &b, &param)) != 1)
+			return res;
 		break;
 
 	case SPA_PARAM_Format:
@@ -858,7 +869,24 @@ static int port_set_format(struct impl *this, struct port *port,
 		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
 			return -EINVAL;
 
-		port->frame_size = info.info.raw.channels * 2;
+		port->frame_size = info.info.raw.channels;
+
+		switch (info.info.raw.format) {
+		case SPA_AUDIO_FORMAT_S16:
+			port->frame_size *= 2;
+			break;
+		case SPA_AUDIO_FORMAT_S24:
+			port->frame_size *= 3;
+			break;
+		case SPA_AUDIO_FORMAT_S24_32:
+		case SPA_AUDIO_FORMAT_S32:
+		case SPA_AUDIO_FORMAT_F32:
+			port->frame_size *= 4;
+			break;
+		default:
+			return -EINVAL;
+		}
+
 		port->current_format = info;
 		port->have_format = true;
 	}
@@ -1209,11 +1237,6 @@ impl_init(const struct spa_handle_factory *factory,
 
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);
-
-	this->codec_data = this->codec->init(0,
-			this->transport->configuration,
-			this->transport->configuration_len,
-			&this->codec_format);
 
 	return 0;
 }

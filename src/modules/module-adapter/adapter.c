@@ -46,9 +46,6 @@
 
 #define NAME "adapter"
 
-#define PORT_BUFFERS	1
-#define MAX_BUFFER_SIZE	2048
-
 struct buffer {
 	struct spa_buffer buf;
 	struct spa_data datas[1];
@@ -89,7 +86,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	struct pw_properties *new;
 	const char *str, *path, *node_name, *media_class;
 	char position[8], *prefix;
-	bool is_monitor, is_device;
+	bool is_monitor, is_device, is_duplex, is_virtual;
 
 	direction = pw_impl_port_get_direction(port);
 
@@ -111,20 +108,27 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	else
 		is_device = false;
 
+	is_duplex = media_class != NULL && strstr(media_class, "Duplex") != NULL;
+	is_virtual = media_class != NULL && strstr(media_class, "Virtual") != NULL;
+
 	new = pw_properties_new(NULL, NULL);
 
-	if (is_monitor)
-		prefix = "monitor";
-	else if (is_device)
+	if (is_duplex)
 		prefix = direction == PW_DIRECTION_INPUT ?
 			"playback" : "capture";
+	else if (is_virtual)
+		prefix = direction == PW_DIRECTION_INPUT ?
+			"input" : "capture";
+	else if (is_device)
+		prefix = direction == PW_DIRECTION_INPUT ?
+			"playback" : is_monitor ? "monitor" : "capture";
 	else
 		prefix = direction == PW_DIRECTION_INPUT ?
 			"input" : "output";
 
 	if ((str = pw_properties_get(old, PW_KEY_AUDIO_CHANNEL)) == NULL ||
 	    strcmp(str, "UNK") == 0) {
-		snprintf(position, 7, "%d", pw_impl_port_get_id(port));
+		snprintf(position, sizeof(position)-1, "%d", pw_impl_port_get_id(port));
 		str = position;
 	}
 	if (direction == n->direction) {

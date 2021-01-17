@@ -1,6 +1,6 @@
-/* Simple Plugin API
+/* Simple DLL
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2019 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,41 +22,50 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef SPA_COMMAND_NODE_H
-#define SPA_COMMAND_NODE_H
+#ifndef SPA_DLL_H
+#define SPA_DLL_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <spa/pod/command.h>
+#include <stddef.h>
+#include <math.h>
 
-/* object id of SPA_TYPE_COMMAND_Node */
-enum spa_node_command {
-	SPA_NODE_COMMAND_Suspend,	/**< suspend a node, this removes all configured
-					  * formats and closes any devices */
-	SPA_NODE_COMMAND_Pause,		/**< pause a node. this makes it stop emiting
-					  *  scheduling events */
-	SPA_NODE_COMMAND_Start,		/**< start a node, this makes it start emiting
-					  *  scheduling events */
-	SPA_NODE_COMMAND_Enable,
-	SPA_NODE_COMMAND_Disable,
-	SPA_NODE_COMMAND_Flush,
-	SPA_NODE_COMMAND_Drain,
-	SPA_NODE_COMMAND_Marker,
-	SPA_NODE_COMMAND_ParamBegin,	/**< begin a set of parameter enumerations or
-					  *  configuration that require the device to
-					  *  remain opened, like query formats and then
-					  *  set a format */
-	SPA_NODE_COMMAND_ParamEnd,	/**< end a transaction */
+#define SPA_DLL_BW_MAX		0.128
+#define SPA_DLL_BW_MIN		0.016
+
+struct spa_dll {
+	double bw;
+	double z1, z2, z3;
+	double w0, w1, w2;
 };
 
-#define SPA_NODE_COMMAND_ID(cmd)	SPA_COMMAND_ID(cmd, SPA_TYPE_COMMAND_Node)
-#define SPA_NODE_COMMAND_INIT(id)	SPA_COMMAND_INIT(SPA_TYPE_COMMAND_Node, id)
+static inline void spa_dll_init(struct spa_dll *dll)
+{
+	dll->bw = 0.0;
+	dll->z1 = dll->z2 = dll->z3 = 0.0;
+}
 
+static inline void spa_dll_set_bw(struct spa_dll *dll, double bw, uint32_t period, uint32_t rate)
+{
+	double w = 2 * M_PI * bw * period / rate;
+	dll->w0 = 1.0 - exp (-20.0 * w);
+	dll->w1 = w * 1.5 / period;
+	dll->w2 = w / 1.5;
+	dll->bw = bw;
+}
+
+static inline double spa_dll_update(struct spa_dll *dll, double err)
+{
+	dll->z1 += dll->w0 * (dll->w1 * err - dll->z1);
+	dll->z2 += dll->w0 * (dll->z1 - dll->z2);
+	dll->z3 += dll->w2 * dll->z2;
+	return 1.0 - (dll->z2 + dll->z3);
+}
 
 #ifdef __cplusplus
-}  /* extern "C" */
+} /* extern "C" */
 #endif
 
-#endif /* SPA_COMMAND_NODE_H */
+#endif /* SPA_DLL_H */

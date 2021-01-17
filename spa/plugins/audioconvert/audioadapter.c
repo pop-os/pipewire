@@ -42,6 +42,8 @@
 
 #define NAME "audioadapter"
 
+#define MAX_PORTS	SPA_AUDIO_MAX_CHANNELS
+
 /** \cond */
 
 struct impl {
@@ -459,6 +461,9 @@ static int negotiate_format(struct impl *this)
 	state = 0;
 	format = NULL;
 
+	spa_node_send_command(this->follower,
+			&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_ParamBegin));
+
 	if (this->have_format)
 		format = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &this->follower_current_format.info.raw);
 
@@ -471,7 +476,7 @@ static int negotiate_format(struct impl *this)
 		else {
 			debug_params(this, this->follower, this->direction, 0,
 					SPA_PARAM_EnumFormat, format, "follower format", res);
-			return res;
+			goto done;
 		}
 	}
 
@@ -484,15 +489,22 @@ static int negotiate_format(struct impl *this)
 			debug_params(this, this->convert,
 					SPA_DIRECTION_REVERSE(this->direction), 0,
 					SPA_PARAM_EnumFormat, format, "convert format", res);
-			return -ENOTSUP;
+			res = -ENOTSUP;
+			goto done;
 		}
 	}
-	if (format == NULL)
-		return -ENOTSUP;
+	if (format == NULL) {
+		res = -ENOTSUP;
+		goto done;
+	}
 
 	spa_pod_fixate(format);
 
 	res = configure_format(this, 0, format);
+
+done:
+	spa_node_send_command(this->follower,
+			&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_ParamEnd));
 
 	return res;
 }
@@ -622,8 +634,8 @@ static void follower_info(void *data, const struct spa_node_info *info)
         else
 		this->direction = SPA_DIRECTION_OUTPUT;
 
-	this->info.max_input_ports = this->direction == SPA_DIRECTION_INPUT ? 128 : 0;
-	this->info.max_output_ports = this->direction == SPA_DIRECTION_OUTPUT ? 128 : 0;
+	this->info.max_input_ports = this->direction == SPA_DIRECTION_INPUT ? MAX_PORTS : 0;
+	this->info.max_output_ports = this->direction == SPA_DIRECTION_OUTPUT ? MAX_PORTS : 0;
 
 	spa_log_debug(this->log, NAME" %p: follower info %s", this,
 			this->direction == SPA_DIRECTION_INPUT ?

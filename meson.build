@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.17',
+  version : '0.3.18',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -60,49 +60,39 @@ pipewire_headers_dir = join_paths(pipewire_name, 'pipewire')
 gnome = import('gnome')
 pkgconfig = import('pkgconfig')
 
-have_cpp = add_languages('cpp', required : false)
-
 cc = meson.get_compiler('c')
 
-if cc.get_id() == 'gcc'
-  add_global_arguments('-fvisibility=hidden',
-			'-Wsign-compare',
-			'-Wpointer-arith',
-			'-Wpointer-sign',
-			'-Wformat',
-			'-Wformat-security',
-			'-Werror=suggest-attribute=format',
-			'-Wmissing-braces',
-			'-Wtype-limits',
-			'-Wold-style-declaration',
-			'-Wvariadic-macros',
-		        '-Wno-missing-field-initializers',
-		        '-Wno-unused-parameter',
-			'-Wno-pedantic',
-			'-Wunused-result',
-			'-DFASTPATH',
-#			'-DSPA_DEBUG_MEMCPY',
-			language : 'c')
-  add_global_arguments('-fvisibility=hidden',
-			'-Wsign-compare',
-			'-Wpointer-arith',
-			'-Wformat',
-			'-Wformat-security',
-			'-Werror=suggest-attribute=format',
-			'-Wmissing-braces',
-			'-Wtype-limits',
-			'-Wvariadic-macros',
-		        '-Wno-missing-field-initializers',
-		        '-Wno-unused-parameter',
-			'-Wno-pedantic',
-			'-Wunused-result',
-			language : 'cpp')
-  # warn on implicit fall-through if supported by compiler (gcc >= 7.x)
-  gcc_major_version = cc.version().split('.')[0]
-  if(gcc_major_version.to_int() >= 7)
-    add_global_arguments('-Wimplicit-fallthrough', language : 'c')
-    add_global_arguments('-Wimplicit-fallthrough', language : 'cpp')
-  endif
+common_flags = [
+  '-fvisibility=hidden',
+  '-Werror=suggest-attribute=format',
+  '-Wsign-compare',
+  '-Wpointer-arith',
+  '-Wpointer-sign',
+  '-Wformat',
+  '-Wformat-security',
+  '-Wimplicit-fallthrough',
+  '-Wmissing-braces',
+  '-Wtype-limits',
+  '-Wvariadic-macros',
+  '-Wno-missing-field-initializers',
+  '-Wno-unused-parameter',
+  '-Wno-pedantic',
+  '-Wold-style-declaration',
+  '-Wunused-result',
+]
+
+cc_flags = common_flags + [
+  '-DFASTPATH',
+# '-DSPA_DEBUG_MEMCPY',
+]
+add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
+
+have_cpp = add_languages('cpp', required : false)
+
+if have_cpp
+  cxx = meson.get_compiler('cpp')
+  cxx_flags = common_flags
+  add_project_arguments(cxx.get_supported_arguments(cxx_flags), language: 'cpp')
 endif
 
 sse_args = '-msse'
@@ -316,6 +306,7 @@ pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
   makedata.set('BUILD_ROOT', meson.build_root())
+  makedata.set('SOURCE_ROOT', meson.source_root())
   makedata.set('VERSION', pipewire_version)
 if version_arr.length() == 4
   makedata.set('TAG', 'HEAD')

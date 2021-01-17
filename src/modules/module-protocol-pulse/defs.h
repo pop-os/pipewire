@@ -42,7 +42,8 @@
 #define MIN_BUFFERS     8u
 #define MAX_BUFFERS     64u
 
-#define MIN_SAMPLES	24u
+#define MIN_BLOCK	64u
+#define MIN_SAMPLES	16u
 #define MIN_USEC	(MIN_SAMPLES * SPA_USEC_PER_SEC / 48000u)
 
 #define MAXLENGTH		(4*1024*1024) /* 4MB */
@@ -55,6 +56,10 @@
 #define INDEX_MASK		0xffffu
 #define MONITOR_FLAG		(1u << 16)
 #define EXTENSION_FLAG		(1u << 17)
+
+#define DEFAULT_SINK		"@DEFAULT_SINK@"
+#define DEFAULT_SOURCE		"@DEFAULT_SOURCE@"
+#define DEFAULT_MONITOR		"@DEFAULT_MONITOR@"
 
 enum error_code {
 	ERR_OK = 0,			/**< No error */

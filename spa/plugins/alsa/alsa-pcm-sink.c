@@ -239,6 +239,16 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	spa_return_val_if_fail(command != NULL, -EINVAL);
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
+	case SPA_NODE_COMMAND_ParamBegin:
+		if ((res = spa_alsa_open(this)) < 0)
+			return res;
+		break;
+	case SPA_NODE_COMMAND_ParamEnd:
+		if (this->have_format)
+			return 0;
+		if ((res = spa_alsa_close(this)) < 0)
+			return res;
+		break;
 	case SPA_NODE_COMMAND_Start:
 		if (!this->have_format)
 			return -EIO;
@@ -771,6 +781,8 @@ impl_init(const struct spa_handle_factory *factory,
 			this->default_channels = atoi(info->items[i].value);
 		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_RATE)) {
 			this->default_rate = atoi(info->items[i].value);
+		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_FORMAT)) {
+			this->default_format = spa_alsa_format_from_name(info->items[i].value, 128);
 		}
 	}
 

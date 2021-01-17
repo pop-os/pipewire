@@ -33,7 +33,9 @@ extern "C" {
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
+#include <spa/utils/defs.h>
 
 /* a simple JSON compatible tokenizer */
 struct spa_json {
@@ -94,7 +96,7 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 				}
 				--iter->depth;
 				continue;
-			case '-': case 'a' ... 'z': case 'A' ... 'Z': case '0' ... '9':
+			case '-': case '+': case 'a' ... 'z': case 'A' ... 'Z': case '0' ... '9':
 				*value = iter->cur;
 				iter->state = __BARE;
 				continue;
@@ -163,10 +165,24 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 static inline int spa_json_enter_container(struct spa_json *iter, struct spa_json *sub, char type)
 {
 	const char *value;
-	if (spa_json_next(iter, &value) < 0 || *value != type)
+	if (spa_json_next(iter, &value) <= 0 || *value != type)
 		return -1;
 	spa_json_enter(iter, sub);
 	return 1;
+}
+
+static inline int spa_json_is_container(const char *val, int len)
+{
+	return len > 0 && (*val == '{'  || *val == '[');
+}
+
+static inline int spa_json_container_len(struct spa_json *iter, const char *value, int len)
+{
+	const char *val;
+	struct spa_json sub;
+	spa_json_enter(iter, &sub);
+	while (spa_json_next(&sub, &val) > 0);
+	return sub.cur + 1 - value;
 }
 
 /* object */
@@ -271,6 +287,8 @@ static inline int spa_json_parse_string(const char *val, int len, char *result)
 				*result++ = '\b';
 			else if (*p == 't')
 				*result++ = '\t';
+			else if (*p == 'f')
+				*result++ = '\f';
 			else
 				*result++ = *p;
 		} else
@@ -287,6 +305,40 @@ static inline int spa_json_get_string(struct spa_json *iter, char *res, int maxl
 	if ((len = spa_json_next(iter, &value)) <= 0 || maxlen < len)
 		return -1;
 	return spa_json_parse_string(value, len, res);
+}
+
+static inline int spa_json_encode_string(char *str, int size, const char *val)
+{
+	int len = 0;
+#define __PUT(c) { if (len < size) *str++ = c; len++; }
+	__PUT('"');
+	while (*val) {
+		switch (*val) {
+		case '\n':
+			__PUT('\\'); __PUT('n');
+			break;
+		case '\r':
+			__PUT('\\'); __PUT('r');
+			break;
+		case '\b':
+			__PUT('\\'); __PUT('b');
+			break;
+		case '\t':
+			__PUT('\\'); __PUT('t');
+			break;
+		case '\f':
+			__PUT('\\'); __PUT('f');
+			break;
+		default:
+			__PUT(*val);
+			break;
+		}
+		val++;
+	}
+	__PUT('"');
+	__PUT('\0');
+#undef __PUT
+	return len-1;
 }
 
 #ifdef __cplusplus
