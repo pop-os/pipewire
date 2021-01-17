@@ -1,8 +1,9 @@
-pipewire (0.3.16-1) UNRELEASED; urgency=medium
+pipewire (0.3.17-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * New upstream release
 
- -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 10:36:05 +0000
+ -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 10:36:24 +0000
 
 pipewire (0.3.15-1) unstable; urgency=medium
 
