@@ -22,8 +22,9 @@ pipewire (0.3.19-1) UNRELEASED; urgency=medium
   * Build-depend on libncurses-dev for the new pw-top utility
   * d/copyright: Update
   * d/pipewire-bin.install: Install pw-dump and pw-top
+  * Don't automatically start pipewire for root logins (Closes: #979791)
 
- -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 11:25:09 +0000
+ -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 11:40:33 +0000
 
 pipewire (0.3.15-1) unstable; urgency=medium
 
