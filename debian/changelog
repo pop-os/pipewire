@@ -1,3 +1,12 @@
+pipewire (0.3.19-2) unstable; urgency=medium
+
+  * Team upload
+  * Depend on openaptx with #980297 fixed, instead of working around it
+  * Don't depend on libldac on big-endian architectures.
+    It currently only compiles on little-endian architectures (#980372).
+
+ -- Simon McVittie <smcv@debian.org>  Mon, 18 Jan 2021 11:58:41 +0000
+
 pipewire (0.3.19-1) unstable; urgency=medium
 
   * Team upload
