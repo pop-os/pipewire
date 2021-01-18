@@ -3,8 +3,7 @@ Section: libs
 Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.net>
 Uploaders: Jeremy Bicha <jbicha@debian.org>
-Build-Depends: chrpath,
-               debhelper-compat (= 13),
+Build-Depends: debhelper-compat (= 13),
                libasound2-dev,
                libbluetooth-dev,
                libdbus-1-dev,
@@ -15,7 +14,7 @@ Build-Depends: chrpath,
                libldacbt-abr-dev,
                libldacbt-enc-dev,
                libncurses-dev,
-               libopenaptx-dev,
+               libopenaptx-dev (>= 0.2.0-5~),
                libpulse-dev (>= 11.1),
                libsbc-dev,
                libsdl2-dev,

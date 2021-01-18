@@ -22,13 +22,6 @@ override_dh_auto_configure:
 	install -d debian/ld.so.conf.d
 	echo "/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/jack/" > "debian/ld.so.conf.d/pipewire-jack-$(DEB_HOST_MULTIARCH).conf"
 
-override_dh_auto_install:
-	dh_auto_install
-	# Workaround for https://bugs.debian.org/980297
-	chrpath -l debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/spa-0.2/bluez5/libspa-bluez5.so
-	chrpath -d debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/spa-0.2/bluez5/libspa-bluez5.so
-	chrpath -l debian/tmp/usr/lib/$(DEB_HOST_MULTIARCH)/spa-0.2/bluez5/libspa-bluez5.so || :
-
 test_timeout_multiplier = 1
 
 ifneq ($(filter arm hppa ia64 m68k riscv64 sh4 sparc%,$(DEB_HOST_ARCH_CPU)),)
