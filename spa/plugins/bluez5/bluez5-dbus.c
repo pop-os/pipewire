@@ -75,9 +75,11 @@ struct spa_bt_monitor {
 	unsigned int filters_added:1;
 	unsigned int objects_listed:1;
 
-	struct spa_bt_backend *backend_hsp_native;
+	struct spa_bt_backend *backend_native;
 	struct spa_bt_backend *backend_ofono;
 	struct spa_bt_backend *backend_hsphfpd;
+
+	unsigned int enable_sbc_xq:1;
 };
 
 /*
@@ -156,8 +158,13 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 		spa_log_debug(monitor->log, "  %d: %02x", i, cap[i]);
 
 	codec = a2dp_endpoint_to_codec(path);
-	if (codec != NULL)
-		res = codec->select_config(codec, 0, cap, size, NULL, config);
+	if (codec != NULL) {
+		struct spa_dict_item items[1];
+
+		items[0] = SPA_DICT_ITEM_INIT("codec.sbc.enable-xq", monitor->enable_sbc_xq ? "true" : "false");
+
+		res = codec->select_config(codec, 0, cap, size, &SPA_DICT_INIT_ARRAY(items), config);
+	}
 	else
 		res = -ENOTSUP;
 
@@ -392,9 +399,9 @@ static void device_free(struct spa_bt_device *device)
 static int device_add(struct spa_bt_monitor *monitor, struct spa_bt_device *device)
 {
 	struct spa_device_object_info info;
-	char dev[32];
+	char dev[32], name[128], class[16];
 	struct spa_dict_item items[20];
-        uint32_t n_items = 0;
+	uint32_t n_items = 0;
 
 	if (device->added)
 		return 0;
@@ -408,18 +415,25 @@ static int device_add(struct spa_bt_monitor *monitor, struct spa_bt_device *devi
 
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "bluez5");
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, device->name);
+	snprintf(name, sizeof(name), "bluez_card.%s", device->address);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, name);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->name);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->alias);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ICON_NAME, device->icon);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_FORM_FACTOR,
+			spa_bt_form_factor_name(
+				spa_bt_form_factor_from_class(device->bluetooth_class)));
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PATH, device->path);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
 	snprintf(dev, sizeof(dev), "pointer:%p", device);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_DEVICE, dev);
+	snprintf(class, sizeof(class), "0x%06x", device->bluetooth_class);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CLASS, class);
 
 	info.props = &SPA_DICT_INIT(items, n_items);
 
 	device->added = true;
-        spa_device_emit_object_info(&monitor->hooks, device->id, &info);
+	spa_device_emit_object_info(&monitor->hooks, device->id, &info);
 
 	return 0;
 }
@@ -679,6 +693,53 @@ static int device_update_props(struct spa_bt_device *device,
 		dbus_message_iter_next(props_iter);
 	}
 	return 0;
+}
+
+static int device_try_connect_profile(struct spa_bt_device *device,
+                                      enum spa_bt_profile profile,
+                                      const char *profile_uuid)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	DBusMessage *m;
+
+	if (!(device->profiles & profile) || (device->connected_profiles & profile))
+		return 0;
+
+	spa_log_info(monitor->log, "device %p %s: A2DP profile %s not connected; try ConnectProfile()",
+	             device, device->path, profile_uuid);
+
+	/* Call org.bluez.Device1.ConnectProfile() on device, ignoring result */
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE,
+	                                 device->path,
+	                                 BLUEZ_DEVICE_INTERFACE,
+	                                 "ConnectProfile");
+	if (m == NULL)
+		return -ENOMEM;
+	dbus_message_append_args(m, DBUS_TYPE_STRING, &profile_uuid, DBUS_TYPE_INVALID);
+	if (!dbus_connection_send(monitor->conn, m, NULL)) {
+		dbus_message_unref(m);
+		return -EIO;
+	}
+	dbus_message_unref(m);
+
+	return 0;
+}
+
+static void reconnect_device_profiles(struct spa_bt_monitor *monitor)
+{
+	struct spa_bt_device *device;
+
+	/* Call org.bluez.Device1.ConnectProfile() on connected devices, it they have A2DP but the
+	 * profile is not yet connected.
+	 */
+
+	spa_list_for_each(device, &monitor->device_list, link) {
+		if (device->connected) {
+			device_try_connect_profile(device, SPA_BT_PROFILE_A2DP_SINK, SPA_BT_UUID_A2DP_SINK);
+			device_try_connect_profile(device, SPA_BT_PROFILE_A2DP_SOURCE, SPA_BT_UUID_A2DP_SOURCE);
+		}
+	}
 }
 
 struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path)
@@ -1140,6 +1201,25 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	if (is_new)
 		spa_list_append(&transport->device->transport_list, &transport->device_link);
 
+	if (codec->validate_config) {
+		struct spa_audio_info info;
+		if (codec->validate_config(codec, 0,
+					transport->configuration, transport->configuration_len,
+					&info) < 0) {
+			spa_log_error(monitor->log, "invalid transport configuration");
+			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+		}
+		transport->n_channels = info.info.raw.channels;
+		memcpy(transport->channels, info.info.raw.position,
+				transport->n_channels * sizeof(uint32_t));
+	} else {
+		transport->n_channels = 2;
+		transport->channels[0] = SPA_AUDIO_CHANNEL_FL;
+		transport->channels[1] = SPA_AUDIO_CHANNEL_FR;
+	}
+	spa_log_info(monitor->log, "%p: %s validate conf channels:%d",
+			monitor, path, transport->n_channels);
+
 	spa_bt_device_connect_profile(transport->device, transport->profile);
 
 	if ((r = dbus_message_new_method_return(m)) == NULL)
@@ -1528,6 +1608,9 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 		if (!dbus_connection_send(monitor->conn, r, NULL))
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		res = DBUS_HANDLER_RESULT_HANDLED;
+
+		/* Reconnect A2DP profiles for existing connected devices */
+		reconnect_device_profiles(monitor);
 	}
 	else
 		res = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
@@ -1667,7 +1750,7 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		adapter_register_application(a);
 	}
 	else if (strcmp(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE) == 0) {
-		backend_hsp_native_register_profiles(monitor->backend_hsp_native);
+		backend_native_register_profiles(monitor->backend_native);
 	}
 	else if (strcmp(interface_name, BLUEZ_DEVICE_INTERFACE) == 0) {
 		struct spa_bt_device *d;
@@ -2050,9 +2133,9 @@ static int impl_clear(struct spa_handle *handle)
 	spa_list_consume(a, &monitor->adapter_list, link)
 		adapter_free(a);
 
-	if (monitor->backend_hsp_native) {
-		backend_hsp_native_free(monitor->backend_hsp_native);
-		monitor->backend_hsp_native = NULL;
+	if (monitor->backend_native) {
+		backend_native_free(monitor->backend_native);
+		monitor->backend_native = NULL;
 	}
 
 	if (monitor->backend_ofono) {
@@ -2122,7 +2205,15 @@ impl_init(const struct spa_handle_factory *factory,
 
 	register_media_application(this);
 
-	this->backend_hsp_native = backend_hsp_native_new(this, this->conn, support, n_support);
+	if (info) {
+		const char *str;
+
+		if ((str = spa_dict_lookup(info, "bluez5.sbc-xq-support")) != NULL &&
+		    (strcmp(str, "true") == 0 || atoi(str)))
+			this->enable_sbc_xq = true;
+	}
+
+	this->backend_native = backend_native_new(this, this->conn, info, support, n_support);
 	this->backend_ofono = backend_ofono_new(this, this->conn, info, support, n_support);
 	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, info, support, n_support);
 

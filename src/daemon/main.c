@@ -122,10 +122,13 @@ static int load_module(struct data *d, const char *key, const char *args, const 
 		if (errno == ENOENT && flags && strstr(flags, "ifexists") != NULL) {
 			pw_log_debug(NAME" %p: skipping unavailable module %s",
 					d, key);
-		} else {
+		} else if (flags == NULL || strstr(flags, "nofail") == NULL) {
 			pw_log_error(NAME" %p: could not load module \"%s\": %m",
 					d, key);
 			return -errno;
+		} else {
+			pw_log_info(NAME" %p: could not load module \"%s\": %m",
+					d, key);
 		}
 	}
 	return 0;
@@ -142,9 +145,9 @@ static int parse_modules(struct data *d, const char *str)
 		return -EINVAL;
 
 	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
+		const char *val, *aval;
 		char *args = NULL, *flags = NULL;
-		int len;
+		int len, alen;
 
 		if ((len = spa_json_next(&it[1], &val)) <= 0)
 			break;
@@ -153,18 +156,22 @@ static int parse_modules(struct data *d, const char *str)
 			continue;
 
 		if (spa_json_is_object(val, len)) {
-			char arg[512], aval[1024];
+			char arg[512];
 
 			spa_json_enter(&it[1], &it[2]);
 
 			while (spa_json_get_string(&it[2], arg, sizeof(arg)-1) > 0) {
-				if (spa_json_get_string(&it[2], aval, sizeof(aval)-1) <= 0)
+				if ((alen = spa_json_next(&it[2], &aval)) <= 0)
 					break;
 
 				if (strcmp(arg, "args") == 0) {
-					args = strdup(aval);
+					if (spa_json_is_container(aval, alen))
+						alen = spa_json_container_len(&it[2], aval, alen);
+
+					args = malloc(alen + 1);
+					spa_json_parse_string(aval, alen, args);
 				} else if (strcmp(arg, "flags") == 0) {
-					flags = strdup(aval);
+					flags = strndup(aval, alen);
 				}
 			}
 		}
@@ -220,9 +227,9 @@ static int parse_objects(struct data *d, const char *str)
 		return -EINVAL;
 
 	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
+		const char *val, *aval;
 		char *args = NULL, *flags = NULL;
-		int len;
+		int len, alen;
 
 		if ((len = spa_json_next(&it[1], &val)) <= 0)
 			break;
@@ -231,18 +238,22 @@ static int parse_objects(struct data *d, const char *str)
 			continue;
 
 		if (spa_json_is_object(val, len)) {
-			char arg[512], aval[1024];
+			char arg[512];
 
 			spa_json_enter(&it[1], &it[2]);
 
 			while (spa_json_get_string(&it[2], arg, sizeof(arg)-1) > 0) {
-				if (spa_json_get_string(&it[2], aval, sizeof(aval)-1) <= 0)
+				if ((alen = spa_json_next(&it[2], &aval)) <= 0)
 					break;
 
 				if (strcmp(arg, "args") == 0) {
-					args = strdup(aval);
+					if (spa_json_is_container(aval, alen))
+						alen = spa_json_container_len(&it[2], aval, alen);
+
+					args = malloc(alen + 1);
+					spa_json_parse_string(aval, alen, args);
 				} else if (strcmp(arg, "flags") == 0) {
-					flags = strdup(aval);
+					flags = strndup(aval, alen);
 				}
 			}
 		}
@@ -269,7 +280,7 @@ static int do_exec(struct data *d, const char *key, const char *args)
 	if (pid == 0) {
 		char *cmd, **argv;
 
-		cmd = spa_aprintf("%s %s", key, args);
+		cmd = spa_aprintf("%s %s", key, args ? args : "");
 		argv = pw_split_strv(cmd, " \t", INT_MAX, &n_args);
 		free(cmd);
 

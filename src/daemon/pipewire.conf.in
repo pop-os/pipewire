@@ -6,6 +6,7 @@ properties = {
     #link.max-buffers =		64
     link.max-buffers =		16		# version < 3 clients can't handle more
     #mem.allow-mlock =		true
+    #mem.mlock-all =		false
     #log.level =		2
 
     ## Properties for the DSP configuration
@@ -40,12 +41,19 @@ spa-libs = {
 
 modules = {
     ##  <module-name> = { [args = "<key>=<value> ..."] 
-    #                     [flags = ifexists] }
+    #                     [flags = [ifexists]|[nofail]}
     #
-    # Loads a module with the given parameters. Normally failure is
-    # fatal if the module is not found, unless -ifexists is given.
+    # Loads a module with the given parameters.
+    # If ifexists is given, the module is ignoed when it is not found.
+    # If nofail is given, module initialization failures are ignored.
     #
-    libpipewire-module-rtkit  = { "#args" = "rt.prio=20 rt.time.soft=200000 rt.time.hard=200000" flags=ifexists }
+    libpipewire-module-rtkit  = { "#args" = { nice.level = -11
+				              rt.prio = 20
+					      rt.time.soft = 200000
+					      rt.time.hard = 200000
+					    }
+				  "flags" = "ifexists|nofail"
+				}
     libpipewire-module-protocol-native = null
     libpipewire-module-profiler = null
     libpipewire-module-metadata = null
@@ -54,7 +62,7 @@ modules = {
     libpipewire-module-client-node = null
     libpipewire-module-client-device = null
     libpipewire-module-portal = null
-    libpipewire-module-access = { "#args" = "access.allowed=@media_session_path@ access.force=flatpak" }
+    libpipewire-module-access = { "#args" = { access.allowed = @media_session_path@ access.force = flatpak" } }
     libpipewire-module-adapter = null
     libpipewire-module-link-factory = null
     libpipewire-module-session-manager = null
@@ -73,7 +81,14 @@ objects = {
     #spa-device-factory = { args = "factory.name=api.alsa.seq.bridge node.name=Internal-MIDI-Bridge" }
     #adapter = { args = "factory.name=audiotestsrc node.name=my-test" }
     #spa-node-factory  = { args = "factory.name=api.vulkan.compute.source node.name=my-compute-source" }
-    spa-node-factory = { args = "factory.name=support.node.driver node.name=Dummy priority.driver=8000" }
+
+    # A default dummy driver. This handles nodes marked with the "node.always-driver"
+    # property when no other driver is currently active. JACK clients need this.
+    spa-node-factory = { args = { factory.name = support.node.driver
+                                  node.name = Dummy-Driver
+				  priority.driver = 8000
+				}
+		       }
 }
 
 exec = {

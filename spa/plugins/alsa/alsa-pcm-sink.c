@@ -273,6 +273,7 @@ static const struct spa_dict_item node_info_items[] = {
 	{ SPA_KEY_DEVICE_API, "alsa" },
 	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
 	{ SPA_KEY_NODE_DRIVER, "true" },
+	{ SPA_KEY_NODE_PAUSE_ON_IDLE, "false" },
 };
 
 static void emit_node_info(struct state *this, bool full)
@@ -646,7 +647,7 @@ static int impl_node_process(void *object)
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
 		input->buffer_id = SPA_ID_INVALID;
 
-		spa_alsa_write(this, 0);
+		spa_alsa_write(this);
 
 		input->status = SPA_STATUS_OK;
 	}
@@ -795,6 +796,10 @@ impl_init(const struct spa_handle_factory *factory,
 			}
 		} else if (!strcmp(info->items[i].key, "api.alsa.period-size")) {
 			this->default_period_size = atoi(info->items[i].value);
+		} else if (!strcmp(info->items[i].key, "api.alsa.headroom")) {
+			this->default_headroom = atoi(info->items[i].value);
+		} else if (!strcmp(info->items[i].key, "api.alsa.disable-mmap")) {
+			this->disable_mmap = atoi(info->items[i].value);
 		}
 	}
 	return 0;

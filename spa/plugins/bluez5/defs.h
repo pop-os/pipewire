@@ -131,6 +131,8 @@ extern "C" {
 
 #define PROFILE_HSP_AG	"/Profile/HSPAG"
 #define PROFILE_HSP_HS	"/Profile/HSPHS"
+#define PROFILE_HFP_AG	"/Profile/HFPAG"
+#define PROFILE_HFP_HF	"/Profile/HFPHF"
 
 #define HSP_HS_DEFAULT_CHANNEL  3
 
@@ -179,6 +181,34 @@ static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
 		return 0;
 }
 
+enum spa_bt_hfp_ag_feature {
+	SPA_BT_HFP_AG_FEATURE_NONE =			(0),
+	SPA_BT_HFP_AG_FEATURE_3WAY =			(1 << 0),
+	SPA_BT_HFP_AG_FEATURE_ECNR =			(1 << 1),
+	SPA_BT_HFP_AG_FEATURE_VOICE_RECOG =		(1 << 2),
+	SPA_BT_HFP_AG_FEATURE_IN_BAND_RING_TONE =	(1 << 3),
+	SPA_BT_HFP_AG_FEATURE_ATTACH_VOICE_TAG =	(1 << 4),
+	SPA_BT_HFP_AG_FEATURE_REJECT_CALL =		(1 << 5),
+	SPA_BT_HFP_AG_FEATURE_ENHANCED_CALL_STATUS =	(1 << 6),
+	SPA_BT_HFP_AG_FEATURE_ENHANCED_CALL_CONTROL =	(1 << 7),
+	SPA_BT_HFP_AG_FEATURE_EXTENDED_RES_CODE =	(1 << 8),
+	SPA_BT_HFP_AG_FEATURE_CODEC_NEGOTIATION =	(1 << 9),
+	SPA_BT_HFP_AG_FEATURE_HF_INDICATORS =		(1 << 10),
+};
+
+enum spa_bt_hfp_hf_feature {
+	SPA_BT_HFP_HF_FEATURE_NONE =			(0),
+	SPA_BT_HFP_HF_FEATURE_ECNR =			(1 << 0),
+	SPA_BT_HFP_HF_FEATURE_3WAY =			(1 << 1),
+	SPA_BT_HFP_HF_FEATURE_CLIP =			(1 << 2),
+	SPA_BT_HFP_HF_FEATURE_VOICE_RECOGNITION =	(1 << 3),
+	SPA_BT_HFP_HF_FEATURE_REMOTE_VOLUME_CONTROL =	(1 << 4),
+	SPA_BT_HFP_HF_FEATURE_ENHANCED_CALL_STATUS =	(1 << 5),
+	SPA_BT_HFP_HF_FEATURE_ENHANCED_CALL_CONTROL =	(1 << 6),
+	SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION =	(1 << 7),
+	SPA_BT_HFP_HF_FEATURE_HF_INDICATORS =		(1 << 8),
+};
+
 static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
       switch (profile) {
       case SPA_BT_PROFILE_A2DP_SOURCE:
@@ -215,6 +245,80 @@ struct spa_bt_adapter {
 	unsigned int endpoints_registered:1;
 	unsigned int application_registered:1;
 };
+
+enum spa_bt_form_factor {
+	SPA_BT_FORM_FACTOR_UNKNOWN,
+	SPA_BT_FORM_FACTOR_HEADSET,
+	SPA_BT_FORM_FACTOR_HANDSFREE,
+	SPA_BT_FORM_FACTOR_MICROPHONE,
+	SPA_BT_FORM_FACTOR_SPEAKER,
+	SPA_BT_FORM_FACTOR_HEADPHONE,
+	SPA_BT_FORM_FACTOR_PORTABLE,
+	SPA_BT_FORM_FACTOR_CAR,
+	SPA_BT_FORM_FACTOR_HIFI,
+	SPA_BT_FORM_FACTOR_PHONE,
+};
+
+static inline const char *spa_bt_form_factor_name(enum spa_bt_form_factor ff)
+{
+	switch (ff) {
+	case SPA_BT_FORM_FACTOR_HEADSET:
+		return "headset";
+	case SPA_BT_FORM_FACTOR_HANDSFREE:
+		return "hands-free";
+	case SPA_BT_FORM_FACTOR_MICROPHONE:
+		return "microphone";
+	case SPA_BT_FORM_FACTOR_SPEAKER:
+		return "speaker";
+	case SPA_BT_FORM_FACTOR_HEADPHONE:
+		return "headphone";
+	case SPA_BT_FORM_FACTOR_PORTABLE:
+		return "portable";
+	case SPA_BT_FORM_FACTOR_CAR:
+		return "car";
+	case SPA_BT_FORM_FACTOR_HIFI:
+		return "hifi";
+	case SPA_BT_FORM_FACTOR_PHONE:
+		return "phone";
+	case SPA_BT_FORM_FACTOR_UNKNOWN:
+	default:
+		return "unknown";
+	}
+}
+
+static inline enum spa_bt_form_factor spa_bt_form_factor_from_class(uint32_t bluetooth_class)
+{
+	uint32_t major, minor;
+	/* See Bluetooth Assigned Numbers:
+	 * https://www.bluetooth.org/Technical/AssignedNumbers/baseband.htm */
+	major = (bluetooth_class >> 8) & 0x1F;
+	minor = (bluetooth_class >> 2) & 0x3F;
+
+	switch (major) {
+	case 2:
+		return SPA_BT_FORM_FACTOR_PHONE;
+	case 4:
+		switch (minor) {
+		case 1:
+			return SPA_BT_FORM_FACTOR_HEADSET;
+		case 2:
+			return SPA_BT_FORM_FACTOR_HANDSFREE;
+		case 4:
+			return SPA_BT_FORM_FACTOR_MICROPHONE;
+		case 5:
+			return SPA_BT_FORM_FACTOR_SPEAKER;
+		case 6:
+			return SPA_BT_FORM_FACTOR_HEADPHONE;
+		case 7:
+			return SPA_BT_FORM_FACTOR_PORTABLE;
+		case 8:
+			return SPA_BT_FORM_FACTOR_CAR;
+		case 10:
+			return SPA_BT_FORM_FACTOR_HIFI;
+		}
+	}
+	return SPA_BT_FORM_FACTOR_UNKNOWN;
+}
 
 struct spa_bt_device {
 	struct spa_list link;
@@ -288,9 +392,12 @@ struct spa_bt_transport {
 	enum spa_bt_profile profile;
 	enum spa_bt_transport_state state;
 	const struct a2dp_codec *a2dp_codec;
-	int codec;
+	unsigned int codec;
 	void *configuration;
 	int configuration_len;
+
+	uint32_t n_channels;
+	uint32_t channels[64];
 
 	int acquire_refcount;
 	int fd;
@@ -354,21 +461,23 @@ static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(con
 
 
 #ifdef HAVE_BLUEZ_5_BACKEND_NATIVE
-struct spa_bt_backend *backend_hsp_native_new(struct spa_bt_monitor *monitor,
+struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
-void backend_hsp_native_free(struct spa_bt_backend *backend);
-void backend_hsp_native_register_profiles(struct spa_bt_backend *backend);
+void backend_native_free(struct spa_bt_backend *backend);
+void backend_native_register_profiles(struct spa_bt_backend *backend);
 #else
-static inline struct spa_bt_backend *backend_hsp_native_new(struct spa_bt_monitor *monitor,
+static inline struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
+		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support) {
 	return NULL;
 }
-static inline void backend_hsp_native_free(struct spa_bt_backend *backend) {}
-static inline void backend_hsp_native_register_profiles(struct spa_bt_backend *backend) {}
+static inline void backend_native_free(struct spa_bt_backend *backend) {}
+static inline void backend_native_register_profiles(struct spa_bt_backend *backend) {}
 #endif
 
 #ifdef HAVE_BLUEZ_5_BACKEND_OFONO

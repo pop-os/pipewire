@@ -31,12 +31,15 @@
 #include "config.h"
 
 #include <spa/monitor/device.h>
+#include <spa/monitor/event.h>
 #include <spa/node/node.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
+#include <spa/utils/keys.h>
 #include <spa/pod/builder.h>
+#include <spa/pod/parser.h>
 #include <spa/param/props.h>
 #include <spa/debug/dict.h>
 #include <spa/debug/pod.h>
@@ -44,7 +47,8 @@
 #include "pipewire/impl.h"
 #include "media-session.h"
 
-#define NAME "bluez5-monitor"
+#define NAME		"bluez5-monitor"
+#define SESSION_CONF	"bluez-monitor.conf"
 
 struct device;
 
@@ -88,6 +92,9 @@ struct impl {
 	struct sm_media_session *session;
 	struct spa_hook session_listener;
 
+	struct pw_properties *conf;
+	struct pw_properties *props;
+
 	struct spa_handle *handle;
 
 	struct spa_device *monitor;
@@ -124,7 +131,7 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 	struct pw_context *context = impl->session->context;
 	struct pw_impl_factory *factory;
 	int res;
-	const char *str;
+	const char *prefix, *str, *profile, *rules;
 
 	pw_log_debug("new node %u", id);
 
@@ -151,13 +158,31 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 		str = "bluetooth-device";
 
 	pw_properties_setf(node->props, PW_KEY_DEVICE_ID, "%d", device->device_id);
-	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s", info->factory_name, str);
 	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION, str);
+
+	profile = pw_properties_get(node->props, SPA_KEY_API_BLUEZ5_PROFILE);
+	if (profile == NULL)
+		profile = "unknown";
+	str = pw_properties_get(node->props, SPA_KEY_API_BLUEZ5_ADDRESS);
+	if (str == NULL)
+		str = pw_properties_get(device->props, SPA_KEY_DEVICE_NAME);
+
+	if (strstr(info->factory_name, "sink") != NULL)
+		prefix = "bluez_input";
+	else if (strstr(info->factory_name, "source") != NULL)
+		prefix = "bluez_output";
+	else
+		prefix = info->factory_name;
+
+	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s.%s", prefix, str, profile);
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
 
 	node->impl = impl;
 	node->device = device;
 	node->id = id;
+
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), node->props);
 
 	factory = pw_context_find_factory(context, "adapter");
 	if (factory == NULL) {
@@ -229,9 +254,42 @@ static void bluez5_device_object_info(void *data, uint32_t id,
 
 }
 
+static void bluez_device_event(void *data, const struct spa_event *event)
+{
+	struct device *device = data;
+	struct node *node;
+	uint32_t id, type;
+	struct spa_pod *props = NULL;
+
+	if (spa_pod_parse_object(&event->pod,
+			SPA_TYPE_EVENT_Device, &type,
+			SPA_EVENT_DEVICE_Object, SPA_POD_Int(&id),
+			SPA_EVENT_DEVICE_Props, SPA_POD_OPT_Pod(&props)) < 0)
+		return;
+
+	if ((node = bluez5_find_node(device, id)) == NULL)
+		return;
+
+	switch (type) {
+	case SPA_DEVICE_EVENT_ObjectConfig:
+		/* FIXME, proxy might be NULL at this point until the
+		 * node proxy is created. We should probably do
+		 * pw_client_node_get_node() and perform the set_param on
+		 * that node proxy instead of waiting for the session manager
+		 * proxy. */
+		if (props != NULL && node->snode->obj.proxy != NULL)
+			pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
+				SPA_PARAM_Props, 0, props);
+		break;
+	default:
+		break;
+	}
+}
+
 static const struct spa_device_events bluez5_device_events = {
 	SPA_VERSION_DEVICE_EVENTS,
-	.object_info = bluez5_device_object_info
+	.object_info = bluez5_device_object_info,
+	.event = bluez_device_event,
 };
 
 static struct device *bluez5_find_device(struct impl *impl, uint32_t id)
@@ -319,6 +377,7 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 	struct spa_handle *handle;
 	int res;
 	void *iface;
+	const char *rules;
 
 	pw_log_debug("new device %u", id);
 
@@ -361,6 +420,8 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 
 	spa_list_init(&device->node_list);
 
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), device->props);
 
 	sm_object_add_listener(&device->sdevice->obj,
 			&device->listener,
@@ -431,6 +492,8 @@ static void session_destroy(void *data)
 	spa_hook_remove(&impl->session_listener);
 	spa_hook_remove(&impl->listener);
 	pw_unload_spa_handle(impl->handle);
+	pw_properties_free(impl->props);
+	pw_properties_free(impl->conf);
 	free(impl);
 }
 
@@ -441,32 +504,44 @@ static const struct sm_media_session_events session_events = {
 
 int sm_bluez5_monitor_start(struct sm_media_session *session)
 {
-	struct spa_handle *handle;
 	struct pw_context *context = session->context;
 	int res;
 	void *iface;
 	struct impl *impl;
-
-	handle = pw_context_load_spa_handle(context, SPA_NAME_API_BLUEZ5_ENUM_DBUS, &session->props->dict);
-	if (handle == NULL) {
-		res = -errno;
-		pw_log_error("can't load %s: %m", SPA_NAME_API_BLUEZ5_ENUM_DBUS);
-		goto out;
-	}
-
-	if ((res = spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
-		pw_log_error("can't get Device interface: %s", spa_strerror(res));
-		goto out_unload;
-	}
+	const char *str;
 
 	impl = calloc(1, sizeof(struct impl));
 	if (impl == NULL) {
 		res = -errno;
-		goto out_unload;
+		goto out;
 	}
-
 	impl->session = session;
-	impl->handle = handle;
+
+	if ((impl->conf = pw_properties_new(NULL, NULL)) == NULL) {
+		res = -errno;
+		goto out_free;
+	}
+	if ((res = sm_media_session_load_conf(impl->session,
+					SESSION_CONF, impl->conf)) < 0)
+		pw_log_info("can't load "SESSION_CONF" config: %s", spa_strerror(res));
+
+	if ((impl->props = pw_properties_new(NULL, NULL)) == NULL) {
+		res = -errno;
+		goto out_free;
+	}
+	if ((str = pw_properties_get(impl->conf, "properties")) != NULL)
+		pw_properties_update_string(impl->props, str, strlen(str));
+
+	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_BLUEZ5_ENUM_DBUS, &impl->props->dict);
+	if (impl->handle == NULL) {
+		res = -errno;
+		pw_log_error("can't load %s: %m", SPA_NAME_API_BLUEZ5_ENUM_DBUS);
+		goto out_free;
+	}
+	if ((res = spa_handle_get_interface(impl->handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
+		pw_log_error("can't get Device interface: %s", spa_strerror(res));
+		goto out_free;
+	}
 	impl->monitor = iface;
 	spa_list_init(&impl->device_list);
 
@@ -478,8 +553,14 @@ int sm_bluez5_monitor_start(struct sm_media_session *session)
 
 	return 0;
 
-out_unload:
-	pw_unload_spa_handle(handle);
+out_free:
+	if (impl->handle)
+		pw_unload_spa_handle(impl->handle);
+	if (impl->conf)
+		pw_properties_free(impl->conf);
+	if (impl->props)
+		pw_properties_free(impl->props);
+	free(impl);
 out:
 	return res;
 }

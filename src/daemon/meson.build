@@ -18,6 +18,8 @@ install_data(
   sources : [
     'media-session.d/with-jack',
     'media-session.d/with-pulseaudio',
+    'media-session.d/bluez-monitor.conf',
+    'media-session.d/v4l2-monitor.conf',
     'media-session.d/media-session.conf',
     'media-session.d/alsa-monitor.conf' ],
   install_dir : join_paths(conf_install_dir, 'media-session.d'))
@@ -52,6 +54,22 @@ executable('pipewire-pulse',
   include_directories : [configinc, spa_inc],
   dependencies : [pipewire_dep, ],
 )
+
+#desktop_file = i18n.merge_file(
+#  input : 'pipewire.desktop.in',
+#  output : 'pipewire.desktop',
+#  po_dir : po_dir,
+#  type : 'desktop',
+#  install : true,
+#  install_dir : join_paths(pipewire_sysconfdir, 'xdg', 'autostart')
+#)
+#
+#desktop_utils = find_program('desktop-file-validate', required: false)
+#if desktop_utils.found()
+#  test('Validate desktop file', desktop_utils,
+#    args: [ desktop_file ],
+#  )
+#endif
 
 if get_option('systemd') and systemd.found()
   subdir('systemd')

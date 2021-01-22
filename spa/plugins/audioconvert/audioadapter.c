@@ -944,7 +944,7 @@ static int impl_node_process(void *object)
 				break;
 		}
 	} else if (!this->driver) {
-		bool done;
+		bool done = false;
 		while (true) {
 			/* output node (source). First run the converter to make
 			 * sure we push out any queued data. Then when it needs
@@ -971,9 +971,9 @@ static int impl_node_process(void *object)
 					status = fstatus;
 					break;
 				}
-				/* if the follower didn't produce more data
-				 * we can stop now */
-				if ((fstatus & SPA_STATUS_HAVE_DATA) == 0)
+				/* if the follower didn't produce more data or is
+				 * not drained we can stop now */
+				if ((fstatus & (SPA_STATUS_HAVE_DATA | SPA_STATUS_DRAINED)) == 0)
 					break;
 			}
 			/* converter produced something or is drained and we
@@ -981,7 +981,7 @@ static int impl_node_process(void *object)
 			if (done)
 				break;
 		}
-		if (!(status & SPA_STATUS_HAVE_DATA))
+		if (!done)
 			spa_node_call_xrun(&this->callbacks, 0, 0, NULL);
 
 	} else {

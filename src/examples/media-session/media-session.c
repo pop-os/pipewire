@@ -84,6 +84,7 @@ int sm_default_nodes_start(struct sm_media_session *sess);
 int sm_default_profile_start(struct sm_media_session *sess);
 int sm_default_routes_start(struct sm_media_session *sess);
 int sm_restore_stream_start(struct sm_media_session *sess);
+int sm_streams_follow_default_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
 int sm_libcamera_monitor_start(struct sm_media_session *sess);
@@ -317,13 +318,13 @@ int sm_object_destroy(struct sm_object *obj)
 		spa_list_remove(&d->link);
 		free(d);
 	}
-	if (p)
-		pw_proxy_unref(p);
-	if (h)
-		pw_proxy_unref(h);
 
 	obj->proxy = NULL;
 	obj->handle = NULL;
+	if (p)
+		pw_proxy_unref(p);
+	if (h)
+		pw_proxy_unref(h);  /* may free obj, if from init_object */
 
 	return 0;
 }
@@ -2227,6 +2228,7 @@ static const struct {
 	{ "default-profile", "restore default profiles", sm_default_profile_start, NULL },
 	{ "default-routes", "restore default route", sm_default_routes_start, NULL },
 	{ "restore-stream", "restore stream settings", sm_restore_stream_start, NULL },
+	{ "streams-follow-default", "move streams when default changes", sm_streams_follow_default_start, NULL },
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
 	{ "alsa-monitor", "alsa card udev detection", sm_alsa_monitor_start, NULL },
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },
@@ -2279,7 +2281,9 @@ int main(int argc, char *argv[])
 	pw_init(&argc, &argv);
 
 	impl.state_dir_fd = -1;
-	impl.this.props = pw_properties_new(NULL, NULL);
+	impl.this.props = pw_properties_new(
+			PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
+			NULL);
 	if (impl.this.props == NULL)
 		return -1;
 
@@ -2324,9 +2328,7 @@ int main(int argc, char *argv[])
 	pw_loop_add_signal(impl.this.loop, SIGTERM, do_quit, &impl);
 
 	impl.this.context = pw_context_new(impl.this.loop,
-				pw_properties_new(
-					PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
-					NULL),
+				pw_properties_copy(impl.this.props),
 				0);
 
 	if (impl.this.context == NULL)
