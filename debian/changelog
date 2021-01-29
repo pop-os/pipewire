@@ -1,3 +1,17 @@
+pipewire (0.3.19-3~) UNRELEASED; urgency=medium
+
+  * Don't enable audio-related plugins by default.
+    Using pipewire for audio is considered experimental for Debian 11,
+    and in particular the with-pulseaudio flag file will result in
+    PulseAudio and Pipewire fighting over Bluetooth devices.
+  * Install brief documentation of how to experiment with Pipewire for audio.
+    There should eventually be a pipewire-pulse package that sets up the
+    PulseAudio replacement automatically, and perhaps a pipewire-jack
+    package that does the equivalent for the JACK libraries, but these
+    are rather new and don't seem to be ready for general use in Debian 11.
+
+ -- Simon McVittie <smcv@debian.org>  Fri, 29 Jan 2021 13:10:40 +0000
+
 pipewire (0.3.19-2) unstable; urgency=medium
 
   * Team upload
