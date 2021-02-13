@@ -12,6 +12,7 @@ override_dh_auto_configure:
 		-Dauto_features=enabled \
 		-Ddocs=true \
 		-Dffmpeg=false \
+		-Dgstreamer-device-provider=false \
 		-Dinstalled_tests=true \
 		-Dman=true \
 		-Dtest=true \

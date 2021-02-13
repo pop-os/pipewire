@@ -1,3 +1,12 @@
+pipewire (0.3.19-4) unstable; urgency=medium
+
+  * Team upload
+  * Disable GStreamer device provider.
+    Apparently it isn't ready, and breaks video recording in cheese.
+    Thanks to Fedora (see also Red Hat bug 1884260). (Closes: #982636)
+
+ -- Simon McVittie <smcv@debian.org>  Sat, 13 Feb 2021 10:49:02 +0000
+
 pipewire (0.3.19-3) unstable; urgency=medium
 
   * Team upload
