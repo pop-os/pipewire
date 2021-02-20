@@ -4,6 +4,9 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_buffers_negotiate@Base 0.3.1
  pw_client_info_free@Base 0.3.1
  pw_client_info_update@Base 0.3.1
+ pw_conf_load_conf@Base 0.3.22
+ pw_conf_load_state@Base 0.3.22
+ pw_conf_save_state@Base 0.3.22
  pw_context_add_listener@Base 0.3.1
  pw_context_add_spa_lib@Base 0.3.1
  pw_context_connect@Base 0.3.1
@@ -23,6 +26,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_find_protocol@Base 0.3.1
  pw_context_find_spa_lib@Base 0.3.1
  pw_context_for_each_global@Base 0.3.1
+ pw_context_get_conf_section@Base 0.3.22
  pw_context_get_default_core@Base 0.3.1
  pw_context_get_main_loop@Base 0.3.1
  pw_context_get_object@Base 0.3.1
@@ -32,6 +36,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_load_module@Base 0.3.1
  pw_context_load_spa_handle@Base 0.3.1
  pw_context_new@Base 0.3.1
+ pw_context_parse_conf_section@Base 0.3.22
  pw_context_register_export_type@Base 0.3.1
  pw_context_set_object@Base 0.3.1
  pw_context_update_properties@Base 0.3.1
