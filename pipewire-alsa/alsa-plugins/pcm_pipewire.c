@@ -808,16 +808,21 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
 		SND_PCM_ACCESS_RW_NONINTERLEAVED
 	};
 	unsigned int format_list[] = {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
 		SND_PCM_FORMAT_FLOAT_LE,
-		SND_PCM_FORMAT_FLOAT_BE,
 		SND_PCM_FORMAT_S32_LE,
-		SND_PCM_FORMAT_S32_BE,
-		SND_PCM_FORMAT_S16_LE,
-		SND_PCM_FORMAT_S16_BE,
 		SND_PCM_FORMAT_S24_LE,
+		SND_PCM_FORMAT_S24_3LE,
+		SND_PCM_FORMAT_S24_3BE,
+		SND_PCM_FORMAT_S16_LE,
+#elif __BYTE_ORDER == __BIG_ENDIAN
+		SND_PCM_FORMAT_FLOAT_BE,
+		SND_PCM_FORMAT_S32_BE,
 		SND_PCM_FORMAT_S24_BE,
 		SND_PCM_FORMAT_S24_3LE,
 		SND_PCM_FORMAT_S24_3BE,
+		SND_PCM_FORMAT_S16_BE,
+#endif
 		SND_PCM_FORMAT_U8,
 	};
 	int min_rate;
@@ -854,7 +859,8 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_RATE,
 						   min_rate, max_rate)) < 0 ||
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_BUFFER_BYTES,
-						   16*1024, 4*1024*1024)) < 0 ||
+						   MIN_BUFFERS*min_period_bytes,
+						   MIN_BUFFERS*max_period_bytes)) < 0 ||
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io,
 						   SND_PCM_IOPLUG_HW_PERIOD_BYTES,
 						   min_period_bytes,
@@ -931,7 +937,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 		return -ENOMEM;
 
 	str = getenv("PIPEWIRE_REMOTE");
-	if (str != NULL)
+	if (str != NULL && str[0] != '\0')
 		server_name = str;
 
 	str = getenv("PIPEWIRE_NODE");

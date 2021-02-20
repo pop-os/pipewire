@@ -132,6 +132,8 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 	struct pw_impl_factory *factory;
 	int res;
 	const char *prefix, *str, *profile, *rules;
+	int priority;
+	char tmp[1024];
 
 	pw_log_debug("new node %u", id);
 
@@ -158,7 +160,10 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 		str = "bluetooth-device";
 
 	pw_properties_setf(node->props, PW_KEY_DEVICE_ID, "%d", device->device_id);
-	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION, str);
+
+	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+		sm_media_session_sanitize_description(tmp, sizeof(tmp),
+			' ', "%s", str));
 
 	profile = pw_properties_get(node->props, SPA_KEY_API_BLUEZ5_PROFILE);
 	if (profile == NULL)
@@ -168,14 +173,27 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 		str = pw_properties_get(device->props, SPA_KEY_DEVICE_NAME);
 
 	if (strstr(info->factory_name, "sink") != NULL)
-		prefix = "bluez_input";
-	else if (strstr(info->factory_name, "source") != NULL)
 		prefix = "bluez_output";
+	else if (strstr(info->factory_name, "source") != NULL)
+		prefix = "bluez_input";
 	else
 		prefix = info->factory_name;
 
-	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s.%s", prefix, str, profile);
+	pw_properties_set(node->props, PW_KEY_NODE_NAME,
+		sm_media_session_sanitize_name(tmp, sizeof(tmp),
+			'_', "%s.%s.%s", prefix, str, profile));
+
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
+
+	if (pw_properties_get(node->props, PW_KEY_PRIORITY_DRIVER) == NULL) {
+		priority = device->priority + 10;
+
+		if (strstr(info->factory_name, "source") != NULL)
+			priority += 1000;
+
+		pw_properties_setf(node->props, PW_KEY_PRIORITY_DRIVER, "%d", priority);
+		pw_properties_setf(node->props, PW_KEY_PRIORITY_SESSION, "%d", priority);
+	}
 
 	node->impl = impl;
 	node->device = device;
@@ -267,8 +285,10 @@ static void bluez_device_event(void *data, const struct spa_event *event)
 			SPA_EVENT_DEVICE_Props, SPA_POD_OPT_Pod(&props)) < 0)
 		return;
 
-	if ((node = bluez5_find_node(device, id)) == NULL)
+	if ((node = bluez5_find_node(device, id)) == NULL) {
+		pw_log_warn("device %p: unknown node %d", device, id);
 		return;
+	}
 
 	switch (type) {
 	case SPA_DEVICE_EVENT_ObjectConfig:
@@ -277,9 +297,15 @@ static void bluez_device_event(void *data, const struct spa_event *event)
 		 * pw_client_node_get_node() and perform the set_param on
 		 * that node proxy instead of waiting for the session manager
 		 * proxy. */
-		if (props != NULL && node->snode->obj.proxy != NULL)
-			pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
-				SPA_PARAM_Props, 0, props);
+		if (props != NULL) {
+			if (node->snode->obj.proxy != NULL) {
+				pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
+					SPA_PARAM_Props, 0, props);
+			} else {
+				pw_log_warn("device %p: node %d not ready for volume yet",
+						device, id);
+			}
+		}
 		break;
 	default:
 		break;
@@ -314,23 +340,6 @@ static void bluez5_update_device(struct impl *impl, struct device *dev,
 	pw_properties_update(dev->props, info->props);
 }
 
-static void set_profile(struct device *device, int index)
-{
-	char buf[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-
-	pw_log_debug("%p: set profile %d id:%d", device, index, device->device_id);
-
-	device->profile = index;
-	if (device->device_id != 0) {
-		spa_device_set_param(device->device,
-				SPA_PARAM_Profile, 0,
-				spa_pod_builder_add_object(&b,
-					SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
-					SPA_PARAM_PROFILE_index,   SPA_POD_Int(index)));
-	}
-}
-
 static void device_destroy(void *data)
 {
 	struct device *device = data;
@@ -358,7 +367,6 @@ static void device_update(void *data)
 		&device->device_listener,
 		&bluez5_device_events, device);
 
-	set_profile(device, 1);
 	sm_object_sync_update(&device->sdevice->obj);
 }
 
@@ -408,6 +416,7 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 
 	device->impl = impl;
 	device->id = id;
+	device->priority = 1000;
 	device->handle = handle;
 	device->device = iface;
 	device->props = pw_properties_new_dict(info->props);

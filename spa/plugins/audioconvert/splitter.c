@@ -76,7 +76,7 @@ struct port {
 
 	struct spa_dict info_props;
 	struct spa_dict_item info_props_items[2];
-	char position[8];
+	char position[16];
 
 	bool have_format;
 	struct spa_audio_info format;
@@ -157,9 +157,15 @@ static int init_port(struct impl *this, enum spa_direction direction,
 	port->direction = direction;
 	port->id = port_id;
 
-	snprintf(port->position, 7, "%s",
-			spa_debug_type_short_name(spa_type_audio_channel[position].name));
-
+	if (position < SPA_N_ELEMENTS(spa_type_audio_channel)) {
+		snprintf(port->position, sizeof(port->position), "%s",
+				spa_debug_type_short_name(spa_type_audio_channel[position].name));
+	} else if (position >= SPA_AUDIO_CHANNEL_CUSTOM_START) {
+		snprintf(port->position, sizeof(port->position), "AUX%d",
+				position - SPA_AUDIO_CHANNEL_CUSTOM_START);
+	} else {
+		snprintf(port->position, sizeof(port->position), "UNK");
+	}
 
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
 			SPA_PORT_CHANGE_MASK_PROPS |
@@ -427,23 +433,19 @@ static int port_enum_formats(void *object,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(18,
+				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(14,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32,
-							SPA_AUDIO_FORMAT_F32_OE,
 							SPA_AUDIO_FORMAT_S32P,
 							SPA_AUDIO_FORMAT_S32,
-							SPA_AUDIO_FORMAT_S32_OE,
 							SPA_AUDIO_FORMAT_S24_32P,
 							SPA_AUDIO_FORMAT_S24_32,
-							SPA_AUDIO_FORMAT_S24_32_OE,
 							SPA_AUDIO_FORMAT_S24P,
 							SPA_AUDIO_FORMAT_S24,
 							SPA_AUDIO_FORMAT_S24_OE,
 							SPA_AUDIO_FORMAT_S16P,
 							SPA_AUDIO_FORMAT_S16,
-							SPA_AUDIO_FORMAT_S16_OE,
 							SPA_AUDIO_FORMAT_U8P,
 							SPA_AUDIO_FORMAT_U8),
 				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(

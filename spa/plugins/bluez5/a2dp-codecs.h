@@ -332,8 +332,9 @@ struct a2dp_codec {
 	const char *description;
 	const struct spa_dict *info;
 
-	const int send_fill_frames;
-	const int recv_fill_frames;
+	const size_t send_buf_size;
+
+	const char *feature_flag;
 
 	int (*fill_caps) (const struct a2dp_codec *codec, uint32_t flags,
 			uint8_t caps[A2DP_MAX_CAPS_SIZE]);
@@ -346,6 +347,14 @@ struct a2dp_codec {
 	int (*validate_config) (const struct a2dp_codec *codec, uint32_t flags,
 			const void *caps, size_t caps_size,
 			struct spa_audio_info *info);
+
+	/** qsort comparison sorting caps in order of preference for the codec.
+	 * Used in codec switching to select best remote endpoints.
+	 * The caps handed in correspond to this codec_id, but are
+	 * otherwise not checked beforehand.
+	 */
+	int (*caps_preference_cmp) (const struct a2dp_codec *codec, const void *caps1, size_t caps1_size,
+			const void *caps2, size_t caps2_size);
 
 	void *(*init) (const struct a2dp_codec *codec, uint32_t flags, void *config, size_t config_size,
 			const struct spa_audio_info *info, const struct spa_dict *settings, size_t mtu);
@@ -377,5 +386,7 @@ struct a2dp_codec {
 };
 
 extern const struct a2dp_codec **a2dp_codecs;
+
+bool a2dp_codec_check_caps(const struct a2dp_codec *codec, unsigned int codec_id, const void *caps, size_t caps_size);
 
 #endif

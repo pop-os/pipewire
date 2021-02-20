@@ -121,7 +121,7 @@ static void select_best(struct selector *s, struct pw_manager_object *o)
 	if (o->props &&
 	    (str = pw_properties_get(o->props, PW_KEY_PRIORITY_DRIVER)) != NULL) {
 		prio = pw_properties_parse_int(str);
-		if (prio > s->score) {
+		if (s->best == NULL || prio > s->score) {
 			s->best = o;
 			s->score = prio;
 		}
@@ -135,7 +135,7 @@ static struct pw_manager_object *select_object(struct pw_manager *m,
 	const char *str;
 
 	spa_list_for_each(o, &m->object_list, link) {
-		if (o->creating)
+		if (o->creating || o->removing)
 			continue;
 		if (s->type != NULL && !s->type(o))
 			continue;
@@ -264,7 +264,6 @@ static uint32_t collect_profile_info(struct pw_manager_object *card, struct card
 
 			SPA_POD_STRUCT_FOREACH(classes, iter) {
 				struct spa_pod_parser prs;
-				struct spa_pod_frame f[1];
 				char *class;
 				uint32_t count;
 
@@ -278,8 +277,6 @@ static uint32_t collect_profile_info(struct pw_manager_object *card, struct card
 					pi->n_sinks += count;
 				else if (strcmp(class, "Audio/Source") == 0)
 					pi->n_sources += count;
-
-				spa_pod_parser_pop(&prs, &f[0]);
 			}
 		}
 		n++;

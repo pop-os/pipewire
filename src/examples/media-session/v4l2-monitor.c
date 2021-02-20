@@ -128,6 +128,7 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 	struct impl *impl = dev->impl;
 	int i, res;
 	const char *prefix, *str, *d, *rules;
+	char tmp[1024];
 
 	pw_log_debug("new node %u", id);
 
@@ -156,14 +157,15 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 			str += 12;
 
 	if (strstr(info->factory_name, "sink") != NULL)
-		prefix = "v4l2_input";
-	else if (strstr(info->factory_name, "source") != NULL)
 		prefix = "v4l2_output";
+	else if (strstr(info->factory_name, "source") != NULL)
+		prefix = "v4l2_input";
 	else
 		prefix = info->factory_name;
 
-	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s", prefix, str);
-
+	pw_properties_set(node->props, PW_KEY_NODE_NAME,
+			sm_media_session_sanitize_name(tmp, sizeof(tmp),
+					'_', "%s.%s", prefix, str));
 	for (i = 2; i <= 99; i++) {
 		if ((d = pw_properties_get(node->props, PW_KEY_NODE_NAME)) == NULL)
 			break;
@@ -171,14 +173,18 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 		if (v4l2_find_node(dev, SPA_ID_INVALID, d) == NULL)
 			break;
 
-		pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s.%d",
-				prefix, str, i);
+		pw_properties_set(node->props, PW_KEY_NODE_NAME,
+			sm_media_session_sanitize_name(tmp, sizeof(tmp),
+					'_', "%s.%s.%d", prefix, str, i));
 	}
 
 	str = pw_properties_get(dev->props, SPA_KEY_DEVICE_DESCRIPTION);
 	if (str == NULL)
 		str = "v4l2-device";
-	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION, str);
+
+	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+		sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s", str));
 
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
 

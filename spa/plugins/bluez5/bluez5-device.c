@@ -53,6 +53,9 @@
 
 #define MAX_DEVICES	64
 
+#define DEVICE_ID_SOURCE	0
+#define DEVICE_ID_SINK		1
+
 static const char default_device[] = "";
 
 struct props {
@@ -92,8 +95,16 @@ struct impl {
 	struct props props;
 
 	struct spa_bt_device *bt_dev;
+	struct spa_hook bt_dev_listener;
 
 	uint32_t profile;
+	const struct a2dp_codec *selected_a2dp_codec;  /**< Codec wanted. NULL means any. */
+	unsigned int switching_codec:1;
+	uint32_t prev_bt_connected_profiles;
+
+	const struct a2dp_codec **supported_codecs;
+	size_t supported_codec_count;
+
 	struct node nodes[2];
 };
 
@@ -107,6 +118,19 @@ static void init_node(struct impl *this, struct node *node, uint32_t id)
 		node->volumes[i] = 1.0;
 }
 
+static const char *get_codec_name(struct spa_bt_transport *t)
+{
+	if (t->a2dp_codec != NULL)
+		return t->a2dp_codec->name;
+	switch (t->codec) {
+	case HFP_AUDIO_CODEC_MSBC:
+		return "mSBC";
+	case HFP_AUDIO_CODEC_CVSD:
+		return "CVSD";
+	}
+	return "unknown";
+}
+
 static void emit_node(struct impl *this, struct spa_bt_transport *t,
 		uint32_t id, const char *factory_name)
 {
@@ -118,8 +142,7 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 	snprintf(transport, sizeof(transport), "pointer:%p", t);
 	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_TRANSPORT, transport);
 	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PROFILE, spa_bt_profile_name(t->profile));
-	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CODEC,
-			t->a2dp_codec ? t->a2dp_codec->name : "unknown");
+	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CODEC, get_codec_name(t));
 	snprintf(str_id, sizeof(str_id), "%d", id);
 	items[3] = SPA_DICT_ITEM_INIT("card.profile.device", str_id);
 	items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
@@ -138,16 +161,33 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 			t->n_channels * sizeof(uint32_t));
 }
 
-static struct spa_bt_transport *find_transport(struct impl *this, int profile)
+static struct spa_bt_transport *find_transport(struct impl *this, int profile, const struct a2dp_codec *a2dp_codec)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_bt_transport *t;
+	const struct a2dp_codec **codecs;
+	size_t i, num_codecs;
 
-	spa_list_for_each(t, &device->transport_list, device_link) {
-		if (t->profile & device->connected_profiles &&
-		    (t->profile & profile) == t->profile)
-			return t;
+	codecs = &a2dp_codec;
+	num_codecs = 1;
+
+	if (a2dp_codec == NULL && (profile == SPA_BT_PROFILE_A2DP_SOURCE || profile == SPA_BT_PROFILE_A2DP_SINK)) {
+		codecs = a2dp_codecs;
+		num_codecs = 0;
+		while (codecs[num_codecs] != NULL)
+			++num_codecs;
 	}
+
+	for (i = 0; i < num_codecs; ++i) {
+		spa_list_for_each(t, &device->transport_list, device_link) {
+			if (t->enabled &&
+			    (t->profile & device->connected_profiles) &&
+			    (t->profile & profile) == t->profile &&
+			    (codecs[i] == NULL || t->a2dp_codec == codecs[i]))
+				return t;
+		}
+	}
+
 	return NULL;
 }
 
@@ -160,15 +200,15 @@ static int emit_nodes(struct impl *this)
 		break;
 	case 1:
 		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE) {
-			t = find_transport(this, SPA_BT_PROFILE_A2DP_SOURCE);
+			t = find_transport(this, SPA_BT_PROFILE_A2DP_SOURCE, this->selected_a2dp_codec);
 			if (t)
-				emit_node(this, t, 0, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
+				emit_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
 		}
 
 		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SINK) {
-			t = find_transport(this, SPA_BT_PROFILE_A2DP_SINK);
+			t = find_transport(this, SPA_BT_PROFILE_A2DP_SINK, this->selected_a2dp_codec);
 			if (t)
-				emit_node(this, t, 1, SPA_NAME_API_BLUEZ5_A2DP_SINK);
+				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK);
 		}
 		break;
 	case 2:
@@ -177,14 +217,14 @@ static int emit_nodes(struct impl *this)
 			int i;
 
 			for (i = SPA_BT_PROFILE_HSP_HS ; i <= SPA_BT_PROFILE_HFP_AG ; i <<= 1) {
-				t = find_transport(this, i);
+				t = find_transport(this, i, NULL);
 				if (t)
 					break;
 			}
 			if (t == NULL)
 				break;
-			emit_node(this, t, 0, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
-			emit_node(this, t, 1, SPA_NAME_API_BLUEZ5_SCO_SINK);
+			emit_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
+			emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_SCO_SINK);
 		}
 		break;
 	default:
@@ -195,6 +235,7 @@ static int emit_nodes(struct impl *this)
 
 static const struct spa_dict_item info_items[] = {
 	{ SPA_KEY_DEVICE_API, "bluez5" },
+	{ SPA_KEY_DEVICE_BUS, "bluetooth" },
 	{ SPA_KEY_MEDIA_CLASS, "Audio/Device" },
 };
 
@@ -210,12 +251,9 @@ static void emit_info(struct impl *this, bool full)
 	}
 }
 
-static int set_profile(struct impl *this, uint32_t profile)
+static void emit_remove_nodes(struct impl *this)
 {
 	uint32_t i;
-
-	if (this->profile == profile)
-		return 0;
 
 	for (i = 0; i < 2; i++) {
 		if (this->nodes[i].active) {
@@ -223,8 +261,47 @@ static int set_profile(struct impl *this, uint32_t profile)
 			this->nodes[i].active = false;
 		}
 	}
-	this->profile = profile;
+}
 
+static int set_profile(struct impl *this, uint32_t profile, const struct a2dp_codec *a2dp_codec)
+{
+	if (this->profile == profile && a2dp_codec == this->selected_a2dp_codec)
+		return 0;
+
+	emit_remove_nodes(this);
+
+	this->profile = profile;
+	this->selected_a2dp_codec = a2dp_codec;
+
+	/*
+	 * A2DP: ensure there's a transport with the selected codec (NULL means any).
+	 * Don't try to switch codecs when the device is in the A2DP source role, since
+	 * devices do not appear to like that.
+	 */
+	if (profile == 1 && !(this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)) {
+		int ret;
+		const struct a2dp_codec *codec_list[2], **codecs;
+
+		if (a2dp_codec == NULL) {
+			codecs = a2dp_codecs;
+		} else {
+			codec_list[0] = a2dp_codec;
+			codec_list[1] = NULL;
+			codecs = codec_list;
+		}
+
+		this->switching_codec = true;
+		this->prev_bt_connected_profiles = this->bt_dev->connected_profiles;
+
+		ret = spa_bt_device_ensure_a2dp_codec(this->bt_dev, codecs);
+		if (ret < 0)
+			spa_log_error(this->log, NAME": failed to switch codec (%d), setting basic profile", ret);
+		else
+			return 0;
+	}
+
+	this->switching_codec = false;
+	this->selected_a2dp_codec = NULL;
 	emit_nodes(this);
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
@@ -235,6 +312,90 @@ static int set_profile(struct impl *this, uint32_t profile)
 
 	return 0;
 }
+
+static void codec_switched(void *userdata, int status)
+{
+	struct impl *this = userdata;
+
+	spa_log_debug(this->log, NAME": codec switched (status %d)", status);
+
+	this->switching_codec = false;
+
+	if (status < 0) {
+		/* Failed to switch: return to a fallback profile */
+		spa_log_error(this->log, NAME": failed to switch codec (%d), setting fallback profile", status);
+		if (this->selected_a2dp_codec != NULL) {
+			this->selected_a2dp_codec = NULL;
+		} else {
+			this->profile = 0;
+		}
+	}
+
+	emit_remove_nodes(this);
+	emit_nodes(this);
+
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	if (this->prev_bt_connected_profiles != this->bt_dev->connected_profiles)
+		this->params[IDX_EnumProfile].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->params[IDX_Profile].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->params[IDX_EnumRoute].flags ^= SPA_PARAM_INFO_SERIAL;
+	emit_info(this, false);
+}
+
+static void profiles_changed(void *userdata, uint32_t prev_profiles, uint32_t prev_connected_profiles)
+{
+	struct impl *this = userdata;
+	uint32_t connected_change;
+	bool nodes_changed = false;
+
+	connected_change = (this->bt_dev->connected_profiles ^ prev_connected_profiles);
+
+	/* Profiles changed. We have to re-emit device information. */
+	spa_log_info(this->log, NAME": profiles changed to  %08x %08x (prev %08x %08x, change %08x)"
+		     " switching_codec:%d",
+		     this->bt_dev->profiles, this->bt_dev->connected_profiles,
+		     prev_profiles, prev_connected_profiles, connected_change,
+		     this->switching_codec);
+
+	if (this->switching_codec)
+		return;
+
+	if (this->profile == 0) {
+		/* Noop */
+		nodes_changed = false;
+	} else if (this->profile == 2) {
+		/* HFP/HSP */
+		nodes_changed = (connected_change & (SPA_BT_PROFILE_HEADSET_HEAD_UNIT |
+						     SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY));
+		spa_log_debug(this->log, NAME": profiles changed: HSP/HFP nodes changed: %d",
+			      nodes_changed);
+	} else {
+		nodes_changed = (connected_change & (SPA_BT_PROFILE_A2DP_SINK |
+						     SPA_BT_PROFILE_A2DP_SOURCE));
+		spa_log_debug(this->log, NAME": profiles changed: A2DP nodes changed: %d",
+			      nodes_changed);
+	}
+
+	if (nodes_changed) {
+		emit_remove_nodes(this);
+		emit_nodes(this);
+
+		this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
+		this->params[IDX_EnumRoute].flags ^= SPA_PARAM_INFO_SERIAL;
+	}
+
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Profile].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->params[IDX_EnumProfile].flags ^= SPA_PARAM_INFO_SERIAL;
+	emit_info(this, false);
+}
+
+static const struct spa_bt_device_events bt_dev_events = {
+	SPA_VERSION_BT_DEVICE_EVENTS,
+	.codec_switched = codec_switched,
+	.profiles_changed = profiles_changed,
+};
 
 static int impl_add_listener(void *object,
 			struct spa_hook *listener,
@@ -307,15 +468,99 @@ static uint32_t profile_direction_mask(struct impl *this, uint32_t index)
 	return mask;
 }
 
+static uint32_t get_profile_from_index(struct impl *this, uint32_t index, const struct a2dp_codec **codec)
+{
+	/*
+	 * XXX: The A2DP codec should probably become a separate param, and not have
+	 * XXX: separate profiles for each one.
+	 */
+
+	*codec = NULL;
+
+	if (index < 3)
+		return index;
+
+	/* A2DP sources don't have codec profiles (device chooses it) */
+	if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)
+		return SPA_ID_INVALID;
+
+	if (index - 3 < this->supported_codec_count) {
+		*codec = this->supported_codecs[index - 3];
+		return 1;
+	} else {
+		return SPA_ID_INVALID;
+	}
+}
+
+static uint32_t get_index_from_profile(struct impl *this, uint32_t profile, const struct a2dp_codec *codec)
+{
+	size_t i;
+
+	if (profile != 1)
+		return profile;
+
+	if (codec == NULL)
+		return 1;
+
+	/* A2DP sources don't have codec profiles (device chooses it) */
+	if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)
+		return SPA_ID_INVALID;
+
+	for (i = 0; i < this->supported_codec_count; ++i) {
+		if (this->supported_codecs[i] == codec)
+			return 3 + i;
+	}
+
+	return SPA_ID_INVALID;
+}
+
+static void set_initial_profile(struct impl *this)
+{
+	struct spa_bt_transport *t;
+	int i;
+
+	/* Prefer A2DP, then HFP, then null */
+
+	for (i = SPA_BT_PROFILE_A2DP_SINK; i <= SPA_BT_PROFILE_A2DP_SOURCE; i <<= 1) {
+		if (!(this->bt_dev->connected_profiles & i))
+			continue;
+
+		t = find_transport(this, i, NULL);
+		if (t) {
+			this->profile = 1;
+			this->selected_a2dp_codec = t->a2dp_codec;
+			return;
+		}
+	}
+
+	for (i = SPA_BT_PROFILE_HSP_HS; i <= SPA_BT_PROFILE_HFP_AG; i <<= 1) {
+		if (!(this->bt_dev->connected_profiles & i))
+			continue;
+
+		t = find_transport(this, i, NULL);
+		if (t) {
+			this->profile = 2;
+			this->selected_a2dp_codec = NULL;
+			return;
+		}
+	}
+
+	this->profile = 0;
+	this->selected_a2dp_codec = NULL;
+}
+
 static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *b,
-		uint32_t id, uint32_t index)
+		uint32_t id, uint32_t index, uint32_t profile_index, const struct a2dp_codec *codec)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_pod_frame f[2];
 	const char *name, *desc;
+	char *name_and_codec = NULL;
+	char *desc_and_codec = NULL;
 	uint32_t n_source = 0, n_sink = 0;
+	uint32_t capture[1] = { DEVICE_ID_SOURCE }, playback[1] = { DEVICE_ID_SINK };
 
-	switch (index) {
+	switch (profile_index) {
 	case 0:
 		name = "off";
 		desc = "Off";
@@ -327,19 +572,26 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		if (profile == 0) {
 			return NULL;
 		} else if (profile == SPA_BT_PROFILE_A2DP_SINK) {
-			desc = "High Fidelity Playback (A2DP Sink)";
-			name = "a2dp-sink";
+			desc = "High Fidelity Playback (A2DP Sink%s%s)";
 		} else if (profile == SPA_BT_PROFILE_A2DP_SOURCE) {
-			desc = "High Fidelity Capture (A2DP Source)";
-			name = "a2dp-source";
+			desc = "High Fidelity Capture (A2DP Source%s%s)";
 		} else {
-			desc = "High Fidelity Duplex (A2DP Source/Sink)";
-			name = "a2dp-duplex";
+			desc = "High Fidelity Duplex (A2DP Source/Sink%s%s)";
 		}
+		name = spa_bt_profile_name(profile);
 		if (profile & SPA_BT_PROFILE_A2DP_SOURCE)
 			n_source++;
 		if (profile & SPA_BT_PROFILE_A2DP_SINK)
 			n_sink++;
+		if (codec != NULL) {
+			name_and_codec = spa_aprintf("%s-%s", name, codec->name);
+			desc_and_codec = spa_aprintf(desc, ", codec ", codec->description);
+			name = name_and_codec;
+			desc = desc_and_codec;
+		} else {
+			desc_and_codec = spa_aprintf(desc, "", "");
+			desc = desc_and_codec;
+		}
 		break;
 	}
 	case 2:
@@ -350,14 +602,12 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 			return NULL;
 		} else if (profile == SPA_BT_PROFILE_HEADSET_HEAD_UNIT) {
 			desc = "Headset Head Unit (HSP/HFP)";
-			name = "headset-head-unit";
 		} else if (profile == SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY) {
 			desc = "Headset Audio Gateway (HSP/HFP)";
-			name = "headset-audio-gateway";
 		} else {
 			desc = "Headset Audio (HSP/HFP)";
-			name = "headset-audio";
 		}
+		name = spa_bt_profile_name(profile);
 		n_source++;
 		n_sink++;
 		break;
@@ -372,22 +622,38 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		SPA_PARAM_PROFILE_index,   SPA_POD_Int(index),
 		SPA_PARAM_PROFILE_name, SPA_POD_String(name),
 		SPA_PARAM_PROFILE_description, SPA_POD_String(desc),
+		SPA_PARAM_PROFILE_available, SPA_POD_Id(SPA_PARAM_AVAILABILITY_yes),
 		0);
+	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
+	spa_pod_builder_push_array(b, &f[1]);
+	if (n_source > 0)
+		spa_pod_builder_int(b, capture[0]);
+	if (n_sink > 0)
+		spa_pod_builder_int(b, playback[0]);
+	spa_pod_builder_pop(b, &f[1]);
 	if (n_source > 0 || n_sink > 0) {
 		spa_pod_builder_prop(b, SPA_PARAM_PROFILE_classes, 0);
 		spa_pod_builder_push_struct(b, &f[1]);
 		if (n_source > 0) {
 			spa_pod_builder_add_struct(b,
 				SPA_POD_String("Audio/Source"),
-				SPA_POD_Int(n_source));
+				SPA_POD_Int(n_source),
+				SPA_POD_String("card.profile.devices"),
+				SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Int, 1, capture));
 		}
 		if (n_sink > 0) {
 			spa_pod_builder_add_struct(b,
 				SPA_POD_String("Audio/Sink"),
-				SPA_POD_Int(n_sink));
+				SPA_POD_Int(n_sink),
+				SPA_POD_String("card.profile.devices"),
+				SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Int, 1, playback));
 		}
 		spa_pod_builder_pop(b, &f[1]);
 	}
+
+	free(name_and_codec);
+	free(desc_and_codec);
+
 	return spa_pod_builder_pop(b, &f[0]);
 }
 
@@ -401,7 +667,7 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	enum spa_param_availability available;
 	enum spa_bt_form_factor ff;
 	char name[128];
-	uint32_t i;
+	uint32_t i, mask;
 
 	ff = spa_bt_form_factor_from_class(device->bluetooth_class);
 
@@ -478,6 +744,12 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	if (dev != SPA_ID_INVALID && available == SPA_PARAM_AVAILABILITY_no)
 		return NULL;
 
+	mask = 0;
+	for (i = 1; i < 3; i++)
+		mask |= profile_direction_mask(this, i);
+	if ((mask & (1 << direction)) == 0)
+		return NULL;
+
 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_ParamRoute, id);
 	spa_pod_builder_add(b,
 		SPA_PARAM_ROUTE_index, SPA_POD_Int(port),
@@ -497,7 +769,7 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	spa_pod_builder_pop(b, &f[1]);
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
 	spa_pod_builder_push_array(b, &f[1]);
-	for (i = 0; i < 3; i++) {
+	for (i = 1; i < 3; i++) {
 		if (profile_direction_mask(this, i) & (1 << direction))
 			spa_pod_builder_int(b, i);
 	}
@@ -563,9 +835,14 @@ static int impl_enum_params(void *object, int seq,
 	switch (id) {
 	case SPA_PARAM_EnumProfile:
 	{
-		switch (result.index) {
+		uint32_t profile;
+		const struct a2dp_codec *codec;
+
+		profile = get_profile_from_index(this, result.index, &codec);
+
+		switch (profile) {
 		case 0: case 1: case 2:
-			param = build_profile(this, &b, id, result.index);
+			param = build_profile(this, &b, id, result.index, profile, codec);
 			if (param == NULL)
 				goto next;
 			break;
@@ -576,9 +853,12 @@ static int impl_enum_params(void *object, int seq,
 	}
 	case SPA_PARAM_Profile:
 	{
+		uint32_t index;
+
 		switch (result.index) {
 		case 0:
-			param = build_profile(this, &b, id, this->profile);
+			index = get_index_from_profile(this, this->profile, this->selected_a2dp_codec);
+			param = build_profile(this, &b, id, index, this->profile, this->selected_a2dp_codec);
 			if (param == NULL)
 				return 0;
 			break;
@@ -593,6 +873,8 @@ static int impl_enum_params(void *object, int seq,
 		case 0: case 1:
 			param = build_route(this, &b, id, result.index,
 					SPA_ID_INVALID, SPA_ID_INVALID);
+			if (param == NULL)
+				goto next;
 			break;
 		default:
 			return 0;
@@ -649,10 +931,10 @@ static int node_set_volume(struct impl *this, struct node *node, float volumes[]
 	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Props, 0);
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
-	SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
-			SPA_TYPE_Float, n_volumes, volumes),
-	SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
-			SPA_TYPE_Id, node->n_channels, node->channels));
+			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
+				SPA_TYPE_Float, n_volumes, volumes),
+			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
+				SPA_TYPE_Id, node->n_channels, node->channels));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
@@ -668,6 +950,7 @@ static int node_set_mute(struct impl *this, struct node *node, bool mute)
 	struct spa_pod_frame f[1];
 
 	spa_log_info(this->log, "node %p mute %d", node, mute);
+	node->mute = mute;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0],
@@ -677,7 +960,7 @@ static int node_set_mute(struct impl *this, struct node *node, bool mute)
 	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Props, 0);
 
 	spa_pod_builder_add_object(&b,
-	SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
+			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
 			SPA_PROP_mute, SPA_POD_Bool(mute));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
@@ -747,6 +1030,8 @@ static int impl_set_param(void *object,
 	case SPA_PARAM_Profile:
 	{
 		uint32_t id;
+		uint32_t profile;
+		const struct a2dp_codec *codec;
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
@@ -755,7 +1040,14 @@ static int impl_set_param(void *object,
 			spa_debug_pod(0, NULL, param);
 			return res;
 		}
-		set_profile(this, id);
+
+		profile = get_profile_from_index(this, id, &codec);
+		if (profile == SPA_ID_INVALID)
+			return -EINVAL;
+
+		spa_log_debug(this->log, NAME": setting profile %d codec %s", profile,
+		              codec ? codec->name : "<null>");
+		set_profile(this, profile, codec);
 		break;
 	}
 	case SPA_PARAM_Route:
@@ -818,6 +1110,12 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 static int impl_clear(struct spa_handle *handle)
 {
+	struct impl *this = (struct impl *) handle;
+
+	free(this->supported_codecs);
+	if (this->bt_dev)
+		spa_hook_remove(&this->bt_dev_listener);
+
 	return 0;
 }
 
@@ -877,6 +1175,12 @@ impl_init(const struct spa_handle_factory *factory,
 	this->params[IDX_Route] = SPA_PARAM_INFO(SPA_PARAM_Route, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
 	this->info.n_params = 4;
+
+	this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(this->bt_dev, &this->supported_codec_count);
+
+	spa_bt_device_add_listener(this->bt_dev, &this->bt_dev_listener, &bt_dev_events, this);
+
+	set_initial_profile(this);
 
 	return 0;
 }

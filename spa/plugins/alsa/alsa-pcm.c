@@ -584,47 +584,38 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	dir = 0;
 	period_size = state->default_period_size ? state->default_period_size : 1024;
-	is_batch = snd_pcm_hw_params_is_batch(params);
-	if (is_batch) {
-		const char *id;
-		snd_pcm_info_t* pcm_info;
-		snd_pcm_info_alloca(&pcm_info);
-		if (snd_pcm_info(hndl, pcm_info) == 0 &&
-		    (id = snd_pcm_info_get_id(pcm_info)) != NULL) {
-			/* usb devices have low enough transfer size */
-			if (strcmp(id, "USB Audio") == 0)
-				is_batch = false;
-		}
-	}
+	is_batch = snd_pcm_hw_params_is_batch(params) &&
+		!state->disable_batch;
+
 	if (is_batch) {
 		/* batch devices get their hw pointers updated every period. Make
 		 * the period smaller and add one period of headroom */
 		period_size /= 2;
 		spa_log_info(state->log, NAME" %s: batch mode, period_size:%ld",
-				state->props.device, period_size);
+			state->props.device, period_size);
 	}
 
 	CHECK(snd_pcm_hw_params_set_period_size_near(hndl, params, &period_size, &dir), "set_period_size_near");
 	CHECK(snd_pcm_hw_params_get_buffer_size_max(params, &state->buffer_frames), "get_buffer_size_max");
 	CHECK(snd_pcm_hw_params_set_buffer_size_near(hndl, params, &state->buffer_frames), "set_buffer_size_near");
 
-	if (state->default_headroom == 0)
-		state->headroom = is_batch ? period_size : 0;
-	else
-		state->headroom = state->default_headroom;
+	state->headroom = state->default_headroom;
+	if (is_batch)
+		state->headroom += period_size;
 
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;
 
 	spa_log_info(state->log, NAME" %s (%s): format:%s access:%s-%s rate:%d channels:%d "
-			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd",
+			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd"
+			"headroom %u",
 			state->props.device,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
 			snd_pcm_format_name(state->format),
 			state->use_mmap ? "mmap" : "rw",
 			planar ? "planar" : "interleaved",
 			state->rate, state->channels, state->buffer_frames, state->period_frames,
-			periods, state->frame_size);
+			periods, state->frame_size, state->headroom);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
@@ -770,6 +761,7 @@ static int alsa_recover(struct state *state, int err)
 	case SND_PCM_STATE_SUSPENDED:
 		spa_log_info(state->log, NAME" %p: recover from state %s",
 				state, snd_pcm_state_name(st));
+		err = -ESTRPIPE;
 		break;
 	default:
 		spa_log_error(state->log, NAME" %p: recover from error state %s",
@@ -811,7 +803,7 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 	}
 
 
-	*target = state->last_threshold + state->headroom;
+	*target = state->threshold + state->headroom;
 
 #define MARGIN 48
 	if (state->resample && state->rate_match) {
@@ -1162,7 +1154,7 @@ int spa_alsa_read(struct state *state, snd_pcm_uframes_t silence)
 			position = state->position->clock.position;
 			if (state->last_position && state->last_position + state->last_duration != position) {
 				state->alsa_sync = true;
-				spa_log_warn(state->log, NAME" %p: discont, resync %"PRIu64" %"PRIu64" %d",
+				spa_log_info(state->log, NAME" %p: discont, resync %"PRIu64" %"PRIu64" %d",
 						state, state->last_position, position, state->last_duration);
 			}
 			state->last_position = position;

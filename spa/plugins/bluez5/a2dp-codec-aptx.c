@@ -86,6 +86,10 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 
 	memcpy(&conf, caps, sizeof(conf));
 
+	if (codec->vendor.vendor_id != conf.info.vendor_id ||
+	    codec->vendor.codec_id != conf.info.codec_id)
+		return -ENOTSUP;
+
 	if (conf.frequency & APTX_SAMPLING_FREQ_48000)
 		conf.frequency = APTX_SAMPLING_FREQ_48000;
 	else if (conf.frequency & APTX_SAMPLING_FREQ_44100)
@@ -341,8 +345,6 @@ const struct a2dp_codec a2dp_codec_aptx = {
 		.codec_id = APTX_CODEC_ID },
 	.name = "aptx",
 	.description = "aptX",
-	.send_fill_frames = 2,
-	.recv_fill_frames = 2,
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
@@ -366,8 +368,6 @@ const struct a2dp_codec a2dp_codec_aptx_hd = {
 		.codec_id = APTX_HD_CODEC_ID },
 	.name = "aptx_hd",
 	.description = "aptX HD",
-	.send_fill_frames = 2,
-	.recv_fill_frames = 2,
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,

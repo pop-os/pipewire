@@ -44,7 +44,7 @@ extern "C" {
 #define BLUEZ_MEDIA_ENDPOINT_INTERFACE BLUEZ_SERVICE ".MediaEndpoint1"
 #define BLUEZ_MEDIA_TRANSPORT_INTERFACE BLUEZ_SERVICE ".MediaTransport1"
 
-#define MIN_LATENCY	128
+#define MIN_LATENCY	512
 #define MAX_LATENCY	1024
 
 #define OBJECT_MANAGER_INTROSPECT_XML                                          \
@@ -149,16 +149,18 @@ extern "C" {
 #define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
 
 enum spa_bt_profile {
-        SPA_BT_PROFILE_NULL =		0,
-        SPA_BT_PROFILE_A2DP_SINK =	(1 << 0),
-        SPA_BT_PROFILE_A2DP_SOURCE =	(1 << 1),
-        SPA_BT_PROFILE_HSP_HS =		(1 << 2),
-        SPA_BT_PROFILE_HSP_AG =		(1 << 3),
-        SPA_BT_PROFILE_HFP_HF =		(1 << 4),
-        SPA_BT_PROFILE_HFP_AG =		(1 << 5),
+	SPA_BT_PROFILE_NULL =		0,
+	SPA_BT_PROFILE_A2DP_SINK =	(1 << 0),
+	SPA_BT_PROFILE_A2DP_SOURCE =	(1 << 1),
+	SPA_BT_PROFILE_HSP_HS =		(1 << 2),
+	SPA_BT_PROFILE_HSP_AG =		(1 << 3),
+	SPA_BT_PROFILE_HFP_HF =		(1 << 4),
+	SPA_BT_PROFILE_HFP_AG =		(1 << 5),
 
-        SPA_BT_PROFILE_HEADSET_HEAD_UNIT = (SPA_BT_PROFILE_HSP_HS | SPA_BT_PROFILE_HFP_HF),
-        SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY = (SPA_BT_PROFILE_HSP_AG | SPA_BT_PROFILE_HFP_AG),
+	SPA_BT_PROFILE_A2DP_DUPLEX =	(SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_A2DP_SOURCE),
+	SPA_BT_PROFILE_HEADSET_HEAD_UNIT = (SPA_BT_PROFILE_HSP_HS | SPA_BT_PROFILE_HFP_HF),
+	SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY = (SPA_BT_PROFILE_HSP_AG | SPA_BT_PROFILE_HFP_AG),
+	SPA_BT_PROFILE_HEADSET_AUDIO =  (SPA_BT_PROFILE_HEADSET_HEAD_UNIT | SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY),
 };
 
 static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
@@ -194,6 +196,17 @@ enum spa_bt_hfp_ag_feature {
 	SPA_BT_HFP_AG_FEATURE_EXTENDED_RES_CODE =	(1 << 8),
 	SPA_BT_HFP_AG_FEATURE_CODEC_NEGOTIATION =	(1 << 9),
 	SPA_BT_HFP_AG_FEATURE_HF_INDICATORS =		(1 << 10),
+	SPA_BT_HFP_AG_FEATURE_ESCO_S4 =			(1 << 11),
+};
+
+enum spa_bt_hfp_sdp_ag_features {
+	SPA_BT_HFP_SDP_AG_FEATURE_NONE =		(0),
+	SPA_BT_HFP_SDP_AG_FEATURE_3WAY =		(1 << 0),
+	SPA_BT_HFP_SDP_AG_FEATURE_ECNR =		(1 << 1),
+	SPA_BT_HFP_SDP_AG_FEATURE_VOICE_RECOG =		(1 << 2),
+	SPA_BT_HFP_SDP_AG_FEATURE_IN_BAND_RING_TONE =	(1 << 3),
+	SPA_BT_HFP_SDP_AG_FEATURE_ATTACH_VOICE_TAG =	(1 << 4),
+	SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
 };
 
 enum spa_bt_hfp_hf_feature {
@@ -207,6 +220,17 @@ enum spa_bt_hfp_hf_feature {
 	SPA_BT_HFP_HF_FEATURE_ENHANCED_CALL_CONTROL =	(1 << 6),
 	SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION =	(1 << 7),
 	SPA_BT_HFP_HF_FEATURE_HF_INDICATORS =		(1 << 8),
+	SPA_BT_HFP_HF_FEATURE_ESCO_S4 =			(1 << 9),
+};
+
+enum spa_bt_hfp_sdp_hf_features {
+	SPA_BT_HFP_SDP_HF_FEATURE_NONE =		(0),
+	SPA_BT_HFP_SDP_HF_FEATURE_ECNR =		(1 << 0),
+	SPA_BT_HFP_SDP_HF_FEATURE_3WAY =		(1 << 1),
+	SPA_BT_HFP_SDP_HF_FEATURE_CLIP =		(1 << 2),
+	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION =	(1 << 3),
+	SPA_BT_HFP_SDP_HF_FEATURE_REMOTE_VOLUME_CONTROL =	(1 << 4),
+	SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
 };
 
 static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
@@ -215,14 +239,18 @@ static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
         return "a2dp-source";
       case SPA_BT_PROFILE_A2DP_SINK:
         return "a2dp-sink";
+      case SPA_BT_PROFILE_A2DP_DUPLEX:
+        return "a2dp-duplex";
       case SPA_BT_PROFILE_HSP_HS:
-        return "hsp-hs";
-      case SPA_BT_PROFILE_HSP_AG:
-        return "hsp-ag";
       case SPA_BT_PROFILE_HFP_HF:
-        return "hfp-hf";
+      case SPA_BT_PROFILE_HEADSET_HEAD_UNIT:
+	return "headset-head-unit";
+      case SPA_BT_PROFILE_HSP_AG:
       case SPA_BT_PROFILE_HFP_AG:
-        return "hfp-ag";
+      case SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY:
+	return "headset-audio-gateway";
+      case SPA_BT_PROFILE_HEADSET_AUDIO:
+	return "headset-audio";
       default:
         break;
       }
@@ -320,6 +348,20 @@ static inline enum spa_bt_form_factor spa_bt_form_factor_from_class(uint32_t blu
 	return SPA_BT_FORM_FACTOR_UNKNOWN;
 }
 
+struct spa_bt_a2dp_codec_switch;
+struct spa_bt_transport;
+
+struct spa_bt_device_events {
+#define SPA_VERSION_BT_DEVICE_EVENTS	0
+	uint32_t version;
+
+	/** Codec switching completed */
+	void (*codec_switched) (void *data, int status);
+
+	/** Profile configuration changed */
+	void (*profiles_changed) (void *data, uint32_t prev_profiles, uint32_t prev_connected);
+};
+
 struct spa_bt_device {
 	struct spa_list link;
 	struct spa_bt_monitor *monitor;
@@ -341,14 +383,32 @@ struct spa_bt_device {
 	uint32_t profiles;
 	uint32_t connected_profiles;
 	struct spa_source timer;
+	struct spa_list remote_endpoint_list;
 	struct spa_list transport_list;
+	struct spa_list codec_switch_list;
+	struct spa_bt_a2dp_codec_switch *active_codec_switch;
+
+	struct spa_hook_list listener_list;
 	bool added;
 };
+
+struct a2dp_codec;
 
 struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const char *path);
 struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monitor, const char *remote_address, const char *local_address);
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
+int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec **codecs);
+bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec);
+const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_device *device, size_t *count);
+
+#define spa_bt_device_emit(d,m,v,...)			spa_hook_list_call(&(d)->listener_list, \
+								struct spa_bt_device_events,	\
+								m, v, ##__VA_ARGS__)
+#define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
+#define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
+#define spa_bt_device_add_listener(d,listener,events,data)           \
+	spa_hook_list_append(&(d)->listener_list, listener, events, data)
 
 struct spa_bt_sco_io;
 
@@ -395,6 +455,8 @@ struct spa_bt_transport {
 	unsigned int codec;
 	void *configuration;
 	int configuration_len;
+
+	unsigned int enabled:1;  /**< Transport ready for use in sink/source */
 
 	uint32_t n_channels;
 	uint32_t channels[64];

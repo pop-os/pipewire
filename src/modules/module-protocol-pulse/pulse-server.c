@@ -40,6 +40,8 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/vfs.h>
 #if HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -99,6 +101,7 @@ struct client {
 	struct impl *impl;
 	struct server *server;
 
+	int ref;
 	const char *name;
 
 	struct spa_source *source;
@@ -133,10 +136,14 @@ struct client {
 	struct spa_list operations;
 	struct spa_list modules;
 
-	struct spa_list samples;
+	struct spa_list pending_samples;
 
+	unsigned int disconnect:1;
 	unsigned int disconnecting:1;
 	unsigned int need_flush:1;
+
+	struct pw_manager_object *prev_default_sink;
+	struct pw_manager_object *prev_default_source;
 };
 
 struct buffer_attr {
@@ -195,6 +202,7 @@ struct stream {
 	unsigned int draining:1;
 	unsigned int volume_set:1;
 	unsigned int muted_set:1;
+	unsigned int early_requests:1;
 	unsigned int adjust_latency:1;
 	unsigned int is_underrun:1;
 	unsigned int in_prebuf:1;
@@ -227,6 +235,9 @@ struct impl {
 
 	struct spa_source *source;
 	struct spa_list servers;
+
+	struct spa_source *cleanup;
+	struct spa_list cleanup_clients;
 
 	struct pw_map samples;
 
@@ -293,22 +304,20 @@ static void message_free(struct impl *impl, struct message *msg, bool dequeue, b
 
 static struct message *message_alloc(struct impl *impl, uint32_t channel, uint32_t size)
 {
-	struct message *msg = NULL;
+	struct message *msg;
 
 	if (!spa_list_is_empty(&impl->free_messages)) {
 		msg = spa_list_first(&impl->free_messages, struct message, link);
 		spa_list_remove(&msg->link);
 		pw_log_trace("using recycled message %p", msg);
-	}
-	if (msg == NULL) {
-		msg = calloc(1, sizeof(struct message));
+	} else {
+		if ((msg = calloc(1, sizeof(struct message))) == NULL)
+			return NULL;
 		pw_log_trace("new message %p", msg);
 		msg->stat = &impl->stat;
 		msg->stat->n_allocated++;
 		msg->stat->n_accumulated++;
 	}
-	if (msg == NULL)
-		return NULL;
 	ensure_size(msg, size);
 	spa_zero(msg->extra);
 	msg->channel = channel;
@@ -446,15 +455,15 @@ static int reply_error(struct client *client, uint32_t command, uint32_t tag, in
 
 #include "extension.c"
 
-static int send_underflow(struct stream *stream, int64_t offset)
+static int send_underflow(struct stream *stream, int64_t offset, uint32_t underrun_for)
 {
 	struct client *client = stream->client;
 	struct impl *impl = client->impl;
 	struct message *reply;
 
 	if (ratelimit_test(&impl->rate_limit, stream->timestamp)) {
-		pw_log_warn(NAME" %p: [%s] UNDERFLOW channel:%u offset:%"PRIi64,
-				client, client->name, stream->channel, offset);
+		pw_log_warn(NAME" %p: [%s] UNDERFLOW channel:%u offset:%"PRIi64" underrun:%u",
+				client, client->name, stream->channel, offset, underrun_for);
 	}
 
 	reply = message_alloc(impl, -1, 0);
@@ -712,6 +721,41 @@ static uint32_t get_event_and_id(struct client *client, struct pw_manager_object
 	return event;
 }
 
+static struct pw_manager_object *find_device(struct client *client,
+		uint32_t id, const char *name, bool sink);
+
+static void send_default_change_subscribe_event(struct client *client, bool sink, bool source)
+{
+	struct pw_manager_object *def;
+	bool changed = false;
+
+	/* Send the subscribe event only if actually needed */
+	if (!(client->subscribed & SUBSCRIPTION_MASK_SERVER))
+		return;
+
+	if (sink) {
+		def = find_device(client, SPA_ID_INVALID, NULL, true);
+		if (client->prev_default_sink != def) {
+			client->prev_default_sink = def;
+			changed = true;
+		}
+	}
+
+	if (source) {
+		def = find_device(client, SPA_ID_INVALID, NULL, false);
+		if (client->prev_default_source != def) {
+			client->prev_default_source = def;
+			changed = true;
+		}
+	}
+
+	if (changed)
+		send_subscribe_event(client,
+		                     SUBSCRIPTION_EVENT_CHANGE |
+		                     SUBSCRIPTION_EVENT_SERVER,
+		                     -1);
+}
+
 static void handle_metadata_added(struct client *client, struct pw_manager_object *o,
 		const char *name)
 {
@@ -741,6 +785,9 @@ static void manager_added(void *data, struct pw_manager_object *o)
 		send_subscribe_event(client,
 				event | SUBSCRIPTION_EVENT_NEW,
 				id);
+
+	/* Adding sinks etc. may also change defaults */
+	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
 }
 
 static void manager_updated(void *data, struct pw_manager_object *o)
@@ -752,6 +799,8 @@ static void manager_updated(void *data, struct pw_manager_object *o)
 		send_subscribe_event(client,
 				event | SUBSCRIPTION_EVENT_CHANGE,
 				id);
+
+	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
 }
 
 static void manager_removed(void *data, struct pw_manager_object *o)
@@ -763,6 +812,8 @@ static void manager_removed(void *data, struct pw_manager_object *o)
 		send_subscribe_event(client,
 				event | SUBSCRIPTION_EVENT_REMOVE,
 				id);
+
+	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
 }
 
 static void manager_metadata(void *data, struct pw_manager_object *o,
@@ -785,14 +836,8 @@ static void manager_metadata(void *data, struct pw_manager_object *o,
 			changed = client->default_source != val;
 			client->default_source = val;
 		}
-		if (changed) {
-			if (client->subscribed & SUBSCRIPTION_MASK_SERVER) {
-				send_subscribe_event(client,
-					SUBSCRIPTION_EVENT_CHANGE |
-					SUBSCRIPTION_EVENT_SERVER,
-					-1);
-			}
-		}
+		if (changed)
+			send_default_change_subscribe_event(client, true, true);
 	}
 	if (subject == PW_ID_CORE && o == client->metadata_routes) {
 		if (key == NULL)
@@ -1030,8 +1075,12 @@ static int reply_create_playback_stream(struct stream *stream)
 	struct pw_manager *manager = client->manager;
 	struct message *reply;
 	uint32_t missing, peer_id;
-	struct spa_dict_item items[1];
+	struct spa_dict_item items[5];
 	char latency[32];
+	char attr_maxlength[32];
+	char attr_tlength[32];
+	char attr_prebuf[32];
+	char attr_minreq[32];
 	struct pw_manager_object *peer;
 	const char *peer_name;
 	struct spa_fraction lat;
@@ -1045,15 +1094,35 @@ static int reply_create_playback_stream(struct stream *stream)
 
 	spa_ringbuffer_init(&stream->ring);
 
-	lat.num = stream->attr.minreq / stream->frame_size;
+	if (stream->early_requests) {
+		lat.num = stream->attr.minreq;
+	} else if (stream->adjust_latency) {
+		if (stream->attr.tlength > stream->attr.minreq * 2)
+			lat.num = (stream->attr.tlength - stream->attr.minreq * 2) / 2;
+		else
+			lat.num = stream->attr.minreq;
+	} else {
+		if (stream->attr.tlength > stream->attr.minreq * 2)
+			lat.num = stream->attr.tlength - stream->attr.minreq * 2;
+		else
+			lat.num = stream->attr.minreq;
+	}
+	lat.num /= stream->frame_size;
 	lat.denom = stream->ss.rate;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
-	snprintf(latency, sizeof(latency)-1, "%u/%u", lat.num, lat.denom);
+	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
+	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", stream->attr.maxlength);
+	snprintf(attr_tlength, sizeof(attr_tlength), "%u", stream->attr.tlength);
+	snprintf(attr_prebuf, sizeof(attr_prebuf), "%u", stream->attr.prebuf);
+	snprintf(attr_minreq, sizeof(attr_minreq), "%u", stream->attr.minreq);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
-	pw_stream_update_properties(stream->stream,
-			&SPA_DICT_INIT(items, 1));
+	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
+	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.tlength", attr_tlength);
+	items[3] = SPA_DICT_ITEM_INIT("pulse.attr.prebuf", attr_prebuf);
+	items[4] = SPA_DICT_ITEM_INIT("pulse.attr.minreq", attr_minreq);
+	pw_stream_update_properties(stream->stream, &SPA_DICT_INIT(items, 5));
 
 	missing = stream_pop_missing(stream);
 
@@ -1145,8 +1214,10 @@ static int reply_create_record_stream(struct stream *stream)
 	struct client *client = stream->client;
 	struct pw_manager *manager = client->manager;
 	struct message *reply;
-	struct spa_dict_item items[1];
+	struct spa_dict_item items[3];
 	char latency[32], *tmp;
+	char attr_maxlength[32];
+	char attr_fragsize[32];
 	struct pw_manager_object *peer;
 	const char *peer_name, *name;
 	uint32_t peer_id;
@@ -1161,15 +1232,27 @@ static int reply_create_record_stream(struct stream *stream)
 
 	spa_ringbuffer_init(&stream->ring);
 
-	lat.num = stream->attr.fragsize / stream->frame_size,
+	if (stream->early_requests) {
+		lat.num = stream->attr.fragsize / stream->frame_size;
+	} else if (stream->adjust_latency) {
+		lat.num = stream->attr.fragsize / stream->frame_size;
+	} else {
+		lat.num = stream->attr.fragsize / stream->frame_size;
+	}
+
 	lat.denom = stream->ss.rate;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
-	snprintf(latency, sizeof(latency)-1, "%u/%u", lat.num, lat.denom);
+	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
+
+	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", stream->attr.maxlength);
+	snprintf(attr_fragsize, sizeof(attr_fragsize), "%u", stream->attr.fragsize);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
+	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
+	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.fragsize", attr_fragsize);
 	pw_stream_update_properties(stream->stream,
-			&SPA_DICT_INIT(items, 1));
+			&SPA_DICT_INIT(items, 3));
 
 	pw_log_info(NAME" %p: [%s] reply CREATE_RECORD_STREAM tag:%u latency:%s",
 			stream, client->name, stream->create_tag, latency);
@@ -1231,6 +1314,24 @@ static int reply_create_record_stream(struct stream *stream)
 	stream->create_tag = SPA_ID_INVALID;
 
 	return send_message(client, reply);
+}
+
+static void stream_control_info(void *data, uint32_t id,
+		const struct pw_stream_control *control)
+{
+	struct stream *stream = data;
+
+	switch (id) {
+	case SPA_PROP_channelVolumes:
+		stream->volume.channels = control->n_values;
+		memcpy(stream->volume.values, control->values, control->n_values * sizeof(float));
+		pw_log_info("stream %p: volume changed %f", stream, stream->volume.values[0]);
+		break;
+	case SPA_PROP_mute:
+		stream->muted = control->values[0] >= 0.5;
+		pw_log_info("stream %p: mute changed %d", stream, stream->muted);
+		break;
+	}
 }
 
 static void stream_state_changed(void *data, enum pw_stream_state old,
@@ -1360,6 +1461,7 @@ struct process_data {
 	uint32_t write_index;
 	uint32_t underrun_for;
 	uint32_t playing_for;
+	uint32_t missing;
 	unsigned int underrun:1;
 };
 
@@ -1371,7 +1473,7 @@ do_process_done(struct spa_loop *loop,
 	struct client *client = stream->client;
 	struct impl *impl = client->impl;
 	const struct process_data *pd = data;
-	uint32_t index;
+	uint32_t index, towrite;
 	int32_t avail;
 
 	stream->timestamp = pd->pwt.now;
@@ -1393,11 +1495,11 @@ do_process_done(struct spa_loop *loop,
 			stream->underrun_for = 0;
 			stream->playing_for = 0;
 			if (pd->underrun)
-				send_underflow(stream, pd->read_index);
+				send_underflow(stream, pd->read_index, pd->underrun_for);
 			else
 				send_stream_started(stream);
 		}
-		stream->missing += pd->playing_for + pd->underrun_for;
+		stream->missing += pd->missing;
 		stream->missing = SPA_MIN(stream->missing, stream->attr.tlength);
 		stream->playing_for += pd->playing_for;
 		if (stream->underrun_for != (uint64_t)-1)
@@ -1430,19 +1532,27 @@ do_process_done(struct spa_loop *loop,
 				index = stream->write_index - avail;
 			}
 
-			msg = message_alloc(impl, stream->channel, avail);
-			if (msg == NULL)
-				return -errno;
+			while (avail > 0) {
+				towrite = avail;
+				if (towrite > stream->attr.fragsize)
+					towrite = stream->attr.fragsize;
 
-			spa_ringbuffer_read_data(&stream->ring,
-					stream->buffer, stream->attr.maxlength,
-					index % stream->attr.maxlength,
-					msg->data, avail);
+				msg = message_alloc(impl, stream->channel, towrite);
+				if (msg == NULL)
+					return -errno;
 
-			stream->read_index = index + avail;
+				spa_ringbuffer_read_data(&stream->ring,
+						stream->buffer, stream->attr.maxlength,
+						index % stream->attr.maxlength,
+						msg->data, towrite);
+
+				send_message(client, msg);
+
+				index += towrite;
+				avail -= towrite;
+			}
+			stream->read_index = index;
 			spa_ringbuffer_read_update(&stream->ring, stream->read_index);
-
-			send_message(client, msg);
 		}
 	}
 	return 0;
@@ -1480,7 +1590,7 @@ static void stream_process(void *data)
 		else
 			minreq = SPA_MAX(stream->minblock, stream->attr.minreq);
 
-		if (avail <= 0) {
+		if (avail < (int32_t)minreq || stream->corked) {
 			/* underrun, produce a silence buffer */
 			size = SPA_MIN(buf->datas[0].maxsize, minreq);
 			memset(p, 0, size);
@@ -1490,11 +1600,14 @@ static void stream_process(void *data)
 				pw_stream_flush(stream->stream, true);
 			} else {
 				pd.underrun_for = size;
-				pd.playing_for = size;
 				pd.underrun = true;
 			}
-			pd.read_index += size;
-			spa_ringbuffer_read_update(&stream->ring, pd.read_index);
+			if (stream->attr.prebuf == 0 && !stream->corked) {
+				pd.missing = size;
+				pd.playing_for = size;
+				pd.read_index += size;
+				spa_ringbuffer_read_update(&stream->ring, pd.read_index);
+			}
 		} else {
 			if (avail > (int32_t)stream->attr.maxlength) {
 				/* overrun, reported by other side, here we skip
@@ -1517,6 +1630,7 @@ static void stream_process(void *data)
 			spa_ringbuffer_read_update(&stream->ring, pd.read_index);
 
 			pd.playing_for = size;
+			pd.missing = size;
 			pd.underrun = false;
 		}
 	        buf->datas[0].chunk->offset = 0;
@@ -1569,6 +1683,7 @@ static void stream_drained(void *data)
 static const struct pw_stream_events stream_events =
 {
 	PW_VERSION_STREAM_EVENTS,
+	.control_info = stream_control_info,
 	.state_changed = stream_state_changed,
 	.param_changed = stream_param_changed,
 	.io_changed = stream_io_changed,
@@ -1733,6 +1848,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	stream->client = client;
 	stream->corked = corked;
 	stream->adjust_latency = adjust_latency;
+	stream->early_requests = early_requests;
 	stream->channel = pw_map_insert_new(&client->streams, stream);
 	if (stream->channel == SPA_ID_INVALID)
 		goto error_errno;
@@ -1954,6 +2070,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	stream->client = client;
 	stream->corked = corked;
 	stream->adjust_latency = adjust_latency;
+	stream->early_requests = early_requests;
 	stream->channel = pw_map_insert_new(&client->streams, stream);
 	if (stream->channel == SPA_ID_INVALID)
 		goto error_errno;
@@ -2087,9 +2204,11 @@ static int do_get_playback_latency(struct client *client, uint32_t command, uint
 	if (stream == NULL || stream->type != STREAM_TYPE_PLAYBACK)
 		return -ENOENT;
 
-	pw_log_debug("read:%"PRIi64" write:%"PRIi64" queued:%"PRIi64" delay:%"PRIi64,
+	pw_log_debug("read:%"PRIi64" write:%"PRIi64" queued:%"PRIi64" delay:%"PRIi64
+			" playing:%"PRIu64,
 			stream->read_index, stream->write_index,
-			stream->write_index - stream->read_index, stream->delay);
+			stream->write_index - stream->read_index, stream->delay,
+			stream->playing_for);
 
 	gettimeofday(&now, NULL);
 
@@ -2332,6 +2451,80 @@ error:
 	return res;
 }
 
+static const char *get_default(struct client *client, bool sink)
+{
+	struct selector sel;
+	struct pw_manager *manager = client->manager;
+	struct pw_manager_object *o;
+	const char *def, *str, *mon;
+
+	spa_zero(sel);
+	if (sink) {
+		sel.type = object_is_sink;
+		sel.id = client->default_sink;
+		def = DEFAULT_SINK;
+	} else {
+		sel.type = object_is_source_or_monitor;
+		sel.id = client->default_source;
+		def = DEFAULT_SOURCE;
+	}
+	sel.accumulate = select_best;
+
+	o = select_object(manager, &sel);
+	if (o == NULL || o->props == NULL)
+		return def;
+	str = pw_properties_get(o->props, PW_KEY_NODE_NAME);
+
+	if (!sink && object_is_monitor(o)) {
+		def = DEFAULT_MONITOR;
+		if (str != NULL &&
+		    (mon = pw_properties_get(o->props, PW_KEY_NODE_NAME".monitor")) == NULL) {
+			pw_properties_setf(o->props,
+					PW_KEY_NODE_NAME".monitor",
+					"%s.monitor", str);
+		}
+		str = pw_properties_get(o->props, PW_KEY_NODE_NAME".monitor");
+	}
+	if (str == NULL)
+		str = def;
+	return str;
+}
+
+static struct pw_manager_object *find_device(struct client *client,
+		uint32_t id, const char *name, bool sink)
+{
+	struct selector sel;
+	const char *def;
+
+	if (name != NULL && !sink) {
+		if (pw_endswith(name, ".monitor")) {
+			name = strndupa(name, strlen(name)-8);
+			sink = true;
+		} else if (strcmp(name, DEFAULT_MONITOR) == 0) {
+			name = NULL;
+			sink = true;
+		}
+	}
+
+	spa_zero(sel);
+	sel.id = id;
+	sel.key = PW_KEY_NODE_NAME;
+	sel.value = name;
+
+	if (sink) {
+		sel.type = object_is_sink;
+		def = DEFAULT_SINK;
+	} else {
+		sel.type = object_is_source;
+		def = DEFAULT_SOURCE;
+	}
+	if (id == SPA_ID_INVALID &&
+	    (sel.value == NULL || strcmp(sel.value, def) == 0))
+		sel.value = get_default(client, sink);
+
+	return select_object(client->manager, &sel);
+}
+
 struct pending_sample {
 	struct spa_list link;
 	struct client *client;
@@ -2346,6 +2539,7 @@ static void pending_sample_free(struct pending_sample *ps)
 	spa_list_remove(&ps->link);
 	spa_hook_remove(&ps->listener);
 	sample_play_destroy(ps->play);
+	ps->client->ref--;
 }
 
 static void sample_play_ready(void *data, uint32_t index)
@@ -2397,6 +2591,7 @@ static int do_play_sample(struct client *client, uint32_t command, uint32_t tag,
 	const char *sink_name, *name;
 	struct pw_properties *props = NULL;
 	struct pending_sample *ps;
+	struct pw_manager_object *o;
 	int res;
 
 	if ((props = pw_properties_new(NULL, NULL)) == NULL)
@@ -2421,21 +2616,20 @@ static int do_play_sample(struct client *client, uint32_t command, uint32_t tag,
 			impl, client->name, commands[command].name, tag,
 			sink_index, sink_name, name);
 
+	pw_properties_update(props, &client->props->dict);
+
 	if (sink_index != SPA_ID_INVALID && sink_name != NULL)
 		goto error_inval;
 
-	if (sink_name != NULL)
-		pw_properties_set(props,
-				PW_KEY_NODE_TARGET, sink_name);
-	else if (sink_index != SPA_ID_INVALID)
-		pw_properties_setf(props,
-				PW_KEY_NODE_TARGET, "%u", sink_index);
-
-	pw_properties_update(props, &client->props->dict);
+	o = find_device(client, sink_index, sink_name, PW_DIRECTION_OUTPUT);
+	if (o == NULL)
+		goto error_noent;
 
 	sample = find_sample(impl, SPA_ID_INVALID, name);
 	if (sample == NULL)
 		goto error_noent;
+
+	pw_properties_setf(props, PW_KEY_NODE_TARGET, "%u", o->id);
 
 	play = sample_play_new(client->core, sample, props, sizeof(struct pending_sample));
 	props = NULL;
@@ -2447,7 +2641,8 @@ static int do_play_sample(struct client *client, uint32_t command, uint32_t tag,
 	ps->play = play;
 	ps->tag = tag;
 	sample_play_add_listener(play, &ps->listener, &sample_play_events, ps);
-	spa_list_append(&client->samples, &ps->link);
+	spa_list_append(&client->pending_samples, &ps->link);
+	client->ref++;
 
 	return 0;
 
@@ -2522,8 +2717,8 @@ static int do_cork_stream(struct client *client, uint32_t command, uint32_t tag,
 	if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
 		return -ENOENT;
 
-	pw_stream_set_active(stream->stream, !cork);
 	stream->corked = cork;
+	pw_stream_set_active(stream->stream, !cork);
 	if (cork) {
 		stream->is_underrun = true;
 	} else {
@@ -2691,13 +2886,14 @@ static int do_set_stream_volume(struct client *client, uint32_t command, uint32_
 			TAG_INVALID)) < 0)
 		return -EPROTO;
 
-	pw_log_info(NAME" %p: [%s] DO_STREAM_VOLUME tag:%u index:%u", impl,
-			client->name, tag, id);
+	pw_log_info(NAME" %p: [%s] %s tag:%u index:%u", impl,
+			client->name, commands[command].name, tag, id);
 
 	stream = find_stream(client, id);
 	if (stream != NULL) {
-		stream->volume = volume;
-		stream->volume_set = true;
+
+		if (volume_compare(&stream->volume, &volume) == 0)
+			goto done;
 
 		pw_stream_set_control(stream->stream,
 				SPA_PROP_channelVolumes, volume.channels, volume.values,
@@ -2720,6 +2916,7 @@ static int do_set_stream_volume(struct client *client, uint32_t command, uint32_
 		if ((res = set_node_volume_mute(o, &volume, NULL)) < 0)
 			return res;
 	}
+done:
 	return reply_simple_ack(client, tag);
 }
 
@@ -2745,11 +2942,10 @@ static int do_set_stream_mute(struct client *client, uint32_t command, uint32_t 
 	if (stream != NULL) {
 		float val;
 
-		stream->muted = mute;
-		stream->muted_set = true;
+		if (stream->muted == mute)
+			goto done;
 
 		val = mute ? 1.0f : 0.0f;
-
 		pw_stream_set_control(stream->stream,
 				SPA_PROP_mute, 1, &val,
 				0);
@@ -2771,81 +2967,8 @@ static int do_set_stream_mute(struct client *client, uint32_t command, uint32_t 
 		if ((res = set_node_volume_mute(o, NULL, &mute)) < 0)
 			return res;
 	}
+done:
 	return reply_simple_ack(client, tag);
-}
-
-static const char *get_default(struct client *client, bool sink)
-{
-	struct selector sel;
-	struct pw_manager *manager = client->manager;
-	struct pw_manager_object *o;
-	const char *def, *str, *mon;
-
-	spa_zero(sel);
-	if (sink) {
-		sel.type = object_is_sink;
-		sel.id = client->default_sink;
-		def = DEFAULT_SINK;
-	} else {
-		sel.type = object_is_source_or_monitor;
-		sel.id = client->default_source;
-		def = DEFAULT_SOURCE;
-	}
-	sel.accumulate = select_best;
-
-	o = select_object(manager, &sel);
-	if (o == NULL || o->props == NULL)
-		return def;
-	str = pw_properties_get(o->props, PW_KEY_NODE_NAME);
-
-	if (!sink && object_is_monitor(o)) {
-		def = DEFAULT_MONITOR;
-		if (str != NULL &&
-		    (mon = pw_properties_get(o->props, PW_KEY_NODE_NAME".monitor")) == NULL) {
-			pw_properties_setf(o->props,
-					PW_KEY_NODE_NAME".monitor",
-					"%s.monitor", str);
-		}
-		str = pw_properties_get(o->props, PW_KEY_NODE_NAME".monitor");
-	}
-	if (str == NULL)
-		str = def;
-	return str;
-}
-
-static struct pw_manager_object *find_device(struct client *client,
-		uint32_t id, const char *name, bool sink)
-{
-	struct selector sel;
-	const char *def;
-
-	if (name != NULL && !sink) {
-		if (pw_endswith(name, ".monitor")) {
-			name = strndupa(name, strlen(name)-8);
-			sink = true;
-		} else if (strcmp(name, DEFAULT_MONITOR) == 0) {
-			name = NULL;
-			sink = true;
-		}
-	}
-
-	spa_zero(sel);
-	sel.id = id;
-	sel.key = PW_KEY_NODE_NAME;
-	sel.value = name;
-
-	if (sink) {
-		sel.type = object_is_sink;
-		def = DEFAULT_SINK;
-	} else {
-		sel.type = object_is_source;
-		def = DEFAULT_SOURCE;
-	}
-	if (id == SPA_ID_INVALID &&
-	    (sel.value == NULL || strcmp(sel.value, def) == 0))
-		sel.value = get_default(client, sink);
-
-	return select_object(client->manager, &sel);
 }
 
 static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -2896,6 +3019,10 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 	}
 	collect_device_info(o, card, &dev_info);
 
+	if (dev_info.have_volume &&
+	    volume_compare(&dev_info.volume_info.volume, &volume) == 0)
+		goto done;
+
 	if (card != NULL && dev_info.active_port != SPA_ID_INVALID)
 		res = set_card_volume_mute(card, dev_info.active_port,
 				dev_info.device, &volume, NULL);
@@ -2905,6 +3032,7 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 	if (res < 0)
 		return res;
 
+done:
 	return reply_simple_ack(client, tag);
 }
 
@@ -2956,6 +3084,10 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 	}
 	collect_device_info(o, card, &dev_info);
 
+	if (dev_info.have_volume &&
+	    dev_info.volume_info.mute == mute)
+		goto done;
+
 	if (card != NULL && dev_info.active_port != SPA_ID_INVALID)
 		res = set_card_volume_mute(card, dev_info.active_port,
 				dev_info.device, NULL, &mute);
@@ -2964,7 +3096,7 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 
 	if (res < 0)
 		return res;
-
+done:
 	return reply_simple_ack(client, tag);
 }
 
@@ -3204,7 +3336,7 @@ static int do_get_server_info(struct client *client, uint32_t command, uint32_t 
 		cookie = 0;
 	}
 
-	snprintf(name, sizeof(name)-1, "PulseAudio (on PipeWire %s)", pw_get_library_version());
+	snprintf(name, sizeof(name), "PulseAudio (on PipeWire %s)", pw_get_library_version());
 
 	reply = reply_new(client, tag);
 	message_put(reply,
@@ -3745,6 +3877,15 @@ static int fill_source_info(struct client *client, struct message *m,
 	return 0;
 }
 
+static const char *get_media_name(struct pw_node_info *info)
+{
+	const char *media_name;
+	media_name = spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME);
+	if (media_name == NULL)
+		media_name = "";
+	return media_name;
+}
+
 static int fill_sink_input_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
@@ -3774,7 +3915,7 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 
 	message_put(m,
 		TAG_U32, o->id,					/* sink_input index */
-		TAG_STRING, spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME),
+		TAG_STRING, get_media_name(info),
 		TAG_U32, module_id,				/* module index */
 		TAG_U32, client_id,				/* client index */
 		TAG_U32, peer ? peer->id : SPA_ID_INVALID,	/* sink index */
@@ -3851,7 +3992,7 @@ static int fill_source_output_info(struct client *client, struct message *m,
 
 	message_put(m,
 		TAG_U32, o->id,					/* source_output index */
-		TAG_STRING, spa_dict_lookup(info->props, PW_KEY_MEDIA_NAME),
+		TAG_STRING, get_media_name(info),
 		TAG_U32, module_id,				/* module index */
 		TAG_U32, client_id,				/* client index */
 		TAG_U32, peer_id,				/* source index */
@@ -4004,7 +4145,9 @@ static uint64_t bytes_to_usec(uint64_t length, const struct sample_spec *ss)
 static int fill_sample_info(struct client *client, struct message *m,
 		struct sample *sample)
 {
-	struct volume vol = VOLUME_INIT;
+	struct volume vol;
+
+	volume_make(&vol, sample->ss.channels);
 
 	message_put(m,
 		TAG_U32, sample->index,
@@ -4358,10 +4501,39 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 
 	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
 			PW_ID_CORE,
-			sink ? METADATA_DEFAULT_SINK : METADATA_DEFAULT_SOURCE,
+			sink ? METADATA_CONFIG_DEFAULT_SINK : METADATA_CONFIG_DEFAULT_SOURCE,
 			SPA_TYPE_INFO_BASE"Id", "%d", o->id)) < 0)
 		return res;
 
+	return reply_simple_ack(client, tag);
+}
+
+static int do_suspend(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+{
+	struct impl *impl = client->impl;
+	struct pw_manager_object *o;
+	const char *name;
+	int res;
+	uint32_t id, cmd;;
+	bool sink = command == COMMAND_SUSPEND_SINK, suspend;
+
+	if ((res = message_get(m,
+			TAG_U32, &id,
+			TAG_STRING, &name,
+			TAG_BOOLEAN, &suspend,
+			TAG_INVALID)) < 0)
+		return -EPROTO;
+
+	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u name:%s", impl, client->name,
+			commands[command].name, tag, id, name);
+
+	if ((o = find_device(client, id, name, sink)) == NULL)
+		return -ENOENT;
+
+	if (suspend) {
+		cmd = SPA_NODE_COMMAND_Suspend;
+		pw_node_send_command((struct pw_node*)o->proxy, &SPA_NODE_COMMAND_INIT(cmd));
+	}
 	return reply_simple_ack(client, tag);
 }
 
@@ -4688,8 +4860,8 @@ static const struct command commands[COMMAND_MAX] =
 	/* Supported since protocol v11 (0.9.7) */
 	[COMMAND_SET_SINK_INPUT_MUTE] = { "SET_SINK_INPUT_MUTE", do_set_stream_mute, },
 
-	[COMMAND_SUSPEND_SINK] = { "SUSPEND_SINK", do_error_access, },
-	[COMMAND_SUSPEND_SOURCE] = { "SUSPEND_SOURCE", do_error_access, },
+	[COMMAND_SUSPEND_SINK] = { "SUSPEND_SINK", do_suspend, },
+	[COMMAND_SUSPEND_SOURCE] = { "SUSPEND_SOURCE", do_suspend, },
 
 	/* Supported since protocol v12 (0.9.8) */
 	[COMMAND_SET_PLAYBACK_STREAM_BUFFER_ATTR] = { "SET_PLAYBACK_STREAM_BUFFER_ATTR", do_set_stream_buffer_attr, },
@@ -4758,28 +4930,48 @@ static int client_free_stream(void *item, void *data)
 	return 0;
 }
 
+static void client_disconnect(struct client *client)
+{
+	struct impl *impl = client->impl;
+
+	if (client->disconnect)
+		return;
+
+	client->disconnect = true;
+	spa_list_remove(&client->link);
+	spa_list_append(&impl->cleanup_clients, &client->link);
+
+	pw_map_for_each(&client->streams, client_free_stream, client);
+	pw_map_clear(&client->streams);
+
+	if (client->source)
+		pw_loop_destroy_source(impl->loop, client->source);
+	if (client->manager)
+		pw_manager_destroy(client->manager);
+}
+
 static void client_free(struct client *client)
 {
 	struct impl *impl = client->impl;
 	struct message *msg;
 	struct module *module, *tmp;
-	struct pending_sample *p, *t;
+	struct pending_sample *p;
 
-	pw_log_debug(NAME" %p: client %p free", impl, client);
+	pw_log_info(NAME" %p: client %p free", impl, client);
+
+	client_disconnect(client);
+
 	spa_list_remove(&client->link);
 
-	pw_map_for_each(&client->streams, client_free_stream, client);
-	pw_map_clear(&client->streams);
-
-	spa_list_for_each_safe(p, t, &client->samples, link)
+	spa_list_consume(p, &client->pending_samples, link)
 		pending_sample_free(p);
 
 	spa_list_for_each_safe(module, tmp, &client->modules, link)
 		unload_module(module);
+
 	spa_list_consume(msg, &client->out_messages, link)
 		message_free(impl, msg, true, false);
-	if (client->manager)
-		pw_manager_destroy(client->manager);
+
 	if (client->core) {
 		client->disconnecting = true;
 		pw_core_disconnect(client->core);
@@ -4788,11 +4980,15 @@ static void client_free(struct client *client)
 		pw_properties_free(client->props);
 	if (client->routes)
 		pw_properties_free(client->routes);
-	if (client->source)
-		pw_loop_destroy_source(impl->loop, client->source);
 	if (client->cleanup)
 		pw_loop_destroy_source(impl->loop, client->cleanup);
 	free(client);
+}
+
+static void client_unref(struct client *client)
+{
+	if (--client->ref == 0)
+		client_free(client);
 }
 
 static int handle_packet(struct client *client, struct message *msg)
@@ -4841,7 +5037,7 @@ static int handle_memblock(struct client *client, struct message *msg)
 	struct stream *stream;
 	uint32_t channel, flags, index;
 	int64_t offset;
-	int32_t filled;
+	int32_t filled, diff;
 	int res = 0;
 
 	channel = ntohl(client->desc.channel);
@@ -4861,22 +5057,28 @@ static int handle_memblock(struct client *client, struct message *msg)
 	}
 
 	filled = spa_ringbuffer_get_write_index(&stream->ring, &index);
-	pw_log_debug("new block %p %p/%u filled:%d index:%d flags:%02x offset:%08"PRIx64,
+	pw_log_debug("new block %p %p/%u filled:%d index:%d flags:%02x offset:%"PRIu64,
 			msg, msg->data, msg->length, filled, index, flags, offset);
+
 
 	switch (flags & FLAG_SEEKMASK) {
 	case SEEK_RELATIVE:
 		index += offset;
-		filled -= offset;
+		filled += offset;
+		stream->missing -= offset;
 		break;
 	case SEEK_ABSOLUTE:
-		filled -= (int32_t)(offset - (uint64_t)index);
-		index = offset;
+		diff = (int32_t)(offset - (uint64_t)index);
+		index += diff;
+		filled += diff;
+		stream->missing -= diff;
 		break;
 	case SEEK_RELATIVE_ON_READ:
 	case SEEK_RELATIVE_END:
-		index = index - filled + offset;
-		filled = 0;
+		diff = (int32_t)(offset - (uint64_t)filled);
+		index += diff;
+		filled += diff;
+		stream->missing -= diff;
 		break;
 	}
 
@@ -4995,12 +5197,17 @@ static int client_cleanup_stream(void *item, void *data)
 static void on_client_cleanup(void *data, uint64_t count)
 {
 	struct client *client = data;
+	struct impl *impl = client->impl;
 	struct pending_sample *p, *t;
-	spa_list_for_each_safe(p, t, &client->samples, link) {
+
+	spa_list_for_each_safe(p, t, &client->pending_samples, link) {
 		if (p->done)
 			pending_sample_free(p);
 	}
 	pw_map_for_each(&client->streams, client_cleanup_stream, client);
+
+	if (client->ref <= 0)
+		pw_loop_signal_event(impl->loop, impl->cleanup);
 }
 
 static void
@@ -5050,7 +5257,78 @@ error:
                                 client, client->name, res, spa_strerror(res));
 		return;
 	}
-	client_free(client);
+	client_disconnect(client);
+	client_unref(client);
+}
+
+static int check_flatpak(struct client *client, int pid)
+{
+	char root_path[2048];
+	int root_fd, info_fd, res;
+	struct stat stat_buf;
+
+	sprintf(root_path, "/proc/%u/root", pid);
+	root_fd = openat (AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
+	if (root_fd == -1) {
+		res = -errno;
+		if (res == -EACCES) {
+			struct statfs buf;
+			/* Access to the root dir isn't allowed. This can happen if the root is on a fuse
+			 * filesystem, such as in a toolbox container. We will never have a fuse rootfs
+			 * in the flatpak case, so in that case its safe to ignore this and
+			 * continue to detect other types of apps. */
+			if (statfs(root_path, &buf) == 0 &&
+			    buf.f_type == 0x65735546) /* FUSE_SUPER_MAGIC */
+				return 0;
+		}
+		/* Not able to open the root dir shouldn't happen. Probably the app died and
+		 * we're failing due to /proc/$pid not existing. In that case fail instead
+		 * of treating this as privileged. */
+		pw_log_info("failed to open \"%s\": %s", root_path, spa_strerror(res));
+		return res;
+	}
+	info_fd = openat (root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
+	close (root_fd);
+	if (info_fd == -1) {
+		if (errno == ENOENT) {
+			pw_log_debug("no .flatpak-info, client on the host");
+			/* No file => on the host */
+			return 0;
+		}
+		res = -errno;
+		pw_log_error("error opening .flatpak-info: %m");
+		return res;
+        }
+	if (fstat (info_fd, &stat_buf) != 0 || !S_ISREG (stat_buf.st_mode)) {
+		/* Some weird fd => failure, assume sandboxed */
+		close(info_fd);
+		pw_log_error("error fstat .flatpak-info: %m");
+	}
+	return 1;
+}
+
+static int get_client_pid(struct client *client, int client_fd)
+{
+	socklen_t len;
+#if defined(__linux__)
+	struct ucred ucred;
+	len = sizeof(ucred);
+	if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
+                pw_log_warn(NAME": client %p: no peercred: %m", client);
+	} else
+		return ucred.pid;
+#elif defined(__FreeBSD__)
+	struct xucred xucred;
+	len = sizeof(xucred);
+	if (getsockopt(client_fd, 0, LOCAL_PEERCRED, &xucred, &len) < 0) {
+                pw_log_warn(NAME": client %p: no peercred: %m", client);
+	} else {
+#if __FreeBSD__ >= 13
+		return xucred.cr_pid;
+#endif
+	}
+#endif
+	return 0;
 }
 
 static void
@@ -5060,7 +5338,7 @@ on_connect(void *data, int fd, uint32_t mask)
 	struct impl *impl = server->impl;
 	struct sockaddr_un name;
 	socklen_t length;
-	int client_fd, val;
+	int client_fd, val, pid;
 	struct client *client;
 
 	client = calloc(1, sizeof(struct client));
@@ -5068,6 +5346,7 @@ on_connect(void *data, int fd, uint32_t mask)
 		goto error;
 
 	client->impl = impl;
+	client->ref = 1;
 	client->server = server;
 	client->connect_tag = SPA_ID_INVALID;
 	spa_list_append(&server->clients, &client->link);
@@ -5075,7 +5354,7 @@ on_connect(void *data, int fd, uint32_t mask)
 	spa_list_init(&client->out_messages);
 	spa_list_init(&client->operations);
 	spa_list_init(&client->modules);
-	spa_list_init(&client->samples);
+	spa_list_init(&client->pending_samples);
 
 	client->props = pw_properties_new(
 			PW_KEY_CLIENT_API, "pipewire-pulse",
@@ -5101,6 +5380,9 @@ on_connect(void *data, int fd, uint32_t mask)
 					(const void *) &val, sizeof(val)) < 0)
 			pw_log_warn("SO_PRIORITY failed: %m");
 #endif
+		pid = get_client_pid(client, client_fd);
+		if (pid != 0 && check_flatpak(client, pid) == 1)
+			pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "flatpak");
 	} else if (server->type == SERVER_TYPE_INET) {
 		val = 1;
 		if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
@@ -5111,6 +5393,8 @@ on_connect(void *data, int fd, uint32_t mask)
 		if (setsockopt(client_fd, IPPROTO_IP, IP_TOS,
 					(const void *) &val, sizeof(val)) < 0)
 	            pw_log_warn("IP_TOS failed: %m");
+
+		pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "restricted");
 	}
 
 	client->source = pw_loop_add_io(impl->loop,
@@ -5151,7 +5435,7 @@ get_runtime_dir(char *buf, size_t buflen, const char *dir)
 		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
 			runtime_dir = result ? result->pw_dir : NULL;
 	}
-	size = snprintf(buf, buflen-1, "%s/%s", runtime_dir, dir) + 1;
+	size = snprintf(buf, buflen, "%s/%s", runtime_dir, dir) + 1;
 	if (size > (int) buflen) {
 		pw_log_error(NAME": path %s/%s too long", runtime_dir, dir);
 		return -ENAMETOOLONG;
@@ -5200,9 +5484,9 @@ get_server_name(struct pw_context *context)
 
 	if (props)
 		name = pw_properties_get(props, PW_KEY_REMOTE_NAME);
-	if (name == NULL)
+	if (name == NULL || name[0] == '\0')
 		name = getenv("PIPEWIRE_REMOTE");
-	if (name == NULL)
+	if (name == NULL || name[0] == '\0')
 		name = PW_DEFAULT_REMOTE;
 	return name;
 }
@@ -5418,12 +5702,18 @@ static int impl_free_sample(void *item, void *data)
 static void impl_free(struct impl *impl)
 {
 	struct server *s;
+	struct client *c;
+
 	if (impl->context)
 		spa_hook_remove(&impl->context_listener);
+	spa_list_consume(c, &impl->cleanup_clients, link)
+		client_free(c);
 	spa_list_consume(s, &impl->servers, link)
 		server_free(s);
 	pw_map_for_each(&impl->samples, impl_free_sample, impl);
 	pw_map_clear(&impl->samples);
+	if (impl->cleanup)
+		pw_loop_destroy_source(impl->loop, impl->cleanup);
 	if (impl->props)
 		pw_properties_free(impl->props);
 	free(impl);
@@ -5444,13 +5734,24 @@ static const struct pw_context_events context_events = {
 	.destroy = context_destroy,
 };
 
+static void on_server_cleanup(void *data, uint64_t count)
+{
+	struct impl *impl = data;
+	struct client *c, *t;
+	spa_list_for_each_safe(c, t, &impl->cleanup_clients, link) {
+		if (c->ref <= 0)
+			client_free(c);
+	}
+}
+
 struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		struct pw_properties *props, size_t user_data_size)
 {
 	struct impl *impl;
 	const char *str;
-	int i, n_addr;
-	char **addr, *free_str = NULL;
+	char *free_str = NULL;
+	struct spa_json it[2];
+	char value[512];
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
@@ -5460,7 +5761,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	if (props != NULL)
 		str = pw_properties_get(props, "server.address");
 	if (str == NULL) {
-		str = free_str = spa_aprintf("%s-%s",
+		str = free_str = spa_aprintf("[ \"%s-%s\" ]",
 				PW_PROTOCOL_PULSE_DEFAULT_SERVER,
 				get_server_name(context));
 	}
@@ -5472,25 +5773,31 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
 	impl->props = props;
+
+	impl->cleanup = pw_loop_add_event(impl->loop,
+					on_server_cleanup, impl);
+	if (impl->cleanup == NULL)
+		goto error_free;
+
 	spa_list_init(&impl->servers);
 	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
 	impl->rate_limit.burst = 1;
 	pw_map_init(&impl->samples, 16, 16);
+	spa_list_init(&impl->cleanup_clients);
 	spa_list_init(&impl->free_messages);
 
 	pw_context_add_listener(context, &impl->context_listener,
 			&context_events, impl);
 
-	addr = pw_split_strv(str, ",", INT_MAX, &n_addr);
-	for (i = 0; i < n_addr; i++) {
-		if (addr[i] == NULL)
-			continue;
-		if (create_server(impl, addr[i]) == NULL) {
-			pw_log_warn(NAME" %p: can't create server for %s: %m",
-					impl, addr[i]);
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_array(&it[0], &it[1]) > 0) {
+		while (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
+			if (create_server(impl, value) == NULL) {
+				pw_log_warn(NAME" %p: can't create server for %s: %m",
+						impl, value);
+			}
 		}
 	}
-	pw_free_strv(addr);
 	free(free_str);
 
 	dbus_request_name(context, "org.pulseaudio.Server");

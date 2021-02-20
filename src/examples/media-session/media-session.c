@@ -53,6 +53,7 @@
 
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
+#include "pipewire/conf.h"
 #include "extensions/session-manager.h"
 #include "extensions/client-node.h"
 
@@ -61,6 +62,7 @@
 #include "media-session.h"
 
 #define NAME		"media-session"
+#define SESSION_PREFIX	"media-session.d"
 #define SESSION_CONF	"media-session.conf"
 
 #define sm_object_emit(o,m,v,...) spa_hook_list_call(&(o)->hooks, struct sm_object_events, m, v, ##__VA_ARGS__)
@@ -147,9 +149,6 @@ struct impl {
 	struct spa_list sync_list;		/** list of struct sync */
 	int rescan_seq;
 	int last_seq;
-
-	int state_dir_fd;
-	char state_dir[PATH_MAX];
 
 	unsigned int scanning:1;
 	unsigned int rescan_pending:1;
@@ -1784,171 +1783,64 @@ int sm_media_session_remove_links(struct sm_media_session *sess,
 int sm_media_session_load_conf(struct sm_media_session *sess, const char *name,
 		struct pw_properties *conf)
 {
-	const char *dir;
-	char path[PATH_MAX];
-	int count, fd;
-	struct stat sbuf;
-	char *data;
-
-	if ((count = sm_media_session_load_state(sess, name, NULL, conf)) >= 0)
-		return count;
-
-	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
-		dir = PIPEWIRE_CONFIG_DIR;
-	if (dir == NULL)
-		return -ENOENT;
-
-	snprintf(path, sizeof(path)-1, "%s/media-session.d/%s", dir, name);
-	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)  {
-		pw_log_warn(NAME" %p: error loading config '%s': %m", sess, path);
-		return -errno;
-	}
-
-	pw_log_info(NAME" %p: loading config '%s'", sess, path);
-	if (fstat(fd, &sbuf) < 0)
-		goto error_close;
-	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
-		goto error_close;
-	close(fd);
-
-	count = pw_properties_update_string(conf, data, sbuf.st_size);
-	munmap(data, sbuf.st_size);
-
-	return count;
-
-error_close:
-	pw_log_debug("can't read file %s: %m", path);
-	close(fd);
-	return -errno;
-}
-
-static int state_dir(struct sm_media_session *sess)
-{
-	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
-	const char *home_dir;
-	int res;
-
-	if (impl->state_dir_fd != -1)
-		return impl->state_dir_fd;
-
-	home_dir = getenv("XDG_CONFIG_HOME");
-	if (home_dir != NULL)
-		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
-				"%s/pipewire-media-session/", home_dir);
-	else {
-		home_dir = getenv("HOME");
-		if (home_dir == NULL)
-			home_dir = getenv("USERPROFILE");
-		if (home_dir == NULL) {
-			struct passwd pwd, *result = NULL;
-			char buffer[4096];
-			if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
-				home_dir = result ? result->pw_dir : NULL;
-		}
-		if (home_dir == NULL) {
-			pw_log_error("Can't determine home directory");
-			return -ENOTSUP;
-		}
-		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
-				"%s/.config/pipewire-media-session/", home_dir);
-	}
-
-#ifndef O_PATH
-#define O_PATH 0
-#endif
-
-	if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
-		if (errno == ENOENT) {
-			pw_log_info("creating state directory %s", impl->state_dir);
-			if (mkdir(impl->state_dir, 0700) < 0) {
-				pw_log_info("Can't create state directory %s: %m", impl->state_dir);
-				return -errno;
-			}
-		} else {
-			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
-			return -errno;
-		}
-		if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
-			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
-			return -EINVAL;
-		}
-	}
-	impl->state_dir_fd = res;
-	return res;
+	return pw_conf_load_conf(SESSION_PREFIX, name, conf);
 }
 
 int sm_media_session_load_state(struct sm_media_session *sess,
 		const char *name, const char *prefix, struct pw_properties *props)
 {
-	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
-	int count, sfd, fd;
-	struct stat sbuf;
-	void *data;
-
-	if ((sfd = state_dir(sess)) < 0)
-		return sfd;
-
-	if ((fd = openat(sfd, name, O_CLOEXEC | O_RDONLY)) < 0) {
-		pw_log_debug("can't open file %s%s: %m", impl->state_dir, name);
-		return -errno;
-	}
-	pw_log_info(NAME" %p: loading state '%s%s'", sess, impl->state_dir, name);
-	if (fstat(fd, &sbuf) < 0)
-		goto error_close;
-	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
-		goto error_close;
-	close(fd);
-
-	count = pw_properties_update_string(props, data, sbuf.st_size);
-	munmap(data, sbuf.st_size);
-
-	return count;
-
-error_close:
-	pw_log_debug("can't read file %s: %m", name);
-	close(fd);
-	return -errno;
+	return pw_conf_load_state(SESSION_PREFIX, name, props);
 }
 
 int sm_media_session_save_state(struct sm_media_session *sess,
 		const char *name, const char *prefix, const struct pw_properties *props)
 {
-	const struct spa_dict_item *it;
-	char *tmp_name;
-	int sfd, fd;
-	FILE *f;
+	return pw_conf_save_state(SESSION_PREFIX, name, props);
+}
 
-	pw_log_info(NAME" %p: saving state '%s'", sess, name);
-	if ((sfd = state_dir(sess)) < 0)
-		return sfd;
+char *sm_media_session_sanitize_name(char *name, int size, char sub, const char *fmt, ...)
+{
+	char *p;
+	va_list varargs;
 
-	tmp_name = alloca(strlen(name)+5);
-	sprintf(tmp_name, "%s.tmp", name);
-	if ((fd = openat(sfd, tmp_name,  O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC, 0700)) < 0) {
-		pw_log_error("can't open file '%s': %m", tmp_name);
-		return -errno;
+	va_start(varargs, fmt);
+	if (vsnprintf(name, size, fmt, varargs) < 0)
+		return NULL;
+	va_end(varargs);
+
+	for (p = name; *p; p++) {
+		switch(*p) {
+		case '0' ... '9':
+		case 'a' ... 'z':
+		case 'A' ... 'Z':
+		case '.': case '-': case '_':
+			break;
+		default:
+			*p = sub;
+			break;
+		}
 	}
+	return name;
+}
 
-	f = fdopen(fd, "w");
-	fprintf(f, "{ \n");
-	spa_dict_for_each(it, &props->dict) {
-		char key[1024];
-		if (prefix != NULL && strstr(it->key, prefix) != it->key)
-			continue;
+char *sm_media_session_sanitize_description(char *name, int size, char sub, const char *fmt, ...)
+{
+	char *p;
+	va_list varargs;
 
-		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
-			continue;
+	va_start(varargs, fmt);
+	if (vsnprintf(name, size, fmt, varargs) < 0)
+		return NULL;
+	va_end(varargs);
 
-		fprintf(f, " %s: %s\n", key, it->value);
+	for (p = name; *p; p++) {
+		switch(*p) {
+		case ':':
+			*p = sub;
+			break;
+		}
 	}
-	fprintf(f, "}\n");
-	fclose(f);
-
-	if (renameat(sfd, tmp_name, sfd, name) < 0) {
-		pw_log_error("can't rename temp file '%s': %m", tmp_name);
-		return -errno;
-	}
-	return 0;
+	return name;
 }
 
 static void monitor_core_done(void *data, uint32_t id, int seq)
@@ -2140,29 +2032,6 @@ static void do_quit(void *data, int signal_number)
 	pw_main_loop_quit(impl->loop);
 }
 
-static int load_spa_libs(struct impl *impl, const char *str)
-{
-	struct spa_json it[2];
-	char key[512], value[512];
-
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
-		return -EINVAL;
-
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
-		if (key[0] == '#') {
-			if (spa_json_next(&it[1], &val) <= 0)
-				break;
-		}
-		else if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
-			pw_log_debug("spa-libs: '%s' -> '%s'", key, value);
-			pw_context_add_spa_lib(impl->this.context, key, value);
-		}
-	}
-	return 0;
-}
-
 static int collect_modules(struct impl *impl, const char *str)
 {
 	struct spa_json it[3];
@@ -2191,7 +2060,7 @@ again:
 			add = true;
 		} else {
 			snprintf(check_path, sizeof(check_path),
-					"%s/media-session.d/%s", dir, key);
+					"%s/"SESSION_PREFIX"/%s", dir, key);
 			add = (stat(check_path, &statbuf) == 0);
 		}
 		if (add) {
@@ -2280,22 +2149,24 @@ int main(int argc, char *argv[])
 
 	pw_init(&argc, &argv);
 
-	impl.state_dir_fd = -1;
 	impl.this.props = pw_properties_new(
-			PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
+			PW_KEY_CONFIG_PREFIX, SESSION_PREFIX,
+			PW_KEY_CONFIG_NAME, SESSION_CONF,
 			NULL);
 	if (impl.this.props == NULL)
 		return -1;
 
 	if ((impl.conf = pw_properties_new(NULL, NULL)) == NULL)
 		return -1;
-	sm_media_session_load_conf(&impl.this, SESSION_CONF, impl.conf);
-	if ((str = pw_properties_get(impl.conf, "properties")) != NULL)
+
+	pw_conf_load_conf(SESSION_PREFIX, SESSION_CONF, impl.conf);
+
+	if ((str = pw_properties_get(impl.conf, "context.properties")) != NULL)
 		pw_properties_update_string(impl.this.props, str, strlen(str));
 
 	if ((impl.modules = pw_properties_new("default", "true", NULL)) == NULL)
 		return -1;
-	if ((str = pw_properties_get(impl.conf, "modules")) != NULL)
+	if ((str = pw_properties_get(impl.conf, "session.modules")) != NULL)
 		collect_modules(&impl, str);
 
 	while ((c = getopt_long(argc, argv, "hV", long_options, NULL)) != -1) {
@@ -2334,9 +2205,6 @@ int main(int argc, char *argv[])
 	if (impl.this.context == NULL)
 		return -1;
 
-	if ((str = pw_properties_get(impl.conf, "spa-libs")) != NULL)
-		load_spa_libs(&impl, str);
-
 	pw_context_set_object(impl.this.context, SM_TYPE_MEDIA_SESSION, &impl);
 
 	pw_map_init(&impl.globals, 64, 64);
@@ -2350,12 +2218,15 @@ int main(int argc, char *argv[])
 	support = pw_context_get_support(impl.this.context, &n_support);
 
 	impl.dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
-	if (impl.dbus)
+	if (impl.dbus) {
 		impl.this.dbus_connection = spa_dbus_get_connection(impl.dbus, SPA_DBUS_TYPE_SESSION);
-	if (impl.this.dbus_connection == NULL)
-		pw_log_warn("no dbus connection");
-	else
-		pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
+		if (impl.this.dbus_connection == NULL)
+			pw_log_warn("no dbus connection");
+		else
+			pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
+	} else {
+		pw_log_info("dbus diabled");
+	}
 
 	if ((res = start_session(&impl)) < 0)
 		goto exit;
@@ -2385,9 +2256,6 @@ exit:
 	pw_properties_free(impl.this.props);
 	pw_properties_free(impl.conf);
 	pw_properties_free(impl.modules);
-
-	if (impl.state_dir_fd != -1)
-		close(impl.state_dir_fd);
 
 	pw_deinit();
 
