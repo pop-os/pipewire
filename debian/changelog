@@ -1,8 +1,16 @@
-pipewire (0.3.22-1) UNRELEASED; urgency=medium
+pipewire (0.3.22-1) experimental; urgency=medium
 
+  * Team upload
   * New upstream release
+  * d/p/bluez5-volumes-need-to-be-distributed-to-all-channels.patch
+    d/p/bluez5-set-the-right-volumes-on-the-node.patch:
+    - Fix volume control on bluetooth devices
+  * d/libpipewire-0.3-0.symbols:
+    - Add new symbols
+  * debian/pipewire-bin.install
+    - Install new confiration file (bluez, v4l and client config)
 
- -- Sjoerd Simons <sjoerd@debian.org>  Sat, 20 Feb 2021 12:02:48 +0100
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 20 Feb 2021 21:50:40 +0100
 
 pipewire (0.3.19-3) unstable; urgency=medium
 
