@@ -69,8 +69,12 @@ option('bluez5',
        description: 'Enable bluez5 spa plugin integration',
        type: 'boolean',
        value: true)
-option('bluez5-backend-native',
-       description: 'Enable native HSP backend in bluez5 spa plugin',
+option('bluez5-backend-hsp-native',
+       description: 'Enable HSP in native backend in bluez5 spa plugin',
+       type: 'boolean',
+       value: true)
+option('bluez5-backend-hfp-native',
+       description: 'Enable HFP in native backend in bluez5 spa plugin',
        type: 'boolean',
        value: true)
 option('bluez5-backend-ofono',
@@ -132,11 +136,26 @@ option('volume',
 option('vulkan',
        description: 'Enable vulkan spa plugin integration',
        type: 'boolean',
-       value: true)
+       value: false)
 option('pw-cat',
        description: 'Build pw-cat/pw-play/pw-record',
+       type: 'boolean',
+       value: true)
+option('udev',
+       description: 'Enable Udev integration',
        type: 'boolean',
        value: true)
 option('udevrulesdir',
        type : 'string',
        description : 'Directory for udev rules (defaults to /lib/udev/rules.d)')
+option('systemd-user-unit-dir',
+       type : 'string',
+       description : 'Directory for user systemd units (defaults to /usr/lib/systemd/user)')
+option('sdl2',
+       description: 'Enable code that depends on SDL 2',
+       type: 'feature',
+       value: 'auto')
+option('sndfile',
+       description: 'Enable code that depends on libsndfile',
+       type: 'feature',
+       value: 'auto')

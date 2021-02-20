@@ -364,19 +364,27 @@ static int send_buffer(struct impl *this)
 		update_num_blocks(this);
 	}
 
-	spa_log_trace(this->log, NAME " %p: send %d %u %u %u",
-			this, this->frame_count, this->seqnum, this->timestamp, this->buffer_used);
+	spa_log_trace(this->log, NAME " %p: send %d %u %u %u %u",
+			this, this->frame_count, this->block_size, this->seqnum,
+			this->timestamp, this->buffer_used);
 
-	written = send(this->flush_source.fd, this->buffer, this->buffer_used, MSG_DONTWAIT | MSG_NOSIGNAL);
+	written = send(this->flush_source.fd, this->buffer,
+			this->buffer_used, MSG_DONTWAIT | MSG_NOSIGNAL);
 	reset_buffer(this);
 
-	spa_log_debug(this->log, NAME " %p: send %d", this, written);
+	spa_log_trace(this->log, NAME " %p: send %d", this, written);
+
 	if (written < 0) {
 		spa_log_debug(this->log, NAME " %p: %m", this);
 		return -errno;
 	}
 
 	return written;
+}
+
+static bool want_flush(struct impl *this)
+{
+	return (this->frame_count * this->block_size / this->port.frame_size >= MIN_LATENCY);
 }
 
 static bool need_flush(struct impl *this)
@@ -435,12 +443,12 @@ static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 	return processed;
 }
 
-static int flush_buffer(struct impl *this, bool force)
+static int flush_buffer(struct impl *this)
 {
 	spa_log_trace(this->log, NAME" %p: used:%d num_blocks:%d block_size:%d", this,
 			this->buffer_used, this->num_blocks, this->block_size);
 
-	if (force || need_flush(this))
+	if (want_flush(this) || need_flush(this))
 		return send_buffer(this);
 
 	return 0;
@@ -543,7 +551,7 @@ again:
 		return 0;
 	}
 
-	written = flush_buffer(this, true);
+	written = flush_buffer(this);
 	if (written == -EAGAIN) {
 		spa_log_trace(this->log, NAME" %p: delay flush", this);
 		if (now_time - this->last_error > SPA_NSEC_PER_SEC / 2) {
@@ -666,7 +674,7 @@ static int do_start(struct impl *this)
 	this->codec_data = this->codec->init(this->codec, 0,
 			this->transport->configuration,
 			this->transport->configuration_len,
-			&port->current_format,
+			&port->current_format, NULL,
 			this->transport->write_mtu);
 	if (this->codec_data == NULL)
 		return -EIO;
@@ -676,7 +684,7 @@ static int do_start(struct impl *this)
 	this->seqnum = 0;
 
 	this->block_size = this->codec->get_block_size(this->codec_data);
-	this->num_blocks = this->codec->get_num_blocks(this->codec_data);
+	update_num_blocks(this);
 	if (this->block_size > sizeof(this->tmp_buffer)) {
 		spa_log_error(this->log, "block-size %d > %zu",
 				this->block_size, sizeof(this->tmp_buffer));
@@ -686,7 +694,10 @@ static int do_start(struct impl *this)
         spa_log_debug(this->log, NAME " %p: block_size %d num_blocks:%d", this,
 			this->block_size, this->num_blocks);
 
-	val = SPA_MAX(this->codec->send_fill_frames, FILL_FRAMES) * this->transport->write_mtu;
+	val = this->codec->send_buf_size > 0
+			/* The kernel doubles the SO_SNDBUF option value set by setsockopt(). */
+			? this->codec->send_buf_size / 2 + this->codec->send_buf_size % 2
+			: FILL_FRAMES * this->transport->write_mtu;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, NAME " %p: SO_SNDBUF %m", this);
 
@@ -699,7 +710,7 @@ static int do_start(struct impl *this)
 	}
 	this->fd_buffer_size = val;
 
-	val = SPA_MAX(this->codec->recv_fill_frames, FILL_FRAMES) * this->transport->read_mtu;
+	val = FILL_FRAMES * this->transport->read_mtu;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, NAME " %p: SO_RCVBUF %m", this);
 
@@ -811,7 +822,7 @@ static const struct spa_dict_item node_info_items[] = {
 	{ SPA_KEY_DEVICE_API, "bluez5" },
 	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
 	{ SPA_KEY_NODE_DRIVER, "true" },
-	{ SPA_KEY_NODE_LATENCY, "512/48000" },
+	{ SPA_KEY_NODE_LATENCY, SPA_STRINGIFY(MIN_LATENCY)"/48000" },
 };
 
 static void emit_node_info(struct impl *this, bool full)

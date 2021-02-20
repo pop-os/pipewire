@@ -31,17 +31,35 @@ struct volume {
 				.channels = 0,		\
 			}
 
-#define VOLUME_DEFAULT	(struct volume) {		\
-				.channels = 2,		\
-				.values[0] = 1.0f,	\
-				.values[1] = 1.0f,	\
-			}
-
 static inline bool volume_valid(const struct volume *vol)
 {
 	if (vol->channels == 0 || vol->channels > CHANNELS_MAX)
 		return false;
 	return true;
+}
+
+static inline void volume_make(struct volume *vol, uint8_t channels)
+{
+	uint8_t i;
+	for (i = 0; i < channels; i++)
+		vol->values[i] = 1.0f;
+	vol->channels = channels;
+}
+
+static inline int volume_compare(struct volume *vol, struct volume *other)
+{
+	uint8_t i;
+	if (vol->channels != other->channels) {
+		pw_log_info("channels %d<>%d", vol->channels, other->channels);
+		return -1;
+	}
+	for (i = 0; i < vol->channels; i++) {
+		if (vol->values[i] != other->values[i]) {
+			pw_log_info("val %f<>%f", vol->values[i], other->values[i]);
+			return -1;
+		}
+	}
+	return 0;
 }
 
 struct volume_info {

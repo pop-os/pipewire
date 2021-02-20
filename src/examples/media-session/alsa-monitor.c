@@ -115,6 +115,7 @@ struct impl {
 	struct spa_hook session_listener;
 
 	struct pw_properties *conf;
+	struct pw_properties *props;
 
 	DBusConnection *conn;
 
@@ -202,121 +203,19 @@ static const struct sm_object_methods node_methods = {
 	.release = node_release,
 };
 
-static bool find_match(struct spa_json *arr, struct pw_properties *props)
-{
-	struct spa_json it[1];
-
-	while (spa_json_enter_object(arr, &it[0]) > 0) {
-		char key[256], val[1024];
-		const char *str, *value;
-		int match = 0, fail = 0;
-		int len;
-
-		while (spa_json_get_string(&it[0], key, sizeof(key)-1) > 0) {
-			bool success = false;
-
-			if ((len = spa_json_next(&it[0], &value)) <= 0)
-				break;
-
-			if (key[0] == '#')
-				continue;
-
-			str = pw_properties_get(props, key);
-
-			if (spa_json_is_null(value, len)) {
-				success = str == NULL;
-			} else {
-				spa_json_parse_string(value, SPA_MIN(len, 1024), val);
-				value = val;
-				len = strlen(val);
-			}
-			if (str != NULL) {
-				if (value[0] == '~') {
-					regex_t preg;
-					if (regcomp(&preg, value+1, REG_EXTENDED | REG_NOSUB) == 0) {
-						if (regexec(&preg, str, 0, NULL, 0) == 0)
-							success = true;
-						regfree(&preg);
-					}
-				} else if (strncmp(str, value, len) == 0) {
-					success = true;
-				}
-			}
-			if (success) {
-				match++;
-				pw_log_debug("'%s' match '%s' < > '%.*s'", key, str, len, value);
-			}
-			else
-				fail++;
-		}
-		if (match > 0 && fail == 0)
-			return true;
-	}
-	return false;
-}
-
-static int apply_matches(struct impl *impl, struct pw_properties *props)
-{
-	const char *rules, *val;
-	struct spa_json it[4], actions;;
-
-	if ((rules = pw_properties_get(impl->conf, "rules")) == NULL)
-		return 0;
-
-	spa_json_init(&it[0], rules, strlen(rules));
-	if (spa_json_enter_array(&it[0], &it[1]) < 0)
-		return 0;
-
-	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
-		char key[64];
-		bool have_match = false, have_actions = false;
-
-		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
-			if (strcmp(key, "matches") == 0) {
-				if (spa_json_enter_array(&it[2], &it[3]) < 0)
-					break;
-
-				have_match = find_match(&it[3], props);
-			}
-			else if (strcmp(key, "actions") == 0) {
-				if (spa_json_enter_object(&it[2], &actions) > 0)
-					have_actions = true;
-			}
-			else if (spa_json_next(&it[2], &val) <= 0)
-                                break;
-		}
-		if (!have_match || !have_actions)
-			continue;
-
-		while (spa_json_get_string(&actions, key, sizeof(key)-1) > 0) {
-			int len;
-			pw_log_debug("action %s", key);
-			if (strcmp(key, "update-props") == 0) {
-				if ((len = spa_json_next(&actions, &val)) <= 0)
-					continue;
-				if (!spa_json_is_object(val, len))
-					continue;
-				len = spa_json_container_len(&actions, val, len);
-
-				pw_properties_update_string(props, val, len);
-			}
-			else if (spa_json_next(&actions, &val) <= 0)
-				break;
-		}
-	}
-	return 1;
-}
-
 static struct node *alsa_create_node(struct device *device, uint32_t id,
 		const struct spa_device_object_info *info)
 {
 	struct node *node;
 	struct impl *impl = device->impl;
 	int res;
-	const char *dev, *subdev, *stream, *profile, *profile_desc;
+	const char *dev, *subdev, *stream, *profile, *profile_desc, *rules;
+	char tmp[1024];
 	int i, priority;
 
 	pw_log_debug("new node %u", id);
+	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+		spa_debug_dict(0, info->props);
 
 	if (strcmp(info->type, SPA_TYPE_INTERFACE_Node) != 0) {
 		errno = EINVAL;
@@ -333,6 +232,9 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	pw_properties_setf(node->props, PW_KEY_DEVICE_ID, "%d", device->device_id);
 
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
+
+	if (!device->use_acp && pw_properties_get(node->props, PW_KEY_AUDIO_CHANNELS) == NULL)
+		pw_properties_setf(node->props, PW_KEY_AUDIO_CHANNELS, "%d", SPA_AUDIO_MAX_CHANNELS);
 
 	if ((dev = pw_properties_get(node->props, SPA_KEY_API_ALSA_PCM_DEVICE)) == NULL)
 		if ((dev = pw_properties_get(node->props, "alsa.device")) == NULL)
@@ -381,12 +283,16 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	}
 	if (pw_properties_get(node->props, PW_KEY_NODE_NICK) == NULL) {
 		const char *s;
+
 		s = pw_properties_get(device->props, PW_KEY_DEVICE_NICK);
 		if (s == NULL)
 			s = pw_properties_get(device->props, SPA_KEY_API_ALSA_CARD_NAME);
 		if (s == NULL)
 			s = pw_properties_get(device->props, "alsa.card_name");
-		pw_properties_set(node->props, PW_KEY_NODE_NICK, s);
+
+		pw_properties_set(node->props, PW_KEY_NODE_NICK,
+			sm_media_session_sanitize_description(tmp, sizeof(tmp),
+				' ', "%s", s));
 
 	}
 	if (pw_properties_get(node->props, SPA_KEY_NODE_NAME) == NULL) {
@@ -396,9 +302,12 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 			devname = "unnamed-device";
 		if (strstr(devname, "alsa_card.") == devname)
 			devname += 10;
-		pw_properties_setf(node->props, SPA_KEY_NODE_NAME, "%s.%s.%s",
+
+		pw_properties_set(node->props, SPA_KEY_NODE_NAME,
+			sm_media_session_sanitize_name(tmp, sizeof(tmp),
+				'_', "%s.%s.%s",
 				node->direction == PW_DIRECTION_OUTPUT ?
-				"alsa_input" : "alsa_output", devname, profile);
+				"alsa_input" : "alsa_output", devname, profile));
 
 		for (i = 2; i <= 99; i++) {
 			if ((d = pw_properties_get(node->props, PW_KEY_NODE_NAME)) == NULL)
@@ -407,9 +316,11 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 			if (alsa_find_node(device, SPA_ID_INVALID, d) == NULL)
 				break;
 
-			pw_properties_setf(node->props, SPA_KEY_NODE_NAME, "%s.%s.%s.%d",
+			pw_properties_set(node->props, SPA_KEY_NODE_NAME,
+				sm_media_session_sanitize_name(tmp, sizeof(tmp),
+					'_', "%s.%s.%s.%d",
 					node->direction == PW_DIRECTION_OUTPUT ?
-					"alsa_input" : "alsa_output", devname, profile, i);
+					"alsa_input" : "alsa_output", devname, profile, i));
 		}
 	}
 	if (pw_properties_get(node->props, PW_KEY_NODE_DESCRIPTION) == NULL) {
@@ -425,17 +336,21 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 			name = dev;
 
 		if (profile_desc != NULL) {
-			pw_properties_setf(node->props, PW_KEY_NODE_DESCRIPTION, "%s %s",
-					desc, profile_desc);
+			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+				sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s %s", desc, profile_desc));
 		} else if (strcmp(subdev, "0")) {
-			pw_properties_setf(node->props, PW_KEY_NODE_DESCRIPTION, "%s (%s %s)",
-					desc, name, subdev);
+			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+				sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s (%s %s)", desc, name, subdev));
 		} else if (strcmp(dev, "0")) {
-			pw_properties_setf(node->props, PW_KEY_NODE_DESCRIPTION, "%s (%s)",
-					desc, name);
+			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+				sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s (%s)", desc, name));
 		} else {
-			pw_properties_setf(node->props, PW_KEY_NODE_DESCRIPTION, "%s",
-					desc);
+			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+				sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s", desc));
 		}
 	}
 
@@ -443,7 +358,8 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	node->device = device;
 	node->id = id;
 
-	apply_matches(impl, node->props);
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), node->props);
 
 	node->snode = sm_media_session_create_node(impl->session,
 				"adapter",
@@ -611,6 +527,10 @@ static int update_device_props(struct device *device)
 		if (!d)
 			d = pw_properties_get(p, PW_KEY_DEVICE_PRODUCT_NAME);
 
+		if (!d)
+			d = pw_properties_get(p, SPA_KEY_API_ALSA_CARD_NAME);
+		if (!d)
+			d = pw_properties_get(p, "alsa.card_name");
 		if (!d)
 			d = "Unknown device";
 
@@ -943,9 +863,11 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 {
 	struct device *device;
 	int res;
-	const char *str, *card;
+	const char *str, *card, *rules;
 
 	pw_log_debug("new device %u", id);
+	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+		spa_debug_dict(0, info->props);
 
 	if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) != 0) {
 		errno = EINVAL;
@@ -968,7 +890,8 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 	device->pending_profile = 1;
 	spa_list_append(&impl->device_list, &device->link);
 
-	apply_matches(impl, device->props);
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), device->props);
 
 	str = pw_properties_get(device->props, "api.alsa.use-acp");
 	device->use_acp = str ? pw_properties_parse_bool(str) : true;
@@ -1058,8 +981,10 @@ static int alsa_start_jack_device(struct impl *impl)
 				&props->dict,
                                 0);
 
-	if (impl->jack_device == NULL)
+	if (impl->jack_device == NULL) {
+		pw_log_error("can't create JACK Device: %m");
 		res = -errno;
+	}
 
 	pw_properties_free(props);
 
@@ -1072,8 +997,10 @@ static void session_destroy(void *data)
 	remove_jack_timeout(impl);
 	spa_hook_remove(&impl->session_listener);
 	spa_hook_remove(&impl->listener);
-	pw_proxy_destroy(impl->jack_device);
+	if (impl->jack_device)
+		pw_proxy_destroy(impl->jack_device);
 	pw_unload_spa_handle(impl->handle);
+	pw_properties_free(impl->props);
 	pw_properties_free(impl->conf);
 	free(impl);
 }
@@ -1089,6 +1016,7 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 	struct impl *impl;
 	void *iface;
 	int res;
+	const char *str;
 
 	impl = calloc(1, sizeof(struct impl));
 	if (impl == NULL)
@@ -1097,21 +1025,30 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 	impl->session = session;
 	impl->conf = pw_properties_new(NULL, NULL);
 	if (impl->conf == NULL) {
-		free(impl);
-		return -ENOMEM;
+		res = -errno;
+		goto out_free;
 	}
 
 	if ((res = sm_media_session_load_conf(impl->session,
 					SESSION_CONF, impl->conf)) < 0)
 		pw_log_info("can't load "SESSION_CONF" config: %s", spa_strerror(res));
 
-	if (session->dbus_connection)
-		impl->conn = spa_dbus_connection_get(session->dbus_connection);
-	if (impl->conn == NULL)
-		pw_log_warn("no dbus connection, device reservation disabled");
-	else
-		pw_log_debug("got dbus connection %p", impl->conn);
+	if ((impl->props = pw_properties_new(NULL, NULL)) == NULL) {
+		res = -errno;
+		goto out_free;
+	}
+	if ((str = pw_properties_get(impl->conf, "properties")) != NULL)
+		pw_properties_update_string(impl->props, str, strlen(str));
 
+	if ((str = pw_properties_get(impl->props, "alsa.reserve")) == NULL ||
+	    pw_properties_parse_bool(str)) {
+		if (session->dbus_connection)
+			impl->conn = spa_dbus_connection_get(session->dbus_connection);
+		if (impl->conn == NULL)
+			pw_log_warn("no dbus connection, device reservation disabled");
+		else
+			pw_log_debug("got dbus connection %p", impl->conn);
+	}
 
 	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_ALSA_ENUM_UDEV, NULL);
 	if (impl->handle == NULL) {
@@ -1121,22 +1058,29 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 
 	if ((res = spa_handle_get_interface(impl->handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
 		pw_log_error("can't get udev Device interface: %d", res);
-		goto out_unload;
+		goto out_free;
 	}
 	impl->monitor = iface;
 	spa_list_init(&impl->device_list);
 	spa_device_add_listener(impl->monitor, &impl->listener, &alsa_udev_events, impl);
 
-	if ((res = alsa_start_jack_device(impl)) < 0)
-		goto out_unload;
+	if ((str = pw_properties_get(impl->props, "alsa.jack-device")) != NULL &&
+	    pw_properties_parse_bool(str)) {
+		if ((res = alsa_start_jack_device(impl)) < 0)
+			goto out_free;
+	}
 
 	sm_media_session_add_listener(session, &impl->session_listener, &session_events, impl);
 
 	return 0;
 
-out_unload:
-	pw_unload_spa_handle(impl->handle);
 out_free:
+	if (impl->handle)
+		pw_unload_spa_handle(impl->handle);
+	if (impl->conf)
+		pw_properties_free(impl->conf);
+	if (impl->props)
+		pw_properties_free(impl->props);
 	free(impl);
 	return res;
 }

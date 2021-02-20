@@ -1712,6 +1712,14 @@ static bool element_probe_volume(pa_alsa_element *e, snd_mixer_elem_t *me) {
     else
         e->has_dB = snd_mixer_selem_get_capture_dB_range(me, &min_dB, &max_dB) >= 0;
 
+    /* Assume decibel data to be incorrect if max_dB is negative. */
+    if (e->has_dB && max_dB < 0 && !e->db_fix) {
+        pa_alsa_mixer_id_to_string(buf, sizeof(buf), &e->alsa_id);
+        pa_log_warn("The decibel volume range for element %s (%li dB - %li dB) has negative maximum. "
+                    "Disabling the decibel range.", buf, min_dB, max_dB);
+        e->has_dB = false;
+    }
+
     /* Check that the kernel driver returns consistent limits with
      * both _get_*_dB_range() and _ask_*_vol_dB(). */
     if (e->has_dB && !e->db_fix) {
@@ -4938,12 +4946,19 @@ pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel
 
     items[0].data = &ps->auto_profiles;
 
-    if (!fname)
-        fname = "default.conf";
-
-    fn = pa_maybe_prefix_path(fname,
+    fn = pa_maybe_prefix_path(fname ? fname : "default.conf",
 		    get_default_profile_dir());
-
+    if ((r = access(fn, R_OK)) != 0) {
+        if (fname != NULL) {
+            pa_log_warn("profile-set '%s' can't be accessed: %m", fn);
+            fn = pa_maybe_prefix_path("default.conf",
+			    get_default_profile_dir());
+            r = access(fn, R_OK);
+	}
+	if (r != 0) {
+            pa_log_warn("profile-set '%s' can't be accessed: %m", fn);
+	}
+    }
     r = pa_config_parse(fn, NULL, items, NULL, false, ps);
     pa_xfree(fn);
 
@@ -4994,6 +5009,7 @@ static void profile_finalize_probing(pa_alsa_profile *to_be_finalized, pa_alsa_p
             if (next && next->output_mappings && pa_idxset_get_by_data(next->output_mappings, m, NULL))
                 continue;
 
+            pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
             snd_pcm_close(m->output_pcm);
             m->output_pcm = NULL;
         }
@@ -5013,6 +5029,7 @@ static void profile_finalize_probing(pa_alsa_profile *to_be_finalized, pa_alsa_p
             if (next && next->input_mappings && pa_idxset_get_by_data(next->input_mappings, m, NULL))
                 continue;
 
+            pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
             snd_pcm_close(m->input_pcm);
             m->input_pcm = NULL;
         }
@@ -5238,7 +5255,6 @@ void pa_alsa_profile_set_probe(
                 if (m->output_pcm) {
                     found_output |= !p->fallback_output;
                     mapping_paths_probe(m, p, PA_ALSA_DIRECTION_OUTPUT, used_paths, mixers);
-                    pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
                 }
 
         if (p->input_mappings)
@@ -5246,7 +5262,6 @@ void pa_alsa_profile_set_probe(
                 if (m->input_pcm) {
                     found_input |= !p->fallback_input;
                     mapping_paths_probe(m, p, PA_ALSA_DIRECTION_INPUT, used_paths, mixers);
-                    pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
                 }
     }
 

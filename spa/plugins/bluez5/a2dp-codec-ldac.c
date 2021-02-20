@@ -48,6 +48,8 @@
 #define LDAC_ABR_THRESHOLD_DANGEROUSTREND 4
 #define LDAC_ABR_THRESHOLD_SAFETY_FOR_HQSQ 3
 
+#define LDAC_ABR_SOCK_BUFFER_SIZE (LDAC_ABR_THRESHOLD_CRITICAL * LDAC_ABR_MAX_PACKET_NBYTES)
+
 
 struct impl {
 	HANDLE_LDAC_BT ldac;
@@ -128,7 +130,7 @@ static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags, uint8
 
 static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size,
-		const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_ldac_t conf;
 
@@ -136,8 +138,10 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
                 return -EINVAL;
 
 	memcpy(&conf, caps, sizeof(conf));
-	conf.info.vendor_id = LDAC_VENDOR_ID;
-	conf.info.codec_id = LDAC_CODEC_ID;
+
+	if (codec->vendor.vendor_id != conf.info.vendor_id ||
+	    codec->vendor.codec_id != conf.info.codec_id)
+		return -ENOTSUP;
 
 	if (conf.frequency & LDACBT_SAMPLING_FREQ_044100)
 		conf.frequency = LDACBT_SAMPLING_FREQ_044100;
@@ -308,7 +312,8 @@ static int codec_get_block_size(void *data)
 }
 
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
-		void *config, size_t config_len, const struct spa_audio_info *info, size_t mtu)
+		void *config, size_t config_len, const struct spa_audio_info *info,
+		const struct spa_dict *settings, size_t mtu)
 {
 	struct impl *this;
 	a2dp_ldac_t *conf = config;
@@ -486,7 +491,9 @@ const struct a2dp_codec a2dp_codec_ldac = {
 		.codec_id = LDAC_CODEC_ID },
 	.name = "ldac",
 	.description = "LDAC",
-	.send_fill_frames = 4,
+#ifdef ENABLE_LDAC_ABR
+	.send_buf_size = LDAC_ABR_SOCK_BUFFER_SIZE,
+#endif
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,

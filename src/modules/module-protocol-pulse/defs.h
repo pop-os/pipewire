@@ -48,7 +48,7 @@
 #define MAX_BUFFERS     64u
 
 #define MIN_BLOCK	64u
-#define MIN_SAMPLES	16u
+#define MIN_SAMPLES	32u
 #define MIN_USEC	(MIN_SAMPLES * SPA_USEC_PER_SEC / 48000u)
 
 #define MAXLENGTH		(4*1024*1024) /* 4MB */
@@ -417,4 +417,6 @@ static uint32_t port_type_value(const char *port_type)
 
 #define METADATA_DEFAULT_SINK           "default.audio.sink"
 #define METADATA_DEFAULT_SOURCE         "default.audio.source"
+#define METADATA_CONFIG_DEFAULT_SINK    "default.configured.audio.sink"
+#define METADATA_CONFIG_DEFAULT_SOURCE  "default.configured.audio.source"
 #define METADATA_TARGET_NODE            "target.node"

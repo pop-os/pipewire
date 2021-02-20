@@ -126,6 +126,7 @@ static struct spa_bt_transport *_transport_create(struct spa_bt_backend *backend
 	t->backend = backend;
 	t->profile = profile;
 	t->codec = codec;
+	t->enabled = true;
 
 finish:
 	return t;
@@ -519,6 +520,10 @@ static void ofono_register_reply(DBusPendingCall *pending, void *user_data)
 	}
 	if (dbus_message_is_error(r, DBUS_ERROR_UNKNOWN_METHOD)) {
 		spa_log_warn(backend->log, NAME": Error registering profile");
+		goto finish;
+	}
+	if (dbus_message_is_error(r, DBUS_ERROR_SERVICE_UNKNOWN)) {
+		spa_log_info(backend->log, NAME": oFono not available, disabling");
 		goto finish;
 	}
 	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {

@@ -59,8 +59,12 @@ extern "C" {
 #define PW_KEY_OBJECT_PATH		"object.path"		/**< unique path to construct the object */
 #define PW_KEY_OBJECT_ID		"object.id"		/**< a global object id */
 
+/* config */
+#define PW_KEY_CONFIG_PREFIX		"config.prefix"		/**< a config prefix directory */
+#define PW_KEY_CONFIG_NAME		"config.name"		/**< a config file name */
+
 /* context */
-#define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules */
+#define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules, deprecated */
 #define PW_KEY_USER_NAME		"context.user-name"	/**< The user name that runs pipewire */
 #define PW_KEY_HOST_NAME		"context.host-name"	/**< The host name of the machine */
 
@@ -157,6 +161,8 @@ extern "C" {
 #define PW_KEY_PORT_CONTROL		"port.control"		/**< if this port is a control port */
 #define PW_KEY_PORT_MONITOR		"port.monitor"		/**< if this port is a monitor port */
 #define PW_KEY_PORT_CACHE_PARAMS	"port.cache-params"	/**< cache the node port params */
+#define PW_KEY_PORT_EXTRA		"port.extra"		/**< api specific extra port info, API name
+								  *  should be prefixed. "jack:flags:56" */
 
 /** link properties */
 #define PW_KEY_LINK_ID			"link.id"		/**< a link id */
@@ -246,7 +252,7 @@ extern "C" {
 #define PW_KEY_MEDIA_TYPE		"media.type"		/**< Media type, one of
 								  *  Audio, Video, Midi */
 #define PW_KEY_MEDIA_CATEGORY		"media.category"	/**< Media Category:
-								  *  Playback, Capture, Duplex, Monitor */
+								  *  Playback, Capture, Duplex, Monitor, Manager */
 #define PW_KEY_MEDIA_ROLE		"media.role"		/**< Role: Movie, Music, Camera,
 								  *  Screen, Communication, Game,
 								  *  Notification, DSP, Production,

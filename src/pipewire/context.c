@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <regex.h>
 #include <limits.h>
+#include <sys/mman.h>
 
 #include <pipewire/log.h>
 
@@ -39,6 +40,7 @@
 
 #include <pipewire/impl.h>
 #include <pipewire/private.h>
+#include <pipewire/conf.h>
 
 #include <extensions/protocol-native.h>
 
@@ -56,6 +58,7 @@
 #define DEFAULT_VIDEO_RATE_NUM		25u
 #define DEFAULT_VIDEO_RATE_DENOM	1u
 #define DEFAULT_LINK_MAX_BUFFERS	64u
+#define DEFAULT_MEM_WARN_MLOCK		false
 #define DEFAULT_MEM_ALLOW_MLOCK		true
 
 /** \cond */
@@ -70,30 +73,6 @@ struct factory_entry {
 	regex_t regex;
 	char *lib;
 };
-
-static int load_module_profiles(struct pw_context *this, char **profiles)
-{
-	int i;
-
-	for (i = 0; profiles[i]; i++) {
-		const char *str = profiles[i];
-		if (strcmp(str, "default") == 0) {
-			pw_log_debug(NAME" %p: loading default profile", this);
-			pw_context_load_module(this, "libpipewire-module-protocol-native", NULL, NULL);
-			pw_context_load_module(this, "libpipewire-module-client-node", NULL, NULL);
-			pw_context_load_module(this, "libpipewire-module-client-device", NULL, NULL);
-			pw_context_load_module(this, "libpipewire-module-adapter", NULL, NULL);
-			pw_context_load_module(this, "libpipewire-module-metadata", NULL, NULL);
-			pw_context_load_module(this, "libpipewire-module-session-manager", NULL, NULL);
-		} else if (strcmp(str, "rtkit") == 0) {
-			pw_log_debug(NAME" %p: loading rtkit profile", this);
-			pw_context_load_module(this, "libpipewire-module-rtkit", NULL, NULL);
-		} else if (strcmp(str, "none") != 0) {
-			pw_log_warn(NAME" %p: unknown profile %s", this, str);
-		}
-	}
-	return 0;
-}
 
 static void fill_properties(struct pw_context *context)
 {
@@ -167,6 +146,7 @@ static void fill_defaults(struct pw_context *this)
 	this->defaults.video_rate.num = get_default_int(p, "default.video.rate.num", DEFAULT_VIDEO_RATE_NUM);
 	this->defaults.video_rate.denom = get_default_int(p, "default.video.rate.denom", DEFAULT_VIDEO_RATE_DENOM);
 	this->defaults.link_max_buffers = get_default_int(p, "link.max-buffers", DEFAULT_LINK_MAX_BUFFERS);
+	this->defaults.mem_warn_mlock = get_default_bool(p, "mem.warn-mlock", DEFAULT_MEM_WARN_MLOCK);
 	this->defaults.mem_allow_mlock = get_default_bool(p, "mem.allow-mlock", DEFAULT_MEM_ALLOW_MLOCK);
 
 	this->defaults.clock_max_quantum = SPA_CLAMP(this->defaults.clock_max_quantum,
@@ -192,11 +172,10 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 {
 	struct impl *impl;
 	struct pw_context *this;
-	const char *lib, *str;
-	char **profiles;
+	const char *lib, *str, *conf_prefix, *conf_name;
 	void *dbus_iface = NULL;
 	uint32_t n_support;
-	struct pw_properties *pr;
+	struct pw_properties *pr, *conf = NULL;
 	struct spa_cpu *cpu;
 	int res = 0;
 
@@ -220,6 +199,53 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 		goto error_free;
 	}
 
+	conf_prefix = getenv("PIPEWIRE_CONFIG_PREFIX");
+	if (conf_prefix == NULL)
+		conf_prefix = pw_properties_get(properties, PW_KEY_CONFIG_PREFIX);
+
+	conf_name = getenv("PIPEWIRE_CONFIG_NAME");
+	if (conf_name == NULL)
+		conf_name = pw_properties_get(properties, PW_KEY_CONFIG_NAME);
+	if (conf_name == NULL)
+		conf_name = "client.conf";
+
+	conf = pw_properties_new(NULL, NULL);
+	if (conf == NULL) {
+		res = -errno;
+		goto error_free;
+	}
+	if (strcmp(conf_name, "null") != 0 &&
+	    (res = pw_conf_load_conf(conf_prefix, conf_name, conf)) < 0) {
+		if (conf_prefix == NULL && strcmp(conf_name, "client.conf") == 0) {
+			pw_log_error(NAME" %p: can't load config %s: %s",
+					this, conf_name, spa_strerror(res));
+			goto error_free;
+		} else {
+			pw_log_warn(NAME" %p: can't load config %s%s%s: %s. Using client.conf fallback",
+					this,
+					conf_prefix ? conf_prefix : "",
+					conf_prefix ? "/" : "",
+					conf_name, spa_strerror(res));
+		}
+		conf_prefix = NULL;
+		if ((res = pw_conf_load_conf(NULL, "client.conf", conf)) < 0) {
+			pw_log_error(NAME" %p: can't load client.conf config: %s",
+					this, spa_strerror(res));
+			goto error_free;
+		}
+	}
+	this->conf = conf;
+
+	if ((str = pw_properties_get(conf, "context.properties")) != NULL)
+		pw_properties_update_string(properties, str, strlen(str));
+
+	if ((str = pw_properties_get(properties, "mem.mlock-all")) != NULL &&
+	    pw_properties_parse_bool(str)) {
+		if (mlockall(MCL_CURRENT | MCL_FUTURE) < 0)
+			pw_log_warn(NAME" %p: could not mlockall; %m", impl);
+		else
+			pw_log_info(NAME" %p: mlockall succeeded", impl);
+	}
 	this->properties = properties;
 
 	fill_defaults(this);
@@ -255,20 +281,23 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	if ((cpu = spa_support_find(this->support, n_support, SPA_TYPE_INTERFACE_CPU)) != NULL)
 		pw_properties_setf(properties, PW_KEY_CPU_MAX_ALIGN, "%u", spa_cpu_get_max_align(cpu));
 
-	lib = pw_properties_get(properties, PW_KEY_LIBRARY_NAME_DBUS);
-	if (lib == NULL)
-		lib = "support/libspa-dbus";
+	if ((str = pw_properties_get(properties, "support.dbus")) == NULL ||
+	    pw_properties_parse_bool(str)) {
+		lib = pw_properties_get(properties, PW_KEY_LIBRARY_NAME_DBUS);
+		if (lib == NULL)
+			lib = "support/libspa-dbus";
 
-	impl->dbus_handle = pw_load_spa_handle(lib,
-			SPA_NAME_SUPPORT_DBUS, NULL,
-			n_support, this->support);
+		impl->dbus_handle = pw_load_spa_handle(lib,
+				SPA_NAME_SUPPORT_DBUS, NULL,
+				n_support, this->support);
 
-	if (impl->dbus_handle == NULL ||
-	    (res = spa_handle_get_interface(impl->dbus_handle,
-						SPA_TYPE_INTERFACE_DBus, &dbus_iface)) < 0) {
-			pw_log_warn(NAME" %p: can't load dbus interface: %s", this, spa_strerror(res));
-	} else {
-		this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DBus, dbus_iface);
+		if (impl->dbus_handle == NULL ||
+		    (res = spa_handle_get_interface(impl->dbus_handle,
+							SPA_TYPE_INTERFACE_DBus, &dbus_iface)) < 0) {
+				pw_log_warn(NAME" %p: can't load dbus interface: %s", this, spa_strerror(res));
+		} else {
+			this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DBus, dbus_iface);
+		}
 	}
 	this->n_support = n_support;
 
@@ -308,18 +337,10 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 
 	this->sc_pagesize = sysconf(_SC_PAGESIZE);
 
-	str = pw_properties_get(properties, PW_KEY_CONTEXT_PROFILE_MODULES);
-	if (str == NULL)
-		str = getenv("PIPEWIRE_PROFILE_MODULES");
-	if (str == NULL)
-		str = "default";
-
-	pw_log_debug(NAME" %p: module profile %s", this, str);
-
-	/* make a copy, in case the properties get changed when loading a module */
-	profiles = pw_split_strv(str, ", ", INT_MAX, &res);
-	load_module_profiles(this, profiles);
-	pw_free_strv(profiles);
+	pw_context_parse_conf_section(this, conf, "context.spa-libs");
+	pw_context_parse_conf_section(this, conf, "context.modules");
+	pw_context_parse_conf_section(this, conf, "context.objects");
+	pw_context_parse_conf_section(this, conf, "context.exec");
 
 	pw_log_debug(NAME" %p: created", this);
 
@@ -330,6 +351,8 @@ error_free_loop:
 error_free:
 	free(this);
 error_cleanup:
+	if (conf)
+		pw_properties_free(conf);
 	if (properties)
 		pw_properties_free(properties);
 	errno = -res;
@@ -391,6 +414,7 @@ void pw_context_destroy(struct pw_context *context)
 	pw_data_loop_destroy(context->data_loop_impl);
 
 	pw_properties_free(context->properties);
+	pw_properties_free(context->conf);
 
 	if (impl->dbus_handle)
 		pw_unload_spa_handle(impl->dbus_handle);
@@ -443,6 +467,12 @@ SPA_EXPORT
 const struct pw_properties *pw_context_get_properties(struct pw_context *context)
 {
 	return context->properties;
+}
+
+SPA_EXPORT
+const char *pw_context_get_conf_section(struct pw_context *context, const char *section)
+{
+	return pw_properties_get(context->conf, section);
 }
 
 /** Update context properties

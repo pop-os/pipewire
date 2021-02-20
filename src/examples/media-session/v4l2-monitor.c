@@ -43,6 +43,8 @@
 
 #include "media-session.h"
 
+#define SESSION_CONF	"v4l2-monitor.conf"
+
 struct device;
 
 struct node {
@@ -82,6 +84,8 @@ struct device {
 struct impl {
 	struct sm_media_session *session;
 	struct spa_hook session_listener;
+
+	struct pw_properties *conf;
 
 	struct spa_handle *handle;
 	struct spa_device *monitor;
@@ -123,7 +127,8 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 	struct node *node;
 	struct impl *impl = dev->impl;
 	int i, res;
-	const char *str, *d;
+	const char *prefix, *str, *d, *rules;
+	char tmp[1024];
 
 	pw_log_debug("new node %u", id);
 
@@ -148,8 +153,19 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 		str = pw_properties_get(dev->props, SPA_KEY_DEVICE_ALIAS);
 	if (str == NULL)
 		str = "v4l2-device";
-	pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s", info->factory_name, str);
+	if (strstr(str, "v4l2_device.") == str)
+			str += 12;
 
+	if (strstr(info->factory_name, "sink") != NULL)
+		prefix = "v4l2_output";
+	else if (strstr(info->factory_name, "source") != NULL)
+		prefix = "v4l2_input";
+	else
+		prefix = info->factory_name;
+
+	pw_properties_set(node->props, PW_KEY_NODE_NAME,
+			sm_media_session_sanitize_name(tmp, sizeof(tmp),
+					'_', "%s.%s", prefix, str));
 	for (i = 2; i <= 99; i++) {
 		if ((d = pw_properties_get(node->props, PW_KEY_NODE_NAME)) == NULL)
 			break;
@@ -157,16 +173,23 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 		if (v4l2_find_node(dev, SPA_ID_INVALID, d) == NULL)
 			break;
 
-		pw_properties_setf(node->props, PW_KEY_NODE_NAME, "%s.%s.%d",
-				info->factory_name, str, i);
+		pw_properties_set(node->props, PW_KEY_NODE_NAME,
+			sm_media_session_sanitize_name(tmp, sizeof(tmp),
+					'_', "%s.%s.%d", prefix, str, i));
 	}
 
 	str = pw_properties_get(dev->props, SPA_KEY_DEVICE_DESCRIPTION);
 	if (str == NULL)
 		str = "v4l2-device";
-	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION, str);
+
+	pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
+		sm_media_session_sanitize_description(tmp, sizeof(tmp),
+					' ', "%s", str));
 
 	pw_properties_set(node->props, PW_KEY_FACTORY_NAME, info->factory_name);
+
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), node->props);
 
 	node->impl = impl;
 	node->device = dev;
@@ -383,6 +406,7 @@ static struct device *v4l2_create_device(struct impl *impl, uint32_t id,
 	struct spa_handle *handle;
 	int res;
 	void *iface;
+	const char *rules;
 
 	pw_log_debug("new device %u", id);
 
@@ -417,6 +441,9 @@ static struct device *v4l2_create_device(struct impl *impl, uint32_t id,
 	dev->device = iface;
 	dev->props = pw_properties_new_dict(info->props);
 	v4l2_update_device_props(dev);
+
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), dev->props);
 
 	dev->sdevice = sm_media_session_export_device(impl->session,
 			&dev->props->dict, dev->device);
@@ -485,6 +512,7 @@ static void session_destroy(void *data)
 	spa_hook_remove(&impl->session_listener);
 	spa_hook_remove(&impl->listener);
 	pw_unload_spa_handle(impl->handle);
+	pw_properties_free(impl->conf);
 	free(impl);
 }
 
@@ -504,6 +532,11 @@ int sm_v4l2_monitor_start(struct sm_media_session *sess)
 	if (impl == NULL)
 		return -errno;
 
+	impl->conf = pw_properties_new(NULL, NULL);
+	if (impl->conf == NULL) {
+		res = -errno;
+		goto out_free;
+	}
 	impl->session = sess;
 
 	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_V4L2_ENUM_UDEV, NULL);
@@ -517,8 +550,13 @@ int sm_v4l2_monitor_start(struct sm_media_session *sess)
 		goto out_unload;
 	}
 
+
 	impl->monitor = iface;
 	spa_list_init(&impl->device_list);
+
+	if ((res = sm_media_session_load_conf(impl->session,
+					SESSION_CONF, impl->conf)) < 0)
+		pw_log_info("can't load "SESSION_CONF" config: %s", spa_strerror(res));
 
 	spa_device_add_listener(impl->monitor, &impl->listener,
 			&v4l2_udev_callbacks, impl);

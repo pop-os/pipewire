@@ -24,6 +24,7 @@
 
 #include <unistd.h>
 #include <errno.h>
+#include <sys/random.h>
 
 #include <spa/debug/types.h>
 
@@ -102,7 +103,7 @@ static int registry_destroy(void *object, uint32_t id)
 	if (!PW_PERM_IS_R(permissions))
 		goto error_no_id;
 
-	if (!PW_PERM_IS_X(permissions))
+	if (id == PW_ID_CORE || !PW_PERM_IS_X(permissions))
 		goto error_not_allowed;
 
 	pw_log_debug("global %p: destroy global id %d", global, id);
@@ -112,10 +113,12 @@ static int registry_destroy(void *object, uint32_t id)
 
 error_no_id:
 	pw_log_debug("registry %p: no global with id %u to destroy", resource, id);
+	pw_resource_errorf(resource, -ENOENT, "no global %u", id);
 	res = -ENOENT;
 	goto error_exit;
 error_not_allowed:
 	pw_log_debug("registry %p: destroy of id %u not allowed", resource, id);
+	pw_resource_errorf(resource, -EPERM, "no permission to destroy %u", id);
 	res = -EPERM;
 	goto error_exit;
 error_exit:
@@ -402,8 +405,17 @@ struct pw_impl_core *pw_context_create_core(struct pw_context *context,
 	this->info.user_name = pw_get_user_name();
 	this->info.host_name = pw_get_host_name();
 	this->info.version = pw_get_library_version();
-	srandom(time(NULL));
-	this->info.cookie = random();
+	do {
+		res = getrandom(&this->info.cookie,
+				sizeof(this->info.cookie), 0);
+	} while ((res == -1) && (errno == EINTR));
+	if (res == -1) {
+		res = -errno;
+		goto error_exit;
+	} else if (res != sizeof(this->info.cookie)) {
+		res = -ENODATA;
+		goto error_exit;
+	}
 	this->info.name = name;
 	spa_hook_list_init(&this->listener_list);
 

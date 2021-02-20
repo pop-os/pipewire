@@ -76,7 +76,7 @@ static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
 
 static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size,
-		const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_aptx_t conf;
 	size_t actual_conf_size = codec_get_caps_size(codec);
@@ -85,6 +85,10 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 		return -EINVAL;
 
 	memcpy(&conf, caps, sizeof(conf));
+
+	if (codec->vendor.vendor_id != conf.info.vendor_id ||
+	    codec->vendor.codec_id != conf.info.codec_id)
+		return -ENOTSUP;
 
 	if (conf.frequency & APTX_SAMPLING_FREQ_48000)
 		conf.frequency = APTX_SAMPLING_FREQ_48000;
@@ -218,7 +222,8 @@ static int codec_get_block_size(void *data)
 }
 
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
-		void *config, size_t config_len, const struct spa_audio_info *info, size_t mtu)
+		void *config, size_t config_len, const struct spa_audio_info *info,
+		const struct spa_dict *settings, size_t mtu)
 {
 	struct impl *this;
 	int res;
@@ -340,8 +345,6 @@ const struct a2dp_codec a2dp_codec_aptx = {
 		.codec_id = APTX_CODEC_ID },
 	.name = "aptx",
 	.description = "aptX",
-	.send_fill_frames = 2,
-	.recv_fill_frames = 2,
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
@@ -365,8 +368,6 @@ const struct a2dp_codec a2dp_codec_aptx_hd = {
 		.codec_id = APTX_HD_CODEC_ID },
 	.name = "aptx_hd",
 	.description = "aptX HD",
-	.send_fill_frames = 2,
-	.recv_fill_frames = 2,
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,

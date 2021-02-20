@@ -508,7 +508,10 @@ static int impl_node_enum_params(void *object, int seq,
 		return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
 
 	case SPA_PARAM_Props:
-		return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
+		if (this->fmt[SPA_DIRECTION_INPUT] == this->merger)
+			return spa_node_enum_params(this->merger, seq, id, start, num, filter);
+		else
+			return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
 
 	default:
 		return -ENOENT;
@@ -701,7 +704,8 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 		if (res < 0)
 			return res;
 
-		this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS;
+		this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS | SPA_NODE_CHANGE_MASK_PARAMS;
+		this->params[3].flags ^= SPA_PARAM_INFO_SERIAL;
 		this->info.flags &= ~SPA_NODE_FLAG_NEED_CONFIGURE;
 	}
 
@@ -790,6 +794,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	}
 	case SPA_PARAM_Props:
 	{
+		if (this->fmt[SPA_DIRECTION_INPUT] == this->merger)
+			res = spa_node_set_param(this->merger, id, flags, param);
 		res = spa_node_set_param(this->channelmix, id, flags, param);
 		break;
 	}

@@ -1,9 +1,10 @@
 project('pipewire', ['c' ],
-  version : '0.3.19',
+  version : '0.3.22',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
+                      'b_pie=true',
                       'buildtype=debugoptimized' ])
 
 
@@ -280,7 +281,12 @@ if get_option('systemd')
 endif
 
 if get_option('bluez5')
-  if get_option('bluez5-backend-native')
+  if get_option('bluez5-backend-hsp-native')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_HSP_NATIVE', 1)
+    cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
+  endif
+  if get_option('bluez5-backend-hfp-native')
+    cdata.set('HAVE_BLUEZ_5_BACKEND_HFP_NATIVE', 1)
     cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
   endif
   if get_option('bluez5-backend-ofono')
@@ -324,9 +330,9 @@ rt_lib = cc.find_library('rt', required : false) # clock_gettime
 dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
-sdl_dep = dependency('sdl2', required : false)
+sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 ncurses_dep = dependency('ncurses', required : false)
-sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : false)
+sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 
 if get_option('gstreamer')
   glib_dep = dependency('glib-2.0', version : '>=2.32.0')
@@ -357,6 +363,7 @@ installed_tests_execdir = join_paths(pipewire_libexecdir, 'installed-tests', pip
 installed_tests_enabled = get_option('installed_tests')
 installed_tests_template = files('template.test.in')
 
+subdir('po')
 subdir('spa')
 subdir('src')
 

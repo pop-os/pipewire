@@ -196,10 +196,21 @@ static int load_module(struct client *client, const char *name, const char *argu
 						channel_id2name(map.map[i]));
 			pw_properties_set(props, SPA_KEY_AUDIO_POSITION, s);
 			pw_properties_set(props, "channel_map", NULL);
+		} else if (pw_properties_get(props, SPA_KEY_AUDIO_POSITION) == NULL) {
+			pw_properties_set(props, SPA_KEY_AUDIO_POSITION, "FL,FR");
 		}
 		if ((str = pw_properties_get(props, "device.description")) != NULL) {
 			pw_properties_set(props, PW_KEY_NODE_DESCRIPTION, str);
 			pw_properties_set(props, "device.description", NULL);
+		} else {
+			const char *name, *class;
+
+			name = pw_properties_get(props, PW_KEY_NODE_NAME);
+			class = pw_properties_get(props, PW_KEY_MEDIA_CLASS);
+			pw_properties_setf(props, PW_KEY_NODE_DESCRIPTION,
+							"%s%s%s%ssink",
+							name, (name[0] == '\0') ? "" : " ",
+							class ? class : "", (class && class[0] != '\0') ? " " : "");
 		}
 		pw_properties_set(props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
 

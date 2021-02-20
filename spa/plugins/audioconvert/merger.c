@@ -43,6 +43,7 @@
 #include <spa/debug/types.h>
 #include <spa/debug/pod.h>
 
+#include "volume-ops.h"
 #include "fmt-ops.h"
 
 #define NAME "merger"
@@ -55,6 +56,38 @@
 #define MAX_BUFFERS	32
 #define MAX_DATAS	SPA_AUDIO_MAX_CHANNELS
 #define MAX_PORTS	SPA_AUDIO_MAX_CHANNELS
+
+#define DEFAULT_MUTE	false
+#define DEFAULT_VOLUME	VOLUME_NORM
+
+struct props {
+	float volume;
+	bool mute;
+	uint32_t n_channel_volumes;
+	float channel_volumes[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t n_channels;
+	uint32_t channel_map[SPA_AUDIO_MAX_CHANNELS];
+	bool monitor_mute;
+	uint32_t n_monitor_volumes;
+	float monitor_volumes[SPA_AUDIO_MAX_CHANNELS];
+};
+
+static void props_reset(struct props *props)
+{
+	uint32_t i;
+	props->mute = DEFAULT_MUTE;
+	props->volume = DEFAULT_VOLUME;
+	props->n_channel_volumes = 0;
+	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+		props->channel_volumes[i] = DEFAULT_VOLUME;
+	props->n_channels = 0;
+	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+		props->channel_map[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
+	props->monitor_mute = DEFAULT_MUTE;
+	props->n_monitor_volumes = 0;
+	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+		props->monitor_volumes[i] = DEFAULT_VOLUME;
+}
 
 struct buffer {
 	uint32_t id;
@@ -116,6 +149,10 @@ struct impl {
 	unsigned int is_passthrough:1;
 	unsigned int started:1;
 	unsigned int monitor:1;
+	unsigned int monitor_channel_volumes:1;
+
+	struct volume volume;
+	struct props props;
 
 	uint32_t src_remap[SPA_AUDIO_MAX_CHANNELS];
 	uint32_t dst_remap[SPA_AUDIO_MAX_CHANNELS];
@@ -171,8 +208,15 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 	port->direction = direction;
 	port->id = port_id;
 
-	snprintf(port->position, 16, "%s",
-			spa_debug_type_short_name(spa_type_audio_channel[position].name));
+	if (position < SPA_N_ELEMENTS(spa_type_audio_channel)) {
+		snprintf(port->position, sizeof(port->position), "%s",
+				spa_debug_type_short_name(spa_type_audio_channel[position].name));
+	} else if (position >= SPA_AUDIO_CHANNEL_CUSTOM_START) {
+		snprintf(port->position, sizeof(port->position), "AUX%d",
+				position - SPA_AUDIO_CHANNEL_CUSTOM_START);
+	} else {
+		snprintf(port->position, sizeof(port->position), "UNK");
+	}
 
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
 			SPA_PORT_CHANGE_MASK_PROPS |
@@ -226,6 +270,92 @@ static int impl_node_enum_params(void *object, int seq,
 	switch (id) {
 	case SPA_PARAM_PortConfig:
 		return -ENOTSUP;
+
+	case SPA_PARAM_PropInfo:
+	{
+		struct props *p = &this->props;
+
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_volume),
+				SPA_PROP_INFO_name, SPA_POD_String("Volume"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0));
+			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_mute),
+				SPA_PROP_INFO_name, SPA_POD_String("Mute"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->mute));
+			break;
+		case 2:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelVolumes),
+				SPA_PROP_INFO_name, SPA_POD_String("Channel Volumes"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
+				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
+			break;
+		case 3:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelMap),
+				SPA_PROP_INFO_name, SPA_POD_String("Channel Map"),
+				SPA_PROP_INFO_type, SPA_POD_Id(SPA_AUDIO_CHANNEL_UNKNOWN),
+				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
+			break;
+		case 4:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_monitorMute),
+				SPA_PROP_INFO_name, SPA_POD_String("Monitor Mute"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->monitor_mute));
+			break;
+		case 5:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_monitorVolumes),
+				SPA_PROP_INFO_name, SPA_POD_String("Monitor Volumes"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
+				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+
+	case SPA_PARAM_Props:
+	{
+		struct props *p = &this->props;
+
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Props, id,
+				SPA_PROP_volume,		SPA_POD_Float(p->volume),
+				SPA_PROP_mute,			SPA_POD_Bool(p->mute),
+				SPA_PROP_channelVolumes,	SPA_POD_Array(sizeof(float),
+									SPA_TYPE_Float,
+									p->n_channel_volumes,
+									p->channel_volumes),
+				SPA_PROP_channelMap,		SPA_POD_Array(sizeof(uint32_t),
+									SPA_TYPE_Id,
+									p->n_channels,
+									p->channel_map),
+				SPA_PROP_monitorMute,		SPA_POD_Bool(p->monitor_mute),
+				SPA_PROP_monitorVolumes,	SPA_POD_Array(sizeof(float),
+									SPA_TYPE_Float,
+									p->n_monitor_volumes,
+									p->monitor_volumes));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
 	default:
 		return 0;
 	}
@@ -257,6 +387,49 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 		return -ENOENT;
 	}
 	return 0;
+}
+
+static int apply_props(struct impl *this, const struct spa_pod *param)
+{
+	struct spa_pod_prop *prop;
+	struct spa_pod_object *obj = (struct spa_pod_object *) param;
+	struct props *p = &this->props;
+	int changed = 0;
+
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		switch (prop->key) {
+		case SPA_PROP_volume:
+			if (spa_pod_get_float(&prop->value, &p->volume) == 0)
+				changed++;
+			break;
+		case SPA_PROP_mute:
+			if (spa_pod_get_bool(&prop->value, &p->mute) == 0)
+				changed++;
+			break;
+		case SPA_PROP_channelVolumes:
+			if ((p->n_channel_volumes = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
+					p->channel_volumes, SPA_AUDIO_MAX_CHANNELS)) > 0)
+				changed++;
+			break;
+		case SPA_PROP_channelMap:
+			if ((p->n_channels = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					p->channel_map, SPA_AUDIO_MAX_CHANNELS)) > 0)
+				changed++;
+			break;
+		case SPA_PROP_monitorMute:
+			if (spa_pod_get_bool(&prop->value, &p->monitor_mute) == 0)
+				changed++;
+			break;
+		case SPA_PROP_monitorVolumes:
+			if ((p->n_monitor_volumes = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
+					p->monitor_volumes, SPA_AUDIO_MAX_CHANNELS)) > 0)
+				changed++;
+			break;
+		default:
+			break;
+		}
+	}
+	return changed;
 }
 
 static int int32_cmp(const void *v1, const void *v2)
@@ -335,18 +508,39 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 		this->port_count = info.info.raw.channels;
 		this->monitor_count = this->monitor ? this->port_count : 0;
 		for (i = 0; i < this->port_count; i++) {
+			this->props.channel_map[i] = info.info.raw.position[i];
+			this->props.channel_volumes[i] = this->props.volume;
+			this->props.monitor_volumes[i] = this->props.volume;
+		}
+		this->props.n_channel_volumes = this->port_count;
+		this->props.n_monitor_volumes = this->port_count;
+		this->props.n_channels = this->port_count;
+
+		for (i = 0; i < this->port_count; i++) {
 			init_port(this, SPA_DIRECTION_INPUT, i, info.info.raw.position[i]);
 			if (this->monitor)
 				init_port(this, SPA_DIRECTION_OUTPUT, i+1,
 					info.info.raw.position[i]);
 		}
+
 		port = GET_OUT_PORT(this, 0);
 		qsort(info.info.raw.position, info.info.raw.channels,
 					sizeof(uint32_t), int32_cmp);
 		port->format = info;
 		port->have_format = true;
+
+		this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+		this->params[2].flags ^= SPA_PARAM_INFO_SERIAL;
+		emit_node_info(this, false);
 		return 0;
 	}
+	case SPA_PARAM_Props:
+		if (apply_props(this, param) > 0) {
+			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			this->params[2].flags ^= SPA_PARAM_INFO_SERIAL;
+			emit_node_info(this, false);
+		}
+		break;
 	default:
 		return -ENOENT;
 	}
@@ -446,23 +640,19 @@ static int port_enum_formats(void *object,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(18,
+				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(14,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32,
-							SPA_AUDIO_FORMAT_F32_OE,
 							SPA_AUDIO_FORMAT_S32P,
 							SPA_AUDIO_FORMAT_S32,
-							SPA_AUDIO_FORMAT_S32_OE,
 							SPA_AUDIO_FORMAT_S24_32P,
 							SPA_AUDIO_FORMAT_S24_32,
-							SPA_AUDIO_FORMAT_S24_32_OE,
 							SPA_AUDIO_FORMAT_S24P,
 							SPA_AUDIO_FORMAT_S24,
 							SPA_AUDIO_FORMAT_S24_OE,
 							SPA_AUDIO_FORMAT_S16P,
 							SPA_AUDIO_FORMAT_S16,
-							SPA_AUDIO_FORMAT_S16_OE,
 							SPA_AUDIO_FORMAT_U8,
 							SPA_AUDIO_FORMAT_U8P),
 				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(
@@ -963,7 +1153,7 @@ static inline int get_out_buffer(struct impl *this, struct port *port, struct bu
 	return 0;
 }
 
-static inline int handle_monitor(struct impl *this, const void *data, int n_samples, struct port *outport)
+static inline int handle_monitor(struct impl *this, const void *data, float volume, int n_samples, struct port *outport)
 {
 	struct buffer *dbuf;
         struct spa_data *dd;
@@ -979,10 +1169,10 @@ static inline int handle_monitor(struct impl *this, const void *data, int n_samp
 
 	spa_log_trace(this->log, "%p: io %p %08x", this, outport->io, dd->flags);
 
-	if (SPA_FLAG_IS_SET(dd->flags, SPA_DATA_FLAG_DYNAMIC))
+	if (SPA_FLAG_IS_SET(dd->flags, SPA_DATA_FLAG_DYNAMIC) && volume == VOLUME_NORM)
 		dd->data = (void*)data;
 	else
-		spa_memcpy(dd->data, data, size);
+		volume_process(&this->volume, dd->data, data, volume, size / outport->stride);
 
 	return res;
 }
@@ -1048,8 +1238,16 @@ static int impl_node_process(void *object)
 				sd->chunk->size, maxsize, n_samples, src_datas[i]);
 	}
 
-	for (i = 0; i < this->monitor_count; i++)
-		handle_monitor(this, src_datas[i], n_samples, GET_OUT_PORT(this, i + 1));
+	for (i = 0; i < this->monitor_count; i++) {
+		float volume;
+
+		volume = this->props.monitor_mute ? 0.0f : this->props.monitor_volumes[i];
+		if (this->monitor_channel_volumes)
+			volume *= this->props.mute ? 0.0f : this->props.channel_volumes[i];
+
+		handle_monitor(this, src_datas[i], volume, n_samples,
+				GET_OUT_PORT(this, i + 1));
+	}
 
 	for (i = 0; i < n_dst_datas; i++) {
 		uint32_t dst_remap = this->dst_remap[i];
@@ -1130,6 +1328,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -1145,6 +1344,12 @@ impl_init(const struct spa_handle_factory *factory,
 	if (this->cpu)
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);
 
+	this->monitor_channel_volumes = true;
+	if (info) {
+		if ((str = spa_dict_lookup(info, "monitor.channel-volumes")) != NULL)
+			this->monitor_channel_volumes = strcmp(str, "true") == 0 || atoi(str) == 1;
+	}
+
 	this->node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
@@ -1159,8 +1364,10 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info.flags = SPA_NODE_FLAG_RT |
 		SPA_NODE_FLAG_IN_PORT_CONFIG;
 	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_PortConfig, SPA_PARAM_INFO_WRITE);
+	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
-	this->info.n_params = 1;
+	this->info.n_params = 3;
 
 	port = GET_OUT_PORT(this, 0);
 	port->direction = SPA_DIRECTION_OUTPUT;
@@ -1177,6 +1384,10 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = 5;
 	spa_list_init(&port->queue);
+
+	this->volume.cpu_flags = this->cpu_flags;
+	volume_init(&this->volume);
+	props_reset(&this->props);
 
 	return 0;
 }

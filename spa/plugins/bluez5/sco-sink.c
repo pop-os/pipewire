@@ -441,12 +441,6 @@ static void flush_data(struct impl *this)
 
 		next_timeout = get_next_timeout(this, now_time, processed / port->frame_size);
 
-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
-			uint64_t min_delay = (this->transport->write_mtu / port->frame_size
-					      * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
-			next_timeout = SPA_MAX(next_timeout, min_delay);
-		}
-
 		if (this->clock) {
 			this->clock->nsec = now_time;
 			this->clock->position = this->total_samples;
@@ -670,6 +664,7 @@ static const struct spa_dict_item node_info_items[] = {
 	{ SPA_KEY_DEVICE_API, "bluez5" },
 	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
 	{ SPA_KEY_NODE_DRIVER, "true" },
+	{ SPA_KEY_NODE_PAUSE_ON_IDLE, "false" },
 };
 
 static void emit_node_info(struct impl *this, bool full)

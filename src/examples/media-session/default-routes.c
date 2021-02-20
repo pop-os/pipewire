@@ -62,7 +62,6 @@ struct impl {
 	struct spa_hook meta_listener;
 
 	struct pw_properties *to_restore;
-	struct pw_properties *to_save;
 };
 
 struct device {
@@ -73,12 +72,12 @@ struct device {
 	char *name;
 
 	struct spa_hook listener;
-};
 
-struct find_data {
-	struct impl *impl;
-	const char *name;
-	uint32_t id;
+	uint32_t active_profile;
+	char profile_name[128];
+
+	uint32_t generation;
+	struct pw_array route_info;
 };
 
 static void remove_idle_timeout(struct impl *impl)
@@ -88,7 +87,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->to_save)) < 0)
+						SESSION_KEY, PREFIX, impl->to_restore)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -135,6 +134,108 @@ static const char *channel_to_name(uint32_t channel)
 	return "UNK";
 }
 
+struct route_info {
+	uint32_t index;
+	uint32_t generation;
+	uint32_t available;
+	enum spa_direction direction;
+	char name[64];
+	unsigned int restore:1;
+	unsigned int save:1;
+};
+
+struct route {
+	struct sm_param *p;
+	uint32_t index;
+	uint32_t device_id;
+	enum spa_direction direction;
+	const char *name;
+	uint32_t priority;
+	uint32_t available;
+	struct spa_pod *props;
+};
+
+#define ROUTE_INIT(__p) (struct route) {				\
+			.p = (__p),					\
+			.available = SPA_PARAM_AVAILABILITY_unknown,	\
+		}
+
+static struct route_info *find_route_info(struct device *dev, struct route *r)
+{
+	struct route_info *i;
+
+	pw_array_for_each(i, &dev->route_info) {
+		if (i->index == r->index)
+			return i;
+	}
+	i = pw_array_add(&dev->route_info, sizeof(*i));
+	if (i == NULL)
+		return NULL;
+
+	pw_log_info("device %d: new route %d '%s' found", dev->id, r->index, r->name);
+	i->index = r->index;
+	snprintf(i->name, sizeof(i->name), "%s", r->name);
+	i->direction = r->direction;
+	i->generation = dev->generation;
+	i->available = r->available;
+	i->restore = true;
+
+	return i;
+}
+
+static int parse_route(struct sm_param *p, struct route *r)
+{
+	*r = ROUTE_INIT(p);
+	return spa_pod_parse_object(p->param,
+			SPA_TYPE_OBJECT_ParamRoute, NULL,
+			SPA_PARAM_ROUTE_index, SPA_POD_Int(&r->index),
+			SPA_PARAM_ROUTE_direction, SPA_POD_Id(&r->direction),
+			SPA_PARAM_ROUTE_device, SPA_POD_Int(&r->device_id),
+			SPA_PARAM_ROUTE_name, SPA_POD_String(&r->name),
+			SPA_PARAM_ROUTE_priority,  SPA_POD_OPT_Int(&r->priority),
+			SPA_PARAM_ROUTE_available,  SPA_POD_OPT_Id(&r->available),
+			SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&r->props));
+}
+
+static bool array_contains(struct spa_pod *pod, uint32_t val)
+{
+	uint32_t *vals, n_vals;
+	uint32_t n;
+
+	if (pod == NULL)
+		return false;
+	vals = spa_pod_get_array(pod, &n_vals);
+	if (vals == NULL || n_vals == 0)
+		return false;
+	for (n = 0; n < n_vals; n++)
+		if (vals[n] == val)
+			return true;
+	return false;
+}
+
+static int parse_enum_route(struct sm_param *p, uint32_t device_id, struct route *r)
+{
+	struct spa_pod *devices = NULL;
+	int res;
+
+	*r = ROUTE_INIT(p);
+	if ((res = spa_pod_parse_object(p->param,
+			SPA_TYPE_OBJECT_ParamRoute, NULL,
+			SPA_PARAM_ROUTE_index, SPA_POD_Int(&r->index),
+			SPA_PARAM_ROUTE_direction, SPA_POD_Id(&r->direction),
+			SPA_PARAM_ROUTE_name, SPA_POD_String(&r->name),
+			SPA_PARAM_ROUTE_priority,  SPA_POD_OPT_Int(&r->priority),
+			SPA_PARAM_ROUTE_available,  SPA_POD_OPT_Id(&r->available),
+			SPA_PARAM_ROUTE_devices, SPA_POD_OPT_Pod(&devices))) < 0)
+		return res;
+
+	if (!array_contains(devices, device_id))
+		return -ENOENT;
+
+	r->device_id = device_id;
+	return 0;
+}
+
 static char *serialize_props(struct device *dev, const struct spa_pod *param)
 {
 	struct spa_pod_prop *prop;
@@ -146,17 +247,17 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 	FILE *f;
 
         f = open_memstream(&ptr, &size);
-	fprintf(f, "{ ");
+	fprintf(f, "{");
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {
 		case SPA_PROP_volume:
 			spa_pod_get_float(&prop->value, &val);
-			fprintf(f, "%s\"volume\": %f ", (comma ? ", " : ""), val);
+			fprintf(f, "%s \"volume\": %f", (comma ? "," : ""), val);
 			break;
 		case SPA_PROP_mute:
 			spa_pod_get_bool(&prop->value, &b);
-			fprintf(f, "%s\"mute\": %s ", (comma ? ", " : ""), b ? "true" : "false");
+			fprintf(f, "%s \"mute\": %s", (comma ? "," : ""), b ? "true" : "false");
 			break;
 		case SPA_PROP_channelVolumes:
 		{
@@ -168,9 +269,9 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 			if (n_vals == 0)
 				continue;
 
-			fprintf(f, "%s\"volumes\": [", (comma ? ", " : ""));
+			fprintf(f, "%s \"volumes\": [", (comma ? "," : ""));
 			for (i = 0; i < n_vals; i++)
-				fprintf(f, "%s%f", (i == 0 ? " " : ", "), vals[i]);
+				fprintf(f, "%s %f", (i == 0 ? "" : ","), vals[i]);
 			fprintf(f, " ]");
 			break;
 		}
@@ -184,9 +285,9 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 			if (n_vals == 0)
 				continue;
 
-			fprintf(f, "%s\"channels\": [", (comma ? ", " : ""));
+			fprintf(f, "%s \"channels\": [", (comma ? "," : ""));
 			for (i = 0; i < n_vals; i++)
-				fprintf(f, "%s\"%s\"", (i == 0 ? " " : ", "), channel_to_name(map[i]));
+				fprintf(f, "%s \"%s\"", (i == 0 ? "" : ","), channel_to_name(map[i]));
 			fprintf(f, " ]");
 			break;
 		}
@@ -200,12 +301,11 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 	return ptr;
 }
 
-static int restore_route(struct device *dev, const char *val, uint32_t index, uint32_t device_id)
+static int restore_route_params(struct device *dev, const char *val, uint32_t index, uint32_t device_id)
 {
 	struct spa_json it[3];
-	char buf[1024];
+	char buf[1024], key[128];
 	const char *value;
-	int len;
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct spa_pod_frame f[2];
 	struct spa_pod *param;
@@ -225,22 +325,22 @@ static int restore_route(struct device *dev, const char *val, uint32_t index, ui
 	spa_pod_builder_push_object(&b, &f[1],
 			SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
 
-	while ((len = spa_json_next(&it[1], &value)) > 0) {
-		if (strncmp(value, "\"volume\"", len) == 0) {
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
+		if (strcmp(key, "volume") == 0) {
 			float vol;
 			if (spa_json_get_float(&it[1], &vol) <= 0)
                                 continue;
 			spa_pod_builder_prop(&b, SPA_PROP_volume, 0);
 			spa_pod_builder_float(&b, vol);
 		}
-		else if (strncmp(value, "\"mute\"", len) == 0) {
+		else if (strcmp(key, "mute") == 0) {
 			bool mute;
 			if (spa_json_get_bool(&it[1], &mute) <= 0)
                                 continue;
 			spa_pod_builder_prop(&b, SPA_PROP_mute, 0);
 			spa_pod_builder_bool(&b, mute);
 		}
-		else if (strncmp(value, "\"volumes\"", len) == 0) {
+		else if (strcmp(key, "volumes") == 0) {
 			uint32_t n_vols;
 			float vols[SPA_AUDIO_MAX_CHANNELS];
 
@@ -258,7 +358,7 @@ static int restore_route(struct device *dev, const char *val, uint32_t index, ui
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, vols);
 		}
-		else if (strncmp(value, "\"channels\"", len) == 0) {
+		else if (strcmp(key, "channels") == 0) {
 			uint32_t n_ch;
 			uint32_t map[SPA_AUDIO_MAX_CHANNELS];
 
@@ -293,42 +393,375 @@ static int restore_route(struct device *dev, const char *val, uint32_t index, ui
 	return 0;
 }
 
-static int handle_route(struct device *dev, struct sm_param *p)
+struct profile {
+	uint32_t index;
+	const char *name;
+	struct spa_pod *classes;
+};
+
+static int parse_profile(struct sm_param *p, struct profile *pr)
+{
+	int res;
+	spa_zero(*pr);
+	if ((res = spa_pod_parse_object(p->param,
+			SPA_TYPE_OBJECT_ParamProfile, NULL,
+			SPA_PARAM_PROFILE_index,   SPA_POD_Int(&pr->index),
+			SPA_PARAM_PROFILE_name,    SPA_POD_String(&pr->name),
+			SPA_PARAM_PROFILE_classes, SPA_POD_OPT_Pod(&pr->classes))) < 0)
+		return res;
+	return 0;
+}
+
+static int find_current_profile(struct device *dev, struct profile *pr)
+{
+	struct sm_param *p;
+	spa_list_for_each(p, &dev->obj->param_list, link) {
+		if (p->id == SPA_PARAM_Profile &&
+		    parse_profile(p, pr) >= 0)
+			return 0;
+	}
+	return -ENOENT;
+}
+
+static int restore_route(struct device *dev, struct route *r, bool save)
 {
 	struct impl *impl = dev->impl;
-	int res;
-	const char *name, *val;
-	uint32_t index, device_id;
-	enum spa_direction direction;
-	struct spa_pod *props = NULL;
 	char key[1024];
+	const char *val;
+	struct route_info *ri;
 
-	if ((res = spa_pod_parse_object(p->param,
-			SPA_TYPE_OBJECT_ParamRoute, NULL,
-			SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
-			SPA_PARAM_ROUTE_device, SPA_POD_Int(&device_id),
-			SPA_PARAM_ROUTE_direction, SPA_POD_Id(&direction),
-			SPA_PARAM_ROUTE_name, SPA_POD_String(&name),
-			SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props))) < 0) {
-		pw_log_warn("device %d: can't parse route: %s", dev->id, spa_strerror(res));
-		return res;
-	}
+	if ((ri = find_route_info(dev, r)) == NULL)
+		return -errno;
 
-	snprintf(key, sizeof(key)-1, PREFIX"%s:%s:%s", dev->name,
-			direction == SPA_DIRECTION_INPUT ? "input" : "output", name);
+	snprintf(key, sizeof(key), PREFIX"%s:%s:%s", dev->name,
+		r->direction == SPA_DIRECTION_INPUT ? "input" : "output", r->name);
 
 	val = pw_properties_get(impl->to_restore, key);
-	if (val != NULL) {
-		pw_log_info("device %d: restore route '%s' to %s", dev->id, key, val);
-		restore_route(dev, val, index, device_id);
-		pw_properties_set(impl->to_restore, key, NULL);
-	} else if (props) {
-		char *val = serialize_props(dev, props);
-		pw_log_debug("device %d: current route %s %s", dev->id, key, val);
-		pw_properties_set(impl->to_save, key, val);
-		free(val);
+	if (val == NULL)
+		val = "{ \"volumes\": [ 0.4 ], \"mute\": false }";
+
+	pw_log_info("device %d: restore route %d '%s' to %s", dev->id, r->index, key, val);
+
+	restore_route_params(dev, val, r->index, r->device_id);
+	ri->generation = dev->generation;
+	ri->restore = false;
+	ri->save = save;
+
+	return 0;
+}
+
+static int save_route(struct device *dev, struct route *r)
+{
+	struct impl *impl = dev->impl;
+	char key[1024], *val;
+
+	if (r->props == NULL)
+		return -EINVAL;
+
+	snprintf(key, sizeof(key), PREFIX"%s:%s:%s", dev->name,
+		r->direction == SPA_DIRECTION_INPUT ? "input" : "output", r->name);
+
+	val = serialize_props(dev, r->props);
+	if (pw_properties_set(impl->to_restore, key, val)) {
+		pw_log_info("device %d: route properties changed %s %s", dev->id, key, val);
 		add_idle_timeout(impl);
 	}
+	free(val);
+	return 0;
+}
+
+static char *serialize_routes(struct device *dev)
+{
+	char *ptr;
+	size_t size;
+	FILE *f;
+	struct route_info *ri;
+	int count = 0;
+
+	f = open_memstream(&ptr, &size);
+	fprintf(f, "[");
+
+	pw_array_for_each(ri, &dev->route_info) {
+		if (ri->save) {
+			fprintf(f, "%s \"%s\"", count++ == 0 ? "" : ",", ri->name);
+		}
+	}
+	fprintf(f, " ]");
+	fclose(f);
+	return ptr;
+}
+
+static int save_profile(struct device *dev)
+{
+	struct impl *impl = dev->impl;
+	char key[1024], *val;
+
+	if (pw_array_get_len(&dev->route_info, struct route_info) == 0)
+		return 0;
+
+	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, dev->profile_name);
+
+	val = serialize_routes(dev);
+	if (pw_properties_set(impl->to_restore, key, val)) {
+		pw_log_info("device %d: profile routes changed %s %s", dev->id, key, val);
+		add_idle_timeout(impl);
+	}
+	free(val);
+	return 0;
+}
+
+static int find_best_route(struct device *dev, uint32_t device_id, struct route *r)
+{
+	struct sm_param *p;
+	struct route best, best_avail, best_unk;
+
+	spa_zero(best_avail);
+	spa_zero(best_unk);
+
+	spa_list_for_each(p, &dev->obj->param_list, link) {
+		struct route t;
+
+		if (p->id != SPA_PARAM_EnumRoute ||
+		    parse_enum_route(p, device_id, &t) < 0)
+			continue;
+
+		if (t.available == SPA_PARAM_AVAILABILITY_yes) {
+			if (best_avail.name == NULL || t.priority > best_avail.priority)
+				best_avail = t;
+		}
+		else if (t.available != SPA_PARAM_AVAILABILITY_no) {
+			if (best_unk.name == NULL || t.priority > best_unk.priority)
+				best_unk = t;
+		}
+	}
+	best = best_avail;
+	if (best.name == NULL)
+		best = best_unk;
+	if (best.name == NULL)
+		return -ENOENT;
+	*r = best;
+	return 0;
+}
+
+static int find_route(struct device *dev, uint32_t device_id, const char *name, struct route *r)
+{
+	struct sm_param *p;
+
+	spa_list_for_each(p, &dev->obj->param_list, link) {
+		if (p->id != SPA_PARAM_EnumRoute ||
+		    parse_enum_route(p, device_id, r) < 0)
+			continue;
+		if (strcmp(r->name, name) != 0)
+			continue;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+static int find_saved_route(struct device *dev, const char *val, uint32_t device_id, struct route *r)
+{
+	struct spa_json it[2];
+	char key[128];
+
+	if (val == NULL)
+		return -ENOENT;
+
+	spa_json_init(&it[0], val, strlen(val));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+                return -EINVAL;
+
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
+		if (find_route(dev, device_id, key, r) >= 0)
+			return 0;
+	}
+	return -ENOENT;
+}
+
+static int restore_device_route(struct device *dev, const char *val, uint32_t device_id)
+{
+	int res;
+	struct route t;
+	bool save = false;
+
+	pw_log_info("device %d: restoring device %u", dev->id, device_id);
+
+	res = find_saved_route(dev, val, device_id, &t);
+	if (res < 0) {
+		/* we could not find a saved route, try to find a new best */
+		res = find_best_route(dev, device_id, &t);
+		if (res < 0) {
+			pw_log_info("device %d: can't find best route", dev->id);
+		} else {
+			pw_log_info("device %d: found best route '%s'", dev->id,
+					t.name);
+		}
+	} else {
+		/* we found a saved route */
+		pw_log_info("device %d: found saved route '%s'", dev->id,
+				t.name);
+		/* make sure we save it again */
+		save = true;
+	}
+	if (res >= 0) {
+		restore_route(dev, &t, save);
+	}
+	return res;
+}
+
+static int handle_profile(struct device *dev)
+{
+	struct impl *impl = dev->impl;
+	struct profile pr;
+	int res;
+	char key[1024];
+	const char *json;
+
+	if ((res = find_current_profile(dev, &pr)) < 0)
+		return res;
+	if (dev->active_profile == pr.index)
+		return 0;
+
+	pw_log_info("device %s: restore routes for profile '%s'",
+			dev->name, pr.name);
+	dev->active_profile = pr.index;
+	snprintf(dev->profile_name, sizeof(dev->profile_name), "%s", pr.name);
+
+	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, dev->profile_name);
+	json = pw_properties_get(impl->to_restore, key);
+
+	if (pr.classes != NULL) {
+		struct spa_pod *iter;
+
+		SPA_POD_STRUCT_FOREACH(pr.classes, iter) {
+			struct spa_pod_parser prs;
+			struct spa_pod_frame f[1];
+			struct spa_pod *val;
+			char *key;
+
+			spa_pod_parser_pod(&prs, iter);
+			if (spa_pod_parser_push_struct(&prs, &f[0]) < 0)
+				continue;
+
+			while (spa_pod_parser_get(&prs,
+						SPA_POD_String(&key),
+						SPA_POD_Pod(&val),
+						NULL) >= 0) {
+				if (key == NULL || val == NULL)
+					break;
+				if (strcmp(key, "card.profile.devices") == 0) {
+					uint32_t *devices, n_devices, i;
+
+					devices = spa_pod_get_array(val, &n_devices);
+					if (devices == NULL || n_devices == 0)
+						continue;
+
+					for (i = 0; i < n_devices; i++)
+						restore_device_route(dev, json, devices[i]);
+				}
+			}
+                        spa_pod_parser_pop(&prs, &f[0]);
+		}
+	}
+
+	return 0;
+}
+
+static void prune_route_info(struct device *dev)
+{
+	struct route_info *i;
+
+	for (i = pw_array_first(&dev->route_info);
+	     pw_array_check(&dev->route_info, i);) {
+		if (i->generation != dev->generation) {
+			pw_log_info("device %d: route %d unused", dev->id, i->index);
+			pw_array_remove(&dev->route_info, i);
+		} else
+			i++;
+	}
+}
+
+static int handle_route(struct device *dev, struct route *r)
+{
+	struct route_info *ri;
+	bool restore = false;
+	char key[1024];
+	int res;
+	bool save = false;
+
+	pw_log_info("device %d: route %s %p", dev->id, r->name, r->p);
+	if ((ri = find_route_info(dev, r)) == NULL)
+		return -errno;
+
+	if (ri->restore) {
+		/* a new port has been found, restore the volume and make sure we
+		 * save this as a prefered port */
+		pw_log_info("device %d: new port found '%s'", dev->id, r->name);
+		save = true;
+		restore = true;
+	} else {
+		if (r->available != SPA_PARAM_AVAILABILITY_yes && ri->available != r->available) {
+			struct route t;
+
+			/* an existing port has changed to unavailable */
+			pw_log_info("device %d: route '%s' not available", dev->id, r->name);
+
+			/* try to find a new best port */
+			res = find_best_route(dev, r->device_id, &t);
+			if (res < 0) {
+				pw_log_info("device %d: can't find best route", dev->id);
+			} else {
+				pw_log_info("device %d: found best route '%s'", dev->id,
+						t.name);
+				*r = t;
+				restore = true;
+			}
+		}
+		ri->available = r->available;
+	}
+	ri->generation = dev->generation;
+
+	if (r == NULL)
+		return -EIO;
+
+	snprintf(key, sizeof(key), PREFIX"%s:%s:%s", dev->name,
+			r->direction == SPA_DIRECTION_INPUT ? "input" : "output", r->name);
+
+	if (restore) {
+		restore_route(dev, r, save);
+	} else if (r->props) {
+		save_route(dev, r);
+	}
+	return 0;
+}
+
+static int handle_routes(struct device *dev)
+{
+	struct sm_param *p;
+
+	spa_list_for_each(p, &dev->obj->param_list, link) {
+		struct route r;
+		if (p->id != SPA_PARAM_Route ||
+		    parse_route(p, &r) < 0)
+			continue;
+		handle_route(dev, &r);
+	}
+	prune_route_info(dev);
+
+	save_profile(dev);
+
+	return 0;
+}
+
+static int handle_device(struct device *dev)
+{
+	int res;
+
+	dev->generation++;
+
+	if ((res = handle_profile(dev)) < 0)
+		return res;
+	if ((res = handle_routes(dev)) < 0)
+		return res;
 	return 0;
 }
 
@@ -340,23 +773,8 @@ static void object_update(void *data)
 	pw_log_debug(NAME" %p: device %p %08x/%08x", impl, dev,
 			dev->obj->obj.changed, dev->obj->obj.avail);
 
-	if (dev->obj->obj.changed & SM_NODE_CHANGE_MASK_PARAMS) {
-		struct sm_param *p;
-		spa_list_for_each(p, &dev->obj->param_list, link) {
-			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-				spa_debug_pod(2, NULL, p->param);
-
-			switch (p->id) {
-			case SPA_PARAM_EnumRoute:
-				break;
-			case SPA_PARAM_Route:
-				handle_route(dev, p);
-				break;
-			default:
-				break;
-			}
-		}
-	}
+	if (dev->obj->obj.changed & SM_DEVICE_CHANGE_MASK_PARAMS)
+		handle_device(dev);
 }
 
 static const struct sm_object_events object_events = {
@@ -382,6 +800,9 @@ static void session_create(void *data, struct sm_object *object)
 	dev->id = object->id;
 	dev->impl = impl;
 	dev->name = strdup(name);
+	dev->active_profile = SPA_ID_INVALID;
+	dev->generation = 0;
+	pw_array_init(&dev->route_info, sizeof(struct route_info) * 16);
 
 	dev->obj->obj.mask |= SM_DEVICE_CHANGE_MASK_PARAMS;
 	sm_object_add_listener(&dev->obj->obj, &dev->listener, &object_events, dev);
@@ -390,6 +811,7 @@ static void session_create(void *data, struct sm_object *object)
 static void destroy_device(struct impl *impl, struct device *dev)
 {
 	spa_hook_remove(&dev->listener);
+	pw_array_clear(&dev->route_info);
 	free(dev->name);
 	sm_object_remove_data((struct sm_object*)dev->obj, SESSION_KEY);
 }
@@ -414,7 +836,6 @@ static void session_destroy(void *data)
 	remove_idle_timeout(impl);
 	spa_hook_remove(&impl->listener);
 	pw_properties_free(impl->to_restore);
-	pw_properties_free(impl->to_save);
 	free(impl);
 }
 
@@ -447,18 +868,10 @@ int sm_default_routes_start(struct sm_media_session *session)
 					SESSION_KEY, PREFIX, impl->to_restore)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
-	impl->to_save = pw_properties_copy(impl->to_restore);
-	if (impl->to_save == NULL) {
-		res = -errno;
-		goto exit_free_props;
-	}
-
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);
 
 	return 0;
 
-exit_free_props:
-	pw_properties_free(impl->to_restore);
 exit_free:
 	free(impl);
 	return res;

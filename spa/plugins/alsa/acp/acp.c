@@ -266,6 +266,131 @@ static void profile_free(void *data)
 	}
 }
 
+static int add_pro_profile(pa_card *impl, uint32_t index)
+{
+	snd_ctl_t *ctl_hndl;
+	int err, dev, count = 0;
+	pa_alsa_profile *ap;
+	pa_alsa_profile_set *ps = impl->profile_set;
+	pa_alsa_mapping *m;
+	char *device;
+	snd_pcm_info_t *pcminfo;
+	pa_sample_spec ss;
+	snd_pcm_uframes_t try_period_size, try_buffer_size;
+
+	ss.format = PA_SAMPLE_S32LE;
+	ss.rate = 48000;
+	ss.channels = 64;
+
+	ap = pa_xnew0(pa_alsa_profile, 1);
+	ap->profile_set = ps;
+	ap->profile.name = ap->name = pa_xstrdup("pro-audio");
+	ap->profile.description = ap->description = pa_xstrdup(_("Pro Audio"));
+	ap->profile.available = ACP_AVAILABLE_YES;
+	ap->output_mappings = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+	ap->input_mappings = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+	pa_hashmap_put(ps->profiles, ap->name, ap);
+
+	ap->output_name = pa_xstrdup("pro-output");
+	ap->input_name = pa_xstrdup("pro-input");
+	ap->priority = 1;
+
+	asprintf(&device, "hw:%d", index);
+
+	if ((err = snd_ctl_open(&ctl_hndl, device, 0)) < 0) {
+		pa_log_error("can't open control for card %s: %s",
+				device, snd_strerror(err));
+		return err;
+	}
+
+	snd_pcm_info_alloca(&pcminfo);
+
+	dev = -1;
+	while (1) {
+		char desc[128], devstr[128], *name;
+
+		if ((err = snd_ctl_pcm_next_device(ctl_hndl, &dev)) < 0) {
+			pa_log_error("error iterating devices: %s", snd_strerror(err));
+			break;
+		}
+		if (dev < 0)
+			break;
+
+		snd_pcm_info_set_device(pcminfo, dev);
+		snd_pcm_info_set_subdevice(pcminfo, 0);
+
+		snprintf(devstr, sizeof(devstr), "hw:%d,%d", index, dev);
+		if (count++ == 0)
+			snprintf(desc, sizeof(desc), "Pro");
+		else
+			snprintf(desc, sizeof(desc), "Pro %d", dev);
+
+		snd_pcm_info_set_stream(pcminfo, SND_PCM_STREAM_PLAYBACK);
+		if ((err = snd_ctl_pcm_info(ctl_hndl, pcminfo)) < 0) {
+			if (err != -ENOENT)
+				pa_log_error("error pcm info: %s", snd_strerror(err));
+		}
+		if (err >= 0) {
+			asprintf(&name, "Mapping pro-output-%d", dev);
+			m = pa_alsa_mapping_get(ps, name);
+			m->description = pa_xstrdup(desc);
+			m->device_strings = pa_split_spaces_strv(devstr);
+
+			try_period_size = 1024;
+			try_buffer_size = 1024 * 64;
+			m->sample_spec = ss;
+
+			if ((m->output_pcm = pa_alsa_open_by_template(m->device_strings,
+							devstr, NULL, &m->sample_spec,
+							&m->channel_map, SND_PCM_STREAM_PLAYBACK,
+							&try_period_size, &try_buffer_size,
+							0, NULL, NULL, false))) {
+				pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
+				snd_pcm_close(m->output_pcm);
+				m->output_pcm = NULL;
+				m->supported = true;
+				pa_channel_map_init_pro(&m->channel_map, m->sample_spec.channels);
+			}
+			pa_idxset_put(ap->output_mappings, m, NULL);
+			free(name);
+		}
+
+		snd_pcm_info_set_stream(pcminfo, SND_PCM_STREAM_CAPTURE);
+		if ((err = snd_ctl_pcm_info(ctl_hndl, pcminfo)) < 0) {
+			if (err != -ENOENT)
+				pa_log_error("error pcm info: %s", snd_strerror(err));
+		}
+		if (err >= 0) {
+			asprintf(&name, "Mapping pro-input-%d", dev);
+			m = pa_alsa_mapping_get(ps, name);
+			m->description = pa_xstrdup(desc);
+			m->device_strings = pa_split_spaces_strv(devstr);
+
+			try_period_size = 1024;
+			try_buffer_size = 1024 * 64;
+			m->sample_spec = ss;
+
+			if ((m->input_pcm = pa_alsa_open_by_template(m->device_strings,
+							devstr, NULL, &m->sample_spec,
+							&m->channel_map, SND_PCM_STREAM_CAPTURE,
+							&try_period_size, &try_buffer_size,
+							0, NULL, NULL, false))) {
+				pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
+				snd_pcm_close(m->input_pcm);
+				m->input_pcm = NULL;
+				m->supported = true;
+				pa_channel_map_init_pro(&m->channel_map, m->sample_spec.channels);
+			}
+			pa_idxset_put(ap->input_mappings, m, NULL);
+			free(name);
+		}
+	}
+	snd_ctl_close(ctl_hndl);
+
+	return 0;
+}
+
+
 static void add_profiles(pa_card *impl)
 {
 	pa_alsa_profile *ap;
@@ -285,6 +410,9 @@ static void add_profiles(pa_card *impl)
 	ap->profile.available = ACP_AVAILABLE_YES;
 	ap->profile.flags = ACP_PROFILE_OFF;
 	pa_hashmap_put(impl->profiles, ap->name, ap);
+
+	if (!impl->use_ucm)
+		add_pro_profile(impl, impl->card.index);
 
 	PA_HASHMAP_FOREACH(ap, impl->profile_set->profiles, state) {
 		pa_alsa_mapping *m;
@@ -807,11 +935,9 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 		struct acp_card_profile *p = profiles[i];
 
 		if (name) {
-			if (strcmp(name, p->name))
+			if (strcmp(name, p->name) == 0)
 				best = i;
-			continue;
-		}
-		if (p->flags & ACP_PROFILE_OFF) {
+		} else if (p->flags & ACP_PROFILE_OFF) {
 			off = i;
 		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > profiles[best]->priority)
@@ -1155,7 +1281,7 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 {
 	const char *mod_name;
 	bool ignore_dB = false;
-	uint32_t port_index;
+	uint32_t i, port_index;
 	int res;
 
 	if (impl->use_ucm &&
@@ -1173,11 +1299,22 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 
 	find_mixer(impl, dev, NULL, ignore_dB);
 
-	port_index = acp_device_find_best_port_index(&dev->device, NULL);
+	/* Synchronize priority values, as it may have changed when setting the profile */
+	for (i = 0; i < impl->card.n_ports; i++) {
+		pa_device_port *p = (pa_device_port *)impl->card.ports[i];
+		p->port.priority = p->priority;
+	}
+
+	if (impl->auto_port)
+		port_index = acp_device_find_best_port_index(&dev->device, NULL);
+	else
+		port_index = ACP_INVALID_INDEX;
+
 	if (port_index == ACP_INVALID_INDEX)
 		dev->active_port = NULL;
 	else
 		dev->active_port = (pa_device_port*)impl->card.ports[port_index];
+
 	if (dev->active_port)
 		dev->active_port->port.flags |= ACP_PORT_ACTIVE;
 
@@ -1242,12 +1379,20 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 
 	if (np->output_mappings) {
 		PA_IDXSET_FOREACH(am, np->output_mappings, idx) {
+			if (impl->use_ucm)
+				/* Update ports priorities */
+				pa_alsa_ucm_add_ports_combination(am->output.ports, &am->ucm_context,
+					true, impl->ports, np, NULL);
 			device_enable(impl, am, &am->output);
 		}
 	}
 
 	if (np->input_mappings) {
 		PA_IDXSET_FOREACH(am, np->input_mappings, idx) {
+			if (impl->use_ucm)
+				/* Update ports priorities */
+				pa_alsa_ucm_add_ports_combination(am->output.ports, &am->ucm_context,
+					false, impl->ports, np, NULL);
 			device_enable(impl, am, &am->input);
 		}
 	}
@@ -1332,6 +1477,8 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	card->active_profile_index = ACP_INVALID_INDEX;
 
 	impl->use_ucm = true;
+	impl->auto_profile = true;
+	impl->auto_port = true;
 
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
@@ -1344,6 +1491,10 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 			profile_set = s;
 		if ((s = acp_dict_lookup(props, "device.profile")) != NULL)
 			profile = s;
+		if ((s = acp_dict_lookup(props, "api.acp.auto-profile")) != NULL)
+			impl->auto_profile = (strcmp(s, "true") == 0 || atoi(s) == 1);
+		if ((s = acp_dict_lookup(props, "api.acp.auto-port")) != NULL)
+			impl->auto_port = (strcmp(s, "true") == 0 || atoi(s) == 1);
 	}
 
 	impl->ucm.default_sample_spec.format = PA_SAMPLE_S16NE;
@@ -1410,6 +1561,9 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	pa_proplist_as_dict(impl->proplist, &card->props);
 
 	init_jacks(impl);
+
+	if (!impl->auto_profile && profile == NULL)
+		profile = "off";
 
 	profile_index = acp_card_find_best_profile_index(&impl->card, profile);
 	acp_card_set_profile(&impl->card, profile_index);
@@ -1565,11 +1719,9 @@ uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *nam
 		struct acp_port *p = ports[i];
 
 		if (name) {
-			if (strcmp(name, p->name))
+			if (strcmp(name, p->name) == 0)
 				best = i;
-			continue;
-		}
-		if (p->available == ACP_AVAILABLE_YES) {
+		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > ports[best]->priority)
 				best = i;
 		} else if (p->available != ACP_AVAILABLE_NO) {
