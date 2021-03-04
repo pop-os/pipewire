@@ -1,11 +1,11 @@
-pipewire (0.3.22-2) UNRELEASED; urgency=medium
+pipewire (0.3.22-2) experimental; urgency=medium
 
   [ Daniel van Vugt ]
   * Fix "the metadata crash" (LP: #1916716). Using upstream commit
     3673265ae20d7b59e89cad6c5238c232796731b2 which is scheduled for inclusion
     in release 0.3.23.
 
- -- Iain Lane <laney@debian.org>  Thu, 04 Mar 2021 11:09:04 +0000
+ -- Iain Lane <laney@debian.org>  Thu, 04 Mar 2021 11:09:52 +0000
 
 pipewire (0.3.22-1) experimental; urgency=medium
 
