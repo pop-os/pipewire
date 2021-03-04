@@ -1,8 +1,7 @@
 Description: policy-node: don't crash without metadata
 Author: Wim Taymans <wtaymans@redhat.com>
-Origin: Upstream commit 3673265ae20d7b59e89cad6c5238c232796731b2
+Origin: upstream, commit:3673265ae20d7b59e89cad6c5238c232796731b2
 Bug-Ubuntu: https://bugs.launchpad.net/bugs/1916716
-Forwarded: not-needed
 Last-Update: 2021-03-04
 
 Index: pipewire/src/examples/media-session/policy-node.c
