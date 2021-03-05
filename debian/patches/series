@@ -1,4 +1,1 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
-bluez5-volumes-need-to-be-distributed-to-all-channels.patch
-bluez5-set-the-right-volumes-on-the-node.patch
-policy-node-don-t-crash-without-metadata.patch

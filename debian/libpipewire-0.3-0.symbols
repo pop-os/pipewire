@@ -269,6 +269,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_properties_setf@Base 0.3.1
  pw_properties_setva@Base 0.3.1
  pw_properties_update@Base 0.3.1
+ pw_properties_update_ignore@Base 0.3.23
  pw_properties_update_keys@Base 0.3.1
  pw_properties_update_string@Base 0.3.19
  pw_protocol_add_listener@Base 0.3.1

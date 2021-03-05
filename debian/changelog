@@ -1,8 +1,16 @@
-pipewire (0.3.23-1) UNRELEASED; urgency=medium
+pipewire (0.3.23-1) experimental; urgency=medium
 
   * New upstream release
+  * Update symbols file
+  * debian/pipewire.install
+    - Install new pipewire-media-session.service
+  * d/d/p/bluez5-volumes-need-to-be-distributed-to-all-channels.patch
+    d/p/bluez5-set-the-right-volumes-on-the-node.patch
+    d/p/policy-node-don-t-crash-without-metadata.patch
+    - Dropped; All included in upstream release
+  * Refreshed patches
 
- -- Sjoerd Simons <sjoerd@debian.org>  Fri, 05 Mar 2021 20:02:26 +0100
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 05 Mar 2021 20:21:46 +0100
 
 pipewire (0.3.22-2) experimental; urgency=medium
 
