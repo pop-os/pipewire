@@ -41,7 +41,12 @@
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#if HAVE_SYS_VFS_H
 #include <sys/vfs.h>
+#endif
+#if HAVE_SYS_MOUNT_H
+#include <sys/mount.h>
+#endif
 #if HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -78,6 +83,22 @@ struct stats {
 	uint32_t n_accumulated;
 	uint32_t accumulated;
 	uint32_t sample_cache;
+};
+
+#define DEFAULT_MIN_REQ		"256/48000"
+#define DEFAULT_DEFAULT_REQ	"960/48000"
+#define DEFAULT_MIN_FRAG	"256/48000"
+#define DEFAULT_DEFAULT_FRAG	"96000/48000"
+#define DEFAULT_DEFAULT_TLENGTH	"96000/48000"
+#define DEFAULT_MIN_QUANTUM	"256/48000"
+
+struct defs {
+	struct spa_fraction min_req;
+	struct spa_fraction default_req;
+	struct spa_fraction min_frag;
+	struct spa_fraction default_frag;
+	struct spa_fraction default_tlength;
+	struct spa_fraction min_quantum;
 };
 
 #include "format.c"
@@ -134,7 +155,7 @@ struct client {
 	struct spa_list out_messages;
 
 	struct spa_list operations;
-	struct spa_list modules;
+	struct spa_list loading_modules;
 
 	struct spa_list pending_samples;
 
@@ -144,6 +165,11 @@ struct client {
 
 	struct pw_manager_object *prev_default_sink;
 	struct pw_manager_object *prev_default_source;
+};
+
+struct latency_offset_data {
+	int64_t prev_latency_offset;
+	unsigned int initialized:1;
 };
 
 struct buffer_attr {
@@ -191,7 +217,6 @@ struct stream {
 	struct channel_map map;
 	struct buffer_attr attr;
 	uint32_t frame_size;
-	uint32_t minblock;
 	uint32_t rate;
 
 	struct volume volume;
@@ -240,8 +265,10 @@ struct impl {
 	struct spa_list cleanup_clients;
 
 	struct pw_map samples;
+	struct pw_map modules;
 
 	struct spa_list free_messages;
+	struct defs defs;
 	struct stats stat;
 };
 
@@ -724,6 +751,61 @@ static uint32_t get_event_and_id(struct client *client, struct pw_manager_object
 static struct pw_manager_object *find_device(struct client *client,
 		uint32_t id, const char *name, bool sink);
 
+static int64_t get_node_latency_offset(struct pw_manager_object *o)
+{
+	int64_t latency_offset = 0LL;
+	struct pw_manager_param *p;
+
+	spa_list_for_each(p, &o->param_list, link) {
+		if (p->id != SPA_PARAM_Props)
+			continue;
+		if (spa_pod_parse_object(p->param,
+		                         SPA_TYPE_OBJECT_Props, NULL,
+		                         SPA_PROP_latencyOffsetNsec, SPA_POD_Long(&latency_offset)) == 1)
+			break;
+	}
+	return latency_offset;
+}
+
+static void send_latency_offset_subscribe_event(struct client *client, struct pw_manager_object *o)
+{
+	struct latency_offset_data *d;
+	struct pw_node_info *info;
+	const char *str;
+	uint32_t card_id = SPA_ID_INVALID;
+	int64_t latency_offset = 0LL;
+	bool changed = false;
+
+	if (!object_is_sink(o) && !object_is_source_or_monitor(o))
+		return;
+
+	/*
+	 * Pulseaudio sends card change events on latency offset change.
+	 */
+
+	if ((info = o->info) == NULL || info->props == NULL)
+		return;
+	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL)
+		card_id = (uint32_t)atoi(str);
+	if (card_id == SPA_ID_INVALID)
+		return;
+
+	d = pw_manager_object_add_data(o, "latency_offset_data", sizeof(struct latency_offset_data));
+	if (d == NULL)
+		return;
+
+	latency_offset = get_node_latency_offset(o);
+	changed = (!d->initialized || latency_offset != d->prev_latency_offset);
+
+	d->prev_latency_offset = latency_offset;
+	d->initialized = true;
+
+	if (changed)
+		send_subscribe_event(client,
+		                     SUBSCRIPTION_EVENT_CARD | SUBSCRIPTION_EVENT_CHANGE,
+		                     card_id);
+}
+
 static void send_default_change_subscribe_event(struct client *client, bool sink, bool source)
 {
 	struct pw_manager_object *def;
@@ -800,6 +882,7 @@ static void manager_updated(void *data, struct pw_manager_object *o)
 				event | SUBSCRIPTION_EVENT_CHANGE,
 				id);
 
+	send_latency_offset_subscribe_event(client, o);
 	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
 }
 
@@ -1006,10 +1089,10 @@ static int send_command_request(struct stream *stream)
 	return send_message(client, msg);
 }
 
-static uint32_t usec_to_bytes_round_up(uint64_t usec, const struct sample_spec *ss)
+static uint32_t frac_to_bytes_round_up(struct spa_fraction val, const struct sample_spec *ss)
 {
 	uint64_t u;
-	u = (uint64_t) usec * (uint64_t) ss->rate;
+	u = (uint64_t) (val.num * 1000000UL * (uint64_t) ss->rate) / val.denom;
 	u = (u + 1000000UL - 1) / 1000000UL;
 	u *= sample_spec_frame_size(ss);
 	return (uint32_t) u;
@@ -1018,9 +1101,10 @@ static uint32_t usec_to_bytes_round_up(uint64_t usec, const struct sample_spec *
 static void fix_playback_buffer_attr(struct stream *s, struct buffer_attr *attr)
 {
 	uint32_t frame_size, max_prebuf, minreq;
+	struct defs *defs = &s->impl->defs;
 
 	frame_size = s->frame_size;
-	minreq = usec_to_bytes_round_up(MIN_USEC, &s->ss);
+	minreq = frac_to_bytes_round_up(defs->min_req, &s->ss);
 
 	if (attr->maxlength == (uint32_t) -1 || attr->maxlength > MAXLENGTH)
 		attr->maxlength = MAXLENGTH;
@@ -1028,7 +1112,7 @@ static void fix_playback_buffer_attr(struct stream *s, struct buffer_attr *attr)
 	attr->maxlength = SPA_MAX(attr->maxlength, frame_size);
 
 	if (attr->tlength == (uint32_t) -1)
-		attr->tlength = usec_to_bytes_round_up(DEFAULT_TLENGTH_MSEC*1000, &s->ss);
+		attr->tlength = frac_to_bytes_round_up(defs->default_tlength, &s->ss);
 	if (attr->tlength > attr->maxlength)
 		attr->tlength = attr->maxlength;
 	attr->tlength -= attr->tlength % frame_size;
@@ -1036,7 +1120,7 @@ static void fix_playback_buffer_attr(struct stream *s, struct buffer_attr *attr)
 	attr->tlength = SPA_MAX(attr->tlength, minreq);
 
 	if (attr->minreq == (uint32_t) -1) {
-		uint32_t process = usec_to_bytes_round_up(DEFAULT_PROCESS_MSEC*1000, &s->ss);
+		uint32_t process = frac_to_bytes_round_up(defs->default_req, &s->ss);
 		/* With low-latency, tlength/4 gives a decent default in all of traditional,
 		 * adjust latency and early request modes. */
 		uint32_t m = attr->tlength / 4;
@@ -1064,9 +1148,9 @@ static void fix_playback_buffer_attr(struct stream *s, struct buffer_attr *attr)
 	s->missing = attr->tlength;
 	attr->fragsize = 0;
 
-	pw_log_info(NAME" %p: [%s] maxlength:%u tlength:%u minreq:%u prebuf:%u minblock:%u", s,
+	pw_log_info(NAME" %p: [%s] maxlength:%u tlength:%u minreq:%u prebuf:%u", s,
 			s->client->name, attr->maxlength, attr->tlength,
-			attr->minreq, attr->prebuf, s->minblock);
+			attr->minreq, attr->prebuf);
 }
 
 static int reply_create_playback_stream(struct stream *stream)
@@ -1085,6 +1169,7 @@ static int reply_create_playback_stream(struct stream *stream)
 	const char *peer_name;
 	struct spa_fraction lat;
 	uint64_t lat_usec;
+	struct defs *defs = &stream->impl->defs;
 
 	fix_playback_buffer_attr(stream, &stream->attr);
 
@@ -1107,8 +1192,11 @@ static int reply_create_playback_stream(struct stream *stream)
 		else
 			lat.num = stream->attr.minreq;
 	}
-	lat.num /= stream->frame_size;
 	lat.denom = stream->ss.rate;
+	lat.num /= stream->frame_size;
+	if (lat.num * defs->min_quantum.denom / lat.denom < defs->min_quantum.num)
+		lat.num = (defs->min_quantum.num * lat.denom +
+				(defs->min_quantum.denom -1)) / defs->min_quantum.denom;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
@@ -1184,6 +1272,7 @@ static int reply_create_playback_stream(struct stream *stream)
 static void fix_record_buffer_attr(struct stream *s, struct buffer_attr *attr)
 {
 	uint32_t frame_size, minfrag;
+	struct defs *defs = &s->impl->defs;
 
 	frame_size = s->frame_size;
 
@@ -1192,10 +1281,10 @@ static void fix_record_buffer_attr(struct stream *s, struct buffer_attr *attr)
 	attr->maxlength -= attr->maxlength % frame_size;
 	attr->maxlength = SPA_MAX(attr->maxlength, frame_size);
 
-	minfrag = usec_to_bytes_round_up(MIN_USEC, &s->ss);
+	minfrag = frac_to_bytes_round_up(defs->min_frag, &s->ss);
 
 	if (attr->fragsize == (uint32_t) -1 || attr->fragsize == 0)
-		attr->fragsize = usec_to_bytes_round_up(DEFAULT_FRAGSIZE_MSEC*1000, &s->ss);
+		attr->fragsize = frac_to_bytes_round_up(defs->default_frag, &s->ss);
 	attr->fragsize -= attr->fragsize % frame_size;
 	attr->fragsize = SPA_MAX(attr->fragsize, minfrag);
 	attr->fragsize = SPA_MAX(attr->fragsize, frame_size);
@@ -1223,6 +1312,7 @@ static int reply_create_record_stream(struct stream *stream)
 	uint32_t peer_id;
 	struct spa_fraction lat;
 	uint64_t lat_usec;
+	struct defs *defs = &stream->impl->defs;
 
 	fix_record_buffer_attr(stream, &stream->attr);
 
@@ -1233,14 +1323,18 @@ static int reply_create_record_stream(struct stream *stream)
 	spa_ringbuffer_init(&stream->ring);
 
 	if (stream->early_requests) {
-		lat.num = stream->attr.fragsize / stream->frame_size;
+		lat.num = stream->attr.fragsize;
 	} else if (stream->adjust_latency) {
-		lat.num = stream->attr.fragsize / stream->frame_size;
+		lat.num = stream->attr.fragsize;
 	} else {
-		lat.num = stream->attr.fragsize / stream->frame_size;
+		lat.num = stream->attr.fragsize;
 	}
 
+	lat.num /= stream->frame_size;
 	lat.denom = stream->ss.rate;
+	if (lat.num * defs->min_quantum.denom / lat.denom < defs->min_quantum.num)
+		lat.num = (defs->min_quantum.num * lat.denom +
+				(defs->min_quantum.denom -1)) / defs->min_quantum.denom;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
@@ -1416,7 +1510,6 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 		pw_stream_set_error(stream->stream, res, "format not supported");
 		return;
 	}
-	stream->minblock = MIN_BLOCK * stream->frame_size;
 	stream->rate = stream->ss.rate;
 
 	if (stream->create_tag != SPA_ID_INVALID) {
@@ -1588,7 +1681,7 @@ static void stream_process(void *data)
 		if (stream->rate_match)
 			minreq = stream->rate_match->size * stream->frame_size;
 		else
-			minreq = SPA_MAX(stream->minblock, stream->attr.minreq);
+			minreq = stream->attr.minreq;
 
 		if (avail < (int32_t)minreq || stream->corked) {
 			/* underrun, produce a silence buffer */
@@ -1691,6 +1784,16 @@ static const struct pw_stream_events stream_events =
 	.drained = stream_drained,
 };
 
+static void log_format_info(struct impl *impl, enum spa_log_level level, struct format_info *format)
+{
+	const struct spa_dict_item *it;
+	pw_log(level, NAME" %p: format %s",
+			impl, format_encoding2name(format->encoding));
+	spa_dict_for_each(it, &format->props->dict)
+		pw_log(level, NAME" %p:  '%s': '%s'",
+				impl, it->key, it->value);
+}
+
 static int do_create_playback_stream(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	struct impl *impl = client->impl;
@@ -1722,7 +1825,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	struct pw_properties *props = NULL;
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
-	uint32_t n_params = 0, flags;
+	uint32_t n_params = 0, n_valid_formats = 0, flags;
 	const struct spa_pod *params[32];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -1810,8 +1913,14 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 
 	if (sample_spec_valid(&ss)) {
 		if ((params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss, &map)) != NULL)
+				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
 			n_params++;
+			n_valid_formats++;
+		} else {
+			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
+					impl, format_id2name(ss.format), ss.rate,
+					ss.channels);
+		}
 	}
 	if (client->version >= 21) {
 		if ((res = message_get(m,
@@ -1830,15 +1939,21 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 					goto error_protocol;
 
 				if ((params[n_params] = format_info_build_param(&b,
-						SPA_PARAM_EnumFormat, &format)) != NULL)
+						SPA_PARAM_EnumFormat, &format)) != NULL) {
 					n_params++;
-
+					n_valid_formats++;
+				} else {
+					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
+				}
 				format_info_clear(&format);
 			}
 		}
 	}
 	if (m->offset != m->length)
 		goto error_protocol;
+
+	if (n_valid_formats == 0)
+		goto error_no_formats;
 
 	stream = calloc(1, sizeof(struct stream));
 	if (stream == NULL)
@@ -1907,6 +2022,9 @@ error_errno:
 error_protocol:
 	res = -EPROTO;
 	goto error;
+error_no_formats:
+	res = -ENOTSUP;
+	goto error;
 error_invalid:
 	res = -EINVAL;
 	goto error;
@@ -1951,7 +2069,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	struct pw_properties *props = NULL;
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
-	uint32_t n_params = 0, flags, id;
+	uint32_t n_params = 0, n_valid_formats = 0, flags, id;
 	const struct spa_pod *params[32];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -2021,8 +2139,14 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	}
 	if (sample_spec_valid(&ss)) {
 		if ((params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss, &map)) != NULL)
+				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
 			n_params++;
+			n_valid_formats++;
+		} else {
+			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
+					impl, format_id2name(ss.format), ss.rate,
+					ss.channels);
+		}
 	}
 	if (client->version >= 22) {
 		if ((res = message_get(m,
@@ -2041,9 +2165,12 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 					goto error_protocol;
 
 				if ((params[n_params] = format_info_build_param(&b,
-						SPA_PARAM_EnumFormat, &format)) != NULL)
+						SPA_PARAM_EnumFormat, &format)) != NULL) {
 					n_params++;
-
+					n_valid_formats++;
+				} else {
+					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
+				}
 				format_info_clear(&format);
 			}
 		}
@@ -2059,6 +2186,9 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	}
 	if (m->offset != m->length)
 		goto error_protocol;
+
+	if (n_valid_formats == 0)
+		goto error_no_formats;
 
 	stream = calloc(1, sizeof(struct stream));
 	if (stream == NULL)
@@ -2139,6 +2269,9 @@ error_errno:
 	goto error;
 error_protocol:
 	res = -EPROTO;
+	goto error;
+error_no_formats:
+	res = -ENOTSUP;
 	goto error;
 error_invalid:
 	res = -EINVAL;
@@ -2538,8 +2671,8 @@ static void pending_sample_free(struct pending_sample *ps)
 {
 	spa_list_remove(&ps->link);
 	spa_hook_remove(&ps->listener);
-	sample_play_destroy(ps->play);
 	ps->client->ref--;
+	sample_play_destroy(ps->play);
 }
 
 static void sample_play_ready(void *data, uint32_t index)
@@ -2815,8 +2948,8 @@ static int set_node_volume_mute(struct pw_manager_object *o,
 	return 0;
 }
 
-static int set_card_volume_mute(struct pw_manager_object *o, uint32_t id,
-		uint32_t device_id, struct volume *vol, bool *mute)
+static int set_card_volume_mute_delay(struct pw_manager_object *o, uint32_t id,
+		uint32_t device_id, struct volume *vol, bool *mute, int64_t *latency_offset)
 {
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
@@ -2844,7 +2977,12 @@ static int set_card_volume_mute(struct pw_manager_object *o, uint32_t id,
 	if (mute)
 		spa_pod_builder_add(&b,
 				SPA_PROP_mute, SPA_POD_Bool(*mute), 0);
+	if (latency_offset)
+		spa_pod_builder_add(&b,
+				SPA_PROP_latencyOffsetNsec, SPA_POD_Long(*latency_offset), 0);
 	spa_pod_builder_pop(&b, &f[1]);
+	spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_save, 0);
+	spa_pod_builder_bool(&b, true);
 	param = spa_pod_builder_pop(&b, &f[0]);
 
 	pw_device_set_param((struct pw_device*)o->proxy,
@@ -2866,7 +3004,8 @@ static int set_card_port(struct pw_manager_object *o, uint32_t device_id,
 			spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
 				SPA_PARAM_ROUTE_index, SPA_POD_Int(port_id),
-				SPA_PARAM_ROUTE_device, SPA_POD_Int(device_id)));
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(device_id),
+				SPA_PARAM_ROUTE_save, SPA_POD_Bool(true)));
 
 	return 0;
 }
@@ -3024,8 +3163,8 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 		goto done;
 
 	if (card != NULL && dev_info.active_port != SPA_ID_INVALID)
-		res = set_card_volume_mute(card, dev_info.active_port,
-				dev_info.device, &volume, NULL);
+		res = set_card_volume_mute_delay(card, dev_info.active_port,
+				dev_info.device, &volume, NULL, NULL);
 	else
 		res = set_node_volume_mute(o, &volume, NULL);
 
@@ -3089,8 +3228,8 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 		goto done;
 
 	if (card != NULL && dev_info.active_port != SPA_ID_INVALID)
-		res = set_card_volume_mute(card, dev_info.active_port,
-				dev_info.device, NULL, &mute);
+		res = set_card_volume_mute_delay(card, dev_info.active_port,
+				dev_info.device, NULL, &mute, NULL);
 	else
 		res = set_node_volume_mute(o, NULL, &mute);
 
@@ -3154,6 +3293,77 @@ static int do_set_port(struct client *client, uint32_t command, uint32_t tag, st
 		return res;
 
 	return reply_simple_ack(client, tag);
+}
+
+static int do_set_port_latency_offset(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+{
+	struct impl *impl = client->impl;
+	struct pw_manager *manager = client->manager;
+	const char *port_name = NULL;
+	struct pw_manager_object *card;
+	struct selector sel;
+	struct card_info card_info = CARD_INFO_INIT;
+	struct port_info *port_info;
+	int64_t offset;
+	int64_t value;
+	int res;
+	uint32_t n_ports;
+	size_t i;
+
+	spa_zero(sel);
+	sel.key = PW_KEY_DEVICE_NAME;
+	sel.type = object_is_card;
+
+	if ((res = message_get(m,
+			TAG_U32, &sel.id,
+			TAG_STRING, &sel.value,
+			TAG_STRING, &port_name,
+			TAG_S64, &offset,
+			TAG_INVALID)) < 0)
+		return -EPROTO;
+
+	pw_log_info(NAME" %p: [%s] %s tag:%u index:%u card_name:%s port_name:%s offset:%"PRIi64, impl,
+			client->name, commands[command].name, tag, sel.id, sel.value, port_name, offset);
+
+	if ((sel.id == SPA_ID_INVALID && sel.value == NULL) ||
+	    (sel.id != SPA_ID_INVALID && sel.value != NULL))
+		return -EINVAL;
+	if (port_name == NULL)
+		return -EINVAL;
+
+	value = offset * 1000;  /* to nsec */
+
+	if ((card = select_object(manager, &sel)) == NULL)
+		return -ENOENT;
+
+	collect_card_info(card, &card_info);
+	port_info = alloca(card_info.n_ports * sizeof(*port_info));
+	card_info.active_profile = SPA_ID_INVALID;
+	n_ports = collect_port_info(card, &card_info, NULL, port_info);
+
+	/* Set offset on all devices of the port */
+	res = -ENOENT;
+	for (i = 0; i < n_ports; i++) {
+		struct port_info *pi = &port_info[i];
+		size_t j;
+
+		if (strcmp(pi->name, port_name) != 0)
+			continue;
+
+		res = 0;
+		for (j = 0; j < pi->n_devices; ++j) {
+			res = set_card_volume_mute_delay(card, pi->id, pi->devices[j], NULL, NULL, &value);
+			if (res < 0)
+				break;
+		}
+
+		if (res < 0)
+			break;
+
+		return reply_simple_ack(client, tag);
+	}
+
+	return res;
 }
 
 static int do_set_stream_name(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3484,6 +3694,72 @@ static int fill_module_info(struct client *client, struct message *m,
 	return 0;
 }
 
+static int fill_ext_module_info(struct client *client, struct message *m,
+		struct module *module)
+{
+	message_put(m,
+		TAG_U32, module->idx,			/* module index */
+		TAG_STRING, module->name,
+		TAG_STRING, module->args,
+		TAG_U32, -1,				/* n_used */
+		TAG_INVALID);
+
+	if (client->version < 15) {
+		message_put(m,
+			TAG_BOOLEAN, false,		/* auto unload deprecated */
+			TAG_INVALID);
+	}
+	if (client->version >= 15) {
+		message_put(m,
+			TAG_PROPLIST, module->props,
+			TAG_INVALID);
+	}
+	return 0;
+}
+
+static int64_t get_port_latency_offset(struct client *client, struct pw_manager_object *card, struct port_info *pi)
+{
+	struct pw_manager *m = client->manager;
+	struct pw_manager_object *o;
+	size_t j;
+
+	/*
+	 * The latency offset is a property of nodes in Pipewire, so we look it up on the
+	 * nodes. We'll return the latency offset of the first node in the port.
+	 *
+	 * This is also because we need to be consistent with
+	 * send_latency_offset_subscribe_event, which sends events on node changes. The
+	 * route data might not be updated yet when these events arrive.
+	 */
+	for (j = 0; j < pi->n_devices; ++j) {
+		spa_list_for_each(o, &m->object_list, link) {
+			const char *str;
+			uint32_t card_id = SPA_ID_INVALID;
+			uint32_t device_id = SPA_ID_INVALID;
+			struct pw_node_info *info;
+
+			if (o->creating || o->removing)
+				continue;
+			if (!object_is_sink(o) && !object_is_source_or_monitor(o))
+				continue;
+			if ((info = o->info) == NULL || info->props == NULL)
+				continue;
+			if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL)
+				card_id = (uint32_t)atoi(str);
+			if (card_id != card->id)
+				continue;
+
+			if ((str = spa_dict_lookup(info->props, "card.profile.device")) != NULL)
+				device_id = (uint32_t)atoi(str);
+
+			if (device_id == pi->devices[j])
+				return get_node_latency_offset(o);
+		}
+	}
+
+	return 0LL;
+}
+
 static int fill_card_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
@@ -3583,8 +3859,9 @@ static int fill_card_info(struct client *client, struct message *m,
 					TAG_INVALID);
 			}
 			if (client->version >= 27) {
+				int64_t latency_offset = get_port_latency_offset(client, o, pi);
 				message_put(m,
-					TAG_S64, 0LL,			/* port latency */
+					TAG_S64, latency_offset / 1000,	/* port latency offset */
 					TAG_INVALID);
 			}
 			if (client->version >= 34) {
@@ -4044,6 +4321,17 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 			TAG_INVALID)) < 0)
 		goto error_protocol;
 
+	reply = reply_new(client, tag);
+
+	if (command == COMMAND_GET_MODULE_INFO && (sel.id & MODULE_FLAG) != 0) {
+		struct module *module;
+		module = pw_map_lookup(&impl->modules, sel.id & INDEX_MASK);
+		if (module == NULL)
+			goto error_noentity;
+		fill_ext_module_info(client, reply, module);
+		return send_message(client, reply);
+	}
+
 	switch (command) {
 	case COMMAND_GET_CLIENT_INFO:
 		sel.type = object_is_client;
@@ -4112,7 +4400,6 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 	if (o == NULL)
 		goto error_noentity;
 
-	reply = reply_new(client, tag);
 	if ((res = fill_func(client, reply, o)) < 0)
 		goto error;
 
@@ -4238,6 +4525,14 @@ static int do_list_info(void *data, struct pw_manager_object *object)
 	return 0;
 }
 
+static int do_info_list_module(void *item, void *data)
+{
+	struct module *m = item;
+	struct info_list_data *info = data;
+	fill_ext_module_info(info->client, info->reply, m);
+	return 0;
+}
+
 static int do_get_info_list(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	struct impl *impl = client->impl;
@@ -4279,6 +4574,9 @@ static int do_get_info_list(struct client *client, uint32_t command, uint32_t ta
 	info.reply = reply_new(client, tag);
 	if (info.fill_func)
 		pw_manager_for_each_object(manager, do_list_info, &info);
+
+	if (command == COMMAND_GET_MODULE_INFO_LIST)
+		pw_map_for_each(&impl->modules, do_info_list_module, &info);
 
 	return send_message(client, info.reply);
 }
@@ -4474,7 +4772,8 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
                         SPA_PARAM_Profile, 0,
                         spa_pod_builder_add_object(&b,
                                 SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
-                                SPA_PARAM_PROFILE_index, SPA_POD_Int(profile_id)));
+                                SPA_PARAM_PROFILE_index, SPA_POD_Int(profile_id),
+                                SPA_PARAM_PROFILE_save, SPA_POD_Bool(true)));
 
 	return reply_simple_ack(client, tag);
 }
@@ -4642,7 +4941,10 @@ static int do_kill(struct client *client, uint32_t command, uint32_t tag, struct
 }
 
 struct load_module_data {
+	struct spa_list link;
 	struct client *client;
+	struct module *module;
+	struct spa_hook listener;
 	uint32_t tag;
 };
 
@@ -4654,38 +4956,24 @@ static struct load_module_data *load_module_data_new(struct client *client, uint
 	return data;
 }
 
-static void on_module_removed(void *data, struct module *module)
+static void load_module_data_free(struct load_module_data *d)
 {
-	struct client *client = data;
-
-	pw_log_info(NAME" %p: [%s] module %d unloaded", client->impl, client->name, module->idx);
-
-	spa_list_remove(&module->link);
+	spa_hook_remove(&d->listener);
+	free(d);
 }
 
-static void on_module_error(void *data)
-{
-	struct client *client = data;
-
-	pw_log_info(NAME" %p: [%s] error loading module", client->impl, client->name);
-}
-
-static void on_module_loaded(struct module *module, int error, void *data)
+static void on_module_loaded(void *data, int error)
 {
 	struct load_module_data *d = data;
+	struct module *module = d->module;
+	struct impl *impl = module->impl;
 	struct message *reply;
 	struct client *client;
 	uint32_t tag;
-	int res;
-
-	struct module_events listener = {
-		on_module_removed,
-		on_module_error,
-	};
 
 	client = d->client;
 	tag = d->tag;
-	free(d);
+	load_module_data_free(d);
 
 	if (error < 0) {
 		pw_log_warn(NAME" %p: [%s] error loading module", client->impl, client->name);
@@ -4693,25 +4981,31 @@ static void on_module_loaded(struct module *module, int error, void *data)
 		return;
 	}
 
-	spa_list_append(&client->modules, &module->link);
-	module_add_listener(module, &listener, client);
-
 	pw_log_info(NAME" %p: [%s] module %d loaded", client->impl, client->name, module->idx);
+
+	broadcast_subscribe_event(impl,
+			SUBSCRIPTION_MASK_MODULE,
+			SUBSCRIPTION_EVENT_NEW | SUBSCRIPTION_EVENT_MODULE,
+			module->idx);
 
 	reply = reply_new(client, tag);
 	message_put(reply,
 		TAG_U32, module->idx,
 		TAG_INVALID);
-	if ((res = send_message(client, reply)) < 0)
-		reply_error(client, COMMAND_LOAD_MODULE, tag, res);
+	send_message(client, reply);
 }
 
 static int do_load_module(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
-	struct load_module_data *data;
+	struct module *module;
 	struct impl *impl = client->impl;
+	struct load_module_data *d;
 	const char *name, *argument;
 	int res;
+	static struct module_events listener = {
+		VERSION_MODULE_EVENTS,
+		.loaded = on_module_loaded,
+	};
 
 	if ((res = message_get(m,
 			TAG_STRING, &name,
@@ -4722,9 +5016,15 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 	pw_log_info(NAME" %p: [%s] %s name:%s argument:%s", impl,
 			client->name, commands[command].name, name, argument);
 
-	data = load_module_data_new(client, tag);
-	res = load_module(client, name, argument, on_module_loaded, data);
-	return res;
+	module = create_module(client, name, argument);
+	if (module == NULL)
+		return -errno;
+
+	d = load_module_data_new(client, tag);
+	d->module = module;
+	module_add_listener(module, &d->listener, &listener, d);
+
+	return module_load(client, module);
 }
 
 static int do_unload_module(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4742,14 +5042,22 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u", impl, client->name,
 			commands[command].name, tag, module_idx);
 
-	spa_list_for_each(module, &client->modules, link) {
-		if (module->idx == module_idx)
-			break;
-	}
-	if (spa_list_is_end(module, &client->modules, link))
+	if (module_idx == SPA_ID_INVALID)
+		return -EINVAL;
+	if ((module_idx & MODULE_FLAG) == 0)
+		return -EPERM;
+
+	module = pw_map_lookup(&impl->modules, module_idx & INDEX_MASK);
+	if (module == NULL)
 		return -ENOENT;
 
-	unload_module(module);
+	module_unload(client, module);
+
+	broadcast_subscribe_event(impl,
+			SUBSCRIPTION_MASK_MODULE,
+			SUBSCRIPTION_EVENT_REMOVE | SUBSCRIPTION_EVENT_MODULE,
+			module_idx);
+
 	return reply_simple_ack(client, tag);
 }
 
@@ -4758,7 +5066,7 @@ static int do_error_access(struct client *client, uint32_t command, uint32_t tag
 	return -EACCES;
 }
 
-static int do_error_not_implemented(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+static SPA_UNUSED int do_error_not_implemented(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	return -ENOSYS;
 }
@@ -4911,7 +5219,7 @@ static const struct command commands[COMMAND_MAX] =
 	[COMMAND_SET_SOURCE_OUTPUT_MUTE] = { "SET_SOURCE_OUTPUT_MUTE",  do_set_stream_mute, },
 
 	/* Supported since protocol v27 (3.0) */
-	[COMMAND_SET_PORT_LATENCY_OFFSET] = { "SET_PORT_LATENCY_OFFSET", do_error_not_implemented, },
+	[COMMAND_SET_PORT_LATENCY_OFFSET] = { "SET_PORT_LATENCY_OFFSET", do_set_port_latency_offset, },
 
 	/* Supported since protocol v30 (6.0) */
 	/* BOTH DIRECTIONS */
@@ -4954,7 +5262,6 @@ static void client_free(struct client *client)
 {
 	struct impl *impl = client->impl;
 	struct message *msg;
-	struct module *module, *tmp;
 	struct pending_sample *p;
 
 	pw_log_info(NAME" %p: client %p free", impl, client);
@@ -4965,9 +5272,6 @@ static void client_free(struct client *client)
 
 	spa_list_consume(p, &client->pending_samples, link)
 		pending_sample_free(p);
-
-	spa_list_for_each_safe(module, tmp, &client->modules, link)
-		unload_module(module);
 
 	spa_list_consume(msg, &client->out_messages, link)
 		message_free(impl, msg, true, false);
@@ -5353,7 +5657,6 @@ on_connect(void *data, int fd, uint32_t mask)
 	pw_map_init(&client->streams, 16, 16);
 	spa_list_init(&client->out_messages);
 	spa_list_init(&client->operations);
-	spa_list_init(&client->modules);
 	spa_list_init(&client->pending_samples);
 
 	client->props = pw_properties_new(
@@ -5699,12 +6002,19 @@ static int impl_free_sample(void *item, void *data)
 	return 0;
 }
 
+static int impl_free_module(void *item, void *data)
+{
+	struct module *m = item;
+	module_free(m);
+	return 0;
+}
+
 static void impl_free(struct impl *impl)
 {
 	struct server *s;
 	struct client *c;
 
-	if (impl->context)
+	if (impl->context != NULL)
 		spa_hook_remove(&impl->context_listener);
 	spa_list_consume(c, &impl->cleanup_clients, link)
 		client_free(c);
@@ -5712,10 +6022,11 @@ static void impl_free(struct impl *impl)
 		server_free(s);
 	pw_map_for_each(&impl->samples, impl_free_sample, impl);
 	pw_map_clear(&impl->samples);
-	if (impl->cleanup)
+	pw_map_for_each(&impl->modules, impl_free_module, impl);
+	pw_map_clear(&impl->modules);
+	if (impl->cleanup != NULL)
 		pw_loop_destroy_source(impl->loop, impl->cleanup);
-	if (impl->props)
-		pw_properties_free(impl->props);
+	pw_properties_free(impl->props);
 	free(impl);
 }
 
@@ -5744,29 +6055,58 @@ static void on_server_cleanup(void *data, uint64_t count)
 	}
 }
 
+static int parse_frac(struct pw_properties *props, const char *key, const char *def,
+		struct spa_fraction *res)
+{
+	const char *str;
+	if (props == NULL ||
+	    (str = pw_properties_get(props, key)) == NULL)
+		str = def;
+	if (sscanf(str, "%u/%u", &res->num, &res->denom) != 2 || res->denom == 0)
+		return -EINVAL;
+	pw_log_info(NAME": defaults: %s = %u/%u", key, res->num, res->denom);
+	return 0;
+}
+
+static void load_defaults(struct defs *def, struct pw_properties *props)
+{
+	parse_frac(props, "pulse.min.req", DEFAULT_MIN_REQ, &def->min_req);
+	parse_frac(props, "pulse.default.req", DEFAULT_DEFAULT_REQ, &def->default_req);
+	parse_frac(props, "pulse.min.frag", DEFAULT_MIN_FRAG, &def->min_frag);
+	parse_frac(props, "pulse.default.frag", DEFAULT_DEFAULT_FRAG, &def->default_frag);
+	parse_frac(props, "pulse.default.tlength", DEFAULT_DEFAULT_TLENGTH, &def->default_tlength);
+	parse_frac(props, "pulse.min.quantum", DEFAULT_MIN_QUANTUM, &def->min_quantum);
+}
+
 struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		struct pw_properties *props, size_t user_data_size)
 {
 	struct impl *impl;
 	const char *str;
-	char *free_str = NULL;
 	struct spa_json it[2];
 	char value[512];
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
-		return NULL;
+		goto error_exit;
 
-	str = NULL;
-	if (props != NULL)
-		str = pw_properties_get(props, "server.address");
+	if (props == NULL)
+		props = pw_properties_new(NULL, NULL);
+	if (props == NULL)
+		goto error_free;
+
+	str = pw_properties_get(props, "server.address");
 	if (str == NULL) {
-		str = free_str = spa_aprintf("[ \"%s-%s\" ]",
+		pw_properties_setf(props, "server.address",
+				"[ \"%s-%s\" ]",
 				PW_PROTOCOL_PULSE_DEFAULT_SERVER,
 				get_server_name(context));
+		str = pw_properties_get(props, "server.address");
 	}
 	if (str == NULL)
 		goto error_free;
+
+	load_defaults(&impl->defs, props);
 
 	debug_messages = pw_debug_is_category_enabled("connection");
 
@@ -5783,6 +6123,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
 	impl->rate_limit.burst = 1;
 	pw_map_init(&impl->samples, 16, 16);
+	pw_map_init(&impl->modules, 16, 16);
 	spa_list_init(&impl->cleanup_clients);
 	spa_list_init(&impl->free_messages);
 
@@ -5798,7 +6139,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 			}
 		}
 	}
-	free(free_str);
 
 	dbus_request_name(context, "org.pulseaudio.Server");
 
@@ -5806,6 +6146,9 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 
 error_free:
 	free(impl);
+error_exit:
+	if (props != NULL)
+		pw_properties_free(props);
 	return NULL;
 }
 

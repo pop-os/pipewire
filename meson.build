@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.22',
+  version : '0.3.23',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -214,15 +214,18 @@ check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
   ['stdio_ext.h', 'HAVE_STDIO_EXT_H'],
   ['strings.h', 'HAVE_STRINGS_H'],
   ['string.h', 'HAVE_STRING_H'],
+  ['sys/mount.h', 'HAVE_SYS_MOUNT_H'],
   ['sys/param.h', 'HAVE_SYS_PARAM_H'],
   ['sys/poll.h', 'HAVE_SYS_POLL_H'],
   ['sys/prctl.h', 'HAVE_SYS_PRCTL_H'],
+  ['sys/random.h', 'HAVE_SYS_RANDOM_H'],
   ['sys/socket.h', 'HAVE_SYS_SOCKET_H'],
   ['sys/stat.h', 'HAVE_SYS_STAT_H'],
   ['sys/times.h', 'HAVE_SYS_TIMES_H'],
   ['sys/time.h', 'HAVE_SYS_TIME_H'],
   ['sys/types.h', 'HAVE_SYS_TYPES_H'],
   ['sys/utsname.h', 'HAVE_SYS_UTSNAME_H'],
+  ['sys/vfs.h', 'HAVE_SYS_VFS_H'],
   ['sys/wait.h', 'HAVE_SYS_WAIT_H'],
   ['pwd.h', 'HAVE_PWD_H'],
   ['ucontext.h', 'HAVE_UCONTEXT_H'],
@@ -268,6 +271,10 @@ endif
 
 if cc.has_function('memfd_create', prefix : '#include <sys/mman.h>', args : [ '-D_GNU_SOURCE' ])
   cdata.set('HAVE_MEMFD_CREATE', 1)
+endif
+
+if cc.has_function('getrandom', prefix : '#include <sys/random.h>')
+  cdata.set('HAVE_GETRANDOM', 1)
 endif
 
 if get_option('systemd')
@@ -354,6 +361,10 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
     ? dependency('epoll-shim', required: true)
     : dependency('', required: false))
 
+libinotify_dep = (build_machine.system() == 'freebsd'
+    ? dependency('libinotify', required: true)
+    : dependency('', required: false))
+
 alsa_dep = (get_option('pipewire-alsa')
     ? dependency('alsa', version : '>=1.1.7')
     : dependency('', required: false))
@@ -368,8 +379,7 @@ subdir('spa')
 subdir('src')
 
 if get_option('pipewire-jack')
-  jack_dep = dependency('jack', version : '>= 1.9.10')
-  subdir('pipewire-jack/src')
+  subdir('pipewire-jack')
 endif
 
 if get_option('pipewire-alsa')

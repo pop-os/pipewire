@@ -1,5 +1,5 @@
 pipewire_daemon_sources = [
-  'main.c',
+  'pipewire.c',
 ]
 
 pipewire_c_args = [
@@ -13,6 +13,7 @@ conf_config.set('VERSION', '"@0@"'.format(pipewire_version))
 conf_config.set('media_session_path', join_paths(pipewire_bindir, 'pipewire-media-session'))
 conf_config.set('pipewire_path', join_paths(pipewire_bindir, 'pipewire'))
 conf_config.set('pipewire_pulse_path', join_paths(pipewire_bindir, 'pipewire-pulse'))
+conf_config.set('comment', '#')
 conf_install_dir = join_paths(get_option('sysconfdir'), 'pipewire')
 
 conf_config_uninstalled = conf_config
@@ -22,6 +23,7 @@ conf_config_uninstalled.set('pipewire_path',
   join_paths(meson.build_root(), 'src', 'daemon', 'pipewire'))
 conf_config_uninstalled.set('pipewire_pulse_path',
   join_paths(meson.build_root(), 'src', 'daemon', 'pipewire-pulse'))
+conf_config_uninstalled.set('comment', '')
 
 
 conf_files = [
@@ -52,7 +54,7 @@ executable('pipewire',
 )
 
 executable('pipewire-pulse',
-  'pipewire-pulse.c',
+  pipewire_daemon_sources,
   install: true,
   c_args : pipewire_c_args,
   include_directories : [configinc, spa_inc],
@@ -75,7 +77,9 @@ executable('pipewire-pulse',
 #  )
 #endif
 
-subdir('media-session.d')
+if get_option('media-session')
+  subdir('media-session.d')
+endif
 if get_option('systemd') and systemd.found()
   subdir('systemd')
 endif

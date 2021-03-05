@@ -5,7 +5,7 @@ context.properties = {
     #mem.warn-mlock  = false
     #mem.allow-mlock = true
     #mem.mlock-all   = false
-    #log.level       = 2
+    log.level        = 0
 }
 
 context.spa-libs = {
@@ -33,7 +33,7 @@ context.modules = {
     libpipewire-module-rtkit = {
         args = {
             #nice.level   = -11
-            #rt.prio      = 20
+            #rt.prio      = 88
             #rt.time.soft = 200000
             #rt.time.hard = 200000
         }
@@ -62,4 +62,15 @@ context.modules = {
 
     # Provides factories to make session manager objects.
     libpipewire-module-session-manager = null
+}
+
+filter.properties = {
+    #node.latency = 1024/48000
+}
+
+stream.properties = {
+    #node.latency = 1024/48000
+    #resample.quality = 4
+    #channelmix.normalize = false
+    #channelmix.mix-lfe = false
 }
