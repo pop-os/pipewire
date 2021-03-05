@@ -88,6 +88,9 @@ struct spa_bt_monitor {
 	struct spa_dict enabled_codecs;
 
 	unsigned int enable_sbc_xq:1;
+	unsigned int backend_native_registered:1;
+	unsigned int backend_ofono_registered:1;
+	unsigned int backend_hsphfpd_registered:1;
 };
 
 /* Stream endpoints owned by BlueZ for each device */
@@ -596,7 +599,7 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 	spa_log_debug(monitor->log, "device %p: profiles %08x %08x %d",
 			device, device->profiles, connected_profiles, device->added);
 
-	if (connected_profiles == 0 && device->active_codec_switch == NULL) {
+	if (connected_profiles == 0 && spa_list_is_empty(&device->codec_switch_list)) {
 		if (device->added) {
 			device_stop_timer(device);
 			device_remove(monitor, device);
@@ -1084,6 +1087,7 @@ struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor,
 	t->path = path;
 	t->fd = -1;
 	t->sco_io = NULL;
+	t->delay = SPA_BT_UNKNOWN_DELAY;
 	t->user_data = SPA_MEMBER(t, sizeof(struct spa_bt_transport), void);
 	spa_hook_list_init(&t->listener_list);
 
@@ -1258,6 +1262,40 @@ void spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop 
 						 t->read_mtu,
 						 t->write_mtu);
 	}
+}
+
+int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t)
+{
+	if (t->delay != SPA_BT_UNKNOWN_DELAY)
+		return (int64_t)t->delay * 100 * SPA_NSEC_PER_USEC;
+
+	/* Fallback values when device does not provide information */
+
+	if (t->a2dp_codec == NULL)
+		return 30 * SPA_NSEC_PER_MSEC;
+
+	switch (t->a2dp_codec->codec_id) {
+	case A2DP_CODEC_SBC:
+		return 200 * SPA_NSEC_PER_MSEC;
+	case A2DP_CODEC_MPEG24:
+		return 200 * SPA_NSEC_PER_MSEC;
+	case A2DP_CODEC_VENDOR:
+	{
+		uint32_t vendor_id = t->a2dp_codec->vendor.vendor_id;
+		uint16_t codec_id = t->a2dp_codec->vendor.codec_id;
+
+		if (vendor_id == APTX_VENDOR_ID && codec_id == APTX_CODEC_ID)
+			return 150 * SPA_NSEC_PER_MSEC;
+		if (vendor_id == APTX_HD_VENDOR_ID && codec_id == APTX_HD_CODEC_ID)
+			return 150 * SPA_NSEC_PER_MSEC;
+		if (vendor_id == LDAC_VENDOR_ID && codec_id == LDAC_CODEC_ID)
+			return 175 * SPA_NSEC_PER_MSEC;
+		break;
+	}
+	default:
+		break;
+	};
+	return 150 * SPA_NSEC_PER_MSEC;
 }
 
 static int transport_update_props(struct spa_bt_transport *transport,
@@ -1647,7 +1685,6 @@ static void a2dp_codec_switch_process(struct spa_bt_a2dp_codec_switch *sw)
 
 	/* Didn't find any suitable endpoint. Report failure. */
 	spa_log_info(sw->device->monitor->log, NAME": a2dp codec switch %p: failed to get an endpoint", sw);
-	sw->device->active_codec_switch = NULL;
 	spa_bt_device_emit_codec_switched(sw->device, -ENODEV);
 	spa_bt_device_check_profiles(sw->device, false);
 	a2dp_codec_switch_free(sw);
@@ -1656,6 +1693,7 @@ static void a2dp_codec_switch_process(struct spa_bt_a2dp_codec_switch *sw)
 static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 {
 	struct spa_bt_a2dp_codec_switch *sw = user_data;
+	struct spa_bt_a2dp_codec_switch *active_sw;
 	struct spa_bt_device *device = sw->device;
 	DBusMessage *r;
 
@@ -1665,16 +1703,23 @@ static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 	dbus_pending_call_unref(pending);
 	sw->pending = NULL;
 
-	if (sw->device->active_codec_switch != sw) {
-		/* This codec switch has been canceled. Switch to the new one. */
+	active_sw = spa_list_first(&device->codec_switch_list, struct spa_bt_a2dp_codec_switch, device_link);
+
+	if (active_sw != sw) {
+		struct spa_bt_a2dp_codec_switch *t;
+
+		/* This codec switch has been canceled. Switch to the newest one. */
 		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: canceled, go to new switch", sw);
-		a2dp_codec_switch_free(sw);
 
 		if (r != NULL)
 			dbus_message_unref(r);
 
-		spa_assert(device->active_codec_switch != NULL);
-		a2dp_codec_switch_process(device->active_codec_switch);
+		spa_list_for_each_safe(sw, t, &device->codec_switch_list, device_link) {
+			if (sw != active_sw)
+				a2dp_codec_switch_free(sw);
+		}
+
+		a2dp_codec_switch_process(active_sw);
 		return;
 	}
 
@@ -1697,7 +1742,6 @@ static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 
 	/* Success */
 	spa_log_info(sw->device->monitor->log, NAME": a2dp codec switch %p: success", sw);
-	device->active_codec_switch = NULL;
 	spa_bt_device_emit_codec_switched(sw->device, 0);
 	spa_bt_device_check_profiles(sw->device, false);
 	a2dp_codec_switch_free(sw);
@@ -1760,7 +1804,7 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 	 * However, if there already was a codec switch running, these transports may
 	 * disapper soon. In that case, we have to do the full thing.
 	 */
-	if (device->active_codec_switch == NULL && preferred_codec != NULL) {
+	if (spa_list_is_empty(&device->codec_switch_list) && preferred_codec != NULL) {
 		spa_list_for_each(t, &device->transport_list, device_link) {
 			if (t->a2dp_codec != preferred_codec || !t->enabled)
 				continue;
@@ -1821,9 +1865,8 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 	sw->profile = device->connected_profiles;
 
 	sw->device = device;
-	spa_list_append(&device->codec_switch_list, &sw->device_link);
 
-	if (device->active_codec_switch != NULL) {
+	if (!spa_list_is_empty(&device->codec_switch_list)) {
 		/*
 		 * There's a codec switch already running.  BlueZ does not appear to allow
 		 * calling dbus_pending_call_cancel on an active request, so we have to
@@ -1832,10 +1875,10 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 		 */
 		spa_log_debug(sw->device->monitor->log,
 		             NAME": a2dp codec switch: already in progress, canceling previous");
-		spa_assert(device->active_codec_switch->pending != NULL);
-		device->active_codec_switch = sw;
+
+		spa_list_prepend(&device->codec_switch_list, &sw->device_link);
 	} else {
-		device->active_codec_switch = sw;
+		spa_list_prepend(&device->codec_switch_list, &sw->device_link);
 		a2dp_codec_switch_process(sw);
 	}
 
@@ -2468,7 +2511,10 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		adapter_register_application(a);
 	}
 	else if (strcmp(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE) == 0) {
-		backend_native_register_profiles(monitor->backend_native);
+		if (!monitor->backend_ofono_registered && !monitor->backend_hsphfpd_registered) {
+			backend_native_register_profiles(monitor->backend_native);
+			monitor->backend_native_registered = true;
+		}
 	}
 	else if (strcmp(interface_name, BLUEZ_DEVICE_INTERFACE) == 0) {
 		struct spa_bt_device *d;
@@ -2667,6 +2713,49 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 				spa_log_debug(monitor->log, "Bluetooth daemon appeared");
 				get_managed_objects(monitor);
 			}
+		} else if (strcmp(name, OFONO_SERVICE) == 0 && monitor->backend_ofono) {
+			if (old_owner && *old_owner) {
+				spa_log_debug(monitor->log, "oFono daemon disappeared");
+				monitor->backend_ofono_registered = false;
+				backend_native_register_profiles(monitor->backend_native);
+				monitor->backend_native_registered = true;
+			}
+
+			if (new_owner && *new_owner) {
+				spa_log_debug(monitor->log, "oFono daemon appeared");
+				if (monitor->backend_native_registered) {
+					backend_native_unregister_profiles(monitor->backend_native);
+					monitor->backend_native_registered = false;
+				}
+				if (backend_ofono_register(monitor->backend_ofono) == 0)
+					monitor->backend_ofono_registered = true;
+				else {
+					backend_native_register_profiles(monitor->backend_native);
+					monitor->backend_native_registered = true;
+				}
+			}
+		} else if (strcmp(name, HSPHFPD_SERVICE) == 0 && monitor->backend_hsphfpd) {
+			if (old_owner && *old_owner) {
+				spa_log_debug(monitor->log, "hsphfpd daemon disappeared");
+				backend_hsphfpd_unregistered(monitor->backend_hsphfpd);
+				monitor->backend_hsphfpd_registered = false;
+				backend_native_register_profiles(monitor->backend_native);
+				monitor->backend_native_registered = true;
+			}
+
+			if (new_owner && *new_owner) {
+				spa_log_debug(monitor->log, "hsphfpd daemon appeared");
+				if (monitor->backend_native_registered) {
+					backend_native_unregister_profiles(monitor->backend_native);
+					monitor->backend_native_registered = false;
+				}
+				if (backend_hsphfpd_register(monitor->backend_hsphfpd) == 0)
+					monitor->backend_hsphfpd_registered = true;
+				else {
+					backend_native_register_profiles(monitor->backend_native);
+					monitor->backend_native_registered = true;
+				}
+			}
 		}
 	} else if (dbus_message_is_signal(m, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded")) {
 		DBusMessageIter it;
@@ -2793,6 +2882,18 @@ static void add_filters(struct spa_bt_monitor *this)
 			"type='signal',sender='org.freedesktop.DBus',"
 			"interface='org.freedesktop.DBus',member='NameOwnerChanged',"
 			"arg0='" BLUEZ_SERVICE "'", &err);
+#ifdef HAVE_BLUEZ_5_BACKEND_OFONO
+	dbus_bus_add_match(this->conn,
+			"type='signal',sender='org.freedesktop.DBus',"
+			"interface='org.freedesktop.DBus',member='NameOwnerChanged',"
+			"arg0='" OFONO_SERVICE "'", &err);
+#endif
+#ifdef HAVE_BLUEZ_5_BACKEND_HSPHFPD
+	dbus_bus_add_match(this->conn,
+			"type='signal',sender='org.freedesktop.DBus',"
+			"interface='org.freedesktop.DBus',member='NameOwnerChanged',"
+			"arg0='" HSPHFPD_SERVICE "'", &err);
+#endif
 	dbus_bus_add_match(this->conn,
 			"type='signal',sender='" BLUEZ_SERVICE "',"
 			"interface='org.freedesktop.DBus.ObjectManager',member='InterfacesAdded'", &err);
@@ -3060,6 +3161,11 @@ impl_init(const struct spa_handle_factory *factory,
 	this->backend_native = backend_native_new(this, this->conn, info, support, n_support);
 	this->backend_ofono = backend_ofono_new(this, this->conn, info, support, n_support);
 	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, info, support, n_support);
+
+	if (this->backend_ofono && backend_ofono_register(this->backend_ofono) == 0)
+		this->backend_ofono_registered = true;
+	else if (this->backend_hsphfpd && backend_hsphfpd_register(this->backend_hsphfpd) == 0)
+		this->backend_hsphfpd_registered = true;
 
 	return 0;
 }

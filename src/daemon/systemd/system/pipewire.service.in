@@ -15,10 +15,17 @@ Description=Multimedia Service
 Requires=pipewire.socket
 
 [Service]
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 Type=simple
 ExecStart=@PW_BINARY@
 Restart=on-failure
 RuntimeDirectory=pipewire
+RuntimeDirectoryPreserve=yes
 User=pipewire
 Environment=PIPEWIRE_RUNTIME_DIR=%t/pipewire
 

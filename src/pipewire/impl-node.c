@@ -865,6 +865,26 @@ static void check_properties(struct pw_impl_node *node)
 			}
 		}
 	}
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_MAX_LATENCY))) {
+		uint32_t num, denom;
+                if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
+			uint32_t max_quantum_size;
+
+			node->max_latency = SPA_FRACTION(num, denom);
+			max_quantum_size = flp2((num * context->defaults.clock_rate / denom));
+
+			if (max_quantum_size != node->max_quantum_size) {
+				pw_log_debug(NAME" %p: max latency '%s' quantum %u/%u",
+						node, str, max_quantum_size, context->defaults.clock_rate);
+				pw_log_info("(%s-%u) max latency:%s ->quantum %u/%u", node->name,
+						node->info.id, str, max_quantum_size,
+						context->defaults.clock_rate);
+				node->max_quantum_size = max_quantum_size;
+				do_recalc = true;
+			}
+		}
+	}
+
 	pw_log_debug(NAME" %p: driver:%d recalc:%d active:%d", node, node->driver,
 			do_recalc, node->active);
 
@@ -1220,11 +1240,19 @@ const struct pw_properties *pw_impl_node_get_properties(struct pw_impl_node *nod
 	return node->properties;
 }
 
-static int update_properties(struct pw_impl_node *node, const struct spa_dict *dict)
+static int update_properties(struct pw_impl_node *node, const struct spa_dict *dict, bool filter)
 {
 	int changed;
+	const char *ignored[] = {
+		PW_KEY_OBJECT_ID,
+		PW_KEY_MODULE_ID,
+		PW_KEY_FACTORY_ID,
+		PW_KEY_CLIENT_ID,
+		PW_KEY_DEVICE_ID,
+		NULL
+	};
 
-	changed = pw_properties_update(node->properties, dict);
+	changed = pw_properties_update_ignore(node->properties, dict, filter ? ignored : NULL);
 	node->info.props = &node->properties->dict;
 
 	pw_log_debug(NAME" %p: updated %d properties", node, changed);
@@ -1239,7 +1267,7 @@ static int update_properties(struct pw_impl_node *node, const struct spa_dict *d
 SPA_EXPORT
 int pw_impl_node_update_properties(struct pw_impl_node *node, const struct spa_dict *dict)
 {
-	int changed = update_properties(node, dict);
+	int changed = update_properties(node, dict, false);
 	emit_info_changed(node, false);
 	return changed;
 }
@@ -1265,7 +1293,7 @@ static void node_info(void *data, const struct spa_node_info *info)
 		}
 	}
 	if (info->change_mask & SPA_NODE_CHANGE_MASK_PROPS) {
-		update_properties(node, info->props);
+		update_properties(node, info->props, true);
 	}
 	if (info->change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
 		uint32_t i;

@@ -39,6 +39,7 @@
 #include <spa/support/plugin.h>
 #include <spa/utils/type.h>
 #include <spa/utils/json.h>
+#include <spa/param/audio/raw.h>
 
 #include "defs.h"
 
@@ -144,6 +145,8 @@ static struct spa_bt_transport *_transport_create(struct rfcomm *rfcomm)
 	spa_list_append(&t->device->transport_list, &t->device_link);
 	t->profile = rfcomm->profile;
 	t->backend = backend;
+	t->n_channels = 1;
+	t->channels[0] = SPA_AUDIO_CHANNEL_MONO;
 	t->enabled = true;
 
 	spa_bt_transport_add_listener(t, &rfcomm->transport_listener, &transport_events, rfcomm);
@@ -199,6 +202,8 @@ static void rfcomm_send_reply(struct spa_source *source, char *data)
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 {
+	struct rfcomm *rfcomm = source->data;
+	struct spa_bt_backend *backend = rfcomm->backend;
 	unsigned int gain, dummy;
 
 	/* There are only three HSP AT commands:
@@ -206,11 +211,21 @@ static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 	 * AT+VGM=value: value between 0 and 15, sent by the HS to AG to set the microphone gain.
 	 * AT+CKPD=200: Sent by HS when headset button is pressed. */
 	if (sscanf(buf, "AT+VGS=%d", &gain) == 1) {
-		/* t->speaker_gain = gain; */
-		rfcomm_send_reply(source, "OK");
+		if (gain <= 15) {
+			/* t->speaker_gain = gain; */
+			rfcomm_send_reply(source, "OK");
+		} else {
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
+			rfcomm_send_reply(source, "ERROR");
+		}
 	} else if (sscanf(buf, "AT+VGM=%d", &gain) == 1) {
-		/* t->microphone_gain = gain; */
-		rfcomm_send_reply(source, "OK");
+		if (gain <= 15) {
+			/* t->microphone_gain = gain; */
+			rfcomm_send_reply(source, "OK");
+		} else {
+			rfcomm_send_reply(source, "ERROR");
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
+		}
 	} else if (sscanf(buf, "AT+CKPD=%d", &dummy) == 1) {
 		rfcomm_send_reply(source, "OK");
 	} else {
@@ -222,6 +237,8 @@ static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 
 static bool rfcomm_hsp_hs(struct spa_source *source, char* buf)
 {
+	struct rfcomm *rfcomm = source->data;
+	struct spa_bt_backend *backend = rfcomm->backend;
 	unsigned int gain;
 
 	/* There are only three HSP AT result codes:
@@ -232,9 +249,17 @@ static bool rfcomm_hsp_hs(struct spa_source *source, char* buf)
 	 * RING: Sent by AG to HS to notify of an incoming call. It can safely be ignored because
 	 *   it does not expect a reply. */
 	if (sscanf(buf, "\r\n+VGS=%d\r\n", &gain) == 1) {
-		/* t->microphone_gain = gain; */
+		if (gain <= 15) {
+			/* t->microphone_gain = gain; */
+		} else {
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
+		}
 	} else if (sscanf(buf, "\r\n+VGM=%d\r\n", &gain) == 1) {
-		/* t->speaker_gain = gain; */
+		if (gain <= 15) {
+			/* t->speaker_gain = gain; */
+		} else {
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
+		}
 	}
 
 	return true;
@@ -420,11 +445,21 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		}
 		rfcomm_send_reply(source, "OK");
 	} else if (sscanf(buf, "AT+VGM=%u", &gain) == 1) {
-		/* t->microphone_gain = gain; */
-		rfcomm_send_reply(source, "OK");
+		if (gain <= 15) {
+			/* t->microphone_gain = gain; */
+			rfcomm_send_reply(source, "OK");
+		} else {
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
+			rfcomm_send_reply(source, "ERROR");
+		}
 	} else if (sscanf(buf, "AT+VGS=%u", &gain) == 1) {
-		/* t->speaker_gain = gain; */
-		rfcomm_send_reply(source, "OK");
+		if (gain <= 15) {
+			/* t->speaker_gain = gain; */
+			rfcomm_send_reply(source, "OK");
+		} else {
+			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
+			rfcomm_send_reply(source, "ERROR");
+		}
 	} else {
 		return false;
 	}
@@ -491,12 +526,22 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 			/* get next token */
 			token = strtok(NULL, separators);
 			gain = atoi(token);
-			/* t->speaker_gain = gain; */
+
+			if (gain <= 15) {
+				/* t->speaker_gain = gain; */
+			} else {
+				spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", token);
+			}
 		} else if (strncmp(token, "+VGS", 4) == 0) {
 			/* get next token */
 			token = strtok(NULL, separators);
 			gain = atoi(token);
-			/* t->microphone_gain = gain; */
+
+			if (gain <= 15) {
+				/* t->microphone_gain = gain; */
+			} else {
+				spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", token);
+			}
 		} else if (strncmp(token, "OK", 5) == 0) {
 			switch(rfcomm->hf_state) {
 				case hfp_hf_brsf:
@@ -1265,6 +1310,40 @@ static int register_profile(struct spa_bt_backend *backend, const char *profile,
 	return 0;
 }
 
+void unregister_profile(struct spa_bt_backend *backend, const char *profile)
+{
+	DBusMessage *m, *r;
+	DBusError err;
+
+	spa_log_debug(backend->log, NAME": Unregistering Profile %s", profile);
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE, "/org/bluez",
+			BLUEZ_PROFILE_MANAGER_INTERFACE, "UnregisterProfile");
+	if (m == NULL)
+		return;
+
+	dbus_message_append_args(m, DBUS_TYPE_OBJECT_PATH, &profile, DBUS_TYPE_INVALID);
+
+	dbus_error_init(&err);
+
+	r = dbus_connection_send_with_reply_and_block(backend->conn, m, -1, &err);
+	dbus_message_unref(m);
+	m = NULL;
+
+	if (r == NULL) {
+		spa_log_error(backend->log, NAME": Unregistering Profile %s failed", profile);
+		dbus_error_free(&err);
+		return;
+	}
+
+	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
+		spa_log_error(backend->log, NAME": UnregisterProfile() returned error: %s", dbus_message_get_error_name(r));
+		return;
+	}
+
+	dbus_message_unref(r);
+}
+
 void backend_native_register_profiles(struct spa_bt_backend *backend)
 {
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
@@ -1276,12 +1355,13 @@ void backend_native_register_profiles(struct spa_bt_backend *backend)
 	register_profile(backend, PROFILE_HFP_AG, SPA_BT_UUID_HFP_AG);
 	register_profile(backend, PROFILE_HFP_HF, SPA_BT_UUID_HFP_HF);
 #endif
+
+	if (backend->enabled_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)
+		sco_listen(backend);
 }
 
-void backend_native_free(struct spa_bt_backend *backend)
+void backend_native_unregister_profiles(struct spa_bt_backend *backend)
 {
-	struct rfcomm *rfcomm;
-
 	if (backend->sco.fd >= 0) {
 		if (backend->sco.loop)
 			spa_loop_remove_source(backend->sco.loop, &backend->sco);
@@ -1289,6 +1369,25 @@ void backend_native_free(struct spa_bt_backend *backend)
 		close (backend->sco.fd);
 		backend->sco.fd = -1;
 	}
+
+#ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
+	if (backend->enabled_profiles & SPA_BT_PROFILE_HSP_AG)
+		unregister_profile(backend, PROFILE_HSP_AG);
+	if (backend->enabled_profiles & SPA_BT_PROFILE_HSP_HS)
+		unregister_profile(backend, PROFILE_HSP_HS);
+#endif
+
+#ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
+	if (backend->enabled_profiles & SPA_BT_PROFILE_HFP_AG)
+		unregister_profile(backend, PROFILE_HFP_AG);
+	if (backend->enabled_profiles & SPA_BT_PROFILE_HFP_HF)
+		unregister_profile(backend, PROFILE_HFP_HF);
+#endif
+}
+
+void backend_native_free(struct spa_bt_backend *backend)
+{
+	struct rfcomm *rfcomm;
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	dbus_connection_unregister_object_path(backend->conn, PROFILE_HSP_AG);
@@ -1407,9 +1506,6 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		goto fail3;
 	}
 #endif
-
-	if (backend->enabled_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)
-		sco_listen(backend);
 
 	return backend;
 

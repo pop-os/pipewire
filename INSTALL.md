@@ -59,7 +59,7 @@ make run
 
 This will use the default config file to configure and start the daemon.
 The default config will also start pipewire-media-session, a default
-example media session.
+example media session and pipewire-pulse, a PulseAudio compatible server.
 
 You can also enable more debugging with the PIPEWIRE_DEBUG environment
 variable like so:
@@ -69,11 +69,14 @@ PIPEWIRE_DEBUG=4 make run
 ```
 
 You might have to stop the pipewire service/socket that might have been
-started already, with: 
+started already, with:
 
 ```
-systemctl --user stop pipewire.service
-systemctl --user stop pipewire.socket
+systemctl --user stop pipewire.service \
+                      pipewire.socket \
+                      pipewire-media-session.service \
+                      pipewire-pulse.service \
+                      pipewire-pulse.socket
 ```
 
 ## Installing
@@ -97,8 +100,24 @@ running. PipeWire is usually started as a systemd unit using
 socket activation or as a service.
 
 Configuration of the PipeWire daemon can be found in
-/etc/pipewire/pipewire.conf. Please refer to the comments in the 
+/etc/pipewire/pipewire.conf. Please refer to the comments in the
 config file for more information about the configuration options.
+
+The daemon is started with:
+```
+systemctl --user start pipewire.service pipewire.socket
+```
+
+If you did not start the media-session in pipewire.conf, you will
+also need to start it like this:
+```
+systemctl --user start pipewire-media-session.service
+```
+To make it start on system startup:
+```
+systemctl --user enable pipewire-media-session.service
+```
+you can write ```enable --now``` to start service immediately.
 
 ### ALSA plugin
 
@@ -182,8 +201,7 @@ The server can be started with provided systemd activation files or
 from PipeWire itself. (See `/etc/pipewire/pipewire.conf`)
 
 ```
-systemctl --user stop pipewire-pulse.service
-systemctl --user stop pipewire-pulse.socket
+systemctl --user start pipewire-pulse.service pipewire-pulse.socket
 ```
 
 You can also start additional PulseAudio servers listening on other
