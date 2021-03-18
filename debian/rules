@@ -8,16 +8,18 @@ export DEB_LDFLAGS_MAINT_APPEND = -Wl,-z,defs -Wl,--as-needed
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
-		-Daudiotestsrc=true \
+		-Daudiotestsrc=enabled \
 		-Dauto_features=enabled \
-		-Ddocs=true \
-		-Dffmpeg=false \
-		-Dinstalled_tests=true \
-		-Dman=true \
-		-Dtest=true \
-		-Dvideotestsrc=true \
-		-Dvolume=true \
-		-Dvulkan=false \
+		-Dbluez5-codec-aac=disabled \
+		-Dlibcamera=disabled \
+		-Ddocs=enabled \
+		-Dffmpeg=disabled \
+		-Dinstalled_tests=enabled \
+		-Dman=enabled \
+		-Dtest=enabled \
+		-Dvideotestsrc=enabled \
+		-Dvolume=enabled \
+		-Dvulkan=disabled \
 		$(NULL)
 	install -d debian/ld.so.conf.d
 	echo "/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/jack/" > "debian/ld.so.conf.d/pipewire-jack-$(DEB_HOST_MULTIARCH).conf"

@@ -1,8 +1,10 @@
-pipewire (0.3.24-1) UNRELEASED; urgency=medium
+pipewire (0.3.24-1) experimental; urgency=medium
 
   * New upstream release
+  * Adjust builds options to cope with pipewire switching more options to
+    features, actual options used are unchanged
 
- -- Sjoerd Simons <sjoerd@debian.org>  Thu, 18 Mar 2021 20:45:01 +0100
+ -- Sjoerd Simons <sjoerd@debian.org>  Thu, 18 Mar 2021 20:46:29 +0100
 
 pipewire (0.3.23-1) experimental; urgency=medium
 
