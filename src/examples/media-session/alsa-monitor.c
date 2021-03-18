@@ -441,7 +441,7 @@ static void alsa_device_event(void *data, const struct spa_event *event)
 
 	switch (type) {
 	case SPA_DEVICE_EVENT_ObjectConfig:
-		if (props)
+		if (props && !node->snode->obj.destroyed)
 			pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
 				SPA_PARAM_Props, 0, props);
 		break;
@@ -788,6 +788,7 @@ static void device_free(void *data)
 	free(device->factory_name);
 	pw_unload_spa_handle(device->handle);
 	pw_properties_free(device->props);
+	sm_object_discard(&device->sdevice->obj);
 	free(device);
 }
 
@@ -960,6 +961,7 @@ static void alsa_udev_object_info(void *data, uint32_t id,
 	} else {
 		alsa_update_device(impl, device, info);
 	}
+	sm_media_session_schedule_rescan(impl->session);
 }
 
 static const struct spa_device_events alsa_udev_events =

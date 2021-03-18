@@ -46,26 +46,28 @@
 
 #define NAME "context"
 
-#define CLOCK_MIN_QUANTUM		4u
-#define CLOCK_MAX_QUANTUM		8192u
+#define CLOCK_MIN_QUANTUM			4u
+#define CLOCK_MAX_QUANTUM			8192u
 
-#define DEFAULT_CLOCK_RATE		48000u
-#define DEFAULT_CLOCK_QUANTUM		1024u
-#define DEFAULT_CLOCK_MIN_QUANTUM	32u
-#define DEFAULT_CLOCK_MAX_QUANTUM	8192u
-#define DEFAULT_VIDEO_WIDTH		640
-#define DEFAULT_VIDEO_HEIGHT		480
-#define DEFAULT_VIDEO_RATE_NUM		25u
-#define DEFAULT_VIDEO_RATE_DENOM	1u
-#define DEFAULT_LINK_MAX_BUFFERS	64u
-#define DEFAULT_MEM_WARN_MLOCK		false
-#define DEFAULT_MEM_ALLOW_MLOCK		true
+#define DEFAULT_CLOCK_RATE			48000u
+#define DEFAULT_CLOCK_QUANTUM			1024u
+#define DEFAULT_CLOCK_MIN_QUANTUM		32u
+#define DEFAULT_CLOCK_MAX_QUANTUM		8192u
+#define DEFAULT_CLOCK_POWER_OF_TWO_QUANTUM	true
+#define DEFAULT_VIDEO_WIDTH			640
+#define DEFAULT_VIDEO_HEIGHT			480
+#define DEFAULT_VIDEO_RATE_NUM			25u
+#define DEFAULT_VIDEO_RATE_DENOM		1u
+#define DEFAULT_LINK_MAX_BUFFERS		64u
+#define DEFAULT_MEM_WARN_MLOCK			false
+#define DEFAULT_MEM_ALLOW_MLOCK			true
 
 /** \cond */
 struct impl {
 	struct pw_context this;
 	struct spa_handle *dbus_handle;
-	unsigned int recalc;
+	unsigned int recalc:1;
+	unsigned int recalc_pending:1;
 };
 
 
@@ -137,6 +139,8 @@ static bool get_default_bool(struct pw_properties *properties, const char *name,
 static void fill_defaults(struct pw_context *this)
 {
 	struct pw_properties *p = this->properties;
+	this->defaults.clock_power_of_two_quantum = get_default_bool(p, "clock.power-of-two-quantum",
+			DEFAULT_CLOCK_POWER_OF_TWO_QUANTUM);
 	this->defaults.clock_rate = get_default_int(p, "default.clock.rate", DEFAULT_CLOCK_RATE);
 	this->defaults.clock_quantum = get_default_int(p, "default.clock.quantum", DEFAULT_CLOCK_QUANTUM);
 	this->defaults.clock_min_quantum = get_default_int(p, "default.clock.min-quantum", DEFAULT_CLOCK_MIN_QUANTUM);
@@ -236,8 +240,10 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	}
 	this->conf = conf;
 
-	if ((str = pw_properties_get(conf, "context.properties")) != NULL)
+	if ((str = pw_properties_get(conf, "context.properties")) != NULL) {
 		pw_properties_update_string(properties, str, strlen(str));
+		pw_log_info(NAME" %p: parsed context.properties section", this);
+	}
 
 	if (getenv("PIPEWIRE_DEBUG") == NULL &&
 	    (str = pw_properties_get(properties, "log.level")) != NULL)
@@ -341,10 +347,14 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 
 	this->sc_pagesize = sysconf(_SC_PAGESIZE);
 
-	pw_context_parse_conf_section(this, conf, "context.spa-libs");
-	pw_context_parse_conf_section(this, conf, "context.modules");
-	pw_context_parse_conf_section(this, conf, "context.objects");
-	pw_context_parse_conf_section(this, conf, "context.exec");
+	if ((res = pw_context_parse_conf_section(this, conf, "context.spa-libs")) >= 0)
+		pw_log_info(NAME" %p: parsed context.spa-libs section", this);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.modules")) >= 0)
+		pw_log_info(NAME" %p: parsed context.modules section", this);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.objects")) >= 0)
+		pw_log_info(NAME" %p: parsed context.objects section", this);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.exec")) >= 0)
+		pw_log_info(NAME" %p: parsed context.exec section", this);
 
 	pw_log_debug(NAME" %p: created", this);
 
@@ -867,10 +877,12 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 		spa_list_for_each(p, &n->input_ports, link) {
 			spa_list_for_each(l, &p->links, input_link) {
 				t = l->output->node;
-				if (!l->passive)
-					driver->passive = n->passive = false;
-				else
+
+				if (l->passive)
 					pw_impl_link_prepare(l);
+				else if (t->active)
+					driver->passive = n->passive = false;
+
 				if (t->visited || !t->active)
 					continue;
 				if (l->prepared) {
@@ -882,10 +894,12 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 		spa_list_for_each(p, &n->output_ports, link) {
 			spa_list_for_each(l, &p->links, output_link) {
 				t = l->input->node;
-				if (!l->passive)
-					driver->passive = n->passive = false;
-				else
+
+				if (l->passive)
 					pw_impl_link_prepare(l);
+				else if (t->active)
+					driver->passive = n->passive = false;
+
 				if (t->visited || !t->active)
 					continue;
 				if (l->prepared) {
@@ -918,9 +932,12 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 
 	pw_log_info(NAME" %p: busy:%d reason:%s", context, impl->recalc, reason);
 
-	if (impl->recalc)
+	if (impl->recalc) {
+		impl->recalc_pending = true;
 		return -EBUSY;
+	}
 
+again:
 	impl->recalc = true;
 
 	/* start from all drivers and group all nodes that are linked
@@ -1008,8 +1025,6 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 				if (s->max_quantum_size < max_quantum)
 					max_quantum = s->max_quantum_size;
 			}
-			if (s == n)
-				continue;
 			if (s->active)
 				running = !n->passive;
 		}
@@ -1041,6 +1056,11 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 		ensure_state(n, running);
 	}
 	impl->recalc = false;
+	if (impl->recalc_pending) {
+		impl->recalc_pending = false;
+		goto again;
+	}
+
 	return 0;
 }
 

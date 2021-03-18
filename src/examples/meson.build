@@ -65,7 +65,7 @@ executable('export-spa-device',
   dependencies : [pipewire_dep, mathlib],
 )
 
-if get_option('media-session') and alsa_dep.found()
+if not get_option('media-session').disabled() and alsa_dep.found()
   executable('pipewire-media-session',
     'media-session/access-flatpak.c',
     'media-session/access-portal.c',

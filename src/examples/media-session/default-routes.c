@@ -74,7 +74,6 @@ struct device {
 	struct spa_hook listener;
 
 	uint32_t active_profile;
-	char profile_name[128];
 
 	uint32_t generation;
 	struct pw_array route_info;
@@ -87,7 +86,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->to_restore)) < 0)
+						SESSION_KEY, impl->to_restore)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -138,6 +137,7 @@ struct route_info {
 	uint32_t index;
 	uint32_t generation;
 	uint32_t available;
+	uint32_t prev_available;
 	enum spa_direction direction;
 	char name[64];
 	unsigned int save:1;
@@ -181,6 +181,7 @@ static struct route_info *find_route_info(struct device *dev, struct route *r)
 	i->direction = r->direction;
 	i->generation = dev->generation;
 	i->available = r->available;
+	i->prev_available = r->available;
 
 	return i;
 }
@@ -417,6 +418,9 @@ static int restore_route_params(struct device *dev, const char *val, struct rout
 
 	pw_device_set_param((struct pw_node*)dev->obj->obj.proxy,
 			SPA_PARAM_Route, 0, param);
+
+	sm_media_session_schedule_rescan(dev->impl->session);
+
 	return 0;
 }
 
@@ -454,49 +458,6 @@ static int find_current_profile(struct device *dev, struct profile *pr)
 	return -ENOENT;
 }
 
-static int find_best_profile(struct device *dev, struct profile *pr)
-{
-	struct sm_param *p;
-	struct profile best, best_avail, best_unk, off;
-
-	spa_zero(best);
-	spa_zero(best_avail);
-	spa_zero(best_unk);
-	spa_zero(off);
-
-	spa_list_for_each(p, &dev->obj->param_list, link) {
-		struct profile t;
-
-		if (p->id != SPA_PARAM_EnumProfile ||
-		    parse_profile(p, &t) < 0)
-			continue;
-
-		if (t.name && strcmp(t.name, "pro-audio") == 0)
-			continue;
-
-		if (t.name && strcmp(t.name, "off") == 0) {
-			off = t;
-		}
-		else if (t.available == SPA_PARAM_AVAILABILITY_yes) {
-			if (best_avail.name == NULL || t.prio > best_avail.prio)
-				best_avail = t;
-		}
-		else if (t.available != SPA_PARAM_AVAILABILITY_no) {
-			if (best_unk.name == NULL || t.prio > best_unk.prio)
-				best_unk = t;
-		}
-	}
-	best = best_avail;
-	if (best.name == NULL)
-		best = best_unk;
-	if (best.name == NULL)
-		best = off;
-	if (best.name == NULL)
-		return -ENOENT;
-	*pr = best;
-	return 0;
-}
-
 static int restore_route(struct device *dev, struct route *r)
 {
 	struct impl *impl = dev->impl;
@@ -520,7 +481,6 @@ static int restore_route(struct device *dev, struct route *r)
 	ri->prev_active = true;
 	ri->active = true;
 	ri->generation = dev->generation;
-	ri->available = r->available;
 	ri->save = r->save;
 
 	return 0;
@@ -567,7 +527,7 @@ static char *serialize_routes(struct device *dev)
 	return ptr;
 }
 
-static int save_profile(struct device *dev)
+static int save_profile(struct device *dev, struct profile *pr)
 {
 	struct impl *impl = dev->impl;
 	char key[1024], *val;
@@ -575,12 +535,16 @@ static int save_profile(struct device *dev)
 	if (pw_array_get_len(&dev->route_info, struct route_info) == 0)
 		return 0;
 
-	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, dev->profile_name);
+	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, pr->name);
 
 	val = serialize_routes(dev);
 	if (pw_properties_set(impl->to_restore, key, val)) {
-		pw_log_info("device %d: profile routes changed %s %s", dev->id, key, val);
+		pw_log_info("device %d: profile %s routes changed %s %s",
+				dev->id, pr->name, key, val);
 		add_idle_timeout(impl);
+	} else {
+		pw_log_info("device %d: profile %s unchanged (%s)",
+				dev->id, pr->name, val);
 	}
 	free(val);
 	return 0;
@@ -653,26 +617,28 @@ static int find_saved_route(struct device *dev, const char *val, uint32_t device
 	return -ENOENT;
 }
 
-static int restore_device_route(struct device *dev, const char *val, uint32_t device_id)
+static int restore_device_route(struct device *dev, const char *val, uint32_t device_id, bool restore)
 {
-	int res;
+	int res = -ENOENT;
 	struct route t;
 
 	pw_log_info("device %d: restoring device %u", dev->id, device_id);
 
-	res = find_saved_route(dev, val, device_id, &t);
-	if (res >= 0) {
-		/* we found a saved route */
-		if (t.available == SPA_PARAM_AVAILABILITY_no) {
-			pw_log_info("device %d: saved route '%s' not available", dev->id,
-					t.name);
-			/* not available, try to find next best port */
-			res = -ENOENT;
-		} else {
-			pw_log_info("device %d: found saved route '%s'", dev->id,
-					t.name);
-			/* make sure we save it again */
-			t.save = true;
+	if (restore) {
+		res = find_saved_route(dev, val, device_id, &t);
+		if (res >= 0) {
+			/* we found a saved route */
+			if (t.available == SPA_PARAM_AVAILABILITY_no) {
+				pw_log_info("device %d: saved route '%s' not available", dev->id,
+						t.name);
+				/* not available, try to find next best port */
+				res = -ENOENT;
+			} else {
+				pw_log_info("device %d: found saved route '%s'", dev->id,
+						t.name);
+				/* make sure we save it again */
+				t.save = true;
+			}
 		}
 	}
 	if (res < 0) {
@@ -691,13 +657,17 @@ static int restore_device_route(struct device *dev, const char *val, uint32_t de
 	return res;
 }
 
-static int reconfigure_profile(struct device *dev, struct profile *pr)
+static int reconfigure_profile(struct device *dev, struct profile *pr, bool restore)
 {
 	struct impl *impl = dev->impl;
 	char key[1024];
 	const char *json;
 
-	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, dev->profile_name);
+	pw_log_info("device %s: restore routes for profile '%s'",
+			dev->name, pr->name);
+	dev->active_profile = pr->index;
+
+	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, pr->name);
 	json = pw_properties_get(impl->to_restore, key);
 
 	if (pr->classes != NULL) {
@@ -727,31 +697,13 @@ static int reconfigure_profile(struct device *dev, struct profile *pr)
 						continue;
 
 					for (i = 0; i < n_devices; i++)
-						restore_device_route(dev, json, devices[i]);
+						restore_device_route(dev, json, devices[i], restore);
 				}
 			}
                         spa_pod_parser_pop(&prs, &f[0]);
 		}
 	}
 	return 0;
-}
-
-static int handle_profile(struct device *dev)
-{
-	struct profile pr;
-	int res;
-
-	if ((res = find_current_profile(dev, &pr)) < 0)
-		return res;
-	if (dev->active_profile == pr.index)
-		return 0;
-
-	pw_log_info("device %s: restore routes for profile '%s'",
-			dev->name, pr.name);
-	dev->active_profile = pr.index;
-	snprintf(dev->profile_name, sizeof(dev->profile_name), "%s", pr.name);
-
-	return reconfigure_profile(dev, &pr);
 }
 
 static void prune_route_info(struct device *dev)
@@ -768,26 +720,6 @@ static void prune_route_info(struct device *dev)
 	}
 }
 
-static int set_profile(struct device *dev, struct profile *pr)
-{
-	char buf[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
-
-	if (dev->active_profile == pr->index)
-		return 0;
-
-	pw_device_set_param((struct pw_device*)dev->obj->obj.proxy,
-			SPA_PARAM_Profile, 0,
-			spa_pod_builder_add_object(&b,
-				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(pr->index),
-				SPA_PARAM_PROFILE_save, SPA_POD_Bool(false)));
-
-	dev->active_profile = pr->index;
-
-	return 0;
-}
-
 static int handle_route(struct device *dev, struct route *r)
 {
 	struct route_info *ri;
@@ -797,6 +729,7 @@ static int handle_route(struct device *dev, struct route *r)
 		return -errno;
 
 	ri->active = true;
+	ri->save = r->save;
 
 	if (!ri->prev_active) {
 		/* a new port has been found, restore the volume and make sure we
@@ -807,17 +740,19 @@ static int handle_route(struct device *dev, struct route *r)
 		/* just save port properties */
 		save_route(dev, r);
 	}
-	ri->available = r->available;
 	return 0;
 }
 
-static int handle_routes(struct device *dev)
+static int handle_device(struct device *dev)
 {
+	struct profile pr;
 	struct sm_param *p;
-	bool changed = false;
 	int res;
+	bool route_changed = false;
 
-	/* first look at all routes and see if something changed */
+	dev->generation++;
+
+	/* first look at all routes and update */
 	spa_list_for_each(p, &dev->obj->param_list, link) {
 		struct route r;
 		struct route_info *ri;
@@ -829,14 +764,17 @@ static int handle_routes(struct device *dev)
 		if ((ri = find_route_info(dev, &r)) == NULL)
 			continue;
 
+		ri->prev_available = ri->available;
 		if (ri->available != r.available) {
 			pw_log_info("device %d: route %s available changed %d -> %d",
 					dev->id, r.name, ri->available, r.available);
-			changed = true;
+			ri->available = r.available;
+			route_changed = true;
 		}
 		ri->generation = dev->generation;
 		ri->prev_active = ri->active;
 		ri->active = false;
+		ri->save = false;
 	}
 	/* then check for changes in the active ports */
 	spa_list_for_each(p, &dev->obj->param_list, link) {
@@ -846,45 +784,16 @@ static int handle_routes(struct device *dev)
 			continue;
 		handle_route(dev, &r);
 	}
-	if (changed) {
-		struct profile best;
 
-		pw_log_info("device %d: find best profile", dev->id);
-		/* port availability changed, find new best profile and switch
-		 * to it when needed. */
-		if ((res = find_best_profile(dev, &best)) < 0) {
-			pw_log_info("device %d: can't find best profile", dev->id);
-			return res;
-		}
-		if (dev->active_profile != best.index) {
-			pw_log_info("device %d: activating best profile %s",
-					dev->id, best.name);
-			/* we need to switch profiles */
-			set_profile(dev, &best);
-			return 0;
-		} else {
-			pw_log_info("device %d: best profile %s already active",
-					dev->id, best.name);
-			reconfigure_profile(dev, &best);
-		}
-	}
 	prune_route_info(dev);
 
-	save_profile(dev);
+	if ((res = find_current_profile(dev, &pr)) >= 0) {
+		bool restore = dev->active_profile != pr.index;
+		if (restore || route_changed)
+			reconfigure_profile(dev, &pr, restore);
 
-	return 0;
-}
-
-static int handle_device(struct device *dev)
-{
-	int res;
-
-	dev->generation++;
-
-	if ((res = handle_profile(dev)) < 0)
-		return res;
-	if ((res = handle_routes(dev)) < 0)
-		return res;
+		save_profile(dev, &pr);
+	}
 	return 0;
 }
 
@@ -988,7 +897,7 @@ int sm_default_routes_start(struct sm_media_session *session)
 	}
 
 	if ((res = sm_media_session_load_state(impl->session,
-					SESSION_KEY, PREFIX, impl->to_restore)) < 0)
+					SESSION_KEY, impl->to_restore)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);

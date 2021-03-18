@@ -46,6 +46,7 @@
 #define DEFAULT_CHANNELS	2
 
 #define MAX_SAMPLES	8192
+#define MAX_ALIGN	16
 #define MAX_BUFFERS	32
 
 struct impl;
@@ -121,6 +122,8 @@ struct impl {
 	unsigned int drained:1;
 
 	struct resample resample;
+
+	float empty[MAX_SAMPLES + MAX_ALIGN];
 };
 
 #define CHECK_PORT(this,d,id)		(id == 0)
@@ -238,13 +241,28 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	return 0;
 }
 
-static void update_rate_match(struct impl *this)
+static void update_rate_match(struct impl *this, bool passthrough, uint32_t out_size, uint32_t in_queued)
 {
 	if (this->io_rate_match) {
-		this->io_rate_match->delay = resample_delay(&this->resample);
-		if (SPA_LIKELY(this->io_position))
-			this->io_rate_match->size = resample_in_len(&this->resample,
-					this->io_position->clock.duration);
+		uint32_t match_size;
+
+		if (passthrough) {
+			this->io_rate_match->delay = 0;
+			match_size = out_size;
+		} else {
+			if (SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
+				resample_update_rate(&this->resample, this->io_rate_match->rate);
+			else
+				resample_update_rate(&this->resample, 1.0);
+
+			this->io_rate_match->delay = resample_delay(&this->resample);
+			match_size = resample_in_len(&this->resample, out_size);
+		}
+		match_size -= SPA_MIN(match_size, in_queued);
+		this->io_rate_match->size = match_size;
+		spa_log_trace_fp(this->log, NAME " %p: next match %u", this, match_size);
+	} else {
+		resample_update_rate(&this->resample, this->props.rate);
 	}
 }
 
@@ -268,10 +286,15 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Start:
+	{
+		bool passthrough = this->resample.i_rate == this->resample.o_rate &&
+			(this->io_rate_match == NULL ||
+			 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
+		uint32_t out_size = this->io_position ? this->io_position->clock.duration : 1024;
 		this->started = true;
-		resample_update_rate(&this->resample, 1.0);
-		update_rate_match(this);
+		update_rate_match(this, passthrough, out_size, 0);
 		break;
+	}
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Flush:
 		reset_node(this);
@@ -750,6 +773,7 @@ static int impl_node_process(void *object)
 	bool flush_out = false;
 	bool flush_in = false;
 	bool draining = false;
+	bool passthrough;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -814,31 +838,42 @@ static int impl_node_process(void *object)
 		flush_out = true;
 		break;
 	}
+	src_datas = alloca(sizeof(void*) * this->resample.channels);
+	dst_datas = alloca(sizeof(void*) * this->resample.channels);
+
 	if (size == 0) {
-		size = sb->datas[0].maxsize;
+		size = MAX_SAMPLES * sizeof(float);
 		for (i = 0; i < sb->n_datas; i++)
-			memset(sb->datas[i].data, 0, size);
+			src_datas[i] = SPA_PTR_ALIGN(this->empty, MAX_ALIGN, void);
 		inport->offset = 0;
 		flush_in = draining = true;
+	} else {
+		for (i = 0; i < sb->n_datas; i++)
+			src_datas[i] = SPA_MEMBER(sb->datas[i].data, inport->offset, void);
 	}
+	for (i = 0; i < db->n_datas; i++)
+		dst_datas[i] = SPA_MEMBER(db->datas[i].data, outport->offset, void);
 
 	in_len = (size - inport->offset) / sizeof(float);
 	out_len = (maxsize - outport->offset) / sizeof(float);
 
-	src_datas = alloca(sizeof(void*) * this->resample.channels);
-	dst_datas = alloca(sizeof(void*) * this->resample.channels);
-
-	for (i = 0; i < sb->n_datas; i++)
-		src_datas[i] = SPA_MEMBER(sb->datas[i].data, inport->offset, void);
-	for (i = 0; i < db->n_datas; i++)
-		dst_datas[i] = SPA_MEMBER(db->datas[i].data, outport->offset, void);
 
 #ifndef FASTPATH
 	pin_len = in_len;
 	pout_len = out_len;
 #endif
+	passthrough = this->resample.i_rate == this->resample.o_rate &&
+		(this->io_rate_match == NULL ||
+		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
 
-	resample_process(&this->resample, src_datas, &in_len, dst_datas, &out_len);
+	if (passthrough) {
+		uint32_t len = SPA_MIN(in_len, out_len);
+		for (i = 0; i < sb->n_datas; i++)
+			memcpy(dst_datas[i], src_datas[i], len * sizeof(float));
+		out_len = in_len = len;
+	} else {
+		resample_process(&this->resample, src_datas, &in_len, dst_datas, &out_len);
+	}
 
 #ifndef FASTPATH
 	spa_log_trace_fp(this->log, NAME " %p: in %d/%d %zd %d out %d/%d %zd %d max:%d",
@@ -880,21 +915,8 @@ static int impl_node_process(void *object)
 		spa_log_trace_fp(this->log, NAME " %p: no output buffer", this);
 	}
 
-	if (this->io_rate_match) {
-		uint32_t match_size;
-
-		if (SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
-			resample_update_rate(&this->resample, this->io_rate_match->rate);
-		else
-			resample_update_rate(&this->resample, 1.0);
-
-		this->io_rate_match->delay = resample_delay(&this->resample);
-
-		match_size = resample_in_len(&this->resample, max - outport->offset / sizeof(float));
-		match_size -= SPA_MIN(match_size, size - inport->offset / sizeof(float));
-		this->io_rate_match->size = match_size;
-		spa_log_trace_fp(this->log, NAME " %p: next match %u", this, match_size);
-	}
+	update_rate_match(this, passthrough, max - outport->offset / sizeof(float),
+			size - inport->offset / sizeof(float));
 	return res;
 }
 

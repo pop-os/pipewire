@@ -33,7 +33,10 @@ extern "C" {
 #include <spa/support/log.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
+#include <spa/monitor/device.h>
 #include <spa/utils/hook.h>
+
+#include <dbus/dbus.h>
 
 #include "config.h"
 
@@ -45,6 +48,17 @@ extern "C" {
 #define BLUEZ_MEDIA_INTERFACE BLUEZ_SERVICE ".Media1"
 #define BLUEZ_MEDIA_ENDPOINT_INTERFACE BLUEZ_SERVICE ".MediaEndpoint1"
 #define BLUEZ_MEDIA_TRANSPORT_INTERFACE BLUEZ_SERVICE ".MediaTransport1"
+#define BLUEZ_INTERFACE_BATTERY_PROVIDER BLUEZ_SERVICE ".BatteryProvider1"
+#define BLUEZ_INTERFACE_BATTERY_PROVIDER_MANAGER BLUEZ_SERVICE ".BatteryProviderManager1"
+
+#define DBUS_INTERFACE_OBJECT_MANAGER "org.freedesktop.DBus.ObjectManager"
+#define DBUS_SIGNAL_INTERFACES_ADDED "InterfacesAdded"
+#define DBUS_SIGNAL_INTERFACES_REMOVED "InterfacesRemoved"
+#define DBUS_SIGNAL_PROPERTIES_CHANGED "PropertiesChanged"
+
+#define PIPEWIRE_BATTERY_PROVIDER "/org/freedesktop/pipewire/battery"
+
+#define SPA_BT_HFP_HF_IPHONEACCEV_KEY_BATTERY	1
 
 #define MIN_LATENCY	512
 #define MAX_LATENCY	1024
@@ -276,6 +290,8 @@ struct spa_bt_adapter {
 	int powered;
 	unsigned int endpoints_registered:1;
 	unsigned int application_registered:1;
+	unsigned int has_battery_provider;
+	unsigned int battery_provider_unavailable;
 };
 
 enum spa_bt_form_factor {
@@ -359,6 +375,9 @@ struct spa_bt_device_events {
 #define SPA_VERSION_BT_DEVICE_EVENTS	0
 	uint32_t version;
 
+	/** Device connection status */
+	void (*connected) (void *data, bool connected);
+
 	/** Codec switching completed */
 	void (*codec_switched) (void *data, int status);
 
@@ -375,6 +394,7 @@ struct spa_bt_device {
 	char *alias;
 	char *address;
 	char *adapter_path;
+	char *battery_path;
 	char *name;
 	char *icon;
 	uint32_t bluetooth_class;
@@ -390,9 +410,15 @@ struct spa_bt_device {
 	struct spa_list remote_endpoint_list;
 	struct spa_list transport_list;
 	struct spa_list codec_switch_list;
+	uint8_t battery;
+	int has_battery;
 
 	struct spa_hook_list listener_list;
 	bool added;
+
+	const struct spa_dict *settings;
+
+	DBusPendingCall *battery_pending_call;
 };
 
 struct a2dp_codec;
@@ -404,10 +430,13 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec **codecs);
 bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec);
 const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_device *device, size_t *count);
+int spa_bt_device_release_transports(struct spa_bt_device *device);
+int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage);
 
 #define spa_bt_device_emit(d,m,v,...)			spa_hook_list_call(&(d)->listener_list, \
 								struct spa_bt_device_events,	\
 								m, v, ##__VA_ARGS__)
+#define spa_bt_device_emit_connected(d,...)	        spa_bt_device_emit(d, connected, 0, __VA_ARGS__)
 #define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
 #define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
 #define spa_bt_device_add_listener(d,listener,events,data)           \
@@ -458,8 +487,6 @@ struct spa_bt_transport {
 	unsigned int codec;
 	void *configuration;
 	int configuration_len;
-
-	unsigned int enabled:1;  /**< Transport ready for use in sink/source */
 
 	uint32_t n_channels;
 	uint32_t channels[64];

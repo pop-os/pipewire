@@ -86,7 +86,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->props)) < 0)
+						SESSION_KEY, impl->props)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -217,7 +217,8 @@ static void sync_metadata(struct impl *impl)
 
 	impl->sync = true;
 	spa_dict_for_each(it, &impl->props->dict)
-		pw_metadata_set_property(impl->metadata, 0, it->key, "Spa:String:JSON", it->value);
+		pw_metadata_set_property(impl->metadata,
+				PW_ID_CORE, it->key, "Spa:String:JSON", it->value);
 	impl->sync = false;
 }
 
@@ -362,6 +363,9 @@ static int restore_stream(struct stream *str, const char *val)
 
 	pw_node_set_param((struct pw_node*)str->obj->obj.proxy,
 			SPA_PARAM_Props, 0, param);
+
+	sm_media_session_schedule_rescan(str->impl->session);
+
 	return 0;
 }
 
@@ -524,7 +528,7 @@ int sm_restore_stream_start(struct sm_media_session *session)
 			&metadata_events, impl);
 
 	if ((res = sm_media_session_load_state(impl->session,
-					SESSION_KEY, PREFIX, impl->props)) < 0)
+					SESSION_KEY, impl->props)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sync_metadata(impl);
