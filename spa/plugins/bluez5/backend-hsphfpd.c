@@ -1121,7 +1121,6 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct spa_bt_backend
 	t->n_channels = 1;
 	t->channels[0] = SPA_AUDIO_CHANNEL_MONO;
 
-	t->enabled = true;
 	spa_bt_device_connect_profile(t->device, t->profile);
 
 	spa_log_debug(backend->log, NAME": Transport %s available for hsphfpd", endpoint->path);
@@ -1233,7 +1232,7 @@ int backend_hsphfpd_register(struct spa_bt_backend *backend)
 	dbus_message_unref(m);
 
 	if (r == NULL) {
-		spa_log_error(backend->log, NAME": Registering application %s failed", path);
+		spa_log_warn(backend->log, NAME": Registering application %s failed", path);
 		dbus_error_free(&err);
 		return -EIO;
 	}

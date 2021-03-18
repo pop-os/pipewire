@@ -185,7 +185,7 @@ int pw_conf_save_state(const char *prefix, const char *name, struct pw_propertie
 	const struct spa_dict_item *it;
 	char path[PATH_MAX];
 	char *tmp_name;
-	int res, sfd, fd;
+	int res, sfd, fd, count = 0;
 	FILE *f;
 
 	if ((sfd = open_write_dir(path, sizeof(path), prefix)) < 0)
@@ -200,16 +200,16 @@ int pw_conf_save_state(const char *prefix, const char *name, struct pw_propertie
 	}
 
 	f = fdopen(fd, "w");
-	fprintf(f, "{ \n");
+	fprintf(f, "{");
 	spa_dict_for_each(it, &conf->dict) {
 		char key[1024];
 
 		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
 			continue;
 
-		fprintf(f, " %s: %s\n", key, it->value);
+		fprintf(f, "%s\n  %s: %s", count++ == 0 ? "" : ",", key, it->value);
 	}
-	fprintf(f, "}\n");
+	fprintf(f, "%s}", count == 0 ? " " : "\n");
 	fclose(f);
 
 	if (renameat(sfd, tmp_name, sfd, name) < 0) {
@@ -273,7 +273,11 @@ int pw_conf_load_state(const char *prefix, const char *name, struct pw_propertie
 	return conf_load(prefix, name, conf);
 }
 
-static int parse_spa_libs(struct pw_context *context, const char *str)
+/* context.spa-libs = {
+ *  <factory-name regex> = <library-name>
+ * }
+ */
+static int parse_spa_libs(struct pw_context *context, char *str)
 {
 	struct spa_json it[2];
 	char key[512], value[512];
@@ -313,58 +317,52 @@ static int load_module(struct pw_context *context, const char *key, const char *
 	return 0;
 }
 
-static int parse_modules(struct pw_context *context, const char *str)
+/*
+ * context.modules = [
+ *   {   name = <module-name>
+ *       [ args = { <key> = <value> ... } ]
+ *       [ flags = [ [ ifexists ] [ nofail ] ]
+ *   }
+ * ]
+ */
+static int parse_modules(struct pw_context *context, char *str)
 {
 	struct spa_json it[3];
 	char key[512];
 	int res = 0;
 
 	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
+	if (spa_json_enter_array(&it[0], &it[1]) < 0)
 		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val, *aval;
-		char *args = NULL, *flags = NULL;
-		int len, alen;
+	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+		char *name = NULL, *args = NULL, *flags = NULL;
 
-		if ((len = spa_json_next(&it[1], &val)) <= 0)
-			break;
+		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+			const char *val;
+			int len;
 
-		if (key[0] == '#')
-			continue;
+			if ((len = spa_json_next(&it[2], &val)) <= 0)
+				break;
 
-		if (spa_json_is_object(val, len)) {
-			char arg[512];
+			if (strcmp(key, "name") == 0) {
+				name = (char*)val;
+				spa_json_parse_string(val, len, name);
+			} else if (strcmp(key, "args") == 0) {
+				if (spa_json_is_container(val, len))
+					len = spa_json_container_len(&it[2], val, len);
 
-			spa_json_enter(&it[1], &it[2]);
-
-			while (spa_json_get_string(&it[2], arg, sizeof(arg)-1) > 0) {
-				if ((alen = spa_json_next(&it[2], &aval)) <= 0)
-					break;
-
-				if (strcmp(arg, "args") == 0) {
-					if (spa_json_is_container(aval, alen))
-						alen = spa_json_container_len(&it[2], aval, alen);
-
-					args = malloc(alen + 1);
-					spa_json_parse_string(aval, alen, args);
-				} else if (strcmp(arg, "flags") == 0) {
-					if (spa_json_is_container(aval, alen))
-						alen = spa_json_container_len(&it[2], aval, alen);
-
-					flags = malloc(alen + 1);
-					spa_json_parse_string(aval, alen, flags);
-				}
+				args = (char*)val;
+				spa_json_parse_string(val, len, args);
+			} else if (strcmp(key, "flags") == 0) {
+				if (spa_json_is_container(val, len))
+					len = spa_json_container_len(&it[2], val, len);
+				flags = (char*)val;
+				spa_json_parse_string(val, len, flags);
 			}
 		}
-		else if (!spa_json_is_null(val, len))
-			break;
-
-		res = load_module(context, key, args, flags);
-
-		free(args);
-		free(flags);
+		if (name != NULL)
+			res = load_module(context, name, args, flags);
 
 		if (res < 0)
 			break;
@@ -399,54 +397,53 @@ static int create_object(struct pw_context *context, const char *key, const char
 	return 0;
 }
 
-static int parse_objects(struct pw_context *context, const char *str)
+/*
+ * context.objects = [
+ *   {   factory = <factory-name>
+ *       [ args  = { <key> = <value> ... } ]
+ *       [ flags = [ [ nofail ] ] ]
+ *   }
+ * ]
+ */
+static int parse_objects(struct pw_context *context, char *str)
 {
 	struct spa_json it[3];
 	char key[512];
 	int res = 0;
 
 	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
+	if (spa_json_enter_array(&it[0], &it[1]) < 0)
 		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val, *aval;
-		char *args = NULL, *flags = NULL;
-		int len, alen;
+	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+		char *factory = NULL, *args = NULL, *flags = NULL;
 
-		if ((len = spa_json_next(&it[1], &val)) <= 0)
-			break;
+		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+			const char *val;
+			int len;
 
-		if (key[0] == '#')
-			continue;
+			if ((len = spa_json_next(&it[2], &val)) <= 0)
+				break;
 
-		if (spa_json_is_object(val, len)) {
-			char arg[512];
+			if (strcmp(key, "factory") == 0) {
+				factory = (char*)val;
+				spa_json_parse_string(val, len, factory);
+			} else if (strcmp(key, "args") == 0) {
+				if (spa_json_is_container(val, len))
+					len = spa_json_container_len(&it[2], val, len);
 
-			spa_json_enter(&it[1], &it[2]);
+				args = (char*)val;
+				spa_json_parse_string(val, len, args);
+			} else if (strcmp(key, "flags") == 0) {
+				if (spa_json_is_container(val, len))
+					len = spa_json_container_len(&it[2], val, len);
 
-			while (spa_json_get_string(&it[2], arg, sizeof(arg)-1) > 0) {
-				if ((alen = spa_json_next(&it[2], &aval)) <= 0)
-					break;
-
-				if (strcmp(arg, "args") == 0) {
-					if (spa_json_is_container(aval, alen))
-						alen = spa_json_container_len(&it[2], aval, alen);
-
-					args = malloc(alen + 1);
-					spa_json_parse_string(aval, alen, args);
-				} else if (strcmp(arg, "flags") == 0) {
-					flags = strndup(aval, alen);
-				}
+				flags = (char*)val;
+				spa_json_parse_string(val, len, flags);
 			}
 		}
-		else if (!spa_json_is_null(val, len))
-			break;
-
-		res = create_object(context, key, args, flags);
-
-		free(args);
-		free(flags);
+		if (factory != NULL)
+			res = create_object(context, factory, args, flags);
 
 		if (res < 0)
 			break;
@@ -485,46 +482,43 @@ static int do_exec(struct pw_context *context, const char *key, const char *args
 	return 0;
 }
 
-static int parse_exec(struct pw_context *context, const char *str)
+/*
+ * context.exec = [
+ *   { path = <program-name>
+ *     [ args = "<arguments>" ]
+ *   }
+ * ]
+ */
+static int parse_exec(struct pw_context *context, char *str)
 {
 	struct spa_json it[3];
 	char key[512];
 	int res = 0;
 
 	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
+	if (spa_json_enter_array(&it[0], &it[1]) < 0)
 		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
-		char *args = NULL;
-		int len;
+	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+		char *path = NULL, *args = NULL;
 
-		if ((len = spa_json_next(&it[1], &val)) <= 0)
-			break;
+		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+			const char *val;
+			int len;
 
-		if (key[0] == '#')
-			continue;
+			if ((len = spa_json_next(&it[2], &val)) <= 0)
+				break;
 
-		if (spa_json_is_object(val, len)) {
-			char arg[512], aval[1024];
-
-			spa_json_enter(&it[1], &it[2]);
-
-			while (spa_json_get_string(&it[2], arg, sizeof(arg)-1) > 0) {
-				if (spa_json_get_string(&it[2], aval, sizeof(aval)-1) <= 0)
-					break;
-
-				if (strcmp(arg, "args") == 0)
-					args = strdup(aval);
+			if (strcmp(key, "path") == 0) {
+				path = (char*)val;
+				spa_json_parse_string(val, len, path);
+			} else if (strcmp(key, "args") == 0) {
+				args = (char*)val;
+				spa_json_parse_string(val, len, args);
 			}
 		}
-		else if (!spa_json_is_null(val, len))
-			break;
-
-		res = do_exec(context, key, args);
-
-		free(args);
+		if (path != NULL)
+			res = do_exec(context, path, args);
 
 		if (res < 0)
 			break;
@@ -537,21 +531,26 @@ int pw_context_parse_conf_section(struct pw_context *context,
 		struct pw_properties *conf, const char *section)
 {
 	const char *str;
+	char *s;
 	int res;
 
 	if ((str = pw_properties_get(conf, section)) == NULL)
 		return -ENOENT;
 
+	s = strdup(str);
+
 	if (strcmp(section, "context.spa-libs") == 0)
-		res = parse_spa_libs(context, str);
+		res = parse_spa_libs(context, s);
 	else if (strcmp(section, "context.modules") == 0)
-		res = parse_modules(context, str);
+		res = parse_modules(context, s);
 	else if (strcmp(section, "context.objects") == 0)
-		res = parse_objects(context, str);
+		res = parse_objects(context, s);
 	else if (strcmp(section, "context.exec") == 0)
-		res = parse_exec(context, str);
+		res = parse_exec(context, s);
 	else
 		res = -EINVAL;
+
+	free(s);
 
 	return res;
 }

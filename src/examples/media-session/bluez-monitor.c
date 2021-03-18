@@ -292,19 +292,10 @@ static void bluez_device_event(void *data, const struct spa_event *event)
 
 	switch (type) {
 	case SPA_DEVICE_EVENT_ObjectConfig:
-		/* FIXME, proxy might be NULL at this point until the
-		 * node proxy is created. We should probably do
-		 * pw_client_node_get_node() and perform the set_param on
-		 * that node proxy instead of waiting for the session manager
-		 * proxy. */
 		if (props != NULL) {
-			if (node->snode->obj.proxy != NULL) {
-				pw_node_set_param((struct pw_node*)node->snode->obj.proxy,
-					SPA_PARAM_Props, 0, props);
-			} else {
-				pw_log_warn("device %p: node %d not ready for volume yet",
-						device, id);
-			}
+			struct spa_node *adapter;
+			adapter = pw_impl_node_get_implementation(node->adapter);
+			spa_node_set_param(adapter, SPA_PARAM_Props, 0, props);
 		}
 		break;
 	default:
@@ -353,24 +344,19 @@ static int update_device_props(struct device *device)
 	return 0;
 }
 
-static void bluez5_update_device(struct impl *impl, struct device *dev,
-		const struct spa_device_object_info *info)
-{
-	pw_log_debug("update device %u", dev->id);
-
-	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-		spa_debug_dict(0, info->props);
-
-	pw_properties_update(dev->props, info->props);
-	update_device_props(dev);
-}
-
 static void device_destroy(void *data)
 {
 	struct device *device = data;
 	struct node *node;
 
 	pw_log_debug("device %p destroy", device);
+
+	spa_hook_remove(&device->listener);
+
+	if (device->appeared) {
+		device->appeared = false;
+		spa_hook_remove(&device->device_listener);
+	}
 
 	spa_list_consume(node, &device->node_list, link)
 		bluez5_remove_node(device, node);
@@ -418,13 +404,30 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 		return NULL;
 	}
 
+	device = calloc(1, sizeof(*device));
+	if (device == NULL) {
+		res = -errno;
+		goto exit;
+	}
+
+	device->impl = impl;
+	device->id = id;
+	device->priority = 1000;
+	device->props = pw_properties_new_dict(info->props);
+	update_device_props(device);
+
+	spa_list_init(&device->node_list);
+
+	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
+		sm_media_session_match_rules(rules, strlen(rules), device->props);
+
 	handle = pw_context_load_spa_handle(context,
-			info->factory_name,
-			info->props);
+		info->factory_name,
+		&device->props->dict);
 	if (handle == NULL) {
 		res = -errno;
 		pw_log_error("can't make factory instance: %m");
-		goto exit;
+		goto clean_device;
 	}
 
 	if ((res = spa_handle_get_interface(handle, info->type, &iface)) < 0) {
@@ -432,66 +435,74 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 		goto unload_handle;
 	}
 
-	device = calloc(1, sizeof(*device));
-	if (device == NULL) {
-		res = -errno;
-		goto unload_handle;
-	}
-
-	device->impl = impl;
-	device->id = id;
-	device->priority = 1000;
 	device->handle = handle;
 	device->device = iface;
-	device->props = pw_properties_new_dict(info->props);
-	update_device_props(device);
-	device->sdevice = sm_media_session_export_device(impl->session,
-			&device->props->dict, device->device);
-	if (device->sdevice == NULL) {
-		res = -errno;
-		goto clean_device;
-	}
-
-	spa_list_init(&device->node_list);
-
-	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
-		sm_media_session_match_rules(rules, strlen(rules), device->props);
-
-	sm_object_add_listener(&device->sdevice->obj,
-			&device->listener,
-			&device_events, device);
 
 	spa_list_append(&impl->device_list, &device->link);
 
 	return device;
 
+unload_handle:
+	pw_unload_spa_handle(handle);
 clean_device:
 	pw_properties_free(device->props);
 	free(device);
-unload_handle:
-	pw_unload_spa_handle(handle);
 exit:
 	errno = -res;
 	return NULL;
 }
 
-static void bluez5_remove_device(struct impl *impl, struct device *device)
+static void bluez5_device_free(struct device *device)
 {
-	struct node *node;
-
-	pw_log_debug("remove device %u", device->id);
-	spa_list_remove(&device->link);
-	spa_hook_remove(&device->device_listener);
-
-	spa_list_consume(node, &device->node_list, link)
-		bluez5_remove_node(device, node);
-
-	if (device->sdevice)
+	if (device->sdevice) {
 		sm_object_destroy(&device->sdevice->obj);
-
+		device->sdevice = NULL;
+	}
+	spa_list_remove(&device->link);
 	pw_unload_spa_handle(device->handle);
 	pw_properties_free(device->props);
 	free(device);
+}
+
+static void bluez5_remove_device(struct impl *impl, struct device *device)
+{
+
+	pw_log_debug("remove device %u", device->id);
+	bluez5_device_free(device);
+}
+
+static void bluez5_update_device(struct impl *impl, struct device *device,
+		const struct spa_device_object_info *info)
+{
+	bool connected;
+	const char *str;
+	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+		spa_debug_dict(0, info->props);
+
+	pw_log_debug("update device %u", device->id);
+
+	pw_properties_update(device->props, info->props);
+	update_device_props(device);
+
+	str = spa_dict_lookup(info->props, SPA_KEY_API_BLUEZ5_CONNECTION);
+	connected = str != NULL && strcmp(str, "connected") == 0;
+
+	/* Export device after bluez profiles get connected */
+	if (device->sdevice == NULL && connected) {
+		device->sdevice = sm_media_session_export_device(impl->session,
+					&device->props->dict, device->device);
+		if (device->sdevice == NULL) {
+			bluez5_device_free(device);
+			return;
+		}
+
+		sm_object_add_listener(&device->sdevice->obj,
+				&device->listener,
+				&device_events, device);
+	} else if (device->sdevice != NULL && !connected) {
+		sm_object_destroy(&device->sdevice->obj);
+		device->sdevice = NULL;
+	}
 }
 
 static void bluez5_enum_object_info(void *data, uint32_t id,
@@ -523,6 +534,10 @@ static const struct spa_device_events bluez5_enum_callbacks =
 static void session_destroy(void *data)
 {
 	struct impl *impl = data;
+	struct device *device;
+	spa_list_consume(device, &impl->device_list, link)
+		bluez5_device_free(device);
+
 	spa_hook_remove(&impl->session_listener);
 	spa_hook_remove(&impl->listener);
 	pw_unload_spa_handle(impl->handle);
@@ -565,6 +580,8 @@ int sm_bluez5_monitor_start(struct sm_media_session *session)
 	}
 	if ((str = pw_properties_get(impl->conf, "properties")) != NULL)
 		pw_properties_update_string(impl->props, str, strlen(str));
+
+	pw_properties_set(impl->props, "api.bluez5.connection-info", "true");
 
 	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_BLUEZ5_ENUM_DBUS, &impl->props->dict);
 	if (impl->handle == NULL) {

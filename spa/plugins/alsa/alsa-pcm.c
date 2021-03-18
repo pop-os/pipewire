@@ -559,9 +559,6 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		}
 	}
 
-	/* disable ALSA wakeups, we use a timer */
-	if (snd_pcm_hw_params_can_disable_period_wakeup(params))
-		CHECK(snd_pcm_hw_params_set_period_wakeup(hndl, params, 0), "set_period_wakeup");
 
 	/* set the sample format */
 	spa_log_debug(state->log, NAME" %p: Stream parameters are %iHz fmt:%s access:%s-%s channels:%i",
@@ -616,6 +613,10 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		period_size /= 2;
 		spa_log_info(state->log, NAME" %s: batch mode, period_size:%ld",
 			state->props.device, period_size);
+	} else {
+		/* disable ALSA wakeups, we use a timer */
+		if (snd_pcm_hw_params_can_disable_period_wakeup(params))
+			CHECK(snd_pcm_hw_params_set_period_wakeup(hndl, params, 0), "set_period_wakeup");
 	}
 
 	CHECK(snd_pcm_hw_params_set_period_size_near(hndl, params, &period_size, &dir), "set_period_size_near");
@@ -630,7 +631,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	periods = state->buffer_frames / state->period_frames;
 
 	spa_log_info(state->log, NAME" %s (%s): format:%s access:%s-%s rate:%d channels:%d "
-			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd"
+			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd "
 			"headroom %u",
 			state->props.device,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
@@ -707,7 +708,8 @@ int spa_alsa_silence(struct state *state, snd_pcm_uframes_t silence)
 		}
 		silence = SPA_MIN(silence, frames);
 
-		spa_log_trace_fp(state->log, NAME" %p: silence %ld", state, silence);
+		spa_log_trace_fp(state->log, NAME" %p: frames:%ld offset:%ld silence %ld",
+				state, frames, offset, silence);
 		snd_pcm_areas_silence(my_areas, offset, state->channels, silence, state->format);
 
 		if (SPA_UNLIKELY((res = snd_pcm_mmap_commit(hndl, offset, silence)) < 0)) {
@@ -803,7 +805,7 @@ recover:
 	state->alsa_started = false;
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK)
-		spa_alsa_silence(state, state->threshold * 2 + state->headroom);
+		spa_alsa_silence(state, state->last_threshold * 2 + state->headroom);
 
 	return do_start(state);
 }
@@ -829,14 +831,8 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 	*target = state->threshold + state->headroom;
 
 	if (state->resample && state->rate_match) {
-		state->delay = state->rate_match->delay * 2;
+		state->delay = state->rate_match->delay;
 		state->read_size = state->rate_match->size;
-		/* We try to compensate for the latency introduced by rate matching
-		 * by moving a little closer to the device read/write pointers. */
-		if (*target <= state->delay)
-			*target -= SPA_MAX(0, (int)(*target - state->delay));
-		else
-			*target -= state->delay;
 	} else {
 		state->delay = 0;
 		state->read_size = state->threshold;
@@ -844,8 +840,7 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK) {
 		*delay = state->buffer_frames - avail;
-	}
-	else {
+	} else {
 		*delay = avail;
 		*target = SPA_MAX(*target, state->read_size);
 	}
@@ -856,29 +851,31 @@ static int update_time(struct state *state, uint64_t nsec, snd_pcm_sframes_t del
 		snd_pcm_sframes_t target, bool follower)
 {
 	double err, corr;
+	int32_t diff;
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK)
 		err = delay - target;
 	else
 		err = target - delay;
 
-	err = SPA_CLAMP(err, -state->max_error, state->max_error);
-
 	if (SPA_UNLIKELY(state->dll.bw == 0.0)) {
 		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold, state->rate);
 		state->next_time = nsec;
 		state->base_time = nsec;
 	}
-	corr = spa_dll_update(&state->dll, err);
+	diff = (int32_t) (state->last_threshold - state->threshold);
 
-	if (SPA_UNLIKELY(state->last_threshold != state->threshold)) {
-		int32_t diff = (int32_t) (state->last_threshold - state->threshold);
-		spa_log_trace(state->log, NAME" %p: follower:%d quantum change %d -> %d (%d)",
-				state, follower, state->last_threshold, state->threshold, diff);
-		if (diff < 0)
-			state->next_time += diff / corr * 1e9 / state->rate;
+	if (SPA_UNLIKELY(diff != 0)) {
+		err -= diff;
+		spa_log_trace(state->log, NAME" %p: follower:%d quantum change %d -> %d (%d) %f",
+				state, follower, state->last_threshold, state->threshold, diff, err);
 		state->last_threshold = state->threshold;
 	}
+	err = SPA_CLAMP(err, -state->max_error, state->max_error);
+	corr = spa_dll_update(&state->dll, err);
+
+	if (diff < 0)
+		state->next_time += diff / corr * 1e9 / state->rate;
 
 	if (SPA_UNLIKELY((state->next_time - state->base_time) > BW_PERIOD)) {
 		state->base_time = state->next_time;
@@ -905,7 +902,7 @@ static int update_time(struct state *state, uint64_t nsec, snd_pcm_sframes_t del
 		state->clock->nsec = nsec;
 		state->clock->position += state->duration;
 		state->clock->duration = state->duration;
-		state->clock->delay = delay;
+		state->clock->delay = delay + state->delay;
 		state->clock->rate_diff = corr;
 		state->clock->next_nsec = state->next_time;
 	}
@@ -938,9 +935,9 @@ int spa_alsa_write(struct state *state)
 			return res;
 
 		if (SPA_UNLIKELY(!state->alsa_recovering && delay > target + state->threshold)) {
-			spa_log_warn(state->log, NAME" %s: follower delay:%ld resync %f %f %f",
-					state->props.device, delay, state->dll.z1,
-					state->dll.z2, state->dll.z3);
+			spa_log_warn(state->log, NAME" %s: follower delay:%ld target:%ld resync %f %f %f",
+					state->props.device, delay, target + state->threshold,
+					state->dll.z1, state->dll.z2, state->dll.z3);
 			spa_dll_init(&state->dll);
 			state->alsa_sync = true;
 		}
@@ -1263,7 +1260,7 @@ static int handle_play(struct state *state, uint64_t nsec,
 {
 	int res;
 
-	if (SPA_UNLIKELY(delay > target + state->threshold)) {
+	if (SPA_UNLIKELY(delay > target + state->max_error)) {
 		spa_log_trace(state->log, NAME" %p: early wakeup %ld %ld", state, delay, target);
 		state->next_time = nsec + (delay - target) * SPA_NSEC_PER_SEC / state->rate;
 		return -EAGAIN;
@@ -1338,7 +1335,7 @@ static void alsa_on_timeout_event(struct spa_source *source)
 	if (SPA_UNLIKELY(state->started && spa_system_timerfd_read(state->data_system, state->timerfd, &expire) < 0))
 		spa_log_warn(state->log, NAME" %p: error reading timerfd: %m", state);
 
-	if (SPA_LIKELY(state->position)) {
+	if (SPA_UNLIKELY(state->position && state->duration != state->position->clock.duration)) {
 		state->duration = state->position->clock.duration;
 		state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
 	}

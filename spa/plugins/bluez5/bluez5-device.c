@@ -106,6 +106,10 @@ struct impl {
 	const struct a2dp_codec **supported_codecs;
 	size_t supported_codec_count;
 
+#define MAX_SETTINGS 32
+	struct spa_dict_item setting_items[MAX_SETTINGS];
+	struct spa_dict setting_dict;
+
 	struct node nodes[2];
 };
 
@@ -156,6 +160,17 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 
 	spa_device_emit_object_info(&this->hooks, id, &info);
 
+	if (this->nodes[id].n_channels > 0) {
+		size_t i;
+
+		/*
+		 * Spread mono volume to all channels, if we had switched HFP -> A2DP.
+		 * XXX: we should also use different route for hfp and a2dp
+		 */
+		for (i = this->nodes[id].n_channels; i < t->n_channels; ++i)
+			this->nodes[id].volumes[i] = this->nodes[id].volumes[i % this->nodes[id].n_channels];
+	}
+
 	this->nodes[id].active = true;
 	this->nodes[id].n_channels = t->n_channels;
 	memcpy(this->nodes[id].channels, t->channels,
@@ -181,8 +196,7 @@ static struct spa_bt_transport *find_transport(struct impl *this, int profile, c
 
 	for (i = 0; i < num_codecs; ++i) {
 		spa_list_for_each(t, &device->transport_list, device_link) {
-			if (t->enabled &&
-			    (t->profile & device->connected_profiles) &&
+			if ((t->profile & device->connected_profiles) &&
 			    (t->profile & profile) == t->profile &&
 			    (codecs[i] == NULL || t->a2dp_codec == codecs[i]))
 				return t;
@@ -270,6 +284,8 @@ static int set_profile(struct impl *this, uint32_t profile, const struct a2dp_co
 		return 0;
 
 	emit_remove_nodes(this);
+
+	spa_bt_device_release_transports(this->bt_dev);
 
 	this->profile = profile;
 	this->selected_a2dp_codec = a2dp_codec;
@@ -386,14 +402,32 @@ static void profiles_changed(void *userdata, uint32_t prev_profiles, uint32_t pr
 		this->params[IDX_EnumRoute].flags ^= SPA_PARAM_INFO_SERIAL;
 	}
 
+	if (connected_change & SPA_BT_PROFILE_A2DP_SINK) {
+		free(this->supported_codecs);
+		this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(
+			this->bt_dev, &this->supported_codec_count);
+	}
+
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
 	this->params[IDX_Profile].flags ^= SPA_PARAM_INFO_SERIAL;
 	this->params[IDX_EnumProfile].flags ^= SPA_PARAM_INFO_SERIAL;
 	emit_info(this, false);
 }
 
+static void set_initial_profile(struct impl *this);
+
+static void device_connected(void *userdata, bool connected) {
+	struct impl *this = userdata;
+
+	spa_log_debug(this->log, "connected: %d", connected);
+
+	if (connected ^ (this->profile != 0))
+		set_initial_profile(this);
+}
+
 static const struct spa_bt_device_events bt_dev_events = {
 	SPA_VERSION_BT_DEVICE_EVENTS,
+	.connected = device_connected,
 	.codec_switched = codec_switched,
 	.profiles_changed = profiles_changed,
 };
@@ -522,6 +556,11 @@ static void set_initial_profile(struct impl *this)
 	struct spa_bt_transport *t;
 	int i;
 
+	if (this->supported_codecs)
+		free(this->supported_codecs);
+	this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(
+					this->bt_dev, &this->supported_codec_count);
+
 	/* Prefer A2DP, then HFP, then null */
 
 	for (i = SPA_BT_PROFILE_A2DP_SINK; i <= SPA_BT_PROFILE_A2DP_SOURCE; i <<= 1) {
@@ -531,7 +570,12 @@ static void set_initial_profile(struct impl *this)
 		t = find_transport(this, i, NULL);
 		if (t) {
 			this->profile = 1;
-			this->selected_a2dp_codec = t->a2dp_codec;
+
+			/* Source devices don't have codec selection */
+			if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)
+				this->selected_a2dp_codec = NULL;
+			else
+				this->selected_a2dp_codec = t->a2dp_codec;
 			return;
 		}
 	}
@@ -660,7 +704,6 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	struct spa_pod_frame f[2];
 	enum spa_direction direction;
 	const char *name_prefix, *description, *port_type;
-	enum spa_param_availability available;
 	enum spa_bt_form_factor ff;
 	const struct a2dp_codec *codec;
 	char name[128];
@@ -736,9 +779,7 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 		return NULL;
 	}
 
-	available = profile_direction_mask(this, this->profile) & (1 << direction) ?
-			SPA_PARAM_AVAILABILITY_yes : SPA_PARAM_AVAILABILITY_no;
-	if (dev != SPA_ID_INVALID && available == SPA_PARAM_AVAILABILITY_no)
+	if (dev != SPA_ID_INVALID && !(profile_direction_mask(this, this->profile) & (1 << direction)))
 		return NULL;
 
 	mask = 0;
@@ -754,7 +795,7 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 		SPA_PARAM_ROUTE_name,  SPA_POD_String(name),
 		SPA_PARAM_ROUTE_description,  SPA_POD_String(description),
 		SPA_PARAM_ROUTE_priority,  SPA_POD_Int(0),
-		SPA_PARAM_ROUTE_available,  SPA_POD_Id(available),
+		SPA_PARAM_ROUTE_available,  SPA_POD_Id(SPA_PARAM_AVAILABILITY_yes),
 		0);
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_info, 0);
 	spa_pod_builder_push_struct(b, &f[1]);
@@ -1163,10 +1204,20 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *this = (struct impl *) handle;
+	const struct spa_dict_item *it;
 
 	free(this->supported_codecs);
-	if (this->bt_dev)
+	if (this->bt_dev) {
+		this->bt_dev->settings = NULL;
 		spa_hook_remove(&this->bt_dev_listener);
+	}
+
+	spa_dict_for_each(it, &this->setting_dict) {
+		if(it->key)
+			free((void *)it->key);
+		if(it->value)
+			free((void *)it->value);
+	}
 
 	return 0;
 }
@@ -1176,6 +1227,24 @@ impl_get_size(const struct spa_handle_factory *factory,
 	      const struct spa_dict *params)
 {
 	return sizeof(struct impl);
+}
+
+static const struct spa_dict*
+filter_bluez_device_setting(struct impl *this, const struct spa_dict *dict)
+{
+	uint32_t n_items = 0;
+	for (uint32_t i = 0
+		; i < dict->n_items && n_items < SPA_N_ELEMENTS(this->setting_items)
+		; i++)
+	{
+		const struct spa_dict_item *it = &dict->items[i];
+		if (it->key != NULL && strncmp(it->key, "bluez", 5) == 0 && it->value != NULL) {
+			this->setting_items[n_items++] =
+				SPA_DICT_ITEM_INIT(strdup(it->key), strdup(it->value));
+		}
+	}
+	this->setting_dict = SPA_DICT_INIT(this->setting_items, n_items);
+	return &this->setting_dict;
 }
 
 static int
@@ -1205,6 +1274,9 @@ impl_init(const struct spa_handle_factory *factory,
 		spa_log_error(this->log, "a device is needed");
 		return -EINVAL;
 	}
+
+	this->bt_dev->settings = filter_bluez_device_setting(this, info);
+
 	this->device.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Device,
 			SPA_VERSION_DEVICE,
@@ -1227,8 +1299,6 @@ impl_init(const struct spa_handle_factory *factory,
 	this->params[IDX_Route] = SPA_PARAM_INFO(SPA_PARAM_Route, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
 	this->info.n_params = 4;
-
-	this->supported_codecs = spa_bt_device_get_supported_a2dp_codecs(this->bt_dev, &this->supported_codec_count);
 
 	spa_bt_device_add_listener(this->bt_dev, &this->bt_dev_listener, &bt_dev_events, this);
 

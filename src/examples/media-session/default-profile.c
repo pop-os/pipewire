@@ -75,8 +75,8 @@ struct device {
 	struct spa_hook listener;
 
 	unsigned int restored:1;
-
 	uint32_t saved_profile;
+	uint32_t best_profile;
 	uint32_t active_profile;
 };
 
@@ -87,7 +87,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->properties)) < 0)
+						SESSION_KEY, impl->properties)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -245,72 +245,115 @@ static int set_profile(struct device *dev, struct profile *pr)
 				SPA_PARAM_PROFILE_index, SPA_POD_Int(pr->index),
 				SPA_PARAM_PROFILE_save, SPA_POD_Bool(pr->save)));
 
-	dev->active_profile = pr->index;
+	sm_media_session_schedule_rescan(dev->impl->session);
 
 	return 0;
 }
 
-static int handle_profile(struct device *dev)
+static int handle_active_profile(struct device *dev)
 {
 	struct impl *impl = dev->impl;
 	struct profile pr;
 	int res;
 
-	if (!dev->restored) {
-		/* first try to restore our saved profile */
-		res = find_saved_profile(dev, &pr);
-		if (res < 0 || pr.available == SPA_PARAM_AVAILABILITY_no) {
-			/* no saved profile found or it is not available */
-			if (res < 0)
-				pw_log_info("device '%s': no saved profile: %s",
-					dev->name, spa_strerror(res));
-			else
-				pw_log_info("device '%s': saved profile '%s' unavailable",
-					dev->name, pr.name);
+	/* check if current profile changed */
+	if ((res = find_current_profile(dev, &pr)) < 0)
+		return res;
 
-			/* try to find the next best profile */
-			res = find_best_profile(dev, &pr);
-			if (res < 0)
-				pw_log_info("device '%s': can't find best profile: %s",
-						dev->name, spa_strerror(res));
-			else
-				pw_log_info("device '%s': found best profile '%s'",
-						dev->name, pr.name);
-		} else {
-			pw_log_info("device '%s': found saved profile '%s'",
-						dev->name, pr.name);
-			dev->saved_profile = pr.index;
-			/* make sure we save again */
-			pr.save = true;
-		}
-		if (res >= 0) {
-			pw_log_info("device '%s': restore profile '%s' index %d",
-					dev->name, pr.name, pr.index);
-			if (set_profile(dev, &pr) >= 0)
-				dev->restored = true;
-		} else {
-			pw_log_warn("device '%s': can't restore profile", dev->name);
-		}
-	} else {
-		if ((res = find_current_profile(dev, &pr)) < 0)
-			return res;
+	/* when the active profile is off, always try to restored the saved
+	 * profile again */
+	if (strcmp(pr.name, "off") == 0)
+		dev->restored = false;
 
-		if (dev->active_profile == pr.index)
-			return 0;
-
-		/* we get here when we had configured a profile but something
-		 * else changed it, in that case, save it when asked. */
-		dev->active_profile = pr.index;
-
-		if (!pr.save)
-			return 0;
-
-		dev->saved_profile = pr.index;
-		if (pw_properties_setf(impl->properties, dev->key, "{ \"name\": \"%s\" }", pr.name)) {
-			pw_log_info("device '%s': active profile changed to '%s'", dev->name, pr.name);
-			add_idle_timeout(impl);
-		}
+	if (dev->active_profile == pr.index) {
+		/* no change, we're done */
+		pw_log_info("device '%s': active profile '%s'", dev->name, pr.name);
+		return 0;
 	}
+
+	/* we get here when we had configured a profile but something
+	 * else changed it, in that case, save it when asked. */
+	pw_log_info("device '%s': active profile changed to '%s'", dev->name, pr.name);
+	dev->active_profile = pr.index;
+
+	if (!pr.save)
+		return 0;
+
+	dev->saved_profile = pr.index;
+	if (pw_properties_setf(impl->properties, dev->key, "{ \"name\": \"%s\" }", pr.name)) {
+		pw_log_info("device '%s': active profile saved as '%s'", dev->name, pr.name);
+		add_idle_timeout(impl);
+	}
+	return 0;
+}
+
+static int handle_profile_switch(struct device *dev)
+{
+	struct profile saved, best;
+	int res;
+	bool changed = false;
+
+	/* try to find the next best profile */
+	res = find_best_profile(dev, &best);
+	if (res < 0) {
+		pw_log_info("device '%s': can't find best profile: %s",
+				dev->name, spa_strerror(res));
+		best.index = SPA_ID_INVALID;
+	} else {
+		changed = dev->best_profile != best.index;
+		dev->best_profile = best.index;
+		pw_log_info("device '%s': found best profile '%s' changed:%d",
+				dev->name, best.name, changed);
+	}
+	if (!dev->restored) {
+		/* try to restore our saved profile */
+		res = find_saved_profile(dev, &saved);
+		if (res >= 0) {
+			/* we found a saved profile */
+			if (saved.available == SPA_PARAM_AVAILABILITY_no) {
+				pw_log_info("device '%s': saved profile '%s' unavailable",
+					dev->name, saved.name);
+			} else {
+				pw_log_info("device '%s': found saved profile '%s'",
+							dev->name, saved.name);
+				/* make sure we save again */
+				saved.save = true;
+				best = saved;
+				changed = true;
+			}
+		} else {
+			pw_log_info("device '%s': no saved profile: %s",
+				dev->name, spa_strerror(res));
+		}
+		dev->restored = true;
+	}
+
+	if (best.index != SPA_ID_INVALID && changed) {
+		if (dev->active_profile == best.index) {
+			pw_log_info("device '%s': best profile '%s' is already active",
+					dev->name, best.name);
+		} else {
+			pw_log_info("device '%s': restore best profile '%s' index %d",
+					dev->name, best.name, best.index);
+			set_profile(dev, &best);
+		}
+	} else if (res < 0) {
+		pw_log_warn("device '%s': can't restore profile: %s", dev->name,
+				spa_strerror(res));
+	} else {
+		pw_log_info("device '%s': no profile switch needed", dev->name);
+	}
+	return 0;
+}
+
+static int handle_profile(struct device *dev)
+{
+	/* check if current profile changed */
+	handle_active_profile(dev);
+
+	/* check if we need to switch profile */
+	handle_profile_switch(dev);
+
 	return 0;
 }
 
@@ -358,6 +401,7 @@ static void session_create(void *data, struct sm_object *object)
 	dev->key = spa_aprintf(PREFIX"%s", name);
 	dev->active_profile = SPA_ID_INVALID;
 	dev->saved_profile = SPA_ID_INVALID;
+	dev->best_profile = SPA_ID_INVALID;
 
 	dev->obj->obj.mask |= SM_DEVICE_CHANGE_MASK_PARAMS;
 	sm_object_add_listener(&dev->obj->obj, &dev->listener, &object_events, dev);
@@ -420,7 +464,7 @@ int sm_default_profile_start(struct sm_media_session *session)
 	}
 
 	if ((res = sm_media_session_load_state(impl->session,
-					SESSION_KEY, PREFIX, impl->properties)) < 0)
+					SESSION_KEY, impl->properties)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);

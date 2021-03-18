@@ -87,6 +87,7 @@ struct spa_bt_monitor {
 
 	struct spa_dict enabled_codecs;
 
+	unsigned int connection_info_supported:1;
 	unsigned int enable_sbc_xq:1;
 	unsigned int backend_native_registered:1;
 	unsigned int backend_ofono_registered:1;
@@ -136,6 +137,10 @@ struct spa_bt_a2dp_codec_switch {
 	size_t num_paths;
 };
 
+#define BT_DEVICE_DISCONNECTED	0
+#define BT_DEVICE_CONNECTED	1
+#define BT_DEVICE_INIT		-1
+
 /*
  * SCO socket connect may fail with ECONNABORTED if it is done too soon after
  * previous close. To avoid this in cases where nodes are toggled between
@@ -149,6 +154,212 @@ struct spa_bt_a2dp_codec_switch {
 static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transport);
 static int spa_bt_transport_start_release_timer(struct spa_bt_transport *transport);
 
+// Working with BlueZ Battery Provider.
+// Developed using https://github.com/dgreid/adhd/commit/655b58f as an example of DBus calls.
+
+// Name of battery, formatted as /org/freedesktop/pipewire/battery/org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
+static char *battery_get_name(const char *device_path)
+{
+	char *path = malloc(strlen(PIPEWIRE_BATTERY_PROVIDER) + strlen(device_path) + 1);
+	sprintf(path, PIPEWIRE_BATTERY_PROVIDER "%s", device_path);
+	return path;
+}
+
+// Unregister virtual battery of device
+static void battery_remove(struct spa_bt_device *device) {
+	DBusMessageIter i, entry;
+	DBusMessage *m;
+	const char *interface;
+
+	if (!device->adapter->has_battery_provider || !device->has_battery)
+		return;
+
+	spa_log_debug(device->monitor->log, NAME": Removing virtual battery: %s", device->battery_path);
+
+	m = dbus_message_new_signal(PIPEWIRE_BATTERY_PROVIDER,
+				      DBUS_INTERFACE_OBJECT_MANAGER,
+				      DBUS_SIGNAL_INTERFACES_REMOVED);
+
+
+	dbus_message_iter_init_append(m, &i);
+	dbus_message_iter_append_basic(&i, DBUS_TYPE_OBJECT_PATH,
+				       &device->battery_path);
+	dbus_message_iter_open_container(&i, DBUS_TYPE_ARRAY,
+					 DBUS_TYPE_STRING_AS_STRING, &entry);
+	interface = BLUEZ_INTERFACE_BATTERY_PROVIDER;
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
+				       &interface);
+	dbus_message_iter_close_container(&i, &entry);
+
+	if (!dbus_connection_send(device->monitor->conn, m, NULL)) {
+		spa_log_error(device->monitor->log, NAME": sending " DBUS_SIGNAL_INTERFACES_REMOVED " failed");
+	}
+
+	dbus_message_unref(m);
+
+	device->has_battery = false;
+}
+
+// Create properties for Battery Provider request
+static void battery_write_properties(DBusMessageIter *iter, struct spa_bt_device *device)
+{
+	DBusMessageIter dict, entry, variant;
+
+	dbus_message_iter_open_container(iter, DBUS_TYPE_ARRAY, "{sv}", &dict);
+
+	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL,
+					 &entry);
+	const char *prop_percentage = "Percentage";
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &prop_percentage);
+	dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT,
+					 DBUS_TYPE_BYTE_AS_STRING, &variant);
+	dbus_message_iter_append_basic(&variant, DBUS_TYPE_BYTE, &device->battery);
+	dbus_message_iter_close_container(&entry, &variant);
+	dbus_message_iter_close_container(&dict, &entry);
+
+	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+	const char *prop_device = "Device";
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &prop_device);
+	dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT,
+					 DBUS_TYPE_OBJECT_PATH_AS_STRING,
+					 &variant);
+	dbus_message_iter_append_basic(&variant, DBUS_TYPE_OBJECT_PATH, &device->path);
+	dbus_message_iter_close_container(&entry, &variant);
+	dbus_message_iter_close_container(&dict, &entry);
+
+	dbus_message_iter_close_container(iter, &dict);
+}
+
+// Send current percentage to BlueZ
+static void battery_update(struct spa_bt_device *device)
+{
+	spa_log_debug(device->monitor->log, NAME": updating battery: %s", device->battery_path);
+
+	DBusMessage *msg;
+	DBusMessageIter iter;
+
+	msg = dbus_message_new_signal(device->battery_path,
+				      DBUS_INTERFACE_PROPERTIES,
+				      DBUS_SIGNAL_PROPERTIES_CHANGED);
+
+	dbus_message_iter_init_append(msg, &iter);
+	const char *interface = BLUEZ_INTERFACE_BATTERY_PROVIDER;
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING,
+				       &interface);
+
+	battery_write_properties(&iter, device);
+
+	if (!dbus_connection_send(device->monitor->conn, msg, NULL))
+		spa_log_error(device->monitor->log, NAME": Error updating battery");
+
+	dbus_message_unref(msg);
+}
+
+// Create ney virtual battery with value stored in current device object
+static void battery_create(struct spa_bt_device *device) {
+	DBusMessage *msg;
+	DBusMessageIter iter, entry, dict;
+	msg = dbus_message_new_signal(PIPEWIRE_BATTERY_PROVIDER,
+				      DBUS_INTERFACE_OBJECT_MANAGER,
+				      DBUS_SIGNAL_INTERFACES_ADDED);
+
+	dbus_message_iter_init_append(msg, &iter);
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_OBJECT_PATH,
+				       &device->battery_path);
+	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sa{sv}}", &dict);
+	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+	const char *interface = BLUEZ_INTERFACE_BATTERY_PROVIDER;
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING,
+				       &interface);
+
+	battery_write_properties(&entry, device);
+
+	dbus_message_iter_close_container(&dict, &entry);
+	dbus_message_iter_close_container(&iter, &dict);
+
+	if (!dbus_connection_send(device->monitor->conn, msg, NULL)) {
+		spa_log_error(device->monitor->log, NAME": Failed to create virtual battery for %s", device->address);
+		return;
+	}
+
+	dbus_message_unref(msg);
+
+	spa_log_debug(device->monitor->log, NAME": Created virtual battery for %s", device->address);
+	device->has_battery = true;
+}
+
+static void on_battery_provider_registered(DBusPendingCall *pending_call,
+				       void *data)
+{
+	DBusMessage *reply;
+	struct spa_bt_device *device = data;
+
+	reply = dbus_pending_call_steal_reply(pending_call);
+	dbus_pending_call_unref(pending_call);
+
+	device->battery_pending_call = NULL;
+
+	if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
+		spa_log_error(device->monitor->log, NAME": Failed to register battery provider. Error: %s", dbus_message_get_error_name(reply));
+		spa_log_error(device->monitor->log, NAME": BlueZ Battery Provider is not available, won't retry to register it. Make sure you are running BlueZ 5.56+ with experimental features to use Battery Provider.");
+		device->adapter->battery_provider_unavailable = true;
+		dbus_message_unref(reply);
+		return;
+	}
+
+	spa_log_debug(device->monitor->log, NAME": Registered Battery Provider");
+
+	device->adapter->has_battery_provider = true;
+
+	if (!device->has_battery)
+		battery_create(device);
+
+	dbus_message_unref(reply);
+}
+
+// Register Battery Provider for adapter and then create virtual battery for device
+static void register_battery_provider(struct spa_bt_device *device)
+{
+	DBusMessage *method_call;
+	DBusMessageIter message_iter;
+
+	method_call = dbus_message_new_method_call(
+		BLUEZ_SERVICE, device->adapter_path,
+		BLUEZ_INTERFACE_BATTERY_PROVIDER_MANAGER,
+		"RegisterBatteryProvider");
+
+	if (!method_call) {
+		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		return;
+	}
+
+	dbus_message_iter_init_append(method_call, &message_iter);
+	const char *object_path = PIPEWIRE_BATTERY_PROVIDER;
+	dbus_message_iter_append_basic(&message_iter, DBUS_TYPE_OBJECT_PATH,
+				       &object_path);
+
+	if (!dbus_connection_send_with_reply(device->monitor->conn, method_call, &device->battery_pending_call,
+					     DBUS_TIMEOUT_USE_DEFAULT)) {
+		dbus_message_unref(method_call);
+		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		return;
+	}
+
+	dbus_message_unref(method_call);
+
+	if (!device->battery_pending_call) {
+		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		return;
+	}
+
+	if (!dbus_pending_call_set_notify(
+		    device->battery_pending_call, on_battery_provider_registered,
+		    device, NULL)) {
+		spa_log_error(device->monitor->log, "Failed to register battery provider");
+		dbus_pending_call_cancel(device->battery_pending_call);
+		dbus_pending_call_unref(device->battery_pending_call);
+	}
+}
 
 static inline void add_dict(struct spa_pod_builder *builder, const char *key, const char *val)
 {
@@ -188,6 +399,10 @@ static const struct a2dp_codec *a2dp_endpoint_to_codec(const char *endpoint)
 
 static bool is_a2dp_codec_enabled(struct spa_bt_monitor *monitor, const struct a2dp_codec *codec)
 {
+	if (!monitor->enable_sbc_xq && codec->feature_flag != NULL &&
+	    strcmp(codec->feature_flag, "sbc-xq") == 0)
+		return false;
+
 	return spa_dict_lookup(&monitor->enabled_codecs, codec->name) != NULL;
 }
 
@@ -218,6 +433,11 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 
 	codec = a2dp_endpoint_to_codec(path);
 	if (codec != NULL)
+		/* FIXME: We can't determine which device the SelectConfiguration()
+		 * call is associated with, therefore device settings are not passed.
+		 * This causes inconsistency with SelectConfiguration() triggered
+		 * by codec switching.
+		  */
 		res = codec->select_config(codec, 0, cap, size, NULL, config);
 	else
 		res = -ENOTSUP;
@@ -417,6 +637,7 @@ static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const
 	d->id = monitor->id++;
 	d->monitor = monitor;
 	d->path = strdup(path);
+	d->battery_path = battery_get_name(d->path);
 	spa_list_init(&d->remote_endpoint_list);
 	spa_list_init(&d->transport_list);
 	spa_list_init(&d->codec_switch_list);
@@ -430,8 +651,6 @@ static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const
 
 static int device_stop_timer(struct spa_bt_device *device);
 
-static int device_remove(struct spa_bt_monitor *monitor, struct spa_bt_device *device);
-
 static void a2dp_codec_switch_free(struct spa_bt_a2dp_codec_switch *sw);
 
 static void device_free(struct spa_bt_device *device)
@@ -442,8 +661,20 @@ static void device_free(struct spa_bt_device *device)
 	struct spa_bt_monitor *monitor = device->monitor;
 
 	spa_log_debug(monitor->log, "%p", device);
+
+	if (device->battery_pending_call) {
+		spa_log_debug(monitor->log, "Cancelling and freeing pending battery provider register call");
+		dbus_pending_call_cancel(device->battery_pending_call);
+		dbus_pending_call_unref(device->battery_pending_call);
+		device->battery_pending_call = NULL;
+	}
+
+	battery_remove(device);
 	device_stop_timer(device);
-	device_remove(monitor, device);
+
+	if (device->added) {
+		spa_device_emit_object_info(&monitor->hooks, device->id, NULL);
+	}
 
 	spa_list_for_each_safe(ep, tep, &device->remote_endpoint_list, device_link) {
 		if (ep->device == device) {
@@ -467,20 +698,114 @@ static void device_free(struct spa_bt_device *device)
 	free(device->alias);
 	free(device->address);
 	free(device->adapter_path);
+	free(device->battery_path);
 	free(device->name);
 	free(device->icon);
 	free(device);
 }
 
-static int device_add(struct spa_bt_monitor *monitor, struct spa_bt_device *device)
+static int device_connected_old(struct spa_bt_monitor *monitor, struct spa_bt_device *device, int status)
 {
 	struct spa_device_object_info info;
 	char dev[32], name[128], class[16];
 	struct spa_dict_item items[20];
 	uint32_t n_items = 0;
+	bool connection_changed;
 
-	if (device->connected_profiles == 0 || device->added)
+	if (status == BT_DEVICE_INIT)
 		return 0;
+
+	connection_changed = status ^ device->connected;
+	device->connected = status;
+
+	if (device->connected) {
+		device->added = true;
+	} else if (!device->added || !connection_changed) {
+		return 0;
+	}
+
+	if ((device->connected_profiles != 0) ^ device->connected) {
+		spa_log_error(monitor->log,
+			"unexpected call, connected_profiles:%08x connected:%d",
+			device->connected_profiles, device->connected);
+		return -EINVAL;
+	}
+
+	if (device->connected) {
+		info = SPA_DEVICE_OBJECT_INFO_INIT();
+		info.type = SPA_TYPE_INTERFACE_Device;
+		info.factory_name = SPA_NAME_API_BLUEZ5_DEVICE;
+		info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_FLAGS |
+			SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
+		info.flags = 0;
+
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "bluez5");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
+		snprintf(name, sizeof(name), "bluez_card.%s", device->address);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, name);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->name);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->alias);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ICON_NAME, device->icon);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_FORM_FACTOR,
+				spa_bt_form_factor_name(
+					spa_bt_form_factor_from_class(device->bluetooth_class)));
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_STRING, device->address);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PATH, device->path);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
+		snprintf(dev, sizeof(dev), "pointer:%p", device);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_DEVICE, dev);
+		snprintf(class, sizeof(class), "0x%06x", device->bluetooth_class);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CLASS, class);
+
+		info.props = &SPA_DICT_INIT(items, n_items);
+		spa_device_emit_object_info(&monitor->hooks, device->id, &info);
+	} else {
+		device->added = false;
+		battery_remove(device);
+		spa_bt_device_release_transports(device);
+		spa_device_emit_object_info(&monitor->hooks, device->id, NULL);
+	}
+
+	return 0;
+}
+
+static int device_connected(struct spa_bt_monitor *monitor, struct spa_bt_device *device, int status)
+{
+	struct spa_device_object_info info;
+	char dev[32], name[128], class[16];
+	struct spa_dict_item items[20];
+	uint32_t n_items = 0;
+	bool connection_changed, init;
+
+	if (!monitor->connection_info_supported) {
+		return device_connected_old(monitor, device, status);
+	}
+
+	init = status == BT_DEVICE_INIT;
+	status = init ? 0 : status;
+	connection_changed = status ^ device->connected;
+	device->connected = status;
+
+	if (init) {
+		device->added = true;
+	} else if (!device->added || !connection_changed) {
+		return 0;
+	}
+
+	if ((device->connected_profiles != 0) ^ device->connected) {
+		spa_log_error(monitor->log,
+			"unexpected call, connected_profiles:%08x connected:%d",
+			device->connected_profiles, device->connected);
+		return -EINVAL;
+	}
+
+	if (!init) {
+		spa_bt_device_emit_connected(device, device->connected);
+		if (!device->connected) {
+			battery_remove(device);
+			spa_bt_device_release_transports(device);
+		}
+	}
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 	info.type = SPA_TYPE_INTERFACE_Device;
@@ -499,32 +824,22 @@ static int device_add(struct spa_bt_monitor *monitor, struct spa_bt_device *devi
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_FORM_FACTOR,
 			spa_bt_form_factor_name(
 				spa_bt_form_factor_from_class(device->bluetooth_class)));
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_STRING, device->address);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PATH, device->path);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
 	snprintf(dev, sizeof(dev), "pointer:%p", device);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_DEVICE, dev);
 	snprintf(class, sizeof(class), "0x%06x", device->bluetooth_class);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CLASS, class);
+	items[n_items++] = SPA_DICT_ITEM_INIT(
+				SPA_KEY_API_BLUEZ5_CONNECTION,
+				device->connected ? "connected": "disconnected");
 
 	info.props = &SPA_DICT_INIT(items, n_items);
-
-	device->added = true;
 	spa_device_emit_object_info(&monitor->hooks, device->id, &info);
 
 	return 0;
 }
-
-static int device_remove(struct spa_bt_monitor *monitor, struct spa_bt_device *device)
-{
-	if (!device->added)
-		return 0;
-
-	device->added = false;
-	spa_device_emit_object_info(&monitor->hooks, device->id, NULL);
-
-	return 0;
-}
-
 
 #define DEVICE_PROFILE_TIMEOUT_SEC 3
 
@@ -540,7 +855,7 @@ static void device_timer_event(struct spa_source *source)
 	spa_log_debug(monitor->log, "device %p: timeout %08x %08x",
 			device, device->profiles, device->connected_profiles);
 
-	device_add(device->monitor, device);
+	device_connected(device->monitor, device, BT_DEVICE_CONNECTED);
 }
 
 static int device_start_timer(struct spa_bt_device *device)
@@ -600,13 +915,11 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 			device, device->profiles, connected_profiles, device->added);
 
 	if (connected_profiles == 0 && spa_list_is_empty(&device->codec_switch_list)) {
-		if (device->added) {
-			device_stop_timer(device);
-			device_remove(monitor, device);
-		}
+		device_stop_timer(device);
+		device_connected(monitor, device, BT_DEVICE_DISCONNECTED);
 	} else if (force || (device->profiles & connected_profiles) == device->profiles) {
 		device_stop_timer(device);
-		device_add(monitor, device);
+		device_connected(monitor, device, BT_DEVICE_CONNECTED);
 	} else {
 		device_start_timer(device);
 	}
@@ -620,14 +933,11 @@ static void device_set_connected(struct spa_bt_device *device, int connected)
 	if (device->connected && !connected)
 		device->connected_profiles = 0;
 
-	device->connected = connected;
-
 	if (connected)
 		spa_bt_device_check_profiles(device, false);
 	else {
 		device_stop_timer(device);
-		if (device->added)
-			device_remove(monitor, device);
+		device_connected(monitor, device, connected);
 	}
 }
 
@@ -783,27 +1093,11 @@ static int device_update_props(struct spa_bt_device *device,
 	return 0;
 }
 
-static bool device_can_accept_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec)
-{
-	struct spa_bt_monitor *monitor = device->monitor;
-
-	/* Device capability checks in addition to A2DP Capabilities. */
-
-	if (!is_a2dp_codec_enabled(device->monitor, codec))
-		return false;
-
-	if (codec->feature_flag != NULL && strcmp(codec->feature_flag, "sbc-xq") == 0)
-		return monitor->enable_sbc_xq;
-
-	/* The rest is determined by A2DP caps */
-	return true;
-}
-
 bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec)
 {
 	struct spa_bt_remote_endpoint *ep;
 
-	if (!device_can_accept_a2dp_codec(device, codec))
+	if (!is_a2dp_codec_enabled(device->monitor, codec))
 		return false;
 
 	if (!device->adapter->application_registered) {
@@ -953,6 +1247,8 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 			else if (strcmp(key, "Device") == 0) {
 				struct spa_bt_device *device;
 				device = spa_bt_device_find(monitor, value);
+				if (device == NULL)
+					goto next;
 				spa_log_debug(monitor->log, "remote_endpoint %p: device -> %p", remote_endpoint, device);
 
 				if (remote_endpoint->device != device) {
@@ -1194,6 +1490,29 @@ int spa_bt_transport_release(struct spa_bt_transport *transport)
 	}
 
 	return res;
+}
+
+static int spa_bt_transport_release_now(struct spa_bt_transport *transport)
+{
+	int res;
+
+	if (transport->acquire_refcount == 0)
+		return 0;
+
+	spa_bt_transport_stop_release_timer(transport);
+	res = spa_bt_transport_impl(transport, release, 0);
+	if (res >= 0)
+		transport->acquire_refcount = 0;
+
+	return res;
+}
+
+int spa_bt_device_release_transports(struct spa_bt_device *device)
+{
+	struct spa_bt_transport *t;
+	spa_list_for_each(t, &device->transport_list, device_link)
+		spa_bt_transport_release_now(t);
+	return 0;
 }
 
 static void spa_bt_transport_release_timer_event(struct spa_source *source)
@@ -1612,7 +1931,7 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 		goto next;
 	}
 
-	res = codec->select_config(codec, 0, ep->capabilities, ep->capabilities_len, NULL, config);
+	res = codec->select_config(codec, 0, ep->capabilities, ep->capabilities_len, sw->device->settings, config);
 	if (res < 0) {
 		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: incompatible capabilities (%d), try next",
 		              sw, res);
@@ -1806,7 +2125,7 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 	 */
 	if (spa_list_is_empty(&device->codec_switch_list) && preferred_codec != NULL) {
 		spa_list_for_each(t, &device->transport_list, device_link) {
-			if (t->a2dp_codec != preferred_codec || !t->enabled)
+			if (t->a2dp_codec != preferred_codec)
 				continue;
 
 			if ((device->connected_profiles & t->profile) != t->profile)
@@ -1841,7 +2160,7 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 	}
 
 	for (i = 0, j = 0; i < num_codecs; ++i) {
-		if (device_can_accept_a2dp_codec(device, codecs[i])) {
+		if (is_a2dp_codec_enabled(device->monitor, codecs[i])) {
 			sw->codecs[j] = codecs[i];
 			++j;
 		}
@@ -1951,16 +2270,6 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	}
 	spa_log_info(monitor->log, "%p: %s validate conf channels:%d",
 			monitor, path, transport->n_channels);
-
-	/*
-	 * Per-device determination of which codecs are allowed needs to be done also
-	 * here. The A2DP codec switching process does this filtering, but before that
-	 * BlueZ may autoconnect to any endpoint with compatible caps.  In case it got it
-	 * wrong, mark the transport disabled, and we'll switch to a better one later when
-	 * needed. (We don't want to fail the connection, because we want to keep the
-	 * profile connected.)
-	 */
-	transport->enabled = device_can_accept_a2dp_codec(transport->device, codec);
 
 	spa_bt_device_connect_profile(transport->device, transport->profile);
 
@@ -2519,16 +2828,25 @@ static void interface_added(struct spa_bt_monitor *monitor,
 	else if (strcmp(interface_name, BLUEZ_DEVICE_INTERFACE) == 0) {
 		struct spa_bt_device *d;
 
-		d = spa_bt_device_find(monitor, object_path);
+		spa_assert(spa_bt_device_find(monitor, object_path) == NULL);
+
+		d = device_create(monitor, object_path);
 		if (d == NULL) {
-			d = device_create(monitor, object_path);
-			if (d == NULL) {
-				spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
-						object_path);
-				return;
-			}
+			spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
+					object_path);
+			return;
 		}
+
 		device_update_props(d, props_iter, NULL);
+		/* We only care about audio devices. */
+		if (d->profiles == 0) {
+			device_free(d);
+			return;
+		}
+
+		/* Trigger bluez device creation before bluez profile negotiation started so that
+		 * profile connection handlers can receive per-device settings during profile negotiation. */
+		device_connected(monitor, d, BT_DEVICE_INIT);
 	}
 	else if (strcmp(interface_name, BLUEZ_MEDIA_ENDPOINT_INTERFACE) == 0) {
 		struct spa_bt_remote_endpoint *ep;
@@ -2690,14 +3008,25 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 		}
 
 		if (strcmp(name, BLUEZ_SERVICE) == 0) {
-			if (old_owner && *old_owner) {
+			bool has_old_owner = old_owner && *old_owner;
+			bool has_new_owner = new_owner && *new_owner;
+
+			if (has_old_owner) {
+				spa_log_debug(monitor->log, "Bluetooth daemon disappeared");
+			}
+
+			if (has_old_owner || has_new_owner) {
 				struct spa_bt_adapter *a;
 				struct spa_bt_device *d;
 				struct spa_bt_remote_endpoint *ep;
 				struct spa_bt_transport *t;
 
-				spa_log_debug(monitor->log, "Bluetooth daemon disappeared");
 				monitor->objects_listed = false;
+
+				if (monitor->backend_native_registered) {
+					backend_native_unregister_profiles(monitor->backend_native);
+					monitor->backend_native_registered = false;
+				}
 
 				spa_list_consume(t, &monitor->transport_list, link)
 					spa_bt_transport_free(t);
@@ -2709,7 +3038,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 					adapter_free(a);
 			}
 
-			if (new_owner && *new_owner) {
+			if (has_new_owner) {
 				spa_log_debug(monitor->log, "Bluetooth daemon appeared");
 				get_managed_objects(monitor);
 			}
@@ -3148,15 +3477,19 @@ impl_init(const struct spa_handle_factory *factory,
 	if ((res = parse_codec_array(this, info)) < 0)
 		return res;
 
-	register_media_application(this);
-
 	if (info) {
 		const char *str;
+
+		if ((str = spa_dict_lookup(info, "api.bluez5.connection-info")) != NULL &&
+		    (strcmp(str, "true") == 0 || atoi(str)))
+			this->connection_info_supported = true;
 
 		if ((str = spa_dict_lookup(info, "bluez5.sbc-xq-support")) != NULL &&
 		    (strcmp(str, "true") == 0 || atoi(str)))
 			this->enable_sbc_xq = true;
 	}
+
+	register_media_application(this);
 
 	this->backend_native = backend_native_new(this, this->conn, info, support, n_support);
 	this->backend_ofono = backend_ofono_new(this, this->conn, info, support, n_support);
@@ -3199,3 +3532,28 @@ const struct spa_handle_factory spa_bluez5_dbus_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
+
+// Report battery percentage to BlueZ using experimental (BlueZ 5.56) Battery Provider API. No-op if no changes occured.
+int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage)
+{
+	// BlueZ likely is running without battery provider support, don't try to report battery
+	if (device->adapter->battery_provider_unavailable) return 0;
+
+	// If everything is initialized and battery level has not changed we don't need to send anything to BlueZ
+	if (device->adapter->has_battery_provider && device->has_battery && device->battery == percentage) return 1;
+
+	device->battery = percentage;
+
+	if (!device->adapter->has_battery_provider) {
+		// No provider: register it, create battery when registered
+		register_battery_provider(device);
+	} else if (!device->has_battery) {
+		// Have provider but no battery: create battery with correct percentage
+		battery_create(device);
+	} else {
+		// Just update existing battery percentage
+		battery_update(device);
+	}
+
+	return 1;
+}

@@ -237,6 +237,8 @@ channelmix_f32_2_3p1_c(struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRI
 	const float **s = (const float **)src;
 	const float v0 = mix->matrix[0][0];
 	const float v1 = mix->matrix[1][1];
+	const float v2 = (mix->matrix[2][0] + mix->matrix[2][1]) * 0.5f;
+	const float v3 = (mix->matrix[3][0] + mix->matrix[3][1]) * 0.5f;
 
 	if (SPA_FLAG_IS_SET(mix->flags, CHANNELMIX_FLAG_ZERO)) {
 		for (i = 0; i < n_dst; i++)
@@ -244,19 +246,25 @@ channelmix_f32_2_3p1_c(struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRI
 	}
 	else if (v0 == 1.0f && v1 == 1.0f) {
 		for (n = 0; n < n_samples; n++) {
+			float c = s[0][n] + s[1][n];
 			d[0][n] = s[0][n];
 			d[1][n] = s[1][n];
-			d[2][n] = (s[0][n] + s[1][n]) * 0.5f;
-			d[3][n] = 0.0f;
+			d[2][n] = c * v2;
+			d[3][n] = c * v3;
 		}
+		if (v3 > 0.0f)
+			lr4_process(&mix->lr4[3], d[3], n_samples);
 	}
 	else {
 		for (n = 0; n < n_samples; n++) {
+			float c = s[0][n] + s[1][n];
 			d[0][n] = s[0][n] * v0;
 			d[1][n] = s[1][n] * v1;
-			d[2][n] = (d[0][n] + d[1][n]) * 0.5f;
-			d[3][n] = 0.0f;
+			d[2][n] = c * v2;
+			d[3][n] = c * v3;
 		}
+		if (v3 > 0.0f)
+			lr4_process(&mix->lr4[3], d[3], n_samples);
 	}
 }
 
@@ -270,6 +278,8 @@ channelmix_f32_2_5p1_c(struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRI
 	const float **s = (const float **)src;
 	const float v0 = mix->matrix[0][0];
 	const float v1 = mix->matrix[1][1];
+	const float v2 = (mix->matrix[2][0] + mix->matrix[2][1]) * 0.5f;
+	const float v3 = (mix->matrix[3][0] + mix->matrix[3][1]) * 0.5f;
 	const float v4 = mix->matrix[4][0];
 	const float v5 = mix->matrix[5][1];
 
@@ -279,21 +289,27 @@ channelmix_f32_2_5p1_c(struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRI
 	}
 	else if (v0 == 1.0f && v1 == 1.0f && v4 == 1.0f && v5 == 1.0f) {
 		for (n = 0; n < n_samples; n++) {
+			float c = s[0][n] + s[1][n];
 			d[0][n] = d[4][n] = s[0][n];
 			d[1][n] = d[5][n] = s[1][n];
-			d[2][n] = (s[0][n] + s[1][n]) * 0.5f;
-			d[3][n] = 0.0f;
+			d[2][n] = c * v2;
+			d[3][n] = c * v3;
 		}
+		if (v3 > 0.0f)
+			lr4_process(&mix->lr4[3], d[3], n_samples);
 	}
 	else {
 		for (n = 0; n < n_samples; n++) {
+			float c = s[0][n] + s[1][n];
 			d[0][n] = s[0][n] * v0;
 			d[1][n] = s[1][n] * v1;
-			d[2][n] = (d[0][n] + d[1][n]) * 0.5f;
-			d[3][n] = 0.0f;
+			d[2][n] = c * v2;
+			d[3][n] = c * v3;
 			d[4][n] = s[0][n] * v4;
 			d[5][n] = s[1][n] * v5;
 		}
+		if (v3 > 0.0f)
+			lr4_process(&mix->lr4[3], d[3], n_samples);
 	}
 }
 

@@ -92,6 +92,8 @@ struct stats {
 #define DEFAULT_DEFAULT_TLENGTH	"96000/48000"
 #define DEFAULT_MIN_QUANTUM	"256/48000"
 
+#define MAX_FORMATS	32
+
 struct defs {
 	struct spa_fraction min_req;
 	struct spa_fraction default_req;
@@ -117,6 +119,12 @@ struct client;
 
 #include "sample.c"
 
+struct operation {
+	struct spa_list link;
+	struct client *client;
+	uint32_t tag;
+};
+
 struct client {
 	struct spa_list link;
 	struct impl *impl;
@@ -139,8 +147,8 @@ struct client {
 	uint32_t subscribed;
 
 	struct pw_manager_object *metadata_default;
-	uint32_t default_sink;
-	uint32_t default_source;
+	char *default_sink;
+	char *default_source;
 	struct pw_manager_object *metadata_routes;
 	struct pw_properties *routes;
 
@@ -274,6 +282,7 @@ struct impl {
 
 #include "collect.c"
 #include "module.c"
+
 
 static void sample_free(struct sample *sample)
 {
@@ -478,6 +487,36 @@ static int reply_error(struct client *client, uint32_t command, uint32_t tag, in
 		TAG_U32, error,
 		TAG_INVALID);
 	return send_message(client, reply);
+}
+
+static int operation_new(struct client *client, uint32_t tag)
+{
+	struct operation *o;
+
+	if ((o = calloc(1, sizeof(*o))) == NULL)
+		return -errno;
+
+	o->client = client;
+	o->tag = tag;
+	spa_list_append(&client->operations, &o->link);
+	pw_manager_sync(client->manager);
+	pw_log_debug(NAME" %p: operation tag:%u", client, tag);
+	return 0;
+}
+
+static void operation_free(struct operation *o)
+{
+	spa_list_remove(&o->link);
+	free(o);
+}
+
+static void operation_complete(struct operation *o)
+{
+	struct client *client = o->client;
+
+	pw_log_info(NAME" %p: [%s] tag:%u complete", client, client->name, o->tag);
+	reply_simple_ack(o->client, o->tag);
+	operation_free(o);
 }
 
 #include "extension.c"
@@ -687,6 +726,7 @@ static int reply_set_client_name(struct client *client, uint32_t tag)
 static void manager_sync(void *data)
 {
 	struct client *client = data;
+	struct operation *o;
 
 	pw_log_debug(NAME" %p: manager sync", client);
 
@@ -694,6 +734,8 @@ static void manager_sync(void *data)
 		reply_set_client_name(client, client->connect_tag);
 		client->connect_tag = SPA_ID_INVALID;
 	}
+	spa_list_consume(o, &client->operations, link)
+		operation_complete(o);
 }
 
 static struct stream *find_stream(struct client *client, uint32_t id)
@@ -899,25 +941,75 @@ static void manager_removed(void *data, struct pw_manager_object *o)
 	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
 }
 
+static int json_object_find(const char *obj, const char *key, char *value, size_t len)
+{
+	struct spa_json it[2];
+	const char *v;
+	char k[128];
+
+	spa_json_init(&it[0], obj, strlen(obj));
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
+		if (strcmp(k, key) == 0) {
+			if (spa_json_get_string(&it[1], value, len) <= 0)
+				continue;
+			return 0;
+		} else {
+			if (spa_json_next(&it[1], &v) <= 0)
+				break;
+		}
+	}
+	return -ENOENT;
+}
+
+static inline int strzcmp(const char *s1, const char *s2)
+{
+	if (s1 == s2)
+		return 0;
+	if (s1 == NULL || s2 == NULL)
+		return 1;
+	return strcmp(s1, s2);
+}
+
 static void manager_metadata(void *data, struct pw_manager_object *o,
 		uint32_t subject, const char *key, const char *type, const char *value)
 {
 	struct client *client = data;
-	uint32_t val;
 	bool changed = false;
 
 	pw_log_debug("meta id:%d subject:%d key:%s type:%s value:%s",
 			o->id, subject, key, type, value);
 
 	if (subject == PW_ID_CORE && o == client->metadata_default) {
-		val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
+		char name[1024];
+
 		if (key == NULL || strcmp(key, "default.audio.sink") == 0) {
-			changed = client->default_sink != val;
-			client->default_sink = val;
+			if (value != NULL) {
+				if (json_object_find(value,
+						"name", name, sizeof(name)) < 0)
+					value = NULL;
+				else
+					value = name;
+			}
+			if ((changed = strzcmp(client->default_sink, value))) {
+				free(client->default_sink);
+				client->default_sink = value ? strdup(value) : NULL;
+			}
 		}
 		if (key == NULL || strcmp(key, "default.audio.source") == 0) {
-			changed = client->default_source != val;
-			client->default_source = val;
+			if (value != NULL) {
+				if (json_object_find(value,
+						"name", name, sizeof(name)) < 0)
+					value = NULL;
+				else
+					value = name;
+			}
+			if ((changed = strzcmp(client->default_source, value))) {
+				free(client->default_source);
+				client->default_source = value ? strdup(value) : NULL;
+			}
 		}
 		if (changed)
 			send_default_change_subscribe_event(client, true, true);
@@ -1826,7 +1918,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
 	uint32_t n_params = 0, n_valid_formats = 0, flags;
-	const struct spa_pod *params[32];
+	const struct spa_pod *params[MAX_FORMATS];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
@@ -1911,17 +2003,6 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			goto error_protocol;
 	}
 
-	if (sample_spec_valid(&ss)) {
-		if ((params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
-			n_params++;
-			n_valid_formats++;
-		} else {
-			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
-					impl, format_id2name(ss.format), ss.rate,
-					ss.channels);
-		}
-	}
 	if (client->version >= 21) {
 		if ((res = message_get(m,
 				TAG_U8, &n_formats,
@@ -1938,7 +2019,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 						TAG_INVALID)) < 0)
 					goto error_protocol;
 
-				if ((params[n_params] = format_info_build_param(&b,
+				if (n_params < MAX_FORMATS &&
+				    (params[n_params] = format_info_build_param(&b,
 						SPA_PARAM_EnumFormat, &format)) != NULL) {
 					n_params++;
 					n_valid_formats++;
@@ -1949,6 +2031,19 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			}
 		}
 	}
+	if (sample_spec_valid(&ss)) {
+		if (n_params < MAX_FORMATS &&
+		    (params[n_params] = format_build_param(&b,
+				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
+			n_params++;
+			n_valid_formats++;
+		} else {
+			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
+					impl, format_id2name(ss.format), ss.rate,
+					ss.channels);
+		}
+	}
+
 	if (m->offset != m->length)
 		goto error_protocol;
 
@@ -2070,7 +2165,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
 	uint32_t n_params = 0, n_valid_formats = 0, flags, id;
-	const struct spa_pod *params[32];
+	const struct spa_pod *params[MAX_FORMATS];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
@@ -2137,17 +2232,6 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				TAG_INVALID)) < 0)
 			goto error_protocol;
 	}
-	if (sample_spec_valid(&ss)) {
-		if ((params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
-			n_params++;
-			n_valid_formats++;
-		} else {
-			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
-					impl, format_id2name(ss.format), ss.rate,
-					ss.channels);
-		}
-	}
 	if (client->version >= 22) {
 		if ((res = message_get(m,
 				TAG_U8, &n_formats,
@@ -2164,7 +2248,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 						TAG_INVALID)) < 0)
 					goto error_protocol;
 
-				if ((params[n_params] = format_info_build_param(&b,
+				if (n_params < MAX_FORMATS &&
+				    (params[n_params] = format_info_build_param(&b,
 						SPA_PARAM_EnumFormat, &format)) != NULL) {
 					n_params++;
 					n_valid_formats++;
@@ -2183,6 +2268,18 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				TAG_BOOLEAN, &passthrough,
 				TAG_INVALID)) < 0)
 			goto error_protocol;
+	}
+	if (sample_spec_valid(&ss)) {
+		if (n_params < MAX_FORMATS &&
+		    (params[n_params] = format_build_param(&b,
+				SPA_PARAM_EnumFormat, &ss, &map)) != NULL) {
+			n_params++;
+			n_valid_formats++;
+		} else {
+			pw_log_warn(NAME" %p: unsupported format:%s rate:%d channels:%u",
+					impl, format_id2name(ss.format), ss.rate,
+					ss.channels);
+		}
 	}
 	if (m->offset != m->length)
 		goto error_protocol;
@@ -2594,11 +2691,13 @@ static const char *get_default(struct client *client, bool sink)
 	spa_zero(sel);
 	if (sink) {
 		sel.type = object_is_sink;
-		sel.id = client->default_sink;
+		sel.key = PW_KEY_NODE_NAME;
+		sel.value = client->default_sink;
 		def = DEFAULT_SINK;
 	} else {
 		sel.type = object_is_source_or_monitor;
-		sel.id = client->default_source;
+		sel.key = PW_KEY_NODE_NAME;
+		sel.value = client->default_source;
 		def = DEFAULT_SOURCE;
 	}
 	sel.accumulate = select_best;
@@ -2636,6 +2735,12 @@ static struct pw_manager_object *find_device(struct client *client,
 		} else if (strcmp(name, DEFAULT_MONITOR) == 0) {
 			name = NULL;
 			sink = true;
+		}
+	}
+	if (id != SPA_ID_INVALID && !sink) {
+		if (id & MONITOR_FLAG) {
+			sink = true;
+			id &= ~MONITOR_FLAG;
 		}
 	}
 
@@ -3056,7 +3161,7 @@ static int do_set_stream_volume(struct client *client, uint32_t command, uint32_
 			return res;
 	}
 done:
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_stream_mute(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3107,7 +3212,7 @@ static int do_set_stream_mute(struct client *client, uint32_t command, uint32_t 
 			return res;
 	}
 done:
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3172,7 +3277,7 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 		return res;
 
 done:
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3236,7 +3341,7 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 	if (res < 0)
 		return res;
 done:
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_port(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3292,7 +3397,7 @@ static int do_set_port(struct client *client, uint32_t command, uint32_t tag, st
 	if ((res = set_card_port(card, device_id, port_id)) < 0)
 		return res;
 
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_port_latency_offset(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3360,7 +3465,7 @@ static int do_set_port_latency_offset(struct client *client, uint32_t command, u
 		if (res < 0)
 			break;
 
-		return reply_simple_ack(client, tag);
+		return operation_new(client, tag);
 	}
 
 	return res;
@@ -4223,11 +4328,11 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 			TAG_INVALID);
 	if (client->version >= 21) {
 		struct format_info fi;
-		spa_zero(fi);
-		fi.encoding = ENCODING_PCM;
+		format_info_from_spec(&fi, &dev_info.ss, &dev_info.map);
 		message_put(m,
 			TAG_FORMAT_INFO, &fi,
 			TAG_INVALID);
+		format_info_clear(&fi);
 	}
 	return 0;
 }
@@ -4290,8 +4395,7 @@ static int fill_source_output_info(struct client *client, struct message *m,
 			TAG_INVALID);
 	if (client->version >= 22) {
 		struct format_info fi;
-		spa_zero(fi);
-		fi.encoding = ENCODING_PCM;
+		format_info_from_spec(&fi, &dev_info.ss, &dev_info.map);
 		message_put(m,
 			TAG_CVOLUME, &dev_info.volume_info.volume,
 			TAG_BOOLEAN, dev_info.volume_info.mute,	/* muted */
@@ -4299,6 +4403,7 @@ static int fill_source_output_info(struct client *client, struct message *m,
 			TAG_BOOLEAN, true,		/* volume writable */
 			TAG_FORMAT_INFO, &fi,
 			TAG_INVALID);
+		format_info_clear(&fi);
 	}
 	return 0;
 }
@@ -4775,7 +4880,7 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
                                 SPA_PARAM_PROFILE_index, SPA_POD_Int(profile_id),
                                 SPA_PARAM_PROFILE_save, SPA_POD_Bool(true)));
 
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_set_default(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4795,16 +4900,27 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 	pw_log_info(NAME" %p: [%s] %s tag:%u name:%s", impl, client->name,
 			commands[command].name, tag, name);
 
-	if ((o = find_device(client, SPA_ID_INVALID, name, sink)) == NULL)
+	if (name != NULL && (o = find_device(client, SPA_ID_INVALID, name, sink)) == NULL)
 		return -ENOENT;
 
-	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
-			PW_ID_CORE,
-			sink ? METADATA_CONFIG_DEFAULT_SINK : METADATA_CONFIG_DEFAULT_SOURCE,
-			SPA_TYPE_INFO_BASE"Id", "%d", o->id)) < 0)
+	if (name != NULL) {
+		if (pw_endswith(name, ".monitor"))
+			name = strndupa(name, strlen(name)-8);
+
+		res = pw_manager_set_metadata(manager, client->metadata_default,
+				PW_ID_CORE,
+				sink ? METADATA_CONFIG_DEFAULT_SINK : METADATA_CONFIG_DEFAULT_SOURCE,
+				"Spa:String:JSON", "{ \"name\": \"%s\" }", name);
+	} else {
+		res = pw_manager_set_metadata(manager, client->metadata_default,
+				PW_ID_CORE,
+				sink ? METADATA_CONFIG_DEFAULT_SINK : METADATA_CONFIG_DEFAULT_SOURCE,
+				NULL, NULL);
+	}
+	if (res < 0)
 		return res;
 
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_suspend(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4833,7 +4949,7 @@ static int do_suspend(struct client *client, uint32_t command, uint32_t tag, str
 		cmd = SPA_NODE_COMMAND_Suspend;
 		pw_node_send_command((struct pw_node*)o->proxy, &SPA_NODE_COMMAND_INIT(cmd));
 	}
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_move_stream(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5250,7 +5366,6 @@ static void client_disconnect(struct client *client)
 	spa_list_append(&impl->cleanup_clients, &client->link);
 
 	pw_map_for_each(&client->streams, client_free_stream, client);
-	pw_map_clear(&client->streams);
 
 	if (client->source)
 		pw_loop_destroy_source(impl->loop, client->source);
@@ -5263,6 +5378,7 @@ static void client_free(struct client *client)
 	struct impl *impl = client->impl;
 	struct message *msg;
 	struct pending_sample *p;
+	struct operation *o;
 
 	pw_log_info(NAME" %p: client %p free", impl, client);
 
@@ -5276,10 +5392,16 @@ static void client_free(struct client *client)
 	spa_list_consume(msg, &client->out_messages, link)
 		message_free(impl, msg, true, false);
 
+	spa_list_consume(o, &client->operations, link)
+		operation_free(o);
+
 	if (client->core) {
 		client->disconnecting = true;
 		pw_core_disconnect(client->core);
 	}
+	pw_map_clear(&client->streams);
+	free(client->default_sink);
+	free(client->default_source);
 	if (client->props)
 		pw_properties_free(client->props);
 	if (client->routes)
@@ -5894,6 +6016,31 @@ error:
 	return res;
 }
 
+static int create_pid_file(void) {
+	int res;
+	char pid_file[PATH_MAX];
+	FILE *f;
+
+	if ((res = get_runtime_dir(pid_file, sizeof(pid_file), "pulse")) < 0) {
+		return res;
+	}
+	if (strlen(pid_file) > PATH_MAX - 5) {
+		pw_log_error(NAME" %s/pid too long", pid_file);
+		return -ENAMETOOLONG;
+	}
+	strcat(pid_file, "/pid");
+
+	if ((f = fopen(pid_file, "w")) == NULL) {
+		res = -errno;
+		pw_log_error(NAME" failed to open pid file");
+		return res;
+	}
+
+	fprintf(f, "%lu\n", (unsigned long)getpid());
+	fclose(f);
+	return 0;
+}
+
 static int make_inet_socket(struct server *server, char *name)
 {
 	struct sockaddr_in addr;
@@ -5982,6 +6129,9 @@ static struct server *create_server(struct impl *impl, char *address)
 	if (server->source == NULL) {
 		res = -errno;
 		pw_log_error(NAME" %p: can't create server source: %m", impl);
+		goto error_close;
+	}
+	if ((res = create_pid_file()) < 0) {
 		goto error_close;
 	}
 	return server;

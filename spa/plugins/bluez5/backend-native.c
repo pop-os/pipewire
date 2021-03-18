@@ -61,7 +61,7 @@ struct spa_bt_backend {
 	struct spa_source sco;
 
 	struct spa_list rfcomm_list;
-	unsigned int msbc_support_enabled_in_config:1;
+	unsigned int defer_setup_enabled:1;
 };
 
 struct transport_data {
@@ -90,6 +90,7 @@ struct rfcomm {
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
 	unsigned int slc_configured:1;
 	unsigned int codec_negotiation_supported:1;
+	unsigned int msbc_support_enabled_in_config:1;
 	unsigned int msbc_supported_by_hfp:1;
 	enum hfp_hf_state hf_state;
 	unsigned int codec;
@@ -147,7 +148,6 @@ static struct spa_bt_transport *_transport_create(struct rfcomm *rfcomm)
 	t->backend = backend;
 	t->n_channels = 1;
 	t->channels[0] = SPA_AUDIO_CHANNEL_MONO;
-	t->enabled = true;
 
 	spa_bt_transport_add_listener(t, &rfcomm->transport_listener, &transport_events, rfcomm);
 
@@ -298,13 +298,13 @@ static bool device_supports_required_mSBC_transport_modes(
 	hci_close_dev(sock);
 
 	if (!(features[2] & LMP_TRSP_SCO)) {
-		/* When adapater support, then the LMP_TRSP_SCO bit in features[2] is set*/
+		/* When adapter support, then the LMP_TRSP_SCO bit in features[2] is set*/
 		spa_log_info(backend->log,
 			NAME": bluetooth host adapter not capable of Transparent SCO LMP_TRSP_SCO" );
 		return false;
 
 	} else if (!(features[3] & LMP_ESCO)) {
-	  /* When adapater support, then the LMP_ESCO bit in features[3] is set*/
+	  /* When adapter support, then the LMP_ESCO bit in features[3] is set*/
 		spa_log_info(backend->log,
 			NAME": bluetooth host adapter not capable of eSCO link mode (LMP_ESCO)" );
 		return false;
@@ -325,6 +325,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 	struct spa_bt_backend *backend = rfcomm->backend;
 	unsigned int features;
 	unsigned int gain;
+	unsigned int len, k, v;
 	unsigned int selected_codec;
 
 	if (sscanf(buf, "AT+BRSF=%u", &features) == 1) {
@@ -336,7 +337,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		   This should be done when
 			 a) mSBC support is enabled in config file and
 			 b) the computers bluetooth adapter supports the necessary transport mode */
-		if ((backend->msbc_support_enabled_in_config == true) &&
+		if ((rfcomm->msbc_support_enabled_in_config == true) &&
 			  (device_supports_required_mSBC_transport_modes(backend, rfcomm->device))) {
 
 			/* set the feature bit that indicates AG (=computer) supports codec negotiation */
@@ -371,9 +372,9 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		/* response has the form AT+BAC=<codecID1>,<codecID2>,<codecIDx>
 		   strategy: split the string into tokens */
 		char* token;
-		char seperators[] = "=,";
+		char separators[] = "=,";
 		int cntr = 0;
-		token = strtok (buf, seperators);
+		token = strtok (buf, separators);
 		while (token != NULL)
 		{
 			/* skip token 0 i.e. the "AT+BAC=" part */
@@ -387,7 +388,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 				}
 			}
 			/* get next token */
-			token = strtok (NULL, seperators);
+			token = strtok (NULL, separators);
 			cntr++;
 		}
 
@@ -423,7 +424,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 	} else if (sscanf(buf, "AT+BCS=%u", &selected_codec) == 1) {
 		/* parse BCS(=Bluetooth Codec Selection) reply */
 		if (selected_codec != HFP_AUDIO_CODEC_CVSD && selected_codec != HFP_AUDIO_CODEC_MSBC) {
-			spa_log_warn(backend->log, NAME": unsupported codec negociation: %d", selected_codec);
+			spa_log_warn(backend->log, NAME": unsupported codec negotiation: %d", selected_codec);
 			rfcomm_send_reply(source, "ERROR");
 			return true;
 		}
@@ -460,6 +461,33 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
 			rfcomm_send_reply(source, "ERROR");
 		}
+	} else if (strncmp(buf, "AT+XAPL=", 8) == 0) {
+		// We expect battery status only (bitmask 10)
+        	rfcomm_send_reply(source, "+XAPL: iPhone,2");
+		rfcomm_send_reply(source, "OK");
+	} else if (sscanf(buf, "AT+IPHONEACCEV=%d", &len) == 1) {
+		if (len < 1) {
+			return false;
+		}
+
+		for (unsigned int i = 1; i <= len; i++) {
+			buf = strchr(buf, ',') + 1;
+			if (sscanf(buf, "%d", &k) != 1) return false;
+			buf = strchr(buf, ',') + 1;
+			if (sscanf(buf, "%d", &v) != 1) return false;
+
+			if (k == SPA_BT_HFP_HF_IPHONEACCEV_KEY_BATTERY) {
+				// Battery level is reported in range of 0-9, convert to 0-100%
+				uint8_t level = (v + 1) * 10;
+				spa_log_debug(backend->log, NAME": battery level: %d%%", level);
+
+				// TODO: report without Battery Provider (using props)
+				spa_bt_device_report_battery_level(rfcomm->device, level);
+			}
+		}
+	} else if (strncmp(buf, "AT+APLSIRI?", 11) == 0) {
+		// This command is sent when we activate Apple extensions
+        	rfcomm_send_reply(source, "OK");
 	} else {
 		return false;
 	}
@@ -850,7 +878,7 @@ static void sco_listen_event(struct spa_source *source)
 	}
 
 	spa_log_debug(backend->log, NAME": transport %p: codec=%u", t, t->codec);
-	if (backend->msbc_support_enabled_in_config) {
+	if (backend->defer_setup_enabled) {
 		/* In BT_DEFER_SETUP mode, when a connection is accepted, the listening socket is unblocked but
 		 * the effective connection setup happens only on first receive, allowing to configure the
 		 * accepted socket. */
@@ -923,10 +951,11 @@ static int sco_listen(struct spa_bt_backend *backend)
 		goto fail_close;
 	}
 
-	if (backend->msbc_support_enabled_in_config &&
-	    setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP, &defer, sizeof(defer)) < 0) {
+	if (setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP, &defer, sizeof(defer)) < 0) {
 		spa_log_warn(backend->log, NAME": Can't enable deferred setup: %s", strerror(errno));
-		goto fail_close;
+		backend->defer_setup_enabled = 0;
+	} else {
+		backend->defer_setup_enabled = 1;
 	}
 
 	spa_log_debug(backend->log, NAME": doing listen");
@@ -960,7 +989,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	struct spa_bt_backend *backend = userdata;
 	DBusMessage *r;
 	DBusMessageIter it[5];
-	const char *handler, *path;
+	const char *handler, *path, *str;
 	enum spa_bt_profile profile = SPA_BT_PROFILE_NULL;
 	struct rfcomm *rfcomm;
 	struct spa_bt_device *d;
@@ -1019,6 +1048,11 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	rfcomm->source.mask = SPA_IO_IN;
 	rfcomm->source.rmask = 0;
 
+	if (d->settings && (str = spa_dict_lookup(d->settings, "bluez5.msbc-support")))
+		rfcomm->msbc_support_enabled_in_config = strcmp(str, "true") == 0 || atoi(str) == 1;
+	else
+		rfcomm->msbc_support_enabled_in_config = false;
+
 	if (profile == SPA_BT_PROFILE_HSP_HS || profile == SPA_BT_PROFILE_HSP_AG) {
 		t = _transport_create(rfcomm);
 		if (t == NULL) {
@@ -1039,7 +1073,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		   This should be done when
 			 a) mSBC support is enabled in config file and
 			 b) the bluetooth adapter supports the necessary transport mode */
-		if ((backend->msbc_support_enabled_in_config == true) &&
+		if ((rfcomm->msbc_support_enabled_in_config == true) &&
 			  (device_supports_required_mSBC_transport_modes(backend, rfcomm->device))) {
 			/* set the feature bit that indicates HF supports codec negotiation */
 			hf_features |= SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION;
@@ -1261,9 +1295,9 @@ static int register_profile(struct spa_bt_backend *backend, const char *profile,
 		dbus_message_iter_close_container(&it[1], &it[2]);
 	} else if (strcmp(uuid, SPA_BT_UUID_HFP_AG) == 0) {
 		str = "Features";
-		features = SPA_BT_HFP_SDP_AG_FEATURE_NONE;
-		if (backend->msbc_support_enabled_in_config == true)
-			features |= SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH;
+
+		/* We announce wideband speech support anyway */
+		features = SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH;
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
@@ -1282,9 +1316,9 @@ static int register_profile(struct spa_bt_backend *backend, const char *profile,
 		dbus_message_iter_close_container(&it[1], &it[2]);
 	} else if (strcmp(uuid, SPA_BT_UUID_HFP_HF) == 0) {
 		str = "Features";
-		features = SPA_BT_HFP_SDP_HF_FEATURE_NONE;
-		if (backend->msbc_support_enabled_in_config == true)
-			features |= SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH;
+
+		/* We announce wideband speech support anyway */
+		features = SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH;
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
@@ -1360,7 +1394,7 @@ void backend_native_register_profiles(struct spa_bt_backend *backend)
 		sco_listen(backend);
 }
 
-void backend_native_unregister_profiles(struct spa_bt_backend *backend)
+void sco_close(struct spa_bt_backend *backend)
 {
 	if (backend->sco.fd >= 0) {
 		if (backend->sco.loop)
@@ -1369,6 +1403,11 @@ void backend_native_unregister_profiles(struct spa_bt_backend *backend)
 		close (backend->sco.fd);
 		backend->sco.fd = -1;
 	}
+}
+
+void backend_native_unregister_profiles(struct spa_bt_backend *backend)
+{
+	sco_close(backend);
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	if (backend->enabled_profiles & SPA_BT_PROFILE_HSP_AG)
@@ -1388,6 +1427,8 @@ void backend_native_unregister_profiles(struct spa_bt_backend *backend)
 void backend_native_free(struct spa_bt_backend *backend)
 {
 	struct rfcomm *rfcomm;
+
+	sco_close(backend);
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	dbus_connection_unregister_object_path(backend->conn, PROFILE_HSP_AG);
@@ -1418,7 +1459,7 @@ static int parse_headset_roles(struct spa_bt_backend *backend, const struct spa_
 	spa_json_init(&it, str, strlen(str));
 
 	if (spa_json_enter_array(&it, &it_array) <= 0) {
-		spa_log_error(backend->log, 
+		spa_log_error(backend->log,
 					  NAME": property "PROP_KEY_HEADSET_ROLES" '%s' is not an array", str);
 		goto fallback;
 	}
@@ -1452,7 +1493,6 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 	  uint32_t n_support)
 {
 	struct spa_bt_backend *backend;
-	const char *str;
 
 	static const DBusObjectPathVTable vtable_profile = {
 		.message_function = profile_handler,
@@ -1470,11 +1510,6 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 	backend->sco.fd = -1;
 
 	spa_list_init(&backend->rfcomm_list);
-
-	if (info && (str = spa_dict_lookup(info, "bluez5.msbc-support")))
-		backend->msbc_support_enabled_in_config = strcmp(str, "true") == 0 || atoi(str) == 1;
-	else
-		backend->msbc_support_enabled_in_config = false;
 
 	if (parse_headset_roles(backend, info) < 0)
 		goto fail;

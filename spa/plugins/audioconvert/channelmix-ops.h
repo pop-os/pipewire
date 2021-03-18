@@ -28,6 +28,8 @@
 #include <spa/utils/defs.h>
 #include <spa/param/audio/raw.h>
 
+#include "crossover.h"
+
 #define VOLUME_MIN 0.0f
 #define VOLUME_NORM 1.0f
 
@@ -48,6 +50,7 @@ struct channelmix {
 	uint32_t cpu_flags;
 #define CHANNELMIX_OPTION_MIX_LFE	(1<<0)		/**< mix LFE */
 #define CHANNELMIX_OPTION_NORMALIZE	(1<<1)		/**< normalize volumes */
+#define CHANNELMIX_OPTION_UPMIX		(1<<2)		/**< do simple upmixing */
 	uint32_t options;
 
 	struct spa_log *log;
@@ -59,6 +62,10 @@ struct channelmix {
 	uint32_t flags;
 	float matrix_orig[SPA_AUDIO_MAX_CHANNELS][SPA_AUDIO_MAX_CHANNELS];
 	float matrix[SPA_AUDIO_MAX_CHANNELS][SPA_AUDIO_MAX_CHANNELS];
+
+	float freq;					/* sample frequency */
+	float lfe_cutoff;				/* in Hz, 0 is disabled */
+	struct lr4 lr4[SPA_AUDIO_MAX_CHANNELS];
 
 	void (*process) (struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRICT dst[n_dst],
 			uint32_t n_src, const void * SPA_RESTRICT src[n_src], uint32_t n_samples);
