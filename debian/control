@@ -4,6 +4,8 @@ Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.net>
 Uploaders: Jeremy Bicha <jbicha@debian.org>
 Build-Depends: debhelper-compat (= 13),
+               doxygen <!nodoc>,
+               graphviz <!nodoc>,
                libasound2-dev,
                libbluetooth-dev,
                libdbus-1-dev,
@@ -25,10 +27,8 @@ Build-Depends: debhelper-compat (= 13),
                meson (>= 0.50.0),
                pkg-config (>= 0.22),
                systemd [linux-any],
-               xmltoman,
+               xmltoman
 Build-Conflicts: libfdk-aac-dev
-Build-Depends-Indep: doxygen <!nodoc>,
-                     graphviz <!nodoc>,
 Standards-Version: 4.5.1
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
