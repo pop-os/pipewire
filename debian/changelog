@@ -1,3 +1,11 @@
+pipewire (0.3.24-2) experimental; urgency=medium
+
+  * Move doxygen/graphviz into Build-Depends; Fixes arch only build failures
+  * Re-add support for nodocs builds
+  * run wrap-and-sort
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 19 Mar 2021 16:57:32 +0100
+
 pipewire (0.3.24-1) experimental; urgency=medium
 
   * New upstream release
