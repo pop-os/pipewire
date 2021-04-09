@@ -104,6 +104,18 @@ static const struct module_methods module_null_sink_methods = {
 	.unload = module_null_sink_unload,
 };
 
+static const struct spa_dict_item module_null_sink_info[] = {
+	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
+	{ PW_KEY_MODULE_DESCRIPTION, "A NULL sink" },
+	{ PW_KEY_MODULE_USAGE,  "sink_name=<name of sink> "
+				"sink_properties=<properties for the sink> "
+				"format=<sample format> "
+				"rate=<sample rate> "
+				"channels=<number of channels> "
+				"channel_map=<channel map>" },
+	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
+};
+
 static struct module *create_module_null_sink(struct impl *impl, const char *argument)
 {
 	struct module *module;
@@ -112,16 +124,13 @@ static struct module *create_module_null_sink(struct impl *impl, const char *arg
 	const char *str;
 	int res;
 
-	if (argument == NULL) {
-		res = -EINVAL;
-		goto out;
-	}
-	props = pw_properties_new(NULL, NULL);
+	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_null_sink_info));
 	if (props == NULL) {
 		res = -EINVAL;
 		goto out;
 	}
-	add_props(props, argument);
+	if (argument)
+		add_props(props, argument);
 
 	if ((str = pw_properties_get(props, "sink_name")) != NULL) {
 		pw_properties_set(props, PW_KEY_NODE_NAME, str);

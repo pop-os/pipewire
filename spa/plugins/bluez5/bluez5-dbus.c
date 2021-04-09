@@ -171,6 +171,13 @@ static void battery_remove(struct spa_bt_device *device) {
 	DBusMessage *m;
 	const char *interface;
 
+	if (device->battery_pending_call) {
+		spa_log_debug(device->monitor->log, "Cancelling and freeing pending battery provider register call");
+		dbus_pending_call_cancel(device->battery_pending_call);
+		dbus_pending_call_unref(device->battery_pending_call);
+		device->battery_pending_call = NULL;
+	}
+
 	if (!device->adapter->has_battery_provider || !device->has_battery)
 		return;
 
@@ -323,6 +330,11 @@ static void register_battery_provider(struct spa_bt_device *device)
 	DBusMessage *method_call;
 	DBusMessageIter message_iter;
 
+	if (device->battery_pending_call) {
+		spa_log_debug(device->monitor->log, NAME": Already registering battery provider");
+		return;
+	}
+
 	method_call = dbus_message_new_method_call(
 		BLUEZ_SERVICE, device->adapter_path,
 		BLUEZ_INTERFACE_BATTERY_PROVIDER_MANAGER,
@@ -358,6 +370,7 @@ static void register_battery_provider(struct spa_bt_device *device)
 		spa_log_error(device->monitor->log, "Failed to register battery provider");
 		dbus_pending_call_cancel(device->battery_pending_call);
 		dbus_pending_call_unref(device->battery_pending_call);
+		device->battery_pending_call = NULL;
 	}
 }
 
@@ -662,13 +675,6 @@ static void device_free(struct spa_bt_device *device)
 
 	spa_log_debug(monitor->log, "%p", device);
 
-	if (device->battery_pending_call) {
-		spa_log_debug(monitor->log, "Cancelling and freeing pending battery provider register call");
-		dbus_pending_call_cancel(device->battery_pending_call);
-		dbus_pending_call_unref(device->battery_pending_call);
-		device->battery_pending_call = NULL;
-	}
-
 	battery_remove(device);
 	device_stop_timer(device);
 
@@ -769,20 +775,27 @@ static int device_connected_old(struct spa_bt_monitor *monitor, struct spa_bt_de
 	return 0;
 }
 
+enum {
+	BT_DEVICE_RECONNECT_INIT = 0,
+	BT_DEVICE_RECONNECT_PROFILE,
+	BT_DEVICE_RECONNECT_STOP
+};
+
 static int device_connected(struct spa_bt_monitor *monitor, struct spa_bt_device *device, int status)
 {
 	struct spa_device_object_info info;
 	char dev[32], name[128], class[16];
 	struct spa_dict_item items[20];
 	uint32_t n_items = 0;
-	bool connection_changed, init;
+	bool connection_changed, init = status == BT_DEVICE_INIT;
+	status = init ? 0 : status;
+
+	device->reconnect_state = status ? BT_DEVICE_RECONNECT_STOP : BT_DEVICE_RECONNECT_PROFILE;
 
 	if (!monitor->connection_info_supported) {
 		return device_connected_old(monitor, device, status);
 	}
 
-	init = status == BT_DEVICE_INIT;
-	status = init ? 0 : status;
 	connection_changed = status ^ device->connected;
 	device->connected = status;
 
@@ -841,7 +854,77 @@ static int device_connected(struct spa_bt_monitor *monitor, struct spa_bt_device
 	return 0;
 }
 
+static int device_try_connect_profile(struct spa_bt_device *device,
+                                      const char *profile_uuid)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	DBusMessage *m;
+
+	spa_log_info(monitor->log, "device %p %s: profile %s not connected; try ConnectProfile()",
+	             device, device->path, profile_uuid);
+
+	/* Call org.bluez.Device1.ConnectProfile() on device, ignoring result */
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE,
+	                                 device->path,
+	                                 BLUEZ_DEVICE_INTERFACE,
+	                                 "ConnectProfile");
+	if (m == NULL)
+		return -ENOMEM;
+	dbus_message_append_args(m, DBUS_TYPE_STRING, &profile_uuid, DBUS_TYPE_INVALID);
+	if (!dbus_connection_send(monitor->conn, m, NULL)) {
+		dbus_message_unref(m);
+		return -EIO;
+	}
+	dbus_message_unref(m);
+
+	return 0;
+}
+
+static int reconnect_device_profiles(struct spa_bt_device *device)
+{
+	uint32_t reconnect = device->profiles
+			& device->reconnect_profiles
+			& (device->connected_profiles ^ device->profiles);
+
+	if (!(device->connected_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)) {
+		if (reconnect & SPA_BT_PROFILE_HFP_HF) {
+			SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HSP_HS);
+		} else if (reconnect & SPA_BT_PROFILE_HSP_HS) {
+			SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HFP_HF);
+		}
+	} else
+		SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HEADSET_HEAD_UNIT);
+
+	if (!(device->connected_profiles & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY)) {
+		if (reconnect & SPA_BT_PROFILE_HFP_AG)
+			SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HSP_AG);
+		else if (reconnect & SPA_BT_PROFILE_HSP_AG)
+			SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HFP_AG);
+	} else
+		SPA_FLAG_CLEAR(reconnect, SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY);
+
+	if (reconnect & SPA_BT_PROFILE_HFP_HF)
+		device_try_connect_profile(device, SPA_BT_UUID_HFP_HF);
+	if (reconnect & SPA_BT_PROFILE_HSP_HS)
+		device_try_connect_profile(device, SPA_BT_UUID_HSP_HS);
+	if (reconnect & SPA_BT_PROFILE_HFP_AG)
+		device_try_connect_profile(device, SPA_BT_UUID_HFP_AG);
+	if (reconnect & SPA_BT_PROFILE_HSP_AG)
+		device_try_connect_profile(device, SPA_BT_UUID_HSP_AG);
+	if (reconnect & SPA_BT_PROFILE_A2DP_SINK)
+		device_try_connect_profile(device, SPA_BT_UUID_A2DP_SINK);
+	if (reconnect & SPA_BT_PROFILE_A2DP_SOURCE)
+		device_try_connect_profile(device, SPA_BT_UUID_A2DP_SOURCE);
+
+	return reconnect;
+}
+
+#define DEVICE_RECONNECT_TIMEOUT_SEC 2
 #define DEVICE_PROFILE_TIMEOUT_SEC 3
+
+static int device_start_timer(struct spa_bt_device *device);
+static int device_stop_timer(struct spa_bt_device *device);
 
 static void device_timer_event(struct spa_source *source)
 {
@@ -854,8 +937,21 @@ static void device_timer_event(struct spa_source *source)
 
 	spa_log_debug(monitor->log, "device %p: timeout %08x %08x",
 			device, device->profiles, device->connected_profiles);
-
-	device_connected(device->monitor, device, BT_DEVICE_CONNECTED);
+	device_stop_timer(device);
+	if (BT_DEVICE_RECONNECT_STOP != device->reconnect_state) {
+		device->reconnect_state = BT_DEVICE_RECONNECT_STOP;
+		if (device->paired
+			&& device->trusted
+			&& !device->blocked
+			&& device->reconnect_profiles != 0
+			&& reconnect_device_profiles(device))
+		{
+			device_start_timer(device);
+			return;
+		}
+	}
+	if (device->connected_profiles)
+		device_connected(device->monitor, device, BT_DEVICE_CONNECTED);
 }
 
 static int device_start_timer(struct spa_bt_device *device)
@@ -873,7 +969,9 @@ static int device_start_timer(struct spa_bt_device *device)
 		device->timer.rmask = 0;
 		spa_loop_add_source(monitor->main_loop, &device->timer);
 	}
-	ts.it_value.tv_sec = DEVICE_PROFILE_TIMEOUT_SEC;
+	ts.it_value.tv_sec = device->reconnect_state == BT_DEVICE_RECONNECT_STOP
+				? DEVICE_PROFILE_TIMEOUT_SEC
+				: DEVICE_RECONNECT_TIMEOUT_SEC;
 	ts.it_value.tv_nsec = 0;
 	ts.it_interval.tv_sec = 0;
 	ts.it_interval.tv_nsec = 0;
@@ -921,6 +1019,10 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_CONNECTED);
 	} else {
+		/* The initial reconnect event has not been triggred,
+		 * the connecting is triggred by bluez. */
+		if (device->reconnect_state == BT_DEVICE_RECONNECT_INIT)
+			device->reconnect_state = BT_DEVICE_RECONNECT_PROFILE;
 		device_start_timer(device);
 	}
 	return 0;
@@ -936,8 +1038,9 @@ static void device_set_connected(struct spa_bt_device *device, int connected)
 	if (connected)
 		spa_bt_device_check_profiles(device, false);
 	else {
-		device_stop_timer(device);
-		device_connected(monitor, device, connected);
+		if (device->reconnect_state != BT_DEVICE_RECONNECT_INIT)
+			device_stop_timer(device);
+		device_connected(monitor, device, BT_DEVICE_DISCONNECTED);
 	}
 }
 
@@ -1150,53 +1253,6 @@ const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_
 	return supported_codecs;
 }
 
-static int device_try_connect_profile(struct spa_bt_device *device,
-                                      enum spa_bt_profile profile,
-                                      const char *profile_uuid)
-{
-	struct spa_bt_monitor *monitor = device->monitor;
-	DBusMessage *m;
-
-	if (!(device->profiles & profile) || (device->connected_profiles & profile))
-		return 0;
-
-	spa_log_info(monitor->log, "device %p %s: A2DP profile %s not connected; try ConnectProfile()",
-	             device, device->path, profile_uuid);
-
-	/* Call org.bluez.Device1.ConnectProfile() on device, ignoring result */
-
-	m = dbus_message_new_method_call(BLUEZ_SERVICE,
-	                                 device->path,
-	                                 BLUEZ_DEVICE_INTERFACE,
-	                                 "ConnectProfile");
-	if (m == NULL)
-		return -ENOMEM;
-	dbus_message_append_args(m, DBUS_TYPE_STRING, &profile_uuid, DBUS_TYPE_INVALID);
-	if (!dbus_connection_send(monitor->conn, m, NULL)) {
-		dbus_message_unref(m);
-		return -EIO;
-	}
-	dbus_message_unref(m);
-
-	return 0;
-}
-
-static void reconnect_device_profiles(struct spa_bt_monitor *monitor)
-{
-	struct spa_bt_device *device;
-
-	/* Call org.bluez.Device1.ConnectProfile() on connected devices, it they have A2DP but the
-	 * profile is not yet connected.
-	 */
-
-	spa_list_for_each(device, &monitor->device_list, link) {
-		if (device->connected) {
-			device_try_connect_profile(device, SPA_BT_PROFILE_A2DP_SINK, SPA_BT_UUID_A2DP_SINK);
-			device_try_connect_profile(device, SPA_BT_PROFILE_A2DP_SOURCE, SPA_BT_UUID_A2DP_SOURCE);
-		}
-	}
-}
-
 static struct spa_bt_remote_endpoint *device_remote_endpoint_find(struct spa_bt_device *device, const char *path)
 {
 	struct spa_bt_remote_endpoint *ep;
@@ -1391,7 +1447,8 @@ struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor,
 
 	return t;
 }
-static void transport_set_state(struct spa_bt_transport *transport, enum spa_bt_transport_state state)
+
+void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_transport_state state)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
 	enum spa_bt_transport_state old = transport->state;
@@ -1412,7 +1469,7 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 
 	spa_log_debug(monitor->log, "transport %p: free %s", transport, transport->path);
 
-	transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
+	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
 
 	spa_bt_transport_emit_destroy(transport);
 
@@ -1437,11 +1494,12 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 		transport->device->connected_profiles &= ~transport->profile;
 		spa_list_remove(&transport->device_link);
 	}
-	free(transport->path);
-	free(transport);
 
 	if (device && device->connected_profiles != prev_connected)
 		spa_bt_device_emit_profiles_changed(device, device->profiles, prev_connected);
+
+	free(transport->path);
+	free(transport);
 }
 
 int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
@@ -1573,14 +1631,17 @@ static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transpor
 	return 0;
 }
 
-void spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop)
+int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop)
 {
 	if (t->sco_io == NULL) {
 		t->sco_io = spa_bt_sco_io_create(data_loop,
 						 t->fd,
 						 t->read_mtu,
 						 t->write_mtu);
+		if (t->sco_io == NULL)
+			return -ENOMEM;
 	}
+	return 0;
 }
 
 int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t)
@@ -1656,7 +1717,7 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				}
 			}
 			else if (strcmp(key, "State") == 0) {
-				transport_set_state(transport, spa_bt_transport_state_from_string(value));
+				spa_bt_transport_set_state(transport, spa_bt_transport_state_from_string(value));
 			}
 			else if (strcmp(key, "Device") == 0) {
 				transport->device = spa_bt_device_find(monitor, value);
@@ -2204,6 +2265,26 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 	return 0;
 }
 
+int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, unsigned int codec)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	if (monitor->backend_hsphfpd_registered)
+		return spa_bt_backend_ensure_codec(monitor->backend_hsphfpd, device, codec);
+	if (monitor->backend_ofono_registered)
+		return spa_bt_backend_ensure_codec(monitor->backend_ofono, device, codec);
+	return spa_bt_backend_ensure_codec(monitor->backend_native, device, codec);
+}
+
+int spa_bt_device_supports_hfp_codec(struct spa_bt_device *device, unsigned int codec)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	if (monitor->backend_hsphfpd_registered)
+		return spa_bt_backend_supports_codec(monitor->backend_hsphfpd, device, codec);
+	if (monitor->backend_ofono_registered)
+		return spa_bt_backend_supports_codec(monitor->backend_ofono, device, codec);
+	return spa_bt_backend_supports_codec(monitor->backend_native, device, codec);
+}
+
 static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 		const char *path, DBusMessage *m, void *userdata)
 {
@@ -2671,9 +2752,6 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 		if (!dbus_connection_send(monitor->conn, r, NULL))
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		res = DBUS_HANDLER_RESULT_HANDLED;
-
-		/* Reconnect A2DP profiles for existing connected devices */
-		reconnect_device_profiles(monitor);
 	}
 	else
 		res = DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
@@ -2821,7 +2899,7 @@ static void interface_added(struct spa_bt_monitor *monitor,
 	}
 	else if (strcmp(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE) == 0) {
 		if (!monitor->backend_ofono_registered && !monitor->backend_hsphfpd_registered) {
-			backend_native_register_profiles(monitor->backend_native);
+			spa_bt_backend_register_profiles(monitor->backend_native);
 			monitor->backend_native_registered = true;
 		}
 	}
@@ -2847,9 +2925,12 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		/* Trigger bluez device creation before bluez profile negotiation started so that
 		 * profile connection handlers can receive per-device settings during profile negotiation. */
 		device_connected(monitor, d, BT_DEVICE_INIT);
+		d->reconnect_state = BT_DEVICE_RECONNECT_INIT;
+		device_start_timer(d);
 	}
 	else if (strcmp(interface_name, BLUEZ_MEDIA_ENDPOINT_INTERFACE) == 0) {
 		struct spa_bt_remote_endpoint *ep;
+		struct spa_bt_device *d;
 
 		ep = remote_endpoint_find(monitor, object_path);
 		if (ep == NULL) {
@@ -2861,6 +2942,10 @@ static void interface_added(struct spa_bt_monitor *monitor,
 			}
 		}
 		remote_endpoint_update_props(ep, props_iter, NULL);
+
+		d = ep->device;
+		if (d)
+			spa_bt_device_emit_profiles_changed(d, d->profiles, d->connected_profiles);
 	}
 }
 
@@ -2918,8 +3003,12 @@ static void interfaces_removed(struct spa_bt_monitor *monitor, DBusMessageIter *
 		} else if (strcmp(interface_name, BLUEZ_MEDIA_ENDPOINT_INTERFACE) == 0) {
 			struct spa_bt_remote_endpoint *ep;
 			ep = remote_endpoint_find(monitor, object_path);
-			if (ep != NULL)
+			if (ep != NULL) {
+				struct spa_bt_device *d = ep->device;
 				remote_endpoint_free(ep);
+				if (d)
+					spa_bt_device_emit_profiles_changed(d, d->profiles, d->connected_profiles);
+			}
 		}
 
 		dbus_message_iter_next(&it);
@@ -3024,7 +3113,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 				monitor->objects_listed = false;
 
 				if (monitor->backend_native_registered) {
-					backend_native_unregister_profiles(monitor->backend_native);
+					spa_bt_backend_unregister_profiles(monitor->backend_native);
 					monitor->backend_native_registered = false;
 				}
 
@@ -3046,42 +3135,42 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			if (old_owner && *old_owner) {
 				spa_log_debug(monitor->log, "oFono daemon disappeared");
 				monitor->backend_ofono_registered = false;
-				backend_native_register_profiles(monitor->backend_native);
+				spa_bt_backend_register_profiles(monitor->backend_native);
 				monitor->backend_native_registered = true;
 			}
 
 			if (new_owner && *new_owner) {
 				spa_log_debug(monitor->log, "oFono daemon appeared");
 				if (monitor->backend_native_registered) {
-					backend_native_unregister_profiles(monitor->backend_native);
+					spa_bt_backend_unregister_profiles(monitor->backend_native);
 					monitor->backend_native_registered = false;
 				}
-				if (backend_ofono_register(monitor->backend_ofono) == 0)
+				if (spa_bt_backend_register_profiles(monitor->backend_ofono) == 0)
 					monitor->backend_ofono_registered = true;
 				else {
-					backend_native_register_profiles(monitor->backend_native);
+					spa_bt_backend_register_profiles(monitor->backend_native);
 					monitor->backend_native_registered = true;
 				}
 			}
 		} else if (strcmp(name, HSPHFPD_SERVICE) == 0 && monitor->backend_hsphfpd) {
 			if (old_owner && *old_owner) {
 				spa_log_debug(monitor->log, "hsphfpd daemon disappeared");
-				backend_hsphfpd_unregistered(monitor->backend_hsphfpd);
+				spa_bt_backend_unregistered(monitor->backend_hsphfpd);
 				monitor->backend_hsphfpd_registered = false;
-				backend_native_register_profiles(monitor->backend_native);
+				spa_bt_backend_register_profiles(monitor->backend_native);
 				monitor->backend_native_registered = true;
 			}
 
 			if (new_owner && *new_owner) {
 				spa_log_debug(monitor->log, "hsphfpd daemon appeared");
 				if (monitor->backend_native_registered) {
-					backend_native_unregister_profiles(monitor->backend_native);
+					spa_bt_backend_unregister_profiles(monitor->backend_native);
 					monitor->backend_native_registered = false;
 				}
-				if (backend_hsphfpd_register(monitor->backend_hsphfpd) == 0)
+				if (spa_bt_backend_register_profiles(monitor->backend_hsphfpd) == 0)
 					monitor->backend_hsphfpd_registered = true;
 				else {
-					backend_native_register_profiles(monitor->backend_native);
+					spa_bt_backend_register_profiles(monitor->backend_native);
 					monitor->backend_native_registered = true;
 				}
 			}
@@ -3160,6 +3249,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 		}
 		else if (strcmp(iface, BLUEZ_MEDIA_ENDPOINT_INTERFACE) == 0) {
 			struct spa_bt_remote_endpoint *ep;
+			struct spa_bt_device *d;
 
 			ep = remote_endpoint_find(monitor, path);
 			if (ep == NULL) {
@@ -3170,6 +3260,10 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			spa_log_debug(monitor->log, "Properties changed in remote endpoint %s", path);
 
 			remote_endpoint_update_props(ep, &it[1], NULL);
+
+			d = ep->device;
+			if (d)
+				spa_bt_device_emit_profiles_changed(d, d->profiles, d->connected_profiles);
 		}
 		else if (strcmp(iface, BLUEZ_MEDIA_TRANSPORT_INTERFACE) == 0) {
 			struct spa_bt_transport *transport;
@@ -3270,10 +3364,10 @@ impl_device_add_listener(void *object, struct spa_hook *listener,
 	get_managed_objects(this);
 
 	if (this->backend_ofono)
-		backend_ofono_add_filters(this->backend_ofono);
+		spa_bt_backend_add_filters(this->backend_ofono);
 
 	if (this->backend_hsphfpd)
-		backend_hsphfpd_add_filters(this->backend_hsphfpd);
+		spa_bt_backend_add_filters(this->backend_hsphfpd);
 
         spa_hook_list_join(&this->hooks, &save);
 
@@ -3324,17 +3418,17 @@ static int impl_clear(struct spa_handle *handle)
 		adapter_free(a);
 
 	if (monitor->backend_native) {
-		backend_native_free(monitor->backend_native);
+		spa_bt_backend_free(monitor->backend_native);
 		monitor->backend_native = NULL;
 	}
 
 	if (monitor->backend_ofono) {
-		backend_ofono_free(monitor->backend_ofono);
+		spa_bt_backend_free(monitor->backend_ofono);
 		monitor->backend_ofono = NULL;
 	}
 
 	if (monitor->backend_hsphfpd) {
-		backend_hsphfpd_free(monitor->backend_hsphfpd);
+		spa_bt_backend_free(monitor->backend_hsphfpd);
 		monitor->backend_hsphfpd = NULL;
 	}
 
@@ -3349,6 +3443,36 @@ impl_get_size(const struct spa_handle_factory *factory,
 	      const struct spa_dict *params)
 {
 	return sizeof(struct spa_bt_monitor);
+}
+
+int spa_bt_profiles_from_json_array(const char *str)
+{
+	struct spa_json it, it_array;
+	char role_name[256];
+	enum spa_bt_profile profiles = SPA_BT_PROFILE_NULL;
+
+	spa_json_init(&it, str, strlen(str));
+
+	if (spa_json_enter_array(&it, &it_array) <= 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it_array, role_name, sizeof(role_name)) > 0) {
+		if (strcmp(role_name, "hsp_hs") == 0) {
+			profiles |= SPA_BT_PROFILE_HSP_HS;
+		} else if (strcmp(role_name, "hsp_ag") == 0) {
+			profiles |= SPA_BT_PROFILE_HSP_AG;
+		} else if (strcmp(role_name, "hfp_hf") == 0) {
+			profiles |= SPA_BT_PROFILE_HFP_HF;
+		} else if (strcmp(role_name, "hfp_ag") == 0) {
+			profiles |= SPA_BT_PROFILE_HFP_AG;
+		} else if (strcmp(role_name, "a2dp_sink") == 0) {
+			profiles |= SPA_BT_PROFILE_A2DP_SINK;
+		} else if (strcmp(role_name, "a2dp_source") == 0) {
+			profiles |= SPA_BT_PROFILE_A2DP_SOURCE;
+		}
+	}
+
+	return profiles;
 }
 
 static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict *info)
@@ -3495,9 +3619,9 @@ impl_init(const struct spa_handle_factory *factory,
 	this->backend_ofono = backend_ofono_new(this, this->conn, info, support, n_support);
 	this->backend_hsphfpd = backend_hsphfpd_new(this, this->conn, info, support, n_support);
 
-	if (this->backend_ofono && backend_ofono_register(this->backend_ofono) == 0)
+	if (this->backend_ofono && spa_bt_backend_register_profiles(this->backend_ofono) == 0)
 		this->backend_ofono_registered = true;
-	else if (this->backend_hsphfpd && backend_hsphfpd_register(this->backend_hsphfpd) == 0)
+	else if (this->backend_hsphfpd && spa_bt_backend_register_profiles(this->backend_hsphfpd) == 0)
 		this->backend_hsphfpd_registered = true;
 
 	return 0;
@@ -3536,6 +3660,11 @@ const struct spa_handle_factory spa_bluez5_dbus_factory = {
 // Report battery percentage to BlueZ using experimental (BlueZ 5.56) Battery Provider API. No-op if no changes occured.
 int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage)
 {
+	if (percentage == SPA_BT_NO_BATTERY) {
+		battery_remove(device);
+		return 0;
+	}
+
 	// BlueZ likely is running without battery provider support, don't try to report battery
 	if (device->adapter->battery_provider_unavailable) return 0;
 

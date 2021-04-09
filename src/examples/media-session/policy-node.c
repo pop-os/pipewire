@@ -58,6 +58,8 @@
 #define DEFAULT_AUDIO_SOURCE		1
 #define DEFAULT_VIDEO_SOURCE		2
 
+#define MAX_LINK_RETRY			5
+
 struct default_node {
 	char *key;
 	char *key_config;
@@ -79,6 +81,7 @@ struct impl {
 
 	struct spa_list node_list;
 	unsigned int node_list_changed:1;
+	unsigned int linking_node_removed:1;
 	int seq;
 
 	struct default_node defaults[4];
@@ -98,6 +101,7 @@ struct node {
 	struct spa_hook listener;
 
 	struct node *peer;
+	struct node *failed_peer;
 
 	uint32_t client_id;
 	int32_t priority;
@@ -111,6 +115,7 @@ struct node {
 	struct spa_audio_info format;
 
 	int connect_count;
+	int failed_count;
 	uint64_t plugged;
 	unsigned int active:1;
 	unsigned int exclusive:1;
@@ -121,7 +126,10 @@ struct node {
 	unsigned int moving:1;
 	unsigned int capture_sink:1;
 	unsigned int virtual:1;
+	unsigned int linking:1;
 };
+
+static int check_new_target(struct impl *impl, struct node *target);
 
 static bool find_format(struct node *node)
 {
@@ -209,6 +217,9 @@ static int configure_node(struct node *node, struct spa_audio_info *info, bool f
 			SPA_PARAM_PortConfig, 0, param);
 
 	node->configured = true;
+
+	if (node->type == NODE_TYPE_DEVICE)
+		check_new_target(impl, node);
 
 	return 0;
 }
@@ -357,6 +368,8 @@ handle_node(struct impl *impl, struct sm_object *object)
 static void destroy_node(struct impl *impl, struct node *node)
 {
 	spa_list_remove(&node->link);
+	if (node->linking)
+		impl->linking_node_removed = true;
 	impl->node_list_changed = true;
 	if (node->enabled)
 		spa_hook_remove(&node->listener);
@@ -478,6 +491,8 @@ static void session_remove(void *data, struct sm_object *object)
 		spa_list_for_each(n, &impl->node_list, link) {
 			if (n->peer == node)
 				n->peer = NULL;
+			if (n->failed_peer == node)
+				n->failed_peer = NULL;
 		}
 	}
 	sm_media_session_schedule_rescan(impl->session);
@@ -521,7 +536,7 @@ static int find_node(void *data, struct node *node)
 		return 0;
 	}
 
-	if (strcmp(node->media, find->media) != 0) {
+	if (node->media && strcmp(node->media, find->media) != 0) {
 		pw_log_debug(".. incompatible media %s <-> %s", node->media, find->media);
 		return 0;
 	}
@@ -610,6 +625,7 @@ static int link_nodes(struct node *node, struct node *peer)
 	struct impl *impl = node->impl;
 	struct pw_properties *props;
 	struct node *output, *input;
+	int res;
 
 	pw_log_debug(NAME " %p: link nodes %d %d remix:%d", impl,
 			node->id, peer->id, !node->dont_remix);
@@ -632,13 +648,28 @@ static int link_nodes(struct node *node, struct node *peer)
 	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", input->id);
 	pw_log_info("linking node %d to node %d", output->id, input->id);
 
-	if (sm_media_session_create_links(impl->session, &props->dict) > 0) {
-		node->peer = peer;
-		node->connect_count++;
-	}
+	node->linking = true;
+	res = sm_media_session_create_links(impl->session, &props->dict);
 	pw_properties_free(props);
 
-	return 0;
+	if (impl->linking_node_removed) {
+		impl->linking_node_removed = false;
+		return -ENOENT;
+	}
+	node->linking = false;
+
+	if (res > 0) {
+		node->peer = peer;
+		node->failed_peer = NULL;
+		node->connect_count++;
+		node->failed_count = 0;
+	} else {
+		if (node->failed_peer != peer)
+			node->failed_count = 0;
+		node->failed_peer = peer;
+		node->failed_count++;
+	}
+	return res;
 }
 
 static int unlink_nodes(struct node *node, struct node *peer)
@@ -841,8 +872,14 @@ static int rescan_node(struct impl *impl, struct node *n)
 	pw_log_debug(NAME" %p: linking to node '%d'", impl, peer->id);
 
 do_link:
+	if (peer == n->failed_peer && n->failed_count > MAX_LINK_RETRY) {
+		/* Break rescan -> failed link -> rescan loop. */
+		pw_log_debug(NAME" %p: tried to link '%d' on last rescan, not retrying",
+				impl, peer->id);
+		return 0;
+	}
 	link_nodes(n, peer);
-        return 1;
+	return 1;
 }
 
 static void session_info(void *data, const struct pw_core_info *info)
@@ -915,6 +952,11 @@ again:
 static void session_destroy(void *data)
 {
 	struct impl *impl = data;
+	struct default_node *def;
+	for (def = impl->defaults; def->key != NULL; ++def) {
+		free(def->config);
+		free(def->value);
+	}
 	spa_hook_remove(&impl->listener);
 	if (impl->session->metadata)
 		spa_hook_remove(&impl->meta_listener);
@@ -968,6 +1010,23 @@ static int handle_move(struct impl *impl, struct node *src_node, struct node *ds
 	src_node->obj->target_node = str ? strdup(str) : NULL;
 
 	return do_move_node(src_node, src_node->peer, dst_node);
+}
+
+static int check_new_target(struct impl *impl, struct node *target)
+{
+	struct node *node;
+	const char *str = get_device_name(target);
+
+	spa_list_for_each(node, &impl->node_list, link) {
+		pw_log_debug(NAME" %p: node %d target '%s' find:%s", impl,
+				node->id, node->obj->target_node, str);
+
+		if (node->obj->target_node != NULL &&
+		    strcmp(node->obj->target_node , str) == 0) {
+			handle_move(impl, node, target);
+		}
+	}
+	return 0;
 }
 
 static int metadata_property(void *object, uint32_t subject,

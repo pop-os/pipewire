@@ -574,7 +574,7 @@ static void profile_set_available(pa_card *impl, uint32_t index,
 
 	p->available = status;
 
-	if (emit && impl && impl->events && impl->events->profile_available)
+	if (emit && impl->events && impl->events->profile_available)
 		impl->events->profile_available(impl->user_data, index,
 				old, status);
 }
@@ -1043,7 +1043,6 @@ static int read_volume(pa_alsa_device *dev)
 
 static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 {
-	pa_card *impl = dev->card;
 	pa_cvolume r;
 
 	dev->real_volume = *v;
@@ -1083,18 +1082,7 @@ static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 		if (accurate_enough)
 			pa_cvolume_reset(&new_soft_volume, new_soft_volume.channels);
 
-		if (!pa_cvolume_equal(&dev->soft_volume, &new_soft_volume)) {
-			dev->soft_volume = new_soft_volume;
-
-			if (impl->events && impl->events->set_soft_volume) {
-				uint32_t i, n_volumes = new_soft_volume.channels;
-				float volumes[n_volumes];
-				for (i = 0; i < n_volumes; i++)
-					volumes[i] = pa_sw_volume_to_linear(new_soft_volume.values[i]);
-				impl->events->set_soft_volume(impl->user_data, &dev->device, volumes, n_volumes);
-			}
-		}
-
+		dev->soft_volume = new_soft_volume;
 	} else {
 		pa_log_debug("Wrote hardware volume: %d", pa_cvolume_max(&r));
 		/* We can't match exactly what the user requested, hence let's
@@ -1391,7 +1379,7 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index, uint32_t fla
 		PA_IDXSET_FOREACH(am, np->input_mappings, idx) {
 			if (impl->use_ucm)
 				/* Update ports priorities */
-				pa_alsa_ucm_add_ports_combination(am->output.ports, &am->ucm_context,
+				pa_alsa_ucm_add_ports_combination(am->input.ports, &am->ucm_context,
 					false, impl->ports, np, NULL);
 			device_enable(impl, am, &am->input);
 		}
@@ -1755,16 +1743,15 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index, uint32_t fl
 		return -EINVAL;
 
 	p = (pa_device_port*)impl->card.ports[port_index];
-	if (p == old)
-		return 0;
-
 	if (!pa_hashmap_get(d->ports, p->name))
 		return -EINVAL;
 
+	p->port.flags = ACP_PORT_ACTIVE | flags;
+	if (p == old)
+		return 0;
 	if (old)
 		old->port.flags &= ~(ACP_PORT_ACTIVE | ACP_PORT_SAVE);
 	d->active_port = p;
-	p->port.flags |= ACP_PORT_ACTIVE | flags;
 
 	if (impl->use_ucm) {
 		pa_alsa_ucm_port_data *data;
@@ -1823,8 +1810,6 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 	} else {
 		d->real_volume = v;
 		d->soft_volume = v;
-		if (impl->events && impl->events->set_soft_volume)
-			impl->events->set_soft_volume(impl->user_data, dev, volume, n_volume);
 	}
 	if (!pa_cvolume_equal(&d->real_volume, &old_volume))
 		if (impl->events && impl->events->volume_changed)
@@ -1832,17 +1817,26 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 	return 0;
 }
 
+static int get_volume(pa_cvolume *v, float *volume, uint32_t n_volume)
+{
+	uint32_t i;
+	if (v->channels == 0)
+		return -EIO;
+	for (i = 0; i < n_volume; i++)
+		volume[i] = pa_sw_volume_to_linear(v->values[i % v->channels]);
+	return 0;
+}
+
+int acp_device_get_soft_volume(struct acp_device *dev, float *volume, uint32_t n_volume)
+{
+	pa_alsa_device *d = (pa_alsa_device*)dev;
+	return get_volume(&d->soft_volume, volume, n_volume);
+}
+
 int acp_device_get_volume(struct acp_device *dev, float *volume, uint32_t n_volume)
 {
 	pa_alsa_device *d = (pa_alsa_device*)dev;
-	pa_cvolume v;
-	uint32_t i;
-	v = d->real_volume;
-	if (v.channels == 0)
-		return -EIO;
-	for (i = 0; i < n_volume; i++)
-		volume[i] = pa_sw_volume_to_linear(v.values[i % v.channels]);
-	return 0;
+	return get_volume(&d->real_volume, volume, n_volume);
 }
 
 int acp_device_set_mute(struct acp_device *dev, bool mute)
@@ -1860,8 +1854,6 @@ int acp_device_set_mute(struct acp_device *dev, bool mute)
 		d->set_mute(d, mute);
 	} else  {
 		d->muted = mute;
-		if (impl->events && impl->events->set_soft_mute)
-			impl->events->set_soft_mute(impl->user_data, dev, mute);
 	}
 	if (old_muted != mute)
 		if (impl->events && impl->events->mute_changed)

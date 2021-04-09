@@ -441,9 +441,12 @@ void pw_init(int *argc, char **argv[])
 			pw_log_set(log);
 
 #ifdef HAVE_SYSTEMD
-		log = load_journal_logger(support);
-		if (log)
-			pw_log_set(log);
+		if ((str = getenv("PIPEWIRE_LOG_SYSTEMD")) == NULL ||
+				strcmp(str, "true") == 0 || atoi(str) != 0) {
+			log = load_journal_logger(support);
+			if (log)
+				pw_log_set(log);
+		}
 #endif
 	} else {
 		support->support[support->n_support++] =
@@ -595,7 +598,6 @@ const char *pw_get_client_name(void)
 	else {
 		if (snprintf(cname, sizeof(cname), "pipewire-pid-%zd", (size_t) getpid()) < 0)
 			return NULL;
-		cname[255] = 0;
 		return cname;
 	}
 }

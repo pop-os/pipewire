@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <getopt.h>
+#include <locale.h>
 #include <ncurses.h>
 
 #include <spa/utils/result.h>
@@ -94,18 +95,17 @@ struct point {
 
 static int process_info(struct data *d, const struct spa_pod *pod, struct driver *info)
 {
-	spa_pod_parse_struct(pod,
+	return spa_pod_parse_struct(pod,
 			SPA_POD_Long(&info->count),
 			SPA_POD_Float(&info->cpu_load[0]),
 			SPA_POD_Float(&info->cpu_load[1]),
 			SPA_POD_Float(&info->cpu_load[2]),
 			SPA_POD_Int(&info->xrun_count));
-	return 0;
 }
 
 static int process_clock(struct data *d, const struct spa_pod *pod, struct driver *info)
 {
-	spa_pod_parse_struct(pod,
+	return spa_pod_parse_struct(pod,
 			SPA_POD_Int(&info->clock.flags),
 			SPA_POD_Int(&info->clock.id),
 			SPA_POD_Stringn(info->clock.name, sizeof(info->clock.name)),
@@ -116,7 +116,6 @@ static int process_clock(struct data *d, const struct spa_pod *pod, struct drive
 			SPA_POD_Long(&info->clock.delay),
 			SPA_POD_Double(&info->clock.rate_diff),
 			SPA_POD_Long(&info->clock.next_nsec));
-	return 0;
 }
 
 static struct node *find_node(struct data *d, uint32_t id)
@@ -161,9 +160,10 @@ static int process_driver_block(struct data *d, const struct spa_pod *pod, struc
 	uint32_t id = 0;
 	struct measurement m;
 	struct node *n;
+	int res;
 
 	spa_zero(m);
-	spa_pod_parse_struct(pod,
+	if ((res = spa_pod_parse_struct(pod,
 			SPA_POD_Int(&id),
 			SPA_POD_String(&name),
 			SPA_POD_Long(&m.prev_signal),
@@ -171,7 +171,8 @@ static int process_driver_block(struct data *d, const struct spa_pod *pod, struc
 			SPA_POD_Long(&m.awake),
 			SPA_POD_Long(&m.finish),
 			SPA_POD_Int(&m.status),
-			SPA_POD_Fraction(&m.latency));
+			SPA_POD_Fraction(&m.latency))) < 0)
+		return res;
 
 	if ((n = find_node(d, id)) == NULL)
 		return -ENOENT;
@@ -195,9 +196,10 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 	const char *name =  NULL;
 	struct measurement m;
 	struct node *n;
+	int res;
 
 	spa_zero(m);
-	spa_pod_parse_struct(pod,
+	if ((res = spa_pod_parse_struct(pod,
 			SPA_POD_Int(&id),
 			SPA_POD_String(&name),
 			SPA_POD_Long(&m.prev_signal),
@@ -205,7 +207,8 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 			SPA_POD_Long(&m.awake),
 			SPA_POD_Long(&m.finish),
 			SPA_POD_Int(&m.status),
-			SPA_POD_Fraction(&m.latency));
+			SPA_POD_Fraction(&m.latency))) < 0)
+		return res;
 
 	if ((n = find_node(d, id)) == NULL)
 		return -ENOENT;
@@ -495,6 +498,7 @@ int main(int argc, char *argv[])
 	struct timespec value, interval;
 	struct node *n;
 
+	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
 	spa_list_init(&data.node_list);

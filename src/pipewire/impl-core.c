@@ -26,6 +26,7 @@
 
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #ifndef ENODATA
 #define ENODATA 9919
 #endif
@@ -37,7 +38,6 @@
 #ifndef HAVE_GETRANDOM
 # ifdef __FreeBSD__
 #  include <sys/param.h>
-#  include <fcntl.h>
 // FreeBSD versions < 12 do not have getrandom() syscall
 // Give a poor-man implementation here
 // Can be removed after September 30, 2021
@@ -45,6 +45,7 @@
 #   define GETRANDOM_FALLBACK	1
 #  endif
 # else
+#  include <fcntl.h>
 #  define GETRANDOM_FALLBACK	1
 # endif
 #endif
@@ -463,6 +464,7 @@ struct pw_impl_core *pw_context_create_core(struct pw_context *context,
 error_exit:
 	if (properties)
 		pw_properties_free(properties);
+	free(this);
 	errno = -res;
 	return NULL;
 }

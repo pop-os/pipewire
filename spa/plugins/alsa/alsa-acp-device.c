@@ -144,7 +144,7 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	struct spa_dict_item *items;
 	const struct acp_dict_item *it;
 	uint32_t n_items, i;
-	char device_name[128], path[180], channels[16], ch[12];
+	char device_name[128], path[180], channels[16], ch[12], routes[16];
 	char card_id[16], *p;
 	char positions[SPA_AUDIO_MAX_CHANNELS * 12];
 	struct spa_device_object_info info;
@@ -164,7 +164,7 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 
 	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
 
-	n_items = dev->props.n_items + 6;
+	n_items = dev->props.n_items + 7;
 	items = alloca(n_items * sizeof(*items));
 
 	snprintf(card_id, sizeof(card), "%d", card->index);
@@ -192,9 +192,11 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 		p += snprintf(p, 12, "%s%s", i == 0 ? "" : ",",
 				acp_channel_str(ch, sizeof(ch), dev->format.map[i]));
 	}
-
 	items[5] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_POSITION, positions);
-	n_items = 6;
+
+	snprintf(routes, sizeof(routes), "%d", dev->n_ports);
+	items[6] = SPA_DICT_ITEM_INIT("device.routes", routes);
+	n_items = 7;
 	acp_dict_for_each(it, &dev->props)
 		items[n_items++] = SPA_DICT_ITEM_INIT(it->key, it->value);
 
@@ -780,29 +782,22 @@ static void card_port_available(void *data, uint32_t index,
 static void on_volume_changed(void *data, struct acp_device *dev)
 {
 	struct impl *this = data;
-	spa_log_info(this->log, "device %s volume changed", dev->name);
-	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Route].user++;
-}
-
-static void on_mute_changed(void *data, struct acp_device *dev)
-{
-	struct impl *this = data;
-	spa_log_info(this->log, "device %s mute changed", dev->name);
-	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Route].user++;
-}
-
-static void on_set_soft_volume(void *data, struct acp_device *dev,
-		const float *volume, uint32_t n_volume)
-{
-	struct impl *this = data;
 	struct spa_event *event;
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = { 0 };
 	struct spa_pod_frame f[1];
+	uint32_t n_volume = dev->format.channels;
+	float volume[n_volume];
+	float mon_volume[n_volume];
 
-	spa_log_info(this->log, "device %s soft volume %f", dev->name, volume[0]);
+	spa_log_info(this->log, "device %s volume changed", dev->name);
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Route].user++;
+
+	spa_zero(volume);
+	spa_zero(mon_volume);
+	acp_device_get_soft_volume(dev, volume, n_volume);
+	acp_device_get_volume(dev, mon_volume, n_volume);
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0],
@@ -814,6 +809,8 @@ static void on_set_soft_volume(void *data, struct acp_device *dev,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
 			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
 						SPA_TYPE_Float, n_volume, volume),
+			SPA_PROP_monitorVolumes, SPA_POD_Array(sizeof(float),
+						SPA_TYPE_Float, n_volume, mon_volume),
 			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
 						SPA_TYPE_Id, dev->format.channels,
 						dev->format.map));
@@ -822,16 +819,20 @@ static void on_set_soft_volume(void *data, struct acp_device *dev,
 	spa_device_emit_event(&this->hooks, event);
 }
 
-static void on_set_soft_mute(void *data, struct acp_device *dev,
-		bool mute)
+static void on_mute_changed(void *data, struct acp_device *dev)
 {
 	struct impl *this = data;
 	struct spa_event *event;
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = { 0 };
 	struct spa_pod_frame f[1];
+	bool mute;
 
-	spa_log_info(this->log, "device %s soft mute %d", dev->name, mute);
+	spa_log_info(this->log, "device %s mute changed", dev->name);
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Route].user++;
+
+	acp_device_get_mute(dev, &mute);
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0],
@@ -842,7 +843,8 @@ static void on_set_soft_mute(void *data, struct acp_device *dev,
 
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
-			SPA_PROP_mute, SPA_POD_Bool(mute));
+			SPA_PROP_mute, SPA_POD_Bool(mute),
+			SPA_PROP_monitorMute, SPA_POD_Bool(mute));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
@@ -857,8 +859,6 @@ struct acp_card_events card_events = {
 	.port_available = card_port_available,
 	.volume_changed = on_volume_changed,
 	.mute_changed = on_mute_changed,
-	.set_soft_volume = on_set_soft_volume,
-	.set_soft_mute = on_set_soft_mute,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)

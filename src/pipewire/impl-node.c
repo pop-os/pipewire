@@ -317,6 +317,23 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	enum pw_node_state old = node->info.state;
 
+	switch (state) {
+	case PW_NODE_STATE_RUNNING:
+		if (node->driving && node->driver) {
+			res = spa_node_send_command(node->node,
+				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Start));
+			if (res < 0) {
+				state = PW_NODE_STATE_ERROR;
+				error = spa_aprintf("Start error: %s", spa_strerror(res));
+			}
+		}
+		if (res >= 0)
+			pw_loop_invoke(node->data_loop, do_node_add, 1, NULL, 0, true, node);
+		break;
+	default:
+		break;
+	}
+
 	free((char*)node->info.error);
 	node->info.error = error;
 	node->info.state = state;
@@ -335,18 +352,6 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 		pw_log_info("(%s-%u) %s -> %s", node->name, node->info.id,
 		     pw_node_state_as_string(old), pw_node_state_as_string(state));
 	}
-
-	switch (state) {
-	case PW_NODE_STATE_RUNNING:
-		pw_loop_invoke(node->data_loop, do_node_add, 1, NULL, 0, true, node);
-		if (node->driving && node->driver)
-			spa_node_send_command(node->node,
-				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Start));
-		break;
-	default:
-		break;
-	}
-
 	pw_impl_node_emit_state_changed(node, old, state, error);
 
 	node->info.change_mask |= PW_NODE_CHANGE_MASK_STATE;
@@ -367,7 +372,7 @@ static int suspend_node(struct pw_impl_node *this)
 	pw_log_debug(NAME" %p: suspend node state:%s", this,
 			pw_node_state_as_string(this->info.state));
 
-	if (this->info.state <= PW_NODE_STATE_SUSPENDED)
+	if (this->info.state > 0 && this->info.state <= PW_NODE_STATE_SUSPENDED)
 		return 0;
 
 	pause_node(this);
@@ -810,8 +815,8 @@ static void check_properties(struct pw_impl_node *node)
 {
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	struct pw_context *context = node->context;
-	const char *str;
-	bool driver, do_recalc = false;
+	const char *str, *recalc_reason = NULL;
+	bool driver;
 	uint32_t group_id;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
@@ -828,7 +833,7 @@ static void check_properties(struct pw_impl_node *node)
 	if (group_id != node->group_id) {
 		pw_log_debug(NAME" %p: group %u->%u", node, node->group_id, group_id);
 		node->group_id = group_id;
-		do_recalc = true;
+		recalc_reason = "group changed";
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_NAME)) &&
@@ -862,7 +867,7 @@ static void check_properties(struct pw_impl_node *node)
 			else
 				spa_list_remove(&node->driver_link);
 		}
-		do_recalc = true;
+		recalc_reason = "driver changed";
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS)))
@@ -887,7 +892,7 @@ static void check_properties(struct pw_impl_node *node)
 						node->info.id, str, quantum_size,
 						context->defaults.clock_rate);
 				node->quantum_size = quantum_size;
-				do_recalc = true;
+				recalc_reason = "quantum changed";
 			}
 		}
 	}
@@ -908,16 +913,17 @@ static void check_properties(struct pw_impl_node *node)
 						node->info.id, str, max_quantum_size,
 						context->defaults.clock_rate);
 				node->max_quantum_size = max_quantum_size;
-				do_recalc = true;
+				recalc_reason = "max quantum changed";
+
 			}
 		}
 	}
 
-	pw_log_debug(NAME" %p: driver:%d recalc:%d active:%d", node, node->driver,
-			do_recalc, node->active);
+	pw_log_debug(NAME" %p: driver:%d recalc:%s active:%d", node, node->driver,
+			recalc_reason, node->active);
 
-	if (do_recalc && node->active)
-		pw_context_recalc_graph(context, "quantum change");
+	if (recalc_reason && node->active)
+		pw_context_recalc_graph(context, recalc_reason);
 }
 
 static const char *str_status(uint32_t status)

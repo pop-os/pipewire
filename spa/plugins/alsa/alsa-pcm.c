@@ -627,19 +627,22 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	if (is_batch)
 		state->headroom += period_size;
 
+	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
+	state->start_delay = state->default_start_delay;
+
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;
 
 	spa_log_info(state->log, NAME" %s (%s): format:%s access:%s-%s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd "
-			"headroom %u",
+			"headroom %u start-delay:%u",
 			state->props.device,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback",
 			snd_pcm_format_name(state->format),
 			state->use_mmap ? "mmap" : "rw",
 			planar ? "planar" : "interleaved",
 			state->rate, state->channels, state->buffer_frames, state->period_frames,
-			periods, state->frame_size, state->headroom);
+			periods, state->frame_size, state->headroom, state->start_delay);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
@@ -805,7 +808,7 @@ recover:
 	state->alsa_started = false;
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK)
-		spa_alsa_silence(state, state->last_threshold * 2 + state->headroom);
+		spa_alsa_silence(state, state->start_delay + state->threshold * 2 + state->headroom);
 
 	return do_start(state);
 }
@@ -826,7 +829,6 @@ static int get_status(struct state *state, snd_pcm_uframes_t *delay, snd_pcm_ufr
 	} else {
 		state->alsa_recovering = false;
 	}
-
 
 	*target = state->threshold + state->headroom;
 
@@ -1147,6 +1149,9 @@ push_frames(struct state *state,
 				snd_pcm_readi(state->hndl, bufs[0], total_frames);
 			}
 		}
+		spa_log_trace_fp(state->log, NAME" %p: wrote %ld frames into buffer %d",
+				state, total_frames, b->id);
+
 		spa_list_append(&state->ready, &b->link);
 	}
 	return total_frames;
@@ -1307,7 +1312,8 @@ static int handle_capture(struct state *state, uint64_t nsec,
 		return 0;
 
 	io = state->io;
-	if (io != NULL && io->status != SPA_STATUS_HAVE_DATA) {
+	if (io != NULL &&
+	    (io->status != SPA_STATUS_HAVE_DATA || state->rate_match != NULL)) {
 		struct buffer *b;
 
 		if (io->buffer_id < state->n_buffers)
@@ -1475,7 +1481,7 @@ int spa_alsa_start(struct state *state)
 	state->alsa_started = false;
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK)
-		spa_alsa_silence(state, state->threshold * 2 + state->headroom);
+		spa_alsa_silence(state, state->start_delay + state->threshold * 2 + state->headroom);
 
 	if ((err = do_start(state)) < 0)
 		return err;
