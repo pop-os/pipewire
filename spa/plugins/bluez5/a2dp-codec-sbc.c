@@ -45,7 +45,7 @@ struct impl {
 
 	size_t mtu;
 	int codesize;
-	int frame_length;
+	int max_frames;
 
 	int min_bitpool;
 	int max_bitpool;
@@ -86,36 +86,37 @@ static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
 static uint8_t default_bitpool(uint8_t freq, uint8_t mode, bool xq)
 {
 	/* A2DP spec v1.2 states that all SNK implementation shall handle bitrates
-	   of up to 512 kbps (~ bitpool = 76 stereo, or 2x38 dual channel). */
+	 * of up to 512 kbps (~ bitpool = 86 stereo, or 2x43 dual channel at 44.1KHz
+	 * or ~ bitpool = 78 stereo, or 2x39 dual channel at 48KHz). */
 	switch (freq) {
 	case SBC_SAMPLING_FREQ_16000:
         case SBC_SAMPLING_FREQ_32000:
-		return 53;
+		return 64;
 
 	case SBC_SAMPLING_FREQ_44100:
 		switch (mode) {
 		case SBC_CHANNEL_MODE_MONO:
 		case SBC_CHANNEL_MODE_DUAL_CHANNEL:
-			return xq ? 38 : 31;
+			return xq ? 43 : 32;
 
 		case SBC_CHANNEL_MODE_STEREO:
 		case SBC_CHANNEL_MODE_JOINT_STEREO:
-			return xq ? 64 : 53;
+			return xq ? 86 : 64;
 		}
-		return 53;
+		return xq ? 86 : 64;
 	case SBC_SAMPLING_FREQ_48000:
 		switch (mode) {
 		case SBC_CHANNEL_MODE_MONO:
 		case SBC_CHANNEL_MODE_DUAL_CHANNEL:
-			return xq ? 35 : 29;
+			return xq ? 39 : 29;
 
 		case SBC_CHANNEL_MODE_STEREO:
 		case SBC_CHANNEL_MODE_JOINT_STEREO:
-			return xq ? 62 : 51;
+			return xq ? 78 : 58;
 		}
-		return 51;
+		return xq ? 78 : 58;
 	}
-	return 53;
+	return xq ? 86 : 64;
 }
 
 static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
@@ -133,7 +134,15 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 
 	memcpy(&conf, caps, sizeof(conf));
 
-	if (conf.frequency & SBC_SAMPLING_FREQ_48000)
+	if (xq) {
+		if (conf.frequency & SBC_SAMPLING_FREQ_44100)
+			conf.frequency = SBC_SAMPLING_FREQ_44100;
+		else if (conf.frequency & SBC_SAMPLING_FREQ_48000)
+			conf.frequency = SBC_SAMPLING_FREQ_48000;
+		else
+			return -ENOTSUP;
+	}
+	else if (conf.frequency & SBC_SAMPLING_FREQ_48000)
 		conf.frequency = SBC_SAMPLING_FREQ_48000;
 	else if (conf.frequency & SBC_SAMPLING_FREQ_44100)
 		conf.frequency = SBC_SAMPLING_FREQ_44100;
@@ -147,8 +156,14 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 	if (xq) {
 		if (conf.channel_mode & SBC_CHANNEL_MODE_DUAL_CHANNEL)
 			conf.channel_mode = SBC_CHANNEL_MODE_DUAL_CHANNEL;
+		else if (conf.channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
+			conf.channel_mode = SBC_CHANNEL_MODE_JOINT_STEREO;
+		else if (conf.channel_mode & SBC_CHANNEL_MODE_STEREO)
+			conf.channel_mode = SBC_CHANNEL_MODE_STEREO;
+		else
+			return -ENOTSUP;
 	}
-	if (conf.channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
+	else if (conf.channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
 		conf.channel_mode = SBC_CHANNEL_MODE_JOINT_STEREO;
 	else if (conf.channel_mode & SBC_CHANNEL_MODE_STEREO)
 		conf.channel_mode = SBC_CHANNEL_MODE_STEREO;
@@ -310,9 +325,13 @@ static int codec_validate_config(const struct a2dp_codec *codec, uint32_t flags,
 
 static int codec_set_bitpool(struct impl *this, int bitpool)
 {
+	size_t rtp_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
+
 	this->sbc.bitpool = SPA_CLAMP(bitpool, this->min_bitpool, this->max_bitpool);
 	this->codesize = sbc_get_codesize(&this->sbc);
-	this->frame_length = sbc_get_frame_length(&this->sbc);
+	this->max_frames = (this->mtu - rtp_size) / sbc_get_frame_length(&this->sbc);
+	if (this->max_frames > 15)
+		this->max_frames = 15;
 	return this->sbc.bitpool;
 }
 
@@ -407,18 +426,6 @@ static int codec_increase_bitpool(void *data)
 	return codec_set_bitpool(this, this->sbc.bitpool + 1);
 }
 
-static int codec_get_num_blocks(void *data)
-{
-	struct impl *this = data;
-	size_t rtp_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
-	size_t frame_count = (this->mtu - rtp_size) / this->frame_length;
-
-	/* frame_count is only 4 bit number */
-	if (frame_count > 15)
-		frame_count = 15;
-	return frame_count;
-}
-
 static int codec_get_block_size(void *data)
 {
 	struct impl *this = data;
@@ -427,7 +434,7 @@ static int codec_get_block_size(void *data)
 
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		void *config, size_t config_len, const struct spa_audio_info *info,
-		const struct spa_dict *settings, size_t mtu)
+		void *props, size_t mtu)
 {
 	struct impl *this;
 	a2dp_sbc_t *conf = config;
@@ -565,17 +572,19 @@ static int codec_start_encode (void *data,
 static int codec_encode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
-		size_t *dst_out)
+		size_t *dst_out, int *need_flush)
 {
 	struct impl *this = data;
 	int res;
 
 	res = sbc_encode(&this->sbc, src, src_size,
 			dst, dst_size, (ssize_t*)dst_out);
+	if (SPA_UNLIKELY(res < 0))
+		return -EINVAL;
+	spa_assert(res == this->codesize);
 
-	if (res >= this->codesize)
-		this->payload->frame_count += res / this->codesize;
-
+	this->payload->frame_count += res / this->codesize;
+	*need_flush = this->payload->frame_count >= this->max_frames;
 	return res;
 }
 
@@ -609,6 +618,7 @@ static int codec_decode(void *data,
 }
 
 const struct a2dp_codec a2dp_codec_sbc = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_SBC,
 	.codec_id = A2DP_CODEC_SBC,
 	.name = "sbc",
 	.description = "SBC",
@@ -620,7 +630,6 @@ const struct a2dp_codec a2dp_codec_sbc = {
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.abr_process = codec_abr_process,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,
@@ -631,6 +640,7 @@ const struct a2dp_codec a2dp_codec_sbc = {
 };
 
 const struct a2dp_codec a2dp_codec_sbc_xq = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ,
 	.codec_id = A2DP_CODEC_SBC,
 	.name = "sbc_xq",
 	.description = "SBC-XQ",
@@ -642,7 +652,6 @@ const struct a2dp_codec a2dp_codec_sbc_xq = {
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.abr_process = codec_abr_process,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,

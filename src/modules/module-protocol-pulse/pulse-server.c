@@ -41,6 +41,7 @@
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <regex.h>
 #if HAVE_SYS_VFS_H
 #include <sys/vfs.h>
 #endif
@@ -240,6 +241,7 @@ struct stream {
 	unsigned int is_underrun:1;
 	unsigned int in_prebuf:1;
 	unsigned int done:1;
+	unsigned int killed:1;
 };
 
 struct server {
@@ -263,6 +265,7 @@ struct impl {
 	struct spa_hook context_listener;
 
 	struct pw_properties *props;
+	void *dbus_name;
 
 	struct ratelimit rate_limit;
 
@@ -280,8 +283,12 @@ struct impl {
 	struct stats stat;
 };
 
+/* Functions that modules can use */
+static void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id);
+
 #include "collect.c"
 #include "module.c"
+#include "message-handler.c"
 
 
 static void sample_free(struct sample *sample)
@@ -354,7 +361,8 @@ static struct message *message_alloc(struct impl *impl, uint32_t channel, uint32
 		msg->stat->n_allocated++;
 		msg->stat->n_accumulated++;
 	}
-	ensure_size(msg, size);
+	if (ensure_size(msg, size) < 0)
+		return NULL;
 	spa_zero(msg->extra);
 	msg->channel = channel;
 	msg->offset = 0;
@@ -880,17 +888,16 @@ static void send_default_change_subscribe_event(struct client *client, bool sink
 		                     -1);
 }
 
-static void handle_metadata_added(struct client *client, struct pw_manager_object *o,
-		const char *name)
+static void handle_metadata(struct client *client, struct pw_manager_object *old,
+		struct pw_manager_object *new, const char *name)
 {
 	if (strcmp(name, "default") == 0) {
-		if (client->metadata_default == NULL)
-			client->metadata_default = o;
+		if (client->metadata_default == old)
+			client->metadata_default = new;
 	}
 	else if (strcmp(name, "route-settings") == 0) {
-		if (client->metadata_routes == NULL) {
-			client->metadata_routes = o;
-		}
+		if (client->metadata_routes == old)
+			client->metadata_routes = new;
 	}
 }
 
@@ -900,10 +907,12 @@ static void manager_added(void *data, struct pw_manager_object *o)
 	uint32_t event, id;
 	const char *str;
 
+	register_object_message_handlers(o);
+
 	if (strcmp(o->type, PW_TYPE_INTERFACE_Metadata) == 0) {
 		if (o->props != NULL &&
 		    (str = pw_properties_get(o->props, PW_KEY_METADATA_NAME)) != NULL)
-			handle_metadata_added(client, o, str);
+			handle_metadata(client, NULL, o, str);
 	}
 	if ((event = get_event_and_id(client, o, &id)) != SPA_ID_INVALID)
 		send_subscribe_event(client,
@@ -932,6 +941,7 @@ static void manager_removed(void *data, struct pw_manager_object *o)
 {
 	struct client *client = data;
 	uint32_t event, id;
+	const char *str;
 
 	if ((event = get_event_and_id(client, o, &id)) != SPA_ID_INVALID)
 		send_subscribe_event(client,
@@ -939,6 +949,12 @@ static void manager_removed(void *data, struct pw_manager_object *o)
 				id);
 
 	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
+
+	if (strcmp(o->type, PW_TYPE_INTERFACE_Metadata) == 0) {
+		if (o->props != NULL &&
+		    (str = pw_properties_get(o->props, PW_KEY_METADATA_NAME)) != NULL)
+			handle_metadata(client, o, NULL, str);
+	}
 }
 
 static int json_object_find(const char *obj, const char *key, char *value, size_t len)
@@ -1110,6 +1126,12 @@ static void stream_free(struct stream *stream)
 	struct impl *impl = client->impl;
 
 	pw_log_debug(NAME" %p: stream %p channel:%d", impl, stream, stream->channel);
+
+	if (stream->drain_tag)
+		reply_error(client, -1, stream->drain_tag, -ENOENT);
+
+	if (stream->killed)
+		send_stream_killed(stream);
 
 	/* force processing of all pending messages before we destroy
 	 * the stream */
@@ -1534,7 +1556,7 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
 		if (!client->disconnecting)
-			send_stream_killed(stream);
+			stream->killed = true;
 		stream->done = true;
 		break;
 	case PW_STREAM_STATE_CONNECTING:
@@ -1895,7 +1917,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	struct channel_map map;
 	uint32_t sink_index, syncid;
 	const char *sink_name;
-	struct buffer_attr attr;
+	struct buffer_attr attr = { 0 };
 	bool corked = false,
 		no_remap = false,
 		no_remix = false,
@@ -2085,7 +2107,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	if (sink_name != NULL)
 		pw_properties_set(props,
 				PW_KEY_NODE_TARGET, sink_name);
-	else if (sink_index != SPA_ID_INVALID)
+	else if (sink_index != SPA_ID_INVALID && sink_index != 0)
 		pw_properties_setf(props,
 				PW_KEY_NODE_TARGET, "%u", sink_index);
 
@@ -2159,8 +2181,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		fail_on_suspend = false,
 		relative_volume = false,
 		passthrough = false;
-	uint32_t direct_on_input_idx;
-	struct volume volume;
+	uint32_t direct_on_input_idx = SPA_ID_INVALID;
+	struct volume volume = VOLUME_INIT;
 	struct pw_properties *props = NULL;
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
@@ -2268,6 +2290,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				TAG_BOOLEAN, &passthrough,
 				TAG_INVALID)) < 0)
 			goto error_protocol;
+	} else {
+		volume_set = false;
 	}
 	if (sample_spec_valid(&ss)) {
 		if (n_params < MAX_FORMATS &&
@@ -2325,7 +2349,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		if ((id = atoi(source_name)) != 0)
 			source_index = id;
 	}
-	if (source_index != SPA_ID_INVALID) {
+	if (source_index != SPA_ID_INVALID && source_index != 0) {
 		if (source_index & MONITOR_FLAG)
 			source_index &= INDEX_MASK;
 		pw_properties_setf(props,
@@ -2728,6 +2752,9 @@ static struct pw_manager_object *find_device(struct client *client,
 	struct selector sel;
 	const char *def;
 
+	if (id == 0)
+		id = SPA_ID_INVALID;
+
 	if (name != NULL && !sink) {
 		if (pw_endswith(name, ".monitor")) {
 			name = strndupa(name, strlen(name)-8);
@@ -2757,7 +2784,8 @@ static struct pw_manager_object *find_device(struct client *client,
 		def = DEFAULT_SOURCE;
 	}
 	if (id == SPA_ID_INVALID &&
-	    (sel.value == NULL || strcmp(sel.value, def) == 0))
+	    (sel.value == NULL || strcmp(sel.value, def) == 0 ||
+	    strcmp(sel.value, "0") == 0))
 		sel.value = get_default(client, sink);
 
 	return select_object(client->manager, &sel);
@@ -3034,6 +3062,8 @@ static int set_node_volume_mute(struct pw_manager_object *o,
 
 	if (!SPA_FLAG_IS_SET(o->permissions, PW_PERM_W | PW_PERM_X))
 		return -EACCES;
+	if (o->proxy == NULL)
+		return -ENOENT;
 
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Props,  SPA_PARAM_Props);
@@ -3063,6 +3093,9 @@ static int set_card_volume_mute_delay(struct pw_manager_object *o, uint32_t id,
 
 	if (!SPA_FLAG_IS_SET(o->permissions, PW_PERM_W | PW_PERM_X))
 		return -EACCES;
+
+	if (o->proxy == NULL)
+		return -ENOENT;
 
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
@@ -3103,6 +3136,9 @@ static int set_card_port(struct pw_manager_object *o, uint32_t device_id,
 
 	if (!SPA_FLAG_IS_SET(o->permissions, PW_PERM_W | PW_PERM_X))
 		return -EACCES;
+
+	if (o->proxy == NULL)
+		return -ENOENT;
 
 	pw_device_set_param((struct pw_device*)o->proxy,
 			SPA_PARAM_Route, 0,
@@ -3741,6 +3777,8 @@ static int do_drain_stream(struct client *client, uint32_t command, uint32_t tag
 
 	stream->drain_tag = tag;
 	stream->draining = true;
+	pw_stream_set_active(stream->stream, true);
+
 	return 0;
 }
 
@@ -3869,7 +3907,7 @@ static int fill_card_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
 	struct pw_device_info *info = o->info;
-	const char *str;
+	const char *str, *drv_name;
 	uint32_t module_id = SPA_ID_INVALID, n_profiles, n;
 	struct card_info card_info = CARD_INFO_INIT;
 	struct profile_info *profile_info;
@@ -3880,11 +3918,15 @@ static int fill_card_info(struct client *client, struct message *m,
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
 		module_id = (uint32_t)atoi(str);
 
+	drv_name = spa_dict_lookup(info->props, PW_KEY_DEVICE_API);
+	if (drv_name && !strcmp("bluez5", drv_name))
+		drv_name = "module-bluez5-device.c"; /* blueman needs this */
+
 	message_put(m,
 		TAG_U32, o->id,				/* card index */
 		TAG_STRING, spa_dict_lookup(info->props, PW_KEY_DEVICE_NAME),
 		TAG_U32, module_id,
-		TAG_STRING, spa_dict_lookup(info->props, PW_KEY_DEVICE_API),
+		TAG_STRING, drv_name,
 		TAG_INVALID);
 
 	collect_card_info(o, &card_info);
@@ -3933,7 +3975,7 @@ static int fill_card_info(struct client *client, struct message *m,
 		for (n = 0; n < n_ports; n++) {
 			struct spa_dict_item *items;
 			struct spa_dict *pdict = NULL, dict;
-			uint32_t i;
+			uint32_t i, pi_n_profiles;
 
 			pi = &port_info[n];
 
@@ -3952,15 +3994,30 @@ static int fill_card_info(struct client *client, struct message *m,
 				TAG_PROPLIST, pdict,			/* port proplist */
 				TAG_INVALID);
 
+			pi_n_profiles = SPA_MIN(pi->n_profiles, n_profiles);
+			if (pi->n_profiles != pi_n_profiles) {
+				/* libpulse assumes port profile array size <= n_profiles */
+				pw_log_error(NAME" %p: card %d port %d profiles inconsistent (%d < %d)",
+						client->impl, o->id, n, n_profiles, pi->n_profiles);
+			}
+
 			message_put(m,
-				TAG_U32, pi->n_profiles,		/* n_profiles */
+				TAG_U32, pi_n_profiles,		/* n_profiles */
 				TAG_INVALID);
 
-			for (i = 0; i < pi->n_profiles; i++) {
-				uint32_t idx = pi->profiles[i];
+			for (i = 0; i < pi_n_profiles; i++) {
+				uint32_t j;
+				const char *name = "off";
+
+				for (j = 0; j < n_profiles; ++j) {
+					if (profile_info[j].id == pi->profiles[i]) {
+						name = profile_info[j].name;
+						break;
+					}
+				}
+
 				message_put(m,
-					TAG_STRING, idx < n_profiles ?
-						profile_info[idx].name : "off",	/* profile name */
+					TAG_STRING, name,	/* profile name */
 					TAG_INVALID);
 			}
 			if (client->version >= 27) {
@@ -3993,20 +4050,23 @@ static int fill_sink_info(struct client *client, struct message *m,
 	uint32_t flags;
 	struct card_info card_info = CARD_INFO_INIT;
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_OUTPUT);
+	size_t size;
 
 	if (!object_is_sink(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
-	if ((name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME)) != NULL) {
-		size_t size = strlen(name) + 10;
-		monitor_name = alloca(size);
-		if (object_is_source(o))
-			snprintf(monitor_name, size, "%s", name);
-		else
-			snprintf(monitor_name, size, "%s.monitor", name);
-	}
+	name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
 	if ((desc = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)) == NULL)
-		desc = name;
+		desc = name ? name : "Unknown";
+	if (name == NULL)
+		name = "unknown";
+
+	size = strlen(name) + 10;
+	monitor_name = alloca(size);
+	if (object_is_source(o))
+		snprintf(monitor_name, size, "%s", name);
+	else
+		snprintf(monitor_name, size, "%s.monitor", name);
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
 		module_id = (uint32_t)atoi(str);
@@ -4131,24 +4191,25 @@ static int fill_source_info(struct client *client, struct message *m,
 	uint32_t flags;
 	struct card_info card_info = CARD_INFO_INIT;
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_INPUT);
+	size_t size;
 
 	is_monitor = object_is_monitor(o);
 	if ((!object_is_source(o) && !is_monitor) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
-	if ((name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME)) != NULL) {
-		size_t size = strlen(name) + 10;
-		monitor_name = alloca(size);
-		snprintf(monitor_name, size, "%s.monitor", name);
-	}
-	if ((desc = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)) != NULL) {
-		size_t size = strlen(name) + 20;
-		monitor_desc = alloca(size);
-		snprintf(monitor_desc, size, "Monitor of %s", desc);
-	} else {
-		desc = name;
-		monitor_desc = monitor_name;
-	}
+	name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
+	if ((desc = spa_dict_lookup(info->props, PW_KEY_NODE_DESCRIPTION)) == NULL)
+		desc = name ? name : "Unknown";
+	if (name == NULL)
+		name = "unknown";
+
+	size = strlen(name) + 10;
+	monitor_name = alloca(size);
+	snprintf(monitor_name, size, "%s.monitor", name);
+
+	size = strlen(desc) + 20;
+	monitor_desc = alloca(size);
+	snprintf(monitor_desc, size, "Monitor of %s", desc);
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
 		module_id = (uint32_t)atoi(str);
@@ -4484,17 +4545,17 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 	if (sel.id != SPA_ID_INVALID && sel.value != NULL)
 		goto error_invalid;
 
+	pw_log_info(NAME" %p: [%s] %s tag:%u idx:%u name:%s", impl, client->name,
+			commands[command].name, tag, sel.id, sel.value);
+
 	if (command == COMMAND_GET_SINK_INFO || command == COMMAND_GET_SOURCE_INFO) {
-		if ((sel.value == NULL && sel.id == SPA_ID_INVALID) ||
-		    (sel.value != NULL && strcmp(sel.value, def) == 0))
+		if ((sel.value == NULL && (sel.id == SPA_ID_INVALID || sel.id == 0)) ||
+		    (sel.value != NULL && (strcmp(sel.value, def) == 0 || strcmp(sel.value, "0") == 0)))
 			sel.value = get_default(client, command == COMMAND_GET_SINK_INFO);
 	} else {
 		if (sel.value == NULL && sel.id == SPA_ID_INVALID)
 			goto error_invalid;
 	}
-
-	pw_log_info(NAME" %p: [%s] %s tag:%u idx:%u name:%s", impl, client->name,
-			commands[command].name, tag, sel.id, sel.value);
 
 	if (command == COMMAND_GET_SOURCE_INFO &&
 	    sel.value != NULL && pw_endswith(sel.value, ".monitor")) {
@@ -4528,7 +4589,10 @@ error:
 static uint64_t bytes_to_usec(uint64_t length, const struct sample_spec *ss)
 {
 	uint64_t u;
-	u = length / sample_spec_frame_size(ss);
+	uint64_t frame_size = sample_spec_frame_size(ss);
+	if (frame_size == 0)
+		return 0;
+	u = length / frame_size;
 	u *= SPA_USEC_PER_SEC;
 	u /= ss->rate;
 	return u;
@@ -4873,6 +4937,9 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
 	if (!SPA_FLAG_IS_SET(o->permissions, PW_PERM_W | PW_PERM_X))
 		return -EACCES;
 
+	if (o->proxy == NULL)
+		return -ENOENT;
+
         pw_device_set_param((struct pw_device*)o->proxy,
                         SPA_PARAM_Profile, 0,
                         spa_pod_builder_add_object(&b,
@@ -4888,7 +4955,7 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 	struct impl *impl = client->impl;
 	struct pw_manager *manager = client->manager;
 	struct pw_manager_object *o;
-	const char *name;
+	const char *name, *str;
 	int res;
 	bool sink = command == COMMAND_SET_DEFAULT_SINK;
 
@@ -4904,7 +4971,9 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 		return -ENOENT;
 
 	if (name != NULL) {
-		if (pw_endswith(name, ".monitor"))
+		if (o->props && (str = pw_properties_get(o->props, PW_KEY_NODE_NAME)) != NULL)
+			name = str;
+		else if (pw_endswith(name, ".monitor"))
 			name = strndupa(name, strlen(name)-8);
 
 		res = pw_manager_set_metadata(manager, client->metadata_default,
@@ -4943,6 +5012,9 @@ static int do_suspend(struct client *client, uint32_t command, uint32_t tag, str
 			commands[command].name, tag, id, name);
 
 	if ((o = find_device(client, id, name, sink)) == NULL)
+		return -ENOENT;
+
+	if (o->proxy == NULL)
 		return -ENOENT;
 
 	if (suspend) {
@@ -5169,12 +5241,66 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 
 	module_unload(client, module);
 
-	broadcast_subscribe_event(impl,
-			SUBSCRIPTION_MASK_MODULE,
-			SUBSCRIPTION_EVENT_REMOVE | SUBSCRIPTION_EVENT_MODULE,
-			module_idx);
-
 	return reply_simple_ack(client, tag);
+}
+
+static int do_send_object_message(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+{
+	struct impl *impl = client->impl;
+	struct pw_manager *manager = client->manager;
+	const char *object_path = NULL;
+	const char *message = NULL;
+	const char *params = NULL;
+	char *response = NULL;
+	char *path = NULL;
+	struct message *reply;
+	struct pw_manager_object *o;
+	int len = 0;
+	int res;
+
+	if ((res = message_get(m,
+			TAG_STRING, &object_path,
+			TAG_STRING, &message,
+			TAG_STRING, &params,
+			TAG_INVALID)) < 0)
+		return -EPROTO;
+
+	pw_log_info(NAME" %p: [%s] %s tag:%u object_path:'%s' message:'%s' params:'%s'", impl,
+			client->name, commands[command].name, tag, object_path,
+			message, params ? params : "<null>");
+
+	if (object_path == NULL || message == NULL)
+		return -EINVAL;
+
+	len = strlen(object_path);
+	if (len > 0 && object_path[len - 1] == '/')
+		--len;
+	path = strndup(object_path, len);
+	if (path == NULL)
+		return -ENOMEM;
+
+	res = -ENOENT;
+
+	spa_list_for_each(o, &manager->object_list, link) {
+		if (o->message_object_path && strcmp(o->message_object_path, path) == 0) {
+			if (o->message_handler)
+				res = o->message_handler(manager, o, message, params, &response);
+			else
+				res = -ENOSYS;
+			break;
+		}
+	}
+
+	free(path);
+	if (res < 0)
+		return res;
+
+	pw_log_debug(NAME" %p: object message response:'%s'", impl, response ? response : "<null>");
+
+	reply = reply_new(client, tag);
+	message_put(reply, TAG_STRING, response, TAG_INVALID);
+	free(response);
+	return send_message(client, reply);
 }
 
 static int do_error_access(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5345,6 +5471,9 @@ static const struct command commands[COMMAND_MAX] =
 	/* Supported since protocol v31 (9.0)
 	 * BOTH DIRECTIONS */
 	[COMMAND_REGISTER_MEMFD_SHMID] = { "REGISTER_MEMFD_SHMID", do_error_access, },
+
+	/* Supported since protocol v35 (15.0) */
+	[COMMAND_SEND_OBJECT_MESSAGE] = { "SEND_OBJECT_MESSAGE", do_send_object_message, },
 };
 
 static int client_free_stream(void *item, void *data)
@@ -5694,7 +5823,7 @@ static int check_flatpak(struct client *client, int pid)
 	struct stat stat_buf;
 
 	sprintf(root_path, "/proc/%u/root", pid);
-	root_fd = openat (AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
+	root_fd = openat(AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
 	if (root_fd == -1) {
 		res = -errno;
 		if (res == -EACCES) {
@@ -5713,8 +5842,8 @@ static int check_flatpak(struct client *client, int pid)
 		pw_log_info("failed to open \"%s\": %s", root_path, spa_strerror(res));
 		return res;
 	}
-	info_fd = openat (root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
-	close (root_fd);
+	info_fd = openat(root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
+	close(root_fd);
 	if (info_fd == -1) {
 		if (errno == ENOENT) {
 			pw_log_debug("no .flatpak-info, client on the host");
@@ -5725,11 +5854,11 @@ static int check_flatpak(struct client *client, int pid)
 		pw_log_error("error opening .flatpak-info: %m");
 		return res;
         }
-	if (fstat (info_fd, &stat_buf) != 0 || !S_ISREG (stat_buf.st_mode)) {
+	if (fstat(info_fd, &stat_buf) != 0 || !S_ISREG(stat_buf.st_mode)) {
 		/* Some weird fd => failure, assume sandboxed */
-		close(info_fd);
 		pw_log_error("error fstat .flatpak-info: %m");
 	}
+	close(info_fd);
 	return 1;
 }
 
@@ -6004,7 +6133,9 @@ static int make_local_socket(struct server *server, char *name)
 		goto error_close;
 	}
 	pw_log_info(NAME" listening on unix:%s", server->addr.sun_path);
+#ifdef HAVE_SYSTEMD
 done:
+#endif
 	server->activated = activated;
 	server->type = SERVER_TYPE_UNIX;
 
@@ -6163,6 +6294,13 @@ static void impl_free(struct impl *impl)
 {
 	struct server *s;
 	struct client *c;
+	struct message *msg;
+
+	if (impl->dbus_name)
+		dbus_release_name(impl->dbus_name);
+
+	spa_list_consume(msg, &impl->free_messages, link)
+		message_free(impl, msg, true, true);
 
 	if (impl->context != NULL)
 		spa_hook_remove(&impl->context_listener);
@@ -6170,10 +6308,12 @@ static void impl_free(struct impl *impl)
 		client_free(c);
 	spa_list_consume(s, &impl->servers, link)
 		server_free(s);
+
 	pw_map_for_each(&impl->samples, impl_free_sample, impl);
 	pw_map_clear(&impl->samples);
 	pw_map_for_each(&impl->modules, impl_free_module, impl);
 	pw_map_clear(&impl->modules);
+
 	if (impl->cleanup != NULL)
 		pw_loop_destroy_source(impl->loop, impl->cleanup);
 	pw_properties_free(impl->props);
@@ -6290,7 +6430,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		}
 	}
 
-	dbus_request_name(context, "org.pulseaudio.Server");
+	impl->dbus_name = dbus_request_name(context, "org.pulseaudio.Server");
 
 	return (struct pw_protocol_pulse*)impl;
 
@@ -6310,8 +6450,5 @@ void *pw_protocol_pulse_get_user_data(struct pw_protocol_pulse *pulse)
 void pw_protocol_pulse_destroy(struct pw_protocol_pulse *pulse)
 {
 	struct impl *impl = (struct impl*)pulse;
-	struct message *msg;
-	spa_list_consume(msg, &impl->free_messages, link)
-		message_free(impl, msg, true, true);
 	impl_free(impl);
 }

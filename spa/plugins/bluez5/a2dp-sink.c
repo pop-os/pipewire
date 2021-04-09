@@ -128,13 +128,16 @@ struct impl {
 	uint64_t last_error;
 
 	const struct a2dp_codec *codec;
+	bool codec_props_changed;
+	void *codec_props;
 	void *codec_data;
 	struct spa_audio_info codec_format;
 
+	int need_flush;
 	uint32_t block_size;
-	uint32_t num_blocks;
 	uint8_t buffer[4096];
 	uint32_t buffer_used;
+	uint32_t header_size;
 	uint32_t frame_count;
 	uint16_t seqnum;
 	uint32_t timestamp;
@@ -167,7 +170,8 @@ static int impl_node_enum_params(void *object, int seq,
 	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[1024];
 	struct spa_result_node_params result;
-	uint32_t count = 0;
+	uint32_t count = 0, index_offset = 0;
+	bool enum_codec = false;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
@@ -207,7 +211,8 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Long(0, INT64_MIN, INT64_MAX));
 			break;
 		default:
-			return 0;
+			enum_codec = true;
+			index_offset = 3;
 		}
 		break;
 	}
@@ -224,12 +229,23 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_PROP_latencyOffsetNsec, SPA_POD_Long(p->latency_offset));
 			break;
 		default:
-			return 0;
+			enum_codec = true;
+			index_offset = 1;
 		}
 		break;
 	}
 	default:
 		return -ENOENT;
+	}
+
+	if (enum_codec) {
+		int res;
+		if (this->codec->enum_props == NULL || this->codec_props == NULL)
+			return 0;
+		else if ((res = this->codec->enum_props(this->codec_props,
+					this->transport->device->settings,
+					id, result.index - index_offset, &b, &param)) != 1)
+			return res;
 	}
 
 	if (spa_pod_filter(&b, &result.param, param, filter) < 0)
@@ -340,7 +356,14 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	switch (id) {
 	case SPA_PARAM_Props:
 	{
-		if (apply_props(this, param) > 0) {
+		int res, codec_res = 0;
+		res = apply_props(this, param);
+		if (this->codec_props && this->codec->set_props) {
+			codec_res = this->codec->set_props(this->codec_props, param);
+			if (codec_res > 0)
+				this->codec_props_changed = true;
+		}
+		if (res > 0 || codec_res > 0) {
 			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
 			this->params[1].flags ^= SPA_PARAM_INFO_SERIAL;
 			emit_node_info(this, false);
@@ -354,17 +377,19 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	return 0;
 }
 
-static void update_num_blocks(struct impl *this)
-{
-	this->num_blocks = this->codec->get_num_blocks(this->codec_data);
-}
-
 static int reset_buffer(struct impl *this)
 {
+	if (this->codec_props_changed && this->codec_props
+			&& this->codec->update_props) {
+		this->codec->update_props(this->codec_data, this->codec_props);
+		this->codec_props_changed = false;
+	}
+	this->need_flush = 0;
 	this->frame_count = 0;
 	this->buffer_used = this->codec->start_encode(this->codec_data,
 			this->buffer, sizeof(this->buffer),
 			this->seqnum++, this->timestamp);
+	this->header_size = this->buffer_used;
 	this->timestamp = this->sample_count;
 	return 0;
 }
@@ -388,7 +413,6 @@ static int send_buffer(struct impl *this)
 	if (unsent >= 0) {
 		unsent = this->fd_buffer_size - unsent;
 		this->codec->abr_process(this->codec_data, unsent);
-		update_num_blocks(this);
 	}
 
 	spa_log_trace(this->log, NAME " %p: send %d %u %u %u %u",
@@ -414,11 +438,6 @@ static bool want_flush(struct impl *this)
 	return (this->frame_count * this->block_size / this->port.frame_size >= MIN_LATENCY);
 }
 
-static bool need_flush(struct impl *this)
-{
-	return (this->frame_count >= this->num_blocks);
-}
-
 static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 {
 	int processed;
@@ -431,7 +450,7 @@ static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 			this, size, this->buffer_used, port->frame_size, this->block_size,
 			this->frame_count);
 
-	if (need_flush(this))
+	if (this->need_flush)
 		return 0;
 
 	if (this->buffer_used >= sizeof(this->buffer))
@@ -452,7 +471,7 @@ static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 				from_data, from_size,
 				this->buffer + this->buffer_used,
 				sizeof(this->buffer) - this->buffer_used,
-				&out_encoded);
+				&out_encoded, &this->need_flush);
 	if (processed < 0)
 		return processed;
 
@@ -472,10 +491,10 @@ static int encode_buffer(struct impl *this, const void *data, uint32_t size)
 
 static int flush_buffer(struct impl *this)
 {
-	spa_log_trace(this->log, NAME" %p: used:%d num_blocks:%d block_size:%d", this,
-			this->buffer_used, this->num_blocks, this->block_size);
+	spa_log_trace(this->log, NAME" %p: used:%d block_size:%d", this,
+			this->buffer_used, this->block_size);
 
-	if (want_flush(this) || need_flush(this))
+	if (this->need_flush || want_flush(this))
 		return send_buffer(this);
 
 	return 0;
@@ -509,12 +528,11 @@ static void enable_flush(struct impl *this, bool enabled)
 static int flush_data(struct impl *this, uint64_t now_time)
 {
 	int written;
-	uint32_t total_frames, iter_buffer_used;
+	uint32_t total_frames;
 	struct port *port = &this->port;
 
 	total_frames = 0;
 again:
-	iter_buffer_used = this->buffer_used;
 	while (!spa_list_is_empty(&port->ready)) {
 		uint8_t *src;
 		uint32_t n_bytes, n_frames;
@@ -572,8 +590,7 @@ again:
 		spa_log_trace(this->log, NAME " %p: written %u frames", this, total_frames);
 	}
 
-	iter_buffer_used = this->buffer_used - iter_buffer_used;
-	if (written > 0 && iter_buffer_used == 0) {
+	if (written > 0 && this->buffer_used == this->header_size) {
 		enable_flush(this, false);
 		return 0;
 	}
@@ -583,7 +600,6 @@ again:
 		spa_log_trace(this->log, NAME" %p: delay flush", this);
 		if (now_time - this->last_error > SPA_NSEC_PER_SEC / 2) {
 			this->codec->reduce_bitpool(this->codec_data);
-			update_num_blocks(this);
 			this->last_error = now_time;
 		}
 		enable_flush(this, true);
@@ -596,7 +612,6 @@ again:
 	else if (written > 0) {
 		if (now_time - this->last_error > SPA_NSEC_PER_SEC) {
 			this->codec->increase_bitpool(this->codec_data);
-			update_num_blocks(this);
 			this->last_error = now_time;
 		}
 		if (!spa_list_is_empty(&port->ready))
@@ -708,7 +723,7 @@ static int do_start(struct impl *this)
 			this->transport->configuration,
 			this->transport->configuration_len,
 			&port->current_format,
-			this->transport->device->settings,
+			this->codec_props,
 			this->transport->write_mtu);
 	if (this->codec_data == NULL)
 		return -EIO;
@@ -719,15 +734,14 @@ static int do_start(struct impl *this)
 	this->seqnum = 0;
 
 	this->block_size = this->codec->get_block_size(this->codec_data);
-	update_num_blocks(this);
 	if (this->block_size > sizeof(this->tmp_buffer)) {
 		spa_log_error(this->log, "block-size %d > %zu",
 				this->block_size, sizeof(this->tmp_buffer));
 		return -EIO;
 	}
 
-        spa_log_debug(this->log, NAME " %p: block_size %d num_blocks:%d", this,
-			this->block_size, this->num_blocks);
+        spa_log_debug(this->log, NAME " %p: block_size %d", this,
+			this->block_size);
 
 	val = this->codec->send_buf_size > 0
 			/* The kernel doubles the SO_SNDBUF option value set by setsockopt(). */
@@ -1317,6 +1331,8 @@ static int impl_clear(struct spa_handle *handle)
 
 	if (this->codec_data)
 		this->codec->deinit(this->codec_data);
+	if (this->codec_props && this->codec->clear_props)
+		this->codec->clear_props(this->codec_props);
 	if (this->transport)
 		spa_hook_remove(&this->transport_listener);
 	spa_system_close(this->data_system, this->timerfd);
@@ -1408,6 +1424,9 @@ impl_init(const struct spa_handle_factory *factory,
 		return -EINVAL;
 	}
 	this->codec = this->transport->a2dp_codec;
+	if (this->codec->init_props != NULL)
+		this->codec_props = this->codec->init_props(this->codec,
+					this->transport->device->settings);
 
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);

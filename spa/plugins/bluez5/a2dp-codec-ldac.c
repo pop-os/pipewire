@@ -27,6 +27,8 @@
 #include <errno.h>
 #include <arpa/inet.h>
 
+#include <spa/pod/parser.h>
+#include <spa/param/props.h>
 #include <spa/param/audio/format.h>
 
 #include <ldacBT.h>
@@ -38,6 +40,8 @@
 #include "defs.h"
 #include "rtp.h"
 #include "a2dp-codecs.h"
+
+#define LDACBT_EQMID_AUTO -1
 
 #define LDAC_ABR_MAX_PACKET_NBYTES 1280
 
@@ -51,12 +55,17 @@
 #define LDAC_ABR_SOCK_BUFFER_SIZE (LDAC_ABR_THRESHOLD_CRITICAL * LDAC_ABR_MAX_PACKET_NBYTES)
 
 
+struct props {
+	int eqmid;
+};
+
 struct impl {
 	HANDLE_LDAC_BT ldac;
 #ifdef ENABLE_LDAC_ABR
 	HANDLE_LDAC_ABR ldac_abr;
-	bool enable_abr;
 #endif
+	bool enable_abr;
+
 	struct rtp_header *header;
 	struct rtp_payload *payload;
 
@@ -67,48 +76,6 @@ struct impl {
 	int codesize;
 	int frame_length;
 	int frame_count;
-	int frame_count_factor;
-};
-
-enum {
-	LDACBT_EQMID_BITRATE_990000 = 0, /* LDACBT_EQMID_HQ */
-	LDACBT_EQMID_BITRATE_660000,     /* LDACBT_EQMID_SQ */
-	LDACBT_EQMID_BITRATE_330000,	 /* LDACBT_EQMID_MQ */
-
-	LDACBT_EQMID_BITRATE_492000,
-	LDACBT_EQMID_BITRATE_396000,
-	LDACBT_EQMID_BITRATE_282000,
-	LDACBT_EQMID_BITRATE_246000,
-	LDACBT_EQMID_BITRATE_216000,
-	LDACBT_EQMID_BITRATE_198000,
-	LDACBT_EQMID_BITRATE_180000,
-	LDACBT_EQMID_BITRATE_162000,
-	LDACBT_EQMID_BITRATE_150000,
-	LDACBT_EQMID_BITRATE_138000
-};
-
-struct ldac_config
-{
-    int eqmid;
-    int frame_count; 	   /* number of ldac frames in packet */
-    int frame_length;      /* ldac frame length */
-    int frame_length_1ch;  /* ldac frame length per channel */
-};
-
-static const struct ldac_config ldac_config_table[] = {
-	{ LDACBT_EQMID_BITRATE_990000,     2,    330,   165},
-	{ LDACBT_EQMID_BITRATE_660000,     3,    220,   110},
-	{ LDACBT_EQMID_BITRATE_492000,     4,    164,    82},
-	{ LDACBT_EQMID_BITRATE_396000,     5,    132,    66},
-	{ LDACBT_EQMID_BITRATE_330000,     6,    110,    55},
-	{ LDACBT_EQMID_BITRATE_282000,     7,     94,    47},
-	{ LDACBT_EQMID_BITRATE_246000,     8,     82,    41},
-	{ LDACBT_EQMID_BITRATE_216000,     9,     72,    36},
-	{ LDACBT_EQMID_BITRATE_198000,    10,     66,    33},
-	{ LDACBT_EQMID_BITRATE_180000,    11,     60,    30},
-	{ LDACBT_EQMID_BITRATE_162000,    12,     54,    27},
-	{ LDACBT_EQMID_BITRATE_150000,    13,     50,    25},
-	{ LDACBT_EQMID_BITRATE_138000,    14,     46,    23},
 };
 
 static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags, uint8_t caps[A2DP_MAX_CAPS_SIZE])
@@ -254,34 +221,16 @@ static int codec_enum_config(const struct a2dp_codec *codec,
 	return *param == NULL ? -EIO : 1;
 }
 
-static int update_frame_info(struct impl *this)
-{
-	const struct ldac_config *config;
-	this->eqmid = ldacBT_get_eqmid(this->ldac);
-	for (size_t i = 0; i < SPA_N_ELEMENTS(ldac_config_table); ++i) {
-		config = &ldac_config_table[i];
-
-		if (config->eqmid != this->eqmid)
-			continue;
-
-		this->frame_count = config->frame_count;
-		this->frame_length = config->frame_length;
-		return 0;
-	}
-	return -EINVAL;
-}
-
 static int codec_reduce_bitpool(void *data)
 {
 #ifdef ENABLE_LDAC_ABR
-	return -EINVAL;
+	return -ENOTSUP;
 #else
 	struct impl *this = data;
 	int res;
-	if (this->eqmid == LDACBT_EQMID_BITRATE_330000)
+	if (this->eqmid == LDACBT_EQMID_BITRATE_330000 || !this->enable_abr)
 		return this->eqmid;
 	res = ldacBT_alter_eqmid_priority(this->ldac, LDACBT_EQMID_INC_CONNECTION);
-	update_frame_info(this);
 	return res;
 #endif
 }
@@ -289,20 +238,15 @@ static int codec_reduce_bitpool(void *data)
 static int codec_increase_bitpool(void *data)
 {
 #ifdef ENABLE_LDAC_ABR
-	return -EINVAL;
+	return -ENOTSUP;
 #else
 	struct impl *this = data;
 	int res;
+	if (!this->enable_abr)
+		return this->eqmid;
 	res = ldacBT_alter_eqmid_priority(this->ldac, LDACBT_EQMID_INC_QUALITY);
-	update_frame_info(this);
 	return res;
 #endif
-}
-
-static int codec_get_num_blocks(void *data)
-{
-	struct impl *this = data;
-	return this->frame_count * this->frame_count_factor;
 }
 
 static int codec_get_block_size(void *data)
@@ -311,13 +255,130 @@ static int codec_get_block_size(void *data)
 	return this->codesize;
 }
 
+static int string_to_eqmid(const char * eqmid)
+{
+	if (!strcmp("auto", eqmid))
+		return LDACBT_EQMID_AUTO;
+	else if (!strcmp("hq", eqmid))
+		return LDACBT_EQMID_HQ;
+	else if (!strcmp("sq", eqmid))
+		return LDACBT_EQMID_SQ;
+	else if (!strcmp("mq", eqmid))
+		return LDACBT_EQMID_MQ;
+	else
+		return LDACBT_EQMID_AUTO;
+}
+
+static void *codec_init_props(const struct a2dp_codec *codec, const struct spa_dict *settings)
+{
+	struct props *p = calloc(1, sizeof(struct props));
+	const char *str;
+
+	if (p == NULL)
+		return NULL;
+
+	if (settings == NULL || (str = spa_dict_lookup(settings, "bluez5.a2dp.ldac.quality")) == NULL)
+		str = "auto";
+
+	p->eqmid = string_to_eqmid(str);
+	return p;
+}
+
+static void codec_clear_props(void *props)
+{
+	free(props);
+}
+
+static int codec_enum_props(void *props, const struct spa_dict *settings, uint32_t id, uint32_t idx,
+			struct spa_pod_builder *b, struct spa_pod **param)
+{
+	struct props *p = props;
+	struct spa_pod_frame f[2];
+	switch (id) {
+	case SPA_PARAM_PropInfo:
+	{
+		switch (idx) {
+		case 0:
+			spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_PropInfo, id);
+			spa_pod_builder_prop(b, SPA_PROP_INFO_id, 0);
+			spa_pod_builder_id(b, SPA_PROP_quality);
+			spa_pod_builder_prop(b, SPA_PROP_INFO_name, 0);
+			spa_pod_builder_string(b, "LDAC quality");
+
+			spa_pod_builder_prop(b, SPA_PROP_INFO_type, 0);
+			spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Enum, 0);
+			spa_pod_builder_frame(b, &f[1]);
+			spa_pod_builder_int(b, p->eqmid);
+			spa_pod_builder_int(b, LDACBT_EQMID_AUTO);
+			spa_pod_builder_int(b, LDACBT_EQMID_HQ);
+			spa_pod_builder_int(b, LDACBT_EQMID_SQ);
+			spa_pod_builder_int(b, LDACBT_EQMID_MQ);
+			spa_pod_builder_pop(b, &f[1]);
+
+			spa_pod_builder_prop(b, SPA_PROP_INFO_labels, 0);
+			spa_pod_builder_push_struct(b, &f[1]);
+			spa_pod_builder_int(b, LDACBT_EQMID_AUTO);
+			spa_pod_builder_string(b, "auto");
+			spa_pod_builder_int(b, LDACBT_EQMID_HQ);
+			spa_pod_builder_string(b, "hq");
+			spa_pod_builder_int(b, LDACBT_EQMID_SQ);
+			spa_pod_builder_string(b, "sq");
+			spa_pod_builder_int(b, LDACBT_EQMID_MQ);
+			spa_pod_builder_string(b, "mq");
+			spa_pod_builder_pop(b, &f[1]);
+
+			*param = spa_pod_builder_pop(b, &f[0]);
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+	case SPA_PARAM_Props:
+	{
+		switch (idx) {
+		case 0:
+			*param = spa_pod_builder_add_object(b,
+				SPA_TYPE_OBJECT_Props, id,
+				SPA_PROP_quality, SPA_POD_Int(p->eqmid));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+	default:
+		return -ENOENT;
+	}
+	return 1;
+}
+
+static int codec_set_props(void *props, const struct spa_pod *param)
+{
+	struct props *p = props;
+	const int prev_eqmid = p->eqmid;
+	if (param == NULL) {
+		p->eqmid = LDACBT_EQMID_AUTO;
+	} else {
+		spa_pod_parse_object(param,
+				SPA_TYPE_OBJECT_Props, NULL,
+				SPA_PROP_quality, SPA_POD_OPT_Int(&p->eqmid));
+		if (p->eqmid != LDACBT_EQMID_AUTO &&
+			(p->eqmid < LDACBT_EQMID_HQ || p->eqmid > LDACBT_EQMID_MQ))
+			p->eqmid = prev_eqmid;
+	}
+
+	return prev_eqmid != p->eqmid;
+}
+
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		void *config, size_t config_len, const struct spa_audio_info *info,
-		const struct spa_dict *settings, size_t mtu)
+		void *props, size_t mtu)
 {
 	struct impl *this;
 	a2dp_ldac_t *conf = config;
 	int res;
+	struct props *p = props;
 
 	this = calloc(1, sizeof(struct impl));
 	if (this == NULL)
@@ -333,10 +394,17 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		goto error_errno;
 #endif
 
-	this->eqmid = LDACBT_EQMID_SQ;
+	if (p == NULL || p->eqmid == LDACBT_EQMID_AUTO) {
+		this->eqmid = LDACBT_EQMID_SQ;
+		this->enable_abr = true;
+	} else {
+		this->eqmid = p->eqmid;
+		this->enable_abr = false;
+	}
+
 	this->mtu = mtu;
 	this->frequency = info->info.raw.rate;
-	this->codesize = info->info.raw.channels;
+	this->codesize = info->info.raw.channels * LDACBT_ENC_LSU;
 
 	switch (info->info.raw.format) {
 	case SPA_AUDIO_FORMAT_F32:
@@ -354,23 +422,6 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 	case SPA_AUDIO_FORMAT_S16:
 		this->fmt = LDACBT_SMPL_FMT_S16;
 		this->codesize *= 2;
-		break;
-	default:
-		res = -EINVAL;
-		goto error;
-	}
-
-	switch(conf->frequency) {
-	case LDACBT_SAMPLING_FREQ_044100:
-	case LDACBT_SAMPLING_FREQ_048000:
-		this->codesize *= 128;
-		this->frame_count_factor = 1;
-		break;
-	case LDACBT_SAMPLING_FREQ_088200:
-	case LDACBT_SAMPLING_FREQ_096000:
-		/* ldac ecoder has a constant encoding lsu: LDACBT_ENC_LSU=128 */
-		this->codesize *= 128;
-		this->frame_count_factor = 2;
 		break;
 	default:
 		res = -EINVAL;
@@ -397,11 +448,7 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		LDAC_ABR_THRESHOLD_SAFETY_FOR_HQSQ);
 	if (res < 0)
 		goto error;
-
-	this->enable_abr = true;
 #endif
-
-	update_frame_info(this);
 
 	return this;
 
@@ -431,6 +478,30 @@ static void codec_deinit(void *data)
 	free(this);
 }
 
+static int codec_update_props(void *data, void *props)
+{
+	struct impl *this = data;
+	struct props *p = props;
+	int res;
+
+	if (p == NULL)
+		return 0;
+
+	if (p->eqmid == LDACBT_EQMID_AUTO) {
+		this->eqmid = LDACBT_EQMID_SQ;
+		this->enable_abr = true;
+	} else {
+		this->eqmid = p->eqmid;
+		this->enable_abr = false;
+	}
+
+	if ((res = ldacBT_set_eqmid(this->ldac, this->eqmid)) < 0)
+		goto error;
+	return 0;
+error:
+	return res;
+}
+
 static int codec_abr_process(void *data, size_t unsent)
 {
 #ifdef ENABLE_LDAC_ABR
@@ -438,10 +509,9 @@ static int codec_abr_process(void *data, size_t unsent)
 	int res;
 	res = ldac_ABR_Proc(this->ldac, this->ldac_abr,
 			unsent / LDAC_ABR_MAX_PACKET_NBYTES, this->enable_abr);
-	update_frame_info(this);
 	return res;
 #else
-	return -EINVAL;
+	return -ENOTSUP;
 #endif
 }
 
@@ -466,7 +536,7 @@ static int codec_start_encode (void *data,
 static int codec_encode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
-		size_t *dst_out)
+		size_t *dst_out, int *need_flush)
 {
 	struct impl *this = data;
 	int res, src_used, dst_used, frame_num = 0;
@@ -475,17 +545,19 @@ static int codec_encode(void *data,
 	dst_used = dst_size;
 
 	res = ldacBT_encode(this->ldac, (void*)src, &src_used, dst, &dst_used, &frame_num);
-	if (res < 0)
+	if (SPA_UNLIKELY(res < 0))
 		return -EINVAL;
 
 	*dst_out = dst_used;
 
 	this->payload->frame_count += frame_num;
+	*need_flush = this->payload->frame_count > 0;
 
 	return src_used;
 }
 
 const struct a2dp_codec a2dp_codec_ldac = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_LDAC,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = LDAC_VENDOR_ID,
 		.codec_id = LDAC_CODEC_ID },
@@ -497,10 +569,14 @@ const struct a2dp_codec a2dp_codec_ldac = {
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
+	.init_props = codec_init_props,
+	.enum_props = codec_enum_props,
+	.set_props = codec_set_props,
+	.clear_props = codec_clear_props,
 	.init = codec_init,
 	.deinit = codec_deinit,
+	.update_props = codec_update_props,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.abr_process = codec_abr_process,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,

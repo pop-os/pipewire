@@ -332,7 +332,7 @@ static void flush_data(struct impl *this)
 	uint32_t min_in_size;
 	uint8_t *packet;
 
-	if (this->transport == NULL)
+	if (this->transport == NULL || this->transport->sco_io == NULL)
 		return;
 
 	/* get buffer */
@@ -488,13 +488,6 @@ static void sco_on_timeout(struct spa_source *source)
 	if (this->started && spa_system_timerfd_read(this->data_system, this->timerfd, &exp) < 0)
 		spa_log_warn(this->log, "error reading timerfd: %s", strerror(errno));
 
-	/* Reset if start time is 0 */
-	if (this->start_time == 0) {
-		this->total_samples = 0;
-		port->ready_offset = 0;
-		port->write_buffer_size = 0;
-	}
-
 	/* delay if no buffers available */
 	if (spa_list_is_empty(&port->ready)) {
 		set_timeout(this, this->transport->write_mtu / port->frame_size * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
@@ -560,7 +553,8 @@ static int do_start(struct impl *this)
 	spa_return_val_if_fail(this->transport->write_mtu <= sizeof(this->port.write_buffer), -EINVAL);
 
 	/* start socket i/o */
-	spa_bt_transport_ensure_sco_io(this->transport, this->data_loop);
+	if ((res = spa_bt_transport_ensure_sco_io(this->transport, this->data_loop)) < 0)
+		goto fail;
 
 	/* Add the timeout callback */
 	this->source.data = this;
@@ -577,6 +571,12 @@ static int do_start(struct impl *this)
 	this->started = true;
 
 	return 0;
+
+fail:
+	free(this->buffer);
+	this->buffer = NULL;
+	spa_bt_transport_release(this->transport);
+	return res;
 }
 
 /* Drop any buffered data remaining in the port */
@@ -586,6 +586,7 @@ static void drop_port_output(struct impl *this)
 
 	port->write_buffer_size = 0;
 	port->current_buffer = NULL;
+	port->ready_offset = 0;
 
 	while (!spa_list_is_empty(&port->ready)) {
 		struct buffer *b;
@@ -608,6 +609,7 @@ static int do_remove_source(struct spa_loop *loop,
 	struct impl *this = user_data;
 
 	this->start_time = 0;
+	this->total_samples = 0;
 	set_timeout(this, 0);
 	if (this->source.loop)
 		spa_loop_remove_source(this->data_loop, &this->source);
@@ -676,19 +678,27 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	return 0;
 }
 
-static const struct spa_dict_item node_info_items[] = {
-	{ SPA_KEY_DEVICE_API, "bluez5" },
-	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
-	{ SPA_KEY_NODE_DRIVER, "true" },
-	{ SPA_KEY_NODE_PAUSE_ON_IDLE, "false" },
-};
-
 static void emit_node_info(struct impl *this, bool full)
 {
+	bool is_ag = (this->transport->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY);
+	struct spa_dict_item ag_node_info_items[] = {
+		{ SPA_KEY_DEVICE_API, "bluez5" },
+		{ SPA_KEY_MEDIA_CLASS, "Stream/Input/Audio" },
+		{ "media.name", ((this->transport && this->transport->device->name) ?
+		                 this->transport->device->name : "HSP/HFP") },
+	};
+	struct spa_dict_item hu_node_info_items[] = {
+		{ SPA_KEY_DEVICE_API, "bluez5" },
+		{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
+		{ SPA_KEY_NODE_DRIVER, "true" },
+	};
+
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
-		this->info.props = &SPA_DICT_INIT_ARRAY(node_info_items);
+		this->info.props = is_ag ?
+			&SPA_DICT_INIT_ARRAY(ag_node_info_items) :
+			&SPA_DICT_INIT_ARRAY(hu_node_info_items);
 		spa_node_emit_info(&this->hooks, &this->info);
 		this->info.change_mask = 0;
 	}

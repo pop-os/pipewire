@@ -176,6 +176,8 @@ static void object_destroy(struct object *o)
 		pw_proxy_destroy(o->this.proxy);
 	if (o->this.props)
 		pw_properties_free(o->this.props);
+	if (o->this.message_object_path)
+		free(o->this.message_object_path);
 	clear_params(&o->this.param_list, SPA_ID_INVALID);
 	clear_params(&o->pending_list, SPA_ID_INVALID);
 	spa_list_consume(d, &o->data_list, link) {
@@ -520,11 +522,13 @@ destroy_proxy(void *data)
 {
 	struct object *o = data;
 
+	spa_assert(o->info);
+
 	if (o->info->events)
 		spa_hook_remove(&o->object_listener);
 	spa_hook_remove(&o->proxy_listener);
 
-	if (o->info && o->info->destroy)
+	if (o->info->destroy)
                 o->info->destroy(o);
 
         o->this.proxy = NULL;
@@ -711,6 +715,8 @@ int pw_manager_set_metadata(struct pw_manager *manager,
 		return -ENOTSUP;
 	if (!SPA_FLAG_IS_SET(metadata->permissions, PW_PERM_W|PW_PERM_X))
 		return -EACCES;
+	if (metadata->proxy == NULL)
+		return -ENOENT;
 
 	if (type != NULL) {
 		va_start(args, format);

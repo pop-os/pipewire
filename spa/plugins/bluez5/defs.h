@@ -161,6 +161,8 @@ extern "C" {
 
 #define SPA_BT_UNKNOWN_DELAY			0
 
+#define SPA_BT_NO_BATTERY			((uint8_t)255)
+
 /* HFP uses SBC encoding with precisely defined parameters. Hence, the size
  * of the input (number of PCM samples) and output is known up front. */
 #define MSBC_DECODED_SIZE       240
@@ -200,6 +202,7 @@ static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
 	else
 		return 0;
 }
+int spa_bt_profiles_from_json_array(const char *str);
 
 enum spa_bt_hfp_ag_feature {
 	SPA_BT_HFP_AG_FEATURE_NONE =			(0),
@@ -406,6 +409,8 @@ struct spa_bt_device {
 	int blocked;
 	uint32_t profiles;
 	uint32_t connected_profiles;
+	uint32_t reconnect_profiles;
+	int reconnect_state;
 	struct spa_source timer;
 	struct spa_list remote_endpoint_list;
 	struct spa_list transport_list;
@@ -430,6 +435,8 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec **codecs);
 bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec);
 const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_device *device, size_t *count);
+int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, unsigned int codec);
+int spa_bt_device_supports_hfp_codec(struct spa_bt_device *device, unsigned int codec);
 int spa_bt_device_release_transports(struct spa_bt_device *device);
 int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage);
 
@@ -507,6 +514,7 @@ struct spa_bt_transport {
 
 struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor, char *path, size_t extra);
 void spa_bt_transport_free(struct spa_bt_transport *transport);
+void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_transport_state state);
 struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path);
 struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monitor,
                                                     bool (*callback) (struct spa_bt_transport *t, const void *data),
@@ -515,7 +523,7 @@ int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t);
 
 int spa_bt_transport_acquire(struct spa_bt_transport *t, bool optional);
 int spa_bt_transport_release(struct spa_bt_transport *t);
-void spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop);
+int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop);
 
 #define spa_bt_transport_emit(t,m,v,...)		spa_hook_list_call(&(t)->listener_list, \
 								struct spa_bt_transport_events,	\
@@ -552,6 +560,52 @@ static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(con
 		return SPA_BT_TRANSPORT_STATE_IDLE;
 }
 
+struct spa_bt_backend_implementation {
+#define SPA_VERSION_BT_BACKEND_IMPLEMENTATION	0
+	uint32_t version;
+
+	int (*free) (void *data);
+	int (*register_profiles) (void *data);
+	int (*unregister_profiles) (void *data);
+	int (*unregistered) (void *data);
+	int (*add_filters) (void *data);
+	int (*ensure_codec) (void *data, struct spa_bt_device *device, unsigned int codec);
+	int (*supports_codec) (void *data, struct spa_bt_device *device, unsigned int codec);
+};
+
+struct spa_bt_backend {
+	struct spa_callbacks impl;
+};
+
+#define spa_bt_backend_set_implementation(b,_impl,_data) \
+			(b)->impl = SPA_CALLBACKS_INIT(_impl, _data)
+
+#define spa_bt_backend_impl(b,m,v,...)				\
+({								\
+	int res = -ENOTSUP;					\
+	if (b)							\
+		spa_callbacks_call_res(&(b)->impl,		\
+			struct spa_bt_backend_implementation,	\
+			res, m, v, ##__VA_ARGS__);		\
+	res;							\
+})
+
+#define spa_bt_backend_free(b)			spa_bt_backend_impl(b, free, 0)
+#define spa_bt_backend_register_profiles(b)	spa_bt_backend_impl(b, register_profiles, 0)
+#define spa_bt_backend_unregister_profiles(b)	spa_bt_backend_impl(b, unregister_profiles, 0)
+#define spa_bt_backend_unregistered(b)		spa_bt_backend_impl(b, unregistered, 0)
+#define spa_bt_backend_add_filters(b)		spa_bt_backend_impl(b, add_filters, 0)
+#define spa_bt_backend_ensure_codec(b,...)	spa_bt_backend_impl(b, ensure_codec, 0, __VA_ARGS__)
+#define spa_bt_backend_supports_codec(b,...)	spa_bt_backend_impl(b, supports_codec, 0, __VA_ARGS__)
+
+static inline struct spa_bt_backend *dummy_backend_new(struct spa_bt_monitor *monitor,
+		void *dbus_connection,
+		const struct spa_dict *info,
+		const struct spa_support *support,
+		uint32_t n_support)
+{
+	return NULL;
+}
 
 #ifdef HAVE_BLUEZ_5_BACKEND_NATIVE
 struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
@@ -559,20 +613,8 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
-void backend_native_free(struct spa_bt_backend *backend);
-void backend_native_register_profiles(struct spa_bt_backend *backend);
-void backend_native_unregister_profiles(struct spa_bt_backend *backend);
 #else
-static inline struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
-		void *dbus_connection,
-		const struct spa_dict *info,
-		const struct spa_support *support,
-		uint32_t n_support) {
-	return NULL;
-}
-static inline void backend_native_free(struct spa_bt_backend *backend) {}
-static inline void backend_native_register_profiles(struct spa_bt_backend *backend) {}
-static inline void backend_native_unregister_profiles(struct spa_bt_backend *backend) {}
+#define backend_native_new	dummy_backend_new
 #endif
 
 #define OFONO_SERVICE "org.ofono"
@@ -582,20 +624,8 @@ struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
-void backend_ofono_free(struct spa_bt_backend *backend);
-int backend_ofono_register(struct spa_bt_backend *backend);
-void backend_ofono_add_filters(struct spa_bt_backend *backend);
 #else
-static inline struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
-		void *dbus_connection,
-		const struct spa_dict *info,
-		const struct spa_support *support,
-		uint32_t n_support) {
-	return NULL;
-}
-static inline void backend_ofono_free(struct spa_bt_backend *backend) {}
-static inline int backend_ofono_register(struct spa_bt_backend *backend) { return -ENOTSUP; }
-static inline void backend_ofono_add_filters(struct spa_bt_backend *backend) {}
+#define backend_ofono_new	dummy_backend_new
 #endif
 
 #define HSPHFPD_SERVICE "org.hsphfpd"
@@ -605,22 +635,8 @@ struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		const struct spa_dict *info,
 		const struct spa_support *support,
 		uint32_t n_support);
-void backend_hsphfpd_free(struct spa_bt_backend *backend);
-int backend_hsphfpd_register(struct spa_bt_backend *backend);
-void backend_hsphfpd_unregistered(struct spa_bt_backend *backend);
-void backend_hsphfpd_add_filters(struct spa_bt_backend *backend);
 #else
-static inline struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
-		void *dbus_connection,
-		const struct spa_dict *info,
-		const struct spa_support *support,
-		uint32_t n_support) {
-	return NULL;
-}
-static inline void backend_hsphfpd_free(struct spa_bt_backend *backend) {}
-static inline int backend_hsphfpd_register(struct spa_bt_backend *backend) { return -ENOTSUP; }
-static inline void backend_hsphfpd_unregistered(struct spa_bt_backend *backend) {}
-static inline void backend_hsphfpd_add_filters(struct spa_bt_backend *backend) {}
+#define backend_hsphfpd_new	dummy_backend_new
 #endif
 
 #ifdef __cplusplus

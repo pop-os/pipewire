@@ -79,6 +79,12 @@
 #define TYPE_ID_VIDEO	2
 #define TYPE_ID_OTHER	3
 
+#define SELF_CONNECT_ALLOW	0
+#define SELF_CONNECT_FAIL_EXT	-1
+#define SELF_CONNECT_IGNORE_EXT	1
+#define SELF_CONNECT_FAIL_ALL	-2
+#define SELF_CONNECT_IGNORE_ALL	2
+
 struct client;
 struct port;
 
@@ -358,6 +364,7 @@ struct client {
 	unsigned int merge_monitor:1;
 	unsigned int short_name:1;
 	unsigned int filter_name:1;
+	int self_connect_mode;
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
@@ -374,7 +381,7 @@ static void init_port_pool(struct client *c, enum spa_direction direction)
 	c->n_port_pool[direction] = 0;
 }
 
-static struct object * alloc_object(struct client *c)
+static struct object * alloc_object(struct client *c, int type)
 {
 	struct object *o;
 	int i;
@@ -387,9 +394,10 @@ static struct object * alloc_object(struct client *c)
 			spa_list_append(&c->context.free_objects, &o[i].link);
 	}
 
-        o = spa_list_first(&c->context.free_objects, struct object, link);
-        spa_list_remove(&o->link);
+	o = spa_list_first(&c->context.free_objects, struct object, link);
+	spa_list_remove(&o->link);
 	o->client = c;
+	o->type = type;
 
 	return o;
 }
@@ -503,8 +511,7 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	p = spa_list_first(&c->free_ports[direction], struct port, link);
 	spa_list_remove(&p->link);
 
-	o = alloc_object(c);
-	o->type = INTERFACE_Port;
+	o = alloc_object(c, INTERFACE_Port);
 	o->id = SPA_ID_INVALID;
 	o->port.node_id = c->node_id;
 	o->port.port_id = p->id;
@@ -1620,7 +1627,8 @@ static int port_set_format(struct client *c, struct port *p,
 	}
 	else {
 		struct spa_audio_info info = { 0 };
-		spa_format_parse(param, &info.media_type, &info.media_subtype);
+		if (spa_format_parse(param, &info.media_type, &info.media_subtype) < 0)
+			return -EINVAL;
 
 		switch (info.media_type) {
 		case SPA_MEDIA_TYPE_audio:
@@ -2153,8 +2161,8 @@ static void registry_event_global(void *data, uint32_t id,
 	struct client *c = (struct client *) data;
 	struct object *o, *ot, *op;
 	const char *str;
-	uint32_t object_type;
 	size_t size;
+	bool is_first = false;
 
 	if (props == NULL)
 		return;
@@ -2163,8 +2171,7 @@ static void registry_event_global(void *data, uint32_t id,
 		const char *app, *node_name;
 		char tmp[JACK_CLIENT_NAME_SIZE+1];
 
-		o = alloc_object(c);
-		object_type = INTERFACE_Node;
+		o = alloc_object(c, INTERFACE_Node);
 
 		if ((str = spa_dict_lookup(props, PW_KEY_CLIENT_ID)) != NULL)
 			o->node.client_id = atoi(str);
@@ -2204,11 +2211,13 @@ static void registry_event_global(void *data, uint32_t id,
 			filter_name(tmp, FILTER_NAME);
 
 		ot = find_node(c, tmp);
-		if (ot != NULL && o->node.client_id != ot->node.client_id)
+		if (ot != NULL && o->node.client_id != ot->node.client_id) {
 			snprintf(o->node.name, sizeof(o->node.name), "%.*s-%d",
 					(int)(sizeof(tmp)-11), tmp, id);
-		else
+		} else {
+			is_first = ot == NULL;
 			snprintf(o->node.name, sizeof(o->node.name), "%s", tmp);
+		}
 
 		if ((str = spa_dict_lookup(props, PW_KEY_PRIORITY_DRIVER)) != NULL)
 			o->node.priority = pw_properties_parse_int(str);
@@ -2227,7 +2236,6 @@ static void registry_event_global(void *data, uint32_t id,
 		bool is_monitor = false;
 		char tmp[REAL_JACK_PORT_NAME_SIZE+1];
 
-		object_type = INTERFACE_Port;
 		if ((str = spa_dict_lookup(props, PW_KEY_FORMAT_DSP)) == NULL)
 			str = "other";
 		if ((type_id = string_to_type(str)) == SPA_ID_INVALID)
@@ -2277,7 +2285,7 @@ static void registry_event_global(void *data, uint32_t id,
 				pw_log_debug(NAME" %p: %s found our port %p", c, tmp, o);
 		}
 		if (o == NULL) {
-			o = alloc_object(c);
+			o = alloc_object(c, INTERFACE_Port);
 			if (o == NULL)
 				goto exit;
 
@@ -2331,8 +2339,7 @@ static void registry_event_global(void *data, uint32_t id,
 				o->port.name, type_id);
 	}
 	else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
-		o = alloc_object(c);
-		object_type = INTERFACE_Link;
+		o = alloc_object(c, INTERFACE_Link);
 
 		pthread_mutex_lock(&c->context.lock);
 		spa_list_append(&c->context.links, &o->link);
@@ -2372,7 +2379,6 @@ static void registry_event_global(void *data, uint32_t id,
 		goto exit;
 	}
 
-	o->type = object_type;
 	o->id = id;
 
 	pthread_mutex_lock(&c->context.lock);
@@ -2386,7 +2392,7 @@ static void registry_event_global(void *data, uint32_t id,
 
 	switch (o->type) {
 	case INTERFACE_Node:
-		if (c->registration_callback)
+		if (c->registration_callback && is_first)
 			c->registration_callback(o->node.name, 1, c->registration_arg);
 		break;
 
@@ -2413,14 +2419,25 @@ static void registry_event_global_remove(void *object, uint32_t id)
 {
 	struct client *c = (struct client *) object;
 	struct object *o;
+	bool is_last = false;
 
 	pw_log_debug(NAME" %p: removed: %u", c, id);
 
 	pthread_mutex_lock(&c->context.lock);
 	o = pw_map_lookup(&c->context.globals, id);
+	if (o != NULL)
+	        spa_list_remove(&o->link);
 	pthread_mutex_unlock(&c->context.lock);
 	if (o == NULL)
 		return;
+
+	/* JACK clients expect the objects to hang around after
+	 * they are unregistered. We keep the memory around for that
+	 * reason but reuse it when we can. */
+	spa_list_append(&c->context.free_objects, &o->link);
+
+	if (o->type == INTERFACE_Node)
+		is_last = find_node(c, o->node.name) == NULL;
 
 	pw_thread_loop_unlock(c->context.loop);
 
@@ -2432,7 +2449,7 @@ static void registry_event_global_remove(void *object, uint32_t id)
 			if (strcmp(o->node.node_name, c->metadata->default_audio_source) == 0)
 				c->metadata->default_audio_source[0] = '\0';
 		}
-		if (c->registration_callback)
+		if (c->registration_callback && is_last)
 			c->registration_callback(o->node.name, 0, c->registration_arg);
 		break;
 	case INTERFACE_Port:
@@ -2446,12 +2463,12 @@ static void registry_event_global_remove(void *object, uint32_t id)
 	}
 	pw_thread_loop_lock(c->context.loop);
 
-	/* JACK clients expect the objects to hang around after
-	 * they are unregistered. We keep them in the map but reuse the
-	 * object when we can
+	/* we keep the object available with the id because jack clients
+	 * tend to access the objects with it later.
+	 *
 	 * pw_map_insert_at(&c->context.globals, id, NULL);
-	 **/
-	free_object(c, o);
+	 */
+
 	return;
 }
 
@@ -2550,6 +2567,18 @@ jack_client_t * jack_client_open (const char *client_name,
 		client->short_name = pw_properties_parse_bool(str);
 	if ((str = pw_properties_get(client->props, "jack.filter-name")) != NULL)
 		client->filter_name = pw_properties_parse_bool(str);
+
+	client->self_connect_mode = SELF_CONNECT_ALLOW;
+	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
+		if (strcmp(str, "fail-external") == 0)
+			client->self_connect_mode = SELF_CONNECT_FAIL_EXT;
+		else if (strcmp(str, "ignore-external") == 0)
+			client->self_connect_mode = SELF_CONNECT_IGNORE_EXT;
+		else if (strcmp(str, "fail-all") == 0)
+			client->self_connect_mode = SELF_CONNECT_FAIL_ALL;
+		else if (strcmp(str, "ignore-all") == 0)
+			client->self_connect_mode = SELF_CONNECT_IGNORE_ALL;
+	}
 
 	spa_list_init(&client->context.free_objects);
 	pthread_mutex_init(&client->context.lock, NULL);
@@ -2688,6 +2717,7 @@ server_failed:
 exit_unlock:
 	pw_thread_loop_unlock(client->context.loop);
 exit:
+	free(client);
 	return NULL;
 disabled:
 	if (status)
@@ -2734,6 +2764,7 @@ int jack_client_close (jack_client_t *client)
 	pw_thread_loop_destroy(c->context.loop);
 
 	pw_log_debug(NAME" %p: free", client);
+	pw_map_clear(&c->context.globals);
 	pthread_mutex_destroy(&c->context.lock);
 	pw_properties_free(c->props);
 	free(c);
@@ -3614,7 +3645,9 @@ void * jack_port_get_buffer (jack_port_t *port, jack_nframes_t frames)
 
 	spa_return_val_if_fail(o != NULL, NULL);
 
-	p = o->port.port;
+	if ((p = o->port.port) == NULL)
+		return NULL;
+
 	ptr = p->get_buffer(p, frames);
 	pw_log_trace_fp(NAME" %p: port %p buffer %p empty:%u", p->client, p, ptr, p->empty_out);
 	return ptr;
@@ -4049,6 +4082,33 @@ static const struct pw_proxy_events link_proxy_events = {
 	.error = link_proxy_error,
 };
 
+static int check_connect(struct client *c, struct object *src, struct object *dst)
+{
+	int src_self, dst_self, sum;
+
+	if (c->self_connect_mode == SELF_CONNECT_ALLOW)
+		return 1;
+
+	src_self = src->port.node_id == c->node_id ? 1 : 0;
+	dst_self = dst->port.node_id == c->node_id ? 1 : 0;
+	sum = src_self + dst_self;
+	/* check for no self connection first */
+	if (sum == 0)
+		return 1;
+
+	/* internal connection */
+	if (sum == 2 &&
+	    (c->self_connect_mode == SELF_CONNECT_FAIL_EXT ||
+	     c->self_connect_mode == SELF_CONNECT_IGNORE_EXT))
+		return 1;
+
+	/* failure -> -1 */
+	if (c->self_connect_mode < 0)
+		return -1;
+
+	/* ignore -> 0 */
+	return 0;
+}
 
 SPA_EXPORT
 int jack_connect (jack_client_t *client,
@@ -4083,6 +4143,8 @@ int jack_connect (jack_client_t *client,
 		res = -EINVAL;
 		goto exit;
 	}
+	if ((res = check_connect(c, src, dst)) != 1)
+		goto exit;
 
 	snprintf(val[0], sizeof(val[0]), "%d", src->port.node_id);
 	snprintf(val[1], sizeof(val[1]), "%d", src->id);
@@ -4156,6 +4218,9 @@ int jack_disconnect (jack_client_t *client,
 		res = -EINVAL;
 		goto exit;
 	}
+
+	if ((res = check_connect(c, src, dst)) != 1)
+		goto exit;
 
 	if ((l = find_link(c, src->id, dst->id)) == NULL) {
 		res = -ENOENT;
@@ -4232,10 +4297,10 @@ SPA_EXPORT
 void jack_port_set_latency (jack_port_t *port, jack_nframes_t frames)
 {
 	struct object *o = (struct object *) port;
+	jack_latency_range_t range = { frames, frames };
 
 	spa_return_if_fail(o != NULL);
 
-	jack_latency_range_t range = { frames, frames };
 	if (o->port.flags & JackPortIsOutput) {
 		jack_port_set_latency_range(port, JackCaptureLatency, &range);
         }
@@ -4296,7 +4361,7 @@ SPA_EXPORT
 jack_nframes_t jack_port_get_latency (jack_port_t *port)
 {
 	struct object *o = (struct object *) port;
-	jack_latency_range_t range;
+	jack_latency_range_t range = { 0, 0 };
 
 	spa_return_val_if_fail(o != NULL, 0);
 
@@ -5070,7 +5135,8 @@ SPA_EXPORT
 uint32_t jack_midi_get_event_count(void* port_buffer)
 {
 	struct midi_buffer *mb = port_buffer;
-	spa_return_val_if_fail(mb != NULL, 0);
+	if (mb == NULL)
+		return 0;
 	return mb->event_count;
 }
 

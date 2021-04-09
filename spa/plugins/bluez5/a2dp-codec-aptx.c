@@ -43,6 +43,8 @@ struct impl {
 	size_t mtu;
 	int codesize;
 	int frame_length;
+	int frame_count;
+	int max_frames;
 
 	bool hd;
 };
@@ -202,19 +204,6 @@ static int codec_increase_bitpool(void *data)
 	return -ENOTSUP;
 }
 
-static int codec_get_num_blocks(void *data)
-{
-	struct impl *this = data;
-	size_t frame_count;
-
-	if (this->hd)
-		frame_count = (this->mtu - sizeof(struct rtp_header)) / this->frame_length;
-	else
-		frame_count = this->mtu / this->frame_length;
-
-	return frame_count;
-}
-
 static int codec_get_block_size(void *data)
 {
 	struct impl *this = data;
@@ -223,7 +212,7 @@ static int codec_get_block_size(void *data)
 
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		void *config, size_t config_len, const struct spa_audio_info *info,
-		const struct spa_dict *settings, size_t mtu)
+		void *props, size_t mtu)
 {
 	struct impl *this;
 	int res;
@@ -246,6 +235,11 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 	}
 	this->frame_length = this->hd ? 6 : 4;
 	this->codesize = 4 * 3 * 2;
+
+	if (this->hd)
+		this->max_frames = (this->mtu - sizeof(struct rtp_header)) / this->frame_length;
+	else
+		this->max_frames = this->mtu / this->frame_length;
 
 	return this;
 
@@ -277,6 +271,8 @@ static int codec_start_encode (void *data,
 {
 	struct impl *this = data;
 
+	this->frame_count = 0;
+
 	if (!this->hd)
 		return 0;
 
@@ -287,21 +283,31 @@ static int codec_start_encode (void *data,
 	this->header->pt = 1;
 	this->header->sequence_number = htons(seqnum);
 	this->header->timestamp = htonl(timestamp);
-	this->header->ssrc = htonl(1);
 	return sizeof(struct rtp_header);
 }
 
 static int codec_encode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
-		size_t *dst_out)
+		size_t *dst_out, int *need_flush)
 {
 	struct impl *this = data;
+	size_t avail_dst_size;
 	int res;
 
-	res = aptx_encode(this->aptx, src, src_size,
-			dst, dst_size, dst_out);
+	avail_dst_size = (this->max_frames - this->frame_count) * this->frame_length;
+	if (SPA_UNLIKELY(dst_size < avail_dst_size)) {
+		*need_flush = 1;
+		return 0;
+	}
 
+	res = aptx_encode(this->aptx, src, src_size,
+			dst, avail_dst_size, dst_out);
+	if(SPA_UNLIKELY(res < 0))
+		return -EINVAL;
+
+	this->frame_count += *dst_out / this->frame_length;
+	*need_flush = this->frame_count >= this->max_frames;
 	return res;
 }
 
@@ -340,6 +346,7 @@ static int codec_decode(void *data,
 }
 
 const struct a2dp_codec a2dp_codec_aptx = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_APTX,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = APTX_VENDOR_ID,
 		.codec_id = APTX_CODEC_ID },
@@ -351,7 +358,6 @@ const struct a2dp_codec a2dp_codec_aptx = {
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.abr_process = codec_abr_process,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,
@@ -363,6 +369,7 @@ const struct a2dp_codec a2dp_codec_aptx = {
 
 
 const struct a2dp_codec a2dp_codec_aptx_hd = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_APTX_HD,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = APTX_HD_VENDOR_ID,
 		.codec_id = APTX_HD_CODEC_ID },
@@ -374,7 +381,6 @@ const struct a2dp_codec a2dp_codec_aptx_hd = {
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.abr_process = codec_abr_process,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,

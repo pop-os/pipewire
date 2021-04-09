@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.24',
+  version : '0.3.25',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -308,7 +308,7 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
-ncurses_dep = dependency('ncurses', required : false)
+ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 
 gst_option = get_option('gstreamer')

@@ -1,3 +1,103 @@
+PipeWire 0.3.25
+
+This is a bugfix release that is API and ABI compatible
+with previous 0.3.x releases.
+
+- Highlights
+  - Many stability improvements.
+  - Plug fd leak in flatpak detection
+  - add pw-loopback tool and support module-loopback
+  - volume restore for virtual sinks/sources or other sink/sources
+    without hardware volume.
+  - Fix cracks and pops in audio capture.
+  - Many bluetooth improvements and compatibity fixes.
+
+
+- PipeWire improvements
+  - Hex encode invalid SEC_LABEL properties to avoid generating
+    invalid json.
+  - Small fixes to how nodes are started to avoid crashes.
+  - Make sure ports are only scheduled after being fully
+    negotiated to avoid crashes.
+  - Implement coverity into CI, fix some bugs detected by
+    coverity.
+  - Plug leak in flatpak detection.
+  - Fix crash when removing globals in some cases.
+  - Fix crash because the mixer info was not removed from a
+    port in all cases.
+  - Add PIPEWIRE_AUTOCONNECT environment variable to disable
+    stream autoconnect. Also add a config option to disable
+    autoconnect.
+  - Improve wildcard in format helpers.
+  - Add env variable to disable journald logging.
+
+- Tools
+  - Add a new pw-loopback tool to loop a capture device to a
+    playback device.
+  - Display localized strings correctly in pw-top
+  - Add some more options to pw-dot
+
+- Session-manager
+  - When a new node is configured and some stream have this
+    as the default target, move them to it.
+  - Fix some crashes.
+  - Implement volume restore on nodes without routes. This makes
+    it possible to restore volume on purely software nodes like
+    null-sinks.
+  - Also try to suspend errored nodes so that they may leave the
+    error state and be reused again.
+  - Break endless link loops when something went wrong.
+
+- Device support
+  - Fix monitor volumes, they are now separate from the hardware
+    volume.
+  - Fix cracks and pops in alsa capture caused by mismatch between
+    resampler and capture source.
+  - Add start-delay config option to alsa sink.
+  - Ensure the PipeWire midi ports start from a higher number so
+    that the lower port numbers are available to apps as before.
+
+- Bluetooth
+  - source devices are now removed when idle
+  - Support using pipewire as Audio Gateway.
+  - LDAC encoding quality can be configured now
+  - Implement codec switching for HFP
+  - Implement codec switching with new device property.
+  - Improved stability and compatibility
+  - Autoconnect device profiles at startup
+  - Add AAC bitrate mode configuration
+  - Make it possible to use an A2DP source as an input device. You
+    can then use your phone as an A2DP microphone, for example.
+  - Remove battery reporting when RFCOMM connections is closed.
+
+- PulseAudio server
+  - Add some workarounds for Blueman
+  - Set correct errno values, fixes a hang in load-module of a
+    non-existing module
+  - Try to not send inconsistent information to clients.
+  - Fix some crashes.
+  - Add support for the new send-message API, use this to
+    switch bluetooth codecs.
+  - Fix draining by making sure we are started.
+  - Handle 0 sink and source as the default sink/source.
+  - Implement module-loopback
+
+- JACK
+  - Fix some memory leaks when closing a client
+  - Add self-connect config option to limit where clients
+    can connect themselves.
+  - Don't crash when apps call _port_get_buffer() on a
+    port that is not their own but simply return NULL.
+    This fixes a crash in Ardour6.
+  - Improve client added/removed callbacks. Sometimes it would
+    emit a client remove when there were still ports for the
+    client.
+  - make sure midi port names are stable across reboots.
+
+
+Older versions:
+
+
 PipeWire 0.3.24
 
 This is a bugfix release that is API and ABI compatible
@@ -14,32 +114,32 @@ with previous 0.3.x releases.
 
 
 - PipeWire improvements
-  - Implement simple upmixing
+  - Implement simple upmixing.
   - Disable the resampler when not used. This improves latency
     and CPU usage.
   - Handle max-quantum on devices and try to not make the quantum
     larger than the device buffer size.
-  - improvements to how nodes and links are activated. It should
+  - Improvements to how nodes and links are activated. It should
     now result in less xruns and cracks/pops.
-  - meson uses the feature options everywhere now
+  - meson uses the feature options everywhere now.
   - Handle volume remap in the channelmixer. This fixes the channels
     on multichannel devices.
-  - Try to escape invalid JSON string characters
+  - Try to escape invalid JSON string characters.
   - Keep better track of changed parameters in audioconvert.
   - Improve config files, make arrays where needed.
   - Respect NO_COLOR where possible
   - Support in-place config file parsing to avoid allocations and
     improve startup performance.
-  - There is no a config option to enable non-power-of-two quantums.
+  - There is now a config option to enable non-power-of-two quantums.
   - Preliminary support for upmixing and generating LFE channels.
 
 - Session-manager
-  - default nodes are not stored as JSON in the metadata. This
+  - Default nodes are not stored as JSON in the metadata. This
     is more readable and introspectable.
-  - More default-nodes and default-routes improvements. port
+  - More default-nodes and default-routes improvements. Port
     switching should work better now.
   - Wait until all devices are scanned before linking clients.
-  - Fixes some crashes
+  - Fixes some crashes.
   - Sinks (monitors) can now be set as default sources.
 
 - Device support
@@ -60,7 +160,7 @@ with previous 0.3.x releases.
   - Many other small improvements.
 
 - PulseAudio server
-  - handle NULL in set_default_sink/source to clear the default
+  - Handle NULL in set_default_sink/source to clear the default.
   - Implement a workaround for gnome-control-center when setting
     the default sink/source. It also sets the target in
     stream-restore to the new default. This fixes moving streams
@@ -70,22 +170,18 @@ with previous 0.3.x releases.
   - Prefer formats of the extended format API.
   - Create a pid file on startup to improve compatibility with apps
     that look for it.
-  - Capture streams can now be moved to monitors with pavucontrol
-  - Fixes for crashes
+  - Capture streams can now be moved to monitors with pavucontrol.
+  - Fixes for crashes.
 
 - JACK
-  - jack clients can now connect to the 'default' server
-  - Move midi ports back to the midi client
-  - Only mark midi hardware ports as terminal/physical
-  - Use the same midi names as a2jmidid
+  - jack clients can now connect to the 'default' server.
+  - Move midi ports back to the midi client.
+  - Only mark midi hardware ports as terminal/physical.
+  - Use the same midi names as a2jmidid.
   - match system ports in get_ports.
   - Improve compatibility with some apps that require a
     fixed latency.
   - Beginnings of the libjackserver implementation.
-
-
-
-Older versions:
 
 
 PipeWire 0.3.23
