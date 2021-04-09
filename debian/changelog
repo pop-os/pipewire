@@ -1,8 +1,9 @@
-pipewire (0.3.25-1) UNRELEASED; urgency=medium
+pipewire (0.3.25-1) experimental; urgency=medium
 
   * New upstream release
+  * Install pw-loopback tool in pipewire-bin
 
- -- Sjoerd Simons <sjoerd@debian.org>  Fri, 09 Apr 2021 21:26:31 +0200
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 09 Apr 2021 21:57:09 +0200
 
 pipewire (0.3.24-3) experimental; urgency=medium
 
