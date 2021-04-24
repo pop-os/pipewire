@@ -96,14 +96,29 @@ endif
 
 pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse',
   [ 'module-protocol-pulse.c',
+    'module-protocol-pulse/manager.c',
     'module-protocol-pulse/pulse-server.c',
-    'module-protocol-pulse/manager.c' ],
+    'module-protocol-pulse/modules/module-loopback.c',
+    'module-protocol-pulse/modules/module-native-protocol-tcp.c',
+    'module-protocol-pulse/modules/module-null-sink.c',
+    'module-protocol-pulse/modules/module-simple-protocol-tcp.c',
+  ],
   c_args : pipewire_module_c_args,
   include_directories : [configinc, spa_inc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
   dependencies : pipewire_module_protocol_pulse_deps,
+)
+
+pipewire_module_protocol_simple = shared_library('pipewire-module-protocol-simple',
+  [ 'module-protocol-simple.c' ],
+  c_args : pipewire_module_c_args,
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : pipewire_module_protocol_deps,
 )
 
 pipewire_module_client_node = shared_library('pipewire-module-client-node',
@@ -155,7 +170,7 @@ test('pw-test-protocol-native',
 
 if installed_tests_enabled
   test_conf = configuration_data()
-  test_conf.set('exec', join_paths(installed_tests_execdir, 'pw-test-protocol-native'))
+  test_conf.set('exec', installed_tests_execdir / 'pw-test-protocol-native')
   configure_file(
     input: installed_tests_template,
     output: 'pw-test-protocol-native.test',

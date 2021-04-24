@@ -22,8 +22,8 @@ pipewire_jack_c_args = [
 
 libjack_path = get_option('libjack-path')
 if libjack_path == ''
-  libjack_path = join_paths(modules_install_dir, 'jack')
-  libjack_path_dlopen = join_paths(modules_install_dir_dlopen, 'jack')
+  libjack_path = modules_install_dir / 'jack'
+  libjack_path_dlopen = modules_install_dir_dlopen / 'jack'
 else
   libjack_path_dlopen = libjack_path
 endif
@@ -69,13 +69,23 @@ pipewire_jackserver = shared_library('jacknet',
     install_dir : libjack_path,
 )
 
+if get_option('jack-devel').enabled()
+  pkgconfig.generate(filebase : 'jack',
+  libraries : [pipewire_jack, pipewire_jackserver],
+  name : 'jack',
+  description : 'PipeWire JACK API',
+  version : '1.9.17',
+  extra_cflags : '-D_REENTRANT',
+  variables: ['server_libs=-L${libdir} -ljackserver'])
+endif
+
 if sdl_dep.found()
   executable('video-dsp-play',
     '../examples/video-dsp-play.c',
     c_args : [ '-D_GNU_SOURCE' ],
     include_directories : [jack_inc],
     install : installed_tests_enabled,
-    install_dir : join_paths(installed_tests_execdir, 'examples', 'jack'),
+    install_dir : installed_tests_execdir / 'examples' / 'jack',
     dependencies : [sdl_dep, mathlib],
     link_with: pipewire_jack,
   )

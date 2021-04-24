@@ -29,6 +29,8 @@
 extern "C" {
 #endif
 
+#include <math.h>
+
 #include <spa/support/dbus.h>
 #include <spa/support/log.h>
 #include <spa/support/loop.h>
@@ -386,6 +388,9 @@ struct spa_bt_device_events {
 
 	/** Profile configuration changed */
 	void (*profiles_changed) (void *data, uint32_t prev_profiles, uint32_t prev_connected);
+
+	/** Device freed */
+	void (*destroy) (void *data);
 };
 
 struct spa_bt_device {
@@ -418,6 +423,12 @@ struct spa_bt_device {
 	uint8_t battery;
 	int has_battery;
 
+	uint32_t hw_volume_profiles;
+	/* Even tought A2DP volume is exposed on transport interface, the
+	 * volume activation info would not be variate between transports
+	 * under same device. So it's safe to cache activation info here. */
+	bool a2dp_volume_active[2];
+
 	struct spa_hook_list listener_list;
 	bool added;
 
@@ -446,6 +457,7 @@ int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t per
 #define spa_bt_device_emit_connected(d,...)	        spa_bt_device_emit(d, connected, 0, __VA_ARGS__)
 #define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
 #define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
+#define spa_bt_device_emit_destroy(d)			spa_bt_device_emit(d, destroy, 0)
 #define spa_bt_device_add_listener(d,listener,events,data)           \
 	spa_hook_list_append(&(d)->listener_list, listener, events, data)
 
@@ -456,6 +468,14 @@ void spa_bt_sco_io_destroy(struct spa_bt_sco_io *io);
 void spa_bt_sco_io_set_source_cb(struct spa_bt_sco_io *io, int (*source_cb)(void *userdata, uint8_t *data, int size), void *userdata);
 void spa_bt_sco_io_set_sink_cb(struct spa_bt_sco_io *io, int (*sink_cb)(void *userdata), void *userdata);
 int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *data, int size);
+
+#define SPA_BT_VOLUME_ID_RX	0
+#define SPA_BT_VOLUME_ID_TX	1
+#define SPA_BT_VOLUME_ID_TERM	2
+
+#define SPA_BT_VOLUME_INVALID	-1
+#define SPA_BT_VOLUME_HS_MAX	15
+#define SPA_BT_VOLUME_A2DP_MAX	127
 
 enum spa_bt_transport_state {
         SPA_BT_TRANSPORT_STATE_IDLE,
@@ -470,6 +490,7 @@ struct spa_bt_transport_events {
 	void (*destroy) (void *data);
 	void (*state_changed) (void *data, enum spa_bt_transport_state old,
 			enum spa_bt_transport_state state);
+	void (*volume_changed) (void *data);
 };
 
 struct spa_bt_transport_implementation {
@@ -478,7 +499,18 @@ struct spa_bt_transport_implementation {
 
 	int (*acquire) (void *data, bool optional);
 	int (*release) (void *data);
+	int (*set_volume) (void *data, int id, float volume);
 	int (*destroy) (void *data);
+};
+
+struct spa_bt_transport_volume {
+	bool active;
+	float volume;
+	int hw_volume_max;
+
+	/* XXX: items below should be put to user_data */
+	int hw_volume;
+	int new_hw_volume;
 };
 
 struct spa_bt_transport {
@@ -498,18 +530,24 @@ struct spa_bt_transport {
 	uint32_t n_channels;
 	uint32_t channels[64];
 
+	struct spa_bt_transport_volume volumes[SPA_BT_VOLUME_ID_TERM];
+
 	int acquire_refcount;
 	int fd;
 	uint16_t read_mtu;
 	uint16_t write_mtu;
 	uint16_t delay;
-	void *user_data;
+
 	struct spa_bt_sco_io *sco_io;
 
+	struct spa_source volume_timer;
 	struct spa_source release_timer;
 
 	struct spa_hook_list listener_list;
 	struct spa_callbacks impl;
+
+	/* user_data must be the last item in the struct */
+	void *user_data;
 };
 
 struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor, char *path, size_t extra);
@@ -519,7 +557,8 @@ struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, c
 struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monitor,
                                                     bool (*callback) (struct spa_bt_transport *t, const void *data),
                                                     const void *data);
-int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t);
+int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *transport);
+bool spa_bt_transport_volume_enabled(struct spa_bt_transport *transport);
 
 int spa_bt_transport_acquire(struct spa_bt_transport *t, bool optional);
 int spa_bt_transport_release(struct spa_bt_transport *t);
@@ -530,6 +569,7 @@ int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *
 								m, v, ##__VA_ARGS__)
 #define spa_bt_transport_emit_destroy(t)		spa_bt_transport_emit(t, destroy, 0)
 #define spa_bt_transport_emit_state_changed(t,...)	spa_bt_transport_emit(t, state_changed, 0, __VA_ARGS__)
+#define spa_bt_transport_emit_volume_changed(t)		spa_bt_transport_emit(t, volume_changed, 0)
 
 #define spa_bt_transport_add_listener(t,listener,events,data) \
         spa_hook_list_append(&(t)->listener_list, listener, events, data)
@@ -546,7 +586,8 @@ int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *
 	res;						\
 })
 
-#define spa_bt_transport_destroy(t)	spa_bt_transport_impl(t, destroy, 0)
+#define spa_bt_transport_destroy(t)		spa_bt_transport_impl(t, destroy, 0)
+#define spa_bt_transport_set_volume(t,...)	spa_bt_transport_impl(t, set_volume, 0, __VA_ARGS__)
 
 static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(const char *value)
 {
@@ -558,6 +599,49 @@ static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(con
 		return SPA_BT_TRANSPORT_STATE_ACTIVE;
 	else
 		return SPA_BT_TRANSPORT_STATE_IDLE;
+}
+
+#define DEFAULT_AG_VOLUME	1.0f
+#define DEFAULT_RX_VOLUME	1.0f
+#define DEFAULT_TX_VOLUME	0.064f /* pa_sw_volume_to_linear(0.4 * PA_VOLUME_NORM) */
+
+#define PA_VOLUME_MUTED	((uint32_t) 0u)
+#define PA_VOLUME_NORM	((uint32_t) 0x10000u)
+#define PA_VOLUME_MAX	((uint32_t) UINT32_MAX/2)
+
+static inline uint32_t pa_sw_volume_from_linear(double v)
+{
+    	if (v <= 0.0)
+        	return PA_VOLUME_MUTED;
+    	return SPA_CLAMP(
+	    	(uint64_t) lround(cbrt(v) * PA_VOLUME_NORM),
+		PA_VOLUME_MUTED, PA_VOLUME_MAX);
+}
+
+static inline double pa_sw_volume_to_linear(uint32_t v)
+{
+	double f;
+	if (v <= PA_VOLUME_MUTED)
+		return 0.0;
+	if (v == PA_VOLUME_NORM)
+		return 1.0;
+	f = ((double) v / PA_VOLUME_NORM);
+	return f*f*f;
+}
+
+/* AVRCP/HSP volume is considered as percentage, so map it to pulseaudio volume. */
+static inline uint32_t spa_bt_volume_linear_to_hw(double v, uint32_t hw_volume_max)
+{
+	return SPA_CLAMP(
+		pa_sw_volume_from_linear(v) * hw_volume_max / PA_VOLUME_NORM,
+		0u, hw_volume_max);
+}
+
+static inline double spa_bt_volume_hw_to_linear(uint32_t v, uint32_t hw_volume_max)
+{
+	return SPA_CLAMP(
+		pa_sw_volume_to_linear(v * PA_VOLUME_NORM / hw_volume_max),
+		0.0, 1.0);
 }
 
 struct spa_bt_backend_implementation {

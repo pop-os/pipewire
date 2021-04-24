@@ -1,4 +1,4 @@
-bluez5_deps = [ dbus_dep, sbc_dep, bluez_dep ]
+bluez5_deps = [ mathlib, dbus_dep, sbc_dep, bluez_dep ]
 foreach dep: bluez5_deps
   if not dep.found()
     subdir_done()
@@ -71,4 +71,4 @@ bluez5lib = shared_library('spa-bluez5',
 	c_args : bluez5_args,
 	dependencies : bluez5_deps,
 	install : true,
-        install_dir : join_paths(spa_plugindir, 'bluez5'))
+        install_dir : spa_plugindir / 'bluez5')

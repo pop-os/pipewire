@@ -132,30 +132,6 @@ static int pw_split_ip(char *str, const char *delimiter, int max_tokens, char *t
         return n;
 }
 
-static struct pw_properties *parse_props(char *str)
-{
-	const char *state = NULL;
-	char *s, *p[3];
-	size_t len, n;
-	struct pw_properties *props = NULL;
-
-	while (true) {
-		s = (char *)pw_split_walk(str, WHITESPACE, &len, &state);
-		if (s == NULL)
-			break;
-
-		s[len] = '\0';
-		n = pw_split_ip(s, "=", 2, p);
-		if (n == 2) {
-			if (props == NULL)
-				props = pw_properties_new(p[0], p[1], NULL);
-			else
-				pw_properties_set(props, p[0], p[1]);
-		}
-	}
-	return props;
-}
-
 static void print_properties(struct spa_dict *props, char mark, bool header)
 {
 	const struct spa_dict_item *item;
@@ -1309,13 +1285,16 @@ static bool do_create_device(struct data *data, const char *cmd, char *args, cha
 		return false;
 	}
 	if (n == 2)
-		props = parse_props(a[1]);
+		props = pw_properties_new_string(a[1]);
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Device,
 					    PW_VERSION_DEVICE,
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
+
+	if (props)
+		pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1346,13 +1325,16 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 	if (n == 2)
-		props = parse_props(a[1]);
+		props = pw_properties_new_string(a[1]);
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Node,
 					    PW_VERSION_NODE,
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
+
+	if (props)
+		pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1407,7 +1389,7 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 	if (n == 5)
-		props = parse_props(a[4]);
+		props = pw_properties_new_string(a[4]);
 	else
 		props = pw_properties_new(NULL, NULL);
 
@@ -1422,6 +1404,9 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 					  PW_VERSION_LINK,
 					  props ? &props->dict : NULL,
 					  sizeof(struct proxy_data));
+
+	if (props)
+		pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1480,12 +1465,27 @@ static bool do_export_node(struct data *data, const char *cmd, char *args, char 
 	return false;
 }
 
+static const struct spa_type_info *find_type_info(const struct spa_type_info *info, const char *name)
+{
+	while (info && info->name) {
+                if (strcmp(info->name, name) == 0)
+                        return info;
+                if (strcmp(spa_debug_type_short_name(info->name), name) == 0)
+                        return info;
+                if (info->type != 0 && info->type == (uint32_t)atoi(name))
+                        return info;
+                info++;
+        }
+        return NULL;
+}
+
 static bool do_enum_params(struct data *data, const char *cmd, char *args, char **error)
 {
 	struct remote_data *rd = data->current;
 	char *a[2];
-        int n;
+	int n;
 	uint32_t id, param_id;
+	const struct spa_type_info *ti;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 2, a);
@@ -1495,7 +1495,12 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 	}
 
 	id = atoi(a[0]);
-	param_id = atoi(a[1]);
+	ti = find_type_info(spa_type_param, a[1]);
+	if (ti == NULL) {
+		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
+		return false;
+	}
+	param_id = ti->type;
 
 	global = pw_map_lookup(&rd->globals, id);
 	if (global == NULL) {
@@ -1527,20 +1532,6 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 	return true;
 }
 
-static const struct spa_type_info *find_type_info(const struct spa_type_info *info, const char *name)
-{
-	while (info && info->name) {
-                if (strcmp(info->name, name) == 0)
-                        return info;
-                if (strcmp(spa_debug_type_short_name(info->name), name) == 0)
-                        return info;
-                if (info->type != 0 && info->type == (uint32_t)atoi(name))
-                        return info;
-                info++;
-        }
-        return NULL;
-}
-
 static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 		const struct spa_type_info *info, struct spa_json *iter, const char *value, int len)
 {
@@ -1551,7 +1542,7 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 	int l, res;
 	const char *v;
 
-	if (spa_json_is_object(value, len)) {
+	if (spa_json_is_object(value, len) && info != NULL) {
 		if ((ti = spa_debug_type_find(NULL, info->parent)) == NULL)
 			return -EINVAL;
 
@@ -1570,7 +1561,7 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 		}
 		spa_pod_builder_pop(b, &f[0]);
 	}
-	else if (spa_json_is_array(value, len)) {
+	else if (spa_json_is_array(value, len) && info != NULL) {
 		spa_pod_builder_push_array(b, &f[0]);
 		spa_json_enter(iter, &it[0]);
 		while ((l = spa_json_next(&it[0], &v)) > 0)
@@ -1578,7 +1569,7 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 				return res;
 		spa_pod_builder_pop(b, &f[0]);
 	}
-	else if (spa_json_is_float(value, len)) {
+	else if (spa_json_is_float(value, len) && info != NULL) {
 		float val = 0.0f;
 		spa_json_parse_float(value, len, &val);
 		switch (info->parent) {
@@ -1613,7 +1604,7 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 	else if (spa_json_is_null(value, len)) {
 		spa_pod_builder_none(b);
 	}
-	else {
+	else if (info) {
 		char *val = alloca(len+1);
 		spa_json_parse_string(value, len, val);
 		switch (info->parent) {
@@ -2947,11 +2938,11 @@ static void do_quit(void *data, int signal_number)
 
 static void show_help(struct data *data, const char *name)
 {
-        fprintf(stdout, "%s [options] [command]\n"
+        fprintf(stdout, _("%s [options] [command]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -d, --daemon                          Start as daemon (Default false)\n"
-		"  -r, --remote                          Remote daemon name\n\n",
+		"  -r, --remote                          Remote daemon name\n\n"),
 		name);
 
 	do_help(data, "help", "", NULL);

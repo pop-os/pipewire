@@ -23,6 +23,15 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <spa/param/audio/format-utils.h>
+#include <spa/utils/hook.h>
+#include <pipewire/pipewire.h>
+#include <pipewire/private.h>
+
+#include "../defs.h"
+#include "../module.h"
+#include "registry.h"
+
 #define ERROR_RETURN(str) 		\
 	{ 				\
 		pw_log_error(str); 	\
@@ -76,7 +85,7 @@ static void on_core_error(void *data, uint32_t id, int seq, int res, const char 
 			id, seq, res, spa_strerror(res), message);
 
 	if (id == PW_ID_CORE && res == -EPIPE)
-		pw_loop_signal_event(module->impl->loop, module->unload);
+		module_schedule_unload(module);
 }
 
 static const struct pw_core_events core_events = {
@@ -92,7 +101,7 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
 
 	if (state == PW_STREAM_STATE_UNCONNECTED) {
 		pw_log_info("stream disconnected, unloading");
-		pw_loop_signal_event(module->impl->loop, module->unload);
+		module_schedule_unload(module);
 	}
 }
 
@@ -220,7 +229,7 @@ static const struct spa_dict_item module_loopback_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-static struct module *create_module_loopback(struct impl *impl, const char *argument)
+struct module *create_module_loopback(struct impl *impl, const char *argument)
 {
 	struct module *module;
 	struct module_loopback_data *d;
@@ -237,14 +246,19 @@ static struct module *create_module_loopback(struct impl *impl, const char *argu
 		goto out;
 	}
 	if (argument)
-		add_props(props, argument);
+		module_args_add_props(props, argument);
 
 	/* The following modargs are not implemented:
 	 * adjust_time, max_latency_msec, fast_adjust_threshold_msec: these are just not relevant
 	 */
 
 	if ((str = pw_properties_get(props, "source")) != NULL) {
-		pw_properties_set(capture_props, PW_KEY_NODE_TARGET, str);
+		if (pw_endswith(str, ".monitor")) {
+			pw_properties_setf(capture_props, PW_KEY_NODE_TARGET,
+					"%.*s", (int)strlen(str)-8, str);
+		} else {
+			pw_properties_set(capture_props, PW_KEY_NODE_TARGET, str);
+		}
 		pw_properties_set(props, "source", NULL);
 	}
 
@@ -253,40 +267,9 @@ static struct module *create_module_loopback(struct impl *impl, const char *argu
 		pw_properties_set(props, "sink", NULL);
 	}
 
-	info.format = SPA_AUDIO_FORMAT_F32P;
-
-	if ((str = pw_properties_get(props, "channels")) != NULL) {
-		info.channels = pw_properties_parse_int(str);
-		pw_properties_set(props, "channels", NULL);
-	} else {
-		info.channels = 2;
-	}
-	if ((str = pw_properties_get(props, "rate")) != NULL) {
-		info.rate = pw_properties_parse_int(str);
-		pw_properties_set(props, "rate", NULL);
-	} else {
-		info.rate = 0;
-	}
-
-	if ((str = pw_properties_get(props, "channel_map")) != NULL) {
-		struct channel_map map;
-
-		channel_map_parse(str, &map);
-		if (info.channels != map.channels)
-			ERROR_RETURN("Mismatched channel map");
-		channel_map_to_positions(&map, info.position);
-		pw_properties_set(props, "channel_map", NULL);
-	} else {
-		if (info.channels > 2)
-			ERROR_RETURN("Mismatched channel map");
-
-		if (info.channels == 1) {
-			info.position[0] = SPA_AUDIO_CHANNEL_MONO;
-		} else {
-			info.position[0] = SPA_AUDIO_CHANNEL_FL;
-			info.position[1] = SPA_AUDIO_CHANNEL_FR;
-		}
-		/* TODO: pull in all of pa_channel_map_init_auto() */
+	if (module_args_to_audioinfo(impl, props, &info) < 0) {
+		res = -EINVAL;
+		goto out;
 	}
 
 	if ((str = pw_properties_get(props, "source_dont_move")) != NULL) {
@@ -317,12 +300,12 @@ static struct module *create_module_loopback(struct impl *impl, const char *argu
 	}
 
 	if ((str = pw_properties_get(props, "sink_input_properties")) != NULL) {
-		add_props(playback_props, str);
+		module_args_add_props(playback_props, str);
 		pw_properties_set(props, "sink_input_properties", NULL);
 	}
 
 	if ((str = pw_properties_get(props, "source_output_properties")) != NULL) {
-		add_props(capture_props, str);
+		module_args_add_props(capture_props, str);
 		pw_properties_set(props, "source_output_properties", NULL);
 	}
 

@@ -23,53 +23,23 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-struct module;
-
-struct module_info {
-	const char *name;
-	struct module *(*create) (struct impl *impl, const char *args);
-};
-
-struct module_events {
-#define VERSION_MODULE_EVENTS	0
-	uint32_t version;
-
-	void (*loaded) (void *data, int res);
-};
-
-#define module_emit_loaded(m,r) spa_hook_list_call(&m->hooks, struct module_events, loaded, 0, r)
-
-struct module_methods {
-#define VERSION_MODULE_METHODS	0
-	uint32_t version;
-
-	int (*load) (struct client *client, struct module *module);
-	int (*unload) (struct client *client, struct module *module);
-};
-
-struct module {
-	uint32_t idx;
-	const char *name;
-	const char *args;
-	struct pw_properties *props;
-	struct spa_list link;           /**< link in client modules */
-	struct impl *impl;
-	const struct module_methods *methods;
-	struct spa_hook_list hooks;
-	struct spa_source *unload;
-	void *user_data;
-};
+#include "module.h"
 
 static int module_unload(struct client *client, struct module *module);
 
-static void on_module_unload(void *data, uint64_t count)
+static void on_module_unload(void *obj, void *data, int res, uint32_t id)
 {
-	struct module *module = data;
-
+	struct module *module = obj;
 	module_unload(NULL, module);
 }
 
-static struct module *module_new(struct impl *impl, const struct module_methods *methods, size_t user_data)
+void module_schedule_unload(struct module *module)
+{
+	struct impl *impl = module->impl;
+	pw_work_queue_add(impl->work_queue, module, 0, on_module_unload, impl);
+}
+
+struct module *module_new(struct impl *impl, const struct module_methods *methods, size_t user_data)
 {
 	struct module *module;
 
@@ -80,7 +50,6 @@ static struct module *module_new(struct impl *impl, const struct module_methods 
 	module->impl = impl;
 	module->methods = methods;
 	spa_hook_list_init(&module->hooks);
-	module->unload = pw_loop_add_event(impl->loop, on_module_unload, module);
 	module->user_data = SPA_MEMBER(module, sizeof(struct module), void);
 
 	return module;
@@ -109,12 +78,11 @@ static void module_free(struct module *module)
 	if (module->idx != SPA_ID_INVALID)
 		pw_map_remove(&impl->modules, module->idx & INDEX_MASK);
 
+	pw_work_queue_cancel(impl->work_queue, module, SPA_ID_INVALID);
 	free((char*)module->name);
 	free((char*)module->args);
 	if (module->props)
 		pw_properties_free(module->props);
-	pw_loop_destroy_source(impl->loop, module->unload);
-
 	free(module);
 }
 
@@ -143,7 +111,7 @@ static int module_unload(struct client *client, struct module *module)
 }
 
 /** utils */
-static void add_props(struct pw_properties *props, const char *str)
+void module_args_add_props(struct pw_properties *props, const char *str)
 {
 	char *s = strdup(str), *p = s, *e, f;
 	const char *k, *v;
@@ -177,12 +145,73 @@ static void add_props(struct pw_properties *props, const char *str)
 	free(s);
 }
 
-#include "module-null-sink.c"
-#include "module-loopback.c"
+int module_args_to_audioinfo(struct impl *impl, struct pw_properties *props, struct spa_audio_info_raw *info)
+{
+	const char *str;
+	uint32_t i;
+
+	/* We don't use any incoming format setting and use our native format */
+	spa_zero(*info);
+	info->format = SPA_AUDIO_FORMAT_F32P;
+
+	if ((str = pw_properties_get(props, "channels")) != NULL) {
+		info->channels = pw_properties_parse_int(str);
+		if (info->channels == 0 || info->channels > SPA_AUDIO_MAX_CHANNELS) {
+			pw_log_error("invalid channels '%s'", str);
+			return -EINVAL;
+		}
+		pw_properties_set(props, "channels", NULL);
+	}
+	if ((str = pw_properties_get(props, "channel_map")) != NULL) {
+		struct channel_map map;
+
+		channel_map_parse(str, &map);
+		if (map.channels == 0 || map.channels > SPA_AUDIO_MAX_CHANNELS) {
+			pw_log_error("invalid channel_map '%s'", str);
+			return -EINVAL;
+		}
+		if (info->channels == 0)
+			info->channels = map.channels;
+		if (info->channels != map.channels) {
+			pw_log_error("Mismatched channel map");
+			return -EINVAL;
+		}
+		channel_map_to_positions(&map, info->position);
+		pw_properties_set(props, "channel_map", NULL);
+	} else {
+		if (info->channels == 0)
+			info->channels = impl->defs.sample_spec.channels;
+
+		if (info->channels == impl->defs.channel_map.channels) {
+			channel_map_to_positions(&impl->defs.channel_map, info->position);
+		} else if (info->channels == 1) {
+			info->position[0] = SPA_AUDIO_CHANNEL_MONO;
+		} else if (info->channels == 2) {
+			info->position[0] = SPA_AUDIO_CHANNEL_FL;
+			info->position[1] = SPA_AUDIO_CHANNEL_FR;
+		} else {
+			/* FIXME add more mappings */
+			for (i = 0; i < info->channels; i++)
+				info->position[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
+		}
+	}
+
+	if ((str = pw_properties_get(props, "rate")) != NULL) {
+		info->rate = pw_properties_parse_int(str);
+		pw_properties_set(props, "rate", NULL);
+	} else {
+		info->rate = 0;
+	}
+	return 0;
+}
+
+#include "modules/registry.h"
 
 static const struct module_info module_list[] = {
-	{ "module-null-sink", create_module_null_sink, },
 	{ "module-loopback", create_module_loopback, },
+	{ "module-null-sink", create_module_null_sink, },
+	{ "module-native-protocol-tcp", create_module_native_protocol_tcp, },
+	{ "module-simple-protocol-tcp", create_module_simple_protocol_tcp, },
 	{ NULL, }
 };
 

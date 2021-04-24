@@ -66,7 +66,6 @@ struct spa_bt_monitor {
 
 	struct spa_hook_list hooks;
 
-	uint32_t count;
 	uint32_t id;
 
 	/*
@@ -137,6 +136,9 @@ struct spa_bt_a2dp_codec_switch {
 	size_t num_paths;
 };
 
+#define DEFAULT_RECONNECT_PROFILES SPA_BT_PROFILE_NULL
+#define DEFAULT_HW_VOLUME_PROFILES (SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY | SPA_BT_PROFILE_A2DP_SOURCE)
+
 #define BT_DEVICE_DISCONNECTED	0
 #define BT_DEVICE_CONNECTED	1
 #define BT_DEVICE_INIT		-1
@@ -151,6 +153,10 @@ struct spa_bt_a2dp_codec_switch {
 #define SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC 1000
 #define SPA_BT_TRANSPORT_IS_SCO(transport) (transport->backend != NULL)
 
+#define TRANSPORT_VOLUME_TIMEOUT_MSEC 200
+
+static int spa_bt_transport_stop_volume_timer(struct spa_bt_transport *transport);
+static int spa_bt_transport_start_volume_timer(struct spa_bt_transport *transport);
 static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transport);
 static int spa_bt_transport_start_release_timer(struct spa_bt_transport *transport);
 
@@ -410,6 +416,17 @@ static const struct a2dp_codec *a2dp_endpoint_to_codec(const char *endpoint)
 	return NULL;
 }
 
+static int a2dp_endpoint_to_profile(const char *endpoint)
+{
+
+	if (strstr(endpoint, A2DP_SINK_ENDPOINT "/") == endpoint)
+		return SPA_BT_PROFILE_A2DP_SOURCE;
+	else if (strstr(endpoint, A2DP_SOURCE_ENDPOINT "/") == endpoint)
+		return SPA_BT_PROFILE_A2DP_SINK;
+	else
+		return SPA_BT_PROFILE_NULL;
+}
+
 static bool is_a2dp_codec_enabled(struct spa_bt_monitor *monitor, const struct a2dp_codec *codec)
 {
 	if (!monitor->enable_sbc_xq && codec->feature_flag != NULL &&
@@ -651,6 +668,9 @@ static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const
 	d->monitor = monitor;
 	d->path = strdup(path);
 	d->battery_path = battery_get_name(d->path);
+	d->reconnect_profiles = DEFAULT_RECONNECT_PROFILES;
+	d->hw_volume_profiles = DEFAULT_HW_VOLUME_PROFILES;
+
 	spa_list_init(&d->remote_endpoint_list);
 	spa_list_init(&d->transport_list);
 	spa_list_init(&d->codec_switch_list);
@@ -674,6 +694,8 @@ static void device_free(struct spa_bt_device *device)
 	struct spa_bt_monitor *monitor = device->monitor;
 
 	spa_log_debug(monitor->log, "%p", device);
+
+	spa_bt_device_emit_destroy(device);
 
 	battery_remove(device);
 	device_stop_timer(device);
@@ -746,16 +768,17 @@ static int device_connected_old(struct spa_bt_monitor *monitor, struct spa_bt_de
 		info.flags = 0;
 
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "bluez5");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_BUS, "bluetooth");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
 		snprintf(name, sizeof(name), "bluez_card.%s", device->address);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, name);
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->name);
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->alias);
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ICON_NAME, device->icon);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->alias);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->name);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_FORM_FACTOR,
 				spa_bt_form_factor_name(
 					spa_bt_form_factor_from_class(device->bluetooth_class)));
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_STRING, device->address);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ICON, device->icon);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PATH, device->path);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
 		snprintf(dev, sizeof(dev), "pointer:%p", device);
@@ -828,16 +851,17 @@ static int device_connected(struct spa_bt_monitor *monitor, struct spa_bt_device
 	info.flags = 0;
 
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "bluez5");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_BUS, "bluetooth");
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
 	snprintf(name, sizeof(name), "bluez_card.%s", device->address);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, name);
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->name);
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->alias);
-	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ICON_NAME, device->icon);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device->alias);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_ALIAS, device->name);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_FORM_FACTOR,
 			spa_bt_form_factor_name(
 				spa_bt_form_factor_from_class(device->bluetooth_class)));
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_STRING, device->address);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ICON, device->icon);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PATH, device->path);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
 	snprintf(dev, sizeof(dev), "pointer:%p", device);
@@ -1448,6 +1472,22 @@ struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor,
 	return t;
 }
 
+bool spa_bt_transport_volume_enabled(struct spa_bt_transport *transport)
+{
+	return transport->device != NULL
+		&& (transport->device->hw_volume_profiles & transport->profile);
+}
+
+static void transport_sync_volume(struct spa_bt_transport *transport)
+{
+	if (!spa_bt_transport_volume_enabled(transport))
+		return;
+
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM; ++i)
+		spa_bt_transport_set_volume(transport, i, transport->volumes[i].volume);
+	spa_bt_transport_emit_volume_changed(transport);
+}
+
 void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_transport_state state)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
@@ -1458,6 +1498,8 @@ void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_
 		spa_log_debug(monitor->log, "transport %p: %s state changed %d -> %d",
 				transport, transport->path, old, state);
 		spa_bt_transport_emit_state_changed(transport, old, state);
+		if (state >= SPA_BT_TRANSPORT_STATE_PENDING && old < SPA_BT_TRANSPORT_STATE_PENDING)
+			transport_sync_volume(transport);
 	}
 }
 
@@ -1473,6 +1515,7 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 
 	spa_bt_transport_emit_destroy(transport);
 
+	spa_bt_transport_stop_volume_timer(transport);
 	spa_bt_transport_stop_release_timer(transport);
 
 	if (transport->sco_io) {
@@ -1573,6 +1616,46 @@ int spa_bt_device_release_transports(struct spa_bt_device *device)
 	return 0;
 }
 
+static int start_timeout_timer(struct spa_bt_monitor *monitor,
+		struct spa_source *timer, spa_source_func_t timer_event,
+		time_t timeout_msec, void *data)
+{
+	struct itimerspec ts;
+	if (timer->data == NULL) {
+		timer->data = data;
+		timer->func = timer_event;
+		timer->fd = spa_system_timerfd_create(
+			monitor->main_system, CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+		timer->mask = SPA_IO_IN;
+		timer->rmask = 0;
+		spa_loop_add_source(monitor->main_loop, timer);
+	}
+	ts.it_value.tv_sec = timeout_msec / SPA_MSEC_PER_SEC;
+	ts.it_value.tv_nsec = (timeout_msec % SPA_MSEC_PER_SEC) * SPA_NSEC_PER_MSEC;
+	ts.it_interval.tv_sec = 0;
+	ts.it_interval.tv_nsec = 0;
+	spa_system_timerfd_settime(monitor->main_system, timer->fd, 0, &ts, NULL);
+	return 0;
+}
+
+static int stop_timeout_timer(struct spa_bt_monitor *monitor, struct spa_source *timer)
+{
+	struct itimerspec ts;
+
+	if (timer->data == NULL)
+		return 0;
+
+	spa_loop_remove_source(monitor->main_loop, timer);
+	ts.it_value.tv_sec = 0;
+	ts.it_value.tv_nsec = 0;
+	ts.it_interval.tv_sec = 0;
+	ts.it_interval.tv_nsec = 0;
+	spa_system_timerfd_settime(monitor->main_system, timer->fd, 0, &ts, NULL);
+	spa_system_close(monitor->main_system, timer->fd);
+	timer->data = NULL;
+	return 0;
+}
+
 static void spa_bt_transport_release_timer_event(struct spa_source *source)
 {
 	struct spa_bt_transport *transport = source->data;
@@ -1592,44 +1675,70 @@ static void spa_bt_transport_release_timer_event(struct spa_source *source)
 
 static int spa_bt_transport_start_release_timer(struct spa_bt_transport *transport)
 {
-	struct spa_bt_monitor *monitor = transport->monitor;
-	struct itimerspec ts;
-
-	if (transport->release_timer.data == NULL) {
-		transport->release_timer.data = transport;
-		transport->release_timer.func = spa_bt_transport_release_timer_event;
-		transport->release_timer.fd = spa_system_timerfd_create(
-			monitor->main_system, CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
-		transport->release_timer.mask = SPA_IO_IN;
-		transport->release_timer.rmask = 0;
-		spa_loop_add_source(monitor->main_loop, &transport->release_timer);
-	}
-	ts.it_value.tv_sec = SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC / SPA_MSEC_PER_SEC;
-	ts.it_value.tv_nsec = (SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC % SPA_MSEC_PER_SEC) * SPA_NSEC_PER_MSEC;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(monitor->main_system, transport->release_timer.fd, 0, &ts, NULL);
-	return 0;
+	return start_timeout_timer(transport->monitor,
+		&transport->release_timer,
+		spa_bt_transport_release_timer_event,
+		SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC, transport);
 }
 
 static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transport)
 {
-	struct spa_bt_monitor *monitor = transport->monitor;
-	struct itimerspec ts;
-
-	if (transport->release_timer.data == NULL)
-		return 0;
-
-	spa_loop_remove_source(monitor->main_loop, &transport->release_timer);
-	ts.it_value.tv_sec = 0;
-	ts.it_value.tv_nsec = 0;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(monitor->main_system, transport->release_timer.fd, 0, &ts, NULL);
-	spa_system_close(monitor->main_system, transport->release_timer.fd);
-	transport->release_timer.data = NULL;
-	return 0;
+	return stop_timeout_timer(transport->monitor, &transport->release_timer);
 }
+
+static void spa_bt_transport_volume_changed(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_transport_volume * t_volume;
+	int volume_id;
+
+	if (transport->profile & SPA_BT_PROFILE_A2DP_SINK)
+		volume_id = SPA_BT_VOLUME_ID_TX;
+	else if (transport->profile & SPA_BT_PROFILE_A2DP_SOURCE)
+		volume_id = SPA_BT_VOLUME_ID_RX;
+	else
+		return;
+
+	t_volume = &transport->volumes[volume_id];
+
+	if (t_volume->hw_volume != t_volume->new_hw_volume) {
+		t_volume->hw_volume = t_volume->new_hw_volume;
+		t_volume->volume = spa_bt_volume_hw_to_linear(t_volume->hw_volume,
+					t_volume->hw_volume_max);
+		spa_log_debug(monitor->log, "transport %p: volume changed %d(%f) ",
+			transport, t_volume->new_hw_volume, t_volume->volume);
+		if (spa_bt_transport_volume_enabled(transport)) {
+			transport->device->a2dp_volume_active[volume_id] = true;
+			spa_bt_transport_emit_volume_changed(transport);
+		}
+	}
+}
+
+static void spa_bt_transport_volume_timer_event(struct spa_source *source)
+{
+	struct spa_bt_transport *transport = source->data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	uint64_t exp;
+
+	if (spa_system_timerfd_read(monitor->main_system, source->fd, &exp) < 0)
+                spa_log_warn(monitor->log, "error reading timerfd: %s", strerror(errno));
+
+	spa_bt_transport_volume_changed(transport);
+}
+
+static int spa_bt_transport_start_volume_timer(struct spa_bt_transport *transport)
+{
+	return start_timeout_timer(transport->monitor,
+			&transport->volume_timer,
+			spa_bt_transport_volume_timer_event,
+			TRANSPORT_VOLUME_TIMEOUT_MSEC, transport);
+}
+
+static int spa_bt_transport_stop_volume_timer(struct spa_bt_transport *transport)
+{
+	return stop_timeout_timer(transport->monitor, &transport->volume_timer);
+}
+
 
 int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop)
 {
@@ -1761,6 +1870,29 @@ static int transport_update_props(struct spa_bt_transport *transport,
 			}
 		}
 		else if (strcmp(key, "Volume") == 0) {
+			uint16_t value;
+			struct spa_bt_transport_volume * t_volume;
+
+			if (type != DBUS_TYPE_UINT16)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, value);
+
+			if (transport->profile & SPA_BT_PROFILE_A2DP_SINK)
+				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_TX];
+			else if (transport->profile & SPA_BT_PROFILE_A2DP_SOURCE)
+				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_RX];
+			else
+				goto next;
+
+			t_volume->active = true;
+			t_volume->new_hw_volume = value;
+
+			if (transport->profile & SPA_BT_PROFILE_A2DP_SINK)
+				spa_bt_transport_start_volume_timer(transport);
+			else
+				spa_bt_transport_volume_changed(transport);
 		}
 		else if (strcmp(key, "Delay") == 0) {
 			uint16_t value;
@@ -1775,6 +1907,79 @@ static int transport_update_props(struct spa_bt_transport *transport,
 		}
 	      next:
 		dbus_message_iter_next(props_iter);
+	}
+	return 0;
+}
+
+static int transport_set_property_volume(struct spa_bt_transport *transport, uint16_t value)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusMessage *m, *r;
+	DBusMessageIter it[2];
+	DBusError err;
+	const char *interface = BLUEZ_MEDIA_TRANSPORT_INTERFACE;
+	const char *name = "Volume";
+	int res = 0;
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE,
+					 transport->path,
+	                                 DBUS_INTERFACE_PROPERTIES,
+					 "Set");
+	if (m == NULL)
+		return -ENOMEM;
+
+	dbus_message_iter_init_append(m, &it[0]);
+	dbus_message_iter_append_basic(&it[0], DBUS_TYPE_STRING, &interface);
+	dbus_message_iter_append_basic(&it[0], DBUS_TYPE_STRING, &name);
+	dbus_message_iter_open_container(&it[0], DBUS_TYPE_VARIANT,
+					DBUS_TYPE_UINT16_AS_STRING, &it[1]);
+	dbus_message_iter_append_basic(&it[1], DBUS_TYPE_UINT16, &value);
+	dbus_message_iter_close_container(&it[0], &it[1]);
+
+	dbus_error_init(&err);
+
+	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
+
+	dbus_message_unref(m);
+
+	if (r == NULL) {
+		spa_log_error(monitor->log, NAME": set volume %u failed for transport %s (%s)",
+				value, transport->path, err.message);
+		dbus_error_free(&err);
+		return -EIO;
+	}
+
+	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR)
+		res = -EIO;
+
+	dbus_message_unref(r);
+
+	spa_log_debug(monitor->log, "transport %p: set volume to %d", transport, value);
+
+	return res;
+}
+
+static int transport_set_volume(void *data, int id, float volume)
+{
+	struct spa_bt_transport *transport = data;
+	struct spa_bt_transport_volume *t_volume = &transport->volumes[id];
+	uint16_t value;
+
+	if (!t_volume->active || !spa_bt_transport_volume_enabled(transport))
+		return -ENOTSUP;
+
+	value = spa_bt_volume_linear_to_hw(volume, 127);
+	t_volume->volume = volume;
+
+	/* AVRCP volume would not applied on remote sink device
+	 * if transport is not acquired (idle). */
+	if (transport->fd < 0 && (transport->profile & SPA_BT_PROFILE_A2DP_SINK)) {
+		t_volume->hw_volume = SPA_BT_VOLUME_INVALID;
+		return 0;
+	} else if (t_volume->hw_volume != value) {
+		t_volume->hw_volume = value;
+		spa_bt_transport_stop_volume_timer(transport);
+		transport_set_property_volume(transport, value);
 	}
 	return 0;
 }
@@ -1832,6 +2037,8 @@ static int transport_acquire(void *data, bool optional)
 	}
 	spa_log_debug(monitor->log, "transport %p: %s %s, fd %d MTU %d:%d", transport, method,
 			transport->path, transport->fd, transport->read_mtu, transport->write_mtu);
+
+	transport_sync_volume(transport);
 
 finish:
 	dbus_message_unref(r);
@@ -1893,6 +2100,7 @@ static const struct spa_bt_transport_implementation transport_impl = {
 	SPA_VERSION_BT_TRANSPORT_IMPLEMENTATION,
 	.acquire = transport_acquire,
 	.release = transport_release,
+	.set_volume = transport_set_volume,
 };
 
 static void append_basic_array_variant_dict_entry(DBusMessageIter *dict, int key_type_int, void* key, const char* variant_type_str, const char* array_type_str, int array_type_int, void* data, int data_size);
@@ -2295,6 +2503,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	struct spa_bt_transport *transport;
 	bool is_new = false;
 	const struct a2dp_codec *codec;
+	int profile;
 
 	if (!dbus_message_has_signature(m, "oa{sv}")) {
 		spa_log_warn(monitor->log, "invalid SetConfiguration() signature");
@@ -2302,6 +2511,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	}
 	endpoint = dbus_message_get_path(m);
 
+	profile = a2dp_endpoint_to_profile(endpoint);
 	codec = a2dp_endpoint_to_codec(endpoint);
 	if (codec == NULL) {
 		spa_log_warn(monitor->log, "unknown SetConfiguration() codec");
@@ -2322,7 +2532,21 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
 		spa_bt_transport_set_implementation(transport, &transport_impl, transport);
+
+		if (profile & SPA_BT_PROFILE_A2DP_SOURCE) {
+			transport->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_AG_VOLUME;
+			transport->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_AG_VOLUME;
+		} else {
+			transport->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_RX_VOLUME;
+			transport->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_TX_VOLUME;
+		}
 	}
+
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM; ++i) {
+		transport->volumes[i].hw_volume = SPA_BT_VOLUME_INVALID;
+		transport->volumes[i].hw_volume_max = SPA_BT_VOLUME_A2DP_MAX;
+	}
+
 	transport->a2dp_codec = codec;
 	transport_update_props(transport, &it[1], NULL);
 
@@ -2332,6 +2556,14 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	}
 	if (is_new)
 		spa_list_append(&transport->device->transport_list, &transport->device_link);
+
+	if (profile & SPA_BT_PROFILE_A2DP_SOURCE) {
+		/* PW is the rendering device so it's responsible for reporting hardware volume. */
+		transport->volumes[SPA_BT_VOLUME_ID_RX].active = true;
+	} else if (profile & SPA_BT_PROFILE_A2DP_SINK) {
+		transport->volumes[SPA_BT_VOLUME_ID_TX].active
+			|= transport->device->a2dp_volume_active[SPA_BT_VOLUME_ID_TX];
+	}
 
 	if (codec->validate_config) {
 		struct spa_audio_info info;
@@ -2353,6 +2585,9 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 			monitor, path, transport->n_channels);
 
 	spa_bt_device_connect_profile(transport->device, transport->profile);
+
+	/* Sync initial volumes */
+	transport_sync_volume(transport);
 
 	if ((r = dbus_message_new_method_return(m)) == NULL)
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
@@ -2822,7 +3057,6 @@ static void unregister_media_application(struct spa_bt_monitor * monitor)
 {
 	int ret;
 	char *object_path = NULL;
-	dbus_connection_unregister_object_path(monitor->conn, A2DP_OBJECT_MANAGER_PATH);
 
 	for (int i = 0; a2dp_codecs[i]; i++) {
 		const struct a2dp_codec *codec = a2dp_codecs[i];
@@ -2842,6 +3076,8 @@ static void unregister_media_application(struct spa_bt_monitor * monitor)
 			free(object_path);
 		}
 	}
+
+	dbus_connection_unregister_object_path(monitor->conn, A2DP_OBJECT_MANAGER_PATH);
 }
 
 static int adapter_register_application(struct spa_bt_adapter *a) {
@@ -3406,7 +3642,18 @@ static int impl_clear(struct spa_handle *handle)
 
 	monitor = (struct spa_bt_monitor *) handle;
 
+	/*
+	 * We don't call BlueZ API unregister methods here, since BlueZ generally does the
+	 * unregistration when the DBus connection is closed below.  We'll unregister DBus
+	 * object managers and filter callbacks though.
+	 */
+
 	unregister_media_application(monitor);
+
+	if (monitor->filters_added) {
+		dbus_connection_remove_filter(monitor->conn, filter_cb, monitor);
+		monitor->filters_added = false;
+	}
 
 	spa_list_consume(t, &monitor->transport_list, link)
 		spa_bt_transport_free(t);
@@ -3434,6 +3681,18 @@ static int impl_clear(struct spa_handle *handle)
 
 	free((void*)monitor->enabled_codecs.items);
 	spa_zero(monitor->enabled_codecs);
+
+	spa_dbus_connection_destroy(monitor->dbus_connection);
+	monitor->dbus_connection = NULL;
+	monitor->conn = NULL;
+
+	monitor->objects_listed = false;
+
+	monitor->connection_info_supported = false;
+	monitor->enable_sbc_xq = false;
+	monitor->backend_native_registered = false;
+	monitor->backend_ofono_registered = false;
+	monitor->backend_hsphfpd_registered = false;
 
 	return 0;
 }

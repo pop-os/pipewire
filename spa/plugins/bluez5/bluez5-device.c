@@ -37,6 +37,7 @@
 #include <spa/node/node.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
+#include <spa/support/i18n.h>
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
 #include <spa/monitor/event.h>
@@ -59,6 +60,11 @@
 #define DEVICE_ID_SINK		1
 #define DYNAMIC_NODE_ID_FLAG	0x1000
 
+static struct spa_i18n *_i18n;
+
+#define _(_str)	 spa_i18n_text(_i18n,(_str))
+#define N_(_str) (_str)
+
 enum {
 	DEVICE_PROFILE_OFF = 0,
 	DEVICE_PROFILE_AG = 1,
@@ -75,7 +81,12 @@ static void reset_props(struct props *props)
 	props->codec = 0;
 }
 
+struct impl;
+
 struct node {
+	struct impl *impl;
+	struct spa_bt_transport *transport;
+	struct spa_hook transport_listener;
 	uint32_t id;
 	unsigned int active:1;
 	unsigned int mute:1;
@@ -84,9 +95,9 @@ struct node {
 	int64_t latency_offset;
 	uint32_t channels[SPA_AUDIO_MAX_CHANNELS];
 	float volumes[SPA_AUDIO_MAX_CHANNELS];
+	float soft_volumes[SPA_AUDIO_MAX_CHANNELS];
 };
 
-struct impl;
 struct dynamic_node
 {
 	struct impl *impl;
@@ -220,6 +231,101 @@ static const char *get_codec_name(struct spa_bt_transport *t)
 	return get_hfp_codec_name(t->codec);
 }
 
+static void transport_destroy(void *userdata)
+{
+	struct node *node = userdata;
+	node->transport = NULL;
+}
+
+static void emit_volume(struct impl *this, struct node *node)
+{
+	struct spa_event *event;
+	uint8_t buffer[4096];
+	struct spa_pod_builder b = { 0 };
+	struct spa_pod_frame f[1];
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_pod_builder_push_object(&b, &f[0],
+			SPA_TYPE_EVENT_Device, SPA_DEVICE_EVENT_ObjectConfig);
+	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Object, 0);
+	spa_pod_builder_int(&b, node->id);
+	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Props, 0);
+	spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
+			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
+				SPA_TYPE_Float, node->n_channels, node->soft_volumes),
+			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
+				SPA_TYPE_Id, node->n_channels, node->channels));
+	event = spa_pod_builder_pop(&b, &f[0]);
+
+	spa_device_emit_event(&this->hooks, event);
+}
+
+static void emit_info(struct impl *this, bool full);
+
+static float node_get_hw_volume(struct node *node)
+{
+	uint32_t i;
+	float hw_volume = 0.0f;
+	for (i = 0; i < node->n_channels; i++)
+		hw_volume = SPA_MAX(node->volumes[i], hw_volume);
+	return SPA_MIN(hw_volume, 1.0f);
+}
+
+static void node_update_soft_volumes(struct node *node, float hw_volume)
+{
+	for (uint32_t i = 0; i < node->n_channels; ++i) {
+		node->soft_volumes[i] = hw_volume > 0.0f
+			? node->volumes[i] / hw_volume
+			: 0.0f;
+	}
+}
+
+static void volume_changed(void *userdata)
+{
+	struct node *node = userdata;
+	struct impl *impl = node->impl;
+	struct spa_bt_transport_volume *t_volume;
+	float prev_hw_volume;
+
+	if (!node->transport || !spa_bt_transport_volume_enabled(node->transport))
+		return;
+
+	/* PW is the controller for remote device. */
+	if (impl->profile != DEVICE_PROFILE_A2DP
+	    && impl->profile !=  DEVICE_PROFILE_HSP_HFP)
+		return;
+
+	t_volume = &node->transport->volumes[node->id];
+
+	if (!t_volume->active)
+		return;
+
+	prev_hw_volume = node_get_hw_volume(node);
+	for (uint32_t i = 0; i < node->n_channels; ++i) {
+		node->volumes[i] = prev_hw_volume > 0.0f
+			? node->volumes[i] * t_volume->volume / prev_hw_volume
+			: t_volume->volume;
+	}
+
+	node_update_soft_volumes(node, t_volume->volume);
+
+	impl->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	impl->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
+	emit_info(impl, false);
+
+	/* It sometimes flips volume to over 100% in pavucontrol silder
+	 * if volume is emited before route info emitting while node
+	 * volumes are not identical to route volumes. Not sure why. */
+	emit_volume(impl, node);
+}
+
+static const struct spa_bt_transport_events transport_events = {
+	SPA_VERSION_BT_DEVICE_EVENTS,
+	.destroy = transport_destroy,
+	.volume_changed = volume_changed,
+};
+
 static void emit_node(struct impl *this, struct spa_bt_transport *t,
 		uint32_t id, const char *factory_name)
 {
@@ -264,10 +370,15 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 				this->nodes[id].volumes[i] = this->nodes[id].volumes[i % this->nodes[id].n_channels];
 		}
 
+		this->nodes[id].impl = this;
 		this->nodes[id].active = true;
 		this->nodes[id].n_channels = t->n_channels;
 		memcpy(this->nodes[id].channels, t->channels,
 				t->n_channels * sizeof(uint32_t));
+		if (this->nodes[id].transport)
+			spa_hook_remove(&this->nodes[id].transport_listener);
+		this->nodes[id].transport = t;
+		spa_bt_transport_add_listener(t, &this->nodes[id].transport_listener, &transport_events, &this->nodes[id]);
 	}
 }
 
@@ -296,6 +407,7 @@ static void dynamic_node_transport_destroy(void *data)
 {
 	struct dynamic_node *this = data;
 	spa_log_debug(this->impl->log, "transport %p destroy", this->transport);
+	this->transport = NULL;
 }
 
 static void dynamic_node_transport_state_changed(void *data,
@@ -321,10 +433,58 @@ static void dynamic_node_transport_state_changed(void *data,
 	}
 }
 
+static void dynamic_node_volume_changed(void *data)
+{
+	struct dynamic_node *node = data;
+	struct impl *impl = node->impl;
+	struct spa_event *event;
+	uint8_t buffer[4096];
+	struct spa_pod_builder b = { 0 };
+	struct spa_pod_frame f[1];
+	struct spa_bt_transport_volume *t_volume;
+	int id = node->id, volume_id;
+
+	SPA_FLAG_CLEAR(id, DYNAMIC_NODE_ID_FLAG);
+
+	/* Remote device is the controller */
+	if (!node->transport || impl->profile != DEVICE_PROFILE_AG
+	    || !spa_bt_transport_volume_enabled(node->transport))
+		return;
+
+	if (id == 0 || id == 2)
+		volume_id = SPA_BT_VOLUME_ID_RX;
+	else if (id == 1)
+		volume_id = SPA_BT_VOLUME_ID_TX;
+	else
+		return;
+
+	t_volume = &node->transport->volumes[volume_id];
+	if (!t_volume->active)
+		return;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_pod_builder_push_object(&b, &f[0],
+			SPA_TYPE_EVENT_Device, SPA_DEVICE_EVENT_ObjectConfig);
+	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Object, 0);
+	spa_pod_builder_int(&b, id);
+	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Props, 0);
+	spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
+			SPA_PROP_volume, SPA_POD_Float(t_volume->volume));
+	event = spa_pod_builder_pop(&b, &f[0]);
+
+	spa_log_debug(impl->log, "dynamic node %p: volume %d changed %f, profile %d",
+		node, volume_id, t_volume->volume, node->transport->profile);
+
+	/* Dynamic node doesn't has route, we can only set volume on adaptar node. */
+	spa_device_emit_event(&impl->hooks, event);
+}
+
 static const struct spa_bt_transport_events dynamic_node_transport_events = {
 	SPA_VERSION_BT_TRANSPORT_EVENTS,
 	.destroy = dynamic_node_transport_destroy,
 	.state_changed = dynamic_node_transport_state_changed,
+	.volume_changed = dynamic_node_volume_changed,
 };
 
 static void emit_dynamic_node(struct dynamic_node *this, struct impl *impl,
@@ -374,7 +534,10 @@ static int emit_nodes(struct impl *this)
 			if (!t)
 				t = find_transport(this, SPA_BT_PROFILE_HSP_AG, 0);
 			if (t) {
-				this->props.codec = get_hfp_codec_id(t->codec);
+				if (t->profile == SPA_BT_PROFILE_HSP_AG)
+					this->props.codec = 0;
+				else
+					this->props.codec = get_hfp_codec_id(t->codec);
 				emit_dynamic_node(&this->dyn_sco_source, this, t,
 						0, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
 				emit_dynamic_node(&this->dyn_sco_sink, this, t,
@@ -414,7 +577,10 @@ static int emit_nodes(struct impl *this)
 			if (!t)
 				t = find_transport(this, SPA_BT_PROFILE_HSP_HS, 0);
 			if (t) {
-				this->props.codec = get_hfp_codec_id(t->codec);
+				if (t->profile == SPA_BT_PROFILE_HSP_HS)
+					this->props.codec = 0;
+				else
+					this->props.codec = get_hfp_codec_id(t->codec);
 				emit_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
 				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_SCO_SINK);
 			}
@@ -446,16 +612,19 @@ static void emit_info(struct impl *this, bool full)
 
 static void emit_remove_nodes(struct impl *this)
 {
-	uint32_t i;
-
 	remove_dynamic_node (&this->dyn_a2dp_source);
 	remove_dynamic_node (&this->dyn_sco_source);
 	remove_dynamic_node (&this->dyn_sco_sink);
 
-	for (i = 0; i < 2; i++) {
-		if (this->nodes[i].active) {
+	for (uint32_t i = 0; i < 2; i++) {
+		struct node * node = &this->nodes[i];
+		if (node->transport) {
+			spa_hook_remove(&node->transport_listener);
+			node->transport = NULL;
+		}
+		if (node->active) {
 			spa_device_emit_object_info(&this->hooks, i, NULL);
-			this->nodes[i].active = false;
+			node->active = false;
 		}
 	}
 }
@@ -609,7 +778,7 @@ static void profiles_changed(void *userdata, uint32_t prev_profiles, uint32_t pr
 			      nodes_changed);
 		break;
 	case DEVICE_PROFILE_HSP_HFP:
-		if (spa_bt_device_supports_hfp_codec(this->bt_dev, get_hfp_codec(this->props.codec)) == 0)
+		if (spa_bt_device_supports_hfp_codec(this->bt_dev, get_hfp_codec(this->props.codec)) != 1)
 			this->props.codec = 0;
 		nodes_changed = (connected_change & SPA_BT_PROFILE_HEADSET_HEAD_UNIT);
 		spa_log_debug(this->log, NAME": profiles changed: HSP/HFP nodes changed: %d",
@@ -836,7 +1005,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 	switch (profile_index) {
 	case DEVICE_PROFILE_OFF:
 		name = "off";
-		desc = "Off";
+		desc = _("Off");
 		break;
 	case DEVICE_PROFILE_AG:
 	{
@@ -846,7 +1015,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 			return NULL;
 		} else {
 			name = "audio-gateway";
-			desc = "Audio Gateway (A2DP Source & HSP/HFP AG)";
+			desc = _("Audio Gateway (A2DP Source & HSP/HFP AG)");
 		}
 		break;
 	}
@@ -857,26 +1026,30 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		      (SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_A2DP_SOURCE);
 		if (!(profile & SPA_BT_PROFILE_A2DP_SINK)) {
 			return NULL;
-		} else if (profile == SPA_BT_PROFILE_A2DP_SINK) {
-			desc = "High Fidelity Playback (A2DP Sink%s%s)";
-		} else {
-			desc = "High Fidelity Duplex (A2DP Source/Sink%s%s)";
 		}
 		name = spa_bt_profile_name(profile);
 		n_sink++;
 		if (codec) {
 			const struct a2dp_codec *a2dp_codec = get_supported_a2dp_codec(this, codec);
 			if (a2dp_codec == NULL) {
-				errno = -EINVAL;
+				errno = EINVAL;
 				return NULL;
 			}
 			name_and_codec = spa_aprintf("%s-%s", name, a2dp_codec->name);
-			desc_and_codec = spa_aprintf(desc, ", codec ", a2dp_codec->description);
 			name = name_and_codec;
+			if (profile == SPA_BT_PROFILE_A2DP_SINK) {
+				desc = _("High Fidelity Playback (A2DP Sink, codec %s)");
+			} else {
+				desc = _("High Fidelity Duplex (A2DP Source/Sink, codec %s)");
+			}
+			desc_and_codec = spa_aprintf(desc, a2dp_codec->description);
 			desc = desc_and_codec;
 		} else {
-			desc_and_codec = spa_aprintf(desc, "", "");
-			desc = desc_and_codec;
+			if (profile == SPA_BT_PROFILE_A2DP_SINK) {
+				desc = _("High Fidelity Playback (A2DP Sink)");
+			} else {
+				desc = _("High Fidelity Duplex (A2DP Source/Sink)");
+			}
 		}
 		break;
 	}
@@ -887,8 +1060,6 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		      SPA_BT_PROFILE_HEADSET_HEAD_UNIT;
 		if (profile == 0) {
 			return NULL;
-		} else {
-			desc = "Headset Head Unit (HSP/HFP%s%s)";
 		}
 		name = spa_bt_profile_name(profile);
 		n_source++;
@@ -896,19 +1067,19 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		if (codec) {
 			bool codec_ok = !(profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY);
 			unsigned int hfp_codec = get_hfp_codec(codec);
-			if (spa_bt_device_supports_hfp_codec(this->bt_dev, hfp_codec) == 0)
+			if (spa_bt_device_supports_hfp_codec(this->bt_dev, hfp_codec) != 1)
 				codec_ok = false;
 			if (!codec_ok) {
-				errno = -EINVAL;
+				errno = EINVAL;
 				return NULL;
 			}
 			name_and_codec = spa_aprintf("%s-%s", name, get_hfp_codec_name(hfp_codec));
-			desc_and_codec = spa_aprintf(desc, ", codec ", get_hfp_codec_description(hfp_codec));
 			name = name_and_codec;
+			desc_and_codec = spa_aprintf(_("Headset Head Unit (HSP/HFP, codec %s)"),
+						get_hfp_codec_description(hfp_codec));
 			desc = desc_and_codec;
 		} else {
-			desc_and_codec = spa_aprintf(desc, "", "");
-			desc = desc_and_codec;
+			desc = _("Headset Head Unit (HSP/HFP)");
 		}
 		break;
 	}
@@ -944,8 +1115,10 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		spa_pod_builder_pop(b, &f[1]);
 	}
 
-	free(name_and_codec);
-	free(desc_and_codec);
+	if (name_and_codec)
+		free(name_and_codec);
+	if (desc_and_codec)
+		free(desc_and_codec);
 
 	return spa_pod_builder_pop(b, &f[0]);
 }
@@ -967,53 +1140,53 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	switch (ff) {
 	case SPA_BT_FORM_FACTOR_HEADSET:
 		name_prefix = "headset";
-		description = "Headset";
+		description = _("Headset");
 		port_type = "headset";
 		break;
 	case SPA_BT_FORM_FACTOR_HANDSFREE:
 		name_prefix = "handsfree";
-		description = "Handsfree";
+		description = _("Handsfree");
 		port_type = "handsfree";
 		break;
 	case SPA_BT_FORM_FACTOR_MICROPHONE:
 		name_prefix = "microphone";
-		description = "Microphone";
+		description = _("Microphone");
 		port_type = "mic";
 		break;
 	case SPA_BT_FORM_FACTOR_SPEAKER:
 		name_prefix = "speaker";
-		description = "Speaker";
+		description = _("Speaker");
 		port_type = "speaker";
 		break;
 	case SPA_BT_FORM_FACTOR_HEADPHONE:
 		name_prefix = "headphone";
-		description = "Headphone";
+		description = _("Headphone");
 		port_type = "headphones";
 		break;
 	case SPA_BT_FORM_FACTOR_PORTABLE:
 		name_prefix = "portable";
-		description = "Portable";
+		description = _("Portable");
 		port_type = "portable";
 		break;
 	case SPA_BT_FORM_FACTOR_CAR:
 		name_prefix = "car";
-		description = "Car";
+		description = _("Car");
 		port_type = "car";
 		break;
 	case SPA_BT_FORM_FACTOR_HIFI:
 		name_prefix = "hifi";
-		description = "HiFi";
+		description = _("HiFi");
 		port_type = "hifi";
 		break;
 	case SPA_BT_FORM_FACTOR_PHONE:
 		name_prefix = "phone";
-		description = "Phone";
+		description = _("Phone");
 		port_type = "phone";
 		break;
 	case SPA_BT_FORM_FACTOR_UNKNOWN:
 	default:
 		name_prefix = "bluetooth";
-		description = "Bluetooth";
+		description = _("Bluetooth");
 		port_type = "bluetooth";
 		break;
 	}
@@ -1080,6 +1253,11 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 
 	if (dev != SPA_ID_INVALID) {
 		struct node *node = &this->nodes[dev];
+		struct spa_bt_transport_volume *t_volume;
+
+		t_volume = node->transport
+			? &node->transport->volumes[node->id]
+			: NULL;
 
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_device, 0);
 		spa_pod_builder_int(b, dev);
@@ -1090,9 +1268,15 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 		spa_pod_builder_prop(b, SPA_PROP_mute, 0);
 		spa_pod_builder_bool(b, node->mute);
 
-		spa_pod_builder_prop(b, SPA_PROP_channelVolumes, 0);
+		spa_pod_builder_prop(b, SPA_PROP_channelVolumes,
+			(t_volume && t_volume->active) ? SPA_POD_PROP_FLAG_HARDWARE : 0);
 		spa_pod_builder_array(b, sizeof(float), SPA_TYPE_Float,
 				node->n_channels, node->volumes);
+
+		if (t_volume && t_volume->active) {
+			spa_pod_builder_prop(b, SPA_PROP_volumeStep, SPA_POD_PROP_FLAG_READONLY);
+			spa_pod_builder_float(b, 1.0f / (t_volume->hw_volume_max + 1));
+		}
 
 		spa_pod_builder_prop(b, SPA_PROP_channelMap, 0);
 		spa_pod_builder_array(b, sizeof(uint32_t), SPA_TYPE_Id,
@@ -1325,39 +1509,35 @@ static int impl_enum_params(void *object, int seq,
 
 static int node_set_volume(struct impl *this, struct node *node, float volumes[], uint32_t n_volumes)
 {
-	struct spa_event *event;
-	uint8_t buffer[4096];
-	struct spa_pod_builder b = { 0 };
-	struct spa_pod_frame f[1];
 	uint32_t i;
 	int changed = 0;
+	struct spa_bt_transport_volume *t_volume;
 
 	if (n_volumes == 0)
 		return -EINVAL;
 
-	spa_log_info(this->log, "node %p volume %f", node, volumes[0]);
+	spa_log_debug(this->log, "node %p volume %f", node, volumes[0]);
 
 	for (i = 0; i < node->n_channels; i++) {
-		if (node->volumes[i] != volumes[i % n_volumes])
-			++changed;
+		if (node->volumes[i] == volumes[i % n_volumes])
+			continue;
+		++changed;
 		node->volumes[i] = volumes[i % n_volumes];
 	}
 
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_pod_builder_push_object(&b, &f[0],
-			SPA_TYPE_EVENT_Device, SPA_DEVICE_EVENT_ObjectConfig);
-	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Object, 0);
-	spa_pod_builder_int(&b, node->id);
-	spa_pod_builder_prop(&b, SPA_EVENT_DEVICE_Props, 0);
-	spa_pod_builder_add_object(&b,
-			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
-			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
-				SPA_TYPE_Float, node->n_channels, node->volumes),
-			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
-				SPA_TYPE_Id, node->n_channels, node->channels));
-	event = spa_pod_builder_pop(&b, &f[0]);
+	t_volume = node->transport ? &node->transport->volumes[node->id]: NULL;
 
-	spa_device_emit_event(&this->hooks, event);
+	if (t_volume && t_volume->active
+	    && spa_bt_transport_volume_enabled(node->transport)) {
+		float hw_volume = node_get_hw_volume(node);
+		spa_log_debug(this->log, "node %p hardware volume %f", node, hw_volume);
+
+		node_update_soft_volumes(node, hw_volume);
+		spa_bt_transport_set_volume(node->transport, node->id, hw_volume);
+	} else {
+		for (uint32_t i = 0; i < node->n_channels; ++i)
+			node->soft_volumes[i] = node->volumes[i];
+	}
 
 	return changed;
 }
@@ -1545,6 +1725,8 @@ static int impl_set_param(void *object,
 				this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
 			}
 			emit_info(this, false);
+			/* See volume_changed(void *) */
+			emit_volume(this, node);
 		}
 		break;
 	}
@@ -1623,6 +1805,8 @@ static int impl_clear(struct spa_handle *handle)
 	struct impl *this = (struct impl *) handle;
 	const struct spa_dict_item *it;
 
+	emit_remove_nodes(this);
+
 	free(this->supported_codecs);
 	if (this->bt_dev) {
 		this->bt_dev->settings = NULL;
@@ -1683,6 +1867,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this = (struct impl *) handle;
 
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	_i18n = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_I18N);
 
 	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_DEVICE)))
 		sscanf(str, "pointer:%p", &this->bt_dev);
@@ -1695,11 +1880,16 @@ impl_init(const struct spa_handle_factory *factory,
 	if (info) {
 		int profiles;
 		this->bt_dev->settings = filter_bluez_device_setting(this, info);
-		if ((str = spa_dict_lookup(info, "bluez5.reconnect-profiles")) != NULL)
-			profiles = spa_bt_profiles_from_json_array(str);
-		if (str == NULL || profiles < 0)
-			profiles = SPA_BT_PROFILE_NULL;
-		this->bt_dev->reconnect_profiles = profiles;
+
+		if ((str = spa_dict_lookup(info, "bluez5.auto-connect")) != NULL) {
+			if ((profiles = spa_bt_profiles_from_json_array(str)) >= 0)
+				this->bt_dev->reconnect_profiles = profiles;
+		}
+
+		if ((str = spa_dict_lookup(info, "bluez5.hw-volume")) != NULL) {
+			if ((profiles = spa_bt_profiles_from_json_array(str)) >= 0)
+				this->bt_dev->hw_volume_profiles = profiles;
+		}
 	}
 
 	this->device.iface = SPA_INTERFACE_INIT(

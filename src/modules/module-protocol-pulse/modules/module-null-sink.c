@@ -22,6 +22,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <pipewire/pipewire.h>
+
+#include "../manager.h"
+#include "../module.h"
+#include "registry.h"
+
 struct module_null_sink_data {
 	struct pw_proxy *proxy;
 	struct spa_hook listener;
@@ -116,12 +122,14 @@ static const struct spa_dict_item module_null_sink_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-static struct module *create_module_null_sink(struct impl *impl, const char *argument)
+struct module *create_module_null_sink(struct impl *impl, const char *argument)
 {
 	struct module *module;
 	struct module_null_sink_data *d;
 	struct pw_properties *props = NULL;
 	const char *str;
+	struct spa_audio_info_raw info = { 0 };
+	uint32_t i;
 	int res;
 
 	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_null_sink_info));
@@ -130,7 +138,7 @@ static struct module *create_module_null_sink(struct impl *impl, const char *arg
 		goto out;
 	}
 	if (argument)
-		add_props(props, argument);
+		module_args_add_props(props, argument);
 
 	if ((str = pw_properties_get(props, "sink_name")) != NULL) {
 		pw_properties_set(props, PW_KEY_NODE_NAME, str);
@@ -139,34 +147,30 @@ static struct module *create_module_null_sink(struct impl *impl, const char *arg
 		pw_properties_set(props, PW_KEY_NODE_NAME, "null");
 	}
 	if ((str = pw_properties_get(props, "sink_properties")) != NULL) {
-		add_props(props, str);
+		module_args_add_props(props, str);
 		pw_properties_set(props, "sink_properties", NULL);
 	}
-	if ((str = pw_properties_get(props, "channels")) != NULL) {
-		pw_properties_set(props, SPA_KEY_AUDIO_CHANNELS, str);
-		pw_properties_set(props, "channels", NULL);
+
+	if (module_args_to_audioinfo(impl, props, &info) < 0) {
+		res = -EINVAL;
+		goto out;
 	}
-	if ((str = pw_properties_get(props, "rate")) != NULL) {
-		pw_properties_set(props, SPA_KEY_AUDIO_RATE, str);
-		pw_properties_set(props, "rate", NULL);
-	}
-	if ((str = pw_properties_get(props, "channel_map")) != NULL) {
-		struct channel_map map = CHANNEL_MAP_INIT;
-		uint32_t i;
+
+	if (info.rate)
+		pw_properties_setf(props, SPA_KEY_AUDIO_RATE, "%u", info.rate);
+	if (info.channels) {
 		char *s, *p;
 
-		channel_map_parse(str, &map);
-		p = s = alloca(map.channels * 6);
+		pw_properties_setf(props, SPA_KEY_AUDIO_CHANNELS, "%u", info.channels);
 
-		for (i = 0; i < map.channels; i++)
+		p = s = alloca(info.channels * 6);
+		for (i = 0; i < info.channels; i++)
 			p += snprintf(p, 6, "%s%s", i == 0 ? "" : ",",
-					channel_id2name(map.map[i]));
+					channel_id2name(info.position[i]));
 		pw_properties_set(props, SPA_KEY_AUDIO_POSITION, s);
-		pw_properties_set(props, "channel_map", NULL);
-	} else if (pw_properties_get(props, SPA_KEY_AUDIO_POSITION) == NULL) {
-		pw_properties_set(props, SPA_KEY_AUDIO_POSITION, "FL,FR");
 	}
-	if ((str = pw_properties_get(props, PW_KEY_MEDIA_CLASS)) == NULL)
+
+	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 
 	if ((str = pw_properties_get(props, "device.description")) != NULL) {
@@ -183,7 +187,12 @@ static struct module *create_module_null_sink(struct impl *impl, const char *arg
 						class ? class : "", (class && class[0] != '\0') ? " " : "");
 	}
 	pw_properties_set(props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
-	pw_properties_set(props, PW_KEY_OBJECT_LINGER, "true");
+
+	if (pw_properties_get(props, PW_KEY_OBJECT_LINGER) == NULL)
+		pw_properties_set(props, PW_KEY_OBJECT_LINGER, "true");
+
+	if (pw_properties_get(props, "monitor.channel-volumes") == NULL)
+		pw_properties_set(props, "monitor.channel-volumes", "true");
 
 	module = module_new(impl, &module_null_sink_methods, sizeof(*d));
 	if (module == NULL) {
