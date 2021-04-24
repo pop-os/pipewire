@@ -114,6 +114,61 @@ static struct node *bluez5_find_node(struct device *device, uint32_t id)
 	return NULL;
 }
 
+static void update_icon_name(struct pw_properties *p, bool is_sink)
+{
+	const char *s, *d = NULL, *bus;
+
+	if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR))) {
+		if (strcmp(s, "microphone") == 0)
+			d = "audio-input-microphone";
+		else if (strcmp(s, "webcam") == 0)
+			d = "camera-web";
+		else if (strcmp(s, "computer") == 0)
+			d = "computer";
+		else if (strcmp(s, "handset") == 0)
+			d = "phone";
+		else if (strcmp(s, "portable") == 0)
+			d = "multimedia-player";
+		else if (strcmp(s, "tv") == 0)
+			d = "video-display";
+		else if (strcmp(s, "headset") == 0)
+			d = "audio-headset";
+		else if (strcmp(s, "headphone") == 0)
+			d = "audio-headphones";
+		else if (strcmp(s, "speaker") == 0)
+			d = "audio-speakers";
+		else if (strcmp(s, "hands-free") == 0)
+			d = "audio-handsfree";
+	}
+	if (!d)
+		if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
+			if (strcmp(s, "modem") == 0)
+				d = "modem";
+
+	if (!d) {
+		if (is_sink)
+			d = "audio-card";
+		else
+			d = "audio-input-microphone";
+	}
+
+	if ((s = pw_properties_get(p, "device.profile.name")) != NULL) {
+		if (strstr(s, "analog"))
+			s = "-analog";
+		else if (strstr(s, "iec958"))
+			s = "-iec958";
+		else if (strstr(s, "hdmi"))
+			s = "-hdmi";
+		else
+			s = NULL;
+	}
+
+	bus = pw_properties_get(p, PW_KEY_DEVICE_BUS);
+
+	pw_properties_setf(p, PW_KEY_DEVICE_ICON_NAME,
+			"%s%s%s%s", d, s ? s : "", bus ? "-" : "", bus ? bus : "");
+}
+
 static void bluez5_update_node(struct device *device, struct node *node,
 		const struct spa_device_object_info *info)
 {
@@ -134,6 +189,7 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 	const char *prefix, *str, *profile, *rules;
 	int priority;
 	char tmp[1024];
+	bool is_sink;
 
 	pw_log_debug("new node %u", id);
 
@@ -148,6 +204,13 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 	}
 
 	node->props = pw_properties_new_dict(info->props);
+
+	if (pw_properties_get(node->props, PW_KEY_DEVICE_FORM_FACTOR) == NULL)
+		pw_properties_set(node->props, PW_KEY_DEVICE_FORM_FACTOR,
+				pw_properties_get(device->props, PW_KEY_DEVICE_FORM_FACTOR));
+	if (pw_properties_get(node->props, PW_KEY_DEVICE_BUS) == NULL)
+		pw_properties_set(node->props, PW_KEY_DEVICE_BUS,
+				pw_properties_get(device->props, PW_KEY_DEVICE_BUS));
 
 	str = pw_properties_get(device->props, SPA_KEY_DEVICE_DESCRIPTION);
 	if (str == NULL)
@@ -172,7 +235,8 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 	if (str == NULL)
 		str = pw_properties_get(device->props, SPA_KEY_DEVICE_NAME);
 
-	if (strstr(info->factory_name, "sink") != NULL)
+	is_sink = strstr(info->factory_name, "sink") != NULL;
+	if (is_sink)
 		prefix = "bluez_output";
 	else if (strstr(info->factory_name, "source") != NULL)
 		prefix = "bluez_input";
@@ -194,6 +258,8 @@ static struct node *bluez5_create_node(struct device *device, uint32_t id,
 		pw_properties_setf(node->props, PW_KEY_PRIORITY_DRIVER, "%d", priority);
 		pw_properties_setf(node->props, PW_KEY_PRIORITY_SESSION, "%d", priority);
 	}
+	if (pw_properties_get(node->props, PW_KEY_DEVICE_ICON_NAME) == NULL)
+		update_icon_name(node->props, is_sink);
 
 	node->impl = impl;
 	node->device = device;
@@ -341,6 +407,10 @@ static int update_device_props(struct device *device)
 	pw_properties_set(p, PW_KEY_DEVICE_NAME,
 			sm_media_session_sanitize_name(tmp, sizeof(tmp),
 					'_', "bluez_card.%s", s));
+
+	if (pw_properties_get(p, SPA_KEY_DEVICE_ICON_NAME) == NULL)
+		update_icon_name(p, true);
+
 	return 0;
 }
 
@@ -395,7 +465,7 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 	struct spa_handle *handle;
 	int res;
 	void *iface;
-	const char *rules;
+	const char *rules, *str;
 
 	pw_log_debug("new device %u", id);
 
@@ -420,6 +490,12 @@ static struct device *bluez5_create_device(struct impl *impl, uint32_t id,
 
 	if ((rules = pw_properties_get(impl->conf, "rules")) != NULL)
 		sm_media_session_match_rules(rules, strlen(rules), device->props);
+
+	/* Propagate the msbc-support global property if it exists and is not
+	 * overloaded by a device specific one */
+	if ((str = pw_properties_get(impl->props, "bluez5.msbc-support")) != NULL &&
+	    pw_properties_get(device->props, "bluez5.msbc-support") == NULL)
+		pw_properties_set(device->props, "bluez5.msbc-support", str);
 
 	handle = pw_context_load_spa_handle(context,
 		info->factory_name,
@@ -531,31 +607,88 @@ static const struct spa_device_events bluez5_enum_callbacks =
 	.object_info = bluez5_enum_object_info,
 };
 
-static void session_destroy(void *data)
+static void unload_bluez_handle(struct impl *impl)
 {
-	struct impl *impl = data;
 	struct device *device;
+
+	if (impl->handle == NULL)
+		return;
+
 	spa_list_consume(device, &impl->device_list, link)
 		bluez5_device_free(device);
 
-	spa_hook_remove(&impl->session_listener);
 	spa_hook_remove(&impl->listener);
+
 	pw_unload_spa_handle(impl->handle);
+	impl->handle = NULL;
+}
+
+static int load_bluez_handle(struct impl *impl)
+{
+	struct pw_context *context = impl->session->context;
+	void *iface;
+	int res;
+
+	if (impl->handle != NULL)
+		return 0;
+
+	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_BLUEZ5_ENUM_DBUS, &impl->props->dict);
+	if (impl->handle == NULL) {
+		res = -errno;
+		pw_log_info("can't load %s: %m", SPA_NAME_API_BLUEZ5_ENUM_DBUS);
+		goto fail;
+	}
+	if ((res = spa_handle_get_interface(impl->handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
+		pw_log_error("can't get Device interface: %s", spa_strerror(res));
+		goto fail;
+	}
+	impl->monitor = iface;
+
+	spa_device_add_listener(impl->monitor, &impl->listener,
+			&bluez5_enum_callbacks, impl);
+
+	return 0;
+
+fail:
+	if (impl->handle)
+		pw_unload_spa_handle(impl->handle);
+	impl->handle = NULL;
+	return res;
+}
+
+static void session_destroy(void *data)
+{
+	struct impl *impl = data;
+
+	unload_bluez_handle(impl);
+
+	spa_hook_remove(&impl->session_listener);
 	pw_properties_free(impl->props);
 	pw_properties_free(impl->conf);
 	free(impl);
 }
 
+static void seat_active(void *data, bool active)
+{
+	struct impl *impl = data;
+	if (active) {
+		pw_log_info(NAME ": seat active, starting bluetooth");
+		load_bluez_handle(impl);
+	} else {
+		pw_log_info(NAME ": seat not active, stopping bluetooth");
+		unload_bluez_handle(impl);
+	}
+}
+
 static const struct sm_media_session_events session_events = {
 	SM_VERSION_MEDIA_SESSION_EVENTS,
 	.destroy = session_destroy,
+	.seat_active = seat_active,
 };
 
 int sm_bluez5_monitor_start(struct sm_media_session *session)
 {
-	struct pw_context *context = session->context;
 	int res;
-	void *iface;
 	struct impl *impl;
 	const char *str;
 
@@ -565,6 +698,8 @@ int sm_bluez5_monitor_start(struct sm_media_session *session)
 		goto out;
 	}
 	impl->session = session;
+
+	spa_list_init(&impl->device_list);
 
 	if ((impl->conf = pw_properties_new(NULL, NULL)) == NULL) {
 		res = -errno;
@@ -583,21 +718,8 @@ int sm_bluez5_monitor_start(struct sm_media_session *session)
 
 	pw_properties_set(impl->props, "api.bluez5.connection-info", "true");
 
-	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_BLUEZ5_ENUM_DBUS, &impl->props->dict);
-	if (impl->handle == NULL) {
-		res = -errno;
-		pw_log_error("can't load %s: %m", SPA_NAME_API_BLUEZ5_ENUM_DBUS);
+	if ((res = load_bluez_handle(impl)) < 0)
 		goto out_free;
-	}
-	if ((res = spa_handle_get_interface(impl->handle, SPA_TYPE_INTERFACE_Device, &iface)) < 0) {
-		pw_log_error("can't get Device interface: %s", spa_strerror(res));
-		goto out_free;
-	}
-	impl->monitor = iface;
-	spa_list_init(&impl->device_list);
-
-	spa_device_add_listener(impl->monitor, &impl->listener,
-			&bluez5_enum_callbacks, impl);
 
 	sm_media_session_add_listener(session, &impl->session_listener,
 			&session_events, impl);
@@ -605,8 +727,7 @@ int sm_bluez5_monitor_start(struct sm_media_session *session)
 	return 0;
 
 out_free:
-	if (impl->handle)
-		pw_unload_spa_handle(impl->handle);
+	unload_bluez_handle(impl);
 	if (impl->conf)
 		pw_properties_free(impl->conf);
 	if (impl->props)

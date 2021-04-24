@@ -60,6 +60,7 @@
 
 #define spa_debug pw_log_debug
 
+#include <spa/support/cpu.h>
 #include <spa/utils/result.h>
 #include <spa/debug/dict.h>
 #include <spa/debug/mem.h>
@@ -77,14 +78,7 @@
 
 #include "pulse-server.h"
 #include "defs.h"
-
-struct stats {
-	uint32_t n_allocated;
-	uint32_t allocated;
-	uint32_t n_accumulated;
-	uint32_t accumulated;
-	uint32_t sample_cache;
-};
+#include "internal.h"
 
 #define DEFAULT_MIN_REQ		"256/48000"
 #define DEFAULT_DEFAULT_REQ	"960/48000"
@@ -92,17 +86,14 @@ struct stats {
 #define DEFAULT_DEFAULT_FRAG	"96000/48000"
 #define DEFAULT_DEFAULT_TLENGTH	"96000/48000"
 #define DEFAULT_MIN_QUANTUM	"256/48000"
+#if __BYTE_ORDER == __BIG_ENDIAN
+#define DEFAULT_FORMAT		"F32BE"
+#else
+#define DEFAULT_FORMAT		"F32LE"
+#endif
+#define DEFAULT_POSITION	"[ FL FR ]"
 
 #define MAX_FORMATS	32
-
-struct defs {
-	struct spa_fraction min_req;
-	struct spa_fraction default_req;
-	struct spa_fraction min_frag;
-	struct spa_fraction default_frag;
-	struct spa_fraction default_tlength;
-	struct spa_fraction min_quantum;
-};
 
 #include "format.c"
 #include "volume.c"
@@ -110,13 +101,7 @@ struct defs {
 #include "manager.h"
 #include "dbus-name.c"
 
-#define NAME	"pulse-server"
-
 static bool debug_messages = false;
-
-struct impl;
-struct server;
-struct client;
 
 #include "sample.c"
 
@@ -126,161 +111,9 @@ struct operation {
 	uint32_t tag;
 };
 
-struct client {
-	struct spa_list link;
-	struct impl *impl;
-	struct server *server;
-
-	int ref;
-	const char *name;
-
-	struct spa_source *source;
-	struct spa_source *cleanup;
-
-	uint32_t version;
-
-	struct pw_properties *props;
-
-	struct pw_core *core;
-	struct pw_manager *manager;
-	struct spa_hook manager_listener;
-
-	uint32_t subscribed;
-
-	struct pw_manager_object *metadata_default;
-	char *default_sink;
-	char *default_source;
-	struct pw_manager_object *metadata_routes;
-	struct pw_properties *routes;
-
-	uint32_t connect_tag;
-
-	uint32_t in_index;
-	uint32_t out_index;
-	struct descriptor desc;
-	struct message *message;
-
-	struct pw_map streams;
-	struct spa_list out_messages;
-
-	struct spa_list operations;
-	struct spa_list loading_modules;
-
-	struct spa_list pending_samples;
-
-	unsigned int disconnect:1;
-	unsigned int disconnecting:1;
-	unsigned int need_flush:1;
-
-	struct pw_manager_object *prev_default_sink;
-	struct pw_manager_object *prev_default_source;
-};
-
 struct latency_offset_data {
 	int64_t prev_latency_offset;
 	unsigned int initialized:1;
-};
-
-struct buffer_attr {
-	uint32_t maxlength;
-	uint32_t tlength;
-	uint32_t prebuf;
-	uint32_t minreq;
-	uint32_t fragsize;
-};
-
-struct stream {
-	uint32_t create_tag;
-	uint32_t channel;	/* index in map */
-	uint32_t id;		/* id of global */
-
-	struct impl *impl;
-	struct client *client;
-#define STREAM_TYPE_RECORD	0
-#define STREAM_TYPE_PLAYBACK	1
-#define STREAM_TYPE_UPLOAD	2
-	uint32_t type;
-	enum pw_direction direction;
-
-	struct pw_properties *props;
-
-	struct pw_stream *stream;
-	struct spa_hook stream_listener;
-
-	struct spa_io_rate_match *rate_match;
-	struct spa_ringbuffer ring;
-	void *buffer;
-
-	int64_t read_index;
-	int64_t write_index;
-	uint64_t underrun_for;
-	uint64_t playing_for;
-	uint64_t ticks_base;
-	uint64_t timestamp;
-	int64_t delay;
-
-	uint32_t missing;
-	uint32_t requested;
-
-	struct sample_spec ss;
-	struct channel_map map;
-	struct buffer_attr attr;
-	uint32_t frame_size;
-	uint32_t rate;
-
-	struct volume volume;
-	bool muted;
-
-	uint32_t drain_tag;
-	unsigned int corked:1;
-	unsigned int draining:1;
-	unsigned int volume_set:1;
-	unsigned int muted_set:1;
-	unsigned int early_requests:1;
-	unsigned int adjust_latency:1;
-	unsigned int is_underrun:1;
-	unsigned int in_prebuf:1;
-	unsigned int done:1;
-	unsigned int killed:1;
-};
-
-struct server {
-	struct spa_list link;
-	struct impl *impl;
-
-#define SERVER_TYPE_INVALID	0
-#define SERVER_TYPE_UNIX	1
-#define SERVER_TYPE_INET	2
-	uint32_t type;
-	struct sockaddr_un addr;
-
-	struct spa_source *source;
-	struct spa_list clients;
-	unsigned int activated:1;
-};
-
-struct impl {
-	struct pw_loop *loop;
-	struct pw_context *context;
-	struct spa_hook context_listener;
-
-	struct pw_properties *props;
-	void *dbus_name;
-
-	struct ratelimit rate_limit;
-
-	struct spa_source *source;
-	struct spa_list servers;
-
-	struct spa_source *cleanup;
-	struct spa_list cleanup_clients;
-
-	struct pw_map samples;
-	struct pw_map modules;
-
-	struct spa_list free_messages;
-	struct defs defs;
-	struct stats stat;
 };
 
 /* Functions that modules can use */
@@ -290,6 +123,7 @@ static void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t
 #include "module.c"
 #include "message-handler.c"
 
+static void client_free(struct client *client);
 
 static void sample_free(struct sample *sample)
 {
@@ -554,10 +388,13 @@ static int send_underflow(struct stream *stream, int64_t offset, uint32_t underr
 	return send_message(client, reply);
 }
 
-static int send_subscribe_event(struct client *client, uint32_t event, uint32_t id)
+static int send_subscribe_event(struct client *client, uint32_t mask, uint32_t event, uint32_t id)
 {
 	struct impl *impl = client->impl;
 	struct message *reply, *m, *t;
+
+	if (!(client->subscribed & mask))
+		return 0;
 
 	pw_log_debug(NAME" %p: SUBSCRIBE event:%08x id:%u", client, event, id);
 
@@ -605,10 +442,8 @@ static void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t
 	struct server *s;
 	spa_list_for_each(s, &impl->servers, link) {
 		struct client *c;
-		spa_list_for_each(c, &s->clients, link) {
-			if (c->subscribed & mask)
-				send_subscribe_event(c, event, id);
-		}
+		spa_list_for_each(c, &s->clients, link)
+			send_subscribe_event(c, mask, event, id);
 	}
 }
 
@@ -758,44 +593,51 @@ static struct stream *find_stream(struct client *client, uint32_t id)
 	return NULL;
 }
 
-static uint32_t get_event_and_id(struct client *client, struct pw_manager_object *o, uint32_t *id)
+static int send_object_event(struct client *client, struct pw_manager_object *o,
+		uint32_t facility)
 {
-	uint32_t event = 0, res_id = o->id;
+	uint32_t event = 0, mask = 0, res_id = o->id;
 
-	if (client->subscribed & SUBSCRIPTION_MASK_SINK &&
-	    object_is_sink(o)) {
-		event = SUBSCRIPTION_EVENT_SINK;
+	if (pw_manager_object_is_sink(o)) {
+		send_subscribe_event(client,
+				SUBSCRIPTION_MASK_SINK,
+				SUBSCRIPTION_EVENT_SINK | facility,
+				res_id);
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_SOURCE &&
-	    object_is_source_or_monitor(o)) {
-		if (!object_is_source(o))
+	if (pw_manager_object_is_source_or_monitor(o)) {
+		if (!pw_manager_object_is_source(o))
 			res_id |= MONITOR_FLAG;
+		mask = SUBSCRIPTION_MASK_SOURCE;
 		event = SUBSCRIPTION_EVENT_SOURCE;
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_SINK_INPUT &&
-	    object_is_sink_input(o)) {
+	else if (pw_manager_object_is_sink_input(o)) {
+		mask = SUBSCRIPTION_MASK_SINK_INPUT;
 		event = SUBSCRIPTION_EVENT_SINK_INPUT;
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_SOURCE_OUTPUT &&
-	    object_is_source_output(o)) {
+	else if (pw_manager_object_is_source_output(o)) {
+		mask = SUBSCRIPTION_MASK_SOURCE_OUTPUT;
 		event = SUBSCRIPTION_EVENT_SOURCE_OUTPUT;
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_MODULE &&
-	    object_is_module(o)) {
+	else if (pw_manager_object_is_module(o)) {
+		mask = SUBSCRIPTION_MASK_MODULE;
 		event = SUBSCRIPTION_EVENT_MODULE;
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_CLIENT &&
-	    object_is_client(o)) {
+	else if (pw_manager_object_is_client(o)) {
+		mask = SUBSCRIPTION_MASK_CLIENT;
 		event = SUBSCRIPTION_EVENT_CLIENT;
 	}
-	else if (client->subscribed & SUBSCRIPTION_MASK_CARD &&
-	    object_is_card(o)) {
+	else if (pw_manager_object_is_card(o)) {
+		mask = SUBSCRIPTION_MASK_CARD;
 		event = SUBSCRIPTION_EVENT_CARD;
 	} else
 		event = SPA_ID_INVALID;
-	if (id)
-		*id = res_id;
-	return event;
+
+	if (event != SPA_ID_INVALID)
+		send_subscribe_event(client,
+				mask,
+				event | facility,
+				res_id);
+	return 0;
 }
 
 static struct pw_manager_object *find_device(struct client *client,
@@ -826,13 +668,12 @@ static void send_latency_offset_subscribe_event(struct client *client, struct pw
 	int64_t latency_offset = 0LL;
 	bool changed = false;
 
-	if (!object_is_sink(o) && !object_is_source_or_monitor(o))
+	if (!pw_manager_object_is_sink(o) && !pw_manager_object_is_source_or_monitor(o))
 		return;
 
 	/*
 	 * Pulseaudio sends card change events on latency offset change.
 	 */
-
 	if ((info = o->info) == NULL || info->props == NULL)
 		return;
 	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL)
@@ -852,18 +693,15 @@ static void send_latency_offset_subscribe_event(struct client *client, struct pw
 
 	if (changed)
 		send_subscribe_event(client,
-		                     SUBSCRIPTION_EVENT_CARD | SUBSCRIPTION_EVENT_CHANGE,
-		                     card_id);
+				SUBSCRIPTION_MASK_CARD,
+				SUBSCRIPTION_EVENT_CARD | SUBSCRIPTION_EVENT_CHANGE,
+				card_id);
 }
 
 static void send_default_change_subscribe_event(struct client *client, bool sink, bool source)
 {
 	struct pw_manager_object *def;
 	bool changed = false;
-
-	/* Send the subscribe event only if actually needed */
-	if (!(client->subscribed & SUBSCRIPTION_MASK_SERVER))
-		return;
 
 	if (sink) {
 		def = find_device(client, SPA_ID_INVALID, NULL, true);
@@ -883,9 +721,10 @@ static void send_default_change_subscribe_event(struct client *client, bool sink
 
 	if (changed)
 		send_subscribe_event(client,
-		                     SUBSCRIPTION_EVENT_CHANGE |
-		                     SUBSCRIPTION_EVENT_SERVER,
-		                     -1);
+				SUBSCRIPTION_MASK_SERVER,
+				SUBSCRIPTION_EVENT_CHANGE |
+				SUBSCRIPTION_EVENT_SERVER,
+				-1);
 }
 
 static void handle_metadata(struct client *client, struct pw_manager_object *old,
@@ -904,7 +743,6 @@ static void handle_metadata(struct client *client, struct pw_manager_object *old
 static void manager_added(void *data, struct pw_manager_object *o)
 {
 	struct client *client = data;
-	uint32_t event, id;
 	const char *str;
 
 	register_object_message_handlers(o);
@@ -914,41 +752,31 @@ static void manager_added(void *data, struct pw_manager_object *o)
 		    (str = pw_properties_get(o->props, PW_KEY_METADATA_NAME)) != NULL)
 			handle_metadata(client, NULL, o, str);
 	}
-	if ((event = get_event_and_id(client, o, &id)) != SPA_ID_INVALID)
-		send_subscribe_event(client,
-				event | SUBSCRIPTION_EVENT_NEW,
-				id);
+
+	send_object_event(client, o, SUBSCRIPTION_EVENT_NEW);
 
 	/* Adding sinks etc. may also change defaults */
-	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
+	send_default_change_subscribe_event(client, pw_manager_object_is_sink(o), pw_manager_object_is_source_or_monitor(o));
 }
 
 static void manager_updated(void *data, struct pw_manager_object *o)
 {
 	struct client *client = data;
-	uint32_t event, id;
 
-	if ((event = get_event_and_id(client, o, &id)) != SPA_ID_INVALID)
-		send_subscribe_event(client,
-				event | SUBSCRIPTION_EVENT_CHANGE,
-				id);
+	send_object_event(client, o, SUBSCRIPTION_EVENT_CHANGE);
 
 	send_latency_offset_subscribe_event(client, o);
-	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
+	send_default_change_subscribe_event(client, pw_manager_object_is_sink(o), pw_manager_object_is_source_or_monitor(o));
 }
 
 static void manager_removed(void *data, struct pw_manager_object *o)
 {
 	struct client *client = data;
-	uint32_t event, id;
 	const char *str;
 
-	if ((event = get_event_and_id(client, o, &id)) != SPA_ID_INVALID)
-		send_subscribe_event(client,
-				event | SUBSCRIPTION_EVENT_REMOVE,
-				id);
+	send_object_event(client, o, SUBSCRIPTION_EVENT_REMOVE);
 
-	send_default_change_subscribe_event(client, object_is_sink(o), object_is_source_or_monitor(o));
+	send_default_change_subscribe_event(client, pw_manager_object_is_sink(o), pw_manager_object_is_source_or_monitor(o));
 
 	if (strcmp(o->type, PW_TYPE_INTERFACE_Metadata) == 0) {
 		if (o->props != NULL &&
@@ -1143,6 +971,8 @@ static void stream_free(struct stream *stream)
 		spa_hook_remove(&stream->stream_listener);
 		pw_stream_destroy(stream->stream);
 	}
+	pw_work_queue_cancel(impl->work_queue, stream, SPA_ID_INVALID);
+
 	if (stream->buffer)
 		free(stream->buffer);
 	if (stream->props)
@@ -1339,7 +1169,7 @@ static int reply_create_playback_stream(struct stream *stream)
 		TAG_INVALID);
 
 	peer = find_linked(manager, stream->id, stream->direction);
-	if (peer && object_is_sink(peer)) {
+	if (peer && pw_manager_object_is_sink(peer)) {
 		peer_id = peer->id;
 		peer_name = pw_properties_get(peer->props, PW_KEY_NODE_NAME);
 	} else {
@@ -1472,11 +1302,11 @@ static int reply_create_record_stream(struct stream *stream)
 		TAG_INVALID);
 
 	peer = find_linked(manager, stream->id, stream->direction);
-	if (peer && object_is_sink_input(peer))
+	if (peer && pw_manager_object_is_sink_input(peer))
 		peer = find_linked(manager, peer->id, PW_DIRECTION_OUTPUT);
-	if (peer && object_is_source_or_monitor(peer)) {
+	if (peer && pw_manager_object_is_source_or_monitor(peer)) {
 		name = pw_properties_get(peer->props, PW_KEY_NODE_NAME);
-		if (!object_is_source(peer)) {
+		if (!pw_manager_object_is_source(peer)) {
 			size_t len = (name ? strlen(name) : 5) + 10;
 			peer_id = peer->id | MONITOR_FLAG;
 			peer_name = tmp = alloca(len);
@@ -1542,6 +1372,15 @@ static void stream_control_info(void *data, uint32_t id,
 	}
 }
 
+static void on_stream_cleanup(void *obj, void *data, int res, uint32_t id)
+{
+	struct stream *stream = obj;
+	struct client *client = stream->client;
+	stream_free(stream);
+	if (client->ref <= 0)
+		client_free(client);
+}
+
 static void stream_state_changed(void *data, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
@@ -1564,8 +1403,10 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 	case PW_STREAM_STATE_STREAMING:
 		break;
 	}
-	if (stream->done)
-		pw_loop_signal_event(impl->loop, client->cleanup);
+	if (stream->done) {
+		pw_work_queue_add(impl->work_queue, stream, 0,
+				on_stream_cleanup, client);
+	}
 }
 
 static const struct spa_pod *get_buffers_param(struct stream *s,
@@ -2714,12 +2555,12 @@ static const char *get_default(struct client *client, bool sink)
 
 	spa_zero(sel);
 	if (sink) {
-		sel.type = object_is_sink;
+		sel.type = pw_manager_object_is_sink;
 		sel.key = PW_KEY_NODE_NAME;
 		sel.value = client->default_sink;
 		def = DEFAULT_SINK;
 	} else {
-		sel.type = object_is_source_or_monitor;
+		sel.type = pw_manager_object_is_source_or_monitor;
 		sel.key = PW_KEY_NODE_NAME;
 		sel.value = client->default_source;
 		def = DEFAULT_SOURCE;
@@ -2731,7 +2572,7 @@ static const char *get_default(struct client *client, bool sink)
 		return def;
 	str = pw_properties_get(o->props, PW_KEY_NODE_NAME);
 
-	if (!sink && object_is_monitor(o)) {
+	if (!sink && pw_manager_object_is_monitor(o)) {
 		def = DEFAULT_MONITOR;
 		if (str != NULL &&
 		    (mon = pw_properties_get(o->props, PW_KEY_NODE_NAME".monitor")) == NULL) {
@@ -2777,10 +2618,10 @@ static struct pw_manager_object *find_device(struct client *client,
 	sel.value = name;
 
 	if (sink) {
-		sel.type = object_is_sink;
+		sel.type = pw_manager_object_is_sink;
 		def = DEFAULT_SINK;
 	} else {
-		sel.type = object_is_source;
+		sel.type = pw_manager_object_is_source;
 		def = DEFAULT_SOURCE;
 	}
 	if (id == SPA_ID_INVALID &&
@@ -2802,8 +2643,11 @@ struct pending_sample {
 
 static void pending_sample_free(struct pending_sample *ps)
 {
+	struct client *client = ps->client;
+	struct impl *impl = client->impl;
 	spa_list_remove(&ps->link);
 	spa_hook_remove(&ps->listener);
+	pw_work_queue_cancel(impl->work_queue, ps, SPA_ID_INVALID);
 	ps->client->ref--;
 	sample_play_destroy(ps->play);
 }
@@ -2827,6 +2671,15 @@ static void sample_play_ready(void *data, uint32_t index)
 	send_message(client, reply);
 }
 
+static void on_sample_done(void *obj, void *data, int res, uint32_t id)
+{
+	struct pending_sample *ps = obj;
+	struct client *client = ps->client;
+	pending_sample_free(ps);
+	if (client->ref <= 0)
+		client_free(client);
+}
+
 static void sample_play_done(void *data, int res)
 {
 	struct pending_sample *ps = data;
@@ -2839,7 +2692,8 @@ static void sample_play_done(void *data, int res)
 		pw_log_info(NAME" %p: PLAY_SAMPLE done tag:%u", client, ps->tag);
 
 	ps->done = true;
-	pw_loop_signal_event(impl->loop, client->cleanup);
+	pw_work_queue_add(impl->work_queue, ps, 0,
+				on_sample_done, client);
 }
 
 static const struct sample_play_events sample_play_events = {
@@ -3185,9 +3039,9 @@ static int do_set_stream_volume(struct client *client, uint32_t command, uint32_
 		spa_zero(sel);
 		sel.id = id;
 		if (command == COMMAND_SET_SINK_INPUT_VOLUME)
-			sel.type = object_is_sink_input;
+			sel.type = pw_manager_object_is_sink_input;
 		else
-			sel.type = object_is_source_output;
+			sel.type = pw_manager_object_is_source_output;
 
 		o = select_object(manager, &sel);
 		if (o == NULL)
@@ -3236,9 +3090,9 @@ static int do_set_stream_mute(struct client *client, uint32_t command, uint32_t 
 		spa_zero(sel);
 		sel.id = id;
 		if (command == COMMAND_SET_SINK_INPUT_MUTE)
-			sel.type = object_is_sink_input;
+			sel.type = pw_manager_object_is_sink_input;
 		else
-			sel.type = object_is_source_output;
+			sel.type = pw_manager_object_is_source_output;
 
 		o = select_object(manager, &sel);
 		if (o == NULL)
@@ -3294,7 +3148,7 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 	if ((str = spa_dict_lookup(info->props, "card.profile.device")) != NULL)
 		dev_info.device = (uint32_t)atoi(str);
 	if (card_id != SPA_ID_INVALID) {
-		struct selector sel = { .id = card_id, .type = object_is_card, };
+		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
 	collect_device_info(o, card, &dev_info);
@@ -3359,7 +3213,7 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 	if ((str = spa_dict_lookup(info->props, "card.profile.device")) != NULL)
 		dev_info.device = (uint32_t)atoi(str);
 	if (card_id != SPA_ID_INVALID) {
-		struct selector sel = { .id = card_id, .type = object_is_card, };
+		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
 	collect_device_info(o, card, &dev_info);
@@ -3420,7 +3274,7 @@ static int do_set_port(struct client *client, uint32_t command, uint32_t tag, st
 	if ((str = spa_dict_lookup(info->props, "card.profile.device")) != NULL)
 		device_id = (uint32_t)atoi(str);
 	if (card_id != SPA_ID_INVALID) {
-		struct selector sel = { .id = card_id, .type = object_is_card, };
+		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
 	if (card == NULL || device_id == SPA_ID_INVALID)
@@ -3453,7 +3307,7 @@ static int do_set_port_latency_offset(struct client *client, uint32_t command, u
 
 	spa_zero(sel);
 	sel.key = PW_KEY_DEVICE_NAME;
-	sel.type = object_is_card;
+	sel.type = pw_manager_object_is_card;
 
 	if ((res = message_get(m,
 			TAG_U32, &sel.id,
@@ -3669,19 +3523,15 @@ static int do_get_server_info(struct client *client, uint32_t command, uint32_t 
 	char name[256];
 	const char *str;
 	struct message *reply;
-	struct sample_spec ss;
-	struct channel_map map;
 	uint32_t cookie;
 
 	pw_log_info(NAME" %p: [%s] GET_SERVER_INFO tag:%u", impl, client->name, tag);
 
-	ss = SAMPLE_SPEC_DEFAULT;
-	map = CHANNEL_MAP_DEFAULT;
 
 	if (info != NULL) {
 		if (info->props &&
 		    (str = spa_dict_lookup(info->props, "default.clock.rate")) != NULL)
-			ss.rate = atoi(str);
+			impl->defs.sample_spec.rate = atoi(str);
 		cookie = info->cookie;
 	} else {
 		cookie = 0;
@@ -3695,7 +3545,7 @@ static int do_get_server_info(struct client *client, uint32_t command, uint32_t 
 		TAG_STRING, "14.0.0",
 		TAG_STRING, pw_get_user_name(),
 		TAG_STRING, pw_get_host_name(),
-		TAG_SAMPLE_SPEC, &ss,
+		TAG_SAMPLE_SPEC, &impl->defs.sample_spec,
 		TAG_STRING, get_default(client, true),		/* default sink name */
 		TAG_STRING, get_default(client, false),		/* default source name */
 		TAG_U32, cookie,				/* cookie */
@@ -3703,7 +3553,7 @@ static int do_get_server_info(struct client *client, uint32_t command, uint32_t 
 
 	if (client->version >= 15) {
 		message_put(reply,
-			TAG_CHANNEL_MAP, &map,
+			TAG_CHANNEL_MAP, &impl->defs.channel_map,
 			TAG_INVALID);
 	}
 	return send_message(client, reply);
@@ -3748,7 +3598,7 @@ static int do_lookup(struct client *client, uint32_t command, uint32_t tag, stru
 	if ((o = find_device(client, SPA_ID_INVALID, name, is_sink)) == NULL)
 		return -ENOENT;
 
-	is_monitor = !is_sink && object_is_monitor(o);
+	is_monitor = !is_sink && pw_manager_object_is_monitor(o);
 
 	reply = reply_new(client, tag);
 	message_put(reply,
@@ -3789,7 +3639,7 @@ static int fill_client_info(struct client *client, struct message *m,
 	const char *str;
 	uint32_t module_id = SPA_ID_INVALID;
 
-	if (!object_is_client(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_client(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
@@ -3814,7 +3664,7 @@ static int fill_module_info(struct client *client, struct message *m,
 {
 	struct pw_module_info *info = o->info;
 
-	if (!object_is_module(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_module(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	message_put(m,
@@ -3883,7 +3733,7 @@ static int64_t get_port_latency_offset(struct client *client, struct pw_manager_
 
 			if (o->creating || o->removing)
 				continue;
-			if (!object_is_sink(o) && !object_is_source_or_monitor(o))
+			if (!pw_manager_object_is_sink(o) && !pw_manager_object_is_source_or_monitor(o))
 				continue;
 			if ((info = o->info) == NULL || info->props == NULL)
 				continue;
@@ -3912,7 +3762,7 @@ static int fill_card_info(struct client *client, struct message *m,
 	struct card_info card_info = CARD_INFO_INIT;
 	struct profile_info *profile_info;
 
-	if (!object_is_card(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_card(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
@@ -4052,7 +3902,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_OUTPUT);
 	size_t size;
 
-	if (!object_is_sink(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_sink(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
@@ -4063,7 +3913,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 
 	size = strlen(name) + 10;
 	monitor_name = alloca(size);
-	if (object_is_source(o))
+	if (pw_manager_object_is_source(o))
 		snprintf(monitor_name, size, "%s", name);
 	else
 		snprintf(monitor_name, size, "%s.monitor", name);
@@ -4075,7 +3925,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 	if ((str = spa_dict_lookup(info->props, "card.profile.device")) != NULL)
 		dev_info.device = (uint32_t)atoi(str);
 	if (card_id != SPA_ID_INVALID) {
-		struct selector sel = { .id = card_id, .type = object_is_card, };
+		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
 	if (card)
@@ -4193,8 +4043,8 @@ static int fill_source_info(struct client *client, struct message *m,
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_INPUT);
 	size_t size;
 
-	is_monitor = object_is_monitor(o);
-	if ((!object_is_source(o) && !is_monitor) || info == NULL || info->props == NULL)
+	is_monitor = pw_manager_object_is_monitor(o);
+	if ((!pw_manager_object_is_source(o) && !is_monitor) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	name = spa_dict_lookup(info->props, PW_KEY_NODE_NAME);
@@ -4219,7 +4069,7 @@ static int fill_source_info(struct client *client, struct message *m,
 		dev_info.device = (uint32_t)atoi(str);
 
 	if (card_id != SPA_ID_INVALID) {
-		struct selector sel = { .id = card_id, .type = object_is_card, };
+		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
 	if (card)
@@ -4339,12 +4189,13 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 	uint32_t module_id = SPA_ID_INVALID, client_id = SPA_ID_INVALID;
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_OUTPUT);
 
-	if (!object_is_sink_input(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_sink_input(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
 		module_id = (uint32_t)atoi(str);
-	if ((str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
+	if (!pw_manager_object_is_virtual(o) &&
+	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
 
 	collect_device_info(o, NULL, &dev_info);
@@ -4409,12 +4260,13 @@ static int fill_source_output_info(struct client *client, struct message *m,
 	uint32_t peer_id;
 	struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_INPUT);
 
-	if (!object_is_source_output(o) || info == NULL || info->props == NULL)
+	if (!pw_manager_object_is_source_output(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
 		module_id = (uint32_t)atoi(str);
-	if ((str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
+	if (!pw_manager_object_is_virtual(o) &&
+	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
 
 	collect_device_info(o, NULL, &dev_info);
@@ -4425,9 +4277,9 @@ static int fill_source_output_info(struct client *client, struct message *m,
 		return -ENOENT;
 
 	peer = find_linked(manager, o->id, PW_DIRECTION_INPUT);
-	if (peer && object_is_source_or_monitor(peer)) {
+	if (peer && pw_manager_object_is_source_or_monitor(peer)) {
 		peer_id = peer->id;
-		if (!object_is_source(peer))
+		if (!pw_manager_object_is_source(peer))
 			peer_id |= MONITOR_FLAG;
 	} else {
 		peer_id = SPA_ID_INVALID;
@@ -4500,36 +4352,36 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 
 	switch (command) {
 	case COMMAND_GET_CLIENT_INFO:
-		sel.type = object_is_client;
+		sel.type = pw_manager_object_is_client;
 		fill_func = fill_client_info;
 		break;
 	case COMMAND_GET_MODULE_INFO:
-		sel.type = object_is_module;
+		sel.type = pw_manager_object_is_module;
 		fill_func = fill_module_info;
 		break;
 	case COMMAND_GET_CARD_INFO:
-		sel.type = object_is_card;
+		sel.type = pw_manager_object_is_card;
 		sel.key = PW_KEY_DEVICE_NAME;
 		fill_func = fill_card_info;
 		break;
 	case COMMAND_GET_SINK_INFO:
-		sel.type = object_is_sink;
+		sel.type = pw_manager_object_is_sink;
 		sel.key = PW_KEY_NODE_NAME;
 		fill_func = fill_sink_info;
 		def = DEFAULT_SINK;
 		break;
 	case COMMAND_GET_SOURCE_INFO:
-		sel.type = object_is_source_or_monitor;
+		sel.type = pw_manager_object_is_source_or_monitor;
 		sel.key = PW_KEY_NODE_NAME;
 		fill_func = fill_source_info;
 		def = DEFAULT_SOURCE;
 		break;
 	case COMMAND_GET_SINK_INPUT_INFO:
-		sel.type = object_is_sink_input;
+		sel.type = pw_manager_object_is_sink_input;
 		fill_func = fill_sink_input_info;
 		break;
 	case COMMAND_GET_SOURCE_OUTPUT_INFO:
-		sel.type = object_is_source_output;
+		sel.type = pw_manager_object_is_source_output;
 		fill_func = fill_source_output_info;
 		break;
 	}
@@ -4910,7 +4762,7 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
 
 	spa_zero(sel);
 	sel.key = PW_KEY_DEVICE_NAME;
-	sel.type = object_is_card;
+	sel.type = pw_manager_object_is_card;
 
 	if ((res = message_get(m,
 			TAG_U32, &sel.id,
@@ -5051,7 +4903,7 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 
 	spa_zero(sel);
 	sel.id = id;
-	sel.type = sink ? object_is_sink_input: object_is_source_output;
+	sel.type = sink ? pw_manager_object_is_sink_input: pw_manager_object_is_source_output;
 
 	o = select_object(manager, &sel);
 	if (o == NULL)
@@ -5108,13 +4960,13 @@ static int do_kill(struct client *client, uint32_t command, uint32_t tag, struct
 	sel.id = id;
 	switch (command) {
 	case COMMAND_KILL_CLIENT:
-		sel.type = object_is_client;
+		sel.type = pw_manager_object_is_client;
 		break;
 	case COMMAND_KILL_SINK_INPUT:
-		sel.type = object_is_sink_input;
+		sel.type = pw_manager_object_is_sink_input;
 		break;
 	case COMMAND_KILL_SOURCE_OUTPUT:
-		sel.type = object_is_source_output;
+		sel.type = pw_manager_object_is_source_output;
 		break;
 	default:
 		return -EINVAL;
@@ -5535,8 +5387,6 @@ static void client_free(struct client *client)
 		pw_properties_free(client->props);
 	if (client->routes)
 		pw_properties_free(client->routes);
-	if (client->cleanup)
-		pw_loop_destroy_source(impl->loop, client->cleanup);
 	free(client);
 }
 
@@ -5741,30 +5591,6 @@ exit:
 	return res;
 }
 
-static int client_cleanup_stream(void *item, void *data)
-{
-	struct stream *s = item;
-	if (s->done)
-		stream_free(s);
-	return 0;
-}
-
-static void on_client_cleanup(void *data, uint64_t count)
-{
-	struct client *client = data;
-	struct impl *impl = client->impl;
-	struct pending_sample *p, *t;
-
-	spa_list_for_each_safe(p, t, &client->pending_samples, link) {
-		if (p->done)
-			pending_sample_free(p);
-	}
-	pw_map_for_each(&client->streams, client_cleanup_stream, client);
-
-	if (client->ref <= 0)
-		pw_loop_signal_event(impl->loop, impl->cleanup);
-}
-
 static void
 on_client_data(void *data, int fd, uint32_t mask)
 {
@@ -5916,6 +5742,10 @@ on_connect(void *data, int fd, uint32_t mask)
 	if (client->props == NULL)
 		goto error;
 
+	pw_properties_setf(client->props,
+			"pulse.server.type", "%s",
+			server->type == SERVER_TYPE_INET ? "tcp" : "unix");
+
 	client->routes = pw_properties_new(NULL, NULL);
 	if (client->routes == NULL)
 		goto error;
@@ -5956,11 +5786,6 @@ on_connect(void *data, int fd, uint32_t mask)
 					SPA_IO_ERR | SPA_IO_HUP | SPA_IO_IN,
 					true, on_client_data, client);
 	if (client->source == NULL)
-		goto error;
-
-	client->cleanup = pw_loop_add_event(impl->loop,
-					on_client_cleanup, client);
-	if (client->cleanup == NULL)
 		goto error;
 
 	return;
@@ -6013,7 +5838,7 @@ get_runtime_dir(char *buf, size_t buflen, const char *dir)
 	return 0;
 }
 
-static void server_free(struct server *server)
+void server_free(struct server *server)
 {
 	struct impl *impl = server->impl;
 	struct client *c;
@@ -6057,7 +5882,7 @@ static bool is_stale_socket(struct server *server, int fd)
 	return false;
 }
 
-static int make_local_socket(struct server *server, char *name)
+static int make_local_socket(struct server *server, const char *name)
 {
 	char runtime_dir[PATH_MAX];
 	socklen_t size;
@@ -6172,7 +5997,7 @@ static int create_pid_file(void) {
 	return 0;
 }
 
-static int make_inet_socket(struct server *server, char *name)
+static int make_inet_socket(struct server *server, const char *name)
 {
 	struct sockaddr_in addr;
 	int res, fd, on;
@@ -6183,9 +6008,10 @@ static int make_inet_socket(struct server *server, char *name)
 	col = strchr(name, ':');
 	if (col) {
 		struct in_addr ipv4;
+		char *n;
 		port = atoi(col+1);
-		*col = '\0';
-		if (inet_pton(AF_INET, name, &ipv4) > 0)
+		n = strndupa(name, col - name);
+		if (inet_pton(AF_INET, n, &ipv4) > 0)
 			address = ntohl(ipv4.s_addr);
 		else
 			address = INADDR_ANY;
@@ -6232,7 +6058,7 @@ error:
 	return res;
 }
 
-static struct server *create_server(struct impl *impl, char *address)
+struct server *create_server(struct impl *impl, const char *address)
 {
 	int fd, res;
 	struct server *server;
@@ -6260,9 +6086,6 @@ static struct server *create_server(struct impl *impl, char *address)
 	if (server->source == NULL) {
 		res = -errno;
 		pw_log_error(NAME" %p: can't create server source: %m", impl);
-		goto error_close;
-	}
-	if ((res = create_pid_file()) < 0) {
 		goto error_close;
 	}
 	return server;
@@ -6314,8 +6137,6 @@ static void impl_free(struct impl *impl)
 	pw_map_for_each(&impl->modules, impl_free_module, impl);
 	pw_map_clear(&impl->modules);
 
-	if (impl->cleanup != NULL)
-		pw_loop_destroy_source(impl->loop, impl->cleanup);
 	pw_properties_free(impl->props);
 	free(impl);
 }
@@ -6335,16 +6156,6 @@ static const struct pw_context_events context_events = {
 	.destroy = context_destroy,
 };
 
-static void on_server_cleanup(void *data, uint64_t count)
-{
-	struct impl *impl = data;
-	struct client *c, *t;
-	spa_list_for_each_safe(c, t, &impl->cleanup_clients, link) {
-		if (c->ref <= 0)
-			client_free(c);
-	}
-}
-
 static int parse_frac(struct pw_properties *props, const char *key, const char *def,
 		struct spa_fraction *res)
 {
@@ -6358,6 +6169,43 @@ static int parse_frac(struct pw_properties *props, const char *key, const char *
 	return 0;
 }
 
+static int parse_position(struct pw_properties *props, const char *key, const char *def,
+		struct channel_map *res)
+{
+	const char *str;
+	struct spa_json it[2];
+	char v[256];
+
+	if (props == NULL ||
+	    (str = pw_properties_get(props, key)) == NULL)
+		str = def;
+
+	spa_json_init(&it[0], str, strlen(str));
+        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+                spa_json_init(&it[1], str, strlen(str));
+
+	res->channels = 0;
+	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
+	    res->channels < SPA_AUDIO_MAX_CHANNELS) {
+		res->map[res->channels++] = channel_name2id(v);
+	}
+	pw_log_info(NAME": defaults: %s = %s", key, str);
+	return 0;
+}
+static int parse_format(struct pw_properties *props, const char *key, const char *def,
+		struct sample_spec *res)
+{
+	const char *str;
+	if (props == NULL ||
+	    (str = pw_properties_get(props, key)) == NULL)
+		str = def;
+	res->format = format_name2id(str);
+	if (res->format == SPA_AUDIO_FORMAT_UNKNOWN)
+		res->format = SPA_AUDIO_FORMAT_F32;
+	pw_log_info(NAME": defaults: %s = %s", key, str);
+	return 0;
+}
+
 static void load_defaults(struct defs *def, struct pw_properties *props)
 {
 	parse_frac(props, "pulse.min.req", DEFAULT_MIN_REQ, &def->min_req);
@@ -6366,6 +6214,9 @@ static void load_defaults(struct defs *def, struct pw_properties *props)
 	parse_frac(props, "pulse.default.frag", DEFAULT_DEFAULT_FRAG, &def->default_frag);
 	parse_frac(props, "pulse.default.tlength", DEFAULT_DEFAULT_TLENGTH, &def->default_tlength);
 	parse_frac(props, "pulse.min.quantum", DEFAULT_MIN_QUANTUM, &def->min_quantum);
+	parse_format(props, "pulse.default.format", DEFAULT_FORMAT, &def->sample_spec);
+	parse_position(props, "pulse.default.position", DEFAULT_POSITION, &def->channel_map);
+	def->sample_spec.channels = def->channel_map.channels;
 }
 
 struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
@@ -6375,26 +6226,29 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	const char *str;
 	struct spa_json it[2];
 	char value[512];
+	const struct spa_support *support;
+	struct spa_cpu *cpu;
+	uint32_t n_support;
+	int res;
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL)
 		goto error_exit;
+
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
 	if (props == NULL)
 		goto error_free;
 
-	str = pw_properties_get(props, "server.address");
-	if (str == NULL) {
-		pw_properties_setf(props, "server.address",
-				"[ \"%s-%s\" ]",
-				PW_PROTOCOL_PULSE_DEFAULT_SERVER,
-				get_server_name(context));
-		str = pw_properties_get(props, "server.address");
+	support = pw_context_get_support(context, &n_support);
+	cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
+
+	if ((str = pw_properties_get(props, "vm.overrides")) != NULL) {
+		if (cpu != NULL && spa_cpu_get_vm_type(cpu) != SPA_CPU_VM_NONE)
+			pw_properties_update_string(props, str, strlen(str));
+		pw_properties_set(props, "vm.overrides", NULL);
 	}
-	if (str == NULL)
-		goto error_free;
 
 	load_defaults(&impl->defs, props);
 
@@ -6404,9 +6258,8 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	impl->loop = pw_context_get_main_loop(context);
 	impl->props = props;
 
-	impl->cleanup = pw_loop_add_event(impl->loop,
-					on_server_cleanup, impl);
-	if (impl->cleanup == NULL)
+	impl->work_queue = pw_context_get_work_queue(context);
+	if (impl->work_queue == NULL)
 		goto error_free;
 
 	spa_list_init(&impl->servers);
@@ -6420,6 +6273,17 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	pw_context_add_listener(context, &impl->context_listener,
 			&context_events, impl);
 
+	str = pw_properties_get(props, "server.address");
+	if (str == NULL) {
+		pw_properties_setf(props, "server.address",
+				"[ \"%s-%s\" ]",
+				PW_PROTOCOL_PULSE_DEFAULT_SERVER,
+				get_server_name(context));
+		str = pw_properties_get(props, "server.address");
+	}
+	if (str == NULL)
+		goto error_free;
+
 	spa_json_init(&it[0], str, strlen(str));
 	if (spa_json_enter_array(&it[0], &it[1]) > 0) {
 		while (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
@@ -6429,7 +6293,10 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 			}
 		}
 	}
-
+	if ((res = create_pid_file()) < 0) {
+		pw_log_warn(NAME" %p: can't create pid file: %s",
+				impl, spa_strerror(res));
+	}
 	impl->dbus_name = dbus_request_name(context, "org.pulseaudio.Server");
 
 	return (struct pw_protocol_pulse*)impl;

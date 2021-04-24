@@ -36,8 +36,12 @@
 #include <errno.h>
 #include <dlfcn.h>
 
+#include <locale.h>
+#include <libintl.h>
+
 #include <spa/utils/names.h>
 #include <spa/support/cpu.h>
+#include <spa/support/i18n.h>
 
 #include "pipewire.h"
 #include "private.h"
@@ -45,6 +49,8 @@
 #define MAX_SUPPORT	32
 
 #define SUPPORTLIB	"support/libspa-support"
+
+static struct spa_i18n *_pipewire_i18n = NULL;
 
 struct plugin {
 	struct spa_list link;
@@ -72,6 +78,8 @@ struct support {
 	const char *plugin_dir;
 	const char *support_lib;
 	struct registry *registry;
+	char *i18n_domain;
+	struct spa_interface i18n_iface;
 	struct spa_support support[MAX_SUPPORT];
 	uint32_t n_support;
 	unsigned int in_valgrind:1;
@@ -340,6 +348,79 @@ static void *add_interface(struct support *support,
 	return iface;
 }
 
+SPA_EXPORT
+int pw_set_domain(const char *domain)
+{
+	struct support *support = &global_support;
+	free(support->i18n_domain);
+	if (domain == NULL)
+		support->i18n_domain = NULL;
+	else if ((support->i18n_domain = strdup(domain)) == NULL)
+		return -errno;
+	return 0;
+}
+SPA_EXPORT
+const char *pw_get_domain(void)
+{
+	struct support *support = &global_support;
+	return support->i18n_domain;
+}
+
+static const char *i18n_text(void *object, const char *msgid)
+{
+	struct support *support = object;
+	return dgettext(support->i18n_domain, msgid);
+}
+
+static const char *i18n_ntext(void *object, const char *msgid, const char *msgid_plural,
+		unsigned long int n)
+{
+	struct support *support = object;
+	return dngettext(support->i18n_domain, msgid, msgid_plural, n);
+}
+
+static void init_i18n(struct support *support)
+{
+	/* Load locale from the environment. */
+	setlocale(LC_ALL, "");
+	/* Set LC_NUMERIC to C so that floating point strings are consistently
+	 * formatted and parsed across locales. */
+	setlocale(LC_NUMERIC, "C");
+	bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
+	bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
+	pw_set_domain(GETTEXT_PACKAGE);
+}
+
+static void *add_i18n(struct support *support)
+{
+	static struct spa_i18n_methods i18n_methods = {
+		SPA_VERSION_I18N_METHODS,
+		.text = i18n_text,
+		.ntext = i18n_ntext,
+	};
+	support->i18n_iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_I18N,
+			SPA_VERSION_I18N,
+			&i18n_methods, support);
+	_pipewire_i18n = (struct spa_i18n*) &support->i18n_iface;
+
+	support->support[support->n_support++] =
+		SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_I18N, _pipewire_i18n);
+
+	return 0;
+}
+
+SPA_EXPORT
+const char *pw_gettext(const char *msgid)
+{
+	return spa_i18n_text(_pipewire_i18n, msgid);
+}
+SPA_EXPORT
+const char *pw_ngettext(const char *msgid, const char *msgid_plural, unsigned long int n)
+{
+	return spa_i18n_ntext(_pipewire_i18n, msgid, msgid_plural, n);
+}
+
 #ifdef HAVE_SYSTEMD
 static struct spa_log *load_journal_logger(struct support *support)
 {
@@ -413,6 +494,8 @@ void pw_init(int *argc, char **argv[])
 	if ((str = getenv("PIPEWIRE_DEBUG")))
 		configure_debug(support, str);
 
+	init_i18n(support);
+
 	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
 		str = PLUGINDIR;
 	support->plugin_dir = str;
@@ -456,9 +539,14 @@ void pw_init(int *argc, char **argv[])
 	n_items = 0;
 	if ((str = getenv("PIPEWIRE_CPU")))
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_CPU_FORCE, str);
+	if ((str = getenv("PIPEWIRE_VM")))
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_CPU_VM_TYPE, str);
 	info = SPA_DICT_INIT(items, n_items);
 
 	add_interface(support, SPA_NAME_SUPPORT_CPU, SPA_TYPE_INTERFACE_CPU, &info);
+
+	add_i18n(support);
+
 	pw_log_info("version %s", pw_get_library_version());
 }
 
@@ -479,6 +567,7 @@ void pw_deinit(void)
 	}
 	if (support->categories)
 		pw_free_strv(support->categories);
+	free(support->i18n_domain);
 	spa_zero(global_support);
 	spa_zero(global_registry);
 

@@ -161,6 +161,25 @@ static void fill_defaults(struct pw_context *this)
 			this->defaults.clock_min_quantum, this->defaults.clock_max_quantum);
 }
 
+static int try_load_conf(struct pw_context *this, const char *conf_prefix,
+		const char *conf_name, struct pw_properties *conf)
+{
+	int res;
+
+	if (conf_name == NULL)
+		return -EINVAL;
+	if (strcmp(conf_name, "null") == 0)
+		return 0;
+	if ((res = pw_conf_load_conf(conf_prefix, conf_name, conf)) < 0) {
+		pw_log_warn(NAME" %p: can't load config %s%s%s: %s",
+				this,
+				conf_prefix ? conf_prefix : "",
+				conf_prefix ? "/" : "",
+				conf_name, spa_strerror(res));
+	}
+	return res;
+}
+
 /** Create a new context object
  *
  * \param main_loop the main loop to use
@@ -203,47 +222,46 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 		goto error_free;
 	}
 
-	conf_prefix = getenv("PIPEWIRE_CONFIG_PREFIX");
-	if (conf_prefix == NULL)
-		conf_prefix = pw_properties_get(properties, PW_KEY_CONFIG_PREFIX);
-
-	conf_name = getenv("PIPEWIRE_CONFIG_NAME");
-	if (conf_name == NULL)
-		conf_name = pw_properties_get(properties, PW_KEY_CONFIG_NAME);
-	if (conf_name == NULL)
-		conf_name = "client.conf";
-
 	conf = pw_properties_new(NULL, NULL);
 	if (conf == NULL) {
 		res = -errno;
 		goto error_free;
 	}
-	if (strcmp(conf_name, "null") != 0 &&
-	    (res = pw_conf_load_conf(conf_prefix, conf_name, conf)) < 0) {
-		if (conf_prefix == NULL && strcmp(conf_name, "client.conf") == 0) {
-			pw_log_error(NAME" %p: can't load config %s: %s",
+
+	conf_prefix = getenv("PIPEWIRE_CONFIG_PREFIX");
+	if (conf_prefix == NULL)
+		conf_prefix = pw_properties_get(properties, PW_KEY_CONFIG_PREFIX);
+
+	conf_name = getenv("PIPEWIRE_CONFIG_NAME");
+	if (try_load_conf(this, conf_prefix, conf_name, conf) < 0) {
+		conf_name = pw_properties_get(properties, PW_KEY_CONFIG_NAME);
+		if (try_load_conf(this, conf_prefix, conf_name, conf) < 0) {
+			conf_name = "client.conf";
+			if (try_load_conf(this, conf_prefix, conf_name, conf) < 0) {
+				pw_log_error(NAME" %p: can't load config %s: %s",
 					this, conf_name, spa_strerror(res));
-			goto error_free;
-		} else {
-			pw_log_warn(NAME" %p: can't load config %s%s%s: %s. Using client.conf fallback",
-					this,
-					conf_prefix ? conf_prefix : "",
-					conf_prefix ? "/" : "",
-					conf_name, spa_strerror(res));
-		}
-		conf_prefix = NULL;
-		if ((res = pw_conf_load_conf(NULL, "client.conf", conf)) < 0) {
-			pw_log_error(NAME" %p: can't load client.conf config: %s",
-					this, spa_strerror(res));
-			goto error_free;
+				goto error_free;
+			}
 		}
 	}
 	this->conf = conf;
+
+	n_support = pw_get_support(this->support, SPA_N_ELEMENTS(this->support) - 6);
+	cpu = spa_support_find(this->support, n_support, SPA_TYPE_INTERFACE_CPU);
 
 	if ((str = pw_properties_get(conf, "context.properties")) != NULL) {
 		pw_properties_update_string(properties, str, strlen(str));
 		pw_log_info(NAME" %p: parsed context.properties section", this);
 	}
+
+	if ((str = pw_properties_get(properties, "vm.overrides")) != NULL) {
+		if (cpu != NULL && spa_cpu_get_vm_type(cpu) != SPA_CPU_VM_NONE)
+			pw_properties_update_string(properties, str, strlen(str));
+		pw_properties_set(properties, "vm.overrides", NULL);
+	}
+	if (pw_properties_get(properties, PW_KEY_CPU_MAX_ALIGN) == NULL && cpu != NULL)
+		pw_properties_setf(properties, PW_KEY_CPU_MAX_ALIGN,
+				"%u", spa_cpu_get_max_align(cpu));
 
 	if (getenv("PIPEWIRE_DEBUG") == NULL &&
 	    (str = pw_properties_get(properties, "log.level")) != NULL)
@@ -281,15 +299,11 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	this->data_system = this->data_loop->system;
 	this->main_loop = main_loop;
 
-	n_support = pw_get_support(this->support, SPA_N_ELEMENTS(this->support) - 6);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_System, this->main_loop->system);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Loop, this->main_loop->loop);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_LoopUtils, this->main_loop->utils);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DataSystem, this->data_system);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DataLoop, this->data_loop->loop);
-
-	if ((cpu = spa_support_find(this->support, n_support, SPA_TYPE_INTERFACE_CPU)) != NULL)
-		pw_properties_setf(properties, PW_KEY_CPU_MAX_ALIGN, "%u", spa_cpu_get_max_align(cpu));
 
 	if ((str = pw_properties_get(properties, "support.dbus")) == NULL ||
 	    pw_properties_parse_bool(str)) {
@@ -427,6 +441,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	pw_data_loop_destroy(context->data_loop_impl);
 
+	if (context->work_queue)
+		pw_work_queue_destroy(context->work_queue);
+
 	pw_properties_free(context->properties);
 	pw_properties_free(context->conf);
 
@@ -475,6 +492,14 @@ SPA_EXPORT
 struct pw_loop *pw_context_get_main_loop(struct pw_context *context)
 {
 	return context->main_loop;
+}
+
+SPA_EXPORT
+struct pw_work_queue *pw_context_get_work_queue(struct pw_context *context)
+{
+	if (context->work_queue == NULL)
+		context->work_queue = pw_work_queue_new(context->main_loop);
+	return context->work_queue;
 }
 
 SPA_EXPORT
@@ -1117,9 +1142,9 @@ struct spa_handle *pw_context_load_spa_handle(struct pw_context *context,
 	if (lib == NULL && info != NULL)
 		lib = spa_dict_lookup(info, SPA_KEY_LIBRARY_NAME);
 	if (lib == NULL) {
+		errno = ENOENT;
 		pw_log_warn(NAME" %p: no library for %s: %m",
 				context, factory_name);
-		errno = ENOENT;
 		return NULL;
 	}
 

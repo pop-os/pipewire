@@ -47,7 +47,14 @@
 
 #define PROP_KEY_HEADSET_ROLES "bluez5.headset-roles"
 
+#define HFP_CODEC_SWITCH_INITIAL_TIMEOUT_MSEC 2000
 #define HFP_CODEC_SWITCH_TIMEOUT_MSEC 5000
+
+enum {
+	HFP_AG_INITIAL_CODEC_SETUP_NONE = 0,
+	HFP_AG_INITIAL_CODEC_SETUP_SEND,
+	HFP_AG_INITIAL_CODEC_SETUP_WAIT
+};
 
 struct impl {
 	struct spa_bt_backend this;
@@ -70,6 +77,7 @@ struct impl {
 };
 
 struct transport_data {
+	struct rfcomm *rfcomm;
 	struct spa_source sco;
 };
 
@@ -79,8 +87,23 @@ enum hfp_hf_state {
 	hfp_hf_cind1,
 	hfp_hf_cind2,
 	hfp_hf_cmer,
-	hfp_hf_slc,
+	hfp_hf_slc1,
+	hfp_hf_slc2,
+	hfp_hf_vgs,
+	hfp_hf_vgm,
 	hfp_hf_bcs
+};
+
+enum hsp_hs_state {
+	hsp_hs_init1,
+	hsp_hs_init2,
+	hsp_hs_vgs,
+	hsp_hs_vgm,
+};
+
+struct rfcomm_volume {
+	bool active;
+	int hw_volume;
 };
 
 struct rfcomm {
@@ -88,18 +111,23 @@ struct rfcomm {
 	struct spa_source source;
 	struct impl *backend;
 	struct spa_bt_device *device;
+	struct spa_hook device_listener;
 	struct spa_bt_transport *transport;
 	struct spa_hook transport_listener;
 	enum spa_bt_profile profile;
 	struct spa_source timer;
 	char* path;
+	bool has_volume;
+	struct rfcomm_volume volumes[SPA_BT_VOLUME_ID_TERM];
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
 	unsigned int slc_configured:1;
 	unsigned int codec_negotiation_supported:1;
 	unsigned int msbc_support_enabled_in_config:1;
 	unsigned int msbc_supported_by_hfp:1;
 	unsigned int hfp_ag_switching_codec:1;
+	unsigned int hfp_ag_initial_codec_setup:2;
 	enum hfp_hf_state hf_state;
+	enum hsp_hs_state hs_state;
 	unsigned int codec;
 #endif
 };
@@ -139,6 +167,7 @@ static struct spa_bt_transport *_transport_create(struct rfcomm *rfcomm)
 {
 	struct impl *backend = rfcomm->backend;
 	struct spa_bt_transport *t = NULL;
+	struct transport_data *td;
 	char* pathfd;
 
 	if ((pathfd = spa_aprintf("%s/fd%d", rfcomm->path, rfcomm->source.fd)) == NULL)
@@ -155,6 +184,23 @@ static struct spa_bt_transport *_transport_create(struct rfcomm *rfcomm)
 	t->backend = &backend->this;
 	t->n_channels = 1;
 	t->channels[0] = SPA_AUDIO_CHANNEL_MONO;
+
+	td = t->user_data;
+	td->rfcomm = rfcomm;
+
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM ; ++i) {
+		rfcomm->volumes[i].hw_volume = SPA_BT_VOLUME_INVALID;
+		t->volumes[i].active = rfcomm->volumes[i].active;
+		t->volumes[i].hw_volume_max = SPA_BT_VOLUME_HS_MAX;
+	}
+
+	if (t->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY) {
+		t->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_AG_VOLUME;
+		t->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_AG_VOLUME;
+	} else {
+		t->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_RX_VOLUME;
+		t->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_TX_VOLUME;
+	}
 
 	spa_bt_transport_add_listener(t, &rfcomm->transport_listener, &transport_events, rfcomm);
 
@@ -174,8 +220,18 @@ static void rfcomm_free(struct rfcomm *rfcomm)
 		spa_hook_remove(&rfcomm->transport_listener);
 		spa_bt_transport_free(rfcomm->transport);
 	}
-	if (rfcomm->device)
+	if (rfcomm->device) {
 		spa_bt_device_report_battery_level(rfcomm->device, SPA_BT_NO_BATTERY);
+		spa_hook_remove(&rfcomm->device_listener);
+		rfcomm->device = NULL;
+	}
+	if (rfcomm->source.fd >= 0) {
+		if (rfcomm->source.loop)
+			spa_loop_remove_source(rfcomm->source.loop, &rfcomm->source);
+		shutdown(rfcomm->source.fd, SHUT_RDWR);
+		close (rfcomm->source.fd);
+		rfcomm->source.fd = -1;
+	}
 	free(rfcomm);
 }
 
@@ -195,7 +251,7 @@ static void rfcomm_send_cmd(struct spa_source *source, char *data)
 		spa_log_error(backend->log, NAME": RFCOMM write error: %s", strerror(errno));
 }
 
-static int rfcomm_send_reply(struct spa_source *source, char *data)
+static int rfcomm_send_reply(struct spa_source *source, const char *data)
 {
 	struct rfcomm *rfcomm = source->data;
 	struct impl *backend = rfcomm->backend;
@@ -212,6 +268,39 @@ static int rfcomm_send_reply(struct spa_source *source, char *data)
 	return len;
 }
 
+static bool rfcomm_volume_enabled(struct rfcomm *rfcomm)
+{
+	return rfcomm->device != NULL
+		&& (rfcomm->device->hw_volume_profiles & rfcomm->profile);
+}
+
+static void rfcomm_emit_volume_changed(struct rfcomm *rfcomm, int id, int hw_volume)
+{
+	struct spa_bt_transport_volume *t_volume;
+
+	if (!rfcomm_volume_enabled(rfcomm))
+		return;
+
+	if ((id == SPA_BT_VOLUME_ID_RX || id == SPA_BT_VOLUME_ID_TX) && hw_volume >= 0) {
+		rfcomm->volumes[id].active = true;
+		rfcomm->volumes[id].hw_volume = hw_volume;
+	}
+
+	spa_log_debug(rfcomm->backend->log, NAME": volume changed %d", hw_volume);
+
+	if (rfcomm->transport == NULL || !rfcomm->has_volume)
+		return;
+
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM ; ++i) {
+		t_volume = &rfcomm->transport->volumes[i];
+		t_volume->active = rfcomm->volumes[i].active;
+		t_volume->volume =
+			spa_bt_volume_hw_to_linear(rfcomm->volumes[i].hw_volume, t_volume->hw_volume_max);
+	}
+
+	spa_bt_transport_emit_volume_changed(rfcomm->transport);
+}
+
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 {
@@ -224,16 +313,16 @@ static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 	 * AT+VGM=value: value between 0 and 15, sent by the HS to AG to set the microphone gain.
 	 * AT+CKPD=200: Sent by HS when headset button is pressed. */
 	if (sscanf(buf, "AT+VGS=%d", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->speaker_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_TX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
 			rfcomm_send_reply(source, "ERROR");
 		}
 	} else if (sscanf(buf, "AT+VGM=%d", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->microphone_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			rfcomm_send_reply(source, "ERROR");
@@ -245,6 +334,36 @@ static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 		return false;
 	}
 
+	return true;
+}
+
+static bool rfcomm_send_volume_cmd(struct spa_source *source, int id)
+{
+	struct rfcomm *rfcomm = source->data;
+	struct spa_bt_transport_volume *t_volume;
+	char *cmd;
+	int hw_volume;
+
+	if (!rfcomm_volume_enabled(rfcomm))
+		return false;
+
+	t_volume = rfcomm->transport ? &rfcomm->transport->volumes[id] : NULL;
+
+	if (!(t_volume && t_volume->active))
+		return false;
+
+	hw_volume = spa_bt_volume_linear_to_hw(t_volume->volume, t_volume->hw_volume_max);
+	rfcomm->volumes[id].hw_volume = hw_volume;
+
+	if (id == SPA_BT_VOLUME_ID_TX)
+		cmd = spa_aprintf("AT+VGM=%u", hw_volume);
+	else if (id == SPA_BT_VOLUME_ID_RX)
+		cmd = spa_aprintf("AT+VGS=%u", hw_volume);
+	else
+	 	spa_assert_not_reached();
+
+	rfcomm_send_cmd(source, cmd);
+	free(cmd);
 	return true;
 }
 
@@ -262,16 +381,28 @@ static bool rfcomm_hsp_hs(struct spa_source *source, char* buf)
 	 * RING: Sent by AG to HS to notify of an incoming call. It can safely be ignored because
 	 *   it does not expect a reply. */
 	if (sscanf(buf, "\r\n+VGS=%d\r\n", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->microphone_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
 		}
 	} else if (sscanf(buf, "\r\n+VGM=%d\r\n", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->speaker_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_TX, gain);
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
+		}
+	} if (strncmp(buf, "\r\nOK\r\n", 6) == 0) {
+		if (rfcomm->hs_state == hsp_hs_init2) {
+			if (rfcomm_send_volume_cmd(&rfcomm->source, SPA_BT_VOLUME_ID_RX))
+				rfcomm->hs_state = hsp_hs_vgs;
+			else
+				rfcomm->hs_state = hsp_hs_init1;
+		} else if (rfcomm->hs_state == hsp_hs_vgs) {
+			if (rfcomm_send_volume_cmd(&rfcomm->source, SPA_BT_VOLUME_ID_TX))
+				rfcomm->hs_state = hsp_hs_vgm;
+			else
+				rfcomm->hs_state = hsp_hs_init1;
 		}
 	}
 
@@ -332,6 +463,8 @@ static bool device_supports_required_mSBC_transport_modes(
 	return false;
 }
 
+static int codec_switch_start_timer(struct rfcomm *rfcomm, int timeout_msec);
+
 static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 {
 	struct rfcomm *rfcomm = source->data;
@@ -342,9 +475,15 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 	unsigned int selected_codec;
 
 	if (sscanf(buf, "AT+BRSF=%u", &features) == 1) {
-
 		unsigned int ag_features = SPA_BT_HFP_AG_FEATURE_NONE;
 		char *cmd;
+
+		/*
+		 * Determine device volume control. Some headsets only support control of
+		 * TX volume, but not RX, even if they have a microphone. Determine this
+		 * separately based on whether we also get AT+VGS/AT+VGM.
+		 */
+		rfcomm->has_volume = (features & SPA_BT_HFP_HF_FEATURE_REMOTE_VOLUME_CONTROL);
 
 		/* Decide if we want to signal that the computer supports mSBC negotiation
 		   This should be done when
@@ -418,8 +557,10 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 
 		/* switch codec to mSBC by sending unsolicited +BCS message */
 		if (rfcomm->codec_negotiation_supported && rfcomm->msbc_supported_by_hfp) {
-			spa_log_debug(backend->log, NAME": RFCOMM switching codec to mSBC");
-			rfcomm_send_reply(source, "+BCS: 2");
+			spa_log_debug(backend->log, NAME": RFCOMM initial codec setup");
+			rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_SEND;
+			rfcomm_send_reply(&rfcomm->source, "+BCS: 2");
+			codec_switch_start_timer(rfcomm, HFP_CODEC_SWITCH_INITIAL_TIMEOUT_MSEC);
 		} else {
 			rfcomm->transport = _transport_create(rfcomm);
 			if (rfcomm->transport == NULL) {
@@ -428,6 +569,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 			} else {
 				rfcomm->transport->codec = HFP_AUDIO_CODEC_CVSD;
 				spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
+				rfcomm_emit_volume_changed(rfcomm, -1, SPA_BT_VOLUME_INVALID);
 			}
 		}
 
@@ -439,6 +581,7 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		/* parse BCS(=Bluetooth Codec Selection) reply */
 		bool was_switching_codec = rfcomm->hfp_ag_switching_codec && (rfcomm->device != NULL);
 		rfcomm->hfp_ag_switching_codec = false;
+		rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_NONE;
 		codec_switch_stop_timer(rfcomm);
 
 		if (selected_codec != HFP_AUDIO_CODEC_CVSD && selected_codec != HFP_AUDIO_CODEC_MSBC) {
@@ -468,21 +611,22 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		}
 		rfcomm->transport->codec = selected_codec;
 		spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
+		rfcomm_emit_volume_changed(rfcomm, -1, SPA_BT_VOLUME_INVALID);
 
 		rfcomm_send_reply(source, "OK");
 		if (was_switching_codec)
 			spa_bt_device_emit_codec_switched(rfcomm->device, 0);
 	} else if (sscanf(buf, "AT+VGM=%u", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->microphone_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
 			rfcomm_send_reply(source, "ERROR");
 		}
 	} else if (sscanf(buf, "AT+VGS=%u", &gain) == 1) {
-		if (gain <= 15) {
-			/* t->speaker_gain = gain; */
+		if (gain <= SPA_BT_VOLUME_HS_MAX) {
+			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_TX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", buf);
@@ -593,8 +737,8 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 			token = strtok(NULL, separators);
 			gain = atoi(token);
 
-			if (gain <= 15) {
-				/* t->speaker_gain = gain; */
+			if (gain <= SPA_BT_VOLUME_HS_MAX) {
+				rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_TX, gain);
 			} else {
 				spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", token);
 			}
@@ -603,8 +747,8 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 			token = strtok(NULL, separators);
 			gain = atoi(token);
 
-			if (gain <= 15) {
-				/* t->microphone_gain = gain; */
+			if (gain <= SPA_BT_VOLUME_HS_MAX) {
+				rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 			} else {
 				spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGS gain: %s", token);
 			}
@@ -632,7 +776,7 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 					rfcomm->hf_state = hfp_hf_cmer;
 					break;
 				case hfp_hf_cmer:
-					rfcomm->hf_state = hfp_hf_slc;
+					rfcomm->hf_state = hfp_hf_slc1;
 					rfcomm->slc_configured = true;
 					if (!rfcomm->codec_negotiation_supported) {
 						rfcomm->transport = _transport_create(rfcomm);
@@ -644,6 +788,18 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 							spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
 						}
 					}
+					/* Report volume on SLC establishment */
+					if (rfcomm_send_volume_cmd(source, SPA_BT_VOLUME_ID_RX))
+						rfcomm->hf_state = hfp_hf_vgs;
+					break;
+				case hfp_hf_slc2:
+					if (rfcomm_send_volume_cmd(source, SPA_BT_VOLUME_ID_RX))
+						rfcomm->hf_state = hfp_hf_vgs;
+					break;
+				case hfp_hf_vgs:
+					rfcomm->hf_state = hfp_hf_slc1;
+					if (rfcomm_send_volume_cmd(source, SPA_BT_VOLUME_ID_TX))
+						rfcomm->hf_state = hfp_hf_vgm;
 					break;
 				default:
 					break;
@@ -664,8 +820,6 @@ static void rfcomm_event(struct spa_source *source)
 
 	if (source->rmask & (SPA_IO_HUP | SPA_IO_ERR)) {
 		spa_log_info(backend->log, NAME": lost RFCOMM connection.");
-		if (source->loop)
-			spa_loop_remove_source(source->loop, source);
 		rfcomm_free(rfcomm);
 		return;
 	}
@@ -963,6 +1117,19 @@ static void sco_listen_event(struct spa_source *source)
 
 	spa_log_debug(backend->log, NAME": transport %p: audio connected", t);
 
+	/* Report initial volume to remote */
+	if (t->profile == SPA_BT_PROFILE_HSP_AG) {
+		if (rfcomm_send_volume_cmd(&rfcomm->source, SPA_BT_VOLUME_ID_RX))
+			rfcomm->hs_state = hsp_hs_vgs;
+		else
+			rfcomm->hs_state = hsp_hs_init1;
+	} else if (t->profile == SPA_BT_PROFILE_HFP_AG) {
+		if (rfcomm_send_volume_cmd(&rfcomm->source, SPA_BT_VOLUME_ID_RX))
+			rfcomm->hf_state = hfp_hf_vgs;
+		else
+			rfcomm->hf_state = hfp_hf_slc1;
+	}
+
 	spa_bt_transport_set_state(t, SPA_BT_TRANSPORT_STATE_PENDING);
 	return;
 
@@ -1021,10 +1188,52 @@ fail_close:
 	return -1;
 }
 
+static int sco_set_volume_cb(void *data, int id, float volume)
+{
+	struct spa_bt_transport *t = data;
+	struct spa_bt_transport_volume *t_volume = &t->volumes[id];
+	struct transport_data *td = t->user_data;
+	struct rfcomm *rfcomm = td->rfcomm;
+	char *msg;
+	int value;
+
+	if (!rfcomm_volume_enabled(rfcomm)
+	    || !(rfcomm->profile & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)
+	    || !(rfcomm->has_volume && rfcomm->volumes[id].active))
+		return -ENOTSUP;
+
+	value = spa_bt_volume_linear_to_hw(volume, t_volume->hw_volume_max);
+	t_volume->volume = volume;
+
+	if (rfcomm->volumes[id].hw_volume == value)
+		return 0;
+	rfcomm->volumes[id].hw_volume = value;
+
+	if (id == SPA_BT_VOLUME_ID_RX)
+		if (rfcomm->profile & SPA_BT_PROFILE_HFP_HF)
+			msg = spa_aprintf("+VGM: %d", value);
+		else
+			msg = spa_aprintf("+VGM=%d", value);
+	else if (id == SPA_BT_VOLUME_ID_TX)
+		if (rfcomm->profile & SPA_BT_PROFILE_HFP_HF)
+			msg = spa_aprintf("+VGS: %d", value);
+		else
+			msg = spa_aprintf("+VGS=%d", value);
+	else
+		spa_assert_not_reached();
+
+	if (rfcomm->transport)
+		rfcomm_send_reply(&rfcomm->source, msg);
+
+	free(msg);
+	return 0;
+}
+
 static const struct spa_bt_transport_implementation sco_transport_impl = {
 	SPA_VERSION_BT_TRANSPORT_IMPLEMENTATION,
 	.acquire = sco_acquire_cb,
 	.release = sco_release_cb,
+	.set_volume = sco_set_volume_cb,
 };
 
 static struct rfcomm *device_find_rfcomm(struct impl *backend, struct spa_bt_device *device)
@@ -1093,6 +1302,31 @@ static void codec_switch_timer_event(struct spa_source *source)
 
 	spa_log_debug(backend->log, "rfcomm %p: codec switch timeout", rfcomm);
 
+	switch (rfcomm->hfp_ag_initial_codec_setup) {
+	case HFP_AG_INITIAL_CODEC_SETUP_SEND:
+		/* Retry codec selection */
+		rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_WAIT;
+		rfcomm_send_reply(&rfcomm->source, "+BCS: 2");
+		codec_switch_start_timer(rfcomm, HFP_CODEC_SWITCH_TIMEOUT_MSEC);
+		return;
+	case HFP_AG_INITIAL_CODEC_SETUP_WAIT:
+		/* Failure, try falling back to CVSD. */
+		rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_NONE;
+		if (rfcomm->transport == NULL) {
+			rfcomm->transport = _transport_create(rfcomm);
+			if (rfcomm->transport == NULL) {
+				spa_log_warn(backend->log, NAME": can't create transport: %m");
+			} else {
+				rfcomm->transport->codec = HFP_AUDIO_CODEC_CVSD;
+				spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
+			}
+		}
+		rfcomm_send_reply(&rfcomm->source, "+BCS: 1");
+		return;
+	default:
+		break;
+	}
+
 	if (rfcomm->hfp_ag_switching_codec) {
 		rfcomm->hfp_ag_switching_codec = false;
 		if (rfcomm->device)
@@ -1156,6 +1390,17 @@ static int backend_native_ensure_codec(void *data, struct spa_bt_device *device,
 	return -ENOTSUP;
 #endif
 }
+
+static void device_destroy(void *data)
+{
+	struct rfcomm *rfcomm = data;
+	rfcomm_free(rfcomm);
+}
+
+static const struct spa_bt_device_events device_events = {
+	SPA_VERSION_BT_DEVICE_EVENTS,
+	.destroy = device_destroy,
+};
 
 static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
@@ -1221,6 +1466,16 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	rfcomm->source.mask = SPA_IO_IN;
 	rfcomm->source.rmask = 0;
 
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM; ++i) {
+		if (rfcomm->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY)
+			rfcomm->volumes[i].active = true;
+		rfcomm->volumes[i].hw_volume = SPA_BT_VOLUME_INVALID;
+	}
+
+	spa_bt_device_add_listener(d, &rfcomm->device_listener, &device_events, rfcomm);
+	spa_loop_add_source(backend->main_loop, &rfcomm->source);
+	spa_list_append(&backend->rfcomm_list, &rfcomm->link);
+
 	if (d->settings && (str = spa_dict_lookup(d->settings, "bluez5.msbc-support")))
 		rfcomm->msbc_support_enabled_in_config = strcmp(str, "true") == 0 || atoi(str) == 1;
 	else
@@ -1233,6 +1488,11 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 			goto fail_need_memory;
 		}
 		rfcomm->transport = t;
+		rfcomm->has_volume = rfcomm_volume_enabled(rfcomm);
+
+		if (profile == SPA_BT_PROFILE_HSP_AG) {
+			rfcomm->hs_state = hsp_hs_init1;
+		}
 
 		spa_bt_device_connect_profile(t->device, profile);
 
@@ -1257,6 +1517,11 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 			rfcomm->codec_negotiation_supported = false;
 		}
 
+		if (rfcomm_volume_enabled(rfcomm)) {
+			rfcomm->has_volume = true;
+			hf_features |= SPA_BT_HFP_HF_FEATURE_REMOTE_VOLUME_CONTROL;
+		}
+
 		/* send command to AG with the features supported by Hands-Free */
 		cmd = spa_aprintf("AT+BRSF=%u", hf_features);
 		rfcomm_send_cmd(&rfcomm->source, cmd);
@@ -1269,9 +1534,6 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	if (!dbus_connection_send(conn, r, NULL))
 		goto fail_need_memory;
 	dbus_message_unref(r);
-
-	spa_loop_add_source(backend->main_loop, &rfcomm->source);
-	spa_list_append(&backend->rfcomm_list, &rfcomm->link);
 
 	return DBUS_HANDLER_RESULT_HANDLED;
 
@@ -1326,11 +1588,6 @@ static DBusHandlerResult profile_request_disconnection(DBusConnection *conn, DBu
 
 	spa_list_for_each_safe(rfcomm, rfcomm_tmp, &backend->rfcomm_list, link) {
 		if (rfcomm->device == d && rfcomm->profile == profile) {
-			if (rfcomm->source.loop)
-				spa_loop_remove_source(rfcomm->source.loop, &rfcomm->source);
-			shutdown(rfcomm->source.fd, SHUT_RDWR);
-			close (rfcomm->source.fd);
-			rfcomm->source.fd = -1;
 			rfcomm_free(rfcomm);
 		}
 	}
@@ -1612,6 +1869,8 @@ static int backend_native_free(void *data)
 	struct rfcomm *rfcomm;
 
 	sco_close(backend);
+
+	backend_native_unregister_profiles(backend);
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	dbus_connection_unregister_object_path(backend->conn, PROFILE_HSP_AG);

@@ -1,4 +1,5 @@
 # PulseAudio config file for PipeWire version @VERSION@ #
+
 context.properties = {
     ## Configure properties in the system.
     #mem.warn-mlock  = false
@@ -40,6 +41,12 @@ context.modules = [
 	    #pulse.default.frag = 96000/48000       # 2 seconds
 	    #pulse.default.tlength = 96000/48000    # 2 seconds
 	    #pulse.min.quantum = 256/48000          # 5ms
+	    #pulse.default.format = F32
+	    #pulse.default.position = [ FL FR ]
+            # These overrides are only applied when running in a vm.
+            vm.overrides = {
+	        pulse.min.quantum = 1024/48000         # 22ms
+            }
         }
     }
 ]

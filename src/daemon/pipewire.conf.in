@@ -1,4 +1,5 @@
 # Daemon config file for PipeWire version @VERSION@ #
+
 context.properties = {
     ## Configure properties in the system.
     #library.name.system                   = support/libspa-support
@@ -24,6 +25,11 @@ context.properties = {
     #default.video.height      = 480
     #default.video.rate.num    = 25
     #default.video.rate.denom  = 1
+    #
+    # These overrides are only applied when running in a vm.
+    vm.overrides = {
+        default.clock.min-quantum     = 1024
+    }
 }
 
 context.spa-libs = {

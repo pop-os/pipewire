@@ -203,6 +203,61 @@ static const struct sm_object_methods node_methods = {
 	.release = node_release,
 };
 
+static void update_icon_name(struct pw_properties *p, bool is_sink)
+{
+	const char *s, *d = NULL, *bus;
+
+	if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR))) {
+		if (strcmp(s, "microphone") == 0)
+			d = "audio-input-microphone";
+		else if (strcmp(s, "webcam") == 0)
+			d = "camera-web";
+		else if (strcmp(s, "computer") == 0)
+			d = "computer";
+		else if (strcmp(s, "handset") == 0)
+			d = "phone";
+		else if (strcmp(s, "portable") == 0)
+			d = "multimedia-player";
+		else if (strcmp(s, "tv") == 0)
+			d = "video-display";
+		else if (strcmp(s, "headset") == 0)
+			d = "audio-headset";
+		else if (strcmp(s, "headphone") == 0)
+			d = "audio-headphones";
+		else if (strcmp(s, "speaker") == 0)
+			d = "audio-speakers";
+		else if (strcmp(s, "hands-free") == 0)
+			d = "audio-handsfree";
+	}
+	if (!d)
+		if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
+			if (strcmp(s, "modem") == 0)
+				d = "modem";
+
+	if (!d) {
+		if (is_sink)
+			d = "audio-card";
+		else
+			d = "audio-input-microphone";
+	}
+
+	if ((s = pw_properties_get(p, "device.profile.name")) != NULL) {
+		if (strstr(s, "analog"))
+			s = "-analog";
+		else if (strstr(s, "iec958"))
+			s = "-iec958";
+		else if (strstr(s, "hdmi"))
+			s = "-hdmi";
+		else
+			s = NULL;
+	}
+
+	bus = pw_properties_get(p, PW_KEY_DEVICE_BUS);
+
+	pw_properties_setf(p, PW_KEY_DEVICE_ICON_NAME,
+			"%s%s%s%s", d, s ? s : "", bus ? "-" : "", bus ? bus : "");
+}
+
 static struct node *alsa_create_node(struct device *device, uint32_t id,
 		const struct spa_device_object_info *info)
 {
@@ -353,6 +408,8 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 					' ', "%s", desc));
 		}
 	}
+	if (pw_properties_get(node->props, PW_KEY_DEVICE_ICON_NAME) == NULL)
+		update_icon_name(node->props, node->direction == PW_DIRECTION_INPUT);
 
 	node->impl = impl;
 	node->device = device;
@@ -478,10 +535,12 @@ static void alsa_update_device(struct impl *impl, struct device *device,
 {
 	pw_log_debug("update device %u", device->id);
 
-	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-		spa_debug_dict(0, info->props);
+	if (info->change_mask & SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS) {
+		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+			spa_debug_dict(0, info->props);
 
-	pw_properties_update(device->props, info->props);
+		pw_properties_update(device->props, info->props);
+	}
 }
 
 static int update_device_props(struct device *device)
@@ -523,11 +582,11 @@ static int update_device_props(struct device *device)
 
 		if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR)))
 			if (strcmp(s, "internal") == 0)
-				d = "Built-in Audio";
+				d = _("Built-in Audio");
 		if (!d)
 			if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
 				if (strcmp(s, "modem") == 0)
-					d = "Modem";
+					d = _("Modem");
 		if (!d)
 			d = pw_properties_get(p, PW_KEY_DEVICE_PRODUCT_NAME);
 
@@ -536,7 +595,7 @@ static int update_device_props(struct device *device)
 		if (!d)
 			d = pw_properties_get(p, "alsa.card_name");
 		if (!d)
-			d = "Unknown device";
+			d = _("Unknown device");
 
 		pw_properties_set(p, PW_KEY_DEVICE_DESCRIPTION, d);
 	}
@@ -547,44 +606,9 @@ static int update_device_props(struct device *device)
 			pw_properties_set(p, PW_KEY_DEVICE_NICK, s);
 	}
 
-	if (pw_properties_get(p, PW_KEY_DEVICE_ICON_NAME) == NULL) {
-		d = NULL;
+	if (pw_properties_get(p, PW_KEY_DEVICE_ICON_NAME) == NULL)
+		update_icon_name(device->props, true);
 
-		if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR))) {
-			if (strcmp(s, "microphone") == 0)
-				d = "audio-input-microphone";
-			else if (strcmp(s, "webcam") == 0)
-				d = "camera-web";
-			else if (strcmp(s, "computer") == 0)
-				d = "computer";
-			else if (strcmp(s, "handset") == 0)
-				d = "phone";
-			else if (strcmp(s, "portable") == 0)
-				d = "multimedia-player";
-			else if (strcmp(s, "tv") == 0)
-				d = "video-display";
-			else if (strcmp(s, "headset") == 0)
-				d = "audio-headset";
-			else if (strcmp(s, "headphone") == 0)
-				d = "audio-headphones";
-			else if (strcmp(s, "speaker") == 0)
-				d = "audio-speakers";
-			else if (strcmp(s, "hands-free") == 0)
-				d = "audio-handsfree";
-		}
-		if (!d)
-			if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
-				if (strcmp(s, "modem") == 0)
-					d = "modem";
-
-		if (!d)
-			d = "audio-card";
-
-		s = pw_properties_get(p, PW_KEY_DEVICE_BUS);
-
-		pw_properties_setf(p, PW_KEY_DEVICE_ICON_NAME,
-				"%s-analog%s%s", d, s ? "-" : "", s);
-	}
 	return 1;
 }
 
@@ -1061,6 +1085,7 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_ALSA_ENUM_UDEV, NULL);
 	if (impl->handle == NULL) {
 		res = -errno;
+		pw_log_info("can't load %s: %m", SPA_NAME_API_ALSA_ENUM_UDEV);
 		goto out_free;
 	}
 
