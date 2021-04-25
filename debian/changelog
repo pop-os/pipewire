@@ -1,8 +1,11 @@
-pipewire (0.3.26-1) UNRELEASED; urgency=medium
+pipewire (0.3.26-1) experimental; urgency=medium
 
   * New upstream release
+  * Add libpipewire-0.3-common to hold the translation files
+  * Install pw-link in pipewire-bin
+  * Update libpipewire-0.3-0 symbols
 
- -- Sjoerd Simons <sjoerd@debian.org>  Sat, 24 Apr 2021 21:49:46 +0200
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 25 Apr 2021 20:54:29 +0200
 
 pipewire (0.3.25-1) experimental; urgency=medium
 
