@@ -40,7 +40,7 @@ Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
-Recommends: pipewire (= ${binary:Version})
+Recommends: pipewire (= ${binary:Version}), libpipewire-0.3-common
 Description: libraries for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -49,6 +49,22 @@ Description: libraries for the PipeWire multimedia server
     application provided streams) and multiplexing this with clients.
   - Accessing sources of video for consumption.
   - Generating graphs for audio and video processing.
+
+Package: libpipewire-0.3-common
+Architecture: all
+Multi-Arch: foreign
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: libraries for the PipeWire multimedia server - common files
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package is needed for the runtime libraries to display messages in
+ languages other than English.
 
 Package: libpipewire-0.3-dev
 Section: libdevel
