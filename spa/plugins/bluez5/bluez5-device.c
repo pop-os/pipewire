@@ -253,6 +253,8 @@ static void emit_volume(struct impl *this, struct node *node)
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
 			SPA_PROP_channelVolumes, SPA_POD_Array(sizeof(float),
+				SPA_TYPE_Float, node->n_channels, node->volumes),
+			SPA_PROP_softVolumes, SPA_POD_Array(sizeof(float),
 				SPA_TYPE_Float, node->n_channels, node->soft_volumes),
 			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
 				SPA_TYPE_Id, node->n_channels, node->channels));
@@ -314,8 +316,8 @@ static void volume_changed(void *userdata)
 	impl->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
 	emit_info(impl, false);
 
-	/* It sometimes flips volume to over 100% in pavucontrol silder
-	 * if volume is emited before route info emitting while node
+	/* It sometimes flips volume to over 100% in pavucontrol slider
+	 * if volume is emitted before route info emitting while node
 	 * volumes are not identical to route volumes. Not sure why. */
 	emit_volume(impl, node);
 }
@@ -1564,7 +1566,8 @@ static int node_set_mute(struct impl *this, struct node *node, bool mute)
 
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
-			SPA_PROP_mute, SPA_POD_Bool(mute));
+			SPA_PROP_mute, SPA_POD_Bool(mute),
+			SPA_PROP_softMute, SPA_POD_Bool(mute));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);

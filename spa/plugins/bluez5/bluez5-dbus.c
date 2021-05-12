@@ -91,6 +91,9 @@ struct spa_bt_monitor {
 	unsigned int backend_native_registered:1;
 	unsigned int backend_ofono_registered:1;
 	unsigned int backend_hsphfpd_registered:1;
+
+	/* A reference audio info for A2DP codec configuration. */
+	struct a2dp_codec_audio_info default_audio_info;
 };
 
 /* Stream endpoints owned by BlueZ for each device */
@@ -268,7 +271,7 @@ static void battery_update(struct spa_bt_device *device)
 	dbus_message_unref(msg);
 }
 
-// Create ney virtual battery with value stored in current device object
+// Create new virtual battery with value stored in current device object
 static void battery_create(struct spa_bt_device *device) {
 	DBusMessage *msg;
 	DBusMessageIter iter, entry, dict;
@@ -468,7 +471,7 @@ static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBu
 		 * This causes inconsistency with SelectConfiguration() triggered
 		 * by codec switching.
 		  */
-		res = codec->select_config(codec, 0, cap, size, NULL, config);
+		res = codec->select_config(codec, 0, cap, size, &monitor->default_audio_info, NULL, config);
 	else
 		res = -ENOTSUP;
 
@@ -1043,8 +1046,8 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_CONNECTED);
 	} else {
-		/* The initial reconnect event has not been triggred,
-		 * the connecting is triggred by bluez. */
+		/* The initial reconnect event has not been triggered,
+		 * the connecting is triggered by bluez. */
 		if (device->reconnect_state == BT_DEVICE_RECONNECT_INIT)
 			device->reconnect_state = BT_DEVICE_RECONNECT_PROFILE;
 		device_start_timer(device);
@@ -1233,7 +1236,8 @@ bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struc
 	}
 
 	spa_list_for_each(ep, &device->remote_endpoint_list, device_link) {
-		if (a2dp_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len))
+		if (a2dp_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len,
+					  &ep->monitor->default_audio_info))
 			return true;
 	}
 
@@ -2200,7 +2204,9 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 		goto next;
 	}
 
-	res = codec->select_config(codec, 0, ep->capabilities, ep->capabilities_len, sw->device->settings, config);
+	res = codec->select_config(codec, 0, ep->capabilities, ep->capabilities_len,
+				   &sw->device->monitor->default_audio_info,
+				   sw->device->settings, config);
 	if (res < 0) {
 		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: incompatible capabilities (%d), try next",
 		              sw, res);
@@ -2364,7 +2370,7 @@ static int a2dp_codec_switch_cmp(const void *a, const void *b)
 		return -1;
 
 	return codec->caps_preference_cmp(codec, ep1->capabilities, ep1->capabilities_len,
-			ep2->capabilities, ep2->capabilities_len);
+			ep2->capabilities, ep2->capabilities_len, &sw->device->monitor->default_audio_info);
 }
 
 /* Ensure there's a transport for at least one of the listed codecs */
@@ -2390,7 +2396,7 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 
 	/* Check if we already have an enabled transport for the most preferred codec.
 	 * However, if there already was a codec switch running, these transports may
-	 * disapper soon. In that case, we have to do the full thing.
+	 * disappear soon. In that case, we have to do the full thing.
 	 */
 	if (spa_list_is_empty(&device->codec_switch_list) && preferred_codec != NULL) {
 		spa_list_for_each(t, &device->transport_list, device_link) {
@@ -3142,13 +3148,14 @@ static void interface_added(struct spa_bt_monitor *monitor,
 	else if (strcmp(interface_name, BLUEZ_DEVICE_INTERFACE) == 0) {
 		struct spa_bt_device *d;
 
-		spa_assert(spa_bt_device_find(monitor, object_path) == NULL);
-
-		d = device_create(monitor, object_path);
+		d = spa_bt_device_find(monitor, object_path);
 		if (d == NULL) {
-			spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
-					object_path);
-			return;
+			d = device_create(monitor, object_path);
+			if (d == NULL) {
+				spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
+						object_path);
+				return;
+			}
 		}
 
 		device_update_props(d, props_iter, NULL);
@@ -3860,12 +3867,24 @@ impl_init(const struct spa_handle_factory *factory,
 	if ((res = parse_codec_array(this, info)) < 0)
 		return res;
 
+	this->default_audio_info.rate = A2DP_CODEC_DEFAULT_RATE;
+	this->default_audio_info.channels = A2DP_CODEC_DEFAULT_CHANNELS;
+
 	if (info) {
 		const char *str;
+		uint32_t tmp;
 
 		if ((str = spa_dict_lookup(info, "api.bluez5.connection-info")) != NULL &&
 		    (strcmp(str, "true") == 0 || atoi(str)))
 			this->connection_info_supported = true;
+
+		if ((str = spa_dict_lookup(info, "bluez5.default.rate")) != NULL &&
+		    (tmp =  atoi(str)) > 0)
+			this->default_audio_info.rate = tmp;
+
+		if ((str = spa_dict_lookup(info, "bluez5.default.channels")) != NULL &&
+		    ((tmp =  atoi(str)) > 0))
+			this->default_audio_info.channels = tmp;
 
 		if ((str = spa_dict_lookup(info, "bluez5.sbc-xq-support")) != NULL &&
 		    (strcmp(str, "true") == 0 || atoi(str)))
@@ -3916,7 +3935,7 @@ const struct spa_handle_factory spa_bluez5_dbus_factory = {
 	impl_enum_interface_info,
 };
 
-// Report battery percentage to BlueZ using experimental (BlueZ 5.56) Battery Provider API. No-op if no changes occured.
+// Report battery percentage to BlueZ using experimental (BlueZ 5.56) Battery Provider API. No-op if no changes occurred.
 int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage)
 {
 	if (percentage == SPA_BT_NO_BATTERY) {

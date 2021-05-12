@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.26',
+  version : '0.3.27',
   license : 'MIT',
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -274,7 +274,7 @@ if cc.has_function('memfd_create', prefix : '#include <sys/mman.h>', args : [ '-
   cdata.set('HAVE_MEMFD_CREATE', 1)
 endif
 
-if cc.has_function('getrandom', prefix : '#include <sys/random.h>')
+if cc.has_function('getrandom', prefix : '#include <sys/random.h>', args : [ '-D_GNU_SOURCE' ])
   cdata.set('HAVE_GETRANDOM', 1)
 endif
 
@@ -350,6 +350,9 @@ epoll_shim_dep = (build_machine.system() == 'freebsd'
 libinotify_dep = (build_machine.system() == 'freebsd'
     ? dependency('libinotify', required: true)
     : dependency('', required: false))
+
+# On FreeBSD, libintl library is required for gettext
+libintl_dep = cc.find_library('intl', required: false)
 
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: get_option('pipewire-alsa'))
 

@@ -321,7 +321,7 @@ int jack_set_thread_init_callback (jack_client_t *client,
  *
  * Register a function (and argument) to be called if and when the
  * JACK server shuts down the client thread.  The function must
- * be written as if it were an asynchonrous POSIX signal
+ * be written as if it were an asynchronous POSIX signal
  * handler --- use only async-safe functions, and remember that it
  * is executed from another thread.  A typical function might
  * set a flag or write to a pipe so that the rest of the
@@ -352,7 +352,7 @@ void jack_on_shutdown (jack_client_t *client,
  *
  * Register a function (and argument) to be called if and when the
  * JACK server shuts down the client thread.  The function must
- * be written as if it were an asynchonrous POSIX signal
+ * be written as if it were an asynchronous POSIX signal
  * handler --- use only async-safe functions, and remember that it
  * is executed from another thread.  A typical function might
  * set a flag or write to a pipe so that the rest of the
@@ -417,7 +417,7 @@ int jack_set_freewheel_callback (jack_client_t *client,
                                  void *arg) JACK_OPTIONAL_WEAK_EXPORT;
 
 /**
- * Tell JACK to call @a bufsize_callback whenever the size of the the
+ * Tell JACK to call @a bufsize_callback whenever the size of the
  * buffer that will be passed to the @a process_callback is about to
  * change.  Clients that depend on knowing the buffer size must supply
  * a @a bufsize_callback before activating themselves.
@@ -606,7 +606,7 @@ int jack_set_xrun_callback (jack_client_t *client,
  * register a latency callback.
  *
  * Another case is when a client wants to use
- * @ref jack_port_get_latency_range(), which only returns meaninful
+ * @ref jack_port_get_latency_range(), which only returns meaningful
  * values when ports get connected and latency values change.
  *
  * See the documentation for  @ref jack_port_set_latency_range()

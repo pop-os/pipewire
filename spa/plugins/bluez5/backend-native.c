@@ -705,7 +705,7 @@ static bool rfcomm_hfp_hf(struct spa_source *source, char* buf)
 			selected_codec = atoi(token);
 
 			if (selected_codec != HFP_AUDIO_CODEC_CVSD && selected_codec != HFP_AUDIO_CODEC_MSBC) {
-				spa_log_warn(backend->log, NAME": unsupported codec negociation: %d", selected_codec);
+				spa_log_warn(backend->log, NAME": unsupported codec negotiation: %d", selected_codec);
 			} else {
 				spa_log_debug(backend->log, NAME": RFCOMM selected_codec = %i", selected_codec);
 
@@ -1869,8 +1869,6 @@ static int backend_native_free(void *data)
 	struct rfcomm *rfcomm;
 
 	sco_close(backend);
-
-	backend_native_unregister_profiles(backend);
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	dbus_connection_unregister_object_path(backend->conn, PROFILE_HSP_AG);

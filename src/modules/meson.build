@@ -14,6 +14,28 @@ pipewire_module_access = shared_library('pipewire-module-access', [ 'module-acce
   dependencies : [mathlib, dl_lib, pipewire_dep],
 )
 
+pipewire_module_loopback = shared_library('pipewire-module-loopback',
+  [ 'module-loopback.c' ],
+  c_args : pipewire_module_c_args,
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, pipewire_dep],
+)
+
+pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
+  [ 'module-echo-cancel.c',
+    'module-echo-cancel/aec-null.c',
+    'module-echo-cancel/aec-webrtc.cc' ],
+  c_args : pipewire_module_c_args,
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, pipewire_dep],
+)
+
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
   [ 'module-profiler.c',
     'module-profiler/protocol-native.c', ],
@@ -101,6 +123,8 @@ pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse'
     'module-protocol-pulse/modules/module-loopback.c',
     'module-protocol-pulse/modules/module-native-protocol-tcp.c',
     'module-protocol-pulse/modules/module-null-sink.c',
+    'module-protocol-pulse/modules/module-remap-sink.c',
+    'module-protocol-pulse/modules/module-remap-source.c',
     'module-protocol-pulse/modules/module-simple-protocol-tcp.c',
   ],
   c_args : pipewire_module_c_args,
