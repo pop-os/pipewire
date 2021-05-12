@@ -96,7 +96,7 @@ pod = spa_pod_builder_pop(&b, &f);
 `spa_pod_builder_pop()` returns a reference to the object we completed
 on the stack.
 
-## Using varags builder.
+## Using varargs builder.
 
 We can also use the following construct to make POD objects:
 
@@ -468,7 +468,7 @@ default:
 
 Given 2 pod objects of the same type (Object, Struct, ..) one can
 run a filter and generate a new pod that only contains values that
-are compatibe with both input pods.
+are compatible with both input pods.
 
 This is, for example, used to find a compatible format between two ports.
 

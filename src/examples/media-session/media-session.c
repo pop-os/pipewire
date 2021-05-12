@@ -361,7 +361,7 @@ int sm_object_destroy(struct sm_object *obj)
 }
 
 static struct param *add_param(struct spa_list *param_list,
-		uint32_t id, const struct spa_pod *param)
+		int seq, int *param_seq, uint32_t id, const struct spa_pod *param)
 {
 	struct param *p;
 
@@ -371,6 +371,19 @@ static struct param *add_param(struct spa_list *param_list,
 	}
 	if (id == SPA_ID_INVALID)
 		id = SPA_POD_OBJECT_ID(param);
+
+	if (id >= SM_MAX_PARAMS) {
+		pw_log_error(NAME": too big param id %d", id);
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (seq != param_seq[id]) {
+		pw_log_debug(NAME": ignoring param %d, seq:%d != current_seq:%d",
+				id, seq, param_seq[id]);
+		errno = EBUSY;
+		return NULL;
+	}
 
 	p = malloc(sizeof(struct param) + SPA_POD_SIZE(param));
 	if (p == NULL)
@@ -490,13 +503,21 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 			if (info->params[i].user == 0)
 				continue;
 
+			if (id >= SM_MAX_PARAMS) {
+				pw_log_error(NAME" %p: too big param id %d", impl, id);
+				continue;
+			}
+
 			device->n_params -= clear_params(&device->param_list, id);
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
-				pw_log_debug(NAME" %p: device %d enum params %d", impl,
-						device->obj.id, id);
-				pw_device_enum_params((struct pw_device*)device->obj.proxy,
-						1, id, 0, UINT32_MAX, NULL);
+				int res;
+				res = pw_device_enum_params((struct pw_device*)device->obj.proxy,
+						++device->param_seq[id], id, 0, UINT32_MAX, NULL);
+				if (SPA_RESULT_IS_ASYNC(res))
+					device->param_seq[id] = res;
+				pw_log_debug(NAME" %p: device %d enum params %d seq:%d", impl,
+						device->obj.id, id, device->param_seq[id]);
 			}
 			info->params[i].user = 0;
 		}
@@ -512,8 +533,8 @@ static void device_event_param(void *object, int seq,
 	struct sm_device *device = object;
 	struct impl *impl = SPA_CONTAINER_OF(device->obj.session, struct impl, this);
 
-	pw_log_debug(NAME" %p: device %p param %d index:%d", impl, device, id, index);
-	if (add_param(&device->param_list, id, param) != NULL)
+	pw_log_debug(NAME" %p: device %p param %d index:%d seq:%d", impl, device, id, index, seq);
+	if (add_param(&device->param_list, seq, device->param_seq, id, param) != NULL)
 		device->n_params++;
 
 	device->obj.avail |= SM_DEVICE_CHANGE_MASK_PARAMS;
@@ -591,13 +612,21 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 			if (info->params[i].user == 0)
 				continue;
 
+			if (id >= SM_MAX_PARAMS) {
+				pw_log_error(NAME" %p: too big param id %d", impl, id);
+				continue;
+			}
+
 			node->n_params -= clear_params(&node->param_list, id);
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
-				pw_log_debug(NAME" %p: node %d enum params %d", impl,
-						node->obj.id, id);
-				pw_node_enum_params((struct pw_node*)node->obj.proxy,
-						1, id, 0, UINT32_MAX, NULL);
+				int res;
+				res = pw_node_enum_params((struct pw_node*)node->obj.proxy,
+						++node->param_seq[id], id, 0, UINT32_MAX, NULL);
+				if (SPA_RESULT_IS_ASYNC(res))
+					node->param_seq[id] = res;
+				pw_log_debug(NAME" %p: node %d enum params %d seq:%d", impl,
+						node->obj.id, id, node->param_seq[id]);
 			}
 			info->params[i].user = 0;
 		}
@@ -613,8 +642,8 @@ static void node_event_param(void *object, int seq,
 	struct sm_node *node = object;
 	struct impl *impl = SPA_CONTAINER_OF(node->obj.session, struct impl, this);
 
-	pw_log_debug(NAME" %p: node %p param %d index:%d", impl, node, id, index);
-	if (add_param(&node->param_list, id, param) != NULL)
+	pw_log_debug(NAME" %p: node %p param %d index:%d seq:%d", impl, node, id, index, seq);
+	if (add_param(&node->param_list, seq, node->param_seq, id, param) != NULL)
 		node->n_params++;
 
 	node->obj.avail |= SM_NODE_CHANGE_MASK_PARAMS;
@@ -1802,12 +1831,20 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 	struct pw_properties *props;
 	struct sm_port *outport, *inport;
 	int count = 0;
+	bool passive = false;
+	const char *str;
 
 	pw_log_debug(NAME" %p: linking %d -> %d", impl, outnode->obj.id, innode->obj.id);
+
+	if ((str = spa_dict_lookup(outnode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
+		passive |= (pw_properties_parse_bool(str) || strcmp(str, "out") == 0);
+	if ((str = spa_dict_lookup(innode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
+		passive |= (pw_properties_parse_bool(str) || strcmp(str, "in") == 0);
 
 	props = pw_properties_new(NULL, NULL);
 	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", outnode->obj.id);
 	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", innode->obj.id);
+	pw_properties_setf(props, PW_KEY_LINK_PASSIVE, "%s", passive ? "true" : "false");
 
 	spa_list_for_each(inport, &innode->port_list, link)
 		inport->visited = false;
@@ -2483,7 +2520,7 @@ int main(int argc, char *argv[])
 		else
 			pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
 	} else {
-		pw_log_info("dbus diabled");
+		pw_log_info("dbus disabled");
 	}
 
 	if ((res = start_session(&impl)) < 0)

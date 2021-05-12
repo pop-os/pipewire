@@ -58,46 +58,47 @@ static const struct channelmix_info {
 
 	channelmix_func_t process;
 	uint32_t cpu_flags;
+	const char *name;
 } channelmix_table[] =
 {
 #if defined (HAVE_SSE)
-	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
-	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
-	{ EQ, 0, EQ, 0, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
+	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
+	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
+	{ EQ, 0, EQ, 0, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
 #endif
-	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_c, 0 },
-	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_c, 0 },
+	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_c, 0, "copy_c" },
+	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_c, 0, "copy_c" },
 	{ EQ, 0, EQ, 0, channelmix_copy_c, 0 },
 
-	{ 1, MASK_MONO, 2, MASK_STEREO, channelmix_f32_1_2_c, 0 },
-	{ 2, MASK_STEREO, 1, MASK_MONO, channelmix_f32_2_1_c, 0 },
-	{ 4, MASK_QUAD, 1, MASK_MONO, channelmix_f32_4_1_c, 0 },
-	{ 4, MASK_3_1, 1, MASK_MONO, channelmix_f32_3p1_1_c, 0 },
+	{ 1, MASK_MONO, 2, MASK_STEREO, channelmix_f32_1_2_c, 0, "f32_1_2_c" },
+	{ 2, MASK_STEREO, 1, MASK_MONO, channelmix_f32_2_1_c, 0, "f32_2_1_c" },
+	{ 4, MASK_QUAD, 1, MASK_MONO, channelmix_f32_4_1_c, 0, "f32_4_1_c" },
+	{ 4, MASK_3_1, 1, MASK_MONO, channelmix_f32_3p1_1_c, 0, "f32_3p1_1_c" },
 #if defined (HAVE_SSE)
-	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_sse, SPA_CPU_FLAG_SSE },
+	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_sse, SPA_CPU_FLAG_SSE, "f32_2_4_sse" },
 #endif
-	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_c, 0 },
-	{ 2, MASK_STEREO, 4, MASK_3_1, channelmix_f32_2_3p1_c, 0 },
-	{ 2, MASK_STEREO, 6, MASK_5_1, channelmix_f32_2_5p1_c, 0 },
+	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_c, 0, "f32_2_4_c" },
+	{ 2, MASK_STEREO, 4, MASK_3_1, channelmix_f32_2_3p1_c, 0, "f32_2_3p1_c" },
+	{ 2, MASK_STEREO, 6, MASK_5_1, channelmix_f32_2_5p1_c, 0, "f32_2_5p1_c" },
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_sse, SPA_CPU_FLAG_SSE, "f32_5p1_2_sse" },
 #endif
-	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_c, 0 },
+	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_c, 0, "f32_5p1_2_c" },
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_sse, SPA_CPU_FLAG_SSE, "f32_5p1_4_sse" },
 #endif
-	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_c, 0 },
+	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_c, 0, "f32_5p1_4_c" },
 
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_sse, SPA_CPU_FLAG_SSE, "f32_5p1_3p1_sse" },
 #endif
-	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_c, 0 },
+	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_c, 0, "f32_5p1_3p1_c" },
 
-	{ 8, MASK_7_1, 2, MASK_STEREO, channelmix_f32_7p1_2_c, 0 },
-	{ 8, MASK_7_1, 4, MASK_QUAD, channelmix_f32_7p1_4_c, 0 },
-	{ 8, MASK_7_1, 4, MASK_3_1, channelmix_f32_7p1_3p1_c, 0 },
+	{ 8, MASK_7_1, 2, MASK_STEREO, channelmix_f32_7p1_2_c, 0, "f32_7p1_2_c" },
+	{ 8, MASK_7_1, 4, MASK_QUAD, channelmix_f32_7p1_4_c, 0, "f32_7p1_4_c" },
+	{ 8, MASK_7_1, 4, MASK_3_1, channelmix_f32_7p1_3p1_c, 0, "f32_7p1_3p1_c" },
 
-	{ ANY, 0, ANY, 0, channelmix_f32_n_m_c, 0 },
+	{ ANY, 0, ANY, 0, channelmix_f32_n_m_c, 0, "f32_n_m_c" },
 };
 
 #define MATCH_CHAN(a,b)		((a) == ANY || (a) == (b))
@@ -149,12 +150,13 @@ static int make_matrix(struct channelmix *mix)
 	float slev = SQRT1_2;
 	float llev = 0.5f;
 	float maxsum = 0.0f;
+	bool do_upmix = SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_UPMIX);
 #define _MATRIX(s,d)	matrix[_CH(s)][_CH(d)]
 
 	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64,
 			src_mask, dst_mask);
 
-	/* move the MONO mask to FC so that the lower bits can be shifed
+	/* move the MONO mask to FC so that the lower bits can be shifted
 	 * away. */
 	if ((src_mask & (1Ull << SPA_AUDIO_CHANNEL_MONO)) != 0)
 		src_mask |= (1ULL << SPA_AUDIO_CHANNEL_FC);
@@ -178,7 +180,7 @@ static int make_matrix(struct channelmix *mix)
 				matrix[0][i]= 1.0f / mix->src_chan;
 		} else {
 			/* just pair channels */
-			spa_log_debug(mix->log, "paring channels");
+			spa_log_debug(mix->log, "pairing channels");
 			for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
 				matrix[i][i]= 1.0f;
 		}
@@ -362,7 +364,7 @@ static int make_matrix(struct channelmix *mix)
 		}
 	}
 
-	if (!SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_UPMIX))
+	if (!do_upmix)
 		goto done;
 
 	unassigned = dst_mask & ~src_mask;
@@ -422,10 +424,15 @@ done:
 				continue;
 			mix->matrix_orig[ic][jc++] = matrix[i][j];
 			sum += fabs(matrix[i][j]);
-			if (i == _CH(LFE))
-				lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->lfe_cutoff / mix->freq);
 		}
 		maxsum = SPA_MAX(maxsum, sum);
+		if (i == _CH(LFE) && do_upmix && mix->lfe_cutoff > 0.0f) {
+			spa_log_debug(mix->log, "channel %d is LFE", ic);
+			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->lfe_cutoff / mix->freq);
+			mix->lr4_info[ic] = 1;
+		} else {
+			mix->lr4_info[ic] = 0;
+		}
 		ic++;
 	}
 	if (SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_NORMALIZE) &&
@@ -508,6 +515,8 @@ int channelmix_init(struct channelmix *mix)
 			mix->cpu_flags);
 	if (info == NULL)
 		return -ENOTSUP;
+
+	spa_log_debug(mix->log, "selected %s", info->name);
 
 	mix->free = impl_channelmix_free;
 	mix->process = info->process;
