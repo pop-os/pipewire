@@ -1,11 +1,9 @@
 etc/pipewire/client-rt.conf
 etc/pipewire/client.conf
 etc/pipewire/jack.conf
-etc/pipewire/pipewire-pulse.conf
 etc/pipewire/pipewire.conf
 lib/udev/rules.d
 usr/bin/pipewire
-usr/bin/pipewire-pulse
 usr/bin/pw-cat
 usr/bin/pw-cli
 usr/bin/pw-dot

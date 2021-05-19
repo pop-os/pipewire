@@ -222,6 +222,24 @@ Description: PipeWire multimedia session manager
  .
  This package contains the default media session manager.
 
+Package: pipewire-pulse
+Section: video
+Architecture: linux-any
+Multi-Arch: foreign
+Depends: pipewire (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
+Description: PipeWire PulseAudio daemon
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of video (such as from a capture devices or
+    application provided streams) and multiplexing this with clients.
+  - Accessing sources of video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains the PulseAudio replacement daemon.
+
 Package: pipewire-audio-client-libraries
 Architecture: linux-any
 Multi-Arch: same
