@@ -208,6 +208,8 @@ Package: pipewire-media-session
 Section: video
 Architecture: linux-any
 Multi-Arch: foreign
+Replaces: pipewire-bin (<< 0.3.27-2)
+Breaks: pipewire-bin (<< 0.3.27-2)
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -226,6 +228,8 @@ Package: pipewire-pulse
 Section: video
 Architecture: linux-any
 Multi-Arch: foreign
+Replaces: pipewire-bin (<< 0.3.27-2)
+Breaks: pipewire-bin (<< 0.3.27-2)
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
