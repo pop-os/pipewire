@@ -8,8 +8,9 @@ pipewire (0.3.28-1) UNRELEASED; urgency=medium
   * Install user systemd units by default
   * Update readme for seperate pipewire-pulse
   * New upstream release
+  * Disable avahi module at least for now
 
- -- Sjoerd Simons <sjoerd@debian.org>  Sat, 22 May 2021 14:29:40 +0200
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 22 May 2021 14:35:21 +0200
 
 pipewire (0.3.27-1) experimental; urgency=medium
 
