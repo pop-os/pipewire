@@ -1,7 +1,7 @@
-etc/pipewire/client-rt.conf
-etc/pipewire/client.conf
-etc/pipewire/jack.conf
-etc/pipewire/pipewire.conf
+usr/share/pipewire/client-rt.conf
+usr/share/pipewire/client.conf
+usr/share/pipewire/jack.conf
+usr/share/pipewire/pipewire.conf
 lib/udev/rules.d
 usr/bin/pipewire
 usr/bin/pw-cat
