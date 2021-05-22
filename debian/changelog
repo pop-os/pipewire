@@ -1,4 +1,4 @@
-pipewire (0.3.28-1) UNRELEASED; urgency=medium
+pipewire (0.3.28-1) experimental; urgency=medium
 
   [ Frédéric Danis ]
   * Split pipewire-media-session from pipewire-bin package
@@ -13,7 +13,7 @@ pipewire (0.3.28-1) UNRELEASED; urgency=medium
   * Update libpipewire-0.3-0 symbol file
   * Remove configuration files that moved to /usr/share
 
- -- Sjoerd Simons <sjoerd@debian.org>  Sat, 22 May 2021 16:16:55 +0200
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 22 May 2021 16:19:10 +0200
 
 pipewire (0.3.27-1) experimental; urgency=medium
 
