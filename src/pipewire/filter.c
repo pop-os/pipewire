@@ -33,6 +33,7 @@
 #include <spa/node/io.h>
 #include <spa/node/utils.h>
 #include <spa/utils/ringbuffer.h>
+#include <spa/utils/string.h>
 #include <spa/pod/filter.h>
 #include <spa/debug/format.h>
 #include <spa/debug/types.h>
@@ -213,7 +214,7 @@ static struct param *add_param(struct filter *impl, struct port *port,
 
 	p->id = id;
 	p->flags = flags;
-	p->param = SPA_MEMBER(p, sizeof(struct param), struct spa_pod);
+	p->param = SPA_PTROFF(p, sizeof(struct param), struct spa_pod);
 	memcpy(p->param, param, SPA_POD_SIZE(param));
 	SPA_POD_OBJECT_ID(p->param) = id;
 
@@ -576,7 +577,7 @@ static int map_data(struct filter *impl, struct spa_data *data, int prot)
 		pw_log_error(NAME" %p: failed to mmap buffer mem: %m", impl);
 		return -errno;
 	}
-	data->data = SPA_MEMBER(ptr, range.start, void);
+	data->data = SPA_PTROFF(ptr, range.start, void);
 	pw_log_debug(NAME" %p: fd %"PRIi64" mapped %d %d %p", impl, data->fd,
 			range.offset, range.size, data->data);
 
@@ -600,7 +601,7 @@ static int unmap_data(struct filter *impl, struct spa_data *data)
 
 	pw_map_range_init(&range, data->mapoffset, data->maxsize, impl->context->sc_pagesize);
 
-	if (munmap(SPA_MEMBER(data->data, -range.start, void), range.size) < 0)
+	if (munmap(SPA_PTROFF(data->data, -range.start, void), range.size) < 0)
 		pw_log_warn(NAME" %p: failed to unmap: %m", impl);
 
 	pw_log_debug(NAME" %p: fd %"PRIi64" unmapped", impl, data->fd);
@@ -1433,12 +1434,12 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	/* first configure default params */
 	add_port_params(impl, p);
 	if ((str = pw_properties_get(props, PW_KEY_FORMAT_DSP)) != NULL) {
-		if (!strcmp(str, "32 bit float mono audio"))
+		if (spa_streq(str, "32 bit float mono audio"))
 			add_audio_dsp_port_params(impl, p);
-		else if (!strcmp(str, "32 bit float RGBA video"))
+		else if (spa_streq(str, "32 bit float RGBA video"))
 			add_video_dsp_port_params(impl, p);
-		else if (!strcmp(str, "8 bit raw midi") ||
-		    !strcmp(str, "8 bit raw control"))
+		else if (spa_streq(str, "8 bit raw midi") ||
+		    spa_streq(str, "8 bit raw control"))
 			add_control_dsp_port_params(impl, p);
 	}
 	/* then override with user provided if any */

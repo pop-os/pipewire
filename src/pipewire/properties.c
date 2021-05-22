@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/array.h"
 #include "pipewire/utils.h"
@@ -183,10 +184,10 @@ int pw_properties_update_string(struct pw_properties *props, const char *str, si
 
 /** Make a new properties object from the given str
  *
- * \a str should be a whitespace separated list of key=value
+ * \a object should be a whitespace separated list of key=value
  * strings or a json object.
  *
- * \param args a property description
+ * \param object a property description
  * \return a new properties object
  *
  * \memberof pw_properties
@@ -227,8 +228,8 @@ struct pw_properties *pw_properties_copy(const struct pw_properties *properties)
 
 /** Copy multiple keys from one property to another
  *
- * \param src properties to copy from
- * \param dst properties to copy to
+ * \param props properties to copy to
+ * \param dict properties to copy from
  * \param keys a NULL terminated list of keys to copy
  * \return the number of keys changed in \a dest
  *
@@ -252,7 +253,7 @@ static bool has_key(const char *keys[], const char *key)
 {
 	int i;
 	for (i = 0; keys[i]; i++) {
-		if (strcmp(keys[i], key) == 0)
+		if (spa_streq(keys[i], key))
 			return true;
 	}
 	return false;
@@ -401,7 +402,7 @@ static int do_replace(struct pw_properties *properties, const char *key, char *v
 		struct spa_dict_item *item =
 		    pw_array_get_unchecked(&impl->items, index, struct spa_dict_item);
 
-		if (value && strcmp(item->value, value) == 0)
+		if (value && spa_streq(item->value, value))
 			goto exit_noupdate;
 
 		if (value == NULL) {
@@ -539,4 +540,30 @@ const char *pw_properties_iterate(const struct pw_properties *properties, void *
 	*state = SPA_INT_TO_PTR(index + 1);
 
 	return pw_array_get_unchecked(&impl->items, index, struct spa_dict_item)->key;
+}
+
+SPA_EXPORT
+int pw_properties_serialize_dict(FILE *f, const struct spa_dict *dict, uint32_t flags)
+{
+	const struct spa_dict_item *it;
+	int count = 0;
+	spa_dict_for_each(it, dict) {
+		size_t len = it->value ? strlen(it->value) : 0;
+		fprintf(f, " \"%s\" = ", it->key);
+		if (it->value == NULL) {
+			fprintf(f, "null");
+		} else if (spa_json_is_null(it->value, len) ||
+		    spa_json_is_float(it->value, len) ||
+		    spa_json_is_bool(it->value, len) ||
+		    spa_json_is_container(it->value, len)) {
+			fprintf(f, "%s", it->value);
+		} else {
+			size_t size = (len+1) * 4;
+			char str[size];
+			spa_json_encode_string(str, size, it->value);
+			fprintf(f, "%s", str);
+		}
+		count++;
+	}
+	return count;
 }

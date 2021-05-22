@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 
 #include <spa/param/audio/format.h>
+#include <spa/utils/string.h>
 
 #include <sbc/sbc.h>
 
@@ -164,7 +165,7 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 	if (caps_size < sizeof(conf))
 		return -EINVAL;
 
-	xq = (strcmp(codec->name, "sbc_xq") == 0);
+	xq = (spa_streq(codec->name, "sbc_xq"));
 
 	memcpy(&conf, caps, sizeof(conf));
 
@@ -235,7 +236,7 @@ static int codec_caps_preference_cmp(const struct a2dp_codec *codec, const void 
 	a2dp_sbc_t *conf;
 	int res1, res2;
 	int a, b;
-	bool xq = (strcmp(codec->name, "sbc_xq") == 0);
+	bool xq = (spa_streq(codec->name, "sbc_xq"));
 
 	/* Order selected configurations by preference */
 	res1 = codec->select_config(codec, 0, caps1, caps1_size, info, NULL, (uint8_t *)&conf1);
@@ -577,7 +578,7 @@ static int codec_start_encode (void *data,
 	struct impl *this = data;
 
 	this->header = (struct rtp_header *)dst;
-	this->payload = SPA_MEMBER(dst, sizeof(struct rtp_header), struct rtp_payload);
+	this->payload = SPA_PTROFF(dst, sizeof(struct rtp_header), struct rtp_payload);
 	memset(this->header, 0, sizeof(struct rtp_header)+sizeof(struct rtp_payload));
 
 	this->payload->frame_count = 0;

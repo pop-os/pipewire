@@ -26,6 +26,8 @@
 #include "alsa-mixer.h"
 #include "alsa-ucm.h"
 
+#include <spa/utils/string.h>
+
 int _acp_log_level = 1;
 acp_log_func _acp_log_func;
 void *_acp_log_data;
@@ -215,6 +217,7 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	dev->device.format.rate_mask = m->sample_spec.rate;
 	dev->device.format.channels = m->channel_map.channels;
 	pa_cvolume_reset(&dev->real_volume, m->channel_map.channels);
+	pa_cvolume_reset(&dev->soft_volume, m->channel_map.channels);
 	for (i = 0; i < m->channel_map.channels; i++)
 		dev->device.format.map[i]= channel_pa2acp(m->channel_map.map[i]);
 	dev->direction = direction;
@@ -866,7 +869,7 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 		changed |= old_monitor_name != NULL;
 		pa_proplist_unset(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME);
 	} else {
-		changed |= (old_monitor_name == NULL) || (strcmp(old_monitor_name, eld.monitor_name) != 0);
+		changed |= (old_monitor_name == NULL) || (!spa_streq(old_monitor_name, eld.monitor_name));
 		pa_proplist_sets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME, eld.monitor_name);
 	}
 	pa_proplist_as_dict(p->proplist, &p->port.props);
@@ -937,7 +940,7 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 		struct acp_card_profile *p = profiles[i];
 
 		if (name) {
-			if (strcmp(name, p->name) == 0)
+			if (spa_streq(name, p->name))
 				best = i;
 		} else if (p->flags & ACP_PROFILE_OFF) {
 			off = i;
@@ -1033,9 +1036,14 @@ static int read_volume(pa_alsa_device *dev)
 		return 0;
 
 	dev->real_volume = r;
-	pa_log_info("New hardware volume:");
+
+	pa_log_info("New hardware volume: min:%d max:%d",
+			pa_cvolume_min(&r), pa_cvolume_max(&r));
+
 	for (i = 0; i < r.channels; i++)
 		pa_log_debug("  %d: %d", i, r.values[i]);
+
+	pa_cvolume_reset(&dev->soft_volume, r.channels);
 
 	if (impl->events && impl->events->volume_changed)
 		impl->events->volume_changed(impl->user_data, &dev->device);
@@ -1436,7 +1444,7 @@ static const char *acp_dict_lookup(const struct acp_dict *dict, const char *key)
 {
 	const struct acp_dict_item *it;
 	acp_dict_for_each(it, dict) {
-		if (strcmp(key, it->key) == 0)
+		if (spa_streq(key, it->key))
 			return it->value;
 	}
 	return NULL;
@@ -1472,19 +1480,19 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
-			impl->use_ucm = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->use_ucm = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.soft-mixer")) != NULL)
-			impl->soft_mixer = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->soft_mixer = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.ignore-dB")) != NULL)
-			ignore_dB = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			ignore_dB = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "device.profile-set")) != NULL)
 			profile_set = s;
 		if ((s = acp_dict_lookup(props, "device.profile")) != NULL)
 			profile = s;
 		if ((s = acp_dict_lookup(props, "api.acp.auto-profile")) != NULL)
-			impl->auto_profile = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->auto_profile = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.acp.auto-port")) != NULL)
-			impl->auto_port = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->auto_port = spa_atob(s);
 	}
 
 	impl->ucm.default_sample_spec.format = PA_SAMPLE_S16NE;
@@ -1709,7 +1717,7 @@ uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *nam
 		struct acp_port *p = ports[i];
 
 		if (name) {
-			if (strcmp(name, p->name) == 0)
+			if (spa_streq(name, p->name))
 				best = i;
 		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > ports[best]->priority)
@@ -1803,7 +1811,10 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 	for (i = 0; i < v.channels; i++)
 		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);;
 
-	pa_log_info("Set %s volume: %d", d->set_volume ? "hardware" : "software", pa_cvolume_max(&v));
+	pa_log_info("Set %s volume: min:%d max:%d",
+			d->set_volume ? "hardware" : "software",
+			pa_cvolume_min(&v), pa_cvolume_max(&v));
+
 	for (i = 0; i < v.channels; i++)
 		pa_log_debug("  %d: %d", i, v.values[i]);
 

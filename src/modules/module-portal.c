@@ -35,6 +35,7 @@
 
 #include <dbus/dbus.h>
 
+#include <spa/utils/string.h>
 #include <spa/support/dbus.h>
 
 #include "pipewire/context.h"
@@ -212,10 +213,10 @@ static DBusHandlerResult name_owner_changed_handler(DBusConnection *connection,
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
 
-	if (strcmp(name, "org.freedesktop.portal.Desktop") != 0)
+	if (!spa_streq(name, "org.freedesktop.portal.Desktop"))
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 
-	if (strcmp(new_owner, "") == 0) {
+	if (spa_streq(new_owner, "")) {
 		impl->portal_pid = 0;
 		if (impl->portal_pid_pending != NULL) {
 			dbus_pending_call_cancel(impl->portal_pid_pending);

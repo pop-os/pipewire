@@ -27,6 +27,7 @@
 #include <spa/debug/types.h>
 #include <spa/monitor/utils.h>
 #include <spa/pod/filter.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -129,7 +130,7 @@ static void check_properties(struct pw_impl_device *device)
 	const char *str;
 
 	if ((str = pw_properties_get(device->properties, PW_KEY_DEVICE_NAME)) &&
-	    (device->name == NULL || strcmp(str, device->name) != 0)) {
+	    (device->name == NULL || !spa_streq(str, device->name))) {
 		free(device->name);
 		device->name = strdup(str);
 		pw_log_debug(NAME" %p: name '%s'", device, device->name);
@@ -175,7 +176,7 @@ struct pw_impl_device *pw_context_create_device(struct pw_context *context,
 	spa_list_init(&this->object_list);
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(this, sizeof(struct impl), void);
+		this->user_data = SPA_PTROFF(this, sizeof(struct impl), void);
 
 	check_properties(this);
 
@@ -798,7 +799,7 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 	if (info->props && props)
 		pw_properties_update(props, info->props);
 
-	if (strcmp(info->type, SPA_TYPE_INTERFACE_Node) == 0) {
+	if (spa_streq(info->type, SPA_TYPE_INTERFACE_Node)) {
 		struct pw_impl_node *node;
 		node = pw_context_create_node(context, props, sizeof(struct object_data));
 
@@ -807,7 +808,7 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 		od->type = OBJECT_NODE;
 		pw_impl_node_add_listener(node, &od->listener, &node_object_events, od);
 		pw_impl_node_set_implementation(node, iface);
-	} else if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) == 0) {
+	} else if (spa_streq(info->type, SPA_TYPE_INTERFACE_Device)) {
 		struct pw_impl_device *dev;
 		dev = pw_context_create_device(context, props, sizeof(struct object_data));
 

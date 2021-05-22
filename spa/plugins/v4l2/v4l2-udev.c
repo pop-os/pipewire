@@ -38,6 +38,7 @@
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
 #include <spa/monitor/device.h>
@@ -270,7 +271,13 @@ static int emit_object_info(struct impl *this, struct device *device)
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_SUBSYSTEM, str);
 	}
 	if ((str = udev_device_get_property_value(dev, "ID_VENDOR_ID")) && *str) {
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_VENDOR_ID, str);
+		char *dec = alloca(6); /* 65535 is max */
+		int32_t val;
+
+		if (spa_atoi32(str, &val, 16)) {
+			snprintf(dec, 6, "%d", val);
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_VENDOR_ID, dec);
+		}
 	}
 	str = udev_device_get_property_value(dev, "ID_VENDOR_FROM_DATABASE");
 	if (!(str && *str)) {
@@ -287,7 +294,13 @@ static int emit_object_info(struct impl *this, struct device *device)
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_VENDOR_NAME, str);
 	}
 	if ((str = udev_device_get_property_value(dev, "ID_MODEL_ID")) && *str) {
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_PRODUCT_ID, str);
+		char *dec = alloca(6); /* 65535 is max */
+		int32_t val;
+
+		if (spa_atoi32(str, &val, 16)) {
+			snprintf(dec, 6, "%d", val);
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_PRODUCT_ID, dec);
+		}
 	}
 
 	str = udev_device_get_property_value(dev, "ID_V4L_PRODUCT");
@@ -406,10 +419,10 @@ static void impl_on_notify_events(struct spa_source *source)
 		if (len <= 0)
 			break;
 
-		e = SPA_MEMBER(&buf, len, void);
+		e = SPA_PTROFF(&buf, len, void);
 
 		for (p = &buf; p < e;
-		    p = SPA_MEMBER(p, sizeof(struct inotify_event) + event->len, void)) {
+		    p = SPA_PTROFF(p, sizeof(struct inotify_event) + event->len, void)) {
 			unsigned int id;
 			struct device *device;
 
@@ -487,10 +500,10 @@ static void impl_on_fd_events(struct spa_source *source)
 
 	start_inotify(this);
 
-	if (strcmp(action, "add") == 0 ||
-	    strcmp(action, "change") == 0) {
+	if (spa_streq(action, "add") ||
+	    spa_streq(action, "change")) {
 		process_device(this, ACTION_ADD, dev);
-	} else if (strcmp(action, "remove") == 0) {
+	} else if (spa_streq(action, "remove")) {
 		process_device(this, ACTION_REMOVE, dev);
 	}
 	udev_device_unref(dev);
@@ -640,7 +653,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		*interface = &this->device;
 	else
 		return -ENOENT;

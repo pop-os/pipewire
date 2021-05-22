@@ -33,6 +33,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#include <spa/utils/string.h>
+
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
 
@@ -82,7 +84,7 @@ static char *find_module(const char *path, const char *name)
 	while ((entry = readdir(dir))) {
 		char *newpath;
 
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+		if (spa_streq(entry->d_name, ".") || spa_streq(entry->d_name, ".."))
 			continue;
 
 		newpath = spa_aprintf("%s/%s", path, entry->d_name);
@@ -147,7 +149,6 @@ static const struct pw_global_events global_events = {
  * \param context a \ref pw_context
  * \param name name of the module to load
  * \param args A string with arguments for the module
- * \param[out] error Return location for an error string, or NULL
  * \return A \ref pw_impl_module if the module could be loaded, or NULL on failure.
  *
  * \memberof pw_impl_module

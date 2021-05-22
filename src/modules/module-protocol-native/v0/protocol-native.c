@@ -28,6 +28,7 @@
 #include "spa/pod/parser.h"
 #include "spa/pod/builder.h"
 #include "spa/debug/pod.h"
+#include "spa/utils/string.h"
 
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
@@ -50,7 +51,7 @@ uint32_t pw_protocol_native0_find_type(struct pw_impl_client *client, const char
 {
 	uint32_t i;
 	for (i = 0; i < SPA_N_ELEMENTS(type_map); i++) {
-		if (!strcmp(type_map[i].type, type))
+		if (spa_streq(type_map[i].type, type))
 			return i;
 	}
 	return SPA_ID_INVALID;
@@ -251,7 +252,7 @@ static int core_demarshal_permissions(void *object, const struct pw_protocol_nat
 
 		str = props.items[i].value;
 		/* first set global permissions */
-		if (strcmp(props.items[i].key, PW_CORE_PERMISSIONS_GLOBAL) == 0) {
+		if (spa_streq(props.items[i].key, PW_CORE_PERMISSIONS_GLOBAL)) {
 			size_t len;
 
                         /* <global-id>:[r][w][x] */
@@ -261,7 +262,7 @@ static int core_demarshal_permissions(void *object, const struct pw_protocol_nat
 			id = atoi(str);
 			perms = parse_perms(str + len);
 			permissions[n_permissions++] = PW_PERMISSION_INIT(id, perms);
-		} else if (strcmp(props.items[i].key, PW_CORE_PERMISSIONS_DEFAULT) == 0) {
+		} else if (spa_streq(props.items[i].key, PW_CORE_PERMISSIONS_DEFAULT)) {
 			perms = parse_perms(str);
 			defperm = PW_PERMISSION_INIT(PW_ID_ANY, perms);
 		}
@@ -360,7 +361,7 @@ uint32_t pw_protocol_native0_name_to_v2(struct pw_impl_client *client, const cha
 	uint32_t i;
 	/* match name to type table and return index */
 	for (i = 0; i < SPA_N_ELEMENTS(type_map); i++) {
-		if (type_map[i].name != NULL && !strcmp(type_map[i].name, name))
+		if (type_map[i].name != NULL && spa_streq(type_map[i].name, name))
 			return i;
 	}
 	return SPA_ID_INVALID;
@@ -401,15 +402,15 @@ struct spa_pod_prop_body0 {
 
 /* v2 iterates object as containing spa_pod */
 #define SPA_POD_OBJECT_BODY_FOREACH0(body, size, iter)                                           \
-        for ((iter) = SPA_MEMBER((body), sizeof(struct spa_pod_object_body), struct spa_pod);   \
+        for ((iter) = SPA_PTROFF((body), sizeof(struct spa_pod_object_body), struct spa_pod);   \
              spa_pod_is_inside(body, size, iter);                                               \
              (iter) = spa_pod_next(iter))
 
 #define SPA_POD_PROP_ALTERNATIVE_FOREACH0(body, _size, iter)                                     \
-        for ((iter) = SPA_MEMBER((body), (body)->value.size +                                   \
+        for ((iter) = SPA_PTROFF((body), (body)->value.size +                                   \
                                 sizeof(struct spa_pod_prop_body0), __typeof__(*iter));           \
-             (iter) <= SPA_MEMBER((body), (_size)-(body)->value.size, __typeof__(*iter));       \
-             (iter) = SPA_MEMBER((iter), (body)->value.size, __typeof__(*iter)))
+             (iter) <= SPA_PTROFF((body), (_size)-(body)->value.size, __typeof__(*iter));       \
+             (iter) = SPA_PTROFF((iter), (body)->value.size, __typeof__(*iter)))
 
 #define SPA0_POD_PROP_N_VALUES(b,size)     ((size - sizeof(struct spa_pod_prop_body0)) / (b)->value.size)
 
@@ -815,15 +816,15 @@ static void registry_marshal_global(void *object, uint32_t id, uint32_t permissi
 
 	parent_id = 0;
 	if (props) {
-		if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+		if (spa_streq(type, PW_TYPE_INTERFACE_Port)) {
 			if ((str = spa_dict_lookup(props, "node.id")) != NULL)
 				parent_id = atoi(str);
-		} else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+		} else if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 			if ((str = spa_dict_lookup(props, "device.id")) != NULL)
 				parent_id = atoi(str);
-		} else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0 ||
-		    strcmp(type, PW_TYPE_INTERFACE_Device) == 0 ||
-		    strcmp(type, PW_TYPE_INTERFACE_Factory) == 0) {
+		} else if (spa_streq(type, PW_TYPE_INTERFACE_Client) ||
+		    spa_streq(type, PW_TYPE_INTERFACE_Device) ||
+		    spa_streq(type, PW_TYPE_INTERFACE_Factory)) {
 			if ((str = spa_dict_lookup(props, "module.id")) != NULL)
 				parent_id = atoi(str);
 		}

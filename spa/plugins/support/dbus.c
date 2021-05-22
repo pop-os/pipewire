@@ -32,8 +32,10 @@
 
 #include <dbus/dbus.h>
 
+#include <spa/utils/result.h>
 #include <spa/utils/type.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/support/log.h>
 #include <spa/support/plugin.h>
 #include <spa/support/dbus.h>
@@ -56,14 +58,21 @@ struct source_data {
 	struct connection *conn;
 };
 
+#define connection_emit(c,m,v,...) spa_hook_list_call(&c->listener_list, struct spa_dbus_connection_events, m, v, ##__VA_ARGS__)
+#define connection_emit_destroy(c)	connection_emit(c, destroy, 0)
+#define connection_emit_disconnected(c)	connection_emit(c, disconnected, 0)
+
 struct connection {
 	struct spa_list link;
 
 	struct spa_dbus_connection this;
 	struct impl *impl;
+	enum spa_dbus_type type;
 	DBusConnection *conn;
 	struct spa_source *dispatch_event;
 	struct spa_list source_list;
+
+	struct spa_hook_list listener_list;
 };
 
 static void source_data_free(void *data)
@@ -271,11 +280,62 @@ static void wakeup_main(void *userdata)
 	spa_loop_utils_enable_idle(impl->utils, this->dispatch_event, true);
 }
 
+static DBusHandlerResult filter_message (DBusConnection *connection,
+		DBusMessage *message, void *user_data)
+{
+	struct connection *this = user_data;
+	struct impl *impl = this->impl;
+
+	if (dbus_message_is_signal(message, DBUS_INTERFACE_LOCAL, "Disconnected")) {
+		spa_log_debug(impl->log, "dbus connection %p disconnected", this);
+		dbus_connection_unref(this->conn);
+		this->conn = NULL;
+		connection_emit_disconnected(this);
+	}
+	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
 static void *
 impl_connection_get(struct spa_dbus_connection *conn)
 {
 	struct connection *this = SPA_CONTAINER_OF(conn, struct connection, this);
+	struct impl *impl = this->impl;
+	DBusError error;
+
+	if (this->conn != NULL)
+		return this->conn;
+
+	dbus_error_init(&error);
+
+	this->conn = dbus_bus_get_private((DBusBusType)this->type, &error);
+	if (this->conn == NULL)
+		goto error;
+
+	dbus_connection_set_exit_on_disconnect(this->conn, false);
+	if (!dbus_connection_add_filter(this->conn, filter_message, this, NULL))
+		goto error_filter;
+
+	dbus_connection_set_dispatch_status_function(this->conn, dispatch_status, this, NULL);
+	dbus_connection_set_watch_functions(this->conn, add_watch, remove_watch, toggle_watch, this,
+					    NULL);
+	dbus_connection_set_timeout_functions(this->conn, add_timeout, remove_timeout,
+					      toggle_timeout, this, NULL);
+	dbus_connection_set_wakeup_main_function(this->conn, wakeup_main, this, NULL);
+
 	return this->conn;
+
+error:
+	spa_log_error(impl->log, "Failed to connect to system bus: %s", error.message);
+	dbus_error_free(&error);
+	errno = ECONNREFUSED;
+	return NULL;
+error_filter:
+	spa_log_error(impl->log, "Failed to create filter");
+	dbus_connection_close(this->conn);
+	dbus_connection_unref(this->conn);
+	this->conn = NULL;
+	errno = ENOMEM;
+	return NULL;
 }
 
 static void connection_free(struct connection *conn)
@@ -285,13 +345,18 @@ static void connection_free(struct connection *conn)
 
 	spa_list_remove(&conn->link);
 
-	dbus_connection_close(conn->conn);
-	dbus_connection_unref(conn->conn);
+	if (conn->conn) {
+		dbus_connection_remove_filter(conn->conn, filter_message, conn);
+		dbus_connection_close(conn->conn);
+		dbus_connection_unref(conn->conn);
+	}
 
 	spa_list_consume(data, &conn->source_list, link)
 		source_data_free(data);
 
 	spa_loop_utils_destroy_source(impl->utils, conn->dispatch_event);
+
+	spa_hook_list_clean(&conn->listener_list);
 
 	free(conn);
 }
@@ -302,14 +367,27 @@ impl_connection_destroy(struct spa_dbus_connection *conn)
 	struct connection *this = SPA_CONTAINER_OF(conn, struct connection, this);
 	struct impl *impl = this->impl;
 
+	connection_emit_destroy(this);
+
 	spa_log_debug(impl->log, "destroy conn %p", this);
 	connection_free(this);
+}
+
+static void
+impl_connection_add_listener(struct spa_dbus_connection *conn,
+			struct spa_hook *listener,
+			const struct spa_dbus_connection_events *events,
+			void *data)
+{
+	struct connection *this = SPA_CONTAINER_OF(conn, struct connection, this);
+	spa_hook_list_append(&this->listener_list, listener, events, data);
 }
 
 static const struct spa_dbus_connection impl_connection = {
 	SPA_VERSION_DBUS_CONNECTION,
 	impl_connection_get,
 	impl_connection_destroy,
+	impl_connection_add_listener,
 };
 
 static struct spa_dbus_connection *
@@ -318,32 +396,19 @@ impl_get_connection(void *object,
 {
         struct impl *impl = object;
 	struct connection *conn;
-        DBusError error;
 	int res;
-
-	dbus_error_init(&error);
 
 	conn = calloc(1, sizeof(struct connection));
 	conn->this = impl_connection;
 	conn->impl = impl;
-	conn->conn = dbus_bus_get_private((DBusBusType)type, &error);
-	if (conn->conn == NULL)
-		goto error;
-
+	conn->type = type;
 	conn->dispatch_event = spa_loop_utils_add_idle(impl->utils,
 						false, dispatch_cb, conn);
 	if (conn->dispatch_event == NULL)
 		goto no_event;
 
 	spa_list_init(&conn->source_list);
-
-	dbus_connection_set_exit_on_disconnect(conn->conn, false);
-	dbus_connection_set_dispatch_status_function(conn->conn, dispatch_status, conn, NULL);
-	dbus_connection_set_watch_functions(conn->conn, add_watch, remove_watch, toggle_watch, conn,
-					    NULL);
-	dbus_connection_set_timeout_functions(conn->conn, add_timeout, remove_timeout,
-					      toggle_timeout, conn, NULL);
-	dbus_connection_set_wakeup_main_function(conn->conn, wakeup_main, conn, NULL);
+	spa_hook_list_init(&conn->listener_list);
 
 	spa_list_append(&impl->connection_list, &conn->link);
 
@@ -351,20 +416,9 @@ impl_get_connection(void *object,
 
 	return &conn->this;
 
-      error:
-	spa_log_error(impl->log, "Failed to connect to system bus: %s", error.message);
-	dbus_error_free(&error);
-	res = -ECONNREFUSED;
-	goto out_free;
-      no_event:
+no_event:
 	res = -errno;
 	spa_log_error(impl->log, "Failed to create idle event: %m");
-	goto out_unref_dbus;
-
-      out_unref_dbus:
-	dbus_connection_close(conn->conn);
-	dbus_connection_unref(conn->conn);
-      out_free:
 	free(conn);
 	errno = -res;
 	return NULL;
@@ -384,7 +438,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_DBus) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_DBus))
 		*interface = &this->dbus;
 	else
 		return -ENOENT;

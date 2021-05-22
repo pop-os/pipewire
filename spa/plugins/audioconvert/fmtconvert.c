@@ -32,6 +32,7 @@
 #include <spa/support/cpu.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/io.h>
 #include <spa/node/utils.h>
@@ -891,7 +892,7 @@ static int impl_node_process(void *object)
 		struct spa_data *sd = &inb->datas[src_remap];
 		offs = SPA_MIN(sd->chunk->offset, sd->maxsize);
 		size = SPA_MIN(size, SPA_MIN(sd->maxsize - offs, sd->chunk->size));
-		src_datas[i] = SPA_MEMBER(sd->data, offs, void);
+		src_datas[i] = SPA_PTROFF(sd->data, offs, void);
 	}
 	n_samples = size / inport->stride;
 
@@ -952,7 +953,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

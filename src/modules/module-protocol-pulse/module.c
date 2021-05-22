@@ -25,6 +25,8 @@
 
 #include "module.h"
 
+#include <spa/utils/string.h>
+
 static int module_unload(struct client *client, struct module *module);
 
 static void on_module_unload(void *obj, void *data, int res, uint32_t id)
@@ -50,7 +52,7 @@ struct module *module_new(struct impl *impl, const struct module_methods *method
 	module->impl = impl;
 	module->methods = methods;
 	spa_hook_list_init(&module->hooks);
-	module->user_data = SPA_MEMBER(module, sizeof(struct module), void);
+	module->user_data = SPA_PTROFF(module, sizeof(struct module), void);
 
 	return module;
 }
@@ -127,15 +129,19 @@ void module_args_add_props(struct pw_properties *props, const char *str)
 		if (*p == '\"') {
 			p++;
 			f = '\"';
+		} else if (*p == '\'') {
+			p++;
+			f = '\'';
 		} else {
 			f = ' ';
 		}
 		v = p;
-		e = strchr(p, f);
-		if (e == NULL)
-			e = strchr(p, '\0');
-		if (e == NULL)
-			break;
+		for (e = p; *e ; e++) {
+			if (*e == f)
+				break;
+			if (*e == '\\')
+				e++;
+		}
 		p = e;
 		if (*e != '\0')
 			p++;
@@ -208,12 +214,18 @@ int module_args_to_audioinfo(struct impl *impl, struct pw_properties *props, str
 #include "modules/registry.h"
 
 static const struct module_info module_list[] = {
+	{ "module-ladspa-sink", create_module_ladspa_sink, },
+	{ "module-ladspa-source", create_module_ladspa_source, },
 	{ "module-loopback", create_module_loopback, },
 	{ "module-null-sink", create_module_null_sink, },
 	{ "module-native-protocol-tcp", create_module_native_protocol_tcp, },
+	{ "module-pipe-sink", create_module_pipe_sink, },
 	{ "module-remap-sink", create_module_remap_sink, },
 	{ "module-remap-source", create_module_remap_source, },
 	{ "module-simple-protocol-tcp", create_module_simple_protocol_tcp, },
+	{ "module-tunnel-sink", create_module_tunnel_sink, },
+	{ "module-tunnel-source", create_module_tunnel_source, },
+	{ "module-zeroconf-discover", create_module_zeroconf_discover, },
 	{ NULL, }
 };
 
@@ -221,7 +233,7 @@ static const struct module_info *find_module_info(const char *name)
 {
 	int i;
 	for (i = 0; module_list[i].name != NULL; i++) {
-		if (strcmp(module_list[i].name, name) == 0)
+		if (spa_streq(module_list[i].name, name))
 			return &module_list[i];
 	}
 	return NULL;

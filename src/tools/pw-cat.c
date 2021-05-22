@@ -42,6 +42,7 @@
 #include <spa/param/audio/type-info.h>
 #include <spa/param/props.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/debug/types.h>
 
@@ -166,17 +167,17 @@ sf_str_to_fmt(const char *str)
 	if (!str)
 		return -1;
 
-	if (!strcmp(str, "s8"))
+	if (spa_streq(str, "s8"))
 		return SF_FORMAT_PCM_S8;
-	if (!strcmp(str, "s16"))
+	if (spa_streq(str, "s16"))
 		return SF_FORMAT_PCM_16;
-	if (!strcmp(str, "s24"))
+	if (spa_streq(str, "s24"))
 		return SF_FORMAT_PCM_24;
-	if (!strcmp(str, "s32"))
+	if (spa_streq(str, "s32"))
 		return SF_FORMAT_PCM_32;
-	if (!strcmp(str, "f32"))
+	if (spa_streq(str, "f32"))
 		return SF_FORMAT_FLOAT;
-	if (!strcmp(str, "f64"))
+	if (spa_streq(str, "f64"))
 		return SF_FORMAT_DOUBLE;
 
 	return -1;
@@ -495,7 +496,7 @@ static unsigned int find_channel(const char *name)
 	int i;
 
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -507,7 +508,7 @@ static int parse_channelmap(const char *channel_map, struct channelmap *map)
 	char **ch;
 
 	for (i = 0; i < (int) SPA_N_ELEMENTS(maps); i++) {
-		if (strcmp(maps[i].name, channel_map) == 0) {
+		if (spa_streq(maps[i].name, channel_map)) {
 			map->n_channels = maps[i].channels;
 			spa_memcpy(map->channels, &maps[i].values,
 					map->n_channels * sizeof(unsigned int));
@@ -659,7 +660,7 @@ static int json_object_find(const char *obj, const char *key, char *value, size_
 		return -EINVAL;
 
 	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
-		if (strcmp(k, key) == 0) {
+		if (spa_streq(k, key)) {
 			if (spa_json_get_string(&it[1], value, len) <= 0)
 				continue;
 			return 0;
@@ -677,13 +678,13 @@ static int metadata_property(void *object,
 	struct data *data = object;
 
 	if (subject == PW_ID_CORE) {
-		if (key == NULL || strcmp(key, "default.audio.sink") == 0) {
+		if (key == NULL || spa_streq(key, "default.audio.sink")) {
 			if (value == NULL ||
 			    json_object_find(value, "name",
 					data->default_sink, sizeof(data->default_sink)) < 0)
 				data->default_sink[0] = '\0';
 		}
-		if (key == NULL || strcmp(key, "default.audio.source") == 0) {
+		if (key == NULL || spa_streq(key, "default.audio.source")) {
 			if (value == NULL ||
 			    json_object_find(value, "name",
 					data->default_source, sizeof(data->default_source)) < 0)
@@ -717,7 +718,7 @@ static void registry_event_global(void *userdata, uint32_t id,
 	if (!data->list_targets)
 		return;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+	if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
 		if (data->metadata != NULL)
 			return;
 
@@ -729,7 +730,7 @@ static void registry_event_global(void *userdata, uint32_t id,
 
 		data->sync = pw_core_sync(data->core, 0, data->sync);
 
-	} else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+	} else if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 		name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
 		desc = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
 		media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
@@ -741,9 +742,9 @@ static void registry_event_global(void *userdata, uint32_t id,
 
 		/* get allowed mode from the media class */
 		/* TODO extend to something else besides Audio/Source|Sink */
-		if (!strcmp(media_class, "Audio/Source"))
+		if (spa_streq(media_class, "Audio/Source"))
 			mode = mode_record;
-		else if (!strcmp(media_class, "Audio/Sink"))
+		else if (spa_streq(media_class, "Audio/Sink"))
 			mode = mode_playback;
 
 		/* modes must match */
@@ -1028,7 +1029,7 @@ static void show_usage(const char *name, bool is_error)
 	     DEFAULT_VOLUME,
 	     DEFAULT_QUALITY);
 
-	if (!strcmp(name, "pw-cat")) {
+	if (spa_streq(name, "pw-cat")) {
 		fputs(
 		   _("  -p, --playback                        Playback mode\n"
 		     "  -r, --record                          Recording mode\n"
@@ -1291,15 +1292,15 @@ static int setup_sndfile(struct data *data)
 		s++;
 	if (!*s)
 		data->latency_unit = unit_samples;
-	else if (!strcmp(s, "none"))
+	else if (spa_streq(s, "none"))
 		data->latency_unit = unit_none;
-	else if (!strcmp(s, "s") || !strcmp(s, "sec") || !strcmp(s, "secs"))
+	else if (spa_streq(s, "s") || spa_streq(s, "sec") || spa_streq(s, "secs"))
 		data->latency_unit = unit_sec;
-	else if (!strcmp(s, "ms") || !strcmp(s, "msec") || !strcmp(s, "msecs"))
+	else if (spa_streq(s, "ms") || spa_streq(s, "msec") || spa_streq(s, "msecs"))
 		data->latency_unit = unit_msec;
-	else if (!strcmp(s, "us") || !strcmp(s, "usec") || !strcmp(s, "usecs"))
+	else if (spa_streq(s, "us") || spa_streq(s, "usec") || spa_streq(s, "usecs"))
 		data->latency_unit = unit_usec;
-	else if (!strcmp(s, "ns") || !strcmp(s, "nsec") || !strcmp(s, "nsecs"))
+	else if (spa_streq(s, "ns") || spa_streq(s, "nsec") || spa_streq(s, "nsecs"))
 		data->latency_unit = unit_nsec;
 	else {
 		fprintf(stderr, "error: bad latency value %s (bad unit)\n", data->latency);
@@ -1369,14 +1370,14 @@ int main(int argc, char *argv[])
 		prog = argv[0];
 
 	/* prime the mode from the program name */
-	if (!strcmp(prog, "pw-play"))
+	if (spa_streq(prog, "pw-play"))
 		data.mode = mode_playback;
-	else if (!strcmp(prog, "pw-record"))
+	else if (spa_streq(prog, "pw-record"))
 		data.mode = mode_record;
-	else if (!strcmp(prog, "pw-midiplay")) {
+	else if (spa_streq(prog, "pw-midiplay")) {
 		data.mode = mode_playback;
 		data.is_midi = true;
-	} else if (!strcmp(prog, "pw-midirecord")) {
+	} else if (spa_streq(prog, "pw-midirecord")) {
 		data.mode = mode_record;
 		data.is_midi = true;
 	} else
@@ -1444,7 +1445,7 @@ int main(int argc, char *argv[])
 
 		case OPT_TARGET:
 			data.target = optarg;
-			if (!strcmp(optarg, "auto")) {
+			if (spa_streq(optarg, "auto")) {
 				data.target_id = PW_ID_ANY;
 				break;
 			}
@@ -1714,7 +1715,7 @@ int main(int argc, char *argv[])
 			target_default = NULL;
 			spa_list_for_each(target, &data.targets, link) {
 				if (target_default == NULL ||
-				    strcmp(default_name, target->name) == 0 ||
+				    spa_streq(default_name, target->name) ||
 				    (default_name[0] == '\0' &&
 				     target->prio > target_default->prio))
 					target_default = target;

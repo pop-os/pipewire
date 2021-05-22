@@ -32,6 +32,7 @@
 #include <spa/node/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/buffer/alloc.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/filter.h>
@@ -1096,7 +1097,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1196,7 +1197,7 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_VERSION_NODE,
 			&impl_node, this);
 
-	this->hnd_convert = SPA_MEMBER(this, sizeof(struct impl), struct spa_handle);
+	this->hnd_convert = SPA_PTROFF(this, sizeof(struct impl), struct spa_handle);
 	spa_handle_factory_init(&spa_audioconvert_factory,
 				this->hnd_convert,
 				info, support, n_support);

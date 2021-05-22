@@ -42,6 +42,7 @@
 #include <spa/utils/names.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/param/props.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/parser.h>
@@ -117,8 +118,6 @@ struct impl {
 	struct pw_properties *conf;
 	struct pw_properties *props;
 
-	DBusConnection *conn;
-
 	struct spa_handle *handle;
 
 	struct spa_device *monitor;
@@ -128,12 +127,14 @@ struct impl {
 
 	struct spa_source *jack_timeout;
 	struct pw_proxy *jack_device;
+	unsigned int reserve:1;
 };
 
 #undef NAME
 #define NAME "alsa-monitor"
 
 static int probe_device(struct device *device);
+static int do_device_acquire(struct device *device);
 
 static struct node *alsa_find_node(struct device *device, uint32_t id, const char *name)
 {
@@ -145,7 +146,7 @@ static struct node *alsa_find_node(struct device *device, uint32_t id, const cha
 			return node;
 		if (name != NULL &&
 		    (str = pw_properties_get(node->props, PW_KEY_NODE_NAME)) != NULL &&
-		    strcmp(name, str) == 0)
+		    spa_streq(name, str))
 			return node;
 	}
 	return NULL;
@@ -174,8 +175,8 @@ static int node_acquire(void *data)
 
 	node->acquired = true;
 
-	if (device && device->n_acquired++ == 0 && device->reserve)
-		return rd_device_acquire(device->reserve);
+	if (device && device->n_acquired++ == 0)
+		return do_device_acquire(device);
 	else
 		return 0;
 }
@@ -208,30 +209,30 @@ static void update_icon_name(struct pw_properties *p, bool is_sink)
 	const char *s, *d = NULL, *bus;
 
 	if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR))) {
-		if (strcmp(s, "microphone") == 0)
+		if (spa_streq(s, "microphone"))
 			d = "audio-input-microphone";
-		else if (strcmp(s, "webcam") == 0)
+		else if (spa_streq(s, "webcam"))
 			d = "camera-web";
-		else if (strcmp(s, "computer") == 0)
+		else if (spa_streq(s, "computer"))
 			d = "computer";
-		else if (strcmp(s, "handset") == 0)
+		else if (spa_streq(s, "handset"))
 			d = "phone";
-		else if (strcmp(s, "portable") == 0)
+		else if (spa_streq(s, "portable"))
 			d = "multimedia-player";
-		else if (strcmp(s, "tv") == 0)
+		else if (spa_streq(s, "tv"))
 			d = "video-display";
-		else if (strcmp(s, "headset") == 0)
+		else if (spa_streq(s, "headset"))
 			d = "audio-headset";
-		else if (strcmp(s, "headphone") == 0)
+		else if (spa_streq(s, "headphone"))
 			d = "audio-headphones";
-		else if (strcmp(s, "speaker") == 0)
+		else if (spa_streq(s, "speaker"))
 			d = "audio-speakers";
-		else if (strcmp(s, "hands-free") == 0)
+		else if (spa_streq(s, "hands-free"))
 			d = "audio-handsfree";
 	}
 	if (!d)
 		if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
-			if (strcmp(s, "modem") == 0)
+			if (spa_streq(s, "modem"))
 				d = "modem";
 
 	if (!d) {
@@ -272,7 +273,7 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 		spa_debug_dict(0, info->props);
 
-	if (strcmp(info->type, SPA_TYPE_INTERFACE_Node) != 0) {
+	if (!spa_streq(info->type, SPA_TYPE_INTERFACE_Node)) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -303,7 +304,7 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 		profile = "unknown";
 	profile_desc = pw_properties_get(node->props, "device.profile.description");
 
-	if (!strcmp(stream, "capture"))
+	if (spa_streq(stream, "capture"))
 		node->direction = PW_DIRECTION_OUTPUT;
 	else
 		node->direction = PW_DIRECTION_INPUT;
@@ -394,11 +395,11 @@ static struct node *alsa_create_node(struct device *device, uint32_t id,
 			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
 				sm_media_session_sanitize_description(tmp, sizeof(tmp),
 					' ', "%s %s", desc, profile_desc));
-		} else if (strcmp(subdev, "0")) {
+		} else if (!spa_streq(subdev, "0")) {
 			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
 				sm_media_session_sanitize_description(tmp, sizeof(tmp),
 					' ', "%s (%s %s)", desc, name, subdev));
-		} else if (strcmp(dev, "0")) {
+		} else if (!spa_streq(dev, "0")) {
 			pw_properties_set(node->props, PW_KEY_NODE_DESCRIPTION,
 				sm_media_session_sanitize_description(tmp, sizeof(tmp),
 					' ', "%s (%s)", desc, name));
@@ -524,7 +525,7 @@ static struct device *alsa_find_device(struct impl *impl, uint32_t id, const cha
 			return device;
 		if (name != NULL &&
 		    (str = pw_properties_get(device->props, PW_KEY_DEVICE_NAME)) != NULL &&
-		    strcmp(str, name) == 0)
+		    spa_streq(str, name))
 			return device;
 	}
 	return NULL;
@@ -581,11 +582,11 @@ static int update_device_props(struct device *device)
 		d = NULL;
 
 		if ((s = pw_properties_get(p, PW_KEY_DEVICE_FORM_FACTOR)))
-			if (strcmp(s, "internal") == 0)
+			if (spa_streq(s, "internal"))
 				d = _("Built-in Audio");
 		if (!d)
 			if ((s = pw_properties_get(p, PW_KEY_DEVICE_CLASS)))
-				if (strcmp(s, "modem") == 0)
+				if (spa_streq(s, "modem"))
 					d = _("Modem");
 		if (!d)
 			d = pw_properties_get(p, PW_KEY_DEVICE_PRODUCT_NAME);
@@ -677,17 +678,20 @@ static void add_jack_timeout(struct impl *impl)
 	pw_loop_update_timer(main_loop, impl->jack_timeout, &value, NULL, false);
 }
 
-static void reserve_acquired(void *data, struct rd_device *d)
+static void do_reserve_acquired(struct device *device)
 {
-	struct device *device = data;
-
-	pw_log_info("%p: reserve acquired %d", device, device->n_acquired);
-
 	if (!device->probed)
 		probe_device(device);
 
-	if (device->n_acquired == 0)
+	if (device->n_acquired == 0 && device->reserve)
 		rd_device_release(device->reserve);
+}
+
+static void reserve_acquired(void *data, struct rd_device *d)
+{
+	struct device *device = data;
+	pw_log_info("%p: reserve acquired %d", device, device->n_acquired);
+	do_reserve_acquired(device);
 }
 
 static void complete_release(struct device *device)
@@ -753,7 +757,7 @@ static void reserve_busy(void *data, struct rd_device *d, const char *name, int3
 
 	device->sdevice->locked = true;
 
-	if (strcmp(name, "jack") == 0) {
+	if (spa_streq(name, "jack")) {
 		add_jack_timeout(impl);
 	} else {
 		remove_jack_timeout(impl);
@@ -772,10 +776,9 @@ static void reserve_available(void *data, struct rd_device *d, const char *name)
 	device->sdevice->locked = false;
 
 	remove_jack_timeout(impl);
-	if (strcmp(name, "jack") == 0) {
+	if (spa_streq(name, "jack")) {
 		set_jack_profile(impl, 0);
 	}
-
 }
 
 static const struct rd_device_callbacks reserve_callbacks = {
@@ -784,6 +787,61 @@ static const struct rd_device_callbacks reserve_callbacks = {
 	.busy = reserve_busy,
 	.available = reserve_available,
 };
+
+static int do_device_acquire(struct device *device)
+{
+	struct impl *impl = device->impl;
+	struct sm_media_session *session = impl->session;
+	int res;
+
+	if (!impl->reserve)
+		goto done;
+
+	if (device->reserve == NULL) {
+		const char *reserve;
+		const char *path = pw_properties_get(device->props, SPA_KEY_API_ALSA_PATH);
+		DBusConnection *conn = NULL;
+
+		if (session->dbus_connection)
+			conn = spa_dbus_connection_get(session->dbus_connection);
+		if (conn == NULL) {
+			pw_log_warn("no dbus connection, device reservation disabled");
+			goto done;
+		}
+		pw_log_debug("got dbus connection %p", conn);
+
+		reserve = pw_properties_get(device->props, "api.dbus.ReserveDevice1");
+		if (reserve == NULL)
+			goto done;
+
+		device->reserve = rd_device_new(conn, reserve,
+				"PipeWire", -10,
+				&reserve_callbacks, device);
+
+		if (device->reserve == NULL) {
+			pw_log_warn("can't create device reserve for %s: %m", reserve);
+			goto done;
+		} else if (path) {
+			rd_device_set_application_device_name(device->reserve, path);
+		} else {
+			pw_log_warn("empty reserve device path for %s", reserve);
+		}
+	}
+	res = rd_device_acquire(device->reserve);
+	if (res < 0 && res != -EBUSY) {
+		pw_log_warn("device reserve failed, disabling: %s", spa_strerror(res));
+		goto done;
+	}
+	return res;
+
+done:
+	do_reserve_acquired(device);
+	if (device->reserve != NULL) {
+		rd_device_destroy(device->reserve);
+		device->reserve = NULL;
+	}
+	return 0;
+}
 
 static void device_destroy(void *data)
 {
@@ -850,6 +908,9 @@ static int probe_device(struct device *device)
 	void *iface;
 	int res;
 
+	if (device->probed)
+		return 0;
+
 	handle = pw_context_load_spa_handle(context,
 			device->factory_name, &device->props->dict);
 	if (handle == NULL) {
@@ -898,7 +959,7 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 	if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
 		spa_debug_dict(0, info->props);
 
-	if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) != 0) {
+	if (!spa_streq(info->type, SPA_TYPE_INTERFACE_Device)) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -929,32 +990,11 @@ static struct device *alsa_create_device(struct impl *impl, uint32_t id,
 	else
 		device->factory_name = strdup(info->factory_name);
 
-	if (impl->conn &&
-	    (card = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_CARD)) != NULL) {
-		const char *reserve;
-		const char *path = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_PATH);
-
+	if ((card = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_CARD)) != NULL) {
 		device->priority -= atol(card) * 64;
-
 		pw_properties_setf(device->props, "api.dbus.ReserveDevice1", "Audio%s", card);
-		reserve = pw_properties_get(device->props, "api.dbus.ReserveDevice1");
-
-		device->reserve = rd_device_new(impl->conn, reserve,
-				"PipeWire", -10,
-				&reserve_callbacks, device);
-
-		if (device->reserve == NULL) {
-			pw_log_warn("can't create device reserve for %s: %m", reserve);
-		} else if (path) {
-			rd_device_set_application_device_name(device->reserve, path);
-		} else {
-			pw_log_warn("empty reserve device path for %s", reserve);
-		}
 	}
-	if (device->reserve != NULL)
-		rd_device_acquire(device->reserve);
-	else
-		probe_device(device);
+	do_device_acquire(device);
 
 	return device;
 exit:
@@ -1037,9 +1077,22 @@ static void session_destroy(void *data)
 	free(impl);
 }
 
+static void session_dbus_disconnected(void *data)
+{
+	struct device *d;
+	struct impl *impl = data;
+
+	spa_list_for_each(d, &impl->device_list, link) {
+		if (d->reserve != NULL)
+			rd_device_destroy(d->reserve);
+		d->reserve = NULL;
+	}
+}
+
 static const struct sm_media_session_events session_events = {
 	SM_VERSION_MEDIA_SESSION_EVENTS,
 	.destroy = session_destroy,
+	.dbus_disconnected = session_dbus_disconnected,
 };
 
 int sm_alsa_monitor_start(struct sm_media_session *session)
@@ -1073,14 +1126,8 @@ int sm_alsa_monitor_start(struct sm_media_session *session)
 		pw_properties_update_string(impl->props, str, strlen(str));
 
 	if ((str = pw_properties_get(impl->props, "alsa.reserve")) == NULL ||
-	    pw_properties_parse_bool(str)) {
-		if (session->dbus_connection)
-			impl->conn = spa_dbus_connection_get(session->dbus_connection);
-		if (impl->conn == NULL)
-			pw_log_warn("no dbus connection, device reservation disabled");
-		else
-			pw_log_debug("got dbus connection %p", impl->conn);
-	}
+	    pw_properties_parse_bool(str))
+		impl->reserve = true;
 
 	impl->handle = pw_context_load_spa_handle(context, SPA_NAME_API_ALSA_ENUM_UDEV, NULL);
 	if (impl->handle == NULL) {

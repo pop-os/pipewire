@@ -1,12 +1,14 @@
-> What is the array of spa_data in spa_buffer?
+# SPA Buffers
 
-A buffer contains metadata and data. There can be many metadata items (headers, color info, cursor position, etc) in the buffer. The metadata items are stored in the metas array. In the same way, the buffer can contain multiple data blocks in the datas array. Each data block is, for example, a video plane or an audio channel. There are n_datas of those blocks.
+> What is the array of `spa_data` in `spa_buffer`?
 
-> What is the void* data pointer in spa_data?
+A buffer contains metadata and data. There can be many metadata items (headers, color info, cursor position, etc) in the buffer. The metadata items are stored in the metas array. In the same way, the buffer can contain multiple data blocks in the datas array. Each data block is, for example, a video plane or an audio channel. There are `n_datas` of those blocks.
 
-The data information either has a file descriptor or a data pointer. The type of the spa_data tells you what to expect. For a file descriptor, the data pointer can optionally be set when the fd is mapped into memory. Otherwise the user has to mmap the data herself.
+> What is the `void*` data pointer in `spa_data`?
 
-Also associated with each spa_data is a chunk, which is read/write and contains the valid region in the spa_data (offset, size, stride and some flags).
+The data information either has a file descriptor or a data pointer. The type of the `spa_data` tells you what to expect. For a file descriptor, the data pointer can optionally be set when the fd is mapped into memory. Otherwise the user has to mmap the data herself.
+
+Also associated with each `spa_data` is a chunk, which is read/write and contains the valid region in the `spa_data` (offset, size, stride and some flags).
 
 The reason why is this set up like this is that the metadata memory, the data and chunks can be directly transported in shared memory while the buffer structure can be negotiated separately (describing the shared memory). This way buffers can be shared but no process can destroy the structure of the buffers.
 
@@ -57,5 +59,5 @@ The reason why is this set up like this is that the metadata memory, the data an
 	 *    +>| data                         | memory for n_datas data, aligned
 	 *      | ... <n_datas> blocks         | according to alignments
 	 *      +==============================+
-	 
+
 Taken from [here](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/11f95fe11e07192cec19fddb4fafc708e023e49c/spa/include/spa/buffer/alloc.h).

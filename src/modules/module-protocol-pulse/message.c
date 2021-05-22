@@ -22,6 +22,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <spa/utils/string.h>
+
 #define VOLUME_MUTED ((uint32_t) 0U)
 #define VOLUME_NORM ((uint32_t) 0x10000U)
 #define VOLUME_MAX ((uint32_t) UINT32_MAX/2)
@@ -82,8 +84,8 @@ static inline const struct str_map *str_map_find(const struct str_map *map, cons
 {
 	uint32_t i;
 	for (i = 0; map[i].pw_str; i++)
-		if ((pw && strcmp(map[i].pw_str, pw) == 0) ||
-		    (pa && strcmp(map[i].pa_str, pa) == 0))
+		if ((pw && spa_streq(map[i].pw_str, pw)) ||
+		    (pa && spa_streq(map[i].pa_str, pa)))
 			return &map[i];
 	return NULL;
 }
@@ -226,10 +228,10 @@ static int read_arbitrary(struct message *m, const void **val, size_t *length)
 static int read_string(struct message *m, char **str)
 {
 	uint32_t n, maxlen = m->length - m->offset;
-	n = strnlen(SPA_MEMBER(m->data, m->offset, char), maxlen);
+	n = strnlen(SPA_PTROFF(m->data, m->offset, char), maxlen);
 	if (n == maxlen)
 		return -EINVAL;
-	*str = SPA_MEMBER(m->data, m->offset, char);
+	*str = SPA_PTROFF(m->data, m->offset, char);
 	m->offset += n + 1;
 	return 0;
 }
@@ -481,7 +483,7 @@ static void write_string(struct message *m, const char *s)
 	if (s != NULL) {
 		int len = strlen(s) + 1;
 		if (ensure_size(m, len) > 0)
-			strcpy(SPA_MEMBER(m->data, m->length, char), s);
+			strcpy(SPA_PTROFF(m->data, m->length, char), s);
 		m->length += len;
 	}
 }
@@ -569,9 +571,9 @@ static void add_stream_group(struct message *m, struct spa_dict *dict, const cha
 
 	if (media_class == NULL)
 		return;
-	if (strcmp(media_class, "Stream/Output/Audio") == 0)
+	if (spa_streq(media_class, "Stream/Output/Audio"))
 		prefix = "sink-input";
-	else if (strcmp(media_class, "Stream/Input/Audio") == 0)
+	else if (spa_streq(media_class, "Stream/Input/Audio"))
 		prefix = "source-output";
 	else
 		return;
@@ -614,9 +616,9 @@ static void write_dict(struct message *m, struct spa_dict *dict, bool remap)
 				    (map = str_map_find(map->child, val, NULL)) != NULL)
 					val = map->pa_str;
 			}
-			if (strcmp(key, "media.class") == 0)
+			if (spa_streq(key, "media.class"))
 				media_class = val;
-			if (strcmp(key, "media.role") == 0)
+			if (spa_streq(key, "media.role"))
 				media_role = val;
 
 			write_string(m, key);

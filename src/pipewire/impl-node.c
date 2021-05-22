@@ -34,6 +34,7 @@
 #include <spa/pod/filter.h>
 #include <spa/node/utils.h>
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl-node.h"
 #include "pipewire/private.h"
@@ -817,27 +818,14 @@ static void check_properties(struct pw_impl_node *node)
 	struct pw_context *context = node->context;
 	const char *str, *recalc_reason = NULL;
 	bool driver;
-	uint32_t group_id;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
 		node->priority_driver = pw_properties_parse_int(str);
 		pw_log_debug(NAME" %p: priority driver %d", node, node->priority_driver);
 	}
 
-	/* group_id defines what nodes are scheduled together */
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)))
-		group_id = pw_properties_parse_int(str);
-	else
-		group_id = SPA_ID_INVALID;
-
-	if (group_id != node->group_id) {
-		pw_log_debug(NAME" %p: group %u->%u", node, node->group_id, group_id);
-		node->group_id = group_id;
-		recalc_reason = "group changed";
-	}
-
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_NAME)) &&
-	    (node->name == NULL || strcmp(node->name, str) != 0)) {
+	    (node->name == NULL || !spa_streq(node->name, str))) {
 		free(node->name);
 		node->name = strdup(str);
 		pw_log_debug(NAME" %p: name '%s'", node, node->name);
@@ -868,6 +856,17 @@ static void check_properties(struct pw_impl_node *node)
 				spa_list_remove(&node->driver_link);
 		}
 		recalc_reason = "driver changed";
+	}
+
+	/* group defines what nodes are scheduled together */
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)) == NULL)
+		str = "";
+
+	if (!spa_streq(str, node->group)) {
+		pw_log_info(NAME" %p: group '%s'->'%s'", node, node->group, str);
+		snprintf(node->group, sizeof(node->group), "%s", str);
+		node->freewheel = spa_streq(node->group, "pipewire.freewheel");
+		recalc_reason = "group changed";
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS)))
@@ -914,7 +913,6 @@ static void check_properties(struct pw_impl_node *node)
 						context->defaults.clock_rate);
 				node->max_quantum_size = max_quantum_size;
 				recalc_reason = "max quantum changed";
-
 			}
 		}
 	}
@@ -922,7 +920,7 @@ static void check_properties(struct pw_impl_node *node)
 	pw_log_debug(NAME" %p: driver:%d recalc:%s active:%d", node, node->driver,
 			recalc_reason, node->active);
 
-	if (recalc_reason && node->active)
+	if (recalc_reason != NULL && node->active)
 		pw_context_recalc_graph(context, recalc_reason);
 }
 
@@ -1146,10 +1144,9 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	this = &impl->this;
 	this->context = context;
 	this->name = strdup("node");
-	this->group_id = SPA_ID_INVALID;
 
 	if (user_data_size > 0)
-                this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
+                this->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);

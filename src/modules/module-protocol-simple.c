@@ -39,6 +39,7 @@
 #include "config.h"
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/pod/pod.h>
 #include <spa/pod/builder.h>
@@ -226,7 +227,7 @@ static void capture_process(void *data)
 
 	while (size > 0) {
 		res = send(client->source->fd,
-				SPA_MEMBER(d->data, offset, void),
+				SPA_PTROFF(d->data, offset, void),
 				size,
 				MSG_NOSIGNAL | MSG_DONTWAIT);
 		if (res < 0) {
@@ -270,7 +271,7 @@ static void playback_process(void *data)
 	offset = 0;
 	while (size > 0) {
 		res = recv(client->source->fd,
-				SPA_MEMBER(d->data, offset, void),
+				SPA_PTROFF(d->data, offset, void),
 				size,
 				MSG_DONTWAIT);
 		if (res == 0) {
@@ -671,7 +672,7 @@ static inline uint32_t channel_from_name(const char *name)
 {
 	int i;
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;

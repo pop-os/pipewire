@@ -32,6 +32,7 @@
 #include <spa/monitor/device.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/param/audio/format.h>
 #include <spa/pod/filter.h>
 #include <spa/debug/pod.h>
@@ -638,9 +639,12 @@ static int impl_node_process(void *object)
 	spa_return_val_if_fail(input != NULL, -EIO);
 
 	spa_log_trace_fp(this->log, NAME " %p: process %d %d/%d", this, input->status,
-			input->buffer_id,
-			this->n_buffers);
+			input->buffer_id, this->n_buffers);
 
+	if (this->position && this->position->clock.flags & SPA_IO_CLOCK_FLAG_FREEWHEEL) {
+		input->status = SPA_STATUS_NEED_DATA;
+		return SPA_STATUS_HAVE_DATA;
+	}
 	if (input->status == SPA_STATUS_HAVE_DATA &&
 	    input->buffer_id < this->n_buffers) {
 		struct buffer *b = &this->buffers[input->buffer_id];
@@ -691,7 +695,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct state *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -787,28 +791,28 @@ impl_init(const struct spa_handle_factory *factory,
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
-		if (!strcmp(k, SPA_KEY_API_ALSA_PATH)) {
+		if (spa_streq(k, SPA_KEY_API_ALSA_PATH)) {
 			snprintf(this->props.device, 63, "%s", s);
-		} else if (!strcmp(k, SPA_KEY_AUDIO_CHANNELS)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_CHANNELS)) {
 			this->default_channels = atoi(s);
-		} else if (!strcmp(k, SPA_KEY_AUDIO_RATE)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_RATE)) {
 			this->default_rate = atoi(s);
-		} else if (!strcmp(k, SPA_KEY_AUDIO_FORMAT)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_FORMAT)) {
 			this->default_format = spa_alsa_format_from_name(s, strlen(s));
-		} else if (!strcmp(k, SPA_KEY_AUDIO_POSITION)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
 			spa_alsa_parse_position(&this->default_pos, s, strlen(s));
-		} else if (!strcmp(k, "api.alsa.period-size")) {
+		} else if (spa_streq(k, "api.alsa.period-size")) {
 			this->default_period_size = atoi(s);
-		} else if (!strcmp(k, "api.alsa.headroom")) {
+		} else if (spa_streq(k, "api.alsa.headroom")) {
 			this->default_headroom = atoi(s);
-		} else if (!strcmp(k, "api.alsa.start-delay")) {
+		} else if (spa_streq(k, "api.alsa.start-delay")) {
 			this->default_start_delay = atoi(s);
-		} else if (!strcmp(k, "api.alsa.disable-mmap")) {
-			this->disable_mmap = (strcmp(s, "true") == 0 || atoi(s) == 1);
-		} else if (!strcmp(k, "api.alsa.disable-batch")) {
-			this->disable_batch = (strcmp(s, "true") == 0 || atoi(s) == 1);
-		} else if (!strcmp(k, "api.alsa.use-chmap")) {
-			this->props.use_chmap = (strcmp(s, "true") == 0 || atoi(s) == 1);
+		} else if (spa_streq(k, "api.alsa.disable-mmap")) {
+			this->disable_mmap = spa_atob(s);
+		} else if (spa_streq(k, "api.alsa.disable-batch")) {
+			this->disable_batch = spa_atob(s);
+		} else if (spa_streq(k, "api.alsa.use-chmap")) {
+			this->props.use_chmap = spa_atob(s);
 		}
 	}
 	return 0;
