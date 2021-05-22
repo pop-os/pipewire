@@ -36,6 +36,7 @@
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/monitor/device.h>
 
 #include <spa/node/node.h>
@@ -509,7 +510,7 @@ static int add_data(struct impl *this, const void *data, uint32_t size)
 		if (processed <= 0)
 			return total > 0 ? total : processed;
 
-		data = SPA_MEMBER(data, processed, void);
+		data = SPA_PTROFF(data, processed, void);
 		size -= processed;
 		total += processed;
 	}
@@ -1324,7 +1325,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

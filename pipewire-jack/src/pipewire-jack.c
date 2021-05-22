@@ -45,6 +45,7 @@
 #include <spa/debug/types.h>
 #include <spa/debug/pod.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/private.h>
@@ -364,6 +365,7 @@ struct client {
 	unsigned int merge_monitor:1;
 	unsigned int short_name:1;
 	unsigned int filter_name:1;
+	unsigned int freewheeling:1;
 	int self_connect_mode;
 
 	jack_position_t jack_position;
@@ -553,7 +555,7 @@ static struct object *find_node(struct client *c, const char *name)
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if (!strcmp(o->node.name, name))
+		if (spa_streq(o->node.name, name))
 			return o;
 	}
 	return NULL;
@@ -567,8 +569,8 @@ static bool is_port_default(struct client *c, struct object *o)
 		return false;
 
 	if ((ot = o->port.node) != NULL &&
-	    (strcmp(ot->node.node_name, c->metadata->default_audio_source) == 0 ||
-	     strcmp(ot->node.node_name, c->metadata->default_audio_sink) == 0))
+	    (spa_streq(ot->node.node_name, c->metadata->default_audio_source) ||
+	     spa_streq(ot->node.node_name, c->metadata->default_audio_sink)))
 		return true;
 
 	return false;
@@ -579,11 +581,11 @@ static struct object *find_port(struct client *c, const char *name)
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.ports, link) {
-		if (strcmp(o->port.name, name) == 0 ||
-		    strcmp(o->port.alias1, name) == 0 ||
-		    strcmp(o->port.alias2, name) == 0)
+		if (spa_streq(o->port.name, name) ||
+		    spa_streq(o->port.alias1, name) ||
+		    spa_streq(o->port.alias2, name))
 			return o;
-		if (is_port_default(c, o) && strcmp(o->port.system, name) == 0)
+		if (is_port_default(c, o) && spa_streq(o->port.system, name))
 			return o;
 	}
 	return NULL;
@@ -1393,7 +1395,16 @@ do_update_driver_activation(struct spa_loop *loop,
 static int update_driver_activation(struct client *c)
 {
 	struct link *link;
+	bool freewheeling;
+
 	pw_log_debug(NAME" %p: driver %d", c, c->driver_id);
+
+	freewheeling = SPA_FLAG_IS_SET(c->position->clock.flags, SPA_IO_CLOCK_FLAG_FREEWHEEL);
+	if (c->freewheeling != freewheeling) {
+		c->freewheeling = freewheeling;
+		if (c->freewheel_callback)
+			c->freewheel_callback(freewheeling, c->freewheel_arg);
+	}
 
 	link = find_activation(&c->links, c->driver_id);
 	c->driver_activation = link ? link->activation : NULL;
@@ -1799,7 +1810,7 @@ static int client_node_port_use_buffers(void *object,
 
 			memcpy(d, &buf->datas[j], sizeof(struct spa_data));
 			d->chunk =
-			    SPA_MEMBER(mm->ptr, offset + sizeof(struct spa_chunk) * j,
+			    SPA_PTROFF(mm->ptr, offset + sizeof(struct spa_chunk) * j,
 				       struct spa_chunk);
 
 			if (d->type == SPA_DATA_MemId) {
@@ -1833,7 +1844,7 @@ static int client_node_port_use_buffers(void *object,
 						c, j, bm->id, bm->fd, d->maxsize);
 			} else if (d->type == SPA_DATA_MemPtr) {
 				int offs = SPA_PTR_TO_INT(d->data);
-				d->data = SPA_MEMBER(mm->ptr, offs, void);
+				d->data = SPA_PTROFF(mm->ptr, offs, void);
 				d->fd = -1;
 				pw_log_debug(NAME" %p: data %d %u -> mem %p %d",
 						c, j, b->id, d->data, d->maxsize);
@@ -2025,13 +2036,13 @@ static const struct pw_client_node_events client_node_events = {
 
 static jack_port_type_id_t string_to_type(const char *port_type)
 {
-	if (!strcmp(JACK_DEFAULT_AUDIO_TYPE, port_type))
+	if (spa_streq(JACK_DEFAULT_AUDIO_TYPE, port_type))
 		return TYPE_ID_AUDIO;
-	else if (!strcmp(JACK_DEFAULT_MIDI_TYPE, port_type))
+	else if (spa_streq(JACK_DEFAULT_MIDI_TYPE, port_type))
 		return TYPE_ID_MIDI;
-	else if (!strcmp(JACK_DEFAULT_VIDEO_TYPE, port_type))
+	else if (spa_streq(JACK_DEFAULT_VIDEO_TYPE, port_type))
 		return TYPE_ID_VIDEO;
-	else if (!strcmp("other", port_type))
+	else if (spa_streq("other", port_type))
 		return TYPE_ID_OTHER;
 	else
 		return SPA_ID_INVALID;
@@ -2072,7 +2083,7 @@ static int json_object_find(const char *obj, const char *key, char *value, size_
 		return -EINVAL;
 
 	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
-		if (strcmp(k, key) == 0) {
+		if (spa_streq(k, key)) {
 			if (spa_json_get_string(&it[1], value, len) <= 0)
 				continue;
 			return 0;
@@ -2094,7 +2105,7 @@ static int metadata_property(void *object, uint32_t id,
 	pw_log_debug("set id:%u key:'%s' value:'%s' type:'%s'", id, key, value, type);
 
 	if (id == PW_ID_CORE) {
-		if (key == NULL || strcmp(key, "default.audio.sink") == 0) {
+		if (key == NULL || spa_streq(key, "default.audio.sink")) {
 			if (value != NULL) {
 				if (json_object_find(value, "name",
 						c->metadata->default_audio_sink,
@@ -2104,7 +2115,7 @@ static int metadata_property(void *object, uint32_t id,
 			if (value == NULL)
 				c->metadata->default_audio_sink[0] = '\0';
 		}
-		if (key == NULL || strcmp(key, "default.audio.source") == 0) {
+		if (key == NULL || spa_streq(key, "default.audio.source")) {
 			if (value != NULL) {
 				if (json_object_find(value, "name",
 						c->metadata->default_audio_source,
@@ -2167,7 +2178,7 @@ static void registry_event_global(void *data, uint32_t id,
 	if (props == NULL)
 		return;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+	if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 		const char *app, *node_name;
 		char tmp[JACK_CLIENT_NAME_SIZE+1];
 
@@ -2202,7 +2213,7 @@ static void registry_event_global(void *data, uint32_t id,
 		if (str == NULL)
 			str = "node";
 
-		if (app && strcmp(app, str) != 0)
+		if (app && !spa_streq(app, str))
 			snprintf(tmp, sizeof(tmp), "%s/%s", app, str);
 		else
 			snprintf(tmp, sizeof(tmp), "%s", str);
@@ -2228,7 +2239,7 @@ static void registry_event_global(void *data, uint32_t id,
 		spa_list_append(&c->context.nodes, &o->link);
 		pthread_mutex_unlock(&c->context.lock);
 	}
-	else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Port)) {
 		const struct spa_dict_item *item;
 		unsigned long flags = 0;
 		jack_port_type_id_t type_id;
@@ -2254,25 +2265,25 @@ static void registry_event_global(void *data, uint32_t id,
 			goto exit;
 
 		spa_dict_for_each(item, props) {
-	                if (!strcmp(item->key, PW_KEY_PORT_DIRECTION)) {
-				if (strcmp(item->value, "in") == 0)
+	                if (spa_streq(item->key, PW_KEY_PORT_DIRECTION)) {
+				if (spa_streq(item->value, "in"))
 					flags |= JackPortIsInput;
-				else if (strcmp(item->value, "out") == 0)
+				else if (spa_streq(item->value, "out"))
 					flags |= JackPortIsOutput;
 			}
-			else if (!strcmp(item->key, PW_KEY_PORT_PHYSICAL)) {
+			else if (spa_streq(item->key, PW_KEY_PORT_PHYSICAL)) {
 				if (pw_properties_parse_bool(item->value))
 					flags |= JackPortIsPhysical;
 			}
-			else if (!strcmp(item->key, PW_KEY_PORT_TERMINAL)) {
+			else if (spa_streq(item->key, PW_KEY_PORT_TERMINAL)) {
 				if (pw_properties_parse_bool(item->value))
 					flags |= JackPortIsTerminal;
 			}
-			else if (!strcmp(item->key, PW_KEY_PORT_CONTROL)) {
+			else if (spa_streq(item->key, PW_KEY_PORT_CONTROL)) {
 				if (pw_properties_parse_bool(item->value))
 					type_id = TYPE_ID_MIDI;
 			}
-			else if (!strcmp(item->key, PW_KEY_PORT_MONITOR)) {
+			else if (spa_streq(item->key, PW_KEY_PORT_MONITOR)) {
 				is_monitor = pw_properties_parse_bool(item->value);
 			}
 		}
@@ -2338,7 +2349,7 @@ static void registry_event_global(void *data, uint32_t id,
 		pw_log_debug(NAME" %p: add port %d name:%s %d", c, id,
 				o->port.name, type_id);
 	}
-	else if (strcmp(type, PW_TYPE_INTERFACE_Link) == 0) {
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Link)) {
 		o = alloc_object(c, INTERFACE_Link);
 
 		pthread_mutex_lock(&c->context.lock);
@@ -2356,7 +2367,7 @@ static void registry_event_global(void *data, uint32_t id,
 		pw_log_debug(NAME" %p: add link %d %d->%d", c, id,
 				o->port_link.src, o->port_link.dst);
 	}
-	else if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
 		struct pw_proxy *proxy;
 
 		if (c->metadata)
@@ -2444,9 +2455,9 @@ static void registry_event_global_remove(void *object, uint32_t id)
 	switch (o->type) {
 	case INTERFACE_Node:
 		if (c->metadata) {
-			if (strcmp(o->node.node_name, c->metadata->default_audio_sink) == 0)
+			if (spa_streq(o->node.node_name, c->metadata->default_audio_sink))
 				c->metadata->default_audio_sink[0] = '\0';
-			if (strcmp(o->node.node_name, c->metadata->default_audio_source) == 0)
+			if (spa_streq(o->node.node_name, c->metadata->default_audio_source))
 				c->metadata->default_audio_source[0] = '\0';
 		}
 		if (c->registration_callback && is_last)
@@ -2527,7 +2538,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	va_end(ap);
 
 	if (client->server_name != NULL &&
-	    strcmp(client->server_name, "default") == 0)
+	    spa_streq(client->server_name, "default"))
 		client->server_name = NULL;
 
 	client->props = pw_properties_new(
@@ -2570,13 +2581,13 @@ jack_client_t * jack_client_open (const char *client_name,
 
 	client->self_connect_mode = SELF_CONNECT_ALLOW;
 	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
-		if (strcmp(str, "fail-external") == 0)
+		if (spa_streq(str, "fail-external"))
 			client->self_connect_mode = SELF_CONNECT_FAIL_EXT;
-		else if (strcmp(str, "ignore-external") == 0)
+		else if (spa_streq(str, "ignore-external"))
 			client->self_connect_mode = SELF_CONNECT_IGNORE_EXT;
-		else if (strcmp(str, "fail-all") == 0)
+		else if (spa_streq(str, "fail-all"))
 			client->self_connect_mode = SELF_CONNECT_FAIL_ALL;
-		else if (strcmp(str, "ignore-all") == 0)
+		else if (spa_streq(str, "ignore-all"))
 			client->self_connect_mode = SELF_CONNECT_IGNORE_ALL;
 	}
 
@@ -2691,7 +2702,7 @@ jack_client_t * jack_client_open (const char *client_name,
 			break;
 	}
 
-	if (strcmp(client->name, client_name) != 0) {
+	if (!spa_streq(client->name, client_name)) {
 		if (status)
 			*status |= JackNameNotUnique;
 		if (options & JackUseExactName)
@@ -2801,7 +2812,7 @@ char *jack_get_uuid_for_client_name (jack_client_t *client,
 	pthread_mutex_lock(&c->context.lock);
 
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if (strcmp(o->node.name, client_name) == 0) {
+		if (spa_streq(o->node.name, client_name)) {
 			uuid = spa_aprintf( "%" PRIu64, client_make_uuid(o->id));
 			pw_log_debug(NAME" %p: name %s -> %s",
 					client, client_name, uuid);
@@ -3264,8 +3275,24 @@ int jack_set_latency_callback (jack_client_t *client,
 SPA_EXPORT
 int jack_set_freewheel(jack_client_t* client, int onoff)
 {
-	pw_log_warn(NAME" %p: not implemented %d", client, onoff);
-	return -ENOTSUP;
+	struct client *c = (struct client *) client;
+	struct spa_node_info ni;
+	struct spa_dict_item items[1];
+
+	pw_log_info(NAME" %p: freewheel %d", client, onoff);
+
+	ni = SPA_NODE_INFO_INIT();
+	ni.max_input_ports = MAX_PORTS;
+	ni.max_output_ports = MAX_PORTS;
+	ni.change_mask = SPA_NODE_CHANGE_MASK_PROPS;
+	items[0] = SPA_DICT_ITEM_INIT("node.group", onoff ? "pipewire.freewheel" : "");
+	ni.props = &SPA_DICT_INIT_ARRAY(items);
+
+	pw_client_node_update(c->node,
+                                    PW_CLIENT_NODE_UPDATE_INFO,
+				    0, NULL, &ni);
+
+	return 0;
 }
 
 SPA_EXPORT
@@ -3950,9 +3977,9 @@ int jack_port_unset_alias (jack_port_t *port, const char *alias)
 
 	pw_thread_loop_lock(c->context.loop);
 
-	if (strcmp(o->port.alias1, alias) == 0)
+	if (spa_streq(o->port.alias1, alias))
 		key = PW_KEY_OBJECT_PATH;
-	else if (strcmp(o->port.alias2, alias) == 0)
+	else if (spa_streq(o->port.alias2, alias))
 		key = PW_KEY_PORT_ALIAS;
 	else
 		goto error;
@@ -4283,11 +4310,11 @@ size_t jack_port_type_get_buffer_size (jack_client_t *client, const char *port_t
 	spa_return_val_if_fail(client != NULL, 0);
 	spa_return_val_if_fail(port_type != NULL, 0);
 
-	if (!strcmp(JACK_DEFAULT_AUDIO_TYPE, port_type))
+	if (spa_streq(JACK_DEFAULT_AUDIO_TYPE, port_type))
 		return jack_get_buffer_size(client) * sizeof(float);
-	else if (!strcmp(JACK_DEFAULT_MIDI_TYPE, port_type))
+	else if (spa_streq(JACK_DEFAULT_MIDI_TYPE, port_type))
 		return MAX_BUFFER_FRAMES * sizeof(float);
-	else if (!strcmp(JACK_DEFAULT_VIDEO_TYPE, port_type))
+	else if (spa_streq(JACK_DEFAULT_VIDEO_TYPE, port_type))
 		return 320 * 240 * 4 * sizeof(float);
 	else
 		return 0;
@@ -4407,19 +4434,19 @@ static int port_compare_func(const void *v1, const void *v2)
 		ot1 = (*o1)->port.node;
 
 		if (is_cap1)
-			is_def1 = ot1 != NULL && strcmp(ot1->node.node_name,
-					c->metadata->default_audio_source) == 0;
+			is_def1 = ot1 != NULL && spa_streq(ot1->node.node_name,
+					c->metadata->default_audio_source);
 		else if (!is_cap1)
-			is_def1 = ot1 != NULL && strcmp(ot1->node.node_name,
-					c->metadata->default_audio_sink) == 0;
+			is_def1 = ot1 != NULL && spa_streq(ot1->node.node_name,
+					c->metadata->default_audio_sink);
 		ot2 = (*o2)->port.node;
 
 		if (is_cap2)
-			is_def2 = ot2 != NULL && strcmp(ot2->node.node_name,
-					c->metadata->default_audio_source) == 0;
+			is_def2 = ot2 != NULL && spa_streq(ot2->node.node_name,
+					c->metadata->default_audio_source);
 		else if (!is_cap2)
-			is_def2 = ot2 != NULL && strcmp(ot2->node.node_name,
-					c->metadata->default_audio_sink) == 0;
+			is_def2 = ot2 != NULL && spa_streq(ot2->node.node_name,
+					c->metadata->default_audio_sink);
 	}
 	if ((*o1)->port.type_id != (*o2)->port.type_id)
 		res = (*o1)->port.type_id - (*o2)->port.type_id;
@@ -5128,7 +5155,7 @@ static inline uint8_t * midi_event_data (void* port_buffer,
         if (SPA_LIKELY(event->size <= MIDI_INLINE_MAX))
                 return (uint8_t *)event->inline_data;
         else
-                return SPA_MEMBER(port_buffer, event->byte_offset, uint8_t);
+                return SPA_PTROFF(port_buffer, event->byte_offset, uint8_t);
 }
 
 SPA_EXPORT
@@ -5146,7 +5173,7 @@ int jack_midi_event_get(jack_midi_event_t *event,
 			uint32_t    event_index)
 {
 	struct midi_buffer *mb = port_buffer;
-	struct midi_event *ev = SPA_MEMBER(mb, sizeof(*mb), struct midi_event);
+	struct midi_event *ev = SPA_PTROFF(mb, sizeof(*mb), struct midi_event);
 	spa_return_val_if_fail(mb != NULL, -EINVAL);
 	spa_return_val_if_fail(ev != NULL, -EINVAL);
 	if (event_index >= mb->event_count)
@@ -5206,7 +5233,7 @@ jack_midi_data_t* jack_midi_event_reserve(void *port_buffer,
                         size_t data_size)
 {
 	struct midi_buffer *mb = port_buffer;
-	struct midi_event *events = SPA_MEMBER(mb, sizeof(*mb), struct midi_event);
+	struct midi_event *events = SPA_PTROFF(mb, sizeof(*mb), struct midi_event);
 	size_t buffer_size;
 
 	spa_return_val_if_fail(mb != NULL, NULL);
@@ -5241,7 +5268,7 @@ jack_midi_data_t* jack_midi_event_reserve(void *port_buffer,
 		} else {
 			mb->write_pos += data_size;
 			ev->byte_offset = buffer_size - 1 - mb->write_pos;
-			res = SPA_MEMBER(mb, ev->byte_offset, uint8_t);
+			res = SPA_PTROFF(mb, ev->byte_offset, uint8_t);
 		}
 		mb->event_count += 1;
 		return res;

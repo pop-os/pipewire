@@ -35,6 +35,7 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/utils/type-info.h>
 #include <spa/param/format.h>
 #include <spa/param/format-utils.h>
@@ -124,10 +125,10 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 			"playback" : is_monitor ? "monitor" : "capture";
 	else
 		prefix = direction == PW_DIRECTION_INPUT ?
-			"input" : "output";
+			"input" : is_monitor ? "monitor" : "output";
 
 	if ((str = pw_properties_get(old, PW_KEY_AUDIO_CHANNEL)) == NULL ||
-	    strcmp(str, "UNK") == 0) {
+	    spa_streq(str, "UNK")) {
 		snprintf(position, sizeof(position), "%d", pw_impl_port_get_id(port) + 1);
 		str = position;
 	}
@@ -292,7 +293,7 @@ struct pw_impl_node *pw_adapter_new(struct pw_context *context,
 	spa_list_init(&n->ports);
 
 	if (user_data_size > 0)
-		n->user_data = SPA_MEMBER(n, sizeof(struct node), void);
+		n->user_data = SPA_PTROFF(n, sizeof(struct node), void);
 
 	pw_impl_node_add_listener(node, &n->node_listener, &node_events, n);
 

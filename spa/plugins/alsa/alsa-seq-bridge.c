@@ -32,6 +32,7 @@
 #include <spa/node/keys.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/utils/list.h>
 #include <spa/monitor/device.h>
 #include <spa/param/audio/format.h>
@@ -799,7 +800,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct seq_state *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -877,7 +878,7 @@ impl_init(const struct spa_handle_factory *factory,
 	reset_props(&this->props);
 
 	for (i = 0; info && i < info->n_items; i++) {
-		if (!strcmp(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {
+		if (spa_streq(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {
 			snprintf(this->props.device, 63, "%s", info->items[i].value);
 		}
 	}

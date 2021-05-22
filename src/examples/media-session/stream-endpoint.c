@@ -33,6 +33,7 @@
 #include <spa/node/node.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/debug/pod.h>
@@ -208,7 +209,7 @@ static int client_endpoint_create_link(void *object, const struct spa_dict *prop
 			goto exit;
 		}
 		obj = sm_media_session_find_object(impl->session, atoi(str));
-		if (obj == NULL || strcmp(obj->type, PW_TYPE_INTERFACE_Endpoint) != 0) {
+		if (obj == NULL || !spa_streq(obj->type, PW_TYPE_INTERFACE_Endpoint)) {
 			pw_log_warn(NAME" %p: could not find endpoint %s (%p)", impl, str, obj);
 			res = -EINVAL;
 			goto exit;
@@ -559,7 +560,7 @@ static void session_create(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	int res;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Node))
 		res = handle_node(impl, object);
 	else
 		res = 0;
@@ -574,7 +575,7 @@ static void session_remove(void *data, struct sm_object *object)
 {
 	struct impl *impl = data;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Node)) {
 		struct node *node;
 		if ((node = sm_object_get_data(object, SESSION_KEY)) != NULL)
 			destroy_node(impl, node);

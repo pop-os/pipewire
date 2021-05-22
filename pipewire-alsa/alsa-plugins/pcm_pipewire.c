@@ -41,6 +41,7 @@
 #include <spa/debug/types.h>
 #include <spa/param/props.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 
 #include <pipewire/pipewire.h>
 
@@ -259,7 +260,7 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 			d[0].chunk->size = want * pw->stride;
 			d[0].chunk->offset = 0;
 		}
-		ptr = SPA_MEMBER(d[0].data, d[0].chunk->offset, void);
+		ptr = SPA_PTROFF(d[0].data, d[0].chunk->offset, void);
 		for (channel = 0; channel < io->channels; channel++) {
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = channel * pw->sample_bits;
@@ -271,7 +272,7 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 				d[channel].chunk->size = want * pw->stride;
 				d[channel].chunk->offset = 0;
 			}
-			ptr = SPA_MEMBER(d[channel].data, d[channel].chunk->offset, void);
+			ptr = SPA_PTROFF(d[channel].data, d[channel].chunk->offset, void);
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = 0;
 			pwareas[channel].step = pw->sample_bits;
@@ -1017,7 +1018,10 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	pw->main_loop = pw_thread_loop_new("alsa-pipewire", NULL);
 	loop = pw_thread_loop_get_loop(pw->main_loop);
 	pw->system = loop->system;
-	pw->context = pw_context_new(loop, NULL, 0);
+	if ((pw->context = pw_context_new(loop, NULL, 0)) == NULL) {
+		err = -errno;
+		goto error;
+	}
 
 	props = pw_properties_new(NULL, NULL);
 
@@ -1102,30 +1106,30 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 		const char *id;
 		if (snd_config_get_id(n, &id) < 0)
 			continue;
-		if (strcmp(id, "comment") == 0 || strcmp(id, "type") == 0 || strcmp(id, "hint") == 0)
+		if (spa_streq(id, "comment") || spa_streq(id, "type") || spa_streq(id, "hint"))
 			continue;
-		if (strcmp(id, "name") == 0) {
+		if (spa_streq(id, "name")) {
 			snd_config_get_string(n, &node_name);
 			continue;
 		}
-		if (strcmp(id, "server") == 0) {
+		if (spa_streq(id, "server")) {
 			snd_config_get_string(n, &server_name);
 			continue;
 		}
-		if (strcmp(id, "playback_node") == 0) {
+		if (spa_streq(id, "playback_node")) {
 			snd_config_get_string(n, &playback_node);
 			continue;
 		}
-		if (strcmp(id, "capture_node") == 0) {
+		if (spa_streq(id, "capture_node")) {
 			snd_config_get_string(n, &capture_node);
 			continue;
 		}
-		if (strcmp(id, "exclusive") == 0) {
+		if (spa_streq(id, "exclusive")) {
 			if (snd_config_get_bool(n))
 				flags |= PW_STREAM_FLAG_EXCLUSIVE;
 			continue;
 		}
-		if (strcmp(id, "rate") == 0) {
+		if (spa_streq(id, "rate")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)
@@ -1134,7 +1138,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 				SNDERR("%s: invalid type", id);
 			continue;
 		}
-		if (strcmp(id, "format") == 0) {
+		if (spa_streq(id, "format")) {
 			const char *str;
 
 			if (snd_config_get_string(n, &str) == 0) {
@@ -1146,7 +1150,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 			}
 			continue;
 		}
-		if (strcmp(id, "channels") == 0) {
+		if (spa_streq(id, "channels")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)
@@ -1155,7 +1159,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 				SNDERR("%s: invalid type", id);
 			continue;
 		}
-		if (strcmp(id, "period_bytes") == 0) {
+		if (spa_streq(id, "period_bytes")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)

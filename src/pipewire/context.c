@@ -35,6 +35,7 @@
 #include <spa/support/dbus.h>
 #include <spa/node/utils.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/debug/format.h>
 #include <spa/debug/types.h>
 
@@ -168,7 +169,7 @@ static int try_load_conf(struct pw_context *this, const char *conf_prefix,
 
 	if (conf_name == NULL)
 		return -EINVAL;
-	if (strcmp(conf_name, "null") == 0)
+	if (spa_streq(conf_name, "null"))
 		return 0;
 	if ((res = pw_conf_load_conf(conf_prefix, conf_name, conf)) < 0) {
 		pw_log_warn(NAME" %p: can't load config %s%s%s: %s",
@@ -213,7 +214,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	pw_log_debug(NAME" %p: new", this);
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
+		this->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
 	if (properties == NULL)
 		properties = pw_properties_new(NULL, NULL);
@@ -361,14 +362,18 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 
 	this->sc_pagesize = sysconf(_SC_PAGESIZE);
 
-	if ((res = pw_context_parse_conf_section(this, conf, "context.spa-libs")) >= 0)
-		pw_log_info(NAME" %p: parsed context.spa-libs section", this);
-	if ((res = pw_context_parse_conf_section(this, conf, "context.modules")) >= 0)
-		pw_log_info(NAME" %p: parsed context.modules section", this);
-	if ((res = pw_context_parse_conf_section(this, conf, "context.objects")) >= 0)
-		pw_log_info(NAME" %p: parsed context.objects section", this);
-	if ((res = pw_context_parse_conf_section(this, conf, "context.exec")) >= 0)
-		pw_log_info(NAME" %p: parsed context.exec section", this);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.spa-libs")) < 0)
+		goto error_free_loop;
+	pw_log_info(NAME" %p: parsed %d context.spa-libs items", this, res);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.modules")) < 0)
+		goto error_free_loop;
+	pw_log_info(NAME" %p: parsed %d context.modules items", this, res);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.objects")) < 0)
+		goto error_free_loop;
+	pw_log_info(NAME" %p: parsed %d context.objects items", this, res);
+	if ((res = pw_context_parse_conf_section(this, conf, "context.exec")) < 0)
+		goto error_free_loop;
+	pw_log_info(NAME" %p: parsed %d context.exec items", this, res);
 
 	pw_log_debug(NAME" %p: created", this);
 
@@ -935,14 +940,15 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 		}
 		/* now go through all the followers of this driver and add the
 		 * nodes that have the same group and that are not yet visited */
-		if (n->group_id == SPA_ID_INVALID)
+		if (n->group[0] == '\0')
 			continue;
 
 		spa_list_for_each(t, &context->node_list, link) {
 			if (t->exported || t == n || !t->active || t->visited)
 				continue;
-			if (t->group_id != n->group_id)
+			if (!spa_streq(t->group, n->group))
 				continue;
+			pw_log_debug("%p join group %s: '%s'", t, t->group, n->group);
 			t->visited = true;
 			spa_list_append(&queue, &t->sort_link);
 		}
@@ -1173,7 +1179,7 @@ const struct pw_export_type *pw_context_find_export_type(struct pw_context *cont
 {
 	const struct pw_export_type *t;
 	spa_list_for_each(t, &context->export_list, link) {
-		if (strcmp(t->type, type) == 0)
+		if (spa_streq(t->type, type))
 			return t;
 	}
 	return NULL;
@@ -1188,7 +1194,7 @@ static struct object_entry *find_object(struct pw_context *context, const char *
 {
 	struct object_entry *entry;
 	pw_array_for_each(entry, &context->objects) {
-		if (strcmp(entry->type, type) == 0)
+		if (spa_streq(entry->type, type))
 			return entry;
 	}
 	return NULL;

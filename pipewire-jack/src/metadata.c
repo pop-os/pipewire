@@ -30,6 +30,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include <spa/utils/string.h>
+
 #include <jack/metadata.h>
 #include <jack/uuid.h>
 
@@ -98,7 +100,7 @@ static jack_property_t *find_property(jack_description_t *desc, const char *key)
 	uint32_t i;
 	for (i = 0; i < desc->property_cnt; i++) {
 		jack_property_t *prop = &desc->properties[i];
-		if (strcmp(prop->key, key) == 0)
+		if (spa_streq(prop->key, key))
 			return prop;
 	}
 	return NULL;
@@ -129,32 +131,23 @@ static void remove_property(jack_description_t *desc, jack_property_t *prop)
 {
 	clear_property(prop);
 	desc->property_cnt--;
-        memmove(desc->properties, SPA_MEMBER(prop, sizeof(*prop), void),
-                SPA_PTRDIFF(SPA_MEMBER(desc->properties, sizeof(*prop) * desc->property_cnt, void),
+        memmove(desc->properties, SPA_PTROFF(prop, sizeof(*prop), void),
+                SPA_PTRDIFF(SPA_PTROFF(desc->properties, sizeof(*prop) * desc->property_cnt, void),
 			prop));
 
 	if (desc->property_cnt == 0)
 		remove_description(desc);
 }
 
-static inline int strzcmp(const char *s1, const char *s2)
-{
-	if (s1 == s2)
-		return 0;
-	if (s1 == NULL || s2 == NULL)
-		return 1;
-	return strcmp(s1, s2);
-}
-
 static int change_property(jack_property_t *prop, const char *value, const char *type)
 {
 	int changed = 0;
-	if (strzcmp(prop->data, value) != 0) {
+	if (!spa_streq(prop->data, value)) {
 		free((char*)prop->data);
 		prop->data = strdup(value);
 		changed++;
 	}
-	if (strzcmp(prop->type, type) != 0) {
+	if (!spa_streq(prop->type, type)) {
 		free((char*)prop->type);
 		prop->type = strdup(type);
 		changed++;

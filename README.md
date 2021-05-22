@@ -150,11 +150,12 @@ automatically use the PipeWire video source when possible.
 
 ### Inspecting the PipeWire state
 
-There is currently no native graphical tool to inspect the PipeWire graph
-but we recommend to use one of the excellent JACK tools, such as `Carla`,
+To inspect and manipulate the PipeWire graph via GUI, you can use [Helvum](https://gitlab.freedesktop.org/ryuukyu/helvum).
+
+Alternatively, you can use use one of the excellent JACK tools, such as `Carla`,
 `catia`, `qjackctl`, ...
-You will not be able to see all features like the video
-ports but it is a good start.
+However, you will not be able to see all features like the video
+ports.
 
 `pw-mon` dumps and monitors the state of the PipeWire daemon.
 
@@ -187,8 +188,9 @@ The Wiki can be found [here](https://gitlab.freedesktop.org/pipewire/pipewire/-/
 
 ## Contributing
 
-PipeWire is Free Software and is developed in the open. It is licensed under
-the [MIT license](COPYING).
+PipeWire is Free Software and is developed in the open. It is mostly
+licensed under the [MIT license](COPYING). Check [LICENSE](LICENSE) for
+more details about the exceptions.
 
 Contributors are encouraged to submit merge requests or file bugs on
 [gitlab](https://gitlab.freedesktop.org/pipewire).

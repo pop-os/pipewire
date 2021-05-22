@@ -125,7 +125,7 @@ static inline struct pw_param *pw_param_add(struct spa_list *params,
 
 	p->id = id;
 	if (param != NULL) {
-		p->param = SPA_MEMBER(p, sizeof(*p), struct spa_pod);
+		p->param = SPA_PTROFF(p, sizeof(*p), struct spa_pod);
 		memcpy(p->param, param, SPA_POD_SIZE(param));
 	} else {
 		pw_param_clear(params, id);
@@ -622,7 +622,7 @@ struct pw_impl_node {
 	char *name;				/** for debug */
 
 	uint32_t priority_driver;	/** priority for being driver */
-	uint32_t group_id;		/** group to schedule this node in */
+	char group[128];		/** group to schedule this node in */
 	uint64_t spa_flags;
 
 	unsigned int registered:1;
@@ -636,6 +636,7 @@ struct pw_impl_node {
 	unsigned int visited:1;		/**< for sorting */
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */
 	unsigned int passive:1;		/**< driver graph only has passive links */
+	unsigned int freewheel:1;	/**< if this is the freewheel driver */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 

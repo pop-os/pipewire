@@ -19,7 +19,7 @@ include:
 .fedora:
   variables:
     # Update this tag when you want to trigger a rebuild
-    FDO_DISTRIBUTION_TAG: '2021-03-25.1'
+    FDO_DISTRIBUTION_TAG: '2021-05-10.0'
     FDO_DISTRIBUTION_VERSION: '33'
     FDO_DISTRIBUTION_PACKAGES: >-
       alsa-lib-devel
@@ -34,18 +34,19 @@ include:
       gstreamer1-devel
       gstreamer1-plugins-base-devel
       jack-audio-connection-kit-devel
+      libsndfile-devel
       libv4l-devel
       libva-devel
       libX11-devel
       meson
       pulseaudio-libs-devel
       sbc-devel
+      ShellCheck
       SDL2-devel
       systemd-devel
       vulkan-loader-devel
       which
       xmltoman
-      libsndfile-devel
 
 .coverity:
   variables:
@@ -191,6 +192,13 @@ build_with_coverity:
     paths:
       - build-*/meson-logs
       - cov-int/build-log.txt
+
+shellcheck:
+  extends:
+    - .build_on_fedora
+  stage: analysis
+  script:
+    - shellcheck $(git grep -l "#\!/.*bin/.*sh")
 
 pages:
   extends:

@@ -28,11 +28,17 @@
 
 #include "../internal.h"
 
+struct module *create_module_ladspa_sink(struct impl *impl, const char *argument);
+struct module *create_module_ladspa_source(struct impl *impl, const char *argument);
 struct module *create_module_loopback(struct impl *impl, const char *argument);
 struct module *create_module_native_protocol_tcp(struct impl *impl, const char *argument);
 struct module *create_module_null_sink(struct impl *impl, const char *argument);
 struct module *create_module_remap_sink(struct impl *impl, const char *argument);
 struct module *create_module_remap_source(struct impl *impl, const char *argument);
+struct module *create_module_tunnel_sink(struct impl *impl, const char *argument);
+struct module *create_module_tunnel_source(struct impl *impl, const char *argument);
 struct module *create_module_simple_protocol_tcp(struct impl *impl, const char *argument);
+struct module *create_module_pipe_sink(struct impl *impl, const char *argument);
+struct module *create_module_zeroconf_discover(struct impl *impl, const char *argument);
 
 #endif

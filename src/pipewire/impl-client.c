@@ -25,6 +25,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include <spa/utils/string.h>
+
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
 
@@ -137,7 +139,7 @@ static bool has_key(const char *keys[], const char *key)
 {
 	int i;
 	for (i = 0; keys[i]; i++) {
-		if (strcmp(keys[i], key) == 0)
+		if (spa_streq(keys[i], key))
 			return true;
 	}
 	return false;
@@ -157,7 +159,7 @@ static int update_properties(struct pw_impl_client *client, const struct spa_dic
 		if (filter) {
 			if (strstr(dict->items[i].key, "pipewire.") == dict->items[i].key &&
 			    (old = pw_properties_get(client->properties, dict->items[i].key)) != NULL &&
-			    (dict->items[i].value == NULL || strcmp(old, dict->items[i].value) != 0)) {
+			    (dict->items[i].value == NULL || !spa_streq(old, dict->items[i].value))) {
 				pw_log_warn(NAME" %p: refuse property update '%s' from '%s' to '%s'",
 						client, dict->items[i].key, old,
 						dict->items[i].value);
@@ -371,7 +373,7 @@ static const struct pw_context_events context_events = {
 
 /** Make a new client object
  *
- * \param context a \ref pw_context object to register the client with
+ * \param core a \ref pw_context object to register the client with
  * \param ucred a ucred structure or NULL when unknown
  * \param properties optional client properties, ownership is taken
  * \return a newly allocated client object
@@ -430,7 +432,7 @@ struct pw_impl_client *pw_context_create_client(struct pw_impl_core *core,
 	this->permission_data = impl;
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
+		this->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
 	spa_hook_list_init(&this->listener_list);
 
@@ -625,7 +627,7 @@ const struct pw_client_info *pw_impl_client_get_info(struct pw_impl_client *clie
 /** Update client properties
  *
  * \param client the client
- * \param dict a \ref spa_dict with properties
+ * \param dict a \struct spa_dict with properties
  *
  * Add all properties in \a dict to the client properties. Existing
  * properties are overwritten. Items can be removed by setting the value

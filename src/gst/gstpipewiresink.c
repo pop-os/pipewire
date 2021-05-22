@@ -578,6 +578,7 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   GstPipeWireSink *pwsink;
   GstFlowReturn res = GST_FLOW_OK;
   const char *error = NULL;
+  gboolean unref_buffer = FALSE;
 
   pwsink = GST_PIPEWIRE_SINK (bsink);
 
@@ -616,10 +617,11 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
       goto done;
 
     gst_buffer_map (b, &info, GST_MAP_WRITE);
-    gst_buffer_extract (buffer, 0, info.data, info.size);
+    gst_buffer_extract (buffer, 0, info.data, info.maxsize);
     gst_buffer_unmap (b, &info);
     gst_buffer_resize (b, 0, gst_buffer_get_size (buffer));
     buffer = b;
+    unref_buffer = TRUE;
 
     pw_thread_loop_lock (pwsink->core->loop);
     if (pw_stream_get_state (pwsink->stream, &error) != PW_STREAM_STATE_STREAMING)
@@ -628,6 +630,8 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
 
   GST_DEBUG ("push buffer");
   do_send_buffer (pwsink, buffer);
+  if (unref_buffer)
+    gst_buffer_unref (buffer);
 
 done_unlock:
   pw_thread_loop_unlock (pwsink->core->loop);

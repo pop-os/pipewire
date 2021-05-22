@@ -35,6 +35,7 @@
 #include <spa/utils/list.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -695,7 +696,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -728,7 +729,7 @@ static uint32_t channel_from_name(const char *name)
 {
 	int i;
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -828,11 +829,11 @@ impl_init(const struct spa_handle_factory *factory,
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
-		if (!strcmp(k, SPA_KEY_AUDIO_CHANNELS)) {
+		if (spa_streq(k, SPA_KEY_AUDIO_CHANNELS)) {
 			this->props.channels = atoi(s);
-		} else if (!strcmp(k, SPA_KEY_AUDIO_RATE)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_RATE)) {
 			this->props.rate = atoi(s);
-		} else if (!strcmp(k, SPA_KEY_AUDIO_POSITION)) {
+		} else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
 			parse_position(this, s, strlen(s));
 		}
 	}

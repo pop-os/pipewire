@@ -45,6 +45,7 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/debug/pod.h>
@@ -80,6 +81,7 @@
 #define sm_media_session_emit_shutdown(s)		sm_media_session_emit(s, shutdown, 0)
 #define sm_media_session_emit_destroy(s)		sm_media_session_emit(s, destroy, 0)
 #define sm_media_session_emit_seat_active(s,...)	sm_media_session_emit(s, seat_active, 0, __VA_ARGS__)
+#define sm_media_session_emit_dbus_disconnected(s)	sm_media_session_emit(s, dbus_disconnected, 0)
 
 int sm_access_flatpak_start(struct sm_media_session *sess);
 int sm_access_portal_start(struct sm_media_session *sess);
@@ -128,6 +130,7 @@ struct impl {
 
 	struct pw_main_loop *loop;
 	struct spa_dbus *dbus;
+	struct spa_hook dbus_connection_listener;
 
 	struct pw_core *monitor_core;
 	struct spa_hook monitor_listener;
@@ -239,7 +242,7 @@ static void *find_object(struct impl *impl, uint32_t id, const char *type)
 	struct sm_object *obj;
 	if ((obj = pw_map_lookup(&impl->globals, id)) == NULL)
 		return NULL;
-	if (type != NULL && strcmp(obj->type, type) != 0)
+	if (type != NULL && !spa_streq(obj->type, type))
 		return NULL;
 	return obj;
 }
@@ -248,7 +251,7 @@ static struct data *object_find_data(struct sm_object *obj, const char *id)
 {
 	struct data *d;
 	spa_list_for_each(d, &obj->data, link) {
-		if (strcmp(d->id, id) == 0)
+		if (spa_streq(d->id, id))
 			return d;
 	}
 	return NULL;
@@ -271,7 +274,7 @@ void *sm_object_add_data(struct sm_object *obj, const char *id, size_t size)
 
 	spa_list_append(&obj->data, &d->link);
 done:
-	return SPA_MEMBER(d, sizeof(struct data), void);
+	return SPA_PTROFF(d, sizeof(struct data), void);
 }
 
 void *sm_object_get_data(struct sm_object *obj, const char *id)
@@ -280,7 +283,7 @@ void *sm_object_get_data(struct sm_object *obj, const char *id)
 	d = object_find_data(obj, id);
 	if (d == NULL)
 		return NULL;
-	return SPA_MEMBER(d, sizeof(struct data), void);
+	return SPA_PTROFF(d, sizeof(struct data), void);
 }
 
 int sm_object_remove_data(struct sm_object *obj, const char *id)
@@ -390,7 +393,7 @@ static struct param *add_param(struct spa_list *param_list,
 		return NULL;
 
 	p->this.id = id;
-	p->this.param = SPA_MEMBER(p, sizeof(struct param), struct spa_pod);
+	p->this.param = SPA_PTROFF(p, sizeof(struct param), struct spa_pod);
 	memcpy(p->this.param, param, SPA_POD_SIZE(param));
 
 	spa_list_append(param_list, &p->this.link);
@@ -738,7 +741,7 @@ static enum spa_audio_channel find_channel(const char *name)
 {
         int i;
         for (i = 0; spa_type_audio_channel[i].name; i++) {
-                if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+                if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
                         return spa_type_audio_channel[i].type;
         }
         return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -753,12 +756,12 @@ static int port_init(void *object)
 
 	if (props) {
 		if ((str = pw_properties_get(props, PW_KEY_PORT_DIRECTION)) != NULL)
-			port->direction = strcmp(str, "out") == 0 ?
+			port->direction = spa_streq(str, "out") ?
 				PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
 		if ((str = pw_properties_get(props, PW_KEY_FORMAT_DSP)) != NULL) {
-			if (strcmp(str, "32 bit float mono audio") == 0)
+			if (spa_streq(str, "32 bit float mono audio"))
 				port->type = SM_PORT_TYPE_DSP_AUDIO;
-			else if (strcmp(str, "8 bit raw midi") == 0)
+			else if (spa_streq(str, "8 bit raw midi"))
 				port->type = SM_PORT_TYPE_DSP_MIDI;
 		}
 		if ((str = pw_properties_get(props, PW_KEY_AUDIO_CHANNEL)) != NULL)
@@ -1173,29 +1176,29 @@ static const struct object_info *get_object_info(struct impl *impl, const char *
 {
 	const struct object_info *info;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Core) == 0)
+	if (spa_streq(type, PW_TYPE_INTERFACE_Core))
 		info = &core_object_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Module) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Module))
 		info = &module_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Factory) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Factory))
 		info = &factory_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Client))
 		info = &client_info;
-	else if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		info = &spa_device_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Device))
 		info = &device_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Node))
 		info = &node_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Port))
 		info = &port_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Session) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Session))
 		info = &session_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Endpoint) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Endpoint))
 		info = &endpoint_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_EndpointStream) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_EndpointStream))
 		info = &endpoint_stream_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_EndpointLink) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_EndpointLink))
 		info = &endpoint_link_info;
 	else
 		info = NULL;
@@ -1249,7 +1252,7 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 
 	type = pw_proxy_get_type(handle, NULL);
 
-	if (strcmp(type, PW_TYPE_INTERFACE_ClientNode) == 0)
+	if (spa_streq(type, PW_TYPE_INTERFACE_ClientNode))
 		type = PW_TYPE_INTERFACE_Node;
 
 	info = get_object_info(impl, type);
@@ -1484,7 +1487,7 @@ monitor_registry_global(void *data, uint32_t id,
 	re.proxy = pw_registry_bind(impl->registry, id, type, info->version, 0);
 	if (re.proxy)
 		handle_registry_event(impl, &re);
-	else 
+	else
 		pw_log_warn(NAME" %p: can't handle global %d: %s", impl, id, spa_strerror(-errno));
 
 	registry_event_free(&re);
@@ -1837,9 +1840,9 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 	pw_log_debug(NAME" %p: linking %d -> %d", impl, outnode->obj.id, innode->obj.id);
 
 	if ((str = spa_dict_lookup(outnode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
-		passive |= (pw_properties_parse_bool(str) || strcmp(str, "out") == 0);
+		passive |= (pw_properties_parse_bool(str) || spa_streq(str, "out"));
 	if ((str = spa_dict_lookup(innode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
-		passive |= (pw_properties_parse_bool(str) || strcmp(str, "in") == 0);
+		passive |= (pw_properties_parse_bool(str) || spa_streq(str, "in"));
 
 	props = pw_properties_new(NULL, NULL);
 	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", outnode->obj.id);
@@ -2307,6 +2310,18 @@ static int sm_pulse_bridge_start(struct sm_media_session *sess)
 	return 0;
 }
 
+static void dbus_connection_disconnected(void *data)
+{
+	struct impl *impl = data;
+	pw_log_info("DBus disconnected");
+	sm_media_session_emit_dbus_disconnected(impl);
+}
+
+static const struct spa_dbus_connection_events dbus_connection_events = {
+	SPA_VERSION_DBUS_CONNECTION_EVENTS,
+	.disconnected = dbus_connection_disconnected
+};
+
 static void do_quit(void *data, int signal_number)
 {
 	struct impl *impl = data;
@@ -2323,7 +2338,7 @@ static int collect_modules(struct impl *impl, const char *str)
 	int count = 0;
 
 	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
-		dir = PIPEWIRE_CONFIG_DIR;
+		dir = PIPEWIRE_CONFDATADIR;
 	if (dir == NULL)
 		return -ENOENT;
 
@@ -2517,8 +2532,12 @@ int main(int argc, char *argv[])
 		impl.this.dbus_connection = spa_dbus_get_connection(impl.dbus, SPA_DBUS_TYPE_SESSION);
 		if (impl.this.dbus_connection == NULL)
 			pw_log_warn("no dbus connection");
-		else
+		else {
 			pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
+			spa_dbus_connection_add_listener(impl.this.dbus_connection,
+					&impl.dbus_connection_listener,
+					&dbus_connection_events, &impl);
+		}
 	} else {
 		pw_log_info("dbus disabled");
 	}

@@ -33,6 +33,7 @@
 #include "config.h"
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/param/profiler.h>
 #include <spa/debug/pod.h>
@@ -151,7 +152,7 @@ static void process(struct impl *impl)
 	for (i = 0; i < impl->info.channels; i++) {
 		/* captured samples, with echo from sink */
 		ds = &cin->buffer->datas[i];
-		rec[i] = SPA_MEMBER(ds->data, ds->chunk->offset, void);
+		rec[i] = SPA_PTROFF(ds->data, ds->chunk->offset, void);
 
 		size = ds->chunk->size;
 		stride = ds->chunk->stride;
@@ -165,7 +166,7 @@ static void process(struct impl *impl)
 
 		/* echo from sink */
 		ds = &pin->buffer->datas[i];
-		play[i] = SPA_MEMBER(ds->data, ds->chunk->offset, void);
+		play[i] = SPA_PTROFF(ds->data, ds->chunk->offset, void);
 
 		/* output to sink, just copy */
 		dd = &pout->buffer->datas[i];
@@ -419,7 +420,7 @@ static uint32_t channel_from_name(const char *name)
 {
 	int i;
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -534,9 +535,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 
-	if ((str = pw_properties_get(props, "aec,method")) == NULL)
+	if ((str = pw_properties_get(props, "aec.method")) == NULL)
 		str = "null";
-	if (strcmp(str, "webrtc") == 0)
+	if (spa_streq(str, "webrtc"))
 		impl->aec_info = echo_cancel_webrtc;
 	else
 		impl->aec_info = echo_cancel_null;

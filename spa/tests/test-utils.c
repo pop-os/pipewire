@@ -28,6 +28,7 @@
 #include <spa/utils/list.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/ringbuffer.h>
+#include <spa/utils/string.h>
 #include <spa/utils/type.h>
 
 static void test_abi(void)
@@ -102,17 +103,17 @@ static void test_abi(void)
 	spa_assert(SPA_TYPE_Fd == 18);
 	spa_assert(SPA_TYPE_Choice == 19);
 	spa_assert(SPA_TYPE_Pod == 20);
-	spa_assert(SPA_TYPE_LAST == 21);
+	spa_assert(_SPA_TYPE_LAST == 21);
 
 	spa_assert(SPA_TYPE_EVENT_START == 0x20000);
 	spa_assert(SPA_TYPE_EVENT_Device == 0x20001);
 	spa_assert(SPA_TYPE_EVENT_Node == 0x20002);
-	spa_assert(SPA_TYPE_EVENT_LAST == 0x20003);
+	spa_assert(_SPA_TYPE_EVENT_LAST == 0x20003);
 
 	spa_assert(SPA_TYPE_COMMAND_START == 0x30000);
 	spa_assert(SPA_TYPE_COMMAND_Device == 0x30001);
 	spa_assert(SPA_TYPE_COMMAND_Node == 0x30002);
-	spa_assert(SPA_TYPE_COMMAND_LAST == 0x30003);
+	spa_assert(_SPA_TYPE_COMMAND_LAST == 0x30003);
 
 	spa_assert(SPA_TYPE_OBJECT_START == 0x40000);
 	spa_assert(SPA_TYPE_OBJECT_PropInfo == 0x40001);
@@ -125,7 +126,7 @@ static void test_abi(void)
 	spa_assert(SPA_TYPE_OBJECT_ParamPortConfig == 0x40008);
 	spa_assert(SPA_TYPE_OBJECT_ParamRoute == 0x40009);
 	spa_assert(SPA_TYPE_OBJECT_Profiler == 0x4000a);
-	spa_assert(SPA_TYPE_OBJECT_LAST == 0x4000b);
+	spa_assert(_SPA_TYPE_OBJECT_LAST == 0x4000b);
 
 	spa_assert(SPA_TYPE_VENDOR_PipeWire == 0x02000000);
 	spa_assert(SPA_TYPE_VENDOR_Other == 0x7f000000);
@@ -133,6 +134,8 @@ static void test_abi(void)
 
 static void test_macros(void)
 {
+	uint8_t ptr[64];
+
 	spa_assert(SPA_MIN(1, 2) == 1);
 	spa_assert(SPA_MIN(1, -2) == -2);
 	spa_assert(SPA_MAX(1, 2) == 2);
@@ -140,6 +143,14 @@ static void test_macros(void)
 	spa_assert(SPA_CLAMP(23, 1, 16) == 16);
 	spa_assert(SPA_CLAMP(-1, 1, 16) == 1);
 	spa_assert(SPA_CLAMP(8, 1, 16) == 8);
+
+	/* SPA_MEMBER exists for backwards compatibility but should no
+	 * longer be used, let's make sure it does what we expect it to */
+	spa_assert(SPA_MEMBER(ptr, 4, void) == SPA_PTROFF(ptr, 4, void));
+	spa_assert(SPA_MEMBER(ptr, 32, void) == SPA_PTROFF(ptr, 32, void));
+	spa_assert(SPA_MEMBER(ptr, 0, void) == SPA_PTROFF(ptr, 0, void));
+	spa_assert(SPA_MEMBER_ALIGN(ptr, 0, 4, void) == SPA_PTROFF_ALIGN(ptr, 0, 4, void));
+	spa_assert(SPA_MEMBER_ALIGN(ptr, 4, 32, void) == SPA_PTROFF_ALIGN(ptr, 4, 32, void));
 }
 
 static void test_result(void)
@@ -173,11 +184,11 @@ static void test_dict(void)
     int i = 0;
 
     spa_assert(dict.n_items == 5);
-    spa_assert(!strcmp(spa_dict_lookup(&dict, "pipe"), "wire"));
-    spa_assert(!strcmp(spa_dict_lookup(&dict, "123"), ""));
-    spa_assert(!strcmp(spa_dict_lookup(&dict, "key"), "value"));
-    spa_assert(!strcmp(spa_dict_lookup(&dict, "SPA"), "Simple Plugin API"));
-    spa_assert(!strcmp(spa_dict_lookup(&dict, "test"), "Works!"));
+    spa_assert(spa_streq(spa_dict_lookup(&dict, "pipe"), "wire"));
+    spa_assert(spa_streq(spa_dict_lookup(&dict, "123"), ""));
+    spa_assert(spa_streq(spa_dict_lookup(&dict, "key"), "value"));
+    spa_assert(spa_streq(spa_dict_lookup(&dict, "SPA"), "Simple Plugin API"));
+    spa_assert(spa_streq(spa_dict_lookup(&dict, "test"), "Works!"));
     spa_assert(spa_dict_lookup(&dict, "nonexistent") == NULL);
 
     spa_assert(spa_dict_lookup_item(&dict, "123") == &items[3]);
@@ -227,13 +238,13 @@ static void test_list(void)
     spa_list_for_each(e, head, node) {
         switch (i++) {
         case 0:
-            spa_assert(!strcmp(e->string, "First element"));
+            spa_assert(spa_streq(e->string, "First element"));
             break;
         case 1:
-            spa_assert(!strcmp(e->string, "test"));
+            spa_assert(spa_streq(e->string, "test"));
             break;
         case 2:
-            spa_assert(!strcmp(e->string, "pipewire!"));
+            spa_assert(spa_streq(e->string, "pipewire!"));
             break;
         default:
             spa_assert_not_reached();
@@ -419,6 +430,85 @@ static void test_ringbuffer(void)
     spa_assert(!memcmp(buffer, " !!!o pipewire rocks", 20));
 }
 
+static void test_strtol(void)
+{
+	int32_t v;
+
+	spa_assert(spa_atoi32("0", &v, 0) && v == 0);
+	spa_assert(spa_atoi32("0", &v, 16) && v == 0);
+	spa_assert(spa_atoi32("0", &v, 32) && v == 0);
+	spa_assert(spa_atoi32("-1", &v, 0) && v == -1);
+	spa_assert(spa_atoi32("-1234", &v, 0) && v == -1234);
+	spa_assert(spa_atoi32("-2147483648", &v, 0) && v == -2147483648);
+	spa_assert(spa_atoi32("+1", &v, 0) && v == 1);
+	spa_assert(spa_atoi32("+1234", &v, 0) && v == 1234);
+	spa_assert(spa_atoi32("+2147483647", &v, 0) && v == 2147483647);
+	spa_assert(spa_atoi32("65535", &v, 0) && v == 0xffff);
+	spa_assert(spa_atoi32("65535", &v, 10) && v == 0xffff);
+	spa_assert(spa_atoi32("65535", &v, 16) && v == 0x65535);
+	spa_assert(spa_atoi32("0xff", &v, 0) && v == 0xff);
+	spa_assert(spa_atoi32("0xff", &v, 16) && v == 0xff);
+
+	v = 0xabcd;
+	spa_assert(!spa_atoi32("0xff", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32("fabc", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32("fabc", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi32("124bogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("124bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32("124bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi32("0xbogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32("bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi32("", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32("", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi32("  ", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32(" ", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi32("-2147483649", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("2147483648", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("9223372036854775807", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("-9223372036854775808", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32("9223372036854775808999", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi32(NULL, &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi32(NULL, &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi32(NULL, &v, 16) && v == 0xabcd);
+}
+
+static void test_streq(void)
+{
+	spa_assert(spa_streq(NULL, NULL));
+	spa_assert(spa_streq("", ""));
+	spa_assert(spa_streq("a", "a"));
+	spa_assert(spa_streq("abc", "abc"));
+	spa_assert(!spa_streq(NULL, "abc"));
+	spa_assert(!spa_streq("abc", NULL));
+
+	spa_assert(spa_strneq("abc", "aaa", 1));
+	spa_assert(spa_strneq("abc", "abc", 7));
+	spa_assert(!spa_strneq("abc", "aaa", 2));
+	spa_assert(!spa_strneq("abc", NULL, 7));
+	spa_assert(!spa_strneq(NULL, "abc", 7));
+}
+
+static void test_atob(void)
+{
+	spa_assert(spa_atob("true"));
+	spa_assert(spa_atob("1"));
+	spa_assert(!spa_atob("0"));
+	spa_assert(!spa_atob("-1"));
+	spa_assert(!spa_atob("10"));
+	spa_assert(!spa_atob("11"));
+	spa_assert(!spa_atob("t"));
+	spa_assert(!spa_atob("yes"));
+	spa_assert(!spa_atob("no"));
+	spa_assert(!spa_atob(NULL));
+	spa_assert(!spa_atob("True")); /* lower-case required */
+	spa_assert(!spa_atob("TRUE"));
+}
+
 int main(int argc, char *argv[])
 {
     test_abi();
@@ -428,5 +518,8 @@ int main(int argc, char *argv[])
     test_list();
     test_hook();
     test_ringbuffer();
+    test_strtol();
+    test_streq();
+    test_atob();
     return 0;
 }

@@ -25,6 +25,8 @@
 #include "pipewire/pipewire.h"
 #include "pipewire/array.h"
 
+#include <spa/utils/string.h>
+
 #include <extensions/metadata.h>
 
 #include "media-session.h"
@@ -60,24 +62,15 @@ static void set_item(struct item *item, uint32_t subject, const char *key, const
 	item->value = strdup(value);
 }
 
-static inline int strzcmp(const char *s1, const char *s2)
-{
-	if (s1 == s2)
-		return 0;
-	if (s1 == NULL || s2 == NULL)
-		return 1;
-	return strcmp(s1, s2);
-}
-
 static int change_item(struct item *item, const char *type, const char *value)
 {
 	int changed = 0;
-	if (strzcmp(item->type, type) != 0) {
+	if (!spa_streq(item->type, type)) {
 		free((char*)item->type);
 		item->type = type ? strdup(type) : NULL;
 		changed++;
 	}
-	if (strzcmp(item->value, value) != 0) {
+	if (!spa_streq(item->value, value)) {
 		free((char*)item->value);
 		item->value = value ? strdup(value) : NULL;
 		changed++;
@@ -139,7 +132,7 @@ static struct item *find_item(struct metadata *this, uint32_t subject, const cha
 	struct item *item;
 
 	pw_array_for_each(item, &this->metadata) {
-		if (item->subject == subject && (key == NULL || !strcmp(item->key, key)))
+		if (item->subject == subject && (key == NULL || spa_streq(item->key, key)))
 			return item;
 	}
 	return NULL;

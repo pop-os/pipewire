@@ -32,6 +32,7 @@
 #include <spa/support/log.h>
 #include <spa/support/loop.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/keys.h>
 #include <spa/node/io.h>
@@ -134,6 +135,8 @@ static void on_timeout(struct spa_source *source)
 	this->next_time = nsec + duration * SPA_NSEC_PER_SEC / rate;
 
 	if (SPA_LIKELY(this->clock)) {
+		SPA_FLAG_UPDATE(this->clock->flags,
+				SPA_IO_CLOCK_FLAG_FREEWHEEL, this->props.freewheel);
 		this->clock->nsec = nsec;
 		this->clock->position += duration;
 		this->clock->duration = duration;
@@ -265,7 +268,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -302,6 +305,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -353,6 +357,11 @@ impl_init(const struct spa_handle_factory *factory,
 	this->timerspec.it_interval.tv_nsec = 0;
 
 	reset_props(&this->props);
+
+	if (info) {
+		if ((str = spa_dict_lookup(info, "node.freewheel")) != NULL)
+			this->props.freewheel = spa_atob(str);
+	}
 
 	spa_loop_add_source(this->data_loop, &this->timer_source);
 

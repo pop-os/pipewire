@@ -149,7 +149,7 @@ static inline int spa_debug_format(int indent,
 		size = val->size;
 		vals = SPA_POD_BODY(val);
 
-		if (type < SPA_TYPE_None || type >= SPA_TYPE_LAST)
+		if (type < SPA_TYPE_None || type >= _SPA_TYPE_LAST)
 			continue;
 
 		ti = spa_debug_type_find(info, prop->key);
@@ -183,7 +183,7 @@ static inline int spa_debug_format(int indent,
 			fprintf(stderr, "%s", ssep);
 
 			for (i = 1; i < n_vals; i++) {
-				vals = SPA_MEMBER(vals, size, void);
+				vals = SPA_PTROFF(vals, size, void);
 				if (i > 1)
 					fprintf(stderr, "%s", sep);
 				spa_debug_format_value(ti ? ti->values : NULL, type, vals, size);

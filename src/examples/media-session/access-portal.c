@@ -32,6 +32,7 @@
 
 #include <dbus/dbus.h>
 
+#include <spa/utils/string.h>
 #include <spa/support/dbus.h>
 #include <spa/debug/dict.h>
 
@@ -58,7 +59,6 @@ struct impl {
 	DBusConnection *bus;
 };
 
-
 struct client {
 	struct impl *impl;
 
@@ -76,11 +76,13 @@ struct client {
 	enum media_role allowed_media_roles;
 };
 
+static DBusConnection *get_dbus_connection(struct impl *impl);
+
 static void client_info_changed(struct client *client, const struct pw_client_info *info);
 
 static enum media_role media_role_from_string(const char *media_role_str)
 {
-	if (strcmp(media_role_str, "Camera") == 0)
+	if (spa_streq(media_role_str, "Camera"))
 		return MEDIA_ROLE_CAMERA;
 	else
 		return MEDIA_ROLE_INVALID;
@@ -129,7 +131,7 @@ static enum media_role media_role_from_properties(const struct pw_properties *pr
 	if (media_role_str == NULL)
 		return MEDIA_ROLE_INVALID;
 
-	if (strcmp(media_class_str, "Video/Source") != 0)
+	if (!spa_streq(media_class_str, "Video/Source"))
 		return MEDIA_ROLE_INVALID;
 
 	return media_role_from_string(media_role_str);
@@ -170,7 +172,7 @@ handle_client(struct impl *impl, struct sm_object *object)
 
 	if (((str = pw_properties_get(client->obj->obj.props, PW_KEY_ACCESS)) != NULL ||
 	    (str = pw_properties_get(client->obj->obj.props, PW_KEY_CLIENT_ACCESS)) != NULL) &&
-	    strcmp(str, "portal") == 0) {
+	    spa_streq(str, "portal")) {
 		client->portal_managed = true;
 		pw_log_info(NAME " %p: portal managed client %d added",
 			     impl, client->id);
@@ -194,9 +196,9 @@ set_global_permissions(void *data, struct sm_object *object)
 
 	pw_log_debug(NAME" %p: object %d type:%s", impl, object->id, object->type);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Client) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Client)) {
 		set_permission = allowed = object->id == client->id;
-	} else if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0) {
+	} else if (spa_streq(object->type, PW_TYPE_INTERFACE_Node)) {
 		enum media_role media_role;
 
 		media_role = media_role_from_properties(props);
@@ -238,7 +240,7 @@ static void session_create(void *data, struct sm_object *object)
 
 	pw_log_debug(NAME " %p: create global '%d'", impl, object->id);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Client) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Client)) {
 		handle_client(impl, object);
 	} else {
 		struct client *client;
@@ -264,7 +266,7 @@ static void session_remove(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	pw_log_debug(NAME " %p: remove global '%d'", impl, object->id);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Client) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Client)) {
 		struct client *client;
 
 		if ((client = sm_object_get_data(object, SESSION_KEY)) != NULL)
@@ -284,11 +286,19 @@ static void session_destroy(void *data)
 	free(impl);
 }
 
+static void session_dbus_disconnected(void *data)
+{
+	struct impl *impl = data;
+	dbus_connection_unref(impl->bus);
+	impl->bus = NULL;
+}
+
 static const struct sm_media_session_events session_events = {
 	SM_VERSION_MEDIA_SESSION_EVENTS,
 	.create = session_create,
 	.remove = session_remove,
 	.destroy = session_destroy,
+	.dbus_disconnected = session_dbus_disconnected,
 };
 
 static bool
@@ -301,7 +311,7 @@ check_permission_allowed(DBusMessageIter *iter)
 
 		dbus_message_iter_get_basic(iter, &permission_value);
 
-		if (strcmp(permission_value, "yes") == 0) {
+		if (spa_streq(permission_value, "yes")) {
 			allowed = true;
 			break;
 		}
@@ -321,6 +331,7 @@ static void do_permission_store_check(struct client *client)
 	const char *id;
 	DBusMessageIter r_iter;
 	DBusMessageIter permissions_iter;
+	DBusConnection *bus;
 
 	if (client->app_id == NULL) {
 		pw_log_debug("Ignoring portal check for broken portal managed client %p",
@@ -337,7 +348,7 @@ static void do_permission_store_check(struct client *client)
 		return;
 	}
 
-	if (strcmp(client->app_id, "") == 0) {
+	if (spa_streq(client->app_id, "")) {
 		pw_log_debug("Ignoring portal check for non-sandboxed portal client %p",
 			     client);
 		client->allowed_media_roles = MEDIA_ROLE_ALL;
@@ -346,8 +357,9 @@ static void do_permission_store_check(struct client *client)
 					client);
 		return;
 	}
-	if (impl->bus == NULL) {
-		pw_log_debug("Ignoring portal check for client %p: dbus disabled",
+	bus = get_dbus_connection(impl);
+	if (bus == NULL) {
+		pw_log_debug("Ignoring portal check for client %p: no dbus",
 			     client);
 		client->allowed_media_roles = MEDIA_ROLE_ALL;
 		sm_media_session_for_each_object(impl->session,
@@ -371,7 +383,7 @@ static void do_permission_store_check(struct client *client)
 	id = "camera";
 	dbus_message_iter_append_basic(&msg_iter, DBUS_TYPE_STRING, &id);
 
-	if (!(r = dbus_connection_send_with_reply_and_block(impl->bus, m, -1, &error))) {
+	if (!(r = dbus_connection_send_with_reply_and_block(bus, m, -1, &error))) {
 		pw_log_error("Failed to call permission store: %s", error.message);
 		dbus_error_free(&error);
 		goto err_not_allowed;
@@ -393,7 +405,7 @@ static void do_permission_store_check(struct client *client)
 		dbus_message_iter_get_basic(&permissions_entry_iter, &app_id);
 
 		pw_log_info("permissions %s", app_id);
-		if (strcmp(app_id, client->app_id) != 0) {
+		if (!spa_streq(app_id, client->app_id)) {
 			dbus_message_iter_next(&permissions_iter);
 			continue;
 		}
@@ -442,7 +454,7 @@ static void client_info_changed(struct client *client, const struct pw_client_in
 
 	is_portal = spa_dict_lookup(props, "pipewire.access.portal.is_portal");
 	if (is_portal != NULL &&
-	    (strcmp(is_portal, "yes") == 0 || pw_properties_parse_bool(is_portal))) {
+	    (spa_streq(is_portal, "yes") || pw_properties_parse_bool(is_portal))) {
 		pw_log_info(NAME " %p: client %d is the portal itself",
 			     impl, client->id);
 		client->is_portal = true;
@@ -502,7 +514,7 @@ static DBusHandlerResult permission_store_changed_handler(DBusConnection *connec
 	dbus_message_iter_next(&iter);
 	dbus_message_iter_get_basic(&iter, &id);
 
-	if (strcmp(table, "devices") != 0 || strcmp(id, "camera") != 0)
+	if (!spa_streq(table, "devices") || !spa_streq(id, "camera"))
 		return DBUS_HANDLER_RESULT_HANDLED;
 
 	dbus_message_iter_next(&iter);
@@ -538,7 +550,7 @@ static DBusHandlerResult permission_store_changed_handler(DBusConnection *connec
 				continue;
 
 			if (client->app_id == NULL ||
-			    strcmp(client->app_id, app_id) != 0)
+			    !spa_streq(client->app_id, app_id))
 				continue;
 
 			if (!(client->media_roles & MEDIA_ROLE_CAMERA))
@@ -558,12 +570,21 @@ static DBusHandlerResult permission_store_changed_handler(DBusConnection *connec
 	return DBUS_HANDLER_RESULT_HANDLED;
 }
 
-static int init_dbus_connection(struct impl *impl)
+static DBusConnection *get_dbus_connection(struct impl *impl)
 {
+	struct sm_media_session *session = impl->session;
 	DBusError error;
 
-	if (impl->bus == NULL)
-		return 0;
+	if (impl->bus)
+		return impl->bus;
+
+	if (session->dbus_connection)
+		impl->bus = spa_dbus_connection_get(session->dbus_connection);
+	if (impl->bus == NULL) {
+		pw_log_warn("no dbus connection, portal access disabled");
+		return NULL;
+	}
+	pw_log_debug("got dbus connection %p", impl->bus);
 
 	dbus_error_init(&error);
 
@@ -577,19 +598,18 @@ static int init_dbus_connection(struct impl *impl)
 		pw_log_error("Failed to add permission store changed listener: %s",
 			     error.message);
 		dbus_error_free(&error);
-		return -1;
+		impl->bus = NULL;
+		return NULL;
 	}
-
+	dbus_connection_ref(impl->bus);
 	dbus_connection_add_filter(impl->bus, permission_store_changed_handler,
 				   impl, NULL);
-
-	return 0;
+	return impl->bus;
 }
 
 int sm_access_portal_start(struct sm_media_session *session)
 {
 	struct impl *impl;
-	int res;
 
 	impl = calloc(1, sizeof(struct impl));
 	if (impl == NULL)
@@ -599,22 +619,10 @@ int sm_access_portal_start(struct sm_media_session *session)
 
 	impl->session = session;
 
-	if (session->dbus_connection)
-		impl->bus = spa_dbus_connection_get(session->dbus_connection);
-	if (impl->bus == NULL)
-		pw_log_warn("no dbus connection, portal access disabled");
-	else
-		pw_log_debug("got dbus connection %p", impl->bus);
-
-	if ((res = init_dbus_connection(impl)) < 0)
-		goto error_free;
+	get_dbus_connection(impl);
 
 	sm_media_session_add_listener(impl->session,
 			&impl->listener,
 			&session_events, impl);
 	return 0;
-
-error_free:
-	free(impl);
-	return res;
 }

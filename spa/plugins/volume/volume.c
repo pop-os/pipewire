@@ -29,6 +29,7 @@
 #include <spa/support/plugin.h>
 #include <spa/support/log.h>
 #include <spa/utils/list.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -648,8 +649,8 @@ static void do_volume(struct impl *this, struct spa_buffer *dbuf, struct spa_buf
 		uint32_t soffset = sindex % sd[0].maxsize;
 		uint32_t doffset = dindex % dd[0].maxsize;
 
-		src = SPA_MEMBER(sd[0].data, soffset, int16_t);
-		dst = SPA_MEMBER(dd[0].data, doffset, int16_t);
+		src = SPA_PTROFF(sd[0].data, soffset, int16_t);
+		dst = SPA_PTROFF(dd[0].data, doffset, int16_t);
 
 		n_bytes = SPA_MIN(towrite, sd[0].maxsize - soffset);
 		n_bytes = SPA_MIN(n_bytes, dd[0].maxsize - doffset);
@@ -746,7 +747,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

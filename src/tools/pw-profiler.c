@@ -27,6 +27,7 @@
 #include <getopt.h>
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/pod/parser.h>
 #include <spa/debug/pod.h>
 
@@ -143,7 +144,7 @@ static int find_follower(struct data *d, uint32_t id, const char *name)
 {
 	int i;
 	for (i = 0; i < d->n_followers; i++) {
-		if (d->followers[i].id == id && strcmp(d->followers[i].name, name) == 0)
+		if (d->followers[i].id == id && spa_streq(d->followers[i].name, name))
 			return i;
 	}
 	return -1;
@@ -474,7 +475,7 @@ static void registry_event_global(void *data, uint32_t id,
 	struct data *d = data;
 	struct pw_proxy *proxy;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Profiler) != 0)
+	if (!spa_streq(type, PW_TYPE_INTERFACE_Profiler))
 		return;
 
 	if (d->profiler != NULL) {

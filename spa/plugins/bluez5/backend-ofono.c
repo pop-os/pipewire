@@ -36,6 +36,7 @@
 #include <spa/support/loop.h>
 #include <spa/support/dbus.h>
 #include <spa/support/plugin.h>
+#include <spa/utils/string.h>
 #include <spa/utils/type.h>
 #include <spa/param/audio/raw.h>
 
@@ -321,12 +322,12 @@ static DBusHandlerResult ofono_audio_card_found(struct impl *backend, char *path
 
 		dbus_message_iter_get_basic(&value_i, &value);
 
-		if (strcmp(key, "RemoteAddress") == 0) {
+		if (spa_streq(key, "RemoteAddress")) {
 			remote_address = value;
-		} else if (strcmp(key, "LocalAddress") == 0) {
+		} else if (spa_streq(key, "LocalAddress")) {
 			local_address = value;
-		} else if (strcmp(key, "Type") == 0) {
-			if (strcmp(value, "gateway") == 0)
+		} else if (spa_streq(key, "Type")) {
+			if (spa_streq(value, "gateway"))
 				profile = SPA_BT_PROFILE_HFP_HF;
 		}
 
@@ -558,7 +559,7 @@ static void ofono_getcards_reply(DBusPendingCall *pending, void *user_data)
 		goto finish;
 	}
 
-	if (!dbus_message_iter_init(r, &i) || strcmp(dbus_message_get_signature(r), "a(oa{sv})") != 0) {
+	if (!dbus_message_iter_init(r, &i) || !spa_streq(dbus_message_get_signature(r), "a(oa{sv})")) {
 		spa_log_error(backend->log, NAME": Invalid arguments in GetCards() reply");
 		goto finish;
 	}
@@ -681,7 +682,7 @@ static DBusHandlerResult ofono_filter_cb(DBusConnection *bus, DBusMessage *m, vo
 			char *p;
 			DBusMessageIter arg_i, props_i;
 
-			if (!dbus_message_iter_init(m, &arg_i) || strcmp(dbus_message_get_signature(m), "oa{sv}") != 0) {
+			if (!dbus_message_iter_init(m, &arg_i) || !spa_streq(dbus_message_get_signature(m), "oa{sv}")) {
 					spa_log_error(backend->log, NAME": Failed to parse org.ofono.HandsfreeAudioManager.CardAdded");
 					goto fail;
 			}
@@ -788,7 +789,7 @@ struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 	backend->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
 	backend->conn = dbus_connection;
 	if (info && (str = spa_dict_lookup(info, "bluez5.msbc-support")))
-		backend->msbc_supported = strcmp(str, "true") == 0 || atoi(str) == 1;
+		backend->msbc_supported = spa_atob(str);
 	else
 		backend->msbc_supported = false;
 

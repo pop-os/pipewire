@@ -31,6 +31,7 @@
 #include <math.h>
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/pod/iter.h>
 #include <spa/debug/types.h>
 #include <spa/utils/json.h>
@@ -155,7 +156,7 @@ static struct param *add_param(struct spa_list *params, uint32_t id, const struc
 
 	p->id = id;
 	if (param != NULL) {
-		p->param = SPA_MEMBER(p, sizeof(*p), struct spa_pod);
+		p->param = SPA_PTROFF(p, sizeof(*p), struct spa_pod);
 		memcpy(p->param, param, SPA_POD_SIZE(param));
 	} else {
 		clear_params(params, id);
@@ -280,8 +281,8 @@ static void put_value(struct data *d, const char *key, const char *val)
 
 	if (val == NULL)
 		put_literal(d, key, "null");
-	else if (strcmp(val, "true") == 0 ||
-	    strcmp(val, "false") == 0)
+	else if (spa_streq(val, "true") ||
+	    spa_streq(val, "false"))
 		put_literal(d, key, val);
 	else if ((li = strtol(val, &end, 10)) != LONG_MIN &&
 	    errno != -ERANGE && *end == '\0')
@@ -1109,7 +1110,7 @@ static void metadata_dump(struct object *o)
 		put_int(d, "subject", e->subject);
 		put_value(d, "key", e->key);
 		put_value(d, "type", e->type);
-		if (e->type != NULL && strcmp(e->type, "Spa:String:JSON") == 0)
+		if (e->type != NULL && spa_streq(e->type, "Spa:String:JSON"))
 			json_dump(d, "value", e->value);
 		else
 			put_value(d, "value", e->value);
@@ -1124,7 +1125,7 @@ static struct metadata_entry *metadata_find(struct object *o, uint32_t subject, 
 	struct metadata_entry *e;
 	spa_list_for_each(e, &o->data_list, link) {
 		if ((e->subject == subject) &&
-		    (key == NULL || strcmp(e->key, key) == 0))
+		    (key == NULL || spa_streq(e->key, key)))
 			return e;
 	}
 	return NULL;
@@ -1152,12 +1153,12 @@ static int metadata_property(void *object,
 		if (e == NULL)
 			return -errno;
 
-		e->key = SPA_MEMBER(e, sizeof(*e), void);
+		e->key = SPA_PTROFF(e, sizeof(*e), void);
 		strcpy(e->key, key);
-		e->value = SPA_MEMBER(e->key, strlen(e->key) + 1, void);
+		e->value = SPA_PTROFF(e->key, strlen(e->key) + 1, void);
 		strcpy(e->value, value);
 		if (type) {
-			e->type = SPA_MEMBER(e->value, strlen(e->value) + 1, void);
+			e->type = SPA_PTROFF(e->value, strlen(e->value) + 1, void);
 			strcpy(e->type, type);
 		} else {
 			e->type = NULL;
@@ -1208,7 +1209,7 @@ static const struct class *find_class(const char *type, uint32_t version)
 {
 	size_t i;
 	for (i = 0; i < SPA_N_ELEMENTS(classes); i++) {
-		if (strcmp(classes[i]->type, type) == 0 &&
+		if (spa_streq(classes[i]->type, type) &&
 		    classes[i]->version <= version)
 			return classes[i];
 	}
@@ -1429,7 +1430,7 @@ int main(int argc, char *argv[])
 	pw_init(&argc, &argv);
 
 	data.out = stdout;
-	if (getenv("NO_COLOR") == NULL)
+	if (isatty(fileno(data.out)) && getenv("NO_COLOR") == NULL)
 		colors = true;
 
 	while ((c = getopt_long(argc, argv, "hVr:mN", long_options, NULL)) != -1) {

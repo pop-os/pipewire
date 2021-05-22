@@ -32,6 +32,7 @@
 #include <spa/support/log.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -920,7 +921,7 @@ static int impl_node_process(void *object)
 
 	maxsize = INT_MAX;
 	for (i = 0; i < n_src_datas; i++) {
-		src_datas[i] = SPA_MEMBER(sd[i].data,
+		src_datas[i] = SPA_PTROFF(sd[i].data,
 				sd[i].chunk->offset, void);
 		maxsize = SPA_MIN(sd[i].chunk->size, maxsize);
 	}
@@ -1017,7 +1018,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

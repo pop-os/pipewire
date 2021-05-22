@@ -33,6 +33,7 @@
 #include <spa/utils/result.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/io.h>
 #include <spa/node/utils.h>
@@ -1267,7 +1268,7 @@ static int impl_node_process(void *object)
 
 		sd = &sbuf->buf->datas[0];
 
-		src_datas[i] = SPA_MEMBER(sd->data, sd->chunk->offset, void);
+		src_datas[i] = SPA_PTROFF(sd->data, sd->chunk->offset, void);
 
 		n_samples = SPA_MIN(n_samples, sd->chunk->size / inport->stride);
 
@@ -1336,7 +1337,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1384,7 +1385,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->monitor_channel_volumes = false;
 	if (info) {
 		if ((str = spa_dict_lookup(info, "monitor.channel-volumes")) != NULL)
-			this->monitor_channel_volumes = strcmp(str, "true") == 0 || atoi(str) == 1;
+			this->monitor_channel_volumes = spa_atob(str);
 	}
 
 	this->node.iface = SPA_INTERFACE_INIT(

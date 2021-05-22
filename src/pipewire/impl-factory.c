@@ -25,6 +25,7 @@
 #include <errno.h>
 
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -65,7 +66,7 @@ struct pw_impl_factory *pw_context_create_factory(struct pw_context *context,
 	spa_hook_list_init(&this->listener_list);
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(this, sizeof(*this), void);
+		this->user_data = SPA_PTROFF(this, sizeof(*this), void);
 
 	pw_log_debug(NAME" %p: new %s", this, name);
 
@@ -290,7 +291,7 @@ struct pw_impl_factory *pw_context_find_factory(struct pw_context *context,
 	struct pw_impl_factory *factory;
 
 	spa_list_for_each(factory, &context->factory_list, link) {
-		if (strcmp(factory->info.name, name) == 0)
+		if (spa_streq(factory->info.name, name))
 			return factory;
 	}
 	return NULL;

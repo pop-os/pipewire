@@ -1,6 +1,6 @@
-[[previous]](tutorial3.md) [[index]](tutorial-index.md) [[next]](tutorial5.md)
+# Tutorial - Part 4: Playing a tone
 
-# Playing a tone (Tutorial 4)
+[[previous]](tutorial3.md) [[index]](tutorial-index.md) [[next]](tutorial5.md)
 
 In this tutorial we show how to use a stream to play a tone.
 
@@ -184,7 +184,7 @@ static const struct pw_stream_events stream_events = {
 ```
 
 We are for the moment only interested now in the `process` event. This event
-is called whenever we need to produce more data. We'll see how that function 
+is called whenever we need to produce more data. We'll see how that function
 is implemented but first we need to setup the format of the stream:
 
 ```c

@@ -36,7 +36,7 @@ while getopts 'hr:vs:p:' param ; do
 			if [ x"$PIPEWIRE_DEBUG" = x ]; then
 				PIPEWIRE_DEBUG=3
 			else
-				PIPEWIRE_DEBUG=$(( $PIPEWIRE_DEBUG + 1 ))
+				PIPEWIRE_DEBUG=$(( PIPEWIRE_DEBUG + 1 ))
 			fi
 			export PIPEWIRE_DEBUG
 			;;
@@ -55,14 +55,14 @@ while getopts 'hr:vs:p:' param ; do
 			echo "	-h                  show brief help"
 			echo "	-r <remote>         remote daemon name"
 			echo "	-v                  verbose debug info"
-			echo "	-s                  samplerate (default "$SAMPLERATE")"
+			echo "	-s                  samplerate (default \"$SAMPLERATE\")"
 			echo "	-p                  period in samples"
 			exit 0
 			;;
 	esac
 done
 
-shift $(( $OPTIND - 1 ))
+shift $(( OPTIND - 1 ))
 
 if [ x"$PERIOD" != x ]; then
 	PIPEWIRE_LATENCY="$PERIOD/$SAMPLERATE"
