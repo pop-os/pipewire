@@ -90,6 +90,8 @@
 #define DEFAULT_FORMAT		"F32"
 #define DEFAULT_POSITION	"[ FL FR ]"
 
+#define LISTEN_BACKLOG 32
+
 #define MAX_FORMATS	32
 
 #include "format.c"
@@ -132,8 +134,7 @@ static void sample_free(struct sample *sample)
 
 	if (sample->index != SPA_ID_INVALID)
 		pw_map_remove(&impl->samples, sample->index);
-	if (sample->props)
-		pw_properties_free(sample->props);
+	pw_properties_free(sample->props);
 	free(sample->buffer);
 	free(sample);
 }
@@ -192,8 +193,10 @@ static struct message *message_alloc(struct impl *impl, uint32_t channel, uint32
 		msg->stat->n_allocated++;
 		msg->stat->n_accumulated++;
 	}
-	if (ensure_size(msg, size) < 0)
+	if (ensure_size(msg, size) < 0) {
+		message_free(impl, msg, false, true);
 		return NULL;
+	}
 	spa_zero(msg->extra);
 	msg->channel = channel;
 	msg->offset = 0;
@@ -240,11 +243,12 @@ static int flush_messages(struct client *client)
 		while (true) {
 			res = send(client->source->fd, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
 			if (res < 0) {
-				if (errno == EINTR)
+				res = -errno;
+				if (res == -EINTR)
 					continue;
-				if (errno != EAGAIN && errno != EWOULDBLOCK)
-					pw_log_warn("send channel:%d %zu, res %d: %m", m->channel, size, res);
-				return -errno;
+				if (res != -EAGAIN && res != -EWOULDBLOCK)
+					pw_log_warn("send channel:%d %zu, error %d: %m", m->channel, size, res);
+				return res;
 			}
 			client->out_index += res;
 			break;
@@ -963,8 +967,7 @@ static void stream_free(struct stream *stream)
 
 	if (stream->buffer)
 		free(stream->buffer);
-	if (stream->props)
-		pw_properties_free(stream->props);
+	pw_properties_free(stream->props);
 	free(stream);
 }
 
@@ -1382,7 +1385,9 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		stream->done = true;
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
-		if (!client->disconnecting)
+		if (stream->create_tag != SPA_ID_INVALID)
+			reply_error(client, -1, stream->create_tag, -ENOENT);
+		else if (!client->disconnecting)
 			stream->killed = true;
 		stream->done = true;
 		break;
@@ -1807,7 +1812,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 		goto error_invalid;
 
 	if (client->version >= 12) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &no_remap,
 				TAG_BOOLEAN, &no_remix,
 				TAG_BOOLEAN, &fix_format,
@@ -1815,49 +1820,49 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 				TAG_BOOLEAN, &fix_channels,
 				TAG_BOOLEAN, &no_move,
 				TAG_BOOLEAN, &variable_rate,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 13) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &muted,
 				TAG_BOOLEAN, &adjust_latency,
 				TAG_PROPLIST, props,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 14) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &volume_set,
 				TAG_BOOLEAN, &early_requests,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 15) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &muted_set,
 				TAG_BOOLEAN, &dont_inhibit_auto_suspend,
 				TAG_BOOLEAN, &fail_on_suspend,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 17) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &relative_volume,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 18) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &passthrough,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 
 	if (client->version >= 21) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U8, &n_formats,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 
 		if (n_formats) {
@@ -1865,9 +1870,9 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			for (i = 0; i < n_formats; i++) {
 				struct format_info format;
 
-				if ((res = message_get(m,
+				if (message_get(m,
 						TAG_FORMAT_INFO, &format,
-						TAG_INVALID)) < 0)
+						TAG_INVALID) < 0)
 					goto error_protocol;
 
 				if (n_params < MAX_FORMATS &&
@@ -1975,8 +1980,7 @@ error_invalid:
 	res = -EINVAL;
 	goto error;
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	if (stream)
 		stream_free(stream);
 	return res;
@@ -2025,14 +2029,14 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		goto error_errno;
 
 	if (client->version < 13) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_STRING, &name,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 		if (name == NULL)
 			goto error_protocol;
 	}
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_SAMPLE_SPEC, &ss,
 			TAG_CHANNEL_MAP, &map,
 			TAG_U32, &source_index,
@@ -2040,7 +2044,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 			TAG_U32, &attr.maxlength,
 			TAG_BOOLEAN, &corked,
 			TAG_U32, &attr.fragsize,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		goto error_protocol;
 
 	pw_log_info(NAME" %p: [%s] CREATE_RECORD_STREAM tag:%u corked:%u source-name:%s source-index:%u",
@@ -2050,7 +2054,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		goto error_invalid;
 
 	if (client->version >= 12) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &no_remap,
 				TAG_BOOLEAN, &no_remix,
 				TAG_BOOLEAN, &fix_format,
@@ -2058,35 +2062,35 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				TAG_BOOLEAN, &fix_channels,
 				TAG_BOOLEAN, &no_move,
 				TAG_BOOLEAN, &variable_rate,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 13) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &peak_detect,
 				TAG_BOOLEAN, &adjust_latency,
 				TAG_PROPLIST, props,
 				TAG_U32, &direct_on_input_idx,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 14) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &early_requests,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 15) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &dont_inhibit_auto_suspend,
 				TAG_BOOLEAN, &fail_on_suspend,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (client->version >= 22) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U8, &n_formats,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 
 		if (n_formats) {
@@ -2094,9 +2098,9 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 			for (i = 0; i < n_formats; i++) {
 				struct format_info format;
 
-				if ((res = message_get(m,
+				if (message_get(m,
 						TAG_FORMAT_INFO, &format,
-						TAG_INVALID)) < 0)
+						TAG_INVALID) < 0)
 					goto error_protocol;
 
 				if (n_params < MAX_FORMATS &&
@@ -2110,14 +2114,14 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				format_info_clear(&format);
 			}
 		}
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_CVOLUME, &volume,
 				TAG_BOOLEAN, &muted,
 				TAG_BOOLEAN, &volume_set,
 				TAG_BOOLEAN, &muted_set,
 				TAG_BOOLEAN, &relative_volume,
 				TAG_BOOLEAN, &passthrough,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	} else {
 		volume_set = false;
@@ -2227,8 +2231,7 @@ error_invalid:
 	res = -EINVAL;
 	goto error;
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	if (stream)
 		stream_free(stream);
 	return res;
@@ -2298,7 +2301,7 @@ static int do_get_playback_latency(struct client *client, uint32_t command, uint
 	reply = reply_new(client, tag);
 	message_put(reply,
 		TAG_USEC, stream->delay,	/* sink latency + queued samples */
-		TAG_USEC, 0,			/* always 0 */
+		TAG_USEC, 0LL,			/* always 0 */
 		TAG_BOOLEAN, stream->playing_for > 0 &&
 				!stream->corked,	/* playing state */
 		TAG_TIMEVAL, &tv,
@@ -2339,7 +2342,7 @@ static int do_get_record_latency(struct client *client, uint32_t command, uint32
 	gettimeofday(&now, NULL);
 	reply = reply_new(client, tag);
 	message_put(reply,
-		TAG_USEC, 0,			/* monitor latency */
+		TAG_USEC, 0LL,			/* monitor latency */
 		TAG_USEC, stream->delay,	/* source latency + queued */
 		TAG_BOOLEAN, !stream->corked,	/* playing state */
 		TAG_TIMEVAL, &tv,
@@ -2446,8 +2449,7 @@ error_toolarge:
 	res = -EOVERFLOW;
 	goto error;
 error:
-	if (props != NULL)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	if (stream)
 		stream_free(stream);
 	return res;
@@ -2462,9 +2464,9 @@ static int do_finish_upload_stream(struct client *client, uint32_t command, uint
 	const char *name;
 	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &channel,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	stream = pw_map_lookup(&client->streams, channel);
@@ -2493,8 +2495,7 @@ static int do_finish_upload_stream(struct client *client, uint32_t command, uint
 
 		event = SUBSCRIPTION_EVENT_NEW;
 	} else {
-		if (sample->props)
-			pw_properties_free(sample->props);
+		pw_properties_free(sample->props);
 		free(sample->buffer);
 		event = SUBSCRIPTION_EVENT_CHANGE;
 	}
@@ -2772,8 +2773,7 @@ error_noent:
 	res = -ENOENT;
 	goto error;
 error:
-	if (props != NULL)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	return res;
 }
 
@@ -2849,7 +2849,9 @@ static void stream_flush(struct stream *stream)
 	if (stream->type == STREAM_TYPE_PLAYBACK) {
 		stream->write_index = stream->read_index =
 			stream->ring.writeindex = stream->ring.readindex;
-		stream->missing = stream->attr.tlength;
+
+		stream->missing = stream->attr.tlength -
+			SPA_MIN(stream->requested, stream->attr.tlength);
 
 		if (stream->attr.prebuf > 0)
 			stream->in_prebuf = true;
@@ -3410,9 +3412,9 @@ static int do_update_proplist(struct client *client, uint32_t command, uint32_t 
 		return -errno;
 
 	if (command != COMMAND_UPDATE_CLIENT_PROPLIST) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U32, &channel,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	} else {
 		channel = SPA_ID_INVALID;
@@ -3421,10 +3423,10 @@ static int do_update_proplist(struct client *client, uint32_t command, uint32_t 
 	pw_log_info(NAME" %p: [%s] %s tag:%u channel:%d", impl,
 			client->name, commands[command].name, tag, channel);
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &mode,
 			TAG_PROPLIST, props,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		goto error_protocol;
 
 	if (command != COMMAND_UPDATE_CLIENT_PROPLIST) {
@@ -3438,8 +3440,7 @@ static int do_update_proplist(struct client *client, uint32_t command, uint32_t 
 	}
 	res = reply_simple_ack(client, tag);
 exit:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	return res;
 
 error_protocol:
@@ -3465,9 +3466,9 @@ static int do_remove_proplist(struct client *client, uint32_t command, uint32_t 
 		return -errno;
 
 	if (command != COMMAND_REMOVE_CLIENT_PROPLIST) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U32, &channel,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	} else {
 		channel = SPA_ID_INVALID;
@@ -3479,9 +3480,9 @@ static int do_remove_proplist(struct client *client, uint32_t command, uint32_t 
 	while (true) {
 		const char *key;
 
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_STRING, &key,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 		if (key == NULL)
 			break;
@@ -3506,8 +3507,7 @@ static int do_remove_proplist(struct client *client, uint32_t command, uint32_t 
 	}
 	res = reply_simple_ack(client, tag);
 exit:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	return res;
 
 error_protocol:
@@ -3588,13 +3588,12 @@ static int do_lookup(struct client *client, uint32_t command, uint32_t tag, stru
 	struct message *reply;
 	struct pw_manager_object *o;
 	const char *name;
-	int res;
 	bool is_sink = command == COMMAND_LOOKUP_SINK;
 	bool is_monitor;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_STRING, &name,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] LOOKUP tag:%u name:'%s'", impl, client->name, tag, name);
@@ -3615,11 +3614,10 @@ static int do_drain_stream(struct client *client, uint32_t command, uint32_t tag
 	struct impl *impl = client->impl;
 	uint32_t channel;
 	struct stream *stream;
-	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &channel,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] DRAIN tag:%u channel:%d", impl, client->name, tag, channel);
@@ -4336,9 +4334,9 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 
 	spa_zero(sel);
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &sel.id,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		goto error_protocol;
 
 	reply = reply_new(client, tag);
@@ -4388,9 +4386,9 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 		break;
 	}
 	if (sel.key) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_STRING, &sel.value,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
 	if (fill_func == NULL)
@@ -4488,10 +4486,10 @@ static int do_get_sample_info(struct client *client, uint32_t command, uint32_t 
 	struct sample *sample;
 	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &id,
 			TAG_STRING, &name,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	if ((id == SPA_ID_INVALID && name == NULL) ||
@@ -4611,12 +4609,11 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 	struct stream *stream;
 	struct message *reply;
 	struct buffer_attr attr;
-	int res;
 	bool adjust_latency = false, early_requests = false;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &channel,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u channel:%u", impl, client->name,
@@ -4630,33 +4627,33 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 		if (stream->type != STREAM_TYPE_PLAYBACK)
 			return -ENOENT;
 
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U32, &attr.maxlength,
 				TAG_U32, &attr.tlength,
 				TAG_U32, &attr.prebuf,
 				TAG_U32, &attr.minreq,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			return -EPROTO;
 	} else {
 		if (stream->type != STREAM_TYPE_RECORD)
 			return -ENOENT;
 
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_U32, &attr.maxlength,
 				TAG_U32, &attr.fragsize,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			return -EPROTO;
 	}
 	if (client->version >= 13) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &adjust_latency,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			return -EPROTO;
 	}
 	if (client->version >= 14) {
-		if ((res = message_get(m,
+		if (message_get(m,
 				TAG_BOOLEAN, &early_requests,
-				TAG_INVALID)) < 0)
+				TAG_INVALID) < 0)
 			return -EPROTO;
 	}
 
@@ -4671,7 +4668,7 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 			TAG_INVALID);
 		if (client->version >= 13) {
 			message_put(reply,
-				TAG_USEC, 0,		/* configured_sink_latency */
+				TAG_USEC, 0LL,		/* configured_sink_latency */
 				TAG_INVALID);
 		}
 	} else {
@@ -4681,7 +4678,7 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 			TAG_INVALID);
 		if (client->version >= 13) {
 			message_put(reply,
-				TAG_USEC, 0,		/* configured_source_latency */
+				TAG_USEC, 0LL,		/* configured_source_latency */
 				TAG_INVALID);
 		}
 	}
@@ -4693,13 +4690,12 @@ static int do_update_stream_sample_rate(struct client *client, uint32_t command,
 	struct impl *impl = client->impl;
 	uint32_t channel, rate;
 	struct stream *stream;
-	int res;
 	bool match;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &channel,
 			TAG_U32, &rate,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_warn(NAME" %p: [%s] %s tag:%u channel:%u rate:%u", impl, client->name,
@@ -4728,12 +4724,11 @@ static int do_extension(struct client *client, uint32_t command, uint32_t tag, s
 	uint32_t idx;
 	const char *name;
 	struct extension *ext;
-	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &idx,
 			TAG_STRING, &name,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u name:%s", impl, client->name,
@@ -4757,7 +4752,6 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
 	struct pw_manager_object *o;
 	const char *profile_name;
 	uint32_t profile_id = SPA_ID_INVALID;
-	int res;
 	struct selector sel;
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
@@ -4766,11 +4760,11 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
 	sel.key = PW_KEY_DEVICE_NAME;
 	sel.type = pw_manager_object_is_card;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &sel.id,
 			TAG_STRING, &sel.value,
 			TAG_STRING, &profile_name,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u name:%s profile:%s", impl, client->name,
@@ -4813,9 +4807,9 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 	int res;
 	bool sink = command == COMMAND_SET_DEFAULT_SINK;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_STRING, &name,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u name:%s", impl, client->name,
@@ -4851,15 +4845,14 @@ static int do_suspend(struct client *client, uint32_t command, uint32_t tag, str
 	struct impl *impl = client->impl;
 	struct pw_manager_object *o;
 	const char *name;
-	int res;
-	uint32_t id, cmd;;
+	uint32_t id, cmd;
 	bool sink = command == COMMAND_SUSPEND_SINK, suspend;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &id,
 			TAG_STRING, &name,
 			TAG_BOOLEAN, &suspend,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u name:%s", impl, client->name,
@@ -4889,11 +4882,11 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 	int res;
 	bool sink = command == COMMAND_MOVE_SINK_INPUT;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &id,
 			TAG_U32, &id_device,
 			TAG_STRING, &name_device,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	if ((id_device == SPA_ID_INVALID && name_device == NULL) ||
@@ -4948,11 +4941,10 @@ static int do_kill(struct client *client, uint32_t command, uint32_t tag, struct
 	struct pw_manager_object *o;
 	uint32_t id;
 	struct selector sel;
-	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &id,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u", impl, client->name,
@@ -5043,16 +5035,15 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 	struct impl *impl = client->impl;
 	struct load_module_data *d;
 	const char *name, *argument;
-	int res;
 	static struct module_events listener = {
 		VERSION_MODULE_EVENTS,
 		.loaded = on_module_loaded,
 	};
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_STRING, &name,
 			TAG_STRING, &argument,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s name:%s argument:%s", impl,
@@ -5074,11 +5065,10 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 	struct impl *impl = client->impl;
 	struct module *module;
 	uint32_t module_idx;
-	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_U32, &module_idx,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u id:%u", impl, client->name,
@@ -5112,11 +5102,11 @@ static int do_send_object_message(struct client *client, uint32_t command, uint3
 	int len = 0;
 	int res;
 
-	if ((res = message_get(m,
+	if (message_get(m,
 			TAG_STRING, &object_path,
 			TAG_STRING, &message,
 			TAG_STRING, &params,
-			TAG_INVALID)) < 0)
+			TAG_INVALID) < 0)
 		return -EPROTO;
 
 	pw_log_info(NAME" %p: [%s] %s tag:%u object_path:'%s' message:'%s' params:'%s'", impl,
@@ -5337,6 +5327,24 @@ static int client_free_stream(void *item, void *data)
 	return 0;
 }
 
+/*
+ * tries to detach the client from the server,
+ * but it does not drop the server's reference
+ */
+static bool client_detach(struct client *client)
+{
+	if (client->server == NULL)
+		return false;
+
+	pw_log_info(NAME" %p: client %p detaching", client->server, client);
+
+	/* remove from the `server->clients` list */
+	spa_list_remove(&client->link);
+	client->server = NULL;
+
+	return true;
+}
+
 static void client_disconnect(struct client *client)
 {
 	struct impl *impl = client->impl;
@@ -5344,8 +5352,10 @@ static void client_disconnect(struct client *client)
 	if (client->disconnect)
 		return;
 
+	/* the client must be detached from the server to disconnect */
+	spa_assert(client->server == NULL);
+
 	client->disconnect = true;
-	spa_list_remove(&client->link);
 	spa_list_append(&impl->cleanup_clients, &client->link);
 
 	pw_map_for_each(&client->streams, client_free_stream, client);
@@ -5354,6 +5364,7 @@ static void client_disconnect(struct client *client)
 		pw_loop_destroy_source(impl->loop, client->source);
 	if (client->manager)
 		pw_manager_destroy(client->manager);
+
 }
 
 static void client_free(struct client *client)
@@ -5365,8 +5376,10 @@ static void client_free(struct client *client)
 
 	pw_log_info(NAME" %p: client %p free", impl, client);
 
+	client_detach(client);
 	client_disconnect(client);
 
+	/* remove from the `impl->cleanup_clients` list */
 	spa_list_remove(&client->link);
 
 	spa_list_consume(p, &client->pending_samples, link)
@@ -5505,7 +5518,7 @@ static int handle_memblock(struct client *client, struct message *msg)
 			SPA_MIN(msg->length, stream->attr.maxlength));
 	stream->write_index = index + msg->length;
 	spa_ringbuffer_write_update(&stream->ring, stream->write_index);
-	stream->requested -= msg->length;
+	stream->requested -= SPA_MIN(msg->length, stream->requested);
 finish:
 	message_free(impl, msg, false, false);
 	return res;
@@ -5526,7 +5539,7 @@ static int do_read(struct client *client)
 		uint32_t idx = client->in_index - sizeof(client->desc);
 
 		if (client->message == NULL) {
-			res = -EIO;
+			res = -EPROTO;
 			goto exit;
 		}
 		data = SPA_PTROFF(client->message->data, idx, void);
@@ -5554,7 +5567,7 @@ static int do_read(struct client *client)
 
 		flags = ntohl(client->desc.flags);
 		if ((flags & FLAG_SHMMASK) != 0) {
-			res = -ENOTSUP;
+			res = -EPROTO;
 			goto exit;
 		}
 
@@ -5600,6 +5613,8 @@ on_client_data(void *data, int fd, uint32_t mask)
 	struct impl *impl = client->impl;
 	int res;
 
+	client->ref++;
+
 	if (mask & SPA_IO_HUP) {
 		res = -EPIPE;
 		goto error;
@@ -5613,7 +5628,7 @@ on_client_data(void *data, int fd, uint32_t mask)
 		while (true) {
 			res = do_read(client);
 			if (res < 0) {
-				if (res != -EAGAIN)
+				if (res != -EAGAIN && res != EWOULDBLOCK)
 					goto error;
 				break;
 			}
@@ -5627,21 +5642,39 @@ on_client_data(void *data, int fd, uint32_t mask)
 			int mask = client->source->mask;
 			SPA_FLAG_CLEAR(mask, SPA_IO_OUT);
 			pw_loop_update_io(impl->loop, client->source, mask);
-		} else if (res != -EAGAIN)
+		} else if (res != -EAGAIN && res != -EWOULDBLOCK)
 			goto error;
 	}
+done:
+	/* drop the reference that was acquired at the beginning of the function */
+	client_unref(client);
 	return;
 
 error:
-        if (res == -EPIPE)
-                pw_log_info(NAME" %p: client:%p [%s] disconnected", impl, client, client->name);
-        else if (res != -EPROTO) {
-                pw_log_error(NAME" %p: client:%p [%s] error %d (%s)", impl,
-                                client, client->name, res, spa_strerror(res));
-		return;
+	switch (res) {
+	case -EPIPE:
+		pw_log_info(NAME" %p: client:%p [%s] disconnected", impl, client, client->name);
+		SPA_FALLTHROUGH;
+	case -EPROTO:
+		/*
+		 * drop the server's reference to the client
+		 * (if it hasn't been dropped already),
+		 * it is guaranteed that this will not call `client_free()`
+		 * since at the beginning of this function an extra reference
+		 * has been acquired which will keep the client alive
+		 */
+		if (client_detach(client))
+			client_unref(client);
+
+		/* then disconnect the client */
+		client_disconnect(client);
+		break;
+	default:
+		pw_log_error(NAME" %p: client:%p [%s] error %d (%s)", impl,
+			     client, client->name, res, spa_strerror(res));
+		break;
 	}
-	client_disconnect(client);
-	client_unref(client);
+	goto done;
 }
 
 static int check_flatpak(struct client *client, int pid)
@@ -5719,7 +5752,7 @@ on_connect(void *data, int fd, uint32_t mask)
 {
 	struct server *server = data;
 	struct impl *impl = server->impl;
-	struct sockaddr_un name;
+	struct sockaddr_storage name;
 	socklen_t length;
 	int client_fd, val, pid;
 	struct client *client;
@@ -5746,7 +5779,7 @@ on_connect(void *data, int fd, uint32_t mask)
 
 	pw_properties_setf(client->props,
 			"pulse.server.type", "%s",
-			server->type == SERVER_TYPE_INET ? "tcp" : "unix");
+			server->addr.ss_family == AF_UNIX ? "unix" : "tcp");
 
 	client->routes = pw_properties_new(NULL, NULL);
 	if (client->routes == NULL)
@@ -5759,26 +5792,26 @@ on_connect(void *data, int fd, uint32_t mask)
 
 	pw_log_debug(NAME": client %p fd:%d", client, client_fd);
 
-	if (server->type == SERVER_TYPE_UNIX) {
-		val = 6;
+	if (server->addr.ss_family == AF_UNIX) {
 #ifdef SO_PRIORITY
-		if (setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY,
-					(const void *) &val, sizeof(val)) < 0)
-			pw_log_warn("SO_PRIORITY failed: %m");
+		val = 6;
+		if (setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
+			pw_log_warn("setsockopt(SO_PRIORITY) failed: %m");
 #endif
 		pid = get_client_pid(client, client_fd);
 		if (pid != 0 && check_flatpak(client, pid) == 1)
 			pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "flatpak");
-	} else if (server->type == SERVER_TYPE_INET) {
+	}
+	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
 		val = 1;
-		if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY,
-					(const void *) &val, sizeof(val)) < 0)
-	            pw_log_warn("TCP_NODELAY failed: %m");
+		if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
+			pw_log_warn("setsockopt(TCP_NODELAY) failed: %m");
 
-		val = IPTOS_LOWDELAY;
-		if (setsockopt(client_fd, IPPROTO_IP, IP_TOS,
-					(const void *) &val, sizeof(val)) < 0)
-	            pw_log_warn("IP_TOS failed: %m");
+		if (server->addr.ss_family == AF_INET) {
+			val = IPTOS_LOWDELAY;
+			if (setsockopt(client_fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
+				pw_log_warn("setsockopt(IP_TOS) failed: %m");
+		}
 
 		pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "restricted");
 	}
@@ -5843,17 +5876,21 @@ get_runtime_dir(char *buf, size_t buflen, const char *dir)
 void server_free(struct server *server)
 {
 	struct impl *impl = server->impl;
-	struct client *c;
+	struct client *c, *t;
 
 	pw_log_debug(NAME" %p: free server %p", impl, server);
 
 	spa_list_remove(&server->link);
-	spa_list_consume(c, &server->clients, link)
-		client_free(c);
+
+	spa_list_for_each_safe(c, t, &server->clients, link) {
+		spa_assert_se(client_detach(c));
+		client_unref(c);
+	}
+
 	if (server->source)
 		pw_loop_destroy_source(impl->loop, server->source);
-	if (server->type == SERVER_TYPE_UNIX && !server->activated)
-		unlink(server->addr.sun_path);
+	if (server->addr.ss_family == AF_UNIX && !server->activated)
+		unlink(((const struct sockaddr_un *) &server->addr)->sun_path);
 	free(server);
 }
 
@@ -5872,99 +5909,157 @@ get_server_name(struct pw_context *context)
 	return name;
 }
 
-static bool is_stale_socket(struct server *server, int fd)
+static int parse_unix_address(const char *address, struct pw_array *addrs)
 {
-	socklen_t size;
+	struct sockaddr_un addr = {0}, *s;
+	int res;
 
-	size = offsetof(struct sockaddr_un, sun_path) + strlen(server->addr.sun_path);
-	if (connect(fd, (struct sockaddr *)&server->addr, size) < 0) {
+	if (address[0] != '/') {
+		char runtime_dir[PATH_MAX];
+
+		if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir), "pulse")) < 0)
+			return res;
+
+		res = snprintf(addr.sun_path, sizeof(addr.sun_path),
+			       "%s/%s", runtime_dir, address);
+	}
+	else {
+		res = snprintf(addr.sun_path, sizeof(addr.sun_path),
+			       "%s", address);
+	}
+
+	if (res < 0)
+		return -EINVAL;
+
+	if ((size_t) res >= sizeof(addr.sun_path)) {
+		pw_log_warn(NAME": '%s...' too long",
+			    addr.sun_path);
+		return -ENAMETOOLONG;
+	}
+
+	s = pw_array_add(addrs, sizeof(struct sockaddr_storage));
+	if (s == NULL)
+		return -ENOMEM;
+
+	addr.sun_family = AF_UNIX;
+
+	*s = addr;
+
+	return 0;
+}
+
+#ifndef SUN_LEN
+#define SUN_LEN(addr_un) \
+	(offsetof(struct sockaddr_un, sun_path) + strlen((addr_un)->sun_path))
+#endif
+
+static bool is_stale_socket(int fd, const struct sockaddr_un *addr_un)
+{
+	if (connect(fd, (const struct sockaddr *) addr_un, SUN_LEN(addr_un)) < 0) {
 		if (errno == ECONNREFUSED)
 			return true;
 	}
+
 	return false;
 }
 
-static int make_local_socket(struct server *server, const char *name)
-{
-	char runtime_dir[PATH_MAX];
-	socklen_t size;
-	int name_size, fd, res;
-	struct stat socket_stat;
-	bool activated = false;
-
-	if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir), "pulse")) < 0)
-		goto error;
-
-	server->addr.sun_family = AF_LOCAL;
-	name_size = snprintf(server->addr.sun_path, sizeof(server->addr.sun_path),
-                             "%s/%s", runtime_dir, name) + 1;
-
-	if (name_size > (int) sizeof(server->addr.sun_path)) {
-		pw_log_error(NAME" %p: %s/%s too long",
-					server, runtime_dir, name);
-		res = -ENAMETOOLONG;
-		goto error;
-	}
-	size = offsetof(struct sockaddr_un, sun_path) + strlen(server->addr.sun_path);
-
 #ifdef HAVE_SYSTEMD
-	{
-		int i, n = sd_listen_fds(0);
-		for (i = 0; i < n; ++i) {
-			if (sd_is_socket_unix(SD_LISTEN_FDS_START + i, SOCK_STREAM,
-						1, server->addr.sun_path, 0) > 0) {
-				fd = SD_LISTEN_FDS_START + i;
-				activated = true;
-				pw_log_info("server %p: Found socket activation socket for '%s'",
-						server, server->addr.sun_path);
-				goto done;
-			}
-		}
+static int check_systemd_activation(const char *path)
+{
+	const int n = sd_listen_fds(0);
+
+	for (int i = 0; i < n; i++) {
+		const int fd = SD_LISTEN_FDS_START + i;
+
+		if (sd_is_socket_unix(fd, SOCK_STREAM, 1, path, 0) > 0)
+			return fd;
 	}
+
+	return -1;
+}
+#else
+static inline int check_systemd_activation(SPA_UNUSED const char *path)
+{
+	return -1;
+}
 #endif
 
-	if ((fd = socket(PF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
+static int start_unix_server(struct server *server, const struct sockaddr_storage *addr)
+{
+	const struct sockaddr_un * const addr_un = (const struct sockaddr_un *) addr;
+	struct stat socket_stat;
+	int fd, res;
+
+	spa_assert(addr_un->sun_family == AF_UNIX);
+
+	fd = check_systemd_activation(addr_un->sun_path);
+	if (fd >= 0) {
+		server->activated = true;
+		pw_log_info(NAME" %p: found systemd socket activation socket for '%s'",
+			    server, addr_un->sun_path);
+		goto done;
+	}
+	else {
+		server->activated = false;
+	}
+
+	fd = socket(addr_un->sun_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+	if (fd < 0) {
 		res = -errno;
 		pw_log_info(NAME" %p: socket() failed: %m", server);
 		goto error;
 	}
-	if (stat(server->addr.sun_path, &socket_stat) < 0) {
+
+	if (stat(addr_un->sun_path, &socket_stat) < 0) {
 		if (errno != ENOENT) {
 			res = -errno;
-			pw_log_error(NAME" %p: stat() %s failed: %m",
-					server, server->addr.sun_path);
+			pw_log_warn(NAME" %p: stat('%s') failed: %m",
+				    server, addr_un->sun_path);
 			goto error_close;
 		}
-	} else if (socket_stat.st_mode & S_IWUSR || socket_stat.st_mode & S_IWGRP) {
+	}
+	else if (socket_stat.st_mode & S_IWUSR || socket_stat.st_mode & S_IWGRP) {
+		if (!S_ISSOCK(socket_stat.st_mode)) {
+			res = -EEXIST;
+			pw_log_warn(NAME" %p: '%s' exists and is not a socket",
+				    server, addr_un->sun_path);
+			goto error_close;
+		}
+
 		/* socket is there, check if it's stale */
-		if (!is_stale_socket(server, fd)) {
-			res = -EBUSY;
-			pw_log_info(NAME" %p: socket %s is in use", server,
-				server->addr.sun_path);
+		if (!is_stale_socket(fd, addr_un)) {
+			res = -EADDRINUSE;
+			pw_log_warn(NAME" %p: socket '%s' is in use",
+				    server, addr_un->sun_path);
 			goto error_close;
 		}
-		pw_log_warn(NAME" %p: unlink stale socket %s", server,
-				server->addr.sun_path);
-			unlink(server->addr.sun_path);
+
+		pw_log_warn(NAME" %p: unlinking stale socket '%s'",
+			    server, addr_un->sun_path);
+
+		if (unlink(addr_un->sun_path) < 0)
+			pw_log_warn(NAME" %p: unlink('%s') failed: %m",
+				    server, addr_un->sun_path);
 	}
-	if (bind(fd, (struct sockaddr *) &server->addr, size) < 0) {
+
+	if (bind(fd, (const struct sockaddr *) addr_un, SUN_LEN(addr_un)) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: bind() to %s failed: %m", server,
-				server->addr.sun_path);
+		pw_log_warn(NAME" %p: bind() to '%s' failed: %m",
+			    server, addr_un->sun_path);
 		goto error_close;
 	}
-	if (listen(fd, 128) < 0) {
+
+	if (listen(fd, LISTEN_BACKLOG) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: listen() on %s failed: %m", server,
-				server->addr.sun_path);
+		pw_log_warn(NAME" %p: listen() on '%s' failed: %m",
+			    server, addr_un->sun_path);
 		goto error_close;
 	}
-	pw_log_info(NAME" listening on unix:%s", server->addr.sun_path);
-#ifdef HAVE_SYSTEMD
+
+	pw_log_info(NAME" %p: listening on unix:%s", server, addr_un->sun_path);
+
 done:
-#endif
-	server->activated = activated;
-	server->type = SERVER_TYPE_UNIX;
+	server->addr = *addr;
 
 	return fd;
 
@@ -5974,83 +6069,234 @@ error:
 	return res;
 }
 
-static int create_pid_file(void) {
+static int parse_port(const char *port)
+{
+	const char *end;
+	long p;
+
+	if (port[0] == ':')
+		port += 1;
+
+	errno = 0;
+	p = strtol(port, (char **) &end, 0);
+
+	if (errno != 0)
+		return -errno;
+
+	if (end == port || *end != '\0')
+		return -EINVAL;
+
+	if (!(1 <= p && p <= 65535))
+		return -EINVAL;
+
+	return p;
+}
+
+static int parse_ipv6_address(const char *address, struct sockaddr_in6 *out)
+{
+	char addr_str[INET6_ADDRSTRLEN];
+	struct sockaddr_in6 addr = {0};
+	const char *end;
+	size_t len;
 	int res;
-	char pid_file[PATH_MAX];
-	FILE *f;
 
-	if ((res = get_runtime_dir(pid_file, sizeof(pid_file), "pulse")) < 0) {
-		return res;
-	}
-	if (strlen(pid_file) > PATH_MAX - 5) {
-		pw_log_error(NAME" %s/pid too long", pid_file);
+	if (address[0] != '[')
+		return -EINVAL;
+
+	address += 1;
+
+	end = strchr(address, ']');
+	if (end == NULL)
+		return -EINVAL;
+
+	len = end - address;
+	if (len >= sizeof(addr_str))
 		return -ENAMETOOLONG;
-	}
-	strcat(pid_file, "/pid");
 
-	if ((f = fopen(pid_file, "w")) == NULL) {
-		res = -errno;
-		pw_log_error(NAME" failed to open pid file");
+	memcpy(addr_str, address, len);
+	addr_str[len] = '\0';
+
+	res = inet_pton(AF_INET6, addr_str, &addr.sin6_addr.s6_addr);
+	if (res < 0)
+		return -errno;
+	if (res == 0)
+		return -EINVAL;
+
+	res = parse_port(end + 1);
+	if (res < 0)
 		return res;
-	}
 
-	fprintf(f, "%lu\n", (unsigned long)getpid());
-	fclose(f);
+	addr.sin6_port = htons(res);
+	addr.sin6_family = AF_INET6;
+
+	*out = addr;
+
 	return 0;
 }
 
-static int make_inet_socket(struct server *server, const char *name)
+static int parse_ipv4_address(const char *address, struct sockaddr_in *out)
 {
-	struct sockaddr_in addr;
-	int res, fd, on;
-	uint32_t address = INADDR_ANY;
-	uint16_t port;
-	char *col;
+	char addr_str[INET_ADDRSTRLEN];
+	struct sockaddr_in addr = {0};
+	size_t len;
+	int res;
 
-	col = strchr(name, ':');
-	if (col) {
-		struct in_addr ipv4;
-		char *n;
-		port = atoi(col+1);
-		n = strndupa(name, col - name);
-		if (inet_pton(AF_INET, n, &ipv4) > 0)
-			address = ntohl(ipv4.s_addr);
-		else
-			address = INADDR_ANY;
-	} else {
-		address = INADDR_ANY;
-		port = atoi(name);
+	len = strspn(address, "0123456789.");
+	if (len == 0)
+		return -EINVAL;
+	if (len >= sizeof(addr_str))
+		return -ENAMETOOLONG;
+
+	memcpy(addr_str, address, len);
+	addr_str[len] = '\0';
+
+	res = inet_pton(AF_INET, addr_str, &addr.sin_addr.s_addr);
+	if (res < 0)
+		return -errno;
+	if (res == 0)
+		return -EINVAL;
+
+	res = parse_port(address + len);
+	if (res < 0)
+		return res;
+
+	addr.sin_port = htons(res);
+	addr.sin_family = AF_INET;
+
+	*out = addr;
+
+	return 0;
+}
+
+#define FORMATTED_IP_ADDR_STRLEN (INET6_ADDRSTRLEN + 2 + 1 + 5)
+
+static int format_ip_address(const struct sockaddr_storage *addr, char *buffer, size_t buflen)
+{
+	char ip[INET6_ADDRSTRLEN];
+	const void *src;
+	const char *fmt;
+	int port;
+
+	switch (addr->ss_family) {
+	case AF_INET:
+		fmt = "%s:%d";
+		src = &((struct sockaddr_in *) addr)->sin_addr.s_addr;
+		port = ntohs(((struct sockaddr_in *) addr)->sin_port);
+		break;
+	case AF_INET6:
+		fmt = "[%s]:%d";
+		src = &((struct sockaddr_in6 *) addr)->sin6_addr.s6_addr;
+		port = ntohs(((struct sockaddr_in6 *) addr)->sin6_port);
+		break;
+	default:
+		return -EAFNOSUPPORT;
 	}
-	if (port == 0)
-		port = PW_PROTOCOL_PULSE_DEFAULT_PORT;
 
-	if ((fd = socket(PF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
+	if (inet_ntop(addr->ss_family, src, ip, sizeof(ip)) == NULL)
+		return -errno;
+
+	return snprintf(buffer, buflen, fmt, ip, port);
+}
+
+static int get_ip_address_length(const struct sockaddr_storage *addr)
+{
+	switch (addr->ss_family) {
+	case AF_INET:
+		return sizeof(struct sockaddr_in);
+	case AF_INET6:
+		return sizeof(struct sockaddr_in6);
+	default:
+		return -EAFNOSUPPORT;
+	}
+}
+
+static int parse_ip_address(const char *address, struct pw_array *addrs)
+{
+	char ip[FORMATTED_IP_ADDR_STRLEN];
+	struct sockaddr_storage addr, *s;
+	int res;
+
+	res = parse_ipv6_address(address, (struct sockaddr_in6 *) &addr);
+	if (res == 0) {
+		s = pw_array_add(addrs, sizeof(*s));
+		if (s == NULL)
+			return -ENOMEM;
+
+		*s = addr;
+		return 0;
+	}
+
+	res = parse_ipv4_address(address, (struct sockaddr_in *) &addr);
+	if (res == 0) {
+		s = pw_array_add(addrs, sizeof(*s));
+		if (s == NULL)
+			return -ENOMEM;
+
+		*s = addr;
+		return 0;
+	}
+
+	res = parse_port(address);
+	if (res < 0)
+		return res;
+
+	s = pw_array_add(addrs, sizeof(*s) * 2);
+	if (s == NULL)
+		return -ENOMEM;
+
+	snprintf(ip, sizeof(ip), "[::]:%d", res);
+	spa_assert_se(parse_ipv6_address(ip, (struct sockaddr_in6 *) &addr) == 0);
+	*s++ = addr;
+
+	snprintf(ip, sizeof(ip), "0.0.0.0:%d", res);
+	spa_assert_se(parse_ipv4_address(ip, (struct sockaddr_in *) &addr) == 0);
+	*s++ = addr;
+
+	return 0;
+}
+
+static int start_ip_server(struct server *server, const struct sockaddr_storage *addr)
+{
+	char ip[FORMATTED_IP_ADDR_STRLEN];
+	int fd, res;
+
+	spa_assert(addr->ss_family == AF_INET || addr->ss_family == AF_INET6);
+
+	fd = socket(addr->ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
+	if (fd < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: socket() failed: %m", server);
+		pw_log_warn(NAME" %p: socket() failed: %m", server);
 		goto error;
 	}
 
-	on = 1;
-	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *) &on, sizeof(on)) < 0)
-		pw_log_warn(NAME" %p: setsockopt(): %m", server);
+	{
+		int on = 1;
+		if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
+			pw_log_warn(NAME" %p: setsockopt(SO_REUSEADDR) failed: %m", server);
+	}
 
-	spa_zero(addr);
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(address);
+	if (addr->ss_family == AF_INET6) {
+		int on = 1;
+		if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) < 0)
+			pw_log_warn(NAME" %p: setsockopt(IPV6_V6ONLY) failed: %m", server);
+	}
 
-	if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+	if (bind(fd, (const struct sockaddr *) addr, get_ip_address_length(addr)) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: bind() failed: %m", server);
+		pw_log_warn(NAME" %p: bind() failed: %m", server);
 		goto error_close;
 	}
-	if (listen(fd, 5) < 0) {
+
+	if (listen(fd, LISTEN_BACKLOG) < 0) {
 		res = -errno;
-		pw_log_error(NAME" %p: listen() failed: %m", server);
+		pw_log_warn(NAME" %p: listen() failed: %m", server);
 		goto error_close;
 	}
-	server->type = SERVER_TYPE_INET;
-	pw_log_info(NAME" listening on tcp:%08x:%u", address, port);
+
+	spa_assert_se(format_ip_address(addr, ip, sizeof(ip)) >= 0);
+	pw_log_info(NAME" %p: listening on tcp:%s", server, ip);
+
+	server->addr = *addr;
 
 	return fd;
 
@@ -6060,45 +6306,178 @@ error:
 	return res;
 }
 
-struct server *create_server(struct impl *impl, const char *address)
+static struct server *server_new(struct impl *impl)
 {
-	int fd, res;
-	struct server *server;
-
-	server = calloc(1, sizeof(struct server));
+	struct server * const server = calloc(1, sizeof(*server));
 	if (server == NULL)
 		return NULL;
 
 	server->impl = impl;
+	server->addr.ss_family = AF_UNSPEC;
 	spa_list_init(&server->clients);
 	spa_list_append(&impl->servers, &server->link);
 
-	if (strstr(address, "unix:") == address) {
-		fd = make_local_socket(server, address+5);
-	} else if (strstr(address, "tcp:") == address) {
-		fd = make_inet_socket(server, address+4);
-	} else {
-		fd = -EINVAL;
+	return server;
+}
+
+static int server_start(struct server *server, const struct sockaddr_storage *addr)
+{
+	const struct impl * const impl = server->impl;
+	int res = 0, fd;
+
+	switch (addr->ss_family) {
+	case AF_INET:
+	case AF_INET6:
+		fd = start_ip_server(server, addr);
+		break;
+	case AF_UNIX:
+		fd = start_unix_server(server, addr);
+		break;
+	default:
+		/* shouldn't happen */
+		fd = -EAFNOSUPPORT;
+		break;
 	}
-	if (fd < 0) {
-		res = fd;
-		goto error;
-	}
+
+	if (fd < 0)
+		return fd;
+
 	server->source = pw_loop_add_io(impl->loop, fd, SPA_IO_IN, true, on_connect, server);
 	if (server->source == NULL) {
 		res = -errno;
 		pw_log_error(NAME" %p: can't create server source: %m", impl);
-		goto error_close;
 	}
-	return server;
 
-error_close:
-	close(fd);
-error:
-	server_free(server);
-	errno = -res;
-	return NULL;
+	return res;
+}
 
+static int parse_address(const char *address, struct pw_array *addrs)
+{
+	if (strncmp(address, "tcp:", strlen("tcp:")) == 0)
+		return parse_ip_address(address + strlen("tcp:"), addrs);
+
+	if (strncmp(address, "unix:", strlen("unix:")) == 0)
+		return parse_unix_address(address + strlen("unix:"), addrs);
+
+	return -EAFNOSUPPORT;
+}
+
+#define SUN_PATH_SIZE (sizeof(((struct sockaddr_un *) NULL)->sun_path))
+#define FORMATTED_UNIX_ADDR_STRLEN (SUN_PATH_SIZE + 5)
+#define FORMATTED_TCP_ADDR_STRLEN (FORMATTED_IP_ADDR_STRLEN + 4)
+#define FORMATTED_SOCKET_ADDR_STRLEN \
+	(FORMATTED_UNIX_ADDR_STRLEN > FORMATTED_TCP_ADDR_STRLEN ? \
+		FORMATTED_UNIX_ADDR_STRLEN : \
+		FORMATTED_TCP_ADDR_STRLEN)
+
+static int format_socket_address(const struct sockaddr_storage *addr, char *buffer, size_t buflen)
+{
+	if (addr->ss_family == AF_INET || addr->ss_family == AF_INET6) {
+		char ip[FORMATTED_IP_ADDR_STRLEN];
+
+		spa_assert_se(format_ip_address(addr, ip, sizeof(ip)) >= 0);
+
+		return snprintf(buffer, buflen, "tcp:%s", ip);
+	}
+	else if (addr->ss_family == AF_UNIX) {
+		const struct sockaddr_un *addr_un = (const struct sockaddr_un *) addr;
+
+		return snprintf(buffer, buflen, "unix:%s", addr_un->sun_path);
+	}
+
+	return -EAFNOSUPPORT;
+}
+
+int create_and_start_servers(struct impl *impl, const char *addresses, struct pw_array *servers)
+{
+	struct pw_array addrs = PW_ARRAY_INIT(sizeof(struct sockaddr_storage));
+	const struct sockaddr_storage *addr;
+	char addr_str[FORMATTED_SOCKET_ADDR_STRLEN];
+	int res, count = 0, err = 0; /* store the first error to return when no servers could be created */
+	struct spa_json it[2];
+
+	/* update `err` if it hasn't been set to an errno */
+#define UPDATE_ERR(e) do { if (err == 0) err = (e); } while (false)
+
+	/* collect addresses into an array of `struct sockaddr_storage` */
+	spa_json_init(&it[0], addresses, strlen(addresses));
+
+	if (spa_json_enter_array(&it[0], &it[1]) < 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], addr_str, sizeof(addr_str) - 1) > 0) {
+		res = parse_address(addr_str, &addrs);
+		if (res < 0) {
+			pw_log_warn(NAME" %p: failed to parse address '%s': %s",
+				    impl, addr_str, spa_strerror(res));
+
+			UPDATE_ERR(res);
+		}
+	}
+
+	/* try to create sockets for each address in the list */
+	pw_array_for_each (addr, &addrs) {
+		struct server * const server = server_new(impl);
+		if (server == NULL) {
+			UPDATE_ERR(-errno);
+			continue;
+		}
+
+		res = server_start(server, addr);
+		if (res < 0) {
+			spa_assert_se(format_socket_address(addr, addr_str, sizeof(addr_str)) >= 0);
+			pw_log_warn(NAME" %p: failed to start server on '%s': %s",
+				    impl, addr_str, spa_strerror(res));
+
+			UPDATE_ERR(res);
+			server_free(server);
+
+			continue;
+		}
+
+		if (servers != NULL)
+			pw_array_add_ptr(servers, server);
+
+		count += 1;
+	}
+
+	pw_array_clear(&addrs);
+
+	if (count == 0) {
+		UPDATE_ERR(-EINVAL);
+		return err;
+	}
+
+	return count;
+
+#undef UPDATE_ERR
+}
+
+static int create_pid_file(void) {
+	char pid_file[PATH_MAX];
+	FILE *f;
+	int res;
+
+	if ((res = get_runtime_dir(pid_file, sizeof(pid_file), "pulse")) < 0)
+		return res;
+
+	if (strlen(pid_file) > PATH_MAX - 5) {
+		pw_log_error(NAME": path too long: %s/pid", pid_file);
+		return -ENAMETOOLONG;
+	}
+
+	strcat(pid_file, "/pid");
+
+	if ((f = fopen(pid_file, "w")) == NULL) {
+		res = -errno;
+		pw_log_error(NAME": failed to open pid file: %m");
+		return res;
+	}
+
+	fprintf(f, "%lu\n", (unsigned long) getpid());
+	fclose(f);
+
+	return 0;
 }
 
 static int impl_free_sample(void *item, void *data)
@@ -6226,19 +6605,16 @@ static void load_defaults(struct defs *def, struct pw_properties *props)
 struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		struct pw_properties *props, size_t user_data_size)
 {
-	struct impl *impl;
-	const char *str;
-	struct spa_json it[2];
-	char value[512];
 	const struct spa_support *support;
 	struct spa_cpu *cpu;
 	uint32_t n_support;
-	int res;
+	struct impl *impl;
+	const char *str;
+	int res = 0;
 
-	impl = calloc(1, sizeof(struct impl) + user_data_size);
+	impl = calloc(1, sizeof(*impl) + user_data_size);
 	if (impl == NULL)
 		goto error_exit;
-
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
@@ -6285,31 +6661,34 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 				get_server_name(context));
 		str = pw_properties_get(props, "server.address");
 	}
+
 	if (str == NULL)
 		goto error_free;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_array(&it[0], &it[1]) > 0) {
-		while (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
-			if (create_server(impl, value) == NULL) {
-				pw_log_warn(NAME" %p: can't create server for %s: %m",
-						impl, value);
-			}
-		}
+	if ((res = create_and_start_servers(impl, str, NULL)) < 0) {
+		pw_log_error(NAME" %p: no servers could be started: %s",
+			     impl, spa_strerror(res));
+		goto error_free;
 	}
+
 	if ((res = create_pid_file()) < 0) {
 		pw_log_warn(NAME" %p: can't create pid file: %s",
-				impl, spa_strerror(res));
+			    impl, spa_strerror(res));
 	}
+
 	impl->dbus_name = dbus_request_name(context, "org.pulseaudio.Server");
 
-	return (struct pw_protocol_pulse*)impl;
+	return (struct pw_protocol_pulse *) impl;
 
 error_free:
 	free(impl);
+
 error_exit:
-	if (props != NULL)
-		pw_properties_free(props);
+	pw_properties_free(props);
+
+	if (res < 0)
+		errno = -res;
+
 	return NULL;
 }
 

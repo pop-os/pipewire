@@ -155,8 +155,10 @@ static void init_node(struct impl *this, struct node *node, uint32_t id)
 
 	spa_zero(*node);
 	node->id = id;
-	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
-		node->volumes[i] = 1.0;
+	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++) {
+		node->volumes[i] = 1.0f;
+		node->soft_volumes[i] = 1.0f;
+	}
 }
 
 static const struct a2dp_codec *get_a2dp_codec(enum spa_bluetooth_audio_codec id)
@@ -238,7 +240,7 @@ static void transport_destroy(void *userdata)
 	node->transport = NULL;
 }
 
-static void emit_volume(struct impl *this, struct node *node)
+static void emit_node_props(struct impl *this, struct node *node, bool full)
 {
 	struct spa_event *event;
 	uint8_t buffer[4096];
@@ -259,9 +261,21 @@ static void emit_volume(struct impl *this, struct node *node)
 				SPA_TYPE_Float, node->n_channels, node->soft_volumes),
 			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
 				SPA_TYPE_Id, node->n_channels, node->channels));
+	if (full) {
+		spa_pod_builder_add(&b,
+			SPA_PROP_mute, SPA_POD_Bool(node->mute),
+			SPA_PROP_softMute, SPA_POD_Bool(node->mute),
+			SPA_PROP_latencyOffsetNsec, SPA_POD_Long(node->latency_offset),
+			0);
+	}
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
+}
+
+static void emit_volume(struct impl *this, struct node *node)
+{
+	emit_node_props(this, node, false);
 }
 
 static void emit_info(struct impl *this, bool full);
@@ -313,14 +327,11 @@ static void volume_changed(void *userdata)
 
 	node_update_soft_volumes(node, t_volume->volume);
 
+	emit_volume(impl, node);
+
 	impl->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
 	impl->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
 	emit_info(impl, false);
-
-	/* It sometimes flips volume to over 100% in pavucontrol slider
-	 * if volume is emitted before route info emitting while node
-	 * volumes are not identical to route volumes. Not sure why. */
-	emit_volume(impl, node);
 }
 
 static const struct spa_bt_transport_events transport_events = {
@@ -382,6 +393,8 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 			spa_hook_remove(&this->nodes[id].transport_listener);
 		this->nodes[id].transport = t;
 		spa_bt_transport_add_listener(t, &this->nodes[id].transport_listener, &transport_events, &this->nodes[id]);
+
+		emit_node_props(this, &this->nodes[id], true);
 	}
 }
 
@@ -603,13 +616,14 @@ static const struct spa_dict_item info_items[] = {
 
 static void emit_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		this->info.props = &SPA_DICT_INIT_ARRAY(info_items);
 
 		spa_device_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -1534,7 +1548,7 @@ static int node_set_volume(struct impl *this, struct node *node, float volumes[]
 	if (n_volumes == 0)
 		return -EINVAL;
 
-	spa_log_debug(this->log, "node %p volume %f", node, volumes[0]);
+	spa_log_info(this->log, "node %p volume %f", node, volumes[0]);
 
 	for (i = 0; i < node->n_channels; i++) {
 		if (node->volumes[i] == volumes[i % n_volumes])
@@ -1556,6 +1570,8 @@ static int node_set_volume(struct impl *this, struct node *node, float volumes[]
 		for (uint32_t i = 0; i < node->n_channels; ++i)
 			node->soft_volumes[i] = node->volumes[i];
 	}
+
+	emit_volume(this, node);
 
 	return changed;
 }
@@ -1743,8 +1759,6 @@ static int impl_set_param(void *object,
 				this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
 			}
 			emit_info(this, false);
-			/* See volume_changed(void *) */
-			emit_volume(this, node);
 		}
 		break;
 	}

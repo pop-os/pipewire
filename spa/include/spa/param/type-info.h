@@ -29,6 +29,11 @@
 extern "C" {
 #endif
 
+/**
+ * \addtogroup spa_param
+ * \{
+ */
+
 #include <spa/utils/defs.h>
 #include <spa/param/props.h>
 #include <spa/param/format.h>
@@ -54,6 +59,7 @@ static const struct spa_type_info spa_type_param[] = {
 	{ SPA_PARAM_EnumRoute, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "EnumRoute", NULL },
 	{ SPA_PARAM_Route, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "Route", NULL },
 	{ SPA_PARAM_Control, SPA_TYPE_Sequence, SPA_TYPE_INFO_PARAM_ID_BASE "Control", NULL },
+	{ SPA_PARAM_Latency, SPA_TYPE_OBJECT_ParamLatency, SPA_TYPE_INFO_PARAM_ID_BASE "Latency", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -378,6 +384,24 @@ static const struct spa_type_info spa_type_profiler[] = {
 	{ 0, 0, NULL, NULL },
 };
 
+#define SPA_TYPE_INFO_PARAM_Latency		SPA_TYPE_INFO_PARAM_BASE "Latency"
+#define SPA_TYPE_INFO_PARAM_LATENCY_BASE		SPA_TYPE_INFO_PARAM_Latency ":"
+
+static const struct spa_type_info spa_type_param_latency[] = {
+	{ SPA_PARAM_LATENCY_START, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_LATENCY_BASE, spa_type_param, },
+	{ SPA_PARAM_LATENCY_direction, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_LATENCY_BASE "direction", spa_type_direction, },
+	{ SPA_PARAM_LATENCY_minQuantum, SPA_TYPE_Float, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minQuantum", NULL, },
+	{ SPA_PARAM_LATENCY_maxQuantum, SPA_TYPE_Float, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxQuantum", NULL, },
+	{ SPA_PARAM_LATENCY_minRate, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minRate", NULL, },
+	{ SPA_PARAM_LATENCY_maxRate, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxRate", NULL, },
+	{ SPA_PARAM_LATENCY_minNs, SPA_TYPE_Long, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minNs", NULL, },
+	{ SPA_PARAM_LATENCY_maxNs, SPA_TYPE_Long, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxNs", NULL, },
+	{ 0, 0, NULL, NULL },
+};
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

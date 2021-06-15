@@ -31,6 +31,11 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 
+/**
+ * \addtogroup spa_types
+ * \{
+ */
+
 #ifndef SPA_TYPE_ROOT
 #define SPA_TYPE_ROOT	spa_types
 #endif
@@ -118,9 +123,14 @@ static const struct spa_type_info spa_types[] = {
 	{ SPA_TYPE_OBJECT_ParamPortConfig, SPA_TYPE_Object, SPA_TYPE_INFO_PARAM_PortConfig, spa_type_param_port_config },
 	{ SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_Object, SPA_TYPE_INFO_PARAM_Route, spa_type_param_route },
 	{ SPA_TYPE_OBJECT_Profiler, SPA_TYPE_Object, SPA_TYPE_INFO_Profiler, spa_type_profiler },
+	{ SPA_TYPE_OBJECT_ParamLatency, SPA_TYPE_Object, SPA_TYPE_INFO_PARAM_Latency, spa_type_param_latency },
 
 	{ 0, 0, NULL, NULL }
 };
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

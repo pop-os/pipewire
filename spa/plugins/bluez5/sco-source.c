@@ -45,6 +45,7 @@
 #include <spa/node/io.h>
 #include <spa/node/keys.h>
 #include <spa/param/param.h>
+#include <spa/param/latency-utils.h>
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/filter.h>
@@ -77,7 +78,15 @@ struct port {
 	struct spa_port_info info;
 	struct spa_io_buffers *io;
 	struct spa_io_rate_match *rate_match;
-	struct spa_param_info params[8];
+	struct spa_latency_info latency;
+#define IDX_EnumFormat	0
+#define IDX_Meta	1
+#define IDX_IO		2
+#define IDX_Format	3
+#define IDX_Buffers	4
+#define IDX_Latency	5
+#define N_PORT_PARAMS	6
+	struct spa_param_info params[N_PORT_PARAMS];
 
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers;
@@ -102,7 +111,11 @@ struct impl {
 
 	uint64_t info_all;
 	struct spa_node_info info;
-	struct spa_param_info params[8];
+#define IDX_PropInfo	0
+#define IDX_Props	1
+#define IDX_NODE_IO	2
+#define N_NODE_PARAMS	3
+	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
 
 	struct spa_bt_transport *transport;
@@ -283,7 +296,7 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	{
 		if (apply_props(this, param) > 0) {
 			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
-			this->params[1].flags ^= SPA_PARAM_INFO_SERIAL;
+			this->params[IDX_Props].flags ^= SPA_PARAM_INFO_SERIAL;
 			emit_node_info(this, false);
 		}
 		break;
@@ -723,6 +736,7 @@ static void emit_node_info(struct impl *this, bool full)
 		{ SPA_KEY_MEDIA_CLASS, "Audio/Source" },
 		{ SPA_KEY_NODE_DRIVER, "true" },
 	};
+	uint64_t old = full ? this->info.change_mask : 0;
 
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -734,18 +748,19 @@ static void emit_node_info(struct impl *this, bool full)
 			&SPA_DICT_INIT_ARRAY(ag_node_info_items) :
 			&SPA_DICT_INIT_ARRAY(hu_node_info_items);
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_OUTPUT, 0, &port->info);
-		port->info.change_mask = 0;
+		port->info.change_mask = old;
 	}
 }
 
@@ -917,6 +932,16 @@ impl_node_port_enum_params(void *object, int seq,
 		}
 		break;
 
+	case SPA_PARAM_Latency:
+		switch (result.index) {
+		case 0:
+			param = spa_latency_build(&b, id, &port->latency);
+			break;
+		default:
+			return 0;
+		}
+		break;
+
 	default:
 		return -ENOENT;
 	}
@@ -978,11 +1003,12 @@ static int port_set_format(struct impl *this, struct port *port,
 		port->info.flags = SPA_PORT_FLAG_LIVE;
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_RATE;
 		port->info.rate = SPA_FRACTION(1, port->current_format.info.raw.rate);
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
+		port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 	} else {
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+		port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	}
 	emit_port_info(this, port, false);
 
@@ -1007,6 +1033,9 @@ impl_node_port_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Format:
 		res = port_set_format(this, port, flags, param);
+		break;
+	case SPA_PARAM_Latency:
+		res = 0;
 		break;
 	default:
 		res = -ENOENT;
@@ -1268,11 +1297,11 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info = SPA_NODE_INFO_INIT();
 	this->info.flags = SPA_NODE_FLAG_RT;
-	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
-	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
-	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	this->params[IDX_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
+	this->params[IDX_NODE_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
 	this->info.params = this->params;
-	this->info.n_params = 3;
+	this->info.n_params = N_NODE_PARAMS;
 
 	/* set the port info */
 	port = &this->port;
@@ -1282,13 +1311,18 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.change_mask = SPA_PORT_CHANGE_MASK_FLAGS;
 	port->info.flags = SPA_PORT_FLAG_LIVE |
 			   SPA_PORT_FLAG_TERMINAL;
-	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
-	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
-	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
-	port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	port->params[IDX_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	port->params[IDX_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
+	port->params[IDX_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	port->params[IDX_Latency] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_READWRITE);
 	port->info.params = port->params;
-	port->info.n_params = 5;
+	port->info.n_params = N_PORT_PARAMS;
+
+	port->latency = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
+	port->latency.min_quantum = 1.0f;
+	port->latency.max_quantum = 1.0f;
 
 	/* Init the buffer lists */
 	spa_list_init(&port->ready);

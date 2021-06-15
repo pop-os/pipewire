@@ -26,65 +26,11 @@
 #include <alsa/asoundlib.h>
 #include <math.h>
 
-#ifdef HAVE_VALGRIND_MEMCHECK_H
 #include <valgrind/memcheck.h>
-#endif
 
 #include "conf-parser.h"
 #include "alsa-mixer.h"
 #include "alsa-util.h"
-
-#ifdef HAVE_VALGRIND_MEMCHECK_H
-/* These macros are workarounds for a bug in valgrind, which is not handling the
- * ALSA TLV syscalls correctly. See
- * http://valgrind.10908.n7.nabble.com/Missing-ioctl-for-SNDRV-CTL-IOCTL-TLV-READ-td42711.html */
-
-static inline int vgfix_get_capture_dB(snd_mixer_elem_t *a, snd_mixer_selem_channel_id_t b, long *c) {
-    int r = snd_mixer_selem_get_capture_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_playback_dB(snd_mixer_elem_t *a, snd_mixer_selem_channel_id_t b, long *c) {
-    int r = snd_mixer_selem_get_playback_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_ask_capture_vol_dB(snd_mixer_elem_t *a, long b, long *c) {
-    int r = snd_mixer_selem_ask_capture_vol_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_ask_playback_vol_dB(snd_mixer_elem_t *a, long b, long *c) {
-    int r = snd_mixer_selem_ask_playback_vol_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_capture_dB_range(snd_mixer_elem_t *a, long *b, long *c) {
-    int r = snd_mixer_selem_get_capture_dB_range(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(b, sizeof(*b));
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_playback_dB_range(snd_mixer_elem_t *a, long *b, long *c) {
-    int r = snd_mixer_selem_get_playback_dB_range(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(b, sizeof(*b));
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-#define snd_mixer_selem_get_capture_dB(a, b, c) vgfix_get_capture_dB(a, b, c)
-#define snd_mixer_selem_get_playback_dB(a, b, c) vgfix_get_playback_dB(a, b, c)
-#define snd_mixer_selem_ask_capture_vol_dB(a, b, c) vgfix_ask_capture_vol_dB(a, b, c)
-#define snd_mixer_selem_ask_playback_vol_dB(a, b, c) vgfix_ask_playback_vol_dB(a, b, c)
-#define snd_mixer_selem_get_capture_dB_range(a, b, c) vgfix_get_capture_dB_range(a, b, c)
-#define snd_mixer_selem_get_playback_dB_range(a, b, c) vgfix_get_playback_dB_range(a, b, c)
-
-#endif
 
 static int setting_select(pa_alsa_setting *s, snd_mixer_t *m);
 
@@ -918,9 +864,7 @@ static int element_get_volume(pa_alsa_element *e, snd_mixer_t *m, const pa_chann
             if (r < 0)
                 continue;
 
-#ifdef HAVE_VALGRIND_MEMCHECK_H
-                VALGRIND_MAKE_MEM_DEFINED(&value, sizeof(value));
-#endif
+	    VALGRIND_MAKE_MEM_DEFINED(&value, sizeof(value));
 
             f = from_alsa_dB(value);
 
@@ -2553,6 +2497,7 @@ static int element_parse_override_map(pa_config_parser_state *state) {
 
         if (i >= (unsigned)channel_count) {
             pa_log("[%s:%u] Invalid override map size (>%d) in '%s'", state->filename, state->lineno, channel_count, state->section);
+            pa_xfree(n);
             return -1;
         }
         channel_position = alsa_channel_positions[i];
@@ -3531,6 +3476,7 @@ finish:
                      * object. */
                     e->db_fix = pa_xnewdup(pa_alsa_decibel_fix, db_fix, 1);
                     e->db_fix->profile_set = NULL;
+                    e->db_fix->key = pa_xstrdup(db_fix->key);
                     e->db_fix->name = pa_xstrdup(db_fix->name);
                     e->db_fix->db_values = pa_xmemdup(db_fix->db_values, (db_fix->max_step - db_fix->min_step + 1) * sizeof(long));
                 }
@@ -5159,7 +5105,7 @@ void pa_alsa_profile_set_probe(
     pp += add_profiles_to_probe(pp, ps->profiles, false, false);
     pp += add_profiles_to_probe(pp, ps->profiles, false, true);
     pp += add_profiles_to_probe(pp, ps->profiles, true, false);
-    pp += add_profiles_to_probe(pp, ps->profiles, true, true);
+    add_profiles_to_probe(pp, ps->profiles, true, true);
 
     for (pp = probe_order; *pp; pp++) {
         uint32_t idx;

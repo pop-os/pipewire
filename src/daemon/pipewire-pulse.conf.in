@@ -1,4 +1,7 @@
 # PulseAudio config file for PipeWire version @VERSION@ #
+#
+# Copy and edit this file in @PIPEWIRE_CONFIG_DIR@ for systemwide changes
+# or in ~/.config/pipewire for local changes.
 
 context.properties = {
     ## Configure properties in the system.
@@ -33,7 +36,10 @@ context.modules = [
 	    # the addresses this server listens on
             server.address = [
                 "unix:native"
-                # "tcp:4713"
+                # "unix:/tmp/something" # absolute paths may be used
+                # "tcp:4713" # IPv4 and IPv6 on all addresses
+                # "tcp:[::]:9999" # IPv6 on all addresses
+                # "tcp:127.0.0.1:8888" # IPv4 on a single address
             ]
 	    #pulse.min.req = 256/48000              # 5ms
 	    #pulse.default.req = 960/48000          # 20 milliseconds

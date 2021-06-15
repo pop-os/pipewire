@@ -29,6 +29,14 @@
 extern "C" {
 #endif
 
+/** \defgroup spa_param SPA Parameters
+ */
+
+/**
+ * \addtogroup spa_param
+ * \{
+ */
+
 #include <spa/utils/defs.h>
 
 /** different parameter types that can be queried */
@@ -48,6 +56,7 @@ enum spa_param_type {
 	SPA_PARAM_EnumRoute,		/**< routing enumeration as SPA_TYPE_OBJECT_ParamRoute */
 	SPA_PARAM_Route,		/**< routing configuration as SPA_TYPE_OBJECT_ParamRoute */
 	SPA_PARAM_Control,		/**< Control parameter, a SPA_TYPE_Sequence */
+	SPA_PARAM_Latency,		/**< latency reporting, a SPA_TYPE_OBJECT_ParamLatency */
 };
 
 /** information about a parameter */
@@ -163,6 +172,22 @@ enum spa_param_route {
 	SPA_PARAM_ROUTE_save,			/**< If route should be saved (Bool) */
 };
 
+
+/** properties for SPA_TYPE_OBJECT_ParamLatency */
+enum spa_param_latency {
+	SPA_PARAM_LATENCY_START,
+	SPA_PARAM_LATENCY_direction,		/**< direction, input/output (Id enum spa_direction) */
+	SPA_PARAM_LATENCY_minQuantum,		/**< min latency relative to quantum (Float) */
+	SPA_PARAM_LATENCY_maxQuantum,		/**< max latency relative to quantum (Float) */
+	SPA_PARAM_LATENCY_minRate,		/**< min latency (Int) relative to rate */
+	SPA_PARAM_LATENCY_maxRate,		/**< max latency (Int) relative to rate */
+	SPA_PARAM_LATENCY_minNs,		/**< min latency (Long) in nanoseconds */
+	SPA_PARAM_LATENCY_maxNs,		/**< max latency (Long) in nanoseconds */
+};
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

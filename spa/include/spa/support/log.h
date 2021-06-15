@@ -31,8 +31,17 @@ extern "C" {
 
 #include <stdarg.h>
 
+#include <spa/utils/type.h>
 #include <spa/utils/defs.h>
 #include <spa/utils/hook.h>
+
+/** \defgroup spa_log SPA Logging
+ */
+
+/**
+ * \addtogroup spa_log
+ * \{
+ */
 
 enum spa_log_level {
 	SPA_LOG_LEVEL_NONE = 0,
@@ -172,6 +181,10 @@ static inline void spa_log_trace_fp (struct spa_log *l, const char *format, ...)
 								  *  stderr. */
 #define SPA_KEY_LOG_TIMESTAMP		"log.timestamp"		/**< log timestamps */
 #define SPA_KEY_LOG_LINE		"log.line"		/**< log file and line numbers */
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

@@ -171,8 +171,7 @@ static void impl_free(struct impl *impl)
 		avahi_client_free(impl->client);
 	if (impl->avahi_poll)
 		pw_avahi_poll_free(impl->avahi_poll);
-	if (impl->properties)
-		pw_properties_free(impl->properties);
+	pw_properties_free(impl->properties);
 	pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	free(impl);
 }
@@ -463,7 +462,7 @@ static int start_avahi(struct impl *impl)
 	loop = pw_context_get_main_loop(impl->context);
 	impl->avahi_poll = pw_avahi_poll_new(loop);
 
-	return start_client(impl);;
+	return start_client(impl);
 }
 
 SPA_EXPORT

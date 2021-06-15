@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <float.h>
 
 #include <spa/pod/parser.h>
 #include <spa/param/audio/format-utils.h>
@@ -351,12 +352,39 @@ static void emit_params(struct pw_impl_port *port, uint32_t *changed_ids, uint32
 	}
 }
 
+static int process_latency_param(void *data, int seq,
+		uint32_t id, uint32_t index, uint32_t next, struct spa_pod *param)
+{
+	struct pw_impl_port *this = data;
+	struct spa_latency_info latency;
+
+	if (id != SPA_PARAM_Latency)
+		return -EINVAL;
+
+	if (spa_latency_parse(param, &latency) < 0)
+		return 0;
+	if (spa_latency_info_compare(&this->latency[latency.direction], &latency) == 0)
+		return 0;
+
+	pw_log_debug("port %p: got %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
+			pw_direction_as_string(latency.direction),
+			latency.min_quantum, latency.max_quantum,
+			latency.min_rate, latency.max_rate,
+			latency.min_ns, latency.max_ns);
+
+	this->latency[latency.direction] = latency;
+	if (latency.direction == this->direction)
+		pw_impl_port_emit_latency_changed(this);
+
+	return 0;
+}
+
 static void update_info(struct pw_impl_port *port, const struct spa_port_info *info)
 {
 	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
 
-	pw_log_debug(NAME" %p: flags:%08"PRIx64" change_mask:%08"PRIx64,
-			port, info->flags, info->change_mask);
+	pw_log_debug(NAME" %p: %p flags:%08"PRIx64" change_mask:%08"PRIx64,
+			port, info, info->flags, info->change_mask);
 
 	if (info->change_mask & SPA_PORT_CHANGE_MASK_FLAGS) {
 		port->spa_flags = info->flags;
@@ -391,6 +419,18 @@ static void update_info(struct pw_impl_port *port, const struct spa_port_info *i
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ)
 				changed_ids[n_changed_ids++] = id;
+
+			switch (id) {
+			case SPA_PARAM_Latency:
+				port->have_latency_param =
+					SPA_FLAG_IS_SET(info->params[i].flags, SPA_PARAM_INFO_WRITE);
+				if (port->node != NULL)
+					pw_impl_port_for_each_param(port, 0, id, 0, UINT32_MAX,
+							NULL, process_latency_param, port);
+				break;
+			default:
+				break;
+			}
 		}
 	}
 
@@ -478,6 +518,9 @@ struct pw_impl_port *pw_context_create_port(
 	pw_impl_port_set_mix(this, NULL, 0);
 
 	pw_map_init(&this->mix_port_map, 64, 64);
+
+	this->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	this->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	if (info)
 		update_info(this, info);
@@ -911,6 +954,7 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	pw_impl_node_emit_port_init(node, port);
 
 	pw_impl_port_for_each_param(port, 0, SPA_PARAM_IO, 0, 0, NULL, check_param_io, port);
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Latency, 0, 0, NULL, process_latency_param, port);
 
 	control = PW_IMPL_PORT_IS_CONTROL(port);
 	if (control) {
@@ -922,7 +966,7 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	}
 	pw_properties_set(port->properties, PW_KEY_PORT_DIRECTION, dir);
 
-	if ((str = pw_properties_get(port->properties, PW_KEY_PORT_NAME)) == NULL) {
+	if (pw_properties_get(port->properties, PW_KEY_PORT_NAME) == NULL) {
 		if ((str = pw_properties_get(port->properties, PW_KEY_AUDIO_CHANNEL)) != NULL &&
 		    !spa_streq(str, "UNK")) {
 			pw_properties_setf(port->properties, PW_KEY_PORT_NAME, "%s_%s", dir, str);
@@ -1249,6 +1293,67 @@ int pw_impl_port_for_each_link(struct pw_impl_port *port,
 				break;
 	}
 	return res;
+}
+
+static int port_set_latency(struct pw_impl_port *port, struct spa_latency_info *latency)
+{
+	struct spa_latency_info *current;
+	struct spa_pod *param;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[1024];
+
+	current = &port->latency[latency->direction];
+
+	if (spa_latency_info_compare(current, latency) == 0)
+		return 0;
+
+	*current = *latency;
+
+	pw_log_debug("port %p: set %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, port,
+			pw_direction_as_string(latency->direction),
+			latency->min_quantum, latency->max_quantum,
+			latency->min_rate, latency->max_rate,
+			latency->min_ns, latency->max_ns);
+
+	if (!port->have_latency_param)
+		return 0;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	param = spa_latency_build(&b, SPA_PARAM_Latency, latency);
+	return pw_impl_port_set_param(port, SPA_PARAM_Latency, 0, param);
+}
+
+int pw_impl_port_recalc_latency(struct pw_impl_port *port)
+{
+	struct pw_impl_link *l;
+	struct spa_latency_info latency;
+	struct pw_impl_port *other;
+
+	latency = SPA_LATENCY_INFO(SPA_DIRECTION_REVERSE(port->direction));
+
+	if (port->direction == PW_DIRECTION_OUTPUT) {
+		spa_list_for_each(l, &port->links, output_link) {
+			other = l->input;
+			spa_latency_info_combine(&latency, &other->latency[other->direction]);
+			pw_log_debug("port %p: peer %p: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port, other,
+					latency.min_quantum, latency.max_quantum,
+					latency.min_rate, latency.max_rate,
+					latency.min_ns, latency.max_ns);
+		}
+	} else {
+		spa_list_for_each(l, &port->links, input_link) {
+			other = l->output;
+			spa_latency_info_combine(&latency, &other->latency[other->direction]);
+			pw_log_debug("port %p: peer %p: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port, other,
+					latency.min_quantum, latency.max_quantum,
+					latency.min_rate, latency.max_rate,
+					latency.min_ns, latency.max_ns);
+		}
+	}
+	port_set_latency(port, &latency);
+	return 0;
 }
 
 SPA_EXPORT

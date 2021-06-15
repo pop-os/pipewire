@@ -567,20 +567,12 @@ static void graph_reset(struct graph *graph)
 	}
 }
 
-static void param_changed(void *data, uint32_t id, const struct spa_pod *param)
+static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 {
-	struct impl *impl = data;
-	const struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
+	const struct spa_pod_prop *prop;
 	struct graph *graph = &impl->graph;
 	int changed = 0;
-
-	if (id == SPA_PARAM_Format && param == NULL) {
-		graph_reset(graph);
-		return;
-	}
-	if (id != SPA_PARAM_Props)
-		return;
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		uint32_t idx;
@@ -617,6 +609,45 @@ static void param_changed(void *data, uint32_t id, const struct spa_pod *param)
 		params[0] = get_props_param(graph, &b);
 
 		pw_stream_update_params(impl->capture, params, 1);
+	}
+}
+
+static void param_latency_changed(struct impl *impl, const struct spa_pod *param)
+{
+	struct spa_latency_info latency;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b;
+	const struct spa_pod *params[1];
+
+	if (spa_latency_parse(param, &latency) < 0)
+		return;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+
+	if (latency.direction == SPA_DIRECTION_INPUT)
+		pw_stream_update_params(impl->capture, params, 1);
+	else
+		pw_stream_update_params(impl->playback, params, 1);
+}
+
+static void param_changed(void *data, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = data;
+	struct graph *graph = &impl->graph;
+
+	switch (id) {
+	case SPA_PARAM_Format:
+		if (param == NULL)
+			graph_reset(graph);
+		break;
+	case SPA_PARAM_Props:
+		if (param != NULL)
+			param_props_changed(impl, param);
+		break;
+	case SPA_PARAM_Latency:
+		param_latency_changed(impl, param);
+		break;
 	}
 }
 
@@ -756,25 +787,18 @@ static void ladspa_handle_unref(struct ladspa_handle *hndl)
 {
 	if (--hndl->ref > 0)
 		return;
+
 	if (hndl->handle)
 		dlclose(hndl->handle);
+
+	spa_list_remove(&hndl->link);
 	free(hndl);
 }
 
-static struct ladspa_handle *ladspa_handle_load(struct impl *impl, const char *plugin)
+static struct ladspa_handle *ladspa_handle_load_by_path(struct impl *impl, const char *path)
 {
 	struct ladspa_handle *hndl;
-	char path[PATH_MAX];
 	int res;
-
-	if (plugin[0] != '/') {
-		const char *e;
-		if ((e = getenv("LADSPA_PATH")) == NULL)
-			e = "/usr/lib64/ladspa";
-		snprintf(path, sizeof(path), "%s/%s.so", e, plugin);
-	} else {
-		snprintf(path, sizeof(path), "%s", plugin);
-	}
 
 	spa_list_for_each(hndl, &impl->ladspa_handle_list, link) {
 		if (spa_streq(hndl->path, path)) {
@@ -784,38 +808,91 @@ static struct ladspa_handle *ladspa_handle_load(struct impl *impl, const char *p
 	}
 
 	hndl = calloc(1, sizeof(*hndl));
+	if (!hndl)
+		return NULL;
+
 	hndl->ref = 1;
 	snprintf(hndl->path, sizeof(hndl->path), "%s", path);
 
-	if (spa_streq(plugin, "builtin")) {
-		hndl->desc_func = builtin_ladspa_descriptor;
-	} else {
+	if (!spa_streq(path, "builtin")) {
 		hndl->handle = dlopen(path, RTLD_NOW);
-		if (hndl->handle == NULL) {
-			pw_log_error("plugin dlopen failed %s: %s", path, dlerror());
+		if (!hndl->handle) {
+			pw_log_debug("failed to open '%s': %s", path, dlerror());
 			res = -ENOENT;
 			goto exit;
 		}
 
-		hndl->desc_func = (LADSPA_Descriptor_Function)dlsym(hndl->handle,
-							"ladspa_descriptor");
+		pw_log_info("successfully opened '%s'", path);
+
+		hndl->desc_func = (LADSPA_Descriptor_Function) dlsym(hndl->handle, "ladspa_descriptor");
+		if (!hndl->desc_func) {
+			pw_log_warn("cannot find descriptor function in '%s': %s", path, dlerror());
+			res = -ENOSYS;
+			goto exit;
+		}
 	}
-	if (hndl->desc_func == NULL) {
-		pw_log_error("cannot find descriptor function from %s: %s",
-                       path, dlerror());
-		res = -ENOSYS;
-		goto exit;
+	else {
+		hndl->desc_func = builtin_ladspa_descriptor;
 	}
+
 	spa_list_init(&hndl->descriptor_list);
+	spa_list_append(&impl->ladspa_handle_list, &hndl->link);
 
 	return hndl;
 
 exit:
-	if (hndl->handle != NULL)
+	if (hndl->handle)
 		dlclose(hndl->handle);
+
 	free(hndl);
 	errno = -res;
+
 	return NULL;
+}
+
+static struct ladspa_handle *ladspa_handle_load(struct impl *impl, const char *plugin)
+{
+	struct ladspa_handle *hndl = NULL;
+
+	if (!spa_streq(plugin, "builtin") && plugin[0] != '/') {
+		const char *search_dirs, *p;
+		char path[PATH_MAX];
+		size_t len;
+
+		search_dirs = getenv("LADSPA_PATH");
+		if (!search_dirs)
+			search_dirs = "/usr/lib64/ladspa";
+
+		/*
+		 * set the errno for the case when `ladspa_handle_load_by_path()`
+		 * is never called, which can only happen if the supplied
+		 * LADSPA_PATH contains too long paths
+		 */
+		errno = ENAMETOOLONG;
+
+		while ((p = pw_split_walk(NULL, ":", &len, &search_dirs))) {
+			int pathlen;
+
+			if (len >= sizeof(path))
+				continue;
+
+			pathlen = snprintf(path, sizeof(path), "%.*s/%s.so", (int) len, p, plugin);
+			if (pathlen < 0 || (size_t) pathlen >= sizeof(path))
+				continue;
+
+			hndl = ladspa_handle_load_by_path(impl, path);
+			if (hndl)
+				break;
+		}
+	}
+	else {
+		hndl = ladspa_handle_load_by_path(impl, plugin);
+	}
+
+	if (!hndl)
+		pw_log_error("failed to load plugin '%s': %s", plugin, strerror(errno));
+
+	return hndl;
 }
 
 static void ladspa_descriptor_unref(struct ladspa_descriptor *desc)
@@ -844,6 +921,15 @@ static struct ladspa_descriptor *ladspa_descriptor_load(struct impl *impl,
 	spa_list_for_each(desc, &hndl->descriptor_list, link) {
 		if (spa_streq(desc->label, label)) {
 			desc->ref++;
+
+			/*
+			 * since ladspa_handle_load() increments the reference count of the handle,
+			 * if the descriptor is found, then the handle's reference count
+			 * has already been incremented to account for the descriptor,
+			 * so we need to unref handle here since we're merely reusing
+			 * thedescriptor, not creating a new one
+			 */
+			ladspa_handle_unref(hndl);
 			return desc;
 		}
 	}
@@ -971,16 +1057,6 @@ static int parse_link(struct graph *graph, struct spa_json *json)
 	if ((in_port = find_port(def_node, input, LADSPA_PORT_INPUT)) == NULL) {
 		pw_log_error("unknown input port %s", input);
 		return -ENOENT;
-	}
-	if (in_port->external != SPA_ID_INVALID) {
-		pw_log_info("%s already used as graph input %d, use mixer",
-				input, in_port->external);
-		return -EINVAL;
-	}
-	if (out_port->external != SPA_ID_INVALID) {
-		pw_log_info("%s already used as graph output %d, use copy",
-				output, out_port->external);
-		return -EINVAL;
 	}
 	if (in_port->n_links > 0) {
 		pw_log_info("Can't have more than 1 link to %s, use a mixer", input);
@@ -1186,7 +1262,7 @@ static int setup_output_port(struct graph *graph, struct port *port)
 	struct ladspa_descriptor *desc = port->node->desc;
 	const LADSPA_Descriptor *d = desc->desc;
 	struct link *link;
-	uint32_t i, n_hndl = port->node->n_hndl;;
+	uint32_t i, n_hndl = port->node->n_hndl;
 
 	spa_list_for_each(link, &port->link_list, output_link) {
 		for (i = 0; i < n_hndl; i++) {
@@ -1303,7 +1379,7 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		}
 		/* collect all control ports on the graph */
 		for (j = 0; j < desc->n_control; j++) {
-			graph->control_port[graph->n_control] = &node->control_port[j];;
+			graph->control_port[graph->n_control] = &node->control_port[j];
 			graph->n_control++;
 		}
 	}
@@ -1334,10 +1410,10 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				} else {
 					desc = port->node->desc;
 					d = desc->desc;
-					if (port->external != SPA_ID_INVALID) {
+					if (i == 0 && port->external != SPA_ID_INVALID) {
 						pw_log_error("input port %s[%d]:%s already used as input %d, use mixer",
 							port->node->name, i, d->PortNames[port->p],
-							graph->n_input);
+							port->external);
 						res = -EBUSY;
 						goto error;
 					}
@@ -1382,10 +1458,10 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				} else {
 					desc = port->node->desc;
 					d = desc->desc;
-					if (port->external != SPA_ID_INVALID) {
+					if (i == 0 && port->external != SPA_ID_INVALID) {
 						pw_log_error("output port %s[%d]:%s already used as output %d, use copy",
 							port->node->name, i, d->PortNames[port->p],
-							graph->n_output);
+							port->external);
 						res = -EBUSY;
 						goto error;
 					}
@@ -1557,10 +1633,8 @@ static void impl_destroy(struct impl *impl)
 		pw_stream_destroy(impl->playback);
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
-	if (impl->capture_props)
-		pw_properties_free(impl->capture_props);
-	if (impl->playback_props)
-		pw_properties_free(impl->playback_props);
+	pw_properties_free(impl->capture_props);
+	pw_properties_free(impl->playback_props);
 	pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	graph_free(&impl->graph);
 	free(impl);
@@ -1742,8 +1816,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	return 0;
 
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	impl_destroy(impl);
 	return res;
 }

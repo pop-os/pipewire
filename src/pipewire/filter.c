@@ -100,7 +100,14 @@ struct port {
 	uint32_t change_mask_all;
 	struct spa_port_info info;
 	struct spa_list param_list;
-	struct spa_param_info params[5];
+#define IDX_EnumFormat	0
+#define IDX_Meta	1
+#define IDX_IO		2
+#define IDX_Format	3
+#define IDX_Buffers	4
+#define IDX_Latency	5
+#define N_PORT_PARAMS	6
+	struct spa_param_info params[N_PORT_PARAMS];
 
 	struct spa_io_buffers *io;
 
@@ -132,19 +139,23 @@ struct filter {
 		struct spa_io_position *position;
 	} rt;
 
-	struct spa_list port_list;;
+	struct spa_list port_list;
 	struct port *ports[2][MAX_PORTS];
 
 	uint32_t change_mask_all;
 	struct spa_node_info info;
 	struct spa_list param_list;
-	struct spa_param_info params[1];
+#define IDX_Props	0
+#define N_NODE_PARAMS	1
+	struct spa_param_info params[N_NODE_PARAMS];
 
 	struct data data;
 	uintptr_t seq;
 	struct pw_time time;
 	uint64_t base_pos;
 	uint32_t clock_id;
+
+	struct spa_callbacks rt_callbacks;
 
 	unsigned int disconnecting:1;
 	unsigned int disconnect_core:1;
@@ -158,16 +169,28 @@ struct filter {
 static int get_param_index(uint32_t id)
 {
 	switch (id) {
+	case SPA_PARAM_Props:
+		return IDX_Props;
+	default:
+		return -1;
+	}
+}
+
+static int get_port_param_index(uint32_t id)
+{
+	switch (id) {
 	case SPA_PARAM_EnumFormat:
-		return 0;
+		return IDX_EnumFormat;
 	case SPA_PARAM_Meta:
-		return 1;
+		return IDX_Meta;
 	case SPA_PARAM_IO:
-		return 2;
+		return IDX_IO;
 	case SPA_PARAM_Format:
-		return 3;
+		return IDX_Format;
 	case SPA_PARAM_Buffers:
-		return 4;
+		return IDX_Buffers;
+	case SPA_PARAM_Latency:
+		return IDX_Latency;
 	default:
 		return -1;
 	}
@@ -218,9 +241,8 @@ static struct param *add_param(struct filter *impl, struct port *port,
 	memcpy(p->param, param, SPA_POD_SIZE(param));
 	SPA_POD_OBJECT_ID(p->param) = id;
 
-	idx = get_param_index(id);
-
 	if (port) {
+		idx = get_port_param_index(id);
 		spa_list_append(&port->param_list, &p->link);
 		if (idx != -1) {
 			port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
@@ -228,6 +250,7 @@ static struct param *add_param(struct filter *impl, struct port *port,
 			port->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
 		}
 	} else {
+		idx = get_param_index(id);
 		spa_list_append(&impl->param_list, &p->link);
 		if (idx != -1) {
 			impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
@@ -264,7 +287,7 @@ static struct port *alloc_port(struct filter *filter,
 	int i;
 
 	for (i = 0; i < MAX_PORTS; i++) {
-		if ((p = filter->ports[direction][i]) == NULL)
+		if ((filter->ports[direction][i]) == NULL)
 			break;
 	}
 	if (i == MAX_PORTS)
@@ -309,11 +332,10 @@ static inline int push_queue(struct port *port, struct queue *queue, struct buff
 
 static inline struct buffer *pop_queue(struct port *port, struct queue *queue)
 {
-	int32_t avail;
 	uint32_t index, id;
 	struct buffer *buffer;
 
-	if ((avail = spa_ringbuffer_get_read_index(&queue->ring, &index)) < 1) {
+	if (spa_ringbuffer_get_read_index(&queue->ring, &index) < 1) {
 		errno = EPIPE;
 		return NULL;
 	}
@@ -417,20 +439,22 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 static void emit_node_info(struct filter *d, bool full)
 {
+	uint64_t old = full ? d->info.change_mask : 0;
 	if (full)
 		d->info.change_mask = d->change_mask_all;
 	if (d->info.change_mask != 0)
 		spa_node_emit_info(&d->hooks, &d->info);
-	d->info.change_mask = 0;
+	d->info.change_mask = old;
 }
 
 static void emit_port_info(struct filter *d, struct port *p, bool full)
 {
+	uint64_t old = full ? p->info.change_mask : 0;
 	if (full)
 		p->info.change_mask = p->change_mask_all;
 	if (p->info.change_mask != 0)
 		spa_node_emit_port_info(&d->hooks, p->direction, p->id, &p->info);
-	p->info.change_mask = 0;
+	p->info.change_mask = old;
 }
 
 static int impl_add_listener(void *object,
@@ -791,10 +815,10 @@ do_call_process(struct spa_loop *loop,
 
 static void call_process(struct filter *impl)
 {
-	struct pw_filter *filter = &impl->this;
 	pw_log_trace(NAME" %p: call process", impl);
 	if (SPA_FLAG_IS_SET(impl->flags, PW_FILTER_FLAG_RT_PROCESS)) {
-		pw_filter_emit_process(filter, impl->rt.position);
+		spa_callbacks_call(&impl->rt_callbacks, struct pw_filter_events,
+				process, 0, impl->rt.position);
 	}
 	else {
 		pw_loop_invoke(impl->context->main_loop,
@@ -1032,8 +1056,7 @@ filter_new(struct pw_context *context, const char *name,
 error_properties:
 	free(impl);
 error_cleanup:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	errno = -res;
 	return NULL;
 }
@@ -1100,8 +1123,7 @@ pw_filter_new_simple(struct pw_loop *loop,
 error_cleanup:
 	if (context)
 		pw_context_destroy(context);
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	errno = -res;
 	return NULL;
 }
@@ -1163,13 +1185,27 @@ void pw_filter_destroy(struct pw_filter *filter)
 	free(impl);
 }
 
+static void hook_removed(struct spa_hook *hook)
+{
+	struct filter *impl = hook->priv;
+	spa_zero(impl->rt_callbacks);
+	hook->priv = NULL;
+	hook->removed = NULL;
+}
+
 SPA_EXPORT
 void pw_filter_add_listener(struct pw_filter *filter,
 			    struct spa_hook *listener,
 			    const struct pw_filter_events *events,
 			    void *data)
 {
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	spa_hook_list_append(&filter->listener_list, listener, events, data);
+	if (events->process && impl->rt_callbacks.funcs == NULL) {
+		impl->rt_callbacks = SPA_CALLBACKS_INIT(events, data);
+		listener->removed = hook_removed;
+		listener->priv = impl;
+	}
 }
 
 SPA_EXPORT
@@ -1265,9 +1301,9 @@ pw_filter_connect(struct pw_filter *filter,
 	impl->info.max_output_ports = MAX_PORTS;
 	impl->info.flags = impl->process_rt ? SPA_NODE_FLAG_RT : 0;
 	impl->info.props = &filter->properties->dict;
-	impl->params[0] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
+	impl->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
 	impl->info.params = impl->params;
-	impl->info.n_params = SPA_N_ELEMENTS(impl->params);
+	impl->info.n_params = N_NODE_PARAMS;
 	impl->info.change_mask = impl->change_mask_all;
 
 	clear_params(impl, NULL, SPA_ID_INVALID);
@@ -1418,7 +1454,6 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	struct port *p;
 	const char *str;
-	int res;
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
@@ -1443,25 +1478,25 @@ void *pw_filter_add_port(struct pw_filter *filter,
 			add_control_dsp_port_params(impl, p);
 	}
 	/* then override with user provided if any */
-	if ((res = update_params(impl, p, SPA_ID_INVALID, params, n_params)) < 0)
+	if (update_params(impl, p, SPA_ID_INVALID, params, n_params) < 0)
 		goto error_free;
 
 	p->change_mask_all = SPA_PORT_CHANGE_MASK_FLAGS |
 		SPA_PORT_CHANGE_MASK_PROPS;
 	p->info = SPA_PORT_INFO_INIT();
-	p->info.change_mask = 0;
 	p->info.flags = 0;
 	if (SPA_FLAG_IS_SET(flags, PW_FILTER_PORT_FLAG_ALLOC_BUFFERS))
 		p->info.flags |= SPA_PORT_FLAG_CAN_ALLOC_BUFFERS;
 	p->info.props = &p->props->dict;
 	p->change_mask_all |= SPA_PORT_CHANGE_MASK_PARAMS;
-	p->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
-	p->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, 0);
-	p->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, 0);
-	p->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	p->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	p->params[IDX_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	p->params[IDX_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, 0);
+	p->params[IDX_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, 0);
+	p->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	p->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	p->params[IDX_Latency] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_WRITE);
 	p->info.params = p->params;
-	p->info.n_params = 5;
+	p->info.n_params = N_PORT_PARAMS;
 
 	emit_port_info(impl, p, true);
 
@@ -1472,8 +1507,7 @@ error_free:
 	clear_params(impl, p, SPA_ID_INVALID);
 	free(p);
 error_cleanup:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	return NULL;
 }
 

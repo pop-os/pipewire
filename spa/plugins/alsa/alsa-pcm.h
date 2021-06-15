@@ -33,6 +33,7 @@ extern "C" {
 #include <math.h>
 
 #include <alsa/asoundlib.h>
+#include <alsa/use-case.h>
 
 #include <spa/support/plugin.h>
 #include <spa/support/loop.h>
@@ -45,6 +46,7 @@ extern "C" {
 #include <spa/node/io.h>
 #include <spa/debug/types.h>
 #include <spa/param/param.h>
+#include <spa/param/latency-utils.h>
 #include <spa/param/audio/format-utils.h>
 
 #include "dll.h"
@@ -93,6 +95,7 @@ struct state {
 	struct spa_system *data_system;
 	struct spa_loop *data_loop;
 
+	int card_index;
 	snd_pcm_stream_t stream;
 	snd_output_t *output;
 
@@ -101,7 +104,11 @@ struct state {
 
 	uint64_t info_all;
 	struct spa_node_info info;
-	struct spa_param_info params[8];
+#define IDX_PropInfo	0
+#define IDX_Props	1
+#define IDX_NODE_IO	2
+#define N_NODE_PARAMS	3
+	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
 
 	bool opened;
@@ -134,7 +141,14 @@ struct state {
 
 	uint64_t port_info_all;
 	struct spa_port_info port_info;
-	struct spa_param_info port_params[8];
+#define IDX_EnumFormat	0
+#define IDX_Meta	1
+#define IDX_IO		2
+#define IDX_Format	3
+#define IDX_Buffers	4
+#define IDX_Latency	5
+#define N_PORT_PARAMS	6
+	struct spa_param_info port_params[N_PORT_PARAMS];
 	struct spa_io_buffers *io;
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
@@ -168,6 +182,7 @@ struct state {
 	unsigned int use_mmap:1;
 	unsigned int planar:1;
 	unsigned int freewheel:1;
+	unsigned int open_ucm:1;
 
 	int64_t sample_count;
 
@@ -180,6 +195,10 @@ struct state {
 
 	struct spa_dll dll;
 	double max_error;
+
+	struct spa_latency_info latency;
+
+	snd_use_case_mgr_t *ucm;
 };
 
 int
@@ -188,6 +207,9 @@ spa_alsa_enum_format(struct state *state, int seq,
 		     const struct spa_pod *filter);
 
 int spa_alsa_set_format(struct state *state, struct spa_audio_info *info, uint32_t flags);
+
+int spa_alsa_init(struct state *state);
+int spa_alsa_clear(struct state *state);
 
 int spa_alsa_open(struct state *state);
 int spa_alsa_start(struct state *state);

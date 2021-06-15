@@ -18,30 +18,68 @@ foreach h : pipewire_sources
   inputs += meson.source_root() / 'src' / 'pipewire' / h
 endforeach
 
+# SPA headers use static inline functions. Doxygen doesn't extract those
+# unless we have EXTRACT_STATIC set - but we don't want it to extract
+# everything in the rest of the tree.
+# The shell script here basically does a:
+#   cp spa/* builddir/spa/ && sed -i 's/^static//' buildir/spa/**.h
+# The copied files are passed to doxygen as input and they are parsed as
+# normal functions.
+# Because this uses globbing, this target won't rebuild if the headers
+# change but meh.
+spa_header_dirs = []
+sed = find_program('sed', required: false)
+if sed.found()
+  spa_srcdir = meson.source_root() / 'spa' / 'include' / 'spa'
+  spa_dstdir = meson.current_build_dir() / 'spa'
+  spa_strip_static = custom_target(
+    'spa-strip-static',
+    command: [ find_program('strip-static.sh'), spa_srcdir, spa_dstdir ],
+    build_by_default: true,
+    output: 'spa',
+  )
+  spa_header_dirs += spa_dstdir
+else
+  spa_strip_static = []
+endif
+
+# Note: order here is how doxygen will expose the pages in the sidebar
 extra_docs = [
-  'overview.md',
-  'design.txt',
-  'architecture.md',
-  'objects_design.md',
-  'tutorial-index.md',
-  'tutorial1.md',
-  'tutorial2.md',
-  'tutorial3.md',
-  'tutorial4.md',
-  'tutorial5.md',
-  'tutorial6.md',
-  'spa/index.md',
-  'spa/design.md',
-  'spa/pod.md',
-  'spa/buffer.md',
-  'pulseaudio.md',
+  'index.dox',
+  'pipewire.dox',
+  'pipewire-overview.dox',
+  'pipewire-design.dox',
+  'pipewire-daemon.dox',
+  'pipewire-library.dox',
+  'pipewire-tools.dox',
+  'pipewire-session-manager.dox',
+  'pipewire-objects-design.dox',
+  'api.dox',
+  'tutorial.dox',
+  'tutorial1.dox',
+  'tutorial2.dox',
+  'tutorial3.dox',
+  'tutorial4.dox',
+  'tutorial5.dox',
+  'tutorial6.dox',
+  'spa-index.dox',
+  'spa-design.dox',
+  'spa-pod.dox',
+  'spa-buffer.dox',
+  'pulseaudio.dox',
 ]
 
 foreach extra : extra_docs
   inputs += meson.source_root() / 'doc' / extra
 endforeach
 
-doxyfile_conf.set('inputs', ' '.join(inputs))
+cssfiles = [
+  meson.source_root() / 'doc' / 'doxygen-awesome.css',
+  meson.source_root() / 'doc' / 'custom.css'
+]
+
+doxyfile_conf.set('inputs', ' '.join(inputs + [spa_dstdir]))
+doxyfile_conf.set('cssfiles', ' '.join(cssfiles))
 
 doxyfile = configure_file(input: 'Doxyfile.in',
                           output: 'Doxyfile',
@@ -53,8 +91,9 @@ if docdir == ''
 endif
 
 html_target = custom_target('pipewire-docs',
-                            input: [ doxyfile ] + inputs,
+                            input: [ doxyfile ] + inputs + cssfiles,
                             output: [ 'html' ],
                             command: [ doxygen, doxyfile ],
+                            depends: spa_strip_static,
                             install: true,
                             install_dir: docdir)

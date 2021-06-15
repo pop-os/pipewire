@@ -374,11 +374,9 @@ static const struct pw_context_events context_events = {
 /** Make a new client object
  *
  * \param core a \ref pw_context object to register the client with
- * \param ucred a ucred structure or NULL when unknown
  * \param properties optional client properties, ownership is taken
  * \return a newly allocated client object
  *
- * \memberof pw_impl_client
  */
 SPA_EXPORT
 struct pw_impl_client *pw_context_create_client(struct pw_impl_core *core,
@@ -449,8 +447,7 @@ error_clear_array:
 error_free:
 	free(impl);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -512,8 +509,7 @@ int pw_impl_client_register(struct pw_impl_client *client,
 	return 0;
 
 error_existed:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	return -EEXIST;
 }
 
@@ -571,7 +567,6 @@ static int destroy_resource(void *object, void *data)
  *
  * \param client the client to destroy
  *
- * \memberof pw_impl_client
  */
 SPA_EXPORT
 void pw_impl_client_destroy(struct pw_impl_client *client)
@@ -627,13 +622,12 @@ const struct pw_client_info *pw_impl_client_get_info(struct pw_impl_client *clie
 /** Update client properties
  *
  * \param client the client
- * \param dict a \struct spa_dict with properties
+ * \param dict a struct spa_dict with properties
  *
  * Add all properties in \a dict to the client properties. Existing
  * properties are overwritten. Items can be removed by setting the value
  * to NULL.
  *
- * \memberof pw_impl_client
  */
 SPA_EXPORT
 int pw_impl_client_update_properties(struct pw_impl_client *client, const struct spa_dict *dict)

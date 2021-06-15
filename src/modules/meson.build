@@ -35,16 +35,25 @@ pipewire_module_filter_chain = shared_library('pipewire-module-filter-chain',
   dependencies : [mathlib, dl_lib, pipewire_dep],
 )
 
+pipewire_module_echo_cancel_sources = [
+  'module-echo-cancel.c',
+  'module-echo-cancel/aec-null.c',
+]
+
+if webrtc_dep.found()
+  pipewire_module_echo_cancel_sources += [
+    'module-echo-cancel/aec-webrtc.cpp'
+  ]
+endif
+
 pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
-  [ 'module-echo-cancel.c',
-    'module-echo-cancel/aec-null.c',
-    'module-echo-cancel/aec-webrtc.cc' ],
+  pipewire_module_echo_cancel_sources,
   c_args : pipewire_module_c_args,
   include_directories : [configinc, spa_inc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, pipewire_dep],
+  dependencies : [mathlib, dl_lib, pipewire_dep, webrtc_dep],
 )
 
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
@@ -57,6 +66,17 @@ pipewire_module_profiler = shared_library('pipewire-module-profiler',
   install_rpath: modules_install_dir,
   dependencies : [mathlib, dl_lib, pipewire_dep],
 )
+
+if build_machine.system() == 'linux'
+pipewire_module_rt = shared_library('pipewire-module-rt', [ 'module-rt.c' ],
+  c_args : pipewire_module_c_args,
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [dl_lib, pipewire_dep],
+)
+endif
 
 if dbus_dep.found()
 pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rtkit.c' ],
@@ -131,6 +151,8 @@ pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse'
   [ 'module-protocol-pulse.c',
     'module-protocol-pulse/manager.c',
     'module-protocol-pulse/pulse-server.c',
+    'module-protocol-pulse/modules/module-combine-sink.c',
+    'module-protocol-pulse/modules/module-echo-cancel.c',
     'module-protocol-pulse/modules/module-ladspa-sink.c',
     'module-protocol-pulse/modules/module-ladspa-source.c',
     'module-protocol-pulse/modules/module-loopback.c',

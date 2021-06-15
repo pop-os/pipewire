@@ -39,9 +39,6 @@
 
 #define NAME "core"
 
-/** \cond */
-
-/** \endcond */
 static void core_event_ping(void *data, uint32_t id, int seq)
 {
 	struct pw_core *this = data;
@@ -394,8 +391,7 @@ error_proxy:
 exit_free:
 	free(p);
 exit_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
