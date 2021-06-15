@@ -83,8 +83,7 @@ static void module_free(struct module *module)
 	pw_work_queue_cancel(impl->work_queue, module, SPA_ID_INVALID);
 	free((char*)module->name);
 	free((char*)module->args);
-	if (module->props)
-		pw_properties_free(module->props);
+	pw_properties_free(module->props);
 	free(module);
 }
 
@@ -214,6 +213,8 @@ int module_args_to_audioinfo(struct impl *impl, struct pw_properties *props, str
 #include "modules/registry.h"
 
 static const struct module_info module_list[] = {
+	{ "module-combine-sink", create_module_combine_sink, },
+	{ "module-echo-cancel", create_module_echo_cancel, },
 	{ "module-ladspa-sink", create_module_ladspa_sink, },
 	{ "module-ladspa-source", create_module_ladspa_source, },
 	{ "module-loopback", create_module_loopback, },

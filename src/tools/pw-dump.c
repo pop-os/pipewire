@@ -35,6 +35,7 @@
 #include <spa/pod/iter.h>
 #include <spa/debug/types.h>
 #include <spa/utils/json.h>
+#include <spa/utils/ansi.h>
 
 #include <pipewire/pipewire.h>
 #include <extensions/metadata.h>
@@ -43,11 +44,11 @@
 
 static bool colors = false;
 
-#define NORMAL	(colors ? "\x1B[0m":"")
-#define LITERAL	(colors ? "\x1B[95m":"")
-#define NUMBER	(colors ? "\x1B[96m":"")
-#define STRING	(colors ? "\x1B[92m":"")
-#define KEY	(colors ? "\x1B[94m":"")
+#define NORMAL	(colors ? SPA_ANSI_RESET : "")
+#define LITERAL	(colors ? SPA_ANSI_BRIGHT_MAGENTA : "")
+#define NUMBER	(colors ? SPA_ANSI_BRIGHT_CYAN : "")
+#define STRING	(colors ? SPA_ANSI_BRIGHT_GREEN : "")
+#define KEY	(colors ? SPA_ANSI_BRIGHT_BLUE : "")
 
 struct data {
 	struct pw_main_loop *loop;
@@ -197,8 +198,7 @@ static void object_destroy(struct object *o)
 	spa_list_remove(&o->link);
 	if (o->proxy)
 		pw_proxy_destroy(o->proxy);
-	if (o->props)
-		pw_properties_free(o->props);
+	pw_properties_free(o->props);
 	clear_params(&o->param_list, SPA_ID_INVALID);
 	clear_params(&o->pending_list, SPA_ID_INVALID);
 	free(o->type);
@@ -275,20 +275,16 @@ static void put_double(struct data *d, const char *key, double val)
 
 static void put_value(struct data *d, const char *key, const char *val)
 {
-	char *end;
-	long int li;
+	int64_t li;
 	double dv;
 
 	if (val == NULL)
 		put_literal(d, key, "null");
-	else if (spa_streq(val, "true") ||
-	    spa_streq(val, "false"))
+	else if (spa_streq(val, "true") || spa_streq(val, "false"))
 		put_literal(d, key, val);
-	else if ((li = strtol(val, &end, 10)) != LONG_MIN &&
-	    errno != -ERANGE && *end == '\0')
+	else if (spa_atoi64(val, &li, 10))
 		put_int(d, key, li);
-	else if ((dv = strtod(val, &end)) != HUGE_VAL &&
-	    errno != -ERANGE && *end == '\0')
+	else if (spa_atod(val, &dv))
 		put_double(d, key, dv);
 	else
 		put_string(d, key, val);
@@ -1293,8 +1289,7 @@ static void registry_event_global(void *data, uint32_t id,
 
 bind_failed:
 	pw_log_error("can't bind object for %u %s/%d: %m", id, type, version);
-	if (o->props)
-		pw_properties_free(o->props);
+	pw_properties_free(o->props);
 	free(o);
 	return;
 }
@@ -1460,10 +1455,11 @@ int main(int argc, char *argv[])
 			return -1;
 		}
 	}
-	if (optind < argc)
-		data.id = atoi(argv[optind++]);
-	else
-		data.id = SPA_ID_INVALID;
+
+	data.id = SPA_ID_INVALID;
+	if (optind < argc) {
+		spa_atou32(argv[optind++], &data.id, 0);
+	}
 
 	data.loop = pw_main_loop_new(NULL);
 	if (data.loop == NULL) {

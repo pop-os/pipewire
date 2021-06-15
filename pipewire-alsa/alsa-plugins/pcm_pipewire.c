@@ -461,13 +461,12 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	struct pw_properties *props;
-	int res;
 	uint32_t min_period;
 
 	pw_thread_loop_lock(pw->main_loop);
 
 	snd_pcm_sw_params_alloca(&swparams);
-	if ((res = snd_pcm_sw_params_current(io->pcm, swparams)) == 0) {
+	if (snd_pcm_sw_params_current(io->pcm, swparams) == 0) {
 		snd_pcm_sw_params_get_avail_min(swparams, &pw->min_avail);
 		snd_pcm_sw_params_get_boundary(swparams, &pw->boundary);
 	} else {
@@ -1016,6 +1015,10 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	}
 
 	pw->main_loop = pw_thread_loop_new("alsa-pipewire", NULL);
+	if (pw->main_loop == NULL) {
+		err = -errno;
+		goto error;
+	}
 	loop = pw_thread_loop_get_loop(pw->main_loop);
 	pw->system = loop->system;
 	if ((pw->context = pw_context_new(loop, NULL, 0)) == NULL) {
@@ -1075,8 +1078,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	return 0;
 
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	snd_pcm_pipewire_free(pw);
 	return err;
 }

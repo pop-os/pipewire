@@ -1,6 +1,7 @@
 /* PipeWire
  *
  * Copyright © 2021 Wim Taymans
+ *           © 2021 Arun Raghavan <arun@asymptotic.io>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,29 +23,43 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <string.h>
-#include <stdio.h>
-#include <errno.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-
 #include "config.h"
 
-#include <spa/utils/result.h>
-#include <spa/utils/string.h>
-#include <spa/utils/json.h>
-#include <spa/param/profiler.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <limits.h>
+#include <math.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <spa/debug/pod.h>
+#include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw.h>
+#include <spa/param/profiler.h>
+#include <spa/pod/builder.h>
+#include <spa/utils/json.h>
+#include <spa/utils/result.h>
+#include <spa/utils/ringbuffer.h>
+#include <spa/utils/string.h>
 
 #include <pipewire/private.h>
 #include <pipewire/impl.h>
+#include <pipewire/pipewire.h>
+
 #include <extensions/profiler.h>
 
 #include "module-echo-cancel/echo-cancel.h"
 
 #define NAME "echo-cancel"
+/* Hopefully this is enough for any combination of AEC engine and resampler
+ * input requirement for rate matching */
+#define MAX_BUFSIZE_MS 100
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -60,18 +75,6 @@ static const struct spa_dict_item module_props[] = {
 				"[ sink.props=<properties> ] " },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
-
-#include <stdlib.h>
-#include <signal.h>
-#include <getopt.h>
-#include <limits.h>
-#include <math.h>
-
-#include <spa/pod/builder.h>
-#include <spa/param/audio/format-utils.h>
-#include <spa/param/audio/raw.h>
-
-#include <pipewire/pipewire.h>
 
 struct impl {
 	struct pw_context *context;
@@ -93,15 +96,28 @@ struct impl {
 	struct pw_properties *source_props;
 	struct pw_stream *source;
 	struct spa_hook source_listener;
+	void *rec_buffer[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t rec_ringsize;
+	struct spa_ringbuffer rec_ring;
+	struct spa_io_rate_match *rec_rate_match;
 
 	struct pw_stream *playback;
 	struct spa_hook playback_listener;
 	struct pw_properties *sink_props;
 	struct pw_stream *sink;
 	struct spa_hook sink_listener;
+	void *play_buffer[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t play_ringsize;
+	struct spa_ringbuffer play_ring;
+	struct spa_io_rate_match *play_rate_match;
+
+	void *out_buffer[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t out_ringsize;
+	struct spa_ringbuffer out_ring;
 
 	const struct echo_cancel_info *aec_info;
 	void *aec;
+	uint32_t aec_blocksize;
 
 	unsigned int capture_ready:1;
 	unsigned int sink_ready:1;
@@ -125,48 +141,48 @@ static void unload_module(struct impl *impl)
 
 static void process(struct impl *impl)
 {
-	struct pw_buffer *cin, *cout;
-	struct pw_buffer *pin, *pout;
-	const float *rec[SPA_AUDIO_MAX_CHANNELS];
-	const float *play[SPA_AUDIO_MAX_CHANNELS];
-	float *out[SPA_AUDIO_MAX_CHANNELS];
-	struct spa_data *ds, *dd;
-	uint32_t i, size = 0;
+	struct pw_buffer *cout;
+	struct pw_buffer *pout;
+	float rec_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
+	float play_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
+	float out_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
+	const float *rec[impl->info.channels];
+	const float *play[impl->info.channels];
+	float *out[impl->info.channels];
+	struct spa_data *dd;
+	uint32_t i, size;
+	uint32_t rindex, pindex, oindex, avail;
 	int32_t stride = 0;
 
-	if ((cin = pw_stream_dequeue_buffer(impl->capture)) == NULL)
-		pw_log_warn("out of capture buffers: %m");
+	if ((pout = pw_stream_dequeue_buffer(impl->playback)) == NULL) {
+		pw_log_debug("out of playback buffers: %m");
+		goto done;
+	}
 
-	if ((cout = pw_stream_dequeue_buffer(impl->source)) == NULL)
-		pw_log_warn("out of source buffers: %m");
+	size = impl->aec_blocksize;
 
-	if ((pin = pw_stream_dequeue_buffer(impl->sink)) == NULL)
-		pw_log_warn("out of sink buffers: %m");
+	/* First read a block from the playback and capture ring buffers */
 
-	if ((pout = pw_stream_dequeue_buffer(impl->playback)) == NULL)
-		pw_log_warn("out of playback buffers: %m");
-
-	if (cin == NULL || cout == NULL || pin == NULL || pout == NULL)
-		return;
+	spa_ringbuffer_get_read_index(&impl->rec_ring, &rindex);
+	spa_ringbuffer_get_read_index(&impl->play_ring, &pindex);
 
 	for (i = 0; i < impl->info.channels; i++) {
 		/* captured samples, with echo from sink */
-		ds = &cin->buffer->datas[i];
-		rec[i] = SPA_PTROFF(ds->data, ds->chunk->offset, void);
-
-		size = ds->chunk->size;
-		stride = ds->chunk->stride;
-
-		/* filtered samples, without echo from sink */
-		dd = &cout->buffer->datas[i];
-		out[i] = dd->data;
-		dd->chunk->offset = 0;
-		dd->chunk->size = size;
-		dd->chunk->stride = stride;
-
+		rec[i] = &rec_buf[i][0];
 		/* echo from sink */
-		ds = &pin->buffer->datas[i];
-		play[i] = SPA_PTROFF(ds->data, ds->chunk->offset, void);
+		play[i] = &play_buf[i][0];
+		/* filtered samples, without echo from sink */
+		out[i] = &out_buf[i][0];
+
+		stride = 0;
+		spa_ringbuffer_read_data(&impl->rec_ring, impl->rec_buffer[i],
+				impl->rec_ringsize, rindex % impl->rec_ringsize,
+				(void*)rec[i], size);
+
+		stride = 0;
+		spa_ringbuffer_read_data(&impl->play_ring, impl->play_buffer[i],
+				impl->play_ringsize, pindex % impl->play_ringsize,
+				(void *)play[i], size);
 
 		/* output to sink, just copy */
 		dd = &pout->buffer->datas[i];
@@ -176,13 +192,68 @@ static void process(struct impl *impl)
 		dd->chunk->size = size;
 		dd->chunk->stride = stride;
 	}
-	echo_cancel_run(impl->aec_info, impl->aec, rec, play, out, size / sizeof(float));
 
-	pw_stream_queue_buffer(impl->capture, cin);
-	pw_stream_queue_buffer(impl->source, cout);
-	pw_stream_queue_buffer(impl->sink, pin);
+	spa_ringbuffer_read_update(&impl->rec_ring, rindex + size);
+	spa_ringbuffer_read_update(&impl->play_ring, pindex + size);
+
 	pw_stream_queue_buffer(impl->playback, pout);
 
+	/* Now run the canceller */
+	echo_cancel_run(impl->aec_info, impl->aec, rec,	play, out, size / sizeof(float));
+
+	/* Next, copy over the output to the output ringbuffer */
+	avail = spa_ringbuffer_get_write_index(&impl->out_ring, &oindex);
+	if (avail + size > impl->out_ringsize) {
+		uint32_t rindex, drop;
+
+		/* Drop enough so we have size bytes left */
+		drop = avail + size - impl->out_ringsize;
+		pw_log_debug("output ringbuffer xrun %d + %u > %u, dropping %u",
+				avail, size, impl->out_ringsize, drop);
+
+		spa_ringbuffer_get_read_index(&impl->out_ring, &rindex);
+		spa_ringbuffer_read_update(&impl->out_ring, rindex + drop);
+
+		avail += drop;
+	}
+
+	for (i = 0; i < impl->info.channels; i++) {
+		/* captured samples, with echo from sink */
+		spa_ringbuffer_write_data(&impl->out_ring, impl->out_buffer[i],
+				impl->out_ringsize, oindex % impl->out_ringsize,
+				(void *)out[i], size);
+	}
+
+	spa_ringbuffer_write_update(&impl->out_ring, oindex + size);
+
+	/* And finally take data from the output ringbuffer and make it
+	 * available on the source */
+
+	avail = spa_ringbuffer_get_read_index(&impl->out_ring, &oindex);
+	while (avail >= size) {
+		if ((cout = pw_stream_dequeue_buffer(impl->source)) == NULL) {
+			pw_log_debug("out of source buffers: %m");
+			break;
+		}
+
+		for (i = 0; i < impl->info.channels; i++) {
+			dd = &cout->buffer->datas[i];
+			spa_ringbuffer_read_data(&impl->out_ring, impl->out_buffer[i],
+					impl->out_ringsize, oindex % impl->out_ringsize,
+					(void *)dd->data, size);
+			dd->chunk->offset = 0;
+			dd->chunk->size = size;
+			dd->chunk->stride = 0;
+		}
+
+		pw_stream_queue_buffer(impl->source, cout);
+
+		oindex += size;
+		spa_ringbuffer_read_update(&impl->out_ring, oindex);
+		avail -= size;
+	}
+
+done:
 	impl->sink_ready = false;
 	impl->capture_ready = false;
 }
@@ -194,18 +265,110 @@ static void capture_destroy(void *d)
 	impl->capture = NULL;
 }
 
-static void capture_process(void *d)
+static void capture_io_changed(void *data, uint32_t id, void *area, uint32_t size)
 {
-	struct impl *impl = d;
-	impl->capture_ready = true;
-	if (impl->sink_ready)
-		process(impl);
+	struct impl *impl = data;
+
+	switch (id) {
+	case SPA_IO_RateMatch:
+		impl->rec_rate_match = area;
+		break;
+	}
+}
+
+static void capture_process(void *data)
+{
+	struct impl *impl = data;
+	struct pw_buffer *buf;
+	struct spa_data *d;
+	uint32_t i, index, size;
+	int32_t avail;
+
+	if ((buf = pw_stream_dequeue_buffer(impl->capture)) == NULL) {
+		pw_log_warn("out of capture buffers: %m");
+		return;
+	}
+
+	avail = spa_ringbuffer_get_write_index(&impl->rec_ring, &index);
+	size = buf->buffer->datas[0].chunk->size;
+	if (avail + size > impl->rec_ringsize) {
+		uint32_t rindex, drop;
+
+		/* Drop enough so we have size bytes left */
+		drop = avail + size - impl->rec_ringsize;
+		pw_log_debug("capture ringbuffer xrun %d + %u > %u, dropping %u",
+				avail, size, impl->rec_ringsize, drop);
+
+		spa_ringbuffer_get_read_index(&impl->rec_ring, &rindex);
+		spa_ringbuffer_read_update(&impl->rec_ring, rindex + drop);
+
+		avail += drop;
+	}
+
+	/* If we don't know what size to push yet, use the canceller blocksize
+	 * if it has a specific requirement, else keep the block size the same
+	 * on input and output or what the resampler needs */
+	if (impl->aec_blocksize == 0) {
+		impl->aec_blocksize = SPA_MAX(size, impl->rec_rate_match->size);
+		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
+	}
+
+	for (i = 0; i < impl->info.channels; i++) {
+		/* captured samples, with echo from sink */
+		d = &buf->buffer->datas[i];
+
+		spa_ringbuffer_write_data(&impl->rec_ring, impl->rec_buffer[i],
+				impl->rec_ringsize, index % impl->rec_ringsize,
+				SPA_PTROFF(d->data, d->chunk->offset, void),
+				d->chunk->size);
+	}
+
+	spa_ringbuffer_write_update(&impl->rec_ring, index + size);
+
+	if (avail + size >= impl->aec_blocksize) {
+		impl->capture_ready = true;
+		if (impl->sink_ready)
+			process(impl);
+	}
+
+	pw_stream_queue_buffer(impl->capture, buf);
+}
+
+static void input_param_latency_changed(struct impl *impl, const struct spa_pod *param)
+{
+	struct spa_latency_info latency;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b;
+	const struct spa_pod *params[1];
+
+	if (spa_latency_parse(param, &latency) < 0)
+		return;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+
+	if (latency.direction == SPA_DIRECTION_INPUT)
+		pw_stream_update_params(impl->source, params, 1);
+	else
+		pw_stream_update_params(impl->capture, params, 1);
+}
+
+static void input_param_changed(void *data, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = data;
+	switch (id) {
+	case SPA_PARAM_Latency:
+		input_param_latency_changed(impl, param);
+		break;
+	}
 }
 
 static const struct pw_stream_events capture_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = capture_destroy,
-	.process = capture_process
+	.io_changed = capture_io_changed,
+	.process = capture_process,
+	.param_changed = input_param_changed
 };
 
 static void source_destroy(void *d)
@@ -218,7 +381,37 @@ static void source_destroy(void *d)
 static const struct pw_stream_events source_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = source_destroy,
+	.param_changed = input_param_changed
 };
+
+static void output_param_latency_changed(struct impl *impl, const struct spa_pod *param)
+{
+	struct spa_latency_info latency;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b;
+	const struct spa_pod *params[1];
+
+	if (spa_latency_parse(param, &latency) < 0)
+		return;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+
+	if (latency.direction == SPA_DIRECTION_INPUT)
+		pw_stream_update_params(impl->sink, params, 1);
+	else
+		pw_stream_update_params(impl->playback, params, 1);
+}
+
+static void output_param_changed(void *data, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = data;
+	switch (id) {
+	case SPA_PARAM_Latency:
+		output_param_latency_changed(impl, param);
+		break;
+	}
+}
 
 static void sink_destroy(void *d)
 {
@@ -227,12 +420,70 @@ static void sink_destroy(void *d)
 	impl->sink = NULL;
 }
 
-static void sink_process(void *d)
+static void sink_io_changed(void *data, uint32_t id, void *area, uint32_t size)
 {
-	struct impl *impl = d;
-	impl->sink_ready = true;
-	if (impl->capture_ready)
-		process(impl);
+	struct impl *impl = data;
+
+	switch (id) {
+	case SPA_IO_RateMatch:
+		impl->play_rate_match = area;
+		break;
+	}
+}
+
+static void sink_process(void *data)
+{
+	struct impl *impl = data;
+	struct pw_buffer *buf;
+	struct spa_data *d;
+	uint32_t i, index, size;
+	int32_t avail;
+
+	if ((buf = pw_stream_dequeue_buffer(impl->sink)) == NULL) {
+		pw_log_warn("out of sink buffers: %m");
+		return;
+	}
+
+	avail = spa_ringbuffer_get_write_index(&impl->play_ring, &index);
+	size = buf->buffer->datas[0].chunk->size;
+	if (avail + size > impl->play_ringsize) {
+		uint32_t rindex, drop;
+
+		/* Drop enough so we have size bytes left */
+		drop = avail + size - impl->play_ringsize;
+		pw_log_debug("sink ringbuffer xrun %d + %u > %u, dropping %u",
+				avail, size, impl->play_ringsize, drop);
+
+		spa_ringbuffer_get_read_index(&impl->play_ring, &rindex);
+		spa_ringbuffer_read_update(&impl->play_ring, rindex + drop);
+
+		avail += drop;
+	}
+
+	if (impl->aec_blocksize == 0) {
+		impl->aec_blocksize = SPA_MAX(size, impl->rec_rate_match->size);
+		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
+	}
+
+	for (i = 0; i < impl->info.channels; i++) {
+		/* echo from sink */
+		d = &buf->buffer->datas[i];
+
+		spa_ringbuffer_write_data(&impl->play_ring, impl->play_buffer[i],
+				impl->play_ringsize, index % impl->play_ringsize,
+				SPA_PTROFF(d->data, d->chunk->offset, void),
+				d->chunk->size);
+	}
+
+	spa_ringbuffer_write_update(&impl->play_ring, index + size);
+
+	if (avail + size >= impl->aec_blocksize) {
+		impl->sink_ready = true;
+		if (impl->capture_ready)
+			process(impl);
+	}
+
+	pw_stream_queue_buffer(impl->sink, buf);
 }
 
 static void playback_destroy(void *d)
@@ -245,17 +496,20 @@ static void playback_destroy(void *d)
 static const struct pw_stream_events playback_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = playback_destroy,
+	.param_changed = output_param_changed
 };
 static const struct pw_stream_events sink_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = sink_destroy,
-	.process = sink_process
+	.io_changed = sink_io_changed,
+	.process = sink_process,
+	.param_changed = output_param_changed
 };
 
 static int setup_streams(struct impl *impl)
 {
 	int res;
-	uint32_t n_params;
+	uint32_t n_params, i;
 	const struct spa_pod *params[1];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
@@ -266,6 +520,8 @@ static int setup_streams(struct impl *impl)
 			NULL);
 	pw_properties_setf(props,
 			PW_KEY_NODE_GROUP, "echo-cancel-%u", impl->id);
+	if (impl->aec_info->latency)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
 
 	impl->capture = pw_stream_new(impl->core,
 			"echo-cancel capture", props);
@@ -301,6 +557,8 @@ static int setup_streams(struct impl *impl)
 			NULL);
 	pw_properties_setf(props,
 			PW_KEY_NODE_GROUP, "echo-cancel-%u", impl->id);
+	if (impl->aec_info->latency)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
 
 	impl->playback = pw_stream_new(impl->core,
 			"echo-cancel playback", props);
@@ -350,6 +608,18 @@ static int setup_streams(struct impl *impl)
 			params, n_params)) < 0)
 		return res;
 
+	impl->rec_ringsize = sizeof(float) * MAX_BUFSIZE_MS * impl->info.rate / 1000;
+	impl->play_ringsize = sizeof(float) * MAX_BUFSIZE_MS * impl->info.rate / 1000;
+	impl->out_ringsize = sizeof(float) * MAX_BUFSIZE_MS * impl->info.rate / 1000;
+	for (i = 0; i < impl->info.channels; i++) {
+		impl->rec_buffer[i] = malloc(impl->rec_ringsize);
+		impl->play_buffer[i] = malloc(impl->play_ringsize);
+		impl->out_buffer[i] = malloc(impl->out_ringsize);
+	}
+	spa_ringbuffer_init(&impl->rec_ring);
+	spa_ringbuffer_init(&impl->play_ring);
+	spa_ringbuffer_init(&impl->out_ring);
+
 	return 0;
 }
 
@@ -383,6 +653,7 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct impl *impl)
 {
+	uint32_t i;
 	if (impl->capture)
 		pw_stream_destroy(impl->capture);
 	if (impl->source)
@@ -395,11 +666,20 @@ static void impl_destroy(struct impl *impl)
 		pw_core_disconnect(impl->core);
 	if (impl->aec)
 		echo_cancel_destroy(impl->aec_info, impl->aec);
-	if (impl->source_props)
-		pw_properties_free(impl->source_props);
-	if (impl->sink_props)
-		pw_properties_free(impl->sink_props);
+	pw_properties_free(impl->source_props);
+	pw_properties_free(impl->sink_props);
+
 	pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
+
+	for (i = 0; i < impl->info.channels; i++) {
+		if (impl->rec_buffer[i])
+			free(impl->rec_buffer[i]);
+		if (impl->play_buffer[i])
+			free(impl->play_buffer[i]);
+		if (impl->out_buffer[i])
+			free(impl->out_buffer[i]);
+	}
+
 	free(impl);
 }
 
@@ -471,7 +751,7 @@ SPA_EXPORT
 int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
-	struct pw_properties *props;
+	struct pw_properties *props, *aec_props;
 	struct impl *impl;
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
 	const char *str;
@@ -507,7 +787,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->work = pw_context_get_work_queue(context);
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_GROUP, "loopback-%u", id);
+		pw_properties_setf(props, PW_KEY_NODE_GROUP, "echo-cancel-%u", id);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
@@ -531,18 +811,37 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(impl->sink_props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(impl->sink_props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 
-	copy_props(impl, props, PW_KEY_NODE_GROUP);
-	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
-	copy_props(impl, props, PW_KEY_NODE_LATENCY);
-
 	if ((str = pw_properties_get(props, "aec.method")) == NULL)
-		str = "null";
+		str = "webrtc";
+
+#ifdef HAVE_WEBRTC
 	if (spa_streq(str, "webrtc"))
 		impl->aec_info = echo_cancel_webrtc;
 	else
+#endif
 		impl->aec_info = echo_cancel_null;
 
-	impl->aec = echo_cancel_create(impl->aec_info, NULL, impl->info.channels);
+	if ((str = pw_properties_get(props, "aec.args")) != NULL)
+		aec_props = pw_properties_new_string(str);
+	else
+		aec_props = pw_properties_new(NULL, NULL);
+
+	impl->aec = echo_cancel_create(impl->aec_info, aec_props, &impl->info);
+
+	pw_properties_free(aec_props);
+
+	if (impl->aec_info->latency) {
+		unsigned int num, denom;
+
+		pw_log_info("Setting node latency to %s", impl->aec_info->latency);
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+
+		sscanf(impl->aec_info->latency, "%u/%u", &num, &denom);
+		impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom;
+	} else {
+		/* Implementation doesn't care about the block size */
+		impl->aec_blocksize = 0;
+	}
 
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {
@@ -559,6 +858,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_log_error("can't connect: %m");
 		goto error;
 	}
+
+	copy_props(impl, props, PW_KEY_NODE_NAME);
+	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
+	copy_props(impl, props, PW_KEY_NODE_GROUP);
+	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
+	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 
 	pw_properties_free(props);
 
@@ -578,8 +883,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	return 0;
 
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	impl_destroy(impl);
 	return res;
 }

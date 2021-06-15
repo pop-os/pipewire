@@ -28,6 +28,8 @@
 
 #include "../internal.h"
 
+struct module *create_module_combine_sink(struct impl *impl, const char *argument);
+struct module *create_module_echo_cancel(struct impl *impl, const char *argument);
 struct module *create_module_ladspa_sink(struct impl *impl, const char *argument);
 struct module *create_module_ladspa_source(struct impl *impl, const char *argument);
 struct module *create_module_loopback(struct impl *impl, const char *argument);

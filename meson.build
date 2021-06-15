@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.28',
+  version : '0.3.30',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.49.0',
   default_options : [ 'warning_level=3',
@@ -157,7 +157,7 @@ test_8_byte_atomic = '''
 int main(void)
 {
   int64_t eight;
-  __atomic_store_n(&eight, 123, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&eight, 123, __ATOMIC_SEQ_CST);
   return 0;
 }
 '''
@@ -166,16 +166,15 @@ int main(void)
 # operations on any reasonable architecture.
 if cc.links(
   test_8_byte_atomic,
-  name : '8-byte __atomic_store_n without libatomic')
+  name : '8-byte __atomic_fetch_add without libatomic')
   atomic_dep = dependency('', required: false)
 elif cc.links(
   test_8_byte_atomic,
   dependencies : libatomic,
-  name : '8-byte __atomic_store_n with libatomic')
+  name : '8-byte __atomic_fetch_add with libatomic')
   atomic_dep = libatomic
-elif get_option('pipewire-jack').enabled()
-  # Currently only required for the JACK backend
-  error('8-byte atomic operations are required for pipewire-jack')
+else
+  error('8-byte atomic operations are required')
 endif
 
 cdata = configuration_data()
@@ -232,7 +231,6 @@ check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
   ['pwd.h', 'HAVE_PWD_H'],
   ['ucontext.h', 'HAVE_UCONTEXT_H'],
   ['unistd.h', 'HAVE_UNISTD_H'],
-  ['valgrind/valgrind.h', 'HAVE_VALGRIND_VALGRIND_H'],
 ]
 
 foreach h : check_headers
@@ -286,6 +284,7 @@ if systemd.found() and systemd_dep.found()
 endif
 
 configinc = include_directories('.')
+includes_inc = include_directories('include')
 pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
@@ -345,6 +344,14 @@ if not get_option('gstreamer-device-provider').disabled()
   cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', 1)
 endif
 
+webrtc_dep = dependency('webrtc-audio-processing',
+  version : ['>= 0.2', '< 1.0'],
+  required : get_option('echo-cancel-webrtc'))
+
+if webrtc_dep.found()
+  cdata.set('HAVE_WEBRTC', 1)
+endif
+
 # On FreeBSD, epoll-shim library is required for eventfd() and timerfd()
 epoll_shim_dep = (build_machine.system() == 'freebsd'
     ? dependency('epoll-shim', required: true)
@@ -394,3 +401,27 @@ endif
 setenv = find_program('pw-uninstalled.sh')
 run_target('pw-uninstalled', command : [setenv,
     '-b@0@'.format(meson.build_root()), '-v@0@'.format(pipewire_version)])
+
+if meson.version().version_compare('>=0.58.0')
+  devenv = environment()
+
+  builddir = meson.current_build_dir()
+  srcdir = meson.current_source_dir()
+
+  devenv.set('PIPEWIRE_CONFIG_DIR', builddir / 'src' / 'daemon')
+  devenv.set('PIPEWIRE_MODULE_DIR', builddir / 'src' / 'modules')
+
+  devenv.set('SPA_PLUGIN_DIR', builddir / 'spa' / 'plugins')
+
+  devenv.set('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
+
+  devenv.set('ALSA_PLUGIN_DIR', builddir / 'pipewire-alsa' / 'alsa-plugins')
+  devenv.set('ACP_PATHS_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'paths')
+  devenv.set('ACP_PROFILES_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'profile-sets')
+
+  devenv.set('LD_LIBRARY_PATH', builddir / 'pipewire-jack' / 'src')
+
+  devenv.set('PW_UNINSTALLED', '1')
+
+  meson.add_devenv(devenv)
+endif

@@ -15,6 +15,46 @@
 
 #include "alsa-pcm.h"
 
+int spa_alsa_init(struct state *state)
+{
+	int err;
+
+	snd_config_update_free_global();
+
+	if (state->open_ucm) {
+		char card_name[64];
+
+		snprintf(card_name, sizeof(card_name), "hw:%i", state->card_index);
+		err = snd_use_case_mgr_open(&state->ucm, card_name);
+		if (err < 0) {
+			char *name;
+			err = snd_card_get_name(state->card_index, &name);
+			if (err < 0) {
+				spa_log_error(state->log,
+						"can't get card name from index %d",
+						state->card_index);
+				return err;
+			}
+			snprintf(card_name, sizeof(card_name), "%s", name);
+			free(name);
+		}
+		err = snd_use_case_mgr_open(&state->ucm, card_name);
+		if (err < 0) {
+			spa_log_error(state->log, "UCM not available for card %s", card_name);
+			return err;
+		}
+	}
+	return 0;
+}
+
+int spa_alsa_clear(struct state *state)
+{
+	if (state->ucm)
+		snd_use_case_mgr_close(state->ucm);
+	state->ucm = NULL;
+	return 0;
+}
+
 #define CHECK(s,msg,...) if ((err = (s)) < 0) { spa_log_error(state->log, msg ": %s", ##__VA_ARGS__, snd_strerror(err)); return err; }
 
 int spa_alsa_open(struct state *state)
@@ -488,7 +528,7 @@ skip_channels:
 
 	fmt = spa_pod_builder_pop(&b, &f[0]);
 
-	if ((res = spa_pod_filter(&b, &result.param, fmt, filter)) < 0)
+	if (spa_pod_filter(&b, &result.param, fmt, filter) < 0)
 		goto next;
 
 	spa_node_emit_result(&state->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
@@ -629,6 +669,8 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
 	state->start_delay = state->default_start_delay;
+
+	state->latency.min_rate = state->latency.max_rate = state->headroom;
 
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;

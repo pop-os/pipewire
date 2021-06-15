@@ -128,6 +128,7 @@ struct impl {
 static void emit_node_info(struct impl *this, bool full)
 {
 	uint32_t i;
+	uint64_t old = full ? this->info.change_mask : 0;
 
 	if (this->add_listener)
 		return;
@@ -144,7 +145,7 @@ static void emit_node_info(struct impl *this, bool full)
 			}
 		}
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -1040,11 +1041,19 @@ impl_node_port_set_param(void *object,
 	spa_log_debug(this->log, NAME " %p: set param %u on port %d:%d %p",
 				this, id, direction, port_id, param);
 
-	is_monitor = IS_MONITOR_PORT(this, direction, port_id);
-	if (is_monitor)
-		target = this->fmt[SPA_DIRECTION_INPUT];
-	else
-		target = this->fmt[direction];
+	switch (id) {
+	case SPA_PARAM_Latency:
+		target = this->fmt[SPA_DIRECTION_REVERSE(direction)];
+		port_id = 0;
+		break;
+	default:
+		is_monitor = IS_MONITOR_PORT(this, direction, port_id);
+		if (is_monitor)
+			target = this->fmt[SPA_DIRECTION_INPUT];
+		else
+			target = this->fmt[direction];
+		break;
+	}
 
 	if ((res = spa_node_port_set_param(target,
 					direction, port_id, id, flags, param)) < 0)

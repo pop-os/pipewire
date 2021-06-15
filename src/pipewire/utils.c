@@ -38,21 +38,18 @@
  * Repeatedly call this function to split \a str into all substrings
  * delimited by \a delimiter. \a state should be set to NULL on the first
  * invocation and passed to the function until NULL is returned.
- *
- * \memberof pw_utils
  */
 SPA_EXPORT
 const char *pw_split_walk(const char *str, const char *delimiter, size_t * len, const char **state)
 {
 	const char *s = *state ? *state : str;
 
+	s += strspn(s, delimiter);
 	if (*s == '\0')
 		return NULL;
 
 	*len = strcspn(s, delimiter);
-
 	*state = s + *len;
-	*state += strspn(*state, delimiter);
 
 	return s;
 }
@@ -64,8 +61,6 @@ const char *pw_split_walk(const char *str, const char *delimiter, size_t * len, 
  * \param[out] n_tokens the number of tokens
  * \return a NULL terminated array of strings that should be
  *	freed with \ref pw_free_strv.
- *
- * \memberof pw_utils
  */
 SPA_EXPORT
 char **pw_split_strv(const char *str, const char *delimiter, int max_tokens, int *n_tokens)
@@ -98,13 +93,15 @@ char **pw_split_strv(const char *str, const char *delimiter, int max_tokens, int
  * \param str a NULL terminated array of string
  *
  * Free all the strings in the array and the array
- *
- * \memberof pw_utils
  */
 SPA_EXPORT
 void pw_free_strv(char **str)
 {
 	int i;
+
+	if (str == NULL)
+		return;
+
 	for (i = 0; str[i]; i++)
 		free(str[i]);
 	free(str);
@@ -117,8 +114,6 @@ void pw_free_strv(char **str)
  *
  * Strip whitespace before and after \a str. \a str will be
  * modified.
- *
- * \memberof pw_utils
  */
 SPA_EXPORT
 char *pw_strip(char *str, const char *whitespace)

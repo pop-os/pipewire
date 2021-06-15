@@ -216,8 +216,8 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	dev->device.format.format_mask = m->sample_spec.format;
 	dev->device.format.rate_mask = m->sample_spec.rate;
 	dev->device.format.channels = m->channel_map.channels;
-	pa_cvolume_reset(&dev->real_volume, m->channel_map.channels);
-	pa_cvolume_reset(&dev->soft_volume, m->channel_map.channels);
+	pa_cvolume_reset(&dev->real_volume, dev->device.format.channels);
+	pa_cvolume_reset(&dev->soft_volume, dev->device.format.channels);
 	for (i = 0; i < m->channel_map.channels; i++)
 		dev->device.format.map[i]= channel_pa2acp(m->channel_map.map[i]);
 	dev->direction = direction;
@@ -241,8 +241,24 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 
 	dev->ports = pa_hashmap_new(pa_idxset_string_hash_func,
 			pa_idxset_string_compare_func);
-	if (m->ucm_context.ucm)
+	if (m->ucm_context.ucm) {
+		const char *alibpref = NULL;
 		dev->ucm_context = &m->ucm_context;
+		if ((snd_use_case_get(impl->ucm.ucm_mgr, "_alibpref", &alibpref) != 0))
+			alibpref = NULL;
+		if (alibpref == NULL)
+			alibpref = spa_aprintf("_ucm%04X.", impl->card.index);
+		if (alibpref != NULL) {
+			char **d;
+			for (d = m->device_strings; *d; d++) {
+				if (pa_startswith(*d, alibpref)) {
+					dev->device.flags |= ACP_DEVICE_UCM_DEVICE;
+					break;
+				}
+			}
+			free((void*)alibpref);
+		}
+	}
 	pa_dynarray_init(&dev->port_array, NULL);
 }
 
@@ -1172,7 +1188,7 @@ static void mixer_volume_init(pa_card *impl, pa_alsa_device *dev)
 		pa_log_info("Using hardware volume control. Hardware dB scale %s.",
 				dev->mixer_path->has_dB ? "supported" : "not supported");
 	}
-	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);;
+	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);
 	dev->device.volume_step = 1.0f / dev->n_volume_steps;
 
 	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_mute) {
@@ -1321,8 +1337,15 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 
 	if (dev->read_volume)
 		dev->read_volume(dev);
+	else {
+		pa_cvolume_reset(&dev->real_volume, dev->device.format.channels);
+		pa_cvolume_reset(&dev->soft_volume, dev->device.format.channels);
+	}
 	if (dev->read_mute)
 		dev->read_mute(dev);
+	else
+		dev->muted = false;
+
 	return 0;
 }
 
@@ -1809,7 +1832,7 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 
 	v.channels = d->mapping->channel_map.channels;
 	for (i = 0; i < v.channels; i++)
-		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);;
+		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);
 
 	pa_log_info("Set %s volume: min:%d max:%d",
 			d->set_volume ? "hardware" : "software",

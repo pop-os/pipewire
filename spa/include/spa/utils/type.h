@@ -31,6 +31,14 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 
+/** \defgroup spa_types SPA Types
+ */
+
+/**
+ * \addtogroup spa_types
+ * \{
+ */
+
 enum {
 	/* Basic types */
 	SPA_TYPE_START = 0x00000,
@@ -87,6 +95,7 @@ enum {
 	SPA_TYPE_OBJECT_ParamPortConfig,
 	SPA_TYPE_OBJECT_ParamRoute,
 	SPA_TYPE_OBJECT_Profiler,
+	SPA_TYPE_OBJECT_ParamLatency,
 	_SPA_TYPE_OBJECT_LAST,			/**< not part of ABI */
 
 	/* vendor extensions */
@@ -130,6 +139,10 @@ struct spa_type_info {
 	const char *name;
 	const struct spa_type_info *values;
 };
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

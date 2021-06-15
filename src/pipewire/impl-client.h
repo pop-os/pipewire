@@ -31,24 +31,6 @@ extern "C" {
 
 #include <spa/utils/hook.h>
 
-/** \class pw_impl_client
- *
- * \brief PipeWire client object class.
- *
- * The client object represents a client connection with the PipeWire
- * server.
- *
- * Each client has its own list of resources it is bound to along with
- * a mapping between the client types and server types.
- */
-struct pw_impl_client;
-
-#include <pipewire/context.h>
-#include <pipewire/global.h>
-#include <pipewire/properties.h>
-#include <pipewire/resource.h>
-#include <pipewire/permission.h>
-
 /** \page page_client Client
  *
  * \section sec_page_client_overview Overview
@@ -63,21 +45,44 @@ struct pw_impl_client;
  *
  * The client object will have its credentials filled in by the protocol.
  * This information is used to check if a resource or action is available
- * for this client. See also \ref page_access
+ * for this client.
  *
  * \section sec_page_client_types Types
  *
  * The client and server maintain a mapping between the client and server
  * types. All type ids that are in messages exchanged between the client
- * and server will automatically be remapped. See also \ref page_types.
+ * and server will automatically be remapped.
  *
  * \section sec_page_client_resources Resources
  *
  * When a client binds to context global object, a resource is made for this
  * binding and a unique id is assigned to the resources. The client and
  * server will use this id as the destination when exchanging messages.
- * See also \ref page_resource
+ * See also \ref pw_resource
  */
+
+/** \defgroup pw_impl_client Client Object
+ *
+ * \brief PipeWire client object class
+ *
+ * The client object represents a client connection with the PipeWire
+ * server.
+ *
+ * Each client has its own list of resources it is bound to along with
+ * a mapping between the client types and server types.
+ */
+
+/**
+ * \addtogroup pw_impl_client
+ * \{
+ */
+struct pw_impl_client;
+
+#include <pipewire/context.h>
+#include <pipewire/global.h>
+#include <pipewire/properties.h>
+#include <pipewire/resource.h>
+#include <pipewire/permission.h>
 
 /** The events that a client can emit */
 struct pw_impl_client_events {
@@ -166,6 +171,10 @@ void pw_impl_client_add_listener(struct pw_impl_client *client,
 /** Mark the client busy. This can be used when an asynchronous operation is
   * started and no further processing is allowed to happen for the client */
 void pw_impl_client_set_busy(struct pw_impl_client *client, bool busy);
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }

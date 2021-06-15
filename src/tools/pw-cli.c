@@ -118,20 +118,21 @@ struct command {
 static int pw_split_ip(char *str, const char *delimiter, int max_tokens, char *tokens[])
 {
 	const char *state = NULL;
-	char *s;
-	size_t len;
+	char *s, *t;
+	size_t len, l2;
 	int n = 0;
 
-        s = (char *)pw_split_walk(str, delimiter, &len, &state);
-        while (s && n + 1 < max_tokens) {
+	s = (char *)pw_split_walk(str, delimiter, &len, &state);
+	while (s && n + 1 < max_tokens) {
+		t = (char*)pw_split_walk(str, delimiter, &l2, &state);
 		s[len] = '\0';
 		tokens[n++] = s;
-                s = (char*)pw_split_walk(str, delimiter, &len, &state);
-        }
-        if (s) {
+		s = t;
+		len = l2;
+	}
+	if (s)
 		tokens[n++] = s;
-        }
-        return n;
+	return n;
 }
 
 static void print_properties(struct spa_dict *props, char mark, bool header)
@@ -356,8 +357,7 @@ static int destroy_global(void *obj, void *data)
 		return 0;
 
 	pw_map_remove(&global->rd->globals, global->id);
-	if (global->properties)
-		pw_properties_free(global->properties);
+	pw_properties_free(global->properties);
 	free(global->type);
 	free(global);
 	return 0;
@@ -931,8 +931,7 @@ static const struct pw_device_events device_events = {
 static void session_info_free(struct pw_session_info *info)
 {
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -955,8 +954,7 @@ static void session_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -980,8 +978,7 @@ static void endpoint_info_free(struct pw_endpoint_info *info)
 	free(info->name);
 	free(info->media_class);
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -1012,8 +1009,7 @@ static void endpoint_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -1036,8 +1032,7 @@ static void endpoint_stream_info_free(struct pw_endpoint_stream_info *info)
 {
 	free(info->name);
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -1062,8 +1057,7 @@ static void endpoint_stream_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -1295,8 +1289,7 @@ static bool do_create_device(struct data *data, const char *cmd, char *args, cha
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
 
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1335,8 +1328,7 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
 
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1407,8 +1399,7 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 					  props ? &props->dict : NULL,
 					  sizeof(struct proxy_data));
 
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -2093,7 +2084,6 @@ dump_properties(struct data *data, struct global *global,
 				ind, item->key, item->value);
 
 		extra = NULL;
-		id = -1;
 		if (spa_streq(global->type, PW_TYPE_INTERFACE_Port) && spa_streq(item->key, PW_KEY_NODE_ID)) {
 			id = atoi(item->value);
 			if (id >= 0)
@@ -3028,6 +3018,10 @@ int main(int argc, char *argv[])
 				PW_KEY_CORE_DAEMON, daemon ? "true" : NULL,
 				NULL),
 			0);
+	if (data.context == NULL) {
+		fprintf(stderr, "Can't create context: %m\n");
+		return -1;
+	}
 
 	pw_context_load_module(data.context, "libpipewire-module-link-factory", NULL, NULL);
 

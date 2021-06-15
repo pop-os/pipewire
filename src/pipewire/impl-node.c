@@ -718,8 +718,7 @@ int pw_impl_node_register(struct pw_impl_node *this,
 	return 0;
 
 error_existed:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	return -EEXIST;
 }
 
@@ -1235,8 +1234,7 @@ error_clean:
 		spa_system_close(this->context->data_system, this->source.fd);
 	free(impl);
 error_exit:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -1715,8 +1713,6 @@ void pw_impl_node_add_listener(struct pw_impl_node *node,
  *
  * Remove \a node. This will stop the transfer on the node and
  * free the resources allocated by \a node.
- *
- * \memberof pw_impl_node
  */
 SPA_EXPORT
 void pw_impl_node_destroy(struct pw_impl_node *node)
@@ -2067,8 +2063,6 @@ static void node_activate(struct pw_impl_node *this)
  * \return 0 on success < 0 on error
  *
  * Set the state of \a node to \a state.
- *
- * \memberof pw_impl_node
  */
 SPA_EXPORT
 int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)

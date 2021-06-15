@@ -317,9 +317,6 @@
 /* Define if valgrind should be used */
 #mesondefine HAVE_VALGRIND
 
-/* Define to 1 if you have the <valgrind/valgrind.h> header file. */
-#mesondefine HAVE_VALGRIND_VALGRIND_H
-
 /* Define to 1 if you have the <pwd.h> header file.  */
 #mesondefine HAVE_PWD_H
 
@@ -427,9 +424,6 @@
 /* the target CPU */
 #mesondefine TARGET_CPU
 
-/* Define if we should poison deallocated memory */
-#mesondefine USE_POISONING
-
 /* Version number of package */
 #mesondefine VERSION
 
@@ -489,3 +483,5 @@
 #mesondefine PA_ALSA_PROFILE_SETS_DIR
 
 #mesondefine HAVE_GSTREAMER_DEVICE_PROVIDER
+
+#mesondefine HAVE_WEBRTC

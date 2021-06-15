@@ -76,6 +76,7 @@ struct factory_entry {
 	regex_t regex;
 	char *lib;
 };
+/** \endcond */
 
 static void fill_properties(struct pw_context *context)
 {
@@ -186,8 +187,6 @@ static int try_load_conf(struct pw_context *this, const char *conf_prefix,
  * \param main_loop the main loop to use
  * \param properties extra properties for the context, ownership it taken
  * \return a newly allocated context object
- *
- * \memberof pw_context
  */
 SPA_EXPORT
 struct pw_context *pw_context_new(struct pw_loop *main_loop,
@@ -238,7 +237,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 		conf_name = pw_properties_get(properties, PW_KEY_CONFIG_NAME);
 		if (try_load_conf(this, conf_prefix, conf_name, conf) < 0) {
 			conf_name = "client.conf";
-			if (try_load_conf(this, conf_prefix, conf_name, conf) < 0) {
+			if ((res = try_load_conf(this, conf_prefix, conf_name, conf)) < 0) {
 				pw_log_error(NAME" %p: can't load config %s: %s",
 					this, conf_name, spa_strerror(res));
 				goto error_free;
@@ -253,6 +252,11 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	if ((str = pw_properties_get(conf, "context.properties")) != NULL) {
 		pw_properties_update_string(properties, str, strlen(str));
 		pw_log_info(NAME" %p: parsed context.properties section", this);
+	}
+
+	if ((str = getenv("PIPEWIRE_CORE"))) {
+		pw_log_info("using core.name from environment: %s", str);
+		pw_properties_set(properties, PW_KEY_CORE_NAME, str);
 	}
 
 	if ((str = pw_properties_get(properties, "vm.overrides")) != NULL) {
@@ -367,7 +371,10 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	pw_log_info(NAME" %p: parsed %d context.spa-libs items", this, res);
 	if ((res = pw_context_parse_conf_section(this, conf, "context.modules")) < 0)
 		goto error_free_loop;
-	pw_log_info(NAME" %p: parsed %d context.modules items", this, res);
+	if (res > 0)
+		pw_log_info(NAME" %p: parsed %d context.modules items", this, res);
+	else
+		pw_log_warn(NAME "%p: no modules loaded from context.modules", this);
 	if ((res = pw_context_parse_conf_section(this, conf, "context.objects")) < 0)
 		goto error_free_loop;
 	pw_log_info(NAME" %p: parsed %d context.objects items", this, res);
@@ -384,10 +391,8 @@ error_free_loop:
 error_free:
 	free(this);
 error_cleanup:
-	if (conf)
-		pw_properties_free(conf);
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(conf);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -395,8 +400,6 @@ error_cleanup:
 /** Destroy a context object
  *
  * \param context a context to destroy
- *
- * \memberof pw_context
  */
 SPA_EXPORT
 void pw_context_destroy(struct pw_context *context)
@@ -525,8 +528,6 @@ const char *pw_context_get_conf_section(struct pw_context *context, const char *
  * \param dict properties to update
  *
  * Update the context object with the given properties
- *
- * \memberof pw_context
  */
 SPA_EXPORT
 int pw_context_update_properties(struct pw_context *context, const struct spa_dict *dict)
@@ -592,8 +593,6 @@ struct pw_global *pw_context_find_global(struct pw_context *context, uint32_t id
  * \param format_filters array of format filters
  * \param[out] error an error when something is wrong
  * \return a port that can be used to link to \a otherport or NULL on error
- *
- * \memberof pw_context
  */
 struct pw_impl_port *pw_context_find_port(struct pw_context *context,
 				  struct pw_impl_port *other_port,
@@ -723,13 +722,13 @@ SPA_PRINTF_FUNC(7, 8) int pw_context_debug_port_params(struct pw_context *this,
  * \param props extra properties
  * \param n_format_filters number of format filters
  * \param format_filters array of format filters
+ * \param[out] format the common format between the ports
+ * \param builder builder to use for processing
  * \param[out] error an error when something is wrong
  * \return a common format of NULL on error
  *
  * Find a common format between the given ports. The format will
  * be restricted to a subset given with the format filters.
- *
- * \memberof pw_context
  */
 int pw_context_find_format(struct pw_context *context,
 			struct pw_impl_port *output,

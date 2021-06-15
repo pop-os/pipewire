@@ -341,10 +341,8 @@ unref:
 	if (!obj->discarded)
 		return 0;
 
-	if (obj->props) {
-		pw_properties_free(obj->props);
-		obj->props = NULL;
-	}
+	pw_properties_free(obj->props);
+	obj->props = NULL;
 
 	spa_list_consume(d, &obj->data, link) {
 		spa_list_remove(&d->link);
@@ -818,8 +816,7 @@ static void session_event_info(void *object, const struct pw_session_info *info)
 	if (info) {
 		i->change_mask = info->change_mask;
 		if (info->change_mask & PW_SESSION_CHANGE_MASK_PROPS) {
-			if (i->props)
-				pw_properties_free ((struct pw_properties *)i->props);
+			pw_properties_free ((struct pw_properties *)i->props);
 			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
 		}
 	}
@@ -857,8 +854,7 @@ static void session_destroy(void *object)
 		spa_list_remove(&endpoint->link);
 	}
 	if (i) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
+		pw_properties_free ((struct pw_properties *)i->props);
 		free(i);
 	}
 
@@ -898,8 +894,7 @@ static void endpoint_event_info(void *object, const struct pw_endpoint_info *inf
 			i->session_id = info->session_id;
 		}
 		if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-			if (i->props)
-				pw_properties_free ((struct pw_properties *)i->props);
+			pw_properties_free ((struct pw_properties *)i->props);
 			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
 			if ((str = spa_dict_lookup(i->props, PW_KEY_PRIORITY_SESSION)) != NULL)
 				endpoint->priority = pw_properties_parse_int(str);
@@ -954,8 +949,7 @@ static void endpoint_destroy(void *object)
 		spa_list_remove(&endpoint->link);
 	}
 	if (i) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
+		pw_properties_free ((struct pw_properties *)i->props);
 		free(i->name);
 		free(i->media_class);
 		free(i);
@@ -1321,8 +1315,7 @@ static void registry_event_free(struct registry_event *re)
 {
 	if (re->proxy)
 		pw_proxy_destroy(re->proxy);
-	if (re->props_store)
-		pw_properties_free(re->props_store);
+	pw_properties_free(re->props_store);
 	if (re->allocated) {
 		spa_list_remove(&re->link);
 		free(re);
@@ -1355,7 +1348,7 @@ static int handle_registry_event(struct impl *impl, struct registry_event *re)
 		 * removed. In that case, we create a zombie object here, but its remove
 		 * event is already queued and arrives soon.
 		 */
-		obj = bind_object(impl, info, re);
+		bind_object(impl, info, re);
 	} else if (obj != NULL && obj->monitor_global == re->monitor) {
 		/* Each core handles their own object updates */
 		update_object(impl, info, obj, re);

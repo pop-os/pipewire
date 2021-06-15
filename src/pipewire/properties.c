@@ -146,6 +146,14 @@ struct pw_properties *pw_properties_new_dict(const struct spa_dict *dict)
 	return &impl->this;
 }
 
+/** Update the properties from the given string, overwriting any
+ * existing keys with the new values from \a str.
+ *
+ * \a str should be a whitespace separated list of key=value
+ * strings or a json object, see pw_properties_new_string().
+ *
+ * \return The number of properties added or updated
+ */
 SPA_EXPORT
 int pw_properties_update_string(struct pw_properties *props, const char *str, size_t size)
 {
@@ -377,7 +385,12 @@ int pw_properties_add_keys(struct pw_properties *props,
 SPA_EXPORT
 void pw_properties_free(struct pw_properties *properties)
 {
-	struct properties *impl = SPA_CONTAINER_OF(properties, struct properties, this);
+	struct properties *impl;
+
+	if (properties == NULL)
+		return;
+
+	impl = SPA_CONTAINER_OF(properties, struct properties, this);
 	pw_properties_clear(properties);
 	pw_array_clear(&impl->items);
 	free(impl);
@@ -542,6 +555,44 @@ const char *pw_properties_iterate(const struct pw_properties *properties, void *
 	return pw_array_get_unchecked(&impl->items, index, struct spa_dict_item)->key;
 }
 
+static int encode_string(FILE *f, const char *val)
+{
+	int len = 0;
+	len += fprintf(f, "\"");
+	while (*val) {
+		switch (*val) {
+		case '\n':
+			len += fprintf(f, "\\n");
+			break;
+		case '\r':
+			len += fprintf(f, "\\r");
+			break;
+		case '\b':
+			len += fprintf(f, "\\b");
+			break;
+		case '\t':
+			len += fprintf(f, "\\t");
+			break;
+		case '\f':
+			len += fprintf(f, "\\f");
+			break;
+		case '\\':
+		case '"':
+			len += fprintf(f, "\\%c", *val);
+		break;
+		default:
+			if (*val > 0 && *val < 0x20)
+				len += fprintf(f, "\\u%04x", *val);
+			else
+				len += fprintf(f, "%c", *val);
+			break;
+		}
+		val++;
+	}
+	len += fprintf(f, "\"");
+	return len-1;
+}
+
 SPA_EXPORT
 int pw_properties_serialize_dict(FILE *f, const struct spa_dict *dict, uint32_t flags)
 {
@@ -558,10 +609,7 @@ int pw_properties_serialize_dict(FILE *f, const struct spa_dict *dict, uint32_t 
 		    spa_json_is_container(it->value, len)) {
 			fprintf(f, "%s", it->value);
 		} else {
-			size_t size = (len+1) * 4;
-			char str[size];
-			spa_json_encode_string(str, size, it->value);
-			fprintf(f, "%s", str);
+			encode_string(f, it->value);
 		}
 		count++;
 	}

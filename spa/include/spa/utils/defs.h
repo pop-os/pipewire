@@ -31,10 +31,19 @@ extern "C" {
 #include <stdbool.h>
 #endif
 #include <inttypes.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
+
+/** \defgroup spa_utils SPA Utils
+ */
+
+/**
+ * \addtogroup spa_utils
+ * \{
+ */
 
 /**
  * SPA_FALLTHROUGH is an annotation to suppress compiler warnings about switch
@@ -98,6 +107,18 @@ struct spa_fraction {
 };
 
 #define SPA_N_ELEMENTS(arr)  (sizeof(arr) / sizeof((arr)[0]))
+/**
+ * Array iterator macro. Usage:
+ * ```c
+ * struct foo *array[16];
+ * struct foo *f;
+ * SPA_FOR_EACH_ELEMENT(array, f) {
+ *	f->bar = baz;
+ * }
+ * ```
+ */
+#define SPA_FOR_EACH_ELEMENT(arr, ptr) \
+	for (ptr = arr; (void*)ptr < SPA_PTROFF(arr, sizeof(arr), void); ptr++)
 
 #define SPA_MIN(a,b)		\
 ({				\
@@ -292,6 +313,10 @@ struct spa_fraction {
 		_strp = NULL;						\
 	_strp;								\
 })
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 } /* extern "C" */

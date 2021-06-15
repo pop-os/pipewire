@@ -637,6 +637,8 @@ static void input_remove(struct pw_impl_link *this, struct pw_impl_port *port)
 	spa_list_remove(&this->input_link);
 	pw_impl_port_emit_link_removed(this->input, this);
 
+	pw_impl_port_recalc_latency(this->input);
+
 	if ((res = pw_impl_port_use_buffers(port, mix, 0, NULL, 0)) < 0) {
 		pw_log_warn(NAME" %p: port %p clear error %s", this, port, spa_strerror(res));
 	}
@@ -656,6 +658,8 @@ static void output_remove(struct pw_impl_link *this, struct pw_impl_port *port)
 
 	spa_list_remove(&this->output_link);
 	pw_impl_port_emit_link_removed(this->output, this);
+
+	pw_impl_port_recalc_latency(this->output);
 
 	/* we don't clear output buffers when the link goes away. They will get
 	 * cleared when the node goes to suspend */
@@ -792,16 +796,15 @@ static void port_param_changed(struct pw_impl_link *this, uint32_t id,
 {
 	enum pw_impl_port_state target;
 
-	pw_log_debug(NAME" %p: outport %p input %p param %d", this,
-		outport, inport, id);
+	pw_log_debug(NAME" %p: outport %p input %p param %d (%s)", this,
+		outport, inport, id, spa_debug_type_find_name(spa_type_param, id));
 
 	switch (id) {
 	case SPA_PARAM_EnumFormat:
 		target = PW_IMPL_PORT_STATE_CONFIGURE;
 		break;
-//	case SPA_PARAM_Buffers:
-//		target = PW_IMPL_PORT_STATE_READY;
-//		break;
+	case SPA_PARAM_Latency:
+		return;
 	default:
 		return;
 	}
@@ -843,16 +846,32 @@ static void output_port_state_changed(void *data, enum pw_impl_port_state old,
 	port_state_changed(this, this->output, this->input, state, error);
 }
 
+static void input_port_latency_changed(void *data)
+{
+	struct impl *impl = data;
+	struct pw_impl_link *this = &impl->this;
+	pw_impl_port_recalc_latency(this->output);
+}
+
+static void output_port_latency_changed(void *data)
+{
+	struct impl *impl = data;
+	struct pw_impl_link *this = &impl->this;
+	pw_impl_port_recalc_latency(this->input);
+}
+
 static const struct pw_impl_port_events input_port_events = {
 	PW_VERSION_IMPL_PORT_EVENTS,
 	.param_changed = input_port_param_changed,
 	.state_changed = input_port_state_changed,
+	.latency_changed = input_port_latency_changed,
 };
 
 static const struct pw_impl_port_events output_port_events = {
 	PW_VERSION_IMPL_PORT_EVENTS,
 	.param_changed = output_port_param_changed,
 	.state_changed = output_port_state_changed,
+	.latency_changed = output_port_latency_changed,
 };
 
 static void node_result(struct impl *impl, struct pw_impl_port *port,
@@ -1148,6 +1167,9 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	try_link_controls(impl, output, input);
 
+	pw_impl_port_recalc_latency(this->output);
+	pw_impl_port_recalc_latency(this->input);
+
 	pw_impl_node_emit_peer_added(impl->onode, impl->inode);
 
 	return this;
@@ -1178,8 +1200,7 @@ error_no_io:
 error_free:
 	free(impl);
 error_exit:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -1256,8 +1277,7 @@ int pw_impl_link_register(struct pw_impl_link *link,
 	return 0;
 
 error_existed:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	return -EEXIST;
 }
 

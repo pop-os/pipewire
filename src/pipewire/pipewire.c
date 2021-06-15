@@ -39,6 +39,8 @@
 #include <locale.h>
 #include <libintl.h>
 
+#include <valgrind/valgrind.h>
+
 #include <spa/utils/names.h>
 #include <spa/utils/string.h>
 #include <spa/support/cpu.h>
@@ -84,6 +86,8 @@ struct support {
 	struct spa_support support[MAX_SUPPORT];
 	uint32_t n_support;
 	unsigned int in_valgrind:1;
+	unsigned int no_color:1;
+	unsigned int no_config:1;
 };
 
 static struct registry global_registry;
@@ -221,8 +225,7 @@ static void configure_debug(struct support *support, const char *str)
 	if (n_tokens > 1)
 		support->categories = pw_split_strv(level[1], ",", INT_MAX, &n_tokens);
 
-	if (level)
-		pw_free_strv(level);
+	pw_free_strv(level);
 }
 
 SPA_EXPORT
@@ -473,7 +476,6 @@ static struct spa_log *load_journal_logger(struct support *support)
  *
  * The environment variable \a PIPEWIRE_DEBUG
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 void pw_init(int *argc, char **argv[])
@@ -489,10 +491,15 @@ void pw_init(int *argc, char **argv[])
 	if (support->registry != NULL)
 		return;
 
-	if ((str = getenv("VALGRIND")))
-		support->in_valgrind = pw_properties_parse_bool(str);
+	support->in_valgrind = RUNNING_ON_VALGRIND;
 
-	if ((str = getenv("PIPEWIRE_DEBUG")))
+	if ((str = getenv("NO_COLOR")) != NULL)
+		support->no_color = true;
+
+	if ((str = getenv("PIPEWIRE_NO_CONFIG")) != NULL)
+		support->no_config = pw_properties_parse_bool(str);
+
+	if ((str = getenv("PIPEWIRE_DEBUG")) != NULL)
 		configure_debug(support, str);
 
 	init_i18n(support);
@@ -510,7 +517,7 @@ void pw_init(int *argc, char **argv[])
 
 	if (pw_log_is_default()) {
 		n_items = 0;
-		if (getenv("NO_COLOR") == NULL)
+		if (!support->no_color)
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "true");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LINE, "true");
@@ -565,8 +572,7 @@ void pw_deinit(void)
 			unref_handle(h);
 		unref_plugin(p);
 	}
-	if (support->categories)
-		pw_free_strv(support->categories);
+	pw_free_strv(support->categories);
 	free(support->i18n_domain);
 	spa_zero(global_support);
 	spa_zero(global_registry);
@@ -581,7 +587,6 @@ void pw_deinit(void)
  * Debugging categories can be enabled by using the PIPEWIRE_DEBUG
  * environment variable
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 bool pw_debug_is_category_enabled(const char *name)
@@ -598,7 +603,7 @@ bool pw_debug_is_category_enabled(const char *name)
 	return false;
 }
 
-/** Get the application name \memberof pw_pipewire */
+/** Get the application name */
 SPA_EXPORT
 const char *pw_get_application_name(void)
 {
@@ -606,7 +611,7 @@ const char *pw_get_application_name(void)
 	return NULL;
 }
 
-/** Get the program name \memberof pw_pipewire */
+/** Get the program name */
 SPA_EXPORT
 const char *pw_get_prgname(void)
 {
@@ -614,8 +619,7 @@ const char *pw_get_prgname(void)
 	spa_memzero(prgname, sizeof(prgname));
 #if defined(__linux__) || defined(__FreeBSD_kernel__)
 	{
-		ssize_t len;
-		if ((len = readlink("/proc/self/exe", prgname, sizeof(prgname)-1)) > 0)
+		if (readlink("/proc/self/exe", prgname, sizeof(prgname)-1) > 0)
 			return strrchr(prgname, '/') + 1;
 	}
 #endif
@@ -637,7 +641,7 @@ const char *pw_get_prgname(void)
 	return prgname;
 }
 
-/** Get the user name \memberof pw_pipewire */
+/** Get the user name */
 SPA_EXPORT
 const char *pw_get_user_name(void)
 {
@@ -649,7 +653,7 @@ const char *pw_get_user_name(void)
 	return NULL;
 }
 
-/** Get the host name \memberof pw_pipewire */
+/** Get the host name */
 SPA_EXPORT
 const char *pw_get_host_name(void)
 {
@@ -668,11 +672,23 @@ bool pw_in_valgrind(void)
 	return global_support.in_valgrind;
 }
 
+SPA_EXPORT
+bool pw_check_option(const char *option, const char *value)
+{
+	if (spa_streq(option, "in-valgrind"))
+		return global_support.in_valgrind == spa_atob(value);
+	else if (spa_streq(option, "no-color"))
+		return global_support.no_color == spa_atob(value);
+	else if (spa_streq(option, "no-config"))
+		return global_support.no_config == spa_atob(value);
+	else
+		return false;
+}
+
 /** Get the client name
  *
  * Make a new PipeWire client name that can be used to construct a remote.
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 const char *pw_get_client_name(void)
@@ -691,7 +707,7 @@ const char *pw_get_client_name(void)
 	}
 }
 
-/** Reverse the direction \memberof pw_pipewire */
+/** Reverse the direction */
 SPA_EXPORT
 enum pw_direction pw_direction_reverse(enum pw_direction direction)
 {

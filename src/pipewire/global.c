@@ -39,8 +39,8 @@
 struct impl {
 	struct pw_global this;
 };
-
 /** \endcond */
+
 SPA_EXPORT
 uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_client *client)
 {
@@ -60,7 +60,6 @@ uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_clie
  * \param object the associated object
  * \return a result global
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 struct pw_global *
@@ -111,8 +110,7 @@ pw_global_new(struct pw_context *context,
 error_free:
 	free(impl);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -122,7 +120,6 @@ error_cleanup:
  * \param global a global to add
  * \return 0 on success < 0 errno value on failure
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 int pw_global_register(struct pw_global *global)
@@ -267,6 +264,7 @@ void pw_global_add_listener(struct pw_global *global,
  *
  * \param global the global to bind to
  * \param client the client that binds
+ * \param permissions the \ref pw_permission
  * \param version the version
  * \param id the id of the resource
  *
@@ -274,7 +272,6 @@ void pw_global_add_listener(struct pw_global *global,
  * After binding, the client and the global object will be able to
  * exchange messages on the proxy/resource with \a id.
  *
- * \memberof pw_global
  */
 SPA_EXPORT int
 pw_global_bind(struct pw_global *global, struct pw_impl_client *client, uint32_t permissions,
@@ -367,7 +364,6 @@ int pw_global_update_permissions(struct pw_global *global, struct pw_impl_client
  *
  * \param global a global to destroy
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 void pw_global_destroy(struct pw_global *global)

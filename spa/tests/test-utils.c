@@ -22,6 +22,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <locale.h>
+#include <unistd.h>
+#include <sys/wait.h>
+
+#include <valgrind/valgrind.h>
+
 #include <spa/utils/defs.h>
 #include <spa/utils/result.h>
 #include <spa/utils/dict.h>
@@ -30,6 +36,7 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/string.h>
 #include <spa/utils/type.h>
+#include <spa/utils/ansi.h>
 
 static void test_abi(void)
 {
@@ -126,7 +133,8 @@ static void test_abi(void)
 	spa_assert(SPA_TYPE_OBJECT_ParamPortConfig == 0x40008);
 	spa_assert(SPA_TYPE_OBJECT_ParamRoute == 0x40009);
 	spa_assert(SPA_TYPE_OBJECT_Profiler == 0x4000a);
-	spa_assert(_SPA_TYPE_OBJECT_LAST == 0x4000b);
+	spa_assert(SPA_TYPE_OBJECT_ParamLatency == 0x4000b);
+	spa_assert(_SPA_TYPE_OBJECT_LAST == 0x4000c);
 
 	spa_assert(SPA_TYPE_VENDOR_PipeWire == 0x02000000);
 	spa_assert(SPA_TYPE_VENDOR_Other == 0x7f000000);
@@ -135,6 +143,10 @@ static void test_abi(void)
 static void test_macros(void)
 {
 	uint8_t ptr[64];
+	uint16_t i16[14];
+	uint32_t i32[10];
+	uint64_t i64[12];
+	unsigned char c[16];
 
 	spa_assert(SPA_MIN(1, 2) == 1);
 	spa_assert(SPA_MIN(1, -2) == -2);
@@ -151,6 +163,27 @@ static void test_macros(void)
 	spa_assert(SPA_MEMBER(ptr, 0, void) == SPA_PTROFF(ptr, 0, void));
 	spa_assert(SPA_MEMBER_ALIGN(ptr, 0, 4, void) == SPA_PTROFF_ALIGN(ptr, 0, 4, void));
 	spa_assert(SPA_MEMBER_ALIGN(ptr, 4, 32, void) == SPA_PTROFF_ALIGN(ptr, 4, 32, void));
+
+	spa_assert(SPA_N_ELEMENTS(ptr) == 64);
+	spa_assert(SPA_N_ELEMENTS(i32) == 10);
+	spa_assert(SPA_N_ELEMENTS(i64) == 12);
+	spa_assert(SPA_N_ELEMENTS(i16) == 14);
+	spa_assert(SPA_N_ELEMENTS(c) == 16);
+
+#define check_traversal(array_) \
+	{ \
+		__typeof__(array_[0]) *it; \
+		int count = 0; \
+		SPA_FOR_EACH_ELEMENT(array_, it) \
+			*it = count++; \
+		for (size_t i = 0; i < SPA_N_ELEMENTS(array_); i++) \
+			spa_assert(array_[i] == i); \
+	}
+	check_traversal(ptr);
+	check_traversal(i64);
+	check_traversal(i32);
+	check_traversal(i16);
+	check_traversal(c);
 }
 
 static void test_result(void)
@@ -477,6 +510,141 @@ static void test_strtol(void)
 	spa_assert(!spa_atoi32(NULL, &v, 16) && v == 0xabcd);
 }
 
+static void test_strtoul(void)
+{
+	uint32_t v;
+
+	spa_assert(spa_atou32("0", &v, 0) && v == 0);
+	spa_assert(spa_atou32("0", &v, 16) && v == 0);
+	spa_assert(spa_atou32("0", &v, 32) && v == 0);
+	spa_assert(spa_atou32("+1", &v, 0) && v == 1);
+	spa_assert(spa_atou32("+1234", &v, 0) && v == 1234);
+	spa_assert(spa_atou32("+4294967295", &v, 0) && v == 4294967295);
+	spa_assert(spa_atou32("4294967295", &v, 0) && v == 4294967295);
+	spa_assert(spa_atou32("65535", &v, 0) && v == 0xffff);
+	spa_assert(spa_atou32("65535", &v, 10) && v == 0xffff);
+	spa_assert(spa_atou32("65535", &v, 16) && v == 0x65535);
+	spa_assert(spa_atou32("0xff", &v, 0) && v == 0xff);
+	spa_assert(spa_atou32("0xff", &v, 16) && v == 0xff);
+
+	v = 0xabcd;
+	spa_assert(!spa_atou32("-1", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("-1234", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("-2147483648", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("0xff", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32("fabc", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32("fabc", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atou32("124bogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("124bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32("124bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atou32("0xbogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32("bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atou32("", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32("", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atou32("  ", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32(" ", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atou32("-2147483649", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("4294967296", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("9223372036854775807", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("-9223372036854775808", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32("9223372036854775808999", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atou32(NULL, &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atou32(NULL, &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atou32(NULL, &v, 16) && v == 0xabcd);
+}
+
+static void test_strtoll(void)
+{
+	int64_t v;
+
+	spa_assert(spa_atoi64("0", &v, 0) && v == 0);
+	spa_assert(spa_atoi64("0", &v, 16) && v == 0);
+	spa_assert(spa_atoi64("0", &v, 32) && v == 0);
+	spa_assert(spa_atoi64("-1", &v, 0) && v == -1);
+	spa_assert(spa_atoi64("-1234", &v, 0) && v == -1234);
+	spa_assert(spa_atoi64("-2147483648", &v, 0) && v == -2147483648);
+	spa_assert(spa_atoi64("+1", &v, 0) && v == 1);
+	spa_assert(spa_atoi64("+1234", &v, 0) && v == 1234);
+	spa_assert(spa_atoi64("+2147483647", &v, 0) && v == 2147483647);
+	spa_assert(spa_atoi64("65535", &v, 0) && v == 0xffff);
+	spa_assert(spa_atoi64("65535", &v, 10) && v == 0xffff);
+	spa_assert(spa_atoi64("65535", &v, 16) && v == 0x65535);
+	spa_assert(spa_atoi64("0xff", &v, 0) && v == 0xff);
+	spa_assert(spa_atoi64("0xff", &v, 16) && v == 0xff);
+	spa_assert(spa_atoi64("9223372036854775807", &v, 0) && v == 0x7fffffffffffffff);
+	spa_assert(spa_atoi64("-9223372036854775808", &v, 0) && (uint64_t)v == 0x8000000000000000);
+
+	v = 0xabcd;
+	spa_assert(!spa_atoi64("0xff", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64("fabc", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64("fabc", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi64("124bogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi64("124bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64("124bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi64("0xbogus", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi64("bogus", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64("bogus", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi64("", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi64("", &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64("", &v, 16) && v == 0xabcd);
+	spa_assert(!spa_atoi64("  ", &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi64(" ", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi64("9223372036854775808999", &v, 0) && v == 0xabcd);
+
+	spa_assert(!spa_atoi64(NULL, &v, 0) && v == 0xabcd);
+	spa_assert(!spa_atoi64(NULL, &v, 10) && v == 0xabcd);
+	spa_assert(!spa_atoi64(NULL, &v, 16) && v == 0xabcd);
+}
+
+static void test_strtof(void)
+{
+	float v;
+
+	spa_assert(spa_atof("0", &v) && v == 0.0f);
+	spa_assert(spa_atof("0.00", &v) && v == 0.0f);
+	spa_assert(spa_atof("1", &v) && v == 1.0f);
+	spa_assert(spa_atof("-1", &v) && v == -1.0f);
+	spa_assert(spa_atof("0x1", &v) && v == 1.0f);
+
+	v = 0xabcd;
+	spa_assert(!spa_atof("0,00", &v) && v == 0xabcd);
+	spa_assert(!spa_atof("fabc", &v) && v == 0xabcd);
+	spa_assert(!spa_atof("1.bogus", &v) && v == 0xabcd);
+	spa_assert(!spa_atof("1.0a", &v) && v == 0xabcd);
+	spa_assert(!spa_atof("  ", &v) && v == 0xabcd);
+	spa_assert(!spa_atof(" ", &v) && v == 0xabcd);
+	spa_assert(!spa_atof("", &v) && v == 0xabcd);
+	spa_assert(!spa_atof(NULL, &v) && v == 0xabcd);
+}
+
+static void test_strtod(void)
+{
+	double v;
+
+	spa_assert(spa_atod("0", &v) && v == 0.0);
+	spa_assert(spa_atod("0.00", &v) && v == 0.0);
+	spa_assert(spa_atod("1", &v) && v == 1.0);
+	spa_assert(spa_atod("-1", &v) && v == -1.0);
+	spa_assert(spa_atod("0x1", &v) && v == 1.0);
+
+	v = 0xabcd;
+	spa_assert(!spa_atod("0,00", &v) && v == 0xabcd);
+	spa_assert(!spa_atod("fabc", &v) && v == 0xabcd);
+	spa_assert(!spa_atod("1.bogus", &v) && v == 0xabcd);
+	spa_assert(!spa_atod("1.0a", &v) && v == 0xabcd);
+	spa_assert(!spa_atod("  ", &v) && v == 0xabcd);
+	spa_assert(!spa_atod(" ", &v) && v == 0xabcd);
+	spa_assert(!spa_atod("", &v) && v == 0xabcd);
+	spa_assert(!spa_atod(NULL, &v) && v == 0xabcd);
+}
+
 static void test_streq(void)
 {
 	spa_assert(spa_streq(NULL, NULL));
@@ -509,8 +677,151 @@ static void test_atob(void)
 	spa_assert(!spa_atob("TRUE"));
 }
 
+static void test_ansi(void)
+{
+	/* Visual test only */
+	printf("%sBOLD%s\n", SPA_ANSI_BOLD, SPA_ANSI_RESET);
+	printf("%sUNDERLINE%s\n", SPA_ANSI_UNDERLINE, SPA_ANSI_RESET);
+	printf("%sITALIC%s\n", SPA_ANSI_ITALIC, SPA_ANSI_RESET);
+
+	printf("%sBLACK%s\n", SPA_ANSI_BLACK, SPA_ANSI_RESET);
+	printf("%sBRIGHT_BLACK%s\n", SPA_ANSI_BRIGHT_BLACK, SPA_ANSI_RESET);
+	printf("%sDARK_BLACK%s\n", SPA_ANSI_DARK_BLACK, SPA_ANSI_RESET);
+	printf("%sBOLD_BLACK%s\n", SPA_ANSI_BOLD_BLACK, SPA_ANSI_RESET);
+
+	printf("%sRED%s\n", SPA_ANSI_RED, SPA_ANSI_RESET);
+	printf("%sBRIGHT_RED%s\n", SPA_ANSI_BRIGHT_RED, SPA_ANSI_RESET);
+	printf("%sDARK_RED%s\n", SPA_ANSI_DARK_RED, SPA_ANSI_RESET);
+	printf("%sBOLD_RED%s\n", SPA_ANSI_BOLD_RED, SPA_ANSI_RESET);
+
+	printf("%sGREEN%s\n", SPA_ANSI_GREEN, SPA_ANSI_RESET);
+	printf("%sBRIGHT_GREEN%s\n", SPA_ANSI_BRIGHT_GREEN, SPA_ANSI_RESET);
+	printf("%sDARK_GREEN%s\n", SPA_ANSI_DARK_GREEN, SPA_ANSI_RESET);
+	printf("%sBOLD_GREEN%s\n", SPA_ANSI_BOLD_GREEN, SPA_ANSI_RESET);
+
+	printf("%sYELLOW%s\n", SPA_ANSI_YELLOW, SPA_ANSI_RESET);
+	printf("%sBRIGHT_YELLOW%s\n", SPA_ANSI_BRIGHT_YELLOW, SPA_ANSI_RESET);
+	printf("%sDARK_YELLOW%s\n", SPA_ANSI_DARK_YELLOW, SPA_ANSI_RESET);
+	printf("%sBOLD_YELLOW%s\n", SPA_ANSI_BOLD_YELLOW, SPA_ANSI_RESET);
+
+	printf("%sBLUE%s\n", SPA_ANSI_BLUE, SPA_ANSI_RESET);
+	printf("%sBRIGHT_BLUE%s\n", SPA_ANSI_BRIGHT_BLUE, SPA_ANSI_RESET);
+	printf("%sDARK_BLUE%s\n", SPA_ANSI_DARK_BLUE, SPA_ANSI_RESET);
+	printf("%sBOLD_BLUE%s\n", SPA_ANSI_BOLD_BLUE, SPA_ANSI_RESET);
+
+	printf("%sMAGENTA%s\n", SPA_ANSI_MAGENTA, SPA_ANSI_RESET);
+	printf("%sBRIGHT_MAGENTA%s\n", SPA_ANSI_BRIGHT_MAGENTA, SPA_ANSI_RESET);
+	printf("%sDARK_MAGENTA%s\n", SPA_ANSI_DARK_MAGENTA, SPA_ANSI_RESET);
+	printf("%sBOLD_MAGENTA%s\n", SPA_ANSI_BOLD_MAGENTA, SPA_ANSI_RESET);
+
+	printf("%sCYAN%s\n", SPA_ANSI_CYAN, SPA_ANSI_RESET);
+	printf("%sBRIGHT_CYAN%s\n", SPA_ANSI_BRIGHT_CYAN, SPA_ANSI_RESET);
+	printf("%sDARK_CYAN%s\n", SPA_ANSI_DARK_CYAN, SPA_ANSI_RESET);
+	printf("%sBOLD_CYAN%s\n", SPA_ANSI_BOLD_CYAN, SPA_ANSI_RESET);
+
+	printf("%sWHITE%s\n", SPA_ANSI_WHITE, SPA_ANSI_RESET);
+	printf("%sBRIGHT_WHITE%s\n", SPA_ANSI_BRIGHT_WHITE, SPA_ANSI_RESET);
+	printf("%sDARK_WHITE%s\n", SPA_ANSI_DARK_WHITE, SPA_ANSI_RESET);
+	printf("%sBOLD_WHITE%s\n", SPA_ANSI_BOLD_WHITE, SPA_ANSI_RESET);
+
+
+	/* Background colors */
+
+	printf("%sBG_BLACK%s\n", SPA_ANSI_BG_BLACK, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_BLACK%s\n", SPA_ANSI_BG_BRIGHT_BLACK, SPA_ANSI_RESET);
+
+	printf("%sBG_RED%s\n", SPA_ANSI_BG_RED, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_RED%s\n", SPA_ANSI_BG_BRIGHT_RED, SPA_ANSI_RESET);
+
+	printf("%sBG_GREEN%s\n", SPA_ANSI_BG_GREEN, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_GREEN%s\n", SPA_ANSI_BG_BRIGHT_GREEN, SPA_ANSI_RESET);
+
+	printf("%sBG_YELLOW%s\n", SPA_ANSI_BG_YELLOW, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_YELLOW%s\n", SPA_ANSI_BG_BRIGHT_YELLOW, SPA_ANSI_RESET);
+
+	printf("%sBG_BLUE%s\n", SPA_ANSI_BG_BLUE, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_BLUE%s\n", SPA_ANSI_BG_BRIGHT_BLUE, SPA_ANSI_RESET);
+
+	printf("%sBG_MAGENTA%s\n", SPA_ANSI_BG_MAGENTA, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_MAGENTA%s\n", SPA_ANSI_BG_BRIGHT_MAGENTA, SPA_ANSI_RESET);
+
+	printf("%sBG_CYAN%s\n", SPA_ANSI_BG_CYAN, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_CYAN%s\n", SPA_ANSI_BG_BRIGHT_CYAN, SPA_ANSI_RESET);
+
+	printf("%sBG_WHITE%s\n", SPA_ANSI_BG_WHITE, SPA_ANSI_RESET);
+	printf("%sBG_BRIGHT_WHITE%s\n", SPA_ANSI_BG_BRIGHT_WHITE, SPA_ANSI_RESET);
+
+	/* A combo */
+	printf("normal%s%s%sBG_BLUE,ITALIC,BOLD_YELLOW%snormal\n", SPA_ANSI_BG_BLUE,
+	       SPA_ANSI_ITALIC, SPA_ANSI_BOLD_YELLOW, SPA_ANSI_RESET);
+}
+
+static void test_snprintf(void)
+{
+	char dest[8];
+	pid_t pid;
+	int len;
+
+	/* Basic printf */
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "foo%d%s", 10, "2") == 6);
+	spa_assert(spa_streq(dest, "foo102"));
+	/* Print a few strings, make sure dest is truncated and return value
+	 * is the length of the returned string */
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "1234567") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "12345678") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "123456789") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+	/* Same as above, but with printf %s expansion */
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "%s", "1234567") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "%s", "12345678") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+	spa_assert(spa_scnprintf(dest, sizeof(dest), "%s", "123456789") == 7);
+	spa_assert(spa_streq(dest, "1234567"));
+
+	spa_assert(spa_scnprintf(dest, 2, "1234567") == 1);
+	spa_assert(spa_streq(dest, "1"));
+	spa_assert(spa_scnprintf(dest, 1, "1234567") == 0);
+	spa_assert(spa_streq(dest, ""));
+
+	/* The "append until buffer is full" use-case */
+	len = 0;
+	while ((size_t)len < sizeof(dest) - 1)
+		len += spa_scnprintf(dest + len, sizeof(dest) - len, "123");
+	/* and once more for good measure, this should print 0 characters */
+	len = spa_scnprintf(dest + len, sizeof(dest) - len, "abc");
+	spa_assert(len == 0);
+	spa_assert(spa_streq(dest, "1231231"));
+
+
+	if (RUNNING_ON_VALGRIND)
+		return;
+
+	/* Check for abort on negative/zero size */
+	for (int i = -2; i <= 0; i++) {
+		pid = fork();
+		if (pid == 0) {
+			close(STDOUT_FILENO);
+			close(STDERR_FILENO);
+			spa_assert(spa_scnprintf(dest, (size_t)i, "1234"));
+			exit(0);
+		} else {
+			int r;
+			int status;
+
+			r = waitpid(pid, &status, 0);
+			spa_assert(r == pid);
+			spa_assert(WIFSIGNALED(status));
+			spa_assert(WTERMSIG(status) == SIGABRT);
+		}
+	}
+}
+
 int main(int argc, char *argv[])
 {
+    setlocale(LC_NUMERIC, "C"); /* For decimal number parsing */
     test_abi();
     test_macros();
     test_result();
@@ -519,7 +830,13 @@ int main(int argc, char *argv[])
     test_hook();
     test_ringbuffer();
     test_strtol();
+    test_strtoul();
+    test_strtoll();
+    test_strtof();
+    test_strtod();
     test_streq();
+    test_snprintf();
     test_atob();
+    test_ansi();
     return 0;
 }
