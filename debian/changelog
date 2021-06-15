@@ -4,6 +4,7 @@ pipewire (0.3.30-1) UNRELEASED; urgency=medium
   * New upstream release
   * Remove d/p/Let-pipewire-pulse-services-conflict-with-their-pulseaudi.patch,
       applied upstream.
+  * Add libwebrtc-audio-processing-dev to Build-Depends
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 15 Jun 2021 16:47:06 +0200
 
