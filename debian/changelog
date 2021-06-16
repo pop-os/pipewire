@@ -1,4 +1,4 @@
-pipewire (0.3.30-1) UNRELEASED; urgency=medium
+pipewire (0.3.30-1) experimental; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -8,7 +8,7 @@ pipewire (0.3.30-1) UNRELEASED; urgency=medium
   * Update symbols file
   * Remove unused lintian override in pipewire-audio-client-libraries
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 15 Jun 2021 16:47:06 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 16 Jun 2021 12:07:16 +0200
 
 pipewire (0.3.28-1) experimental; urgency=medium
 
