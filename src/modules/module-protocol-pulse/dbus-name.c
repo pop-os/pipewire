@@ -1,4 +1,4 @@
-/* pulseaudio server
+/* PipeWire
  *
  * Copyright © 2019 Wim Taymans
  *
@@ -22,10 +22,18 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <dbus/dbus.h>
-#include <spa/support/dbus.h>
+#include <errno.h>
 
-static void *dbus_request_name(struct pw_context *context, const char *name)
+#include <dbus/dbus.h>
+
+#include <spa/support/dbus.h>
+#include <spa/support/plugin.h>
+#include <pipewire/context.h>
+#include <pipewire/log.h>
+
+#include "dbus-name.h"
+
+void *dbus_request_name(struct pw_context *context, const char *name)
 {
 	struct spa_dbus *dbus;
 	struct spa_dbus_connection *conn;
@@ -42,13 +50,15 @@ static void *dbus_request_name(struct pw_context *context, const char *name)
 		return NULL;
 	}
 
-        conn = spa_dbus_get_connection(dbus, SPA_DBUS_TYPE_SESSION);
-        if (conn == NULL)
+	conn = spa_dbus_get_connection(dbus, SPA_DBUS_TYPE_SESSION);
+	if (conn == NULL)
 		return NULL;
 
 	bus = spa_dbus_connection_get(conn);
-        if (bus == NULL)
+	if (bus == NULL) {
+		spa_dbus_connection_destroy(conn);
 		return NULL;
+	}
 
 	dbus_error_init(&error);
 
@@ -64,11 +74,13 @@ static void *dbus_request_name(struct pw_context *context, const char *name)
 
 	dbus_error_free(&error);
 
+	spa_dbus_connection_destroy(conn);
+
 	errno = EEXIST;
 	return NULL;
 }
 
-static void dbus_release_name(void *data)
+void dbus_release_name(void *data)
 {
 	struct spa_dbus_connection *conn = data;
 	spa_dbus_connection_destroy(conn);

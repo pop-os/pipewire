@@ -51,7 +51,7 @@
 #endif
 
 #include <pipewire/impl.h>
-#include <extensions/protocol-native.h>
+#include <pipewire/extensions/protocol-native.h>
 
 #include "pipewire/private.h"
 
@@ -63,6 +63,9 @@
 
 #include <spa/debug/pod.h>
 #include <spa/debug/types.h>
+
+/** \page page_module_protocol_native PipeWire Module: Protocol Native
+ */
 
 #define NAME "protocol-native"
 

@@ -33,13 +33,6 @@
 #include "../module.h"
 #include "registry.h"
 
-#define ERROR_RETURN(str)		\
-	{				\
-		pw_log_error(str);	\
-		res = -EINVAL;		\
-		goto out;		\
-	}
-
 struct module_loopback_data {
 	struct module *module;
 
@@ -98,9 +91,6 @@ static int module_loopback_load(struct client *client, struct module *module)
 			&data->mod_listener,
 			&module_events, data);
 
-	pw_log_info("loaded module %p id:%u name:%s", module, module->idx, module->name);
-	module_emit_loaded(module, 0);
-
 	return 0;
 }
 
@@ -108,13 +98,15 @@ static int module_loopback_unload(struct client *client, struct module *module)
 {
 	struct module_loopback_data *d = module->user_data;
 
-	pw_log_info("unload module %p id:%u name:%s", module, module->idx, module->name);
-
 	if (d->mod) {
 		spa_hook_remove(&d->mod_listener);
 		pw_impl_module_destroy(d->mod);
 		d->mod = NULL;
 	}
+
+	pw_properties_free(d->capture_props);
+	pw_properties_free(d->playback_props);
+
 	return 0;
 }
 
@@ -165,7 +157,7 @@ struct module *create_module_loopback(struct impl *impl, const char *argument)
 	 */
 
 	if ((str = pw_properties_get(props, "source")) != NULL) {
-		if (pw_endswith(str, ".monitor")) {
+		if (spa_strendswith(str, ".monitor")) {
 			pw_properties_setf(capture_props, PW_KEY_NODE_TARGET,
 					"%.*s", (int)strlen(str)-8, str);
 		} else {

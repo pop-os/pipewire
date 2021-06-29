@@ -542,6 +542,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
 			return -EINVAL;
 
+		info.info.raw.rate = 0;
+
 		if (this->have_profile && memcmp(&this->format, &info, sizeof(info)) == 0)
 			return 0;
 
@@ -688,6 +690,9 @@ static int port_enum_formats(void *object,
 				SPA_PARAM_EnumFormat, &port->format.info.raw);
 		}
 		else {
+			uint32_t rate = this->io_position ?
+				this->io_position->clock.rate.denom : DEFAULT_RATE;
+
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
@@ -710,7 +715,7 @@ static int port_enum_formats(void *object,
 							SPA_AUDIO_FORMAT_U8,
 							SPA_AUDIO_FORMAT_U8P),
 				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(
-					DEFAULT_RATE, 1, INT32_MAX),
+					rate, 1, INT32_MAX),
 				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(
 					DEFAULT_CHANNELS, 1, MAX_PORTS));
 		}
@@ -812,8 +817,8 @@ impl_node_port_enum_params(void *object, int seq,
 		break;
 	case SPA_PARAM_Latency:
 		switch (result.index) {
-		case 0:
-			param = spa_latency_build(&b, id, &this->latency[direction]);
+		case 0: case 1:
+			param = spa_latency_build(&b, id, &this->latency[result.index]);
 			break;
 		default:
 			return 0;
@@ -930,7 +935,7 @@ static int port_set_latency(void *object,
 	enum spa_direction other = SPA_DIRECTION_REVERSE(direction);
 	uint32_t i;
 
-	spa_log_debug(this->log, NAME " %p: set latency", this);
+	spa_log_debug(this->log, NAME " %p: set latency direction:%d", this, direction);
 
 	if (latency == NULL) {
 		this->latency[other] = SPA_LATENCY_INFO(other);
@@ -941,19 +946,16 @@ static int port_set_latency(void *object,
 			return -EINVAL;
 		this->latency[other] = info;
 	}
-	if (direction == SPA_DIRECTION_OUTPUT) {
-		for (i = 0; i < this->port_count; i++) {
-			port = GET_IN_PORT(this, i);
-			port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
-			port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
-			emit_port_info(this, port, false);
-		}
-	} else {
-		port = GET_OUT_PORT(this, 0);
+	for (i = 0; i < this->port_count; i++) {
+		port = GET_IN_PORT(this, i);
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 		port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 		emit_port_info(this, port, false);
 	}
+	port = GET_OUT_PORT(this, 0);
+	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+	port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
+	emit_port_info(this, port, false);
 	return 0;
 }
 
@@ -1065,6 +1067,9 @@ impl_node_port_set_param(void *object,
 	struct impl *this = object;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	spa_log_debug(this->log, "%p: set param port %d.%d %u",
+			this, direction, port_id, id);
 
 	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
@@ -1453,6 +1458,9 @@ impl_init(const struct spa_handle_factory *factory,
 		if ((str = spa_dict_lookup(info, "monitor.channel-volumes")) != NULL)
 			this->monitor_channel_volumes = spa_atob(str);
 	}
+
+	this->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	this->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	this->node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,

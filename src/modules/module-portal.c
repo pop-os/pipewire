@@ -45,6 +45,9 @@
 #include "pipewire/utils.h"
 #include "pipewire/private.h"
 
+/** \page page_module_portal PipeWire Module: Portal
+ */
+
 #define NAME "portal"
 
 struct impl {
@@ -108,6 +111,8 @@ static void module_destroy(void *data)
 	spa_hook_remove(&impl->context_listener);
 	spa_hook_remove(&impl->module_listener);
 
+	if (impl->bus)
+		dbus_connection_unref(impl->bus);
 	spa_dbus_connection_destroy(impl->conn);
 
 	pw_properties_free(impl->properties);
@@ -237,6 +242,9 @@ static int init_dbus_connection(struct impl *impl)
 	if (impl->bus == NULL)
 		return -EIO;
 
+	/* XXX: we don't handle dbus reconnection yet, so ref the handle instead */
+	dbus_connection_ref(impl->bus);
+
 	dbus_error_init(&error);
 
 	dbus_bus_add_match(impl->bus,
@@ -301,6 +309,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
       error:
 	free(impl);
-	pw_log_error("Failed to connect to system bus: %s", spa_strerror(res));
+	pw_log_error("Failed to connect to session bus: %s", spa_strerror(res));
 	return res;
 }

@@ -45,7 +45,9 @@ static void module_null_sink_proxy_destroy(void *data)
 {
 	struct module *module = data;
 	struct module_null_sink_data *d = module->user_data;
-	pw_log_info(NAME" %p: proxy %p destroy", module, d->proxy);
+
+	pw_log_info("proxy %p destroy", d->proxy);
+
 	spa_hook_remove(&d->listener);
 	d->proxy = NULL;
 }
@@ -55,7 +57,8 @@ static void module_null_sink_proxy_bound(void *data, uint32_t global_id)
 	struct module *module = data;
 	struct module_null_sink_data *d = module->user_data;
 
-	pw_log_info(NAME" module %p proxy %p bound", module, d->proxy);
+	pw_log_info("proxy %p bound", d->proxy);
+
 	d->global_id = global_id;
 	module_emit_loaded(module, 0);
 }
@@ -64,9 +67,9 @@ static void module_null_sink_proxy_error(void *data, int seq, int res, const cha
 {
 	struct module *module = data;
 	struct module_null_sink_data *d = module->user_data;
-	struct impl *impl = module->impl;
 
-	pw_log_info(NAME" %p module %p error %d", impl, module, res);
+	pw_log_info("proxy %p error %d", d->proxy, res);
+
 	pw_proxy_destroy(d->proxy);
 }
 
@@ -74,6 +77,7 @@ static int module_null_sink_load(struct client *client, struct module *module)
 {
 	struct module_null_sink_data *d = module->user_data;
 	static const struct pw_proxy_events proxy_events = {
+		PW_VERSION_PROXY_EVENTS,
 		.removed = module_null_sink_proxy_removed,
 		.bound = module_null_sink_proxy_bound,
 		.error = module_null_sink_proxy_error,
@@ -88,19 +92,20 @@ static int module_null_sink_load(struct client *client, struct module *module)
 	if (d->proxy == NULL)
 		return -errno;
 
-	pw_log_info("loaded module %p id:%u name:%s %p", module, module->idx, module->name, d->proxy);
 	pw_proxy_add_listener(d->proxy, &d->listener, &proxy_events, module);
-	return 0;
+
+	return SPA_RESULT_RETURN_ASYNC(0);
 }
 
 static int module_null_sink_unload(struct client *client, struct module *module)
 {
 	struct module_null_sink_data *d = module->user_data;
-	pw_log_info("unload module %p id:%u name:%s %p", module, module->idx, module->name, d->proxy);
+
 	if (d->proxy != NULL)
 		pw_proxy_destroy(d->proxy);
 	if (d->global_id != SPA_ID_INVALID)
 		pw_registry_destroy(client->manager->registry, d->global_id);
+
 	return 0;
 }
 
@@ -144,6 +149,10 @@ struct module *create_module_null_sink(struct impl *impl, const char *argument)
 		pw_properties_set(props, PW_KEY_NODE_NAME, str);
 		pw_properties_set(props, "sink_name", NULL);
 	}
+	else {
+		pw_properties_set(props, PW_KEY_NODE_NAME, "null-sink");
+	}
+
 	if ((str = pw_properties_get(props, "sink_properties")) != NULL) {
 		module_args_add_props(props, str);
 		pw_properties_set(props, "sink_properties", NULL);

@@ -22,21 +22,10 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <spa/utils/defs.h>
 #include <spa/utils/string.h>
 
-struct extension_sub {
-	const char *name;
-	uint32_t command;
-	int (*process)(struct client *client, uint32_t command, uint32_t tag, struct message *m);
-};
-
-struct extension {
-	const char *name;
-	uint32_t idx;
-	int (*process)(struct client *client, uint32_t tag, struct message *m);
-};
-
-#include "ext-stream-restore.c"
+#include "extension.h"
 
 static int do_extension_device_restore(struct client *client, uint32_t tag, struct message *m)
 {
@@ -48,13 +37,15 @@ static int do_extension_device_manager(struct client *client, uint32_t tag, stru
 	return -ENOTSUP;
 }
 
-struct extension extensions[] = {
+#include "extensions/ext-stream-restore.c"
+
+static const struct extension extensions[] = {
 	{ "module-stream-restore", 0 | EXTENSION_FLAG, do_extension_stream_restore, },
 	{ "module-device-restore", 1 | EXTENSION_FLAG, do_extension_device_restore, },
 	{ "module-device-manager", 2 | EXTENSION_FLAG, do_extension_device_manager, },
 };
 
-static struct extension *find_extension(uint32_t idx, const char *name)
+const struct extension *extension_find(uint32_t idx, const char *name)
 {
 	uint32_t i;
 	for (i = 0; i < SPA_N_ELEMENTS(extensions); i++) {

@@ -26,14 +26,8 @@
 
 #include "../module.h"
 #include "../pulse-server.h"
+#include "../server.h"
 #include "registry.h"
-
-#define ERROR_RETURN(str) 		\
-	{ 				\
-		pw_log_error(str); 	\
-		res = -EINVAL; 		\
-		goto out; 		\
-	}
 
 struct module_native_protocol_tcp_data {
 	struct module *module;
@@ -52,12 +46,9 @@ static int module_native_protocol_tcp_load(struct client *client, struct module 
 
 	pw_array_init(&data->servers, sizeof(struct server *));
 
-	res = create_and_start_servers(impl, address, &data->servers);
+	res = servers_create_and_start(impl, address, &data->servers);
 	if (res < 0)
 		return res;
-
-	pw_log_info("loaded module %p id:%u name:%s", module, module->idx, module->name);
-	module_emit_loaded(module, 0);
 
 	return 0;
 }
@@ -66,8 +57,6 @@ static int module_native_protocol_tcp_unload(struct client *client, struct modul
 {
 	struct module_native_protocol_tcp_data *d = module->user_data;
 	struct server **s;
-
-	pw_log_info("unload module %p id:%u name:%s", module, module->idx, module->name);
 
 	pw_array_for_each (s, &d->servers)
 		server_free(*s);

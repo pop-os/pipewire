@@ -23,11 +23,23 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include "module.h"
+#include <stdlib.h>
+#include <string.h>
 
+#include <spa/utils/defs.h>
+#include <spa/utils/list.h>
+#include <spa/utils/hook.h>
 #include <spa/utils/string.h>
+#include <pipewire/log.h>
+#include <pipewire/map.h>
+#include <pipewire/properties.h>
+#include <pipewire/work-queue.h>
 
-static int module_unload(struct client *client, struct module *module);
+#include "client.h"
+#include "defs.h"
+#include "format.h"
+#include "internal.h"
+#include "module.h"
 
 static void on_module_unload(void *obj, void *data, int res, uint32_t id)
 {
@@ -51,20 +63,21 @@ struct module *module_new(struct impl *impl, const struct module_methods *method
 
 	module->impl = impl;
 	module->methods = methods;
-	spa_hook_list_init(&module->hooks);
-	module->user_data = SPA_PTROFF(module, sizeof(struct module), void);
+	spa_hook_list_init(&module->listener_list);
+	module->user_data = SPA_PTROFF(module, sizeof(*module), void);
+	module->loaded = false;
 
 	return module;
 }
 
-static void module_add_listener(struct module *module,
-		struct spa_hook *listener,
-		const struct module_events *events, void *data)
+void module_add_listener(struct module *module,
+			 struct spa_hook *listener,
+			 const struct module_events *events, void *data)
 {
-	spa_hook_list_append(&module->hooks, listener, events, data);
+	spa_hook_list_append(&module->listener_list, listener, events, data);
 }
 
-static int module_load(struct client *client, struct module *module)
+int module_load(struct client *client, struct module *module)
 {
 	pw_log_info("load module id:%u name:%s", module->idx, module->name);
 	if (module->methods->load == NULL)
@@ -74,23 +87,26 @@ static int module_load(struct client *client, struct module *module)
 	return module->methods->load(client, module);
 }
 
-static void module_free(struct module *module)
+void module_free(struct module *module)
 {
 	struct impl *impl = module->impl;
+
 	if (module->idx != SPA_ID_INVALID)
 		pw_map_remove(&impl->modules, module->idx & INDEX_MASK);
 
+	spa_hook_list_clean(&module->listener_list);
 	pw_work_queue_cancel(impl->work_queue, module, SPA_ID_INVALID);
+	pw_properties_free(module->props);
+
 	free((char*)module->name);
 	free((char*)module->args);
-	pw_properties_free(module->props);
+
 	free(module);
 }
 
-static int module_unload(struct client *client, struct module *module)
+int module_unload(struct client *client, struct module *module)
 {
 	struct impl *impl = module->impl;
-	uint32_t module_idx = module->idx;
 	int res = 0;
 
 	/* Note that client can be NULL (when the module is being unloaded
@@ -101,12 +117,13 @@ static int module_unload(struct client *client, struct module *module)
 	if (module->methods->unload)
 		res = module->methods->unload(client, module);
 
-	module_free(module);
-
-	broadcast_subscribe_event(impl,
+	if (module->loaded)
+		broadcast_subscribe_event(impl,
 			SUBSCRIPTION_MASK_MODULE,
 			SUBSCRIPTION_EVENT_REMOVE | SUBSCRIPTION_EVENT_MODULE,
-			module_idx);
+			module->idx);
+
+	module_free(module);
 
 	return res;
 }
@@ -220,6 +237,7 @@ static const struct module_info module_list[] = {
 	{ "module-loopback", create_module_loopback, },
 	{ "module-null-sink", create_module_null_sink, },
 	{ "module-native-protocol-tcp", create_module_native_protocol_tcp, },
+	{ "module-pipe-source", create_module_pipe_source, },
 	{ "module-pipe-sink", create_module_pipe_sink, },
 	{ "module-remap-sink", create_module_remap_sink, },
 	{ "module-remap-source", create_module_remap_source, },
@@ -227,6 +245,13 @@ static const struct module_info module_list[] = {
 	{ "module-tunnel-sink", create_module_tunnel_sink, },
 	{ "module-tunnel-source", create_module_tunnel_source, },
 	{ "module-zeroconf-discover", create_module_zeroconf_discover, },
+#ifdef HAVE_AVAHI
+	{ "module-zeroconf-publish", create_module_zeroconf_publish, },
+#endif
+#ifdef HAVE_ROC
+	{ "module-roc-sink", create_module_roc_sink, },
+	{ "module-roc-source", create_module_roc_source, },
+#endif
 	{ NULL, }
 };
 
@@ -240,7 +265,7 @@ static const struct module_info *find_module_info(const char *name)
 	return NULL;
 }
 
-static struct module *create_module(struct client *client, const char *name, const char *args)
+struct module *module_create(struct client *client, const char *name, const char *args)
 {
 	struct impl *impl = client->impl;
 	const struct module_info *info;

@@ -28,10 +28,11 @@ bluez5_sources = ['plugin.c',
 		  'sco-sink.c',
 		  'sco-source.c',
 		  'sco-io.c',
+		  'quirks.c',
 		  'bluez5-device.c',
 		  'bluez5-dbus.c']
 
-bluez5_args = [ '-D_GNU_SOURCE' ]
+bluez5_args = [ ]
 
 if ldac_dep.found()
   bluez5_sources += [ 'a2dp-codec-ldac.c' ]
@@ -54,6 +55,9 @@ if fdk_aac_dep.found()
 endif
 
 if not get_option('bluez5-backend-hsp-native').disabled() or not get_option('bluez5-backend-hfp-native').disabled()
+  if libusb_dep.found()
+    bluez5_deps += libusb_dep
+  endif
   bluez5_sources += ['backend-native.c']
 endif
 

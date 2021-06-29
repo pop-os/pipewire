@@ -41,7 +41,7 @@
 #include <spa/debug/pod.h>
 
 #include "pipewire/pipewire.h"
-#include "extensions/metadata.h"
+#include "pipewire/extensions/metadata.h"
 
 #include "media-session.h"
 
@@ -137,8 +137,8 @@ static const char *channel_to_name(uint32_t channel)
 struct route_info {
 	uint32_t index;
 	uint32_t generation;
-	uint32_t available;
-	uint32_t prev_available;
+	enum spa_param_availability available;
+	enum spa_param_availability prev_available;
 	enum spa_direction direction;
 	char name[64];
 	unsigned int save:1;
@@ -153,7 +153,7 @@ struct route {
 	enum spa_direction direction;
 	const char *name;
 	uint32_t priority;
-	uint32_t available;
+	enum spa_param_availability available;
 	struct spa_pod *props;
 	bool save;
 };
@@ -566,13 +566,29 @@ static int find_best_route(struct device *dev, uint32_t device_id, struct route 
 		    parse_enum_route(p, device_id, &t) < 0)
 			continue;
 
-		if (t.available == SPA_PARAM_AVAILABILITY_yes) {
-			if (best_avail.name == NULL || t.priority > best_avail.priority)
+		if (t.available == SPA_PARAM_AVAILABILITY_yes || t.available == SPA_PARAM_AVAILABILITY_unknown) {
+			struct route_info *ri;
+			if ((ri = find_route_info(dev, &t)) && ri->direction == SPA_DIRECTION_OUTPUT &&
+			    ri->available != ri->prev_available) {
+				/* If route availability changed, that means a user just
+				 * plugged in something like headphones, and they probably
+				 * expect to hear sound from it. Switch to it immediately.
+				 *
+				 * TODO: switch INPUT ports without source and the input
+				 * ports their source->active_port is part of a group of
+				 * ports (see module-switch-on-port-available.c in PulseAudio).
+				 */
 				best_avail = t;
-		}
-		else if (t.available != SPA_PARAM_AVAILABILITY_no) {
-			if (best_unk.name == NULL || t.priority > best_unk.priority)
-				best_unk = t;
+				ri->save = true;
+				break;
+			}
+			else if (t.available == SPA_PARAM_AVAILABILITY_yes) {
+				if (best_avail.name == NULL || t.priority > best_avail.priority)
+					best_avail = t;
+			} else { // SPA_PARAM_AVAILABILITY_unknown
+				if (best_unk.name == NULL || t.priority > best_unk.priority)
+					best_unk = t;
+			}
 		}
 	}
 	best = best_avail;

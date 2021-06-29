@@ -557,6 +557,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	switch (id) {
 	case SPA_IO_Position:
 		res = spa_node_set_io(this->resample, id, data, size);
+		res = spa_node_set_io(this->channelmix, id, data, size);
 		res = spa_node_set_io(this->fmt[0], id, data, size);
 		res = spa_node_set_io(this->fmt[1], id, data, size);
 		break;
@@ -583,6 +584,8 @@ static void fmt_input_port_info(void *data,
 	if (this->fmt_removing[direction])
 		info = NULL;
 
+	spa_log_debug(this->log, "%p: %d.%d info", this, direction, port);
+
 	if (direction == SPA_DIRECTION_INPUT ||
 	    IS_MONITOR_PORT(this, direction, port))
 		spa_node_emit_port_info(&this->hooks, direction, port, info);
@@ -602,6 +605,8 @@ static void fmt_output_port_info(void *data,
 
 	if (this->fmt_removing[direction])
 		info = NULL;
+
+	spa_log_debug(this->log, "%p: %d.%d info", this, direction, port);
 
 	if (direction == SPA_DIRECTION_OUTPUT)
 		spa_node_emit_port_info(&this->hooks, direction, port, info);
@@ -1042,10 +1047,6 @@ impl_node_port_set_param(void *object,
 				this, id, direction, port_id, param);
 
 	switch (id) {
-	case SPA_PARAM_Latency:
-		target = this->fmt[SPA_DIRECTION_REVERSE(direction)];
-		port_id = 0;
-		break;
 	default:
 		is_monitor = IS_MONITOR_PORT(this, direction, port_id);
 		if (is_monitor)
@@ -1058,6 +1059,16 @@ impl_node_port_set_param(void *object,
 	if ((res = spa_node_port_set_param(target,
 					direction, port_id, id, flags, param)) < 0)
 		return res;
+
+	switch (id) {
+	case SPA_PARAM_Latency:
+		target = this->fmt[SPA_DIRECTION_REVERSE(direction)];
+		port_id = 0;
+		if ((res = spa_node_port_set_param(target,
+					direction, port_id, id, flags, param)) < 0)
+			return res;
+		break;
+	}
 
 	return res;
 }

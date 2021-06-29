@@ -104,9 +104,9 @@ struct state {
 
 	uint64_t info_all;
 	struct spa_node_info info;
-#define IDX_PropInfo	0
-#define IDX_Props	1
-#define IDX_NODE_IO	2
+#define NODE_PropInfo	0
+#define NODE_Props	1
+#define NODE_IO		2
 #define N_NODE_PARAMS	3
 	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
@@ -135,20 +135,21 @@ struct state {
 	int channels;
 	size_t frame_size;
 	int blocks;
-	int rate_denom;
+	uint32_t rate_denom;
 	uint32_t delay;
 	uint32_t read_size;
 
 	uint64_t port_info_all;
 	struct spa_port_info port_info;
-#define IDX_EnumFormat	0
-#define IDX_Meta	1
-#define IDX_IO		2
-#define IDX_Format	3
-#define IDX_Buffers	4
-#define IDX_Latency	5
+#define PORT_EnumFormat	0
+#define PORT_Meta	1
+#define PORT_IO		2
+#define PORT_Format	3
+#define PORT_Buffers	4
+#define PORT_Latency	5
 #define N_PORT_PARAMS	6
 	struct spa_param_info port_params[N_PORT_PARAMS];
+	enum spa_direction port_direction;
 	struct spa_io_buffers *io;
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
@@ -196,7 +197,7 @@ struct state {
 	struct spa_dll dll;
 	double max_error;
 
-	struct spa_latency_info latency;
+	struct spa_latency_info latency[2];
 
 	snd_use_case_mgr_t *ucm;
 };

@@ -1,13 +1,12 @@
 project('pipewire', ['c' ],
-  version : '0.3.30',
+  version : '0.3.31',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
-  meson_version : '>= 0.49.0',
+  meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'b_pie=true',
 		      #'b_sanitize=address,undefined',
                       'buildtype=debugoptimized' ])
-
 
 pipewire_version = meson.project_version()
 version_arr = pipewire_version.split('.')
@@ -85,12 +84,13 @@ common_flags = [
 ]
 
 cc_flags = common_flags + [
+  '-D_GNU_SOURCE',
   '-DFASTPATH',
 # '-DSPA_DEBUG_MEMCPY',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
 
-have_cpp = add_languages('cpp', required : false)
+have_cpp = add_languages('cpp', native: false, required : false)
 
 if have_cpp
   cxx = meson.get_compiler('cpp')
@@ -177,19 +177,18 @@ else
   error('8-byte atomic operations are required')
 endif
 
+versiondata = configuration_data()
+versiondata.set('PIPEWIRE_VERSION_MAJOR', pipewire_version_major)
+versiondata.set('PIPEWIRE_VERSION_MINOR', pipewire_version_minor)
+versiondata.set('PIPEWIRE_VERSION_MICRO', pipewire_version_micro)
+versiondata.set('PIPEWIRE_VERSION_NANO', pipewire_version_nano)
+versiondata.set_quoted('PIPEWIRE_API_VERSION', apiversion)
+
 cdata = configuration_data()
-cdata.set('PIPEWIRE_VERSION_MAJOR', pipewire_version_major)
-cdata.set('PIPEWIRE_VERSION_MINOR', pipewire_version_minor)
-cdata.set('PIPEWIRE_VERSION_MICRO', pipewire_version_micro)
-cdata.set('PIPEWIRE_VERSION_NANO', pipewire_version_nano)
-cdata.set_quoted('PIPEWIRE_API_VERSION', apiversion)
 cdata.set_quoted('PIPEWIRE_CONFDATADIR', pipewire_confdatadir)
 cdata.set_quoted('LOCALEDIR', pipewire_localedir)
 cdata.set_quoted('LIBDIR', pipewire_libdir)
 cdata.set_quoted('GETTEXT_PACKAGE', meson.project_name())
-cdata.set('PIPEWIRE_LICENSE', '"MIT"')
-cdata.set('PIPEWIRE_PACKAGE_ORIGIN', '"Unknown package origin"')
-cdata.set('PIPEWIRE_PACKAGE_NAME', '"PipeWire source release"')
 cdata.set('PACKAGE', '"pipewire"')
 cdata.set('PACKAGE_NAME', '"PipeWire"')
 cdata.set('PACKAGE_STRING', '"PipeWire @0@"'.format(pipewire_version))
@@ -198,13 +197,15 @@ cdata.set('PACKAGE_URL', '"http://pipewire.org"')
 cdata.set_quoted('PACKAGE_VERSION', pipewire_version)
 cdata.set_quoted('MODULEDIR', modules_install_dir)
 cdata.set_quoted('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
-cdata.set_quoted('VERSION', pipewire_version)
 cdata.set_quoted('PLUGINDIR', spa_plugindir)
 # FIXME: --with-memory-alignment],[8,N,malloc,pagesize (default is 32)]) option
 cdata.set('MEMORY_ALIGNMENT_MALLOC', 1)
 cdata.set_quoted('PA_ALSA_PATHS_DIR', alsadatadir / 'paths')
 cdata.set_quoted('PA_ALSA_PROFILE_SETS_DIR', alsadatadir / 'profile-sets')
 
+if host_machine.endian() == 'big'
+  cdata.set('WORDS_BIGENDIAN', 1)
+endif
 
 check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
   ['inttypes.h', 'HAVE_INTTYPES_H'],
@@ -277,8 +278,18 @@ if cc.has_function('getrandom', prefix : '#include <sys/random.h>', args : [ '-D
   cdata.set('HAVE_GETRANDOM', 1)
 endif
 
+if cc.has_function('sigabbrev_np', prefix : '#include <string.h>', args : [ '-D_GNU_SOURCE' ])
+  cdata.set('HAVE_SIGABBREV_NP', 1)
+endif
+
+if cc.get_define('SYS_pidfd_open', prefix : '#include <sys/syscall.h>') != ''
+  cdata.set('HAVE_PIDFD_OPEN', 1)
+endif
+
 systemd = dependency('systemd', required: get_option('systemd'))
 systemd_dep = dependency('libsystemd',required: get_option('systemd'))
+summary({'systemd conf data': systemd.found()}, bool_yn: true)
+summary({'libsystemd': systemd_dep.found()}, bool_yn: true)
 if systemd.found() and systemd_dep.found()
   cdata.set('HAVE_SYSTEMD', 1)
 endif
@@ -308,10 +319,26 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
+summary({'SDL 2': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
+summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump tool')
 pulseaudio_dep = dependency('libpulse', required : get_option('libpulse'))
+summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
+summary({'Avahi DNS-SD (Zeroconf)': avahi_dep.found()}, bool_yn: true,
+  section: 'Streaming between daemons')
+
+libusb_dep = dependency('libusb-1.0', required : get_option('libusb'))
+summary({'libusb (Bluetooth quirks)': libusb_dep.found()}, bool_yn: true, section: 'Backend')
+if libusb_dep.found()
+  cdata.set('HAVE_LIBUSB', 1)
+endif
+
+cap_lib = dependency('libcap', required : false)
+if cap_lib.found()
+  cdata.set('HAVE_LIBCAP', 1)
+endif
 
 gst_option = get_option('gstreamer')
 gst_deps_def = {
@@ -330,7 +357,9 @@ gst_deps_def = {
 gst_dep = []
 foreach depname, kwargs: gst_deps_def
   dep = dependency(depname, required: gst_option, kwargs: kwargs)
+  summary({depname: dep.found()}, bool_yn: true, section: 'GStreamer modules')
   if not dep.found()
+    # Beware, there's logic below depending on the array clear here!
     gst_dep = []
     if get_option('gstreamer-device-provider').enabled()
       error('`gstreamer-device-provider` is enabled but `@0@` was not found.'.format(depname))
@@ -340,6 +369,10 @@ foreach depname, kwargs: gst_deps_def
   gst_dep += [dep]
 endforeach
 
+# This code relies on the array being empty if any dependency was not found
+gst_dp_found = gst_dep.length() > 0
+summary({'gstreamer-device-provider': gst_dp_found}, bool_yn: true, section: 'Backend')
+
 if not get_option('gstreamer-device-provider').disabled()
   cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', 1)
 endif
@@ -347,6 +380,7 @@ endif
 webrtc_dep = dependency('webrtc-audio-processing',
   version : ['>= 0.2', '< 1.0'],
   required : get_option('echo-cancel-webrtc'))
+summary({'WebRTC Echo Canceling': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 
 if webrtc_dep.found()
   cdata.set('HAVE_WEBRTC', 1)
@@ -365,19 +399,28 @@ libinotify_dep = (build_machine.system() == 'freebsd'
 libintl_dep = cc.find_library('intl', required: false)
 
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: get_option('pipewire-alsa'))
+summary({'pipewire-alsa': alsa_dep.found()}, bool_yn: true)
 
 installed_tests_metadir = pipewire_datadir / 'installed-tests' / pipewire_name
 installed_tests_execdir = pipewire_libexecdir / 'installed-tests' / pipewire_name
 installed_tests_enabled = not get_option('installed_tests').disabled()
 installed_tests_template = files('template.test.in')
 
+if not get_option('tests').disabled()
+  gstack = find_program('gstack', required : false)
+  cdata.set10('HAVE_GSTACK', gstack.found())
+endif
+
 subdir('po')
 subdir('spa')
 subdir('src')
 
-configure_file(input : 'config.h.meson',
-  output : 'config.h',
-  configuration : cdata)
+if not get_option('tests').disabled()
+  subdir('test')
+endif
+
+configure_file(output : 'config.h',
+               configuration : cdata)
 
 if not get_option('pipewire-jack').disabled()
   subdir('pipewire-jack')
@@ -394,6 +437,7 @@ if doxygen.found()
 endif
 
 xmltoman = find_program('xmltoman', required : get_option('man'))
+summary({'Manpage generation': xmltoman.found()}, bool_yn: true)
 if xmltoman.found()
   subdir('man')
 endif

@@ -49,7 +49,11 @@ struct ucred {
 #define spa_debug(...) pw_log_trace(__VA_ARGS__)
 #endif
 
-struct defaults {
+#define CLOCK_MIN_QUANTUM			4u
+#define CLOCK_MAX_QUANTUM			8192u
+
+struct settings {
+	uint32_t log_level;
 	uint32_t clock_rate;
 	uint32_t clock_quantum;
 	uint32_t clock_min_quantum;
@@ -60,6 +64,8 @@ struct defaults {
 	unsigned int mem_warn_mlock:1;
 	unsigned int mem_allow_mlock:1;
 	unsigned int clock_power_of_two_quantum:1;
+	uint32_t clock_force_rate;
+	uint32_t clock_force_quantum;
 };
 
 struct ratelimit {
@@ -235,6 +241,29 @@ struct pw_impl_core {
 	unsigned int registered:1;
 };
 
+#define pw_impl_metadata_emit(s,m,v,...) spa_hook_list_call(&s->listener_list, struct pw_impl_metadata_events, m, v, ##__VA_ARGS__)
+
+#define pw_impl_metadata_emit_destroy(s)	pw_impl_metadata_emit(s, destroy, 0)
+#define pw_impl_metadata_emit_free(s)		pw_impl_metadata_emit(s, free, 0)
+#define pw_impl_metadata_emit_property(s, ...)	pw_impl_metadata_emit(s, property, 0, __VA_ARGS__)
+
+struct pw_impl_metadata {
+	struct pw_context *context;		/**< the context */
+	struct spa_list link;			/**< link in context metadata_list */
+	struct pw_global *global;		/**< global for this metadata */
+	struct spa_hook global_listener;
+
+	struct pw_properties *properties;	/**< properties of the metadata */
+
+	struct pw_metadata *metadata;
+	struct spa_hook metadata_listener;
+
+	struct spa_hook_list listener_list;	/**< event listeners */
+	void *user_data;
+
+	unsigned int registered:1;
+};
+
 struct pw_impl_client {
 	struct pw_impl_core *core;		/**< core object */
 	struct pw_context *context;		/**< context object */
@@ -378,7 +407,10 @@ struct pw_context {
 	struct pw_properties *conf;		/**< configuration of the context */
 	struct pw_properties *properties;	/**< properties of the context */
 
-	struct defaults defaults;		/**< default parameters */
+	struct settings defaults;		/**< default parameters */
+	struct settings settings;		/**< current parameters */
+
+	void *settings_impl;		/**< settings metadata */
 
 	struct pw_mempool *pool;		/**< global memory pool */
 
@@ -394,6 +426,7 @@ struct pw_context {
 	struct spa_list client_list;		/**< list of clients */
 	struct spa_list node_list;		/**< list of nodes */
 	struct spa_list factory_list;		/**< list of factories */
+	struct spa_list metadata_list;		/**< list of metadata */
 	struct spa_list link_list;		/**< list of links */
 	struct spa_list control_list[2];	/**< list of controls, indexed by direction */
 	struct spa_list export_list;		/**< list of export types */
@@ -1023,7 +1056,7 @@ struct pw_filter {
 
 struct pw_impl_factory {
 	struct pw_context *context;		/**< the context */
-	struct spa_list link;		/**< link in context node_factory_list */
+	struct spa_list link;		/**< link in context factory_list */
 	struct pw_global *global;	/**< global for this factory */
 	struct spa_hook global_listener;
 
@@ -1111,10 +1144,10 @@ int pw_impl_port_release_mix(struct pw_impl_port *port, struct pw_impl_port_mix 
 
 void pw_impl_port_update_state(struct pw_impl_port *port, enum pw_impl_port_state state, int res, char *error);
 
-/** Unlink a port \memberof pw_impl_port */
+/** Unlink a port */
 void pw_impl_port_unlink(struct pw_impl_port *port);
 
-/** Destroy a port \memberof pw_impl_port */
+/** Destroy a port */
 void pw_impl_port_destroy(struct pw_impl_port *port);
 
 /** Iterate the params of the given port. The callback should return
@@ -1148,12 +1181,12 @@ int pw_impl_port_for_each_link(struct pw_impl_port *port,
 			   int (*callback) (void *data, struct pw_impl_link *link),
 			   void *data);
 
-/** Set a param on a port \memberof pw_impl_port, use SPA_ID_INVALID for mix_id to set
+/** Set a param on a port, use SPA_ID_INVALID for mix_id to set
  * the param on all mix ports */
 int pw_impl_port_set_param(struct pw_impl_port *port,
 		uint32_t id, uint32_t flags, const struct spa_pod *param);
 
-/** Use buffers on a port \memberof pw_impl_port */
+/** Use buffers on a port */
 int pw_impl_port_use_buffers(struct pw_impl_port *port, struct pw_impl_port_mix *mix, uint32_t flags,
 		struct spa_buffer **buffers, uint32_t n_buffers);
 
@@ -1169,13 +1202,13 @@ int pw_impl_node_update_ports(struct pw_impl_node *node);
 
 int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driver);
 
-/** Prepare a link \memberof pw_impl_link
+/** Prepare a link
   * Starts the negotiation of formats and buffers on \a link */
 int pw_impl_link_prepare(struct pw_impl_link *link);
 /** starts streaming on a link */
 int pw_impl_link_activate(struct pw_impl_link *link);
 
-/** Deactivate a link \memberof pw_impl_link */
+/** Deactivate a link */
 int pw_impl_link_deactivate(struct pw_impl_link *link);
 
 struct pw_control *
@@ -1209,6 +1242,9 @@ void pw_log_log_object(enum spa_log_level level, const char *file, int line,
 #define pw_log_format(lev,pod) pw_log_object(lev,PW_LOG_OBJECT_POD,pod)
 
 bool pw_log_is_default(void);
+
+int pw_settings_init(struct pw_context *context);
+void pw_settings_clean(struct pw_context *context);
 
 /** \endcond */
 

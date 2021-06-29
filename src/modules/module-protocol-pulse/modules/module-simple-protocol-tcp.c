@@ -31,9 +31,24 @@
 
 struct module_simple_protocol_tcp_data {
 	struct module *module;
-	struct server *server;
 	struct pw_properties *module_props;
 	struct pw_impl_module *mod;
+	struct spa_hook mod_listener;
+};
+
+static void module_destroy(void *data)
+{
+	struct module_simple_protocol_tcp_data *d = data;
+
+	spa_hook_remove(&d->mod_listener);
+	d->mod = NULL;
+
+	module_schedule_unload(d->module);
+}
+
+static const struct pw_impl_module_events module_events = {
+	PW_VERSION_IMPL_MODULE_EVENTS,
+	.destroy = module_destroy
 };
 
 static int module_simple_protocol_tcp_load(struct client *client, struct module *module)
@@ -72,8 +87,8 @@ static int module_simple_protocol_tcp_load(struct client *client, struct module 
 	if (data->mod == NULL)
 		return -errno;
 
-	pw_log_info("loaded module %p id:%u name:%s", module, module->idx, module->name);
-	module_emit_loaded(module, 0);
+	pw_impl_module_add_listener(data->mod, &data->mod_listener, &module_events, data);
+
 	return 0;
 }
 
@@ -81,9 +96,12 @@ static int module_simple_protocol_tcp_unload(struct client *client, struct modul
 {
 	struct module_simple_protocol_tcp_data *d = module->user_data;
 
-	pw_log_info("unload module %p id:%u name:%s", module, module->idx, module->name);
+	if (d->mod != NULL) {
+		spa_hook_remove(&d->mod_listener);
+		pw_impl_module_destroy(d->mod);
+	}
 
-	pw_impl_module_destroy(d->mod);
+	pw_properties_free(d->module_props);
 
 	return 0;
 }
@@ -153,7 +171,7 @@ struct module *create_module_simple_protocol_tcp(struct impl *impl, const char *
 	}
 
 	if ((str = pw_properties_get(props, "source")) != NULL) {
-		if (pw_endswith(str, ".monitor")) {
+		if (spa_strendswith(str, ".monitor")) {
 			pw_properties_setf(module_props, "capture.node",
 					"%.*s", (int)strlen(str)-8, str);
 		} else {

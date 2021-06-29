@@ -30,6 +30,8 @@ extern "C" {
 #endif
 
 #include <string.h>
+#include <sys/un.h>
+#include <sys/mount.h>
 
 #include <spa/utils/defs.h>
 #include <spa/pod/pod.h>
@@ -44,7 +46,7 @@ extern "C" {
  * \{
  */
 
-/** a function to destroy an item \memberof pw_utils */
+/** a function to destroy an item */
 typedef void (*pw_destroy_t) (void *object);
 
 const char *

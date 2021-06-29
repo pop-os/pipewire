@@ -1,10 +1,7 @@
 test_apps = [
-	'test-array',
 	'test-client',
-	'test-context',
 	'test-endpoint',
 	'test-interfaces',
-	'test-properties',
 	#	'test-remote',
 	'test-stream',
 	'test-utils'
@@ -14,7 +11,6 @@ foreach a : test_apps
   test('pw-' + a,
 	executable('pw-' + a, a + '.c',
 		dependencies : [pipewire_dep],
-		c_args : [ '-D_GNU_SOURCE' ],
 		install : installed_tests_enabled,
 		install_dir : installed_tests_execdir),
 	env : [
