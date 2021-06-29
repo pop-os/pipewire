@@ -33,9 +33,7 @@
  * </refsect2>
  */
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include "gstpipewiresrc.h"
 #include "gstpipewiresink.h"
@@ -68,4 +66,4 @@ GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
     pipewire,
     "Uses PipeWire to handle media streams",
-    plugin_init, VERSION, "MIT/X11", "pipewire", "pipewire.org")
+    plugin_init, PACKAGE_VERSION, "MIT/X11", "pipewire", "pipewire.org")

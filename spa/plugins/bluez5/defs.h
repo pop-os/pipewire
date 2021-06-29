@@ -154,6 +154,12 @@ extern "C" {
 
 #define HSP_HS_DEFAULT_CHANNEL  3
 
+#define SOURCE_ID_BLUETOOTH	0x1	/* Bluetooth SIG */
+#define SOURCE_ID_USB		0x2	/* USB Implementer's Forum */
+
+#define BUS_TYPE_USB		1
+#define BUS_TYPE_OTHER		255
+
 #define HFP_AUDIO_CODEC_CVSD    0x01
 #define HFP_AUDIO_CODEC_MSBC    0x02
 
@@ -205,6 +211,10 @@ static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
 		return 0;
 }
 int spa_bt_profiles_from_json_array(const char *str);
+
+int spa_bt_format_vendor_product_id(uint16_t source_id, uint16_t vendor_id,
+		uint16_t product_id, char *vendor_str, int vendor_str_size,
+		char *product_str, int product_str_size);
 
 enum spa_bt_hfp_ag_feature {
 	SPA_BT_HFP_AG_FEATURE_NONE =			(0),
@@ -290,6 +300,11 @@ struct spa_bt_adapter {
 	char *alias;
 	char *address;
 	char *name;
+	int bus_type;
+	uint16_t source_id;
+	uint16_t vendor_id;
+	uint16_t product_id;
+	uint16_t version_id;
 	uint32_t bluetooth_class;
 	uint32_t profiles;
 	int powered;
@@ -405,6 +420,10 @@ struct spa_bt_device {
 	char *battery_path;
 	char *name;
 	char *icon;
+	uint16_t source_id;
+	uint16_t vendor_id;
+	uint16_t product_id;
+	uint16_t version_id;
 	uint32_t bluetooth_class;
 	uint16_t appearance;
 	uint16_t RSSI;
@@ -441,6 +460,7 @@ struct a2dp_codec;
 
 struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const char *path);
 struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monitor, const char *remote_address, const char *local_address);
+int spa_bt_device_add_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
 int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec **codecs);
@@ -646,6 +666,24 @@ static inline double spa_bt_volume_hw_to_linear(uint32_t v, uint32_t hw_volume_m
 		0.0, 1.0);
 }
 
+enum spa_bt_feature {
+	SPA_BT_FEATURE_MSBC		= (1 << 0),
+	SPA_BT_FEATURE_MSBC_ALT1	= (1 << 1),
+	SPA_BT_FEATURE_MSBC_ALT1_RTL	= (1 << 2),
+	SPA_BT_FEATURE_HW_VOLUME	= (1 << 3),
+	SPA_BT_FEATURE_HW_VOLUME_MIC	= (1 << 4),
+	SPA_BT_FEATURE_SBC_XQ		= (1 << 5),
+};
+
+struct spa_bt_quirks;
+
+struct spa_bt_quirks *spa_bt_quirks_create(const struct spa_dict *info, struct spa_log *log);
+int spa_bt_quirks_get_features(const struct spa_bt_quirks *quirks,
+		const struct spa_bt_adapter *adapter,
+		const struct spa_bt_device *device,
+		uint32_t *features);
+void spa_bt_quirks_destroy(struct spa_bt_quirks *quirks);
+
 struct spa_bt_backend_implementation {
 #define SPA_VERSION_BT_BACKEND_IMPLEMENTATION	0
 	uint32_t version;
@@ -687,6 +725,7 @@ struct spa_bt_backend {
 static inline struct spa_bt_backend *dummy_backend_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 		uint32_t n_support)
 {
@@ -697,6 +736,7 @@ static inline struct spa_bt_backend *dummy_backend_new(struct spa_bt_monitor *mo
 struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 		uint32_t n_support);
 #else
@@ -708,6 +748,7 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 		uint32_t n_support);
 #else
@@ -719,6 +760,7 @@ struct spa_bt_backend *backend_ofono_new(struct spa_bt_monitor *monitor,
 struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 		uint32_t n_support);
 #else

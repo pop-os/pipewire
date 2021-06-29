@@ -144,6 +144,8 @@ struct impl {
 	struct spa_log *log;
 	struct spa_cpu *cpu;
 
+	struct spa_io_position *io_position;
+
 	struct spa_hook_list hooks;
 
 	uint64_t info_all;
@@ -595,7 +597,20 @@ static int apply_midi(struct impl *this, const struct spa_pod *value)
 
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
-	return -ENOTSUP;
+	struct impl *this = object;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	spa_log_debug(this->log, NAME " %p: io %d %p/%zd", this, id, data, size);
+
+	switch (id) {
+	case SPA_IO_Position:
+		this->io_position = data;
+		break;
+	default:
+		return -ENOENT;
+	}
+	return 0;
 }
 
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
@@ -729,18 +744,23 @@ static int port_enum_formats(void *object,
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
 				0);
+
 			if (other->have_format) {
 				spa_pod_builder_add(builder,
 					SPA_FORMAT_AUDIO_rate, SPA_POD_Int(other->format.info.raw.rate),
+					SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(
+						other->format.info.raw.channels, 1, INT32_MAX),
 					0);
 			} else {
+				uint32_t rate = this->io_position ?
+					this->io_position->clock.rate.denom : DEFAULT_RATE;
+
 				spa_pod_builder_add(builder,
-					SPA_FORMAT_AUDIO_rate, SPA_POD_CHOICE_RANGE_Int(DEFAULT_RATE, 1, INT32_MAX),
+					SPA_FORMAT_AUDIO_rate, SPA_POD_CHOICE_RANGE_Int(rate, 0, INT32_MAX),
+					SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(
+						DEFAULT_CHANNELS, 1, INT32_MAX),
 					0);
 			}
-			spa_pod_builder_add(builder,
-				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(DEFAULT_CHANNELS, 1, INT32_MAX),
-				0);
 			*param = spa_pod_builder_pop(builder, &f);
 		}
 		break;

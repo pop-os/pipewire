@@ -51,6 +51,8 @@ struct impl {
 	struct spa_dbus *dbus;
 	DBusConnection *conn;
 
+	const struct spa_bt_quirks *quirks;
+
 	struct spa_list endpoint_list;
 	bool endpoints_listed;
 
@@ -1137,6 +1139,7 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct impl *backend,
 	t->n_channels = 1;
 	t->channels[0] = SPA_AUDIO_CHANNEL_MONO;
 
+	spa_bt_device_add_profile(d, t->profile);
 	spa_bt_device_connect_profile(t->device, t->profile);
 
 	spa_log_debug(backend->log, NAME": Transport %s available for hsphfpd", endpoint->path);
@@ -1484,6 +1487,7 @@ static const struct spa_bt_backend_implementation backend_impl = {
 struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 	  uint32_t n_support)
 {
@@ -1503,11 +1507,12 @@ struct spa_bt_backend *backend_hsphfpd_new(struct spa_bt_monitor *monitor,
 	spa_bt_backend_set_implementation(&backend->this, &backend_impl, backend);
 
 	backend->monitor = monitor;
+	backend->quirks = quirks;
 	backend->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	backend->dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
 	backend->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
 	backend->conn = dbus_connection;
-	if (info && (str = spa_dict_lookup(info, "bluez5.msbc-support")))
+	if (info && (str = spa_dict_lookup(info, "bluez5.enable-msbc")))
 		backend->msbc_supported = spa_atob(str);
 	else
 		backend->msbc_supported = false;

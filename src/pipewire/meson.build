@@ -25,6 +25,7 @@ pipewire_headers = [
   'main-loop.h',
   'map.h',
   'mem.h',
+  'impl-metadata.h',
   'impl-module.h',
   'module.h',
   'impl-node.h',
@@ -65,12 +66,14 @@ pipewire_sources = [
   'impl-module.c',
   'impl-node.c',
   'impl-factory.c',
+  'impl-metadata.c',
   'pipewire.c',
   'impl-port.c',
   'properties.c',
   'protocol.c',
   'proxy.c',
   'resource.c',
+  'settings.c',
   'stream.c',
   'thread-loop.c',
   'utils.c',
@@ -80,18 +83,16 @@ pipewire_sources = [
 configure_file(input : 'version.h.in',
   output : 'version.h',
   install_dir : get_option('includedir') / pipewire_headers_dir,
-  configuration : cdata)
+  configuration : versiondata)
 
 
 install_headers(pipewire_headers, subdir : pipewire_headers_dir)
 
 libpipewire_c_args = [
-  '-DHAVE_CONFIG_H',
 ]
 
 if build_machine.system() != 'freebsd'
   libpipewire_c_args += [
-    '-D_GNU_SOURCE',
     '-D_POSIX_C_SOURCE'
   ]
 endif
@@ -106,16 +107,29 @@ libpipewire = shared_library(pipewire_name, pipewire_sources,
 )
 
 pipewire_dep = declare_dependency(link_with : libpipewire,
-  include_directories : [pipewire_inc, configinc, spa_inc],
-  dependencies : [pthread_lib, atomic_dep, ],
+  include_directories : [pipewire_inc, configinc],
+  dependencies : [pthread_lib, atomic_dep, spa_dep],
+  variables : {
+    'moduledir' : meson.current_build_dir() / '..' / 'modules',
+    'confdatadir' : meson.current_build_dir() / '..' / 'daemon',
+  }
 )
 
-pkgconfig.generate(filebase : 'lib@0@'.format(pipewire_name),
-  libraries : [libpipewire],
+pkgconfig.generate(libpipewire,
+  filebase : 'lib@0@'.format(pipewire_name),
   requires : ['lib@0@'.format(spa_name)],
   name : 'libpipewire',
   subdirs : pipewire_name,
   description : 'PipeWire Interface',
   version : pipewire_version,
   extra_cflags : '-D_REENTRANT',
-  variables : ['moduledir=${libdir}/@0@'.format(pipewire_name)])
+  variables : ['moduledir=${libdir}/@0@'.format(pipewire_name)],
+  uninstalled_variables : [
+    'moduledir=${prefix}/src/modules',
+    'confdatadir=${prefix}/src/daemon',
+  ],
+)
+
+meson.override_dependency('lib@0@'.format(pipewire_name), pipewire_dep)
+
+subdir('extensions')

@@ -26,7 +26,7 @@
 #ifndef PIPEWIRE_PULSE_MODULE_REGISTRY_H
 #define PIPEWIRE_PULSE_MODULE_REGISTRY_H
 
-#include "../internal.h"
+struct impl;
 
 struct module *create_module_combine_sink(struct impl *impl, const char *argument);
 struct module *create_module_echo_cancel(struct impl *impl, const char *argument);
@@ -40,7 +40,11 @@ struct module *create_module_remap_source(struct impl *impl, const char *argumen
 struct module *create_module_tunnel_sink(struct impl *impl, const char *argument);
 struct module *create_module_tunnel_source(struct impl *impl, const char *argument);
 struct module *create_module_simple_protocol_tcp(struct impl *impl, const char *argument);
+struct module *create_module_pipe_source(struct impl *impl, const char *argument);
 struct module *create_module_pipe_sink(struct impl *impl, const char *argument);
 struct module *create_module_zeroconf_discover(struct impl *impl, const char *argument);
+struct module *create_module_zeroconf_publish(struct impl *impl, const char *argument);
+struct module *create_module_roc_sink(struct impl *impl, const char *argument);
+struct module *create_module_roc_source(struct impl *impl, const char *argument);
 
 #endif

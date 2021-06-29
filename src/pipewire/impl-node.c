@@ -879,16 +879,16 @@ static void check_properties(struct pw_impl_node *node)
 			uint32_t quantum_size;
 
 			node->latency = SPA_FRACTION(num, denom);
-			quantum_size = (num * context->defaults.clock_rate / denom);
-			if (context->defaults.clock_power_of_two_quantum)
+			quantum_size = (num * context->settings.clock_rate / denom);
+			if (context->settings.clock_power_of_two_quantum)
 				quantum_size = flp2(quantum_size);
 
 			if (quantum_size != node->quantum_size) {
 				pw_log_debug(NAME" %p: latency '%s' quantum %u/%u",
-						node, str, quantum_size, context->defaults.clock_rate);
+						node, str, quantum_size, context->settings.clock_rate);
 				pw_log_info("(%s-%u) latency:%s ->quantum %u/%u", node->name,
 						node->info.id, str, quantum_size,
-						context->defaults.clock_rate);
+						context->settings.clock_rate);
 				node->quantum_size = quantum_size;
 				recalc_reason = "quantum changed";
 			}
@@ -900,16 +900,16 @@ static void check_properties(struct pw_impl_node *node)
 			uint32_t max_quantum_size;
 
 			node->max_latency = SPA_FRACTION(num, denom);
-			max_quantum_size = (num * context->defaults.clock_rate / denom);
-			if (context->defaults.clock_power_of_two_quantum)
+			max_quantum_size = (num * context->settings.clock_rate / denom);
+			if (context->settings.clock_power_of_two_quantum)
 				max_quantum_size = flp2(max_quantum_size);
 
 			if (max_quantum_size != node->max_quantum_size) {
 				pw_log_debug(NAME" %p: max latency '%s' quantum %u/%u",
-						node, str, max_quantum_size, context->defaults.clock_rate);
+						node, str, max_quantum_size, context->settings.clock_rate);
 				pw_log_info("(%s-%u) max latency:%s ->quantum %u/%u", node->name,
 						node->info.id, str, max_quantum_size,
-						context->defaults.clock_rate);
+						context->settings.clock_rate);
 				node->max_quantum_size = max_quantum_size;
 				recalc_reason = "max quantum changed";
 			}
@@ -1105,14 +1105,16 @@ static void reset_segment(struct spa_io_segment *seg)
 static void reset_position(struct pw_impl_node *this, struct spa_io_position *pos)
 {
 	uint32_t i;
-	struct defaults *def = &this->context->defaults;
+	struct settings *s = &this->context->settings;
+	uint32_t quantum = s->clock_force_quantum == 0 ? s->clock_quantum : s->clock_force_quantum;
+	uint32_t rate = s->clock_force_rate == 0 ? s->clock_rate : s->clock_force_rate;
 
-	pos->clock.rate = SPA_FRACTION(1, def->clock_rate);
-	pos->clock.duration = def->clock_quantum;
+	pos->clock.rate = SPA_FRACTION(1, rate);
+	pos->clock.duration = quantum;
 	pos->video.flags = SPA_IO_VIDEO_SIZE_VALID;
-	pos->video.size = def->video_size;
+	pos->video.size = s->video_size;
 	pos->video.stride = pos->video.size.width * 16;
-	pos->video.framerate = def->video_rate;
+	pos->video.framerate = s->video_rate;
 	pos->offset = INT64_MIN;
 
 	pos->n_segments = 1;

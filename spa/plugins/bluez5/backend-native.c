@@ -25,6 +25,9 @@
 
 #include <errno.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/sco.h>
@@ -43,6 +46,10 @@
 #include <spa/param/audio/raw.h>
 
 #include "defs.h"
+
+#ifdef HAVE_LIBUSB
+#include <libusb.h>
+#endif
 
 #define NAME "native"
 
@@ -72,6 +79,8 @@ struct impl {
 	enum spa_bt_profile enabled_profiles;
 
 	struct spa_source sco;
+
+	const struct spa_bt_quirks *quirks;
 
 	struct spa_list rfcomm_list;
 	unsigned int defer_setup_enabled:1;
@@ -120,10 +129,10 @@ struct rfcomm {
 	char* path;
 	bool has_volume;
 	struct rfcomm_volume volumes[SPA_BT_VOLUME_ID_TERM];
+	unsigned int broken_mic_hw_volume:1;
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
 	unsigned int slc_configured:1;
 	unsigned int codec_negotiation_supported:1;
-	unsigned int msbc_support_enabled_in_config:1;
 	unsigned int msbc_supported_by_hfp:1;
 	unsigned int hfp_ag_switching_codec:1;
 	unsigned int hfp_ag_initial_codec_setup:2;
@@ -323,7 +332,8 @@ static bool rfcomm_hsp_ag(struct spa_source *source, char* buf)
 		}
 	} else if (sscanf(buf, "AT+VGM=%d", &gain) == 1) {
 		if (gain <= SPA_BT_VOLUME_HS_MAX) {
-			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
+			if (!rfcomm->broken_mic_hw_volume)
+				rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			rfcomm_send_reply(source, "ERROR");
@@ -411,24 +421,135 @@ static bool rfcomm_hsp_hs(struct spa_source *source, char* buf)
 }
 #endif
 
+#ifdef HAVE_LIBUSB
+static bool check_usb_altsetting_6(struct impl *backend, uint16_t vendor_id, uint16_t product_id)
+{
+	libusb_context *ctx = NULL;
+	struct libusb_config_descriptor *cfg = NULL;
+	libusb_device **devices = NULL;
+
+	ssize_t ndev, idev;
+	int res;
+	bool ok = false;
+
+	if ((res = libusb_init(&ctx)) < 0) {
+		ctx = NULL;
+		goto fail;
+	}
+
+	if ((ndev = libusb_get_device_list(ctx, &devices)) < 0) {
+		res = ndev;
+		devices = NULL;
+		goto fail;
+	}
+
+	for (idev = 0; idev < ndev; ++idev) {
+		libusb_device *dev = devices[idev];
+		struct libusb_device_descriptor desc;
+		int icfg;
+
+		libusb_get_device_descriptor(dev, &desc);
+		if (vendor_id != desc.idVendor || product_id != desc.idProduct)
+			continue;
+
+		/* Check the device has Bluetooth isoch. altsetting 6 interface */
+
+		for (icfg = 0; icfg < desc.bNumConfigurations; ++icfg) {
+			int iiface;
+
+			if ((res = libusb_get_config_descriptor(dev, icfg, &cfg)) != 0) {
+				cfg = NULL;
+				goto fail;
+			}
+
+			for (iiface = 0; iiface < cfg->bNumInterfaces; ++iiface) {
+				const struct libusb_interface *iface = &cfg->interface[iiface];
+				int ialt;
+
+				for (ialt = 0; ialt < iface->num_altsetting; ++ialt) {
+					const struct libusb_interface_descriptor *idesc = &iface->altsetting[ialt];
+					int iep;
+
+					if (idesc->bInterfaceClass != LIBUSB_CLASS_WIRELESS ||
+							idesc->bInterfaceSubClass != 1 /* RF */ ||
+							idesc->bInterfaceProtocol != 1 /* Bluetooth */ ||
+							idesc->bAlternateSetting != 6)
+						continue;
+
+					for (iep = 0; iep < idesc->bNumEndpoints; ++iep) {
+						const struct libusb_endpoint_descriptor *ep = &idesc->endpoint[iep];
+						if ((ep->bmAttributes & 0x3) == 0x1 /* isochronous */) {
+							ok = true;
+							goto done;
+						}
+					}
+				}
+			}
+
+			libusb_free_config_descriptor(cfg);
+			cfg = NULL;
+		}
+	}
+
+done:
+	if (cfg)
+		libusb_free_config_descriptor(cfg);
+	if (devices)
+		libusb_free_device_list(devices, 0);
+	if (ctx)
+		libusb_exit(ctx);
+	return ok;
+
+fail:
+	spa_log_info(backend->log, NAME": failed to acquire USB device info: %d (%s)",
+			res, libusb_strerror(res));
+	ok = false;
+	goto done;
+}
+#endif
+
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
 static bool device_supports_required_mSBC_transport_modes(
 		struct impl *backend, struct spa_bt_device *device) {
 	bdaddr_t src;
 	uint8_t features[8], max_page = 0;
+	struct hci_dev_info di;
 	int device_id;
 	int sock;
+	bool msbc_ok, msbc_alt1_ok;
+	uint32_t bt_features;
 
 	if (device->adapter == NULL)
 		return false;
 
 	spa_log_debug(backend->log, NAME": Entering function");
 
+	if (backend->quirks && spa_bt_quirks_get_features(backend->quirks, device->adapter, device, &bt_features) == 0) {
+		msbc_ok = bt_features & SPA_BT_FEATURE_MSBC;
+		msbc_alt1_ok = bt_features & (SPA_BT_FEATURE_MSBC_ALT1 | SPA_BT_FEATURE_MSBC_ALT1_RTL);
+	} else {
+		msbc_ok = true;
+		msbc_alt1_ok = true;
+	}
+
+	spa_log_info(backend->log,
+			NAME": bluez-monitor/hardware.conf: msbc:%d msbc-alt1:%d", (int)msbc_ok, (int)msbc_alt1_ok);
+
+	if (!msbc_ok && !msbc_alt1_ok)
+		return false;
+
 	str2ba(device->adapter->address, &src);
 
 	device_id = hci_get_route(&src);
+
+	if (hci_devinfo(device_id, &di) < 0) {
+		spa_log_error(backend->log, NAME": Error getting device info for hci%d: %s (%d)\n",
+						device_id, strerror(errno), errno);
+		return false;
+	}
+
 	sock = hci_open_dev(device_id);
-		if (sock < 0) {
+	if (sock < 0) {
 		spa_log_error(backend->log, NAME": Error opening device hci%d: %s (%d)\n",
 						device_id, strerror(errno), errno);
 		return false;
@@ -457,11 +578,29 @@ static bool device_supports_required_mSBC_transport_modes(
 	} else {
 		spa_log_info(backend->log,
 				NAME": bluetooth host adapter supports eSCO link and Transparent Data mode" );
-		return true;
 	}
 
-	spa_log_debug(backend->log, NAME": Fallthrough - we should not be here");
-	return false;
+	if ((di.type & 0x0f) == HCI_USB && !msbc_alt1_ok && msbc_ok) {
+		/* Check if USB ALT6 is really available on the device */
+#if HAVE_LIBUSB
+		if (device->adapter->source_id == SOURCE_ID_USB) {
+			msbc_ok = check_usb_altsetting_6(backend, device->adapter->vendor_id,
+					device->adapter->product_id);
+		} else {
+			msbc_ok = false;
+		}
+		if (!msbc_ok)
+			spa_log_info(backend->log, NAME": bluetooth host adapter does not support USB ALT6");
+#else
+		spa_log_info(backend->log,
+			NAME": compiled without libusb; can't check if bluetooth adapter has USB ALT6");
+		msbc_ok = false;
+#endif
+	}
+	if ((di.type & 0x0f) != HCI_USB)
+		msbc_alt1_ok = false;
+
+	return msbc_ok || msbc_alt1_ok;
 }
 
 static int codec_switch_start_timer(struct rfcomm *rfcomm, int timeout_msec);
@@ -482,16 +621,13 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 		/*
 		 * Determine device volume control. Some headsets only support control of
 		 * TX volume, but not RX, even if they have a microphone. Determine this
-		 * separately based on whether we also get AT+VGS/AT+VGM.
+		 * separately based on whether we also get AT+VGS/AT+VGM, and quirks.
 		 */
 		rfcomm->has_volume = (features & SPA_BT_HFP_HF_FEATURE_REMOTE_VOLUME_CONTROL);
 
 		/* Decide if we want to signal that the computer supports mSBC negotiation
-		   This should be done when
-			 a) mSBC support is enabled in config file and
-			 b) the computers bluetooth adapter supports the necessary transport mode */
-		if ((rfcomm->msbc_support_enabled_in_config == true) &&
-			  (device_supports_required_mSBC_transport_modes(backend, rfcomm->device))) {
+		   This should be done when the computers bluetooth adapter supports the necessary transport mode */
+		if (device_supports_required_mSBC_transport_modes(backend, rfcomm->device)) {
 
 			/* set the feature bit that indicates AG (=computer) supports codec negotiation */
 			ag_features |= SPA_BT_HFP_AG_FEATURE_CODEC_NEGOTIATION;
@@ -619,7 +755,8 @@ static bool rfcomm_hfp_ag(struct spa_source *source, char* buf)
 			spa_bt_device_emit_codec_switched(rfcomm->device, 0);
 	} else if (sscanf(buf, "AT+VGM=%u", &gain) == 1) {
 		if (gain <= SPA_BT_VOLUME_HS_MAX) {
-			rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
+			if (!rfcomm->broken_mic_hw_volume)
+				rfcomm_emit_volume_changed(rfcomm, SPA_BT_VOLUME_ID_RX, gain);
 			rfcomm_send_reply(source, "OK");
 		} else {
 			spa_log_debug(backend->log, NAME": RFCOMM receive unsupported VGM gain: %s", buf);
@@ -1263,7 +1400,6 @@ static int backend_native_supports_codec(void *data, struct spa_bt_device *devic
 	return (codec == HFP_AUDIO_CODEC_MSBC &&
 	        (rfcomm->profile == SPA_BT_PROFILE_HFP_AG ||
 	         rfcomm->profile == SPA_BT_PROFILE_HFP_HF) &&
-	        rfcomm->msbc_support_enabled_in_config &&
 	        rfcomm->msbc_supported_by_hfp &&
 	        rfcomm->codec_negotiation_supported) ? 1 : 0;
 #else
@@ -1374,6 +1510,9 @@ static int backend_native_ensure_codec(void *data, struct spa_bt_device *device,
 	if (rfcomm == NULL)
 		return -ENOTSUP;
 
+	if (!rfcomm->codec_negotiation_supported)
+		return -ENOTSUP;
+
 	if (rfcomm->codec == codec) {
 		spa_bt_device_emit_codec_switched(device, 0);
 		return 0;
@@ -1408,7 +1547,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	struct impl *backend = userdata;
 	DBusMessage *r;
 	DBusMessageIter it[5];
-	const char *handler, *path, *str;
+	const char *handler, *path;
 	enum spa_bt_profile profile = SPA_BT_PROFILE_NULL;
 	struct rfcomm *rfcomm;
 	struct spa_bt_device *d;
@@ -1447,6 +1586,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		spa_log_warn(backend->log, NAME": unknown device for path %s", path);
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
+	spa_bt_device_add_profile(d, profile);
 
 	dbus_message_iter_next(&it[0]);
 	dbus_message_iter_get_basic(&it[0], &fd);
@@ -1477,11 +1617,6 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	spa_loop_add_source(backend->main_loop, &rfcomm->source);
 	spa_list_append(&backend->rfcomm_list, &rfcomm->link);
 
-	if (d->settings && (str = spa_dict_lookup(d->settings, "bluez5.msbc-support")))
-		rfcomm->msbc_support_enabled_in_config = spa_atob(str);
-	else
-		rfcomm->msbc_support_enabled_in_config = false;
-
 	if (profile == SPA_BT_PROFILE_HSP_HS || profile == SPA_BT_PROFILE_HSP_AG) {
 		t = _transport_create(rfcomm);
 		if (t == NULL) {
@@ -1504,11 +1639,8 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		char *cmd;
 
 		/* Decide if we want to signal that the HF supports mSBC negotiation
-		   This should be done when
-			 a) mSBC support is enabled in config file and
-			 b) the bluetooth adapter supports the necessary transport mode */
-		if ((rfcomm->msbc_support_enabled_in_config == true) &&
-			  (device_supports_required_mSBC_transport_modes(backend, rfcomm->device))) {
+		   This should be done when the bluetooth adapter supports the necessary transport mode */
+		if (device_supports_required_mSBC_transport_modes(backend, rfcomm->device)) {
 			/* set the feature bit that indicates HF supports codec negotiation */
 			hf_features |= SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION;
 			rfcomm->msbc_supported_by_hfp = true;
@@ -1528,6 +1660,15 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		rfcomm_send_cmd(&rfcomm->source, cmd);
 		free(cmd);
 		rfcomm->hf_state = hfp_hf_brsf;
+	}
+
+	if (rfcomm_volume_enabled(rfcomm) && (profile == SPA_BT_PROFILE_HFP_HF || profile == SPA_BT_PROFILE_HSP_HS)) {
+		uint32_t device_features;
+		if (spa_bt_quirks_get_features(backend->quirks, d->adapter, d, &device_features) == 0) {
+			rfcomm->broken_mic_hw_volume = !(device_features & SPA_BT_FEATURE_HW_VOLUME_MIC);
+			if (rfcomm->broken_mic_hw_volume)
+				spa_log_debug(backend->log, NAME": microphone HW volume disabled by quirk");
+		}
 	}
 
 	if ((r = dbus_message_new_method_return(m)) == NULL)
@@ -1921,6 +2062,7 @@ static const struct spa_bt_backend_implementation backend_impl = {
 struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 		void *dbus_connection,
 		const struct spa_dict *info,
+		const struct spa_bt_quirks *quirks,
 		const struct spa_support *support,
 	  uint32_t n_support)
 {
@@ -1937,6 +2079,7 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 	spa_bt_backend_set_implementation(&backend->this, &backend_impl, backend);
 
 	backend->monitor = monitor;
+	backend->quirks = quirks;
 	backend->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	backend->dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
 	backend->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);

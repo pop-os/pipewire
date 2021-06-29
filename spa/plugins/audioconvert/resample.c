@@ -124,6 +124,8 @@ struct impl {
 
 	struct resample resample;
 
+	double rate_scale;
+
 	float empty[MAX_SAMPLES + MAX_ALIGN];
 };
 
@@ -252,9 +254,9 @@ static void update_rate_match(struct impl *this, bool passthrough, uint32_t out_
 			match_size = out_size;
 		} else {
 			if (SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
-				resample_update_rate(&this->resample, this->io_rate_match->rate);
+				resample_update_rate(&this->resample, this->rate_scale * this->io_rate_match->rate);
 			else
-				resample_update_rate(&this->resample, 1.0);
+				resample_update_rate(&this->resample, this->rate_scale);
 
 			this->io_rate_match->delay = resample_delay(&this->resample);
 			match_size = resample_in_len(&this->resample, out_size);
@@ -263,7 +265,7 @@ static void update_rate_match(struct impl *this, bool passthrough, uint32_t out_
 		this->io_rate_match->size = match_size;
 		spa_log_trace_fp(this->log, NAME " %p: next match %u", this, match_size);
 	} else {
-		resample_update_rate(&this->resample, this->props.rate);
+		resample_update_rate(&this->resample, this->rate_scale * this->props.rate);
 	}
 }
 
@@ -404,12 +406,15 @@ static int port_enum_formats(void *object,
 					other->format.info.raw.channels, other->format.info.raw.position);
 			*param = spa_pod_builder_pop(builder, &f);
 		} else {
+			uint32_t rate = this->io_position ?
+				this->io_position->clock.rate.denom : DEFAULT_RATE;
+
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(DEFAULT_RATE, 1, INT32_MAX),
+				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(rate, 1, INT32_MAX),
 				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(DEFAULT_CHANNELS, 1, INT32_MAX));
 		}
 		break;
@@ -821,8 +826,26 @@ static int impl_node_process(void *object)
 	size = sb->datas[0].chunk->size;
 	maxsize = db->datas[0].maxsize;
 
-	if (SPA_LIKELY(this->io_position))
+	if (SPA_LIKELY(this->io_position)) {
+		double r =  this->rate_scale;
+
 		max = this->io_position->clock.duration;
+		if (this->mode == MODE_SPLIT) {
+			if (this->io_position->clock.rate.denom != this->resample.o_rate)
+				r = (double) this->io_position->clock.rate.denom / this->resample.o_rate;
+			else
+				r = 1.0;
+		} else {
+			if (this->io_position->clock.rate.denom != this->resample.i_rate)
+				r = (double) this->resample.i_rate / this->io_position->clock.rate.denom;
+			else
+				r = 1.0;
+		}
+		if (this->rate_scale != r) {
+			spa_log_info(this->log, "scale %f->%f", this->rate_scale, r);
+			this->rate_scale = r;
+		}
+	}
 	else
 		max = maxsize / sizeof(float);
 
@@ -864,7 +887,7 @@ static int impl_node_process(void *object)
 	pin_len = in_len;
 	pout_len = out_len;
 #endif
-	passthrough = this->resample.i_rate == this->resample.o_rate &&
+	passthrough = this->resample.i_rate == this->resample.o_rate && this->rate_scale == 1.0 &&
 		(this->io_rate_match == NULL ||
 		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
 
@@ -1026,6 +1049,8 @@ impl_init(const struct spa_handle_factory *factory,
 			&impl_node, this);
 
 	spa_hook_list_init(&this->hooks);
+
+	this->rate_scale = 1.0;
 
 	this->info = SPA_NODE_INFO_INIT();
 	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS;

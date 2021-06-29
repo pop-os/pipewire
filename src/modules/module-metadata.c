@@ -32,7 +32,10 @@
 #include <spa/utils/result.h>
 
 #include <pipewire/impl.h>
-#include <extensions/metadata.h>
+#include <pipewire/extensions/metadata.h>
+
+/** \page page_module_metadata PipeWire Module: Metadata
+ */
 
 #define NAME "metadata"
 
@@ -79,9 +82,12 @@ static void *create_object(void *_data,
 		goto error_resource;
 	}
 
-	if (properties)
+	if (properties) {
 		pw_properties_setf(properties, PW_KEY_FACTORY_ID, "%d",
 				pw_impl_factory_get_info(data->this)->id);
+		pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d",
+				pw_impl_client_get_info(client)->id);
+	}
 
 	result = pw_metadata_new(pw_impl_client_get_context(client), metadata_resource, properties);
 	if (result == NULL) {

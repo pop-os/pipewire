@@ -27,16 +27,20 @@
 
 #include "config.h"
 
-#include <sys/socket.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 #include <spa/utils/defs.h>
 #include <spa/utils/ringbuffer.h>
-#include <pipewire/pipewire.h>
+#include <pipewire/map.h>
 #include <pipewire/private.h>
 
 #include "format.h"
 
-#define NAME	"pulse-server"
+struct pw_loop;
+struct pw_context;
+struct pw_work_queue;
+struct pw_properties;
 
 struct defs {
 	struct spa_fraction min_req;
@@ -49,156 +53,12 @@ struct defs {
 	struct channel_map channel_map;
 };
 
-struct descriptor {
-	uint32_t length;
-	uint32_t channel;
-	uint32_t offset_hi;
-	uint32_t offset_lo;
-	uint32_t flags;
-};
-
 struct stats {
 	uint32_t n_allocated;
 	uint32_t allocated;
 	uint32_t n_accumulated;
 	uint32_t accumulated;
 	uint32_t sample_cache;
-};
-
-struct impl;
-struct server;
-struct client;
-
-struct client {
-	struct spa_list link;
-	struct impl *impl;
-	struct server *server;
-
-	int ref;
-	const char *name;
-
-	struct spa_source *source;
-
-	uint32_t version;
-
-	struct pw_properties *props;
-
-	struct pw_core *core;
-	struct pw_manager *manager;
-	struct spa_hook manager_listener;
-
-	uint32_t subscribed;
-
-	struct pw_manager_object *metadata_default;
-	char *default_sink;
-	char *default_source;
-	struct pw_manager_object *metadata_routes;
-	struct pw_properties *routes;
-
-	uint32_t connect_tag;
-
-	uint32_t in_index;
-	uint32_t out_index;
-	struct descriptor desc;
-	struct message *message;
-
-	struct pw_map streams;
-	struct spa_list out_messages;
-
-	struct spa_list operations;
-	struct spa_list loading_modules;
-
-	struct spa_list pending_samples;
-
-	unsigned int disconnect:1;
-	unsigned int disconnecting:1;
-	unsigned int need_flush:1;
-
-	struct pw_manager_object *prev_default_sink;
-	struct pw_manager_object *prev_default_source;
-};
-
-struct buffer_attr {
-	uint32_t maxlength;
-	uint32_t tlength;
-	uint32_t prebuf;
-	uint32_t minreq;
-	uint32_t fragsize;
-};
-
-struct volume {
-	uint8_t channels;
-	float values[CHANNELS_MAX];
-};
-
-#define VOLUME_INIT	(struct volume) {		\
-				.channels = 0,		\
-			}
-
-struct stream {
-	uint32_t create_tag;
-	uint32_t channel;	/* index in map */
-	uint32_t id;		/* id of global */
-
-	struct impl *impl;
-	struct client *client;
-#define STREAM_TYPE_RECORD	0
-#define STREAM_TYPE_PLAYBACK	1
-#define STREAM_TYPE_UPLOAD	2
-	uint32_t type;
-	enum pw_direction direction;
-
-	struct pw_properties *props;
-
-	struct pw_stream *stream;
-	struct spa_hook stream_listener;
-
-	struct spa_io_rate_match *rate_match;
-	struct spa_ringbuffer ring;
-	void *buffer;
-
-	int64_t read_index;
-	int64_t write_index;
-	uint64_t underrun_for;
-	uint64_t playing_for;
-	uint64_t ticks_base;
-	uint64_t timestamp;
-	int64_t delay;
-
-	uint32_t missing;
-	uint32_t requested;
-
-	struct sample_spec ss;
-	struct channel_map map;
-	struct buffer_attr attr;
-	uint32_t frame_size;
-	uint32_t rate;
-
-	struct volume volume;
-	bool muted;
-
-	uint32_t drain_tag;
-	unsigned int corked:1;
-	unsigned int draining:1;
-	unsigned int volume_set:1;
-	unsigned int muted_set:1;
-	unsigned int early_requests:1;
-	unsigned int adjust_latency:1;
-	unsigned int is_underrun:1;
-	unsigned int in_prebuf:1;
-	unsigned int done:1;
-	unsigned int killed:1;
-};
-
-struct server {
-	struct spa_list link;
-	struct impl *impl;
-
-	struct sockaddr_storage addr;
-
-	struct spa_source *source;
-	struct spa_list clients;
-	unsigned int activated:1;
 };
 
 struct impl {
@@ -211,7 +71,6 @@ struct impl {
 
 	struct ratelimit rate_limit;
 
-	struct spa_source *source;
 	struct spa_list servers;
 
 	struct pw_work_queue *work_queue;
@@ -225,7 +84,8 @@ struct impl {
 	struct stats stat;
 };
 
-int create_and_start_servers(struct impl *impl, const char *addresses, struct pw_array *servers);
-void server_free(struct server *server);
+extern bool debug_messages;
+
+void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id);
 
 #endif

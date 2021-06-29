@@ -17,6 +17,15 @@ endforeach
 foreach h : pipewire_sources
   inputs += meson.source_root() / 'src' / 'pipewire' / h
 endforeach
+foreach h : module_sources
+  inputs += meson.source_root() / 'src' / 'modules' / h
+endforeach
+inputs += meson.source_root() / 'test' / 'pwtest.h'
+
+find = find_program('find', required: false)
+if find.found()
+
+endif
 
 # SPA headers use static inline functions. Doxygen doesn't extract those
 # unless we have EXTRACT_STATIC set - but we don't want it to extract
@@ -27,7 +36,6 @@ endforeach
 # normal functions.
 # Because this uses globbing, this target won't rebuild if the headers
 # change but meh.
-spa_header_dirs = []
 sed = find_program('sed', required: false)
 if sed.found()
   spa_srcdir = meson.source_root() / 'spa' / 'include' / 'spa'
@@ -38,7 +46,6 @@ if sed.found()
     build_by_default: true,
     output: 'spa',
   )
-  spa_header_dirs += spa_dstdir
 else
   spa_strip_static = []
 endif
@@ -51,6 +58,7 @@ extra_docs = [
   'pipewire-design.dox',
   'pipewire-daemon.dox',
   'pipewire-library.dox',
+  'pipewire-modules.dox',
   'pipewire-tools.dox',
   'pipewire-session-manager.dox',
   'pipewire-objects-design.dox',
@@ -63,6 +71,7 @@ extra_docs = [
   'tutorial5.dox',
   'tutorial6.dox',
   'spa-index.dox',
+  'spa-plugins.dox',
   'spa-design.dox',
   'spa-pod.dox',
   'spa-buffer.dox',

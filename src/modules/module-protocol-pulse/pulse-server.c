@@ -22,39 +22,16 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#define NAME "pulse-server"
+
 #include "config.h"
 
-#include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <netinet/ip.h>
-#include <sys/un.h>
-#include <stdio.h>
 #include <errno.h>
-#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
-#include <limits.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <sys/time.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <regex.h>
-#if HAVE_SYS_VFS_H
-#include <sys/vfs.h>
-#endif
-#if HAVE_SYS_MOUNT_H
-#include <sys/mount.h>
-#endif
-#if HAVE_PWD_H
-#include <pwd.h>
-#endif
-
-#ifdef HAVE_SYSTEMD
-#include <systemd/sd-daemon.h>
-#endif
 
 #include <pipewire/log.h>
 
@@ -73,13 +50,32 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/json.h>
 
-#include "pipewire/pipewire.h"
-#include "pipewire/private.h"
-#include "extensions/metadata.h"
+#include <pipewire/pipewire.h>
+#include <pipewire/private.h>
+#include <pipewire/extensions/metadata.h>
 
 #include "pulse-server.h"
+#include "client.h"
+#include "collect.h"
+#include "commands.h"
+#include "dbus-name.h"
 #include "defs.h"
+#include "extension.h"
+#include "format.h"
 #include "internal.h"
+#include "manager.h"
+#include "message.h"
+#include "message-handler.h"
+#include "module.h"
+#include "operation.h"
+#include "pending-sample.h"
+#include "reply.h"
+#include "sample.h"
+#include "sample-play.h"
+#include "server.h"
+#include "stream.h"
+#include "utils.h"
+#include "volume.h"
 
 #define DEFAULT_MIN_REQ		"256/48000"
 #define DEFAULT_DEFAULT_REQ	"960/48000"
@@ -93,51 +89,14 @@
 #define LISTEN_BACKLOG 32
 
 #define MAX_FORMATS	32
+#define MAX_CLIENTS	64
 
-#include "format.c"
-#include "volume.c"
-#include "message.c"
-#include "manager.h"
-#include "dbus-name.c"
-
-static bool debug_messages = false;
-
-#include "sample.c"
-
-struct operation {
-	struct spa_list link;
-	struct client *client;
-	uint32_t tag;
-};
+bool debug_messages = false;
 
 struct latency_offset_data {
 	int64_t prev_latency_offset;
 	unsigned int initialized:1;
 };
-
-/* Functions that modules can use */
-static void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id);
-
-#include "collect.c"
-#include "module.c"
-#include "message-handler.c"
-
-static void client_free(struct client *client);
-
-static void sample_free(struct sample *sample)
-{
-	struct impl *impl = sample->impl;
-
-	pw_log_info("free sample id:%u name:%s", sample->index, sample->name);
-
-	impl->stat.sample_cache -= sample->length;
-
-	if (sample->index != SPA_ID_INVALID)
-		pw_map_remove(&impl->samples, sample->index);
-	pw_properties_free(sample->props);
-	free(sample->buffer);
-	free(sample);
-}
 
 static struct sample *find_sample(struct impl *impl, uint32_t idx, const char *name)
 {
@@ -155,358 +114,14 @@ static struct sample *find_sample(struct impl *impl, uint32_t idx, const char *n
 	return NULL;
 }
 
-struct command {
-	const char *name;
-	int (*run) (struct client *client, uint32_t command, uint32_t tag, struct message *msg);
-};
-static const struct command commands[COMMAND_MAX];
-
-static void message_free(struct impl *impl, struct message *msg, bool dequeue, bool destroy)
-{
-	if (dequeue)
-		spa_list_remove(&msg->link);
-	if (destroy) {
-		pw_log_trace("destroy message %p", msg);
-		msg->stat->n_allocated--;
-		msg->stat->allocated -= msg->allocated;
-		free(msg->data);
-		free(msg);
-	} else {
-		pw_log_trace("recycle message %p", msg);
-		spa_list_append(&impl->free_messages, &msg->link);
-	}
-}
-
-static struct message *message_alloc(struct impl *impl, uint32_t channel, uint32_t size)
-{
-	struct message *msg;
-
-	if (!spa_list_is_empty(&impl->free_messages)) {
-		msg = spa_list_first(&impl->free_messages, struct message, link);
-		spa_list_remove(&msg->link);
-		pw_log_trace("using recycled message %p", msg);
-	} else {
-		if ((msg = calloc(1, sizeof(struct message))) == NULL)
-			return NULL;
-		pw_log_trace("new message %p", msg);
-		msg->stat = &impl->stat;
-		msg->stat->n_allocated++;
-		msg->stat->n_accumulated++;
-	}
-	if (ensure_size(msg, size) < 0) {
-		message_free(impl, msg, false, true);
-		return NULL;
-	}
-	spa_zero(msg->extra);
-	msg->channel = channel;
-	msg->offset = 0;
-	msg->length = size;
-	return msg;
-}
-
-static int flush_messages(struct client *client)
-{
-	struct impl *impl = client->impl;
-	int res;
-
-	while (true) {
-		struct message *m;
-		struct descriptor desc;
-		void *data;
-		size_t size;
-
-		if (spa_list_is_empty(&client->out_messages))
-			break;
-		m = spa_list_first(&client->out_messages, struct message, link);
-
-		if (client->out_index < sizeof(desc)) {
-			desc.length = htonl(m->length);
-			desc.channel = htonl(m->channel);
-			desc.offset_hi = 0;
-			desc.offset_lo = 0;
-			desc.flags = 0;
-
-			data = SPA_PTROFF(&desc, client->out_index, void);
-			size = sizeof(desc) - client->out_index;
-		} else if (client->out_index < m->length + sizeof(desc)) {
-			uint32_t idx = client->out_index - sizeof(desc);
-			data = m->data + idx;
-			size = m->length - idx;
-		} else {
-			if (debug_messages && m->channel == SPA_ID_INVALID)
-				message_dump(SPA_LOG_LEVEL_INFO, m);
-			message_free(impl, m, true, false);
-			client->out_index = 0;
-			continue;
-		}
-
-		while (true) {
-			res = send(client->source->fd, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
-			if (res < 0) {
-				res = -errno;
-				if (res == -EINTR)
-					continue;
-				if (res != -EAGAIN && res != -EWOULDBLOCK)
-					pw_log_warn("send channel:%d %zu, error %d: %m", m->channel, size, res);
-				return res;
-			}
-			client->out_index += res;
-			break;
-		}
-	}
-	return 0;
-}
-
-static int send_message(struct client *client, struct message *m)
-{
-	struct impl *impl = client->impl;
-	int res, mask;
-
-	if (m == NULL)
-		return -EINVAL;
-
-	if (m->length == 0) {
-		res = 0;
-		goto error;
-	} else if (m->length > m->allocated) {
-		res = -ENOMEM;
-		goto error;
-	}
-
-	m->offset = 0;
-	spa_list_append(&client->out_messages, &m->link);
-
-	mask = client->source->mask;
-	if (!SPA_FLAG_IS_SET(mask, SPA_IO_OUT)) {
-		client->need_flush = true;
-		SPA_FLAG_SET(mask, SPA_IO_OUT);
-		pw_loop_update_io(impl->loop, client->source, mask);
-	}
-	return 0;
-error:
-	message_free(impl, m, false, false);
-	return res;
-}
-
-static struct message *reply_new(struct client *client, uint32_t tag)
-{
-	struct impl *impl = client->impl;
-	struct message *reply;
-	reply = message_alloc(impl, -1, 0);
-	pw_log_debug(NAME" %p: REPLY tag:%u", client, tag);
-	message_put(reply,
-		TAG_U32, COMMAND_REPLY,
-		TAG_U32, tag,
-		TAG_INVALID);
-	return reply;
-}
-
-static int reply_simple_ack(struct client *client, uint32_t tag)
-{
-	struct message *reply = reply_new(client, tag);
-	return send_message(client, reply);
-}
-
-static int reply_error(struct client *client, uint32_t command, uint32_t tag, int res)
-{
-	struct impl *impl = client->impl;
-	struct message *reply;
-	uint32_t error = res_to_err(res);
-	const char *name;
-
-	if (command < COMMAND_MAX)
-		name = commands[command].name;
-	else
-		name = "invalid";
-
-	pw_log(res == -ENOENT ? SPA_LOG_LEVEL_INFO : SPA_LOG_LEVEL_WARN,
-			NAME" %p: [%s] ERROR command:%d (%s) tag:%u error:%u (%s)",
-			client, client->name, command, name, tag, error, spa_strerror(res));
-
-	reply = message_alloc(impl, -1, 0);
-	message_put(reply,
-		TAG_U32, COMMAND_ERROR,
-		TAG_U32, tag,
-		TAG_U32, error,
-		TAG_INVALID);
-	return send_message(client, reply);
-}
-
-static int operation_new(struct client *client, uint32_t tag)
-{
-	struct operation *o;
-
-	if ((o = calloc(1, sizeof(*o))) == NULL)
-		return -errno;
-
-	o->client = client;
-	o->tag = tag;
-	spa_list_append(&client->operations, &o->link);
-	pw_manager_sync(client->manager);
-	pw_log_debug(NAME" %p: operation tag:%u", client, tag);
-	return 0;
-}
-
-static void operation_free(struct operation *o)
-{
-	spa_list_remove(&o->link);
-	free(o);
-}
-
-static void operation_complete(struct operation *o)
-{
-	struct client *client = o->client;
-
-	pw_log_info(NAME" %p: [%s] tag:%u complete", client, client->name, o->tag);
-	reply_simple_ack(o->client, o->tag);
-	operation_free(o);
-}
-
-#include "extension.c"
-
-static int send_underflow(struct stream *stream, int64_t offset, uint32_t underrun_for)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-	struct message *reply;
-
-	if (ratelimit_test(&impl->rate_limit, stream->timestamp)) {
-		pw_log_warn(NAME" %p: [%s] UNDERFLOW channel:%u offset:%"PRIi64" underrun:%u",
-				client, client->name, stream->channel, offset, underrun_for);
-	}
-
-	reply = message_alloc(impl, -1, 0);
-	message_put(reply,
-		TAG_U32, COMMAND_UNDERFLOW,
-		TAG_U32, -1,
-		TAG_U32, stream->channel,
-		TAG_INVALID);
-	if (client->version >= 23) {
-		message_put(reply,
-			TAG_S64, offset,
-			TAG_INVALID);
-	}
-	return send_message(client, reply);
-}
-
-static int send_subscribe_event(struct client *client, uint32_t mask, uint32_t event, uint32_t id)
-{
-	struct impl *impl = client->impl;
-	struct message *reply, *m, *t;
-
-	if (!(client->subscribed & mask))
-		return 0;
-
-	pw_log_debug(NAME" %p: SUBSCRIBE event:%08x id:%u", client, event, id);
-
-	if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) != SUBSCRIPTION_EVENT_NEW) {
-		spa_list_for_each_safe_reverse(m, t, &client->out_messages, link) {
-			if (m->extra[0] != COMMAND_SUBSCRIBE_EVENT)
-				continue;
-			if ((m->extra[1] ^ event) & SUBSCRIPTION_EVENT_FACILITY_MASK)
-				continue;
-			if (m->extra[2] != id)
-				continue;
-
-			if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_REMOVE) {
-		                /* This object is being removed, hence there is no
-		                 * point in keeping the old events regarding this
-		                 * entry in the queue. */
-				message_free(impl, m, true, false);
-				pw_log_debug("Dropped redundant event due to remove event.");
-				continue;
-			}
-			if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_CHANGE) {
-				/* This object has changed. If a "new" or "change" event for
-				 * this object is still in the queue we can exit. */
-				pw_log_debug("Dropped redundant event due to change event.");
-				return 0;
-			}
-		}
-	}
-
-	reply = message_alloc(impl, -1, 0);
-	reply->extra[0] = COMMAND_SUBSCRIBE_EVENT,
-	reply->extra[1] = event,
-	reply->extra[2] = id,
-	message_put(reply,
-		TAG_U32, COMMAND_SUBSCRIBE_EVENT,
-		TAG_U32, -1,
-		TAG_U32, event,
-		TAG_U32, id,
-		TAG_INVALID);
-	return send_message(client, reply);
-}
-
-static void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id)
+void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id)
 {
 	struct server *s;
 	spa_list_for_each(s, &impl->servers, link) {
 		struct client *c;
 		spa_list_for_each(c, &s->clients, link)
-			send_subscribe_event(c, mask, event, id);
+			client_queue_subscribe_event(c, mask, event, id);
 	}
-}
-
-static int send_overflow(struct stream *stream)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-	struct message *reply;
-
-	pw_log_warn(NAME" %p: [%s] OVERFLOW channel:%u", client,
-			client->name, stream->channel);
-
-	reply = message_alloc(impl, -1, 0);
-	message_put(reply,
-		TAG_U32, COMMAND_OVERFLOW,
-		TAG_U32, -1,
-		TAG_U32, stream->channel,
-		TAG_INVALID);
-	return send_message(client, reply);
-}
-
-static int send_stream_killed(struct stream *stream)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-	struct message *reply;
-	uint32_t command;
-
-	command = stream->direction == PW_DIRECTION_OUTPUT ?
-		COMMAND_PLAYBACK_STREAM_KILLED :
-		COMMAND_RECORD_STREAM_KILLED;
-
-	pw_log_info(NAME" %p: [%s] %s channel:%u", client, client->name,
-			commands[command].name, stream->channel);
-
-	if (client->version < 23)
-		return 0;
-
-	reply = message_alloc(impl, -1, 0);
-	message_put(reply,
-		TAG_U32, command,
-		TAG_U32, -1,
-		TAG_U32, stream->channel,
-		TAG_INVALID);
-	return send_message(client, reply);
-}
-
-static int send_stream_started(struct stream *stream)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-	struct message *reply;
-
-	pw_log_debug(NAME" %p: STARTED channel:%u", client, stream->channel);
-
-	reply = message_alloc(impl, -1, 0);
-	message_put(reply,
-		TAG_U32, COMMAND_STARTED,
-		TAG_U32, -1,
-		TAG_U32, stream->channel,
-		TAG_INVALID);
-	return send_message(client, reply);
 }
 
 static int do_command_auth(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -540,7 +155,7 @@ static int do_command_auth(struct client *client, uint32_t command, uint32_t tag
 			TAG_U32, PROTOCOL_VERSION,
 			TAG_INVALID);
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int reply_set_client_name(struct client *client, uint32_t tag)
@@ -564,7 +179,7 @@ static int reply_set_client_name(struct client *client, uint32_t tag)
 			TAG_U32, id,		/* client index */
 			TAG_INVALID);
 	}
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static void manager_sync(void *data)
@@ -600,7 +215,7 @@ static int send_object_event(struct client *client, struct pw_manager_object *o,
 	uint32_t event = 0, mask = 0, res_id = o->id;
 
 	if (pw_manager_object_is_sink(o)) {
-		send_subscribe_event(client,
+		client_queue_subscribe_event(client,
 				SUBSCRIPTION_MASK_SINK,
 				SUBSCRIPTION_EVENT_SINK | facility,
 				res_id);
@@ -634,7 +249,7 @@ static int send_object_event(struct client *client, struct pw_manager_object *o,
 		event = SPA_ID_INVALID;
 
 	if (event != SPA_ID_INVALID)
-		send_subscribe_event(client,
+		client_queue_subscribe_event(client,
 				mask,
 				event | facility,
 				res_id);
@@ -693,7 +308,7 @@ static void send_latency_offset_subscribe_event(struct client *client, struct pw
 	d->initialized = true;
 
 	if (changed)
-		send_subscribe_event(client,
+		client_queue_subscribe_event(client,
 				SUBSCRIPTION_MASK_CARD,
 				SUBSCRIPTION_EVENT_CARD | SUBSCRIPTION_EVENT_CHANGE,
 				card_id);
@@ -721,7 +336,7 @@ static void send_default_change_subscribe_event(struct client *client, bool sink
 	}
 
 	if (changed)
-		send_subscribe_event(client,
+		client_queue_subscribe_event(client,
 				SUBSCRIPTION_MASK_SERVER,
 				SUBSCRIPTION_EVENT_CHANGE |
 				SUBSCRIPTION_EVENT_SERVER,
@@ -940,90 +555,6 @@ static int do_subscribe(struct client *client, uint32_t command, uint32_t tag, s
 	return reply_simple_ack(client, tag);
 }
 
-static void stream_free(struct stream *stream)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-
-	pw_log_debug(NAME" %p: stream %p channel:%d", impl, stream, stream->channel);
-
-	if (stream->drain_tag)
-		reply_error(client, -1, stream->drain_tag, -ENOENT);
-
-	if (stream->killed)
-		send_stream_killed(stream);
-
-	/* force processing of all pending messages before we destroy
-	 * the stream */
-	pw_loop_invoke(impl->loop, NULL, 0, NULL, 0, false, client);
-
-	if (stream->channel != SPA_ID_INVALID)
-		pw_map_remove(&client->streams, stream->channel);
-	if (stream->stream) {
-		spa_hook_remove(&stream->stream_listener);
-		pw_stream_destroy(stream->stream);
-	}
-	pw_work_queue_cancel(impl->work_queue, stream, SPA_ID_INVALID);
-
-	if (stream->buffer)
-		free(stream->buffer);
-	pw_properties_free(stream->props);
-	free(stream);
-}
-
-static bool stream_prebuf_active(struct stream *stream)
-{
-	uint32_t index;
-	int32_t avail;
-
-	avail = spa_ringbuffer_get_write_index(&stream->ring, &index);
-	if (stream->in_prebuf)
-		return avail < (int32_t) stream->attr.prebuf;
-	else
-		return stream->attr.prebuf > 0 && avail >= 0;
-}
-
-static uint32_t stream_pop_missing(struct stream *stream)
-{
-	uint32_t missing;
-
-	if (stream->missing <= 0)
-		return 0;
-
-	if (stream->missing < stream->attr.minreq &&
-	    !stream_prebuf_active(stream))
-		return 0;
-
-	missing = stream->missing;
-	stream->requested += missing;
-	stream->missing = 0;
-	return missing;
-}
-
-static int send_command_request(struct stream *stream)
-{
-	struct client *client = stream->client;
-	struct impl *impl = client->impl;
-	struct message *msg;
-	uint32_t size;
-
-	size = stream_pop_missing(stream);
-	pw_log_debug(NAME" %p: REQUEST channel:%d %u", stream, stream->channel, size);
-
-	if (size == 0)
-		return 0;
-
-	msg = message_alloc(impl, -1, 0);
-	message_put(msg,
-		TAG_U32, COMMAND_REQUEST,
-		TAG_U32, -1,
-		TAG_U32, stream->channel,
-		TAG_U32, size,
-		TAG_INVALID);
-
-	return send_message(client, msg);
-}
-
 static uint32_t frac_to_bytes_round_up(struct spa_fraction val, const struct sample_spec *ss)
 {
 	uint64_t u;
@@ -1201,7 +732,7 @@ static int reply_create_playback_stream(struct stream *stream)
 
 	stream->create_tag = SPA_ID_INVALID;
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static void fix_record_buffer_attr(struct stream *s, struct buffer_attr *attr)
@@ -1342,7 +873,7 @@ static int reply_create_record_stream(struct stream *stream)
 
 	stream->create_tag = SPA_ID_INVALID;
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static void stream_control_info(void *data, uint32_t id,
@@ -1498,8 +1029,8 @@ static void stream_io_changed(void *data, uint32_t id, void *area, uint32_t size
 
 struct process_data {
 	struct pw_time pwt;
-	uint32_t read_index;
-	uint32_t write_index;
+	uint32_t read_inc;
+	uint32_t write_inc;
 	uint32_t underrun_for;
 	uint32_t playing_for;
 	uint32_t missing;
@@ -1524,7 +1055,7 @@ do_process_done(struct spa_loop *loop,
 		stream->delay = 0;
 
 	if (stream->direction == PW_DIRECTION_OUTPUT) {
-		stream->read_index = pd->read_index;
+		stream->read_index += pd->read_inc;
 		if (stream->corked) {
 			if (stream->underrun_for != (uint64_t)-1)
 				stream->underrun_for += pd->underrun_for;
@@ -1536,9 +1067,9 @@ do_process_done(struct spa_loop *loop,
 			stream->underrun_for = 0;
 			stream->playing_for = 0;
 			if (pd->underrun)
-				send_underflow(stream, pd->read_index, pd->underrun_for);
+				stream_send_underflow(stream, stream->read_index, pd->underrun_for);
 			else
-				send_stream_started(stream);
+				stream_send_started(stream);
 		}
 		stream->missing += pd->missing;
 		stream->missing = SPA_MIN(stream->missing, stream->attr.tlength);
@@ -1546,10 +1077,10 @@ do_process_done(struct spa_loop *loop,
 		if (stream->underrun_for != (uint64_t)-1)
 			stream->underrun_for += pd->underrun_for;
 
-		send_command_request(stream);
+		stream_send_request(stream);
 	} else {
 		struct message *msg;
-		stream->write_index = pd->write_index;
+		stream->write_index += pd->write_inc;
 
 		avail = spa_ringbuffer_get_read_index(&stream->ring, &index);
 
@@ -1566,11 +1097,13 @@ do_process_done(struct spa_loop *loop,
 					stream, client->name, index, avail);
 		} else {
 			if (avail > (int32_t)stream->attr.maxlength) {
+				uint32_t skip = avail - stream->attr.fragsize;
 				/* overrun, catch up to latest fragment and send it */
-				pw_log_warn(NAME" %p: [%s] overrun recover read:%u avail:%d max:%u",
-					stream, client->name, index, avail, stream->attr.maxlength);
+				pw_log_warn(NAME" %p: [%s] overrun recover read:%u avail:%d max:%u skip:%u",
+					stream, client->name, index, avail, stream->attr.maxlength, skip);
+				index += skip;
+				stream->read_index += skip;
 				avail = stream->attr.fragsize;
-				index = stream->write_index - avail;
 			}
 
 			while (avail > 0) {
@@ -1587,13 +1120,13 @@ do_process_done(struct spa_loop *loop,
 						index % stream->attr.maxlength,
 						msg->data, towrite);
 
-				send_message(client, msg);
+				client_queue_message(client, msg);
 
 				index += towrite;
 				avail -= towrite;
+				stream->read_index += towrite;
 			}
-			stream->read_index = index;
-			spa_ringbuffer_read_update(&stream->ring, stream->read_index);
+			spa_ringbuffer_read_update(&stream->ring, index);
 		}
 	}
 	return 0;
@@ -1608,7 +1141,7 @@ static void stream_process(void *data)
 	void *p;
 	struct pw_buffer *buffer;
 	struct spa_buffer *buf;
-	uint32_t size, minreq;
+	uint32_t size, minreq, index;
 	struct process_data pd;
 
 	pw_log_trace_fp(NAME" %p: process", stream);
@@ -1624,7 +1157,7 @@ static void stream_process(void *data)
 	spa_zero(pd);
 
 	if (stream->direction == PW_DIRECTION_OUTPUT) {
-		int32_t avail = spa_ringbuffer_get_read_index(&stream->ring, &pd.read_index);
+		int32_t avail = spa_ringbuffer_get_read_index(&stream->ring, &index);
 
 		if (stream->rate_match)
 			minreq = stream->rate_match->size * stream->frame_size;
@@ -1646,17 +1179,20 @@ static void stream_process(void *data)
 			if (stream->attr.prebuf == 0 && !stream->corked) {
 				pd.missing = size;
 				pd.playing_for = size;
-				pd.read_index += size;
-				spa_ringbuffer_read_update(&stream->ring, pd.read_index);
+				index += size;
+				pd.read_inc = size;
+				spa_ringbuffer_read_update(&stream->ring, index);
 			}
 		} else {
 			if (avail > (int32_t)stream->attr.maxlength) {
+				uint32_t skip = avail - stream->attr.maxlength;
 				/* overrun, reported by other side, here we skip
 				 * ahead to the oldest data. */
-				pw_log_debug(NAME" %p: [%s] overrun read:%u avail:%d max:%u",
-						stream, client->name, pd.read_index, avail,
-						stream->attr.maxlength);
-				pd.read_index += avail - stream->attr.maxlength;
+				pw_log_debug(NAME" %p: [%s] overrun read:%u avail:%d max:%u skip:%u",
+						stream, client->name, index, avail,
+						stream->attr.maxlength, skip);
+				index += skip;
+				pd.read_inc = skip;
 				avail = stream->attr.maxlength;
 			}
 			size = SPA_MIN(buf->datas[0].maxsize, (uint32_t)avail);
@@ -1664,11 +1200,12 @@ static void stream_process(void *data)
 
 			spa_ringbuffer_read_data(&stream->ring,
 					stream->buffer, stream->attr.maxlength,
-					pd.read_index % stream->attr.maxlength,
+					index % stream->attr.maxlength,
 					p, size);
 
-			pd.read_index += size;
-			spa_ringbuffer_read_update(&stream->ring, pd.read_index);
+			index += size;
+			pd.read_inc += size;
+			spa_ringbuffer_read_update(&stream->ring, index);
 
 			pd.playing_for = size;
 			pd.missing = size;
@@ -1679,30 +1216,31 @@ static void stream_process(void *data)
 	        buf->datas[0].chunk->size = size;
 	        buffer->size = size / stream->frame_size;
 	} else  {
-		int32_t filled = spa_ringbuffer_get_write_index(&stream->ring, &pd.write_index);
+		int32_t filled = spa_ringbuffer_get_write_index(&stream->ring, &index);
 		size = buf->datas[0].chunk->size;
 		if (filled < 0) {
 			/* underrun, can't really happen because we never read more
 			 * than what's available on the other side  */
 			pw_log_warn(NAME" %p: [%s] underrun write:%u filled:%d",
-					stream, client->name, pd.write_index, filled);
+					stream, client->name, index, filled);
 		} else if ((uint32_t)filled + size > stream->attr.maxlength) {
 			/* overrun, can happen when the other side is not
 			 * reading fast enough. We still write our data into the
 			 * ringbuffer and expect the other side to warn and catch up. */
 			pw_log_debug(NAME" %p: [%s] overrun write:%u filled:%d size:%u max:%u",
-					stream, client->name, pd.write_index, filled,
+					stream, client->name, index, filled,
 					size, stream->attr.maxlength);
 		}
 
 		spa_ringbuffer_write_data(&stream->ring,
 				stream->buffer, stream->attr.maxlength,
-				pd.write_index % stream->attr.maxlength,
+				index % stream->attr.maxlength,
 				SPA_PTROFF(p, buf->datas[0].chunk->offset, void),
 				SPA_MIN(size, stream->attr.maxlength));
 
-		pd.write_index += size;
-		spa_ringbuffer_write_update(&stream->ring, pd.write_index);
+		index += size;
+		pd.write_inc = size;
+		spa_ringbuffer_write_update(&stream->ring, index);
 	}
 	pw_stream_queue_buffer(stream->stream, buffer);
 
@@ -2188,7 +1726,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		pw_properties_setf(props,
 				PW_KEY_NODE_TARGET, "%u", source_index);
 	} else if (source_name != NULL) {
-		if (pw_endswith(source_name, ".monitor")) {
+		if (spa_strendswith(source_name, ".monitor")) {
 			pw_properties_setf(props,
 					PW_KEY_NODE_TARGET,
 					"%.*s", (int)strlen(source_name)-8, source_name);
@@ -2290,7 +1828,7 @@ static int do_get_playback_latency(struct client *client, uint32_t command, uint
 	if (stream == NULL || stream->type != STREAM_TYPE_PLAYBACK)
 		return -ENOENT;
 
-	pw_log_debug("read:%"PRIi64" write:%"PRIi64" queued:%"PRIi64" delay:%"PRIi64
+	pw_log_debug("read:%"PRIx64" write:%"PRIx64" queued:%"PRIi64" delay:%"PRIi64
 			" playing:%"PRIu64,
 			stream->read_index, stream->write_index,
 			stream->write_index - stream->read_index, stream->delay,
@@ -2316,7 +1854,7 @@ static int do_get_playback_latency(struct client *client, uint32_t command, uint
 			TAG_U64, stream->playing_for,
 			TAG_INVALID);
 	}
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_get_record_latency(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -2351,7 +1889,7 @@ static int do_get_record_latency(struct client *client, uint32_t command, uint32
 		TAG_S64, stream->read_index,
 		TAG_INVALID);
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_create_upload_stream(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -2434,7 +1972,7 @@ static int do_create_upload_stream(struct client *client, uint32_t command, uint
 		TAG_U32, stream->channel,
 		TAG_U32, length,
 		TAG_INVALID);
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 
 error_errno:
 	res = -errno;
@@ -2587,7 +2125,7 @@ static struct pw_manager_object *find_device(struct client *client,
 		id = SPA_ID_INVALID;
 
 	if (name != NULL && !sink) {
-		if (pw_endswith(name, ".monitor")) {
+		if (spa_strendswith(name, ".monitor")) {
 			name = strndupa(name, strlen(name)-8);
 			monitor = true;
 		} else if (spa_streq(name, DEFAULT_MONITOR)) {
@@ -2626,26 +2164,6 @@ static struct pw_manager_object *find_device(struct client *client,
 	return select_object(client->manager, &sel);
 }
 
-struct pending_sample {
-	struct spa_list link;
-	struct client *client;
-	struct sample_play *play;
-	struct spa_hook listener;
-	uint32_t tag;
-	unsigned int done:1;
-};
-
-static void pending_sample_free(struct pending_sample *ps)
-{
-	struct client *client = ps->client;
-	struct impl *impl = client->impl;
-	spa_list_remove(&ps->link);
-	spa_hook_remove(&ps->listener);
-	pw_work_queue_cancel(impl->work_queue, ps, SPA_ID_INVALID);
-	ps->client->ref--;
-	sample_play_destroy(ps->play);
-}
-
 static void sample_play_ready(void *data, uint32_t index)
 {
 	struct pending_sample *ps = data;
@@ -2662,7 +2180,7 @@ static void sample_play_ready(void *data, uint32_t index)
 			TAG_U32, index,
 			TAG_INVALID);
 
-	send_message(client, reply);
+	client_queue_message(client, reply);
 }
 
 static void on_sample_done(void *obj, void *data, int res, uint32_t id)
@@ -2840,31 +2358,6 @@ static int do_cork_stream(struct client *client, uint32_t command, uint32_t tag,
 	}
 
 	return reply_simple_ack(client, tag);
-}
-
-static void stream_flush(struct stream *stream)
-{
-	pw_stream_flush(stream->stream, false);
-
-	if (stream->type == STREAM_TYPE_PLAYBACK) {
-		stream->write_index = stream->read_index =
-			stream->ring.writeindex = stream->ring.readindex;
-
-		stream->missing = stream->attr.tlength -
-			SPA_MIN(stream->requested, stream->attr.tlength);
-
-		if (stream->attr.prebuf > 0)
-			stream->in_prebuf = true;
-
-		stream->playing_for = 0;
-		stream->underrun_for = -1;
-		stream->is_underrun = true;
-
-		send_command_request(stream);
-	} else {
-		stream->read_index = stream->write_index =
-			stream->ring.readindex = stream->ring.writeindex;
-	}
 }
 
 static int do_flush_trigger_prebuf_stream(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3560,7 +3053,7 @@ static int do_get_server_info(struct client *client, uint32_t command, uint32_t 
 			TAG_CHANNEL_MAP, &impl->defs.channel_map,
 			TAG_INVALID);
 	}
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_stat(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3579,7 +3072,7 @@ static int do_stat(struct client *client, uint32_t command, uint32_t tag, struct
 		TAG_U32, impl->stat.sample_cache,	/* sample cache size */
 		TAG_INVALID);
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_lookup(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3606,7 +3099,7 @@ static int do_lookup(struct client *client, uint32_t command, uint32_t tag, stru
 		TAG_U32, is_monitor ? o->id | MONITOR_FLAG : o->id,
 		TAG_INVALID);
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_drain_stream(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -3974,11 +3467,19 @@ static int fill_sink_info(struct client *client, struct message *m,
 			TAG_INVALID);
 	}
 	if (client->version >= 15) {
+		bool is_linked = collect_is_linked(manager, o->id, SPA_DIRECTION_INPUT);
+		int state = node_state(info->state);
+
+		/* running with nothing linked is probably the monitor that is
+		 * keeping this sink busy */
+		if (state == STATE_RUNNING && !is_linked)
+			state = STATE_IDLE;
+
 		message_put(m,
 			TAG_VOLUME, dev_info.volume_info.base,	/* base volume */
-			TAG_U32, node_state(info->state),	/* state */
+			TAG_U32, state,				/* state */
 			TAG_U32, dev_info.volume_info.steps,	/* n_volume_steps */
-			TAG_U32, card_id,		/* card index */
+			TAG_U32, card_id,			/* card index */
 			TAG_INVALID);
 	}
 	if (client->version >= 16) {
@@ -4118,9 +3619,17 @@ static int fill_source_info(struct client *client, struct message *m,
 			TAG_INVALID);
 	}
 	if (client->version >= 15) {
+		bool is_linked = collect_is_linked(manager, o->id, SPA_DIRECTION_OUTPUT);
+		int state = node_state(info->state);
+
+		/* running with nothing linked is probably the sink that is
+		 * keeping this source busy */
+		if (state == STATE_RUNNING && !is_linked)
+			state = STATE_IDLE;
+
 		message_put(m,
 			TAG_VOLUME, dev_info.volume_info.base,	/* base volume */
-			TAG_U32, node_state(info->state),	/* state */
+			TAG_U32, state,				/* state */
 			TAG_U32, dev_info.volume_info.steps,	/* n_volume_steps */
 			TAG_U32, card_id,			/* card index */
 			TAG_INVALID);
@@ -4347,7 +3856,7 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 		if (module == NULL)
 			goto error_noentity;
 		fill_ext_module_info(client, reply, module);
-		return send_message(client, reply);
+		return client_queue_message(client, reply);
 	}
 
 	switch (command) {
@@ -4410,7 +3919,7 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 	}
 
 	if (command == COMMAND_GET_SOURCE_INFO &&
-	    sel.value != NULL && pw_endswith(sel.value, ".monitor")) {
+	    sel.value != NULL && spa_strendswith(sel.value, ".monitor")) {
 		sel.value = strndupa(sel.value, strlen(sel.value)-8);
 	}
 
@@ -4421,7 +3930,7 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 	if ((res = fill_func(client, reply, o)) < 0)
 		goto error;
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 
 error_protocol:
 	res = -EPROTO;
@@ -4506,7 +4015,7 @@ static int do_get_sample_info(struct client *client, uint32_t command, uint32_t 
 	if ((res = fill_sample_info(client, reply, sample)) < 0)
 		goto error;
 
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 
 error:
 	if (reply)
@@ -4530,7 +4039,7 @@ static int do_get_sample_info_list(struct client *client, uint32_t command, uint
 			continue;
 		fill_sample_info(client, reply, s);
 	}
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 struct info_list_data {
@@ -4599,7 +4108,7 @@ static int do_get_info_list(struct client *client, uint32_t command, uint32_t ta
 	if (command == COMMAND_GET_MODULE_INFO_LIST)
 		pw_map_for_each(&impl->modules, do_info_list_module, &info);
 
-	return send_message(client, info.reply);
+	return client_queue_message(client, info.reply);
 }
 
 static int do_set_stream_buffer_attr(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4682,7 +4191,7 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 				TAG_INVALID);
 		}
 	}
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_update_stream_sample_rate(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4723,7 +4232,7 @@ static int do_extension(struct client *client, uint32_t command, uint32_t tag, s
 	struct impl *impl = client->impl;
 	uint32_t idx;
 	const char *name;
-	struct extension *ext;
+	const struct extension *ext;
 
 	if (message_get(m,
 			TAG_U32, &idx,
@@ -4738,7 +4247,7 @@ static int do_extension(struct client *client, uint32_t command, uint32_t tag, s
 	    (idx != SPA_ID_INVALID && name != NULL))
 		return -EINVAL;
 
-	ext = find_extension(idx, name);
+	ext = extension_find(idx, name);
 	if (ext == NULL)
 		return -ENOENT;
 
@@ -4821,7 +4330,7 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 	if (name != NULL) {
 		if (o->props && (str = pw_properties_get(o->props, PW_KEY_NODE_NAME)) != NULL)
 			name = str;
-		else if (pw_endswith(name, ".monitor"))
+		else if (spa_strendswith(name, ".monitor"))
 			name = strndupa(name, strlen(name)-8);
 
 		res = pw_manager_set_metadata(manager, client->metadata_default,
@@ -4975,70 +4484,68 @@ static int do_kill(struct client *client, uint32_t command, uint32_t tag, struct
 }
 
 struct load_module_data {
-	struct spa_list link;
 	struct client *client;
 	struct module *module;
 	struct spa_hook listener;
 	uint32_t tag;
 };
 
-static struct load_module_data *load_module_data_new(struct client *client, uint32_t tag)
-{
-	struct load_module_data *data = calloc(1, sizeof(struct load_module_data));
-	data->client = client;
-	data->tag = tag;
-	return data;
-}
-
-static void load_module_data_free(struct load_module_data *d)
-{
-	spa_hook_remove(&d->listener);
-	free(d);
-}
-
-static void on_module_loaded(void *data, int error)
+static void on_module_loaded(void *data, int result)
 {
 	struct load_module_data *d = data;
 	struct module *module = d->module;
+	struct client *client = d->client;
 	struct impl *impl = module->impl;
-	struct message *reply;
-	struct client *client;
-	uint32_t tag;
+	uint32_t tag = d->tag;
 
-	client = d->client;
-	tag = d->tag;
-	load_module_data_free(d);
+	spa_hook_remove(&d->listener);
+	free(d);
 
-	if (error < 0) {
-		pw_log_warn(NAME" %p: [%s] error loading module", client->impl, client->name);
-		reply_error(client, COMMAND_LOAD_MODULE, tag, error);
-		return;
-	}
+	if (SPA_RESULT_IS_OK(result)) {
+		struct message *reply;
 
-	pw_log_info(NAME" %p: [%s] module %d loaded", client->impl, client->name, module->idx);
+		pw_log_info(NAME" %p: [%s] loaded module id:%u name:%s",
+			    impl, client->name,
+			    module->idx, module->name);
 
-	broadcast_subscribe_event(impl,
+		module->loaded = true;
+
+		broadcast_subscribe_event(impl,
 			SUBSCRIPTION_MASK_MODULE,
 			SUBSCRIPTION_EVENT_NEW | SUBSCRIPTION_EVENT_MODULE,
 			module->idx);
 
-	reply = reply_new(client, tag);
-	message_put(reply,
-		TAG_U32, module->idx,
-		TAG_INVALID);
-	send_message(client, reply);
+		reply = reply_new(client, tag);
+		message_put(reply,
+			TAG_U32, module->idx,
+			TAG_INVALID);
+		client_queue_message(client, reply);
+	}
+	else {
+		pw_log_warn(NAME" %p: [%s] failed to load module id:%u name:%s result:%d (%s)",
+			    impl, client->name,
+			    module->idx, module->name,
+			    result, spa_strerror(result));
+
+		reply_error(client, COMMAND_LOAD_MODULE, tag, result);
+		module_schedule_unload(module);
+	}
+
+	client_unref(client);
 }
 
 static int do_load_module(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
-	struct module *module;
-	struct impl *impl = client->impl;
-	struct load_module_data *d;
-	const char *name, *argument;
-	static struct module_events listener = {
+	static const struct module_events listener = {
 		VERSION_MODULE_EVENTS,
 		.loaded = on_module_loaded,
 	};
+
+	struct impl *impl = client->impl;
+	const char *name, *argument;
+	struct load_module_data *d;
+	struct module *module;
+	int r;
 
 	if (message_get(m,
 			TAG_STRING, &name,
@@ -5049,15 +4556,31 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 	pw_log_info(NAME" %p: [%s] %s name:%s argument:%s", impl,
 			client->name, commands[command].name, name, argument);
 
-	module = create_module(client, name, argument);
+	module = module_create(client, name, argument);
 	if (module == NULL)
 		return -errno;
 
-	d = load_module_data_new(client, tag);
+	d = calloc(1, sizeof(*d));
+	if (d == NULL)
+		return -errno;
+
+	d->tag = tag;
+	d->client = client;
 	d->module = module;
 	module_add_listener(module, &d->listener, &listener, d);
 
-	return module_load(client, module);
+	client->ref += 1;
+
+	r = module_load(client, module);
+	if (!SPA_RESULT_IS_ASYNC(r))
+		module_emit_loaded(module, r);
+	/* in the async case the module itself must emit the "loaded" event */
+
+	/*
+	 * return 0 to prevent `handle_packet()` from sending a reply
+	 * because we want `on_module_loaded()` to send the reply
+	 */
+	return 0;
 }
 
 static int do_unload_module(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5144,7 +4667,7 @@ static int do_send_object_message(struct client *client, uint32_t command, uint3
 	reply = reply_new(client, tag);
 	message_put(reply, TAG_STRING, response, TAG_INVALID);
 	free(response);
-	return send_message(client, reply);
+	return client_queue_message(client, reply);
 }
 
 static int do_error_access(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5157,7 +4680,7 @@ static SPA_UNUSED int do_error_not_implemented(struct client *client, uint32_t c
 	return -ENOSYS;
 }
 
-static const struct command commands[COMMAND_MAX] =
+const struct command commands[COMMAND_MAX] =
 {
 	[COMMAND_ERROR] = { "ERROR", },
 	[COMMAND_TIMEOUT] = { "TIMEOUT", }, /* pseudo command */
@@ -5319,1166 +4842,6 @@ static const struct command commands[COMMAND_MAX] =
 	/* Supported since protocol v35 (15.0) */
 	[COMMAND_SEND_OBJECT_MESSAGE] = { "SEND_OBJECT_MESSAGE", do_send_object_message, },
 };
-
-static int client_free_stream(void *item, void *data)
-{
-	struct stream *s = item;
-	stream_free(s);
-	return 0;
-}
-
-/*
- * tries to detach the client from the server,
- * but it does not drop the server's reference
- */
-static bool client_detach(struct client *client)
-{
-	if (client->server == NULL)
-		return false;
-
-	pw_log_info(NAME" %p: client %p detaching", client->server, client);
-
-	/* remove from the `server->clients` list */
-	spa_list_remove(&client->link);
-	client->server = NULL;
-
-	return true;
-}
-
-static void client_disconnect(struct client *client)
-{
-	struct impl *impl = client->impl;
-
-	if (client->disconnect)
-		return;
-
-	/* the client must be detached from the server to disconnect */
-	spa_assert(client->server == NULL);
-
-	client->disconnect = true;
-	spa_list_append(&impl->cleanup_clients, &client->link);
-
-	pw_map_for_each(&client->streams, client_free_stream, client);
-
-	if (client->source)
-		pw_loop_destroy_source(impl->loop, client->source);
-	if (client->manager)
-		pw_manager_destroy(client->manager);
-
-}
-
-static void client_free(struct client *client)
-{
-	struct impl *impl = client->impl;
-	struct message *msg;
-	struct pending_sample *p;
-	struct operation *o;
-
-	pw_log_info(NAME" %p: client %p free", impl, client);
-
-	client_detach(client);
-	client_disconnect(client);
-
-	/* remove from the `impl->cleanup_clients` list */
-	spa_list_remove(&client->link);
-
-	spa_list_consume(p, &client->pending_samples, link)
-		pending_sample_free(p);
-
-	spa_list_consume(msg, &client->out_messages, link)
-		message_free(impl, msg, true, false);
-
-	spa_list_consume(o, &client->operations, link)
-		operation_free(o);
-
-	if (client->core) {
-		client->disconnecting = true;
-		pw_core_disconnect(client->core);
-	}
-	pw_map_clear(&client->streams);
-	free(client->default_sink);
-	free(client->default_source);
-	if (client->props)
-		pw_properties_free(client->props);
-	if (client->routes)
-		pw_properties_free(client->routes);
-	free(client);
-}
-
-static void client_unref(struct client *client)
-{
-	if (--client->ref == 0)
-		client_free(client);
-}
-
-static int handle_packet(struct client *client, struct message *msg)
-{
-	struct impl *impl = client->impl;
-	int res = 0;
-	uint32_t command, tag;
-
-	if (message_get(msg,
-			TAG_U32, &command,
-			TAG_U32, &tag,
-			TAG_INVALID) < 0) {
-		res = -EPROTO;
-		goto finish;
-	}
-
-	pw_log_debug(NAME" %p: Received packet command %u tag %u",
-			impl, command, tag);
-
-	if (command >= COMMAND_MAX) {
-		res = -EINVAL;
-		goto finish;
-	}
-
-	if (debug_messages) {
-		pw_log_debug(NAME" %p: command %s", impl, commands[command].name);
-		message_dump(SPA_LOG_LEVEL_INFO, msg);
-	}
-
-	if (commands[command].run == NULL) {
-		res = -ENOTSUP;
-		goto finish;
-	}
-
-	res = commands[command].run(client, command, tag, msg);
-finish:
-	message_free(impl, msg, false, false);
-	if (res < 0)
-		reply_error(client, command, tag, res);
-	return 0;
-}
-
-static int handle_memblock(struct client *client, struct message *msg)
-{
-	struct impl *impl = client->impl;
-	struct stream *stream;
-	uint32_t channel, flags, index;
-	int64_t offset;
-	int32_t filled, diff;
-	int res = 0;
-
-	channel = ntohl(client->desc.channel);
-	offset = (int64_t) (
-             (((uint64_t) ntohl(client->desc.offset_hi)) << 32) |
-             (((uint64_t) ntohl(client->desc.offset_lo))));
-	flags = ntohl(client->desc.flags);
-
-	pw_log_debug(NAME" %p: Received memblock channel:%d offset:%"PRIi64
-			" flags:%08x size:%u", impl, channel, offset,
-			flags, msg->length);
-
-	stream = pw_map_lookup(&client->streams, channel);
-	if (stream == NULL || stream->type == STREAM_TYPE_RECORD) {
-		res = -EINVAL;
-		goto finish;
-	}
-
-	filled = spa_ringbuffer_get_write_index(&stream->ring, &index);
-	pw_log_debug("new block %p %p/%u filled:%d index:%d flags:%02x offset:%"PRIu64,
-			msg, msg->data, msg->length, filled, index, flags, offset);
-
-
-	switch (flags & FLAG_SEEKMASK) {
-	case SEEK_RELATIVE:
-		index += offset;
-		filled += offset;
-		stream->missing -= offset;
-		break;
-	case SEEK_ABSOLUTE:
-		diff = (int32_t)(offset - (uint64_t)index);
-		index += diff;
-		filled += diff;
-		stream->missing -= diff;
-		break;
-	case SEEK_RELATIVE_ON_READ:
-	case SEEK_RELATIVE_END:
-		diff = (int32_t)(offset - (uint64_t)filled);
-		index += diff;
-		filled += diff;
-		stream->missing -= diff;
-		break;
-	}
-
-	if (filled < 0) {
-		/* underrun, reported on reader side */
-	} else if (filled + msg->length > stream->attr.maxlength) {
-		/* overrun */
-		send_overflow(stream);
-	}
-
-	/* always write data to ringbuffer, we expect the other side
-	 * to recover */
-	spa_ringbuffer_write_data(&stream->ring,
-			stream->buffer, stream->attr.maxlength,
-			index % stream->attr.maxlength,
-			msg->data,
-			SPA_MIN(msg->length, stream->attr.maxlength));
-	stream->write_index = index + msg->length;
-	spa_ringbuffer_write_update(&stream->ring, stream->write_index);
-	stream->requested -= SPA_MIN(msg->length, stream->requested);
-finish:
-	message_free(impl, msg, false, false);
-	return res;
-}
-
-static int do_read(struct client *client)
-{
-	struct impl *impl = client->impl;
-	void *data;
-	size_t size;
-	ssize_t r;
-	int res = 0;
-
-	if (client->in_index < sizeof(client->desc)) {
-		data = SPA_PTROFF(&client->desc, client->in_index, void);
-		size = sizeof(client->desc) - client->in_index;
-	} else {
-		uint32_t idx = client->in_index - sizeof(client->desc);
-
-		if (client->message == NULL) {
-			res = -EPROTO;
-			goto exit;
-		}
-		data = SPA_PTROFF(client->message->data, idx, void);
-		size = client->message->length - idx;
-	}
-	while (true) {
-		r = recv(client->source->fd, data, size, MSG_DONTWAIT);
-		if (r == 0 && size != 0) {
-			res = -EPIPE;
-			goto exit;
-		} else if (r < 0) {
-			if (errno == EINTR)
-		                continue;
-			res = -errno;
-			if (errno != EAGAIN && errno != EWOULDBLOCK)
-				pw_log_warn("recv client:%p res %zd: %m", client, r);
-			goto exit;
-		}
-		client->in_index += r;
-		break;
-	}
-
-	if (client->in_index == sizeof(client->desc)) {
-		uint32_t flags, length, channel;
-
-		flags = ntohl(client->desc.flags);
-		if ((flags & FLAG_SHMMASK) != 0) {
-			res = -EPROTO;
-			goto exit;
-		}
-
-		length = ntohl(client->desc.length);
-		if (length > FRAME_SIZE_MAX_ALLOW || length <= 0) {
-			pw_log_warn(NAME" %p: Received invalid frame size: %u",
-					impl, length);
-			res = -EPROTO;
-			goto exit;
-		}
-		channel = ntohl(client->desc.channel);
-		if (channel == (uint32_t) -1) {
-			if (flags != 0) {
-				pw_log_warn(NAME" %p: Received packet frame with invalid "
-						"flags value.", impl);
-				res = -EPROTO;
-				goto exit;
-			}
-		}
-		if (client->message)
-			message_free(impl, client->message, false, false);
-		client->message = message_alloc(impl, channel, length);
-	} else if (client->message &&
-	    client->in_index >= client->message->length + sizeof(client->desc)) {
-		struct message *msg = client->message;
-
-		client->message = NULL;
-		client->in_index = 0;
-
-		if (msg->channel == (uint32_t)-1)
-			res = handle_packet(client, msg);
-		else
-			res = handle_memblock(client, msg);
-	}
-exit:
-	return res;
-}
-
-static void
-on_client_data(void *data, int fd, uint32_t mask)
-{
-	struct client *client = data;
-	struct impl *impl = client->impl;
-	int res;
-
-	client->ref++;
-
-	if (mask & SPA_IO_HUP) {
-		res = -EPIPE;
-		goto error;
-	}
-	if (mask & SPA_IO_ERR) {
-		res = -EIO;
-		goto error;
-	}
-	if (mask & SPA_IO_IN) {
-		pw_log_trace(NAME" %p: can read", impl);
-		while (true) {
-			res = do_read(client);
-			if (res < 0) {
-				if (res != -EAGAIN && res != EWOULDBLOCK)
-					goto error;
-				break;
-			}
-		}
-	}
-	if (mask & SPA_IO_OUT || client->need_flush) {
-		pw_log_trace(NAME" %p: can write", impl);
-		client->need_flush = false;
-		res = flush_messages(client);
-		if (res >= 0) {
-			int mask = client->source->mask;
-			SPA_FLAG_CLEAR(mask, SPA_IO_OUT);
-			pw_loop_update_io(impl->loop, client->source, mask);
-		} else if (res != -EAGAIN && res != -EWOULDBLOCK)
-			goto error;
-	}
-done:
-	/* drop the reference that was acquired at the beginning of the function */
-	client_unref(client);
-	return;
-
-error:
-	switch (res) {
-	case -EPIPE:
-		pw_log_info(NAME" %p: client:%p [%s] disconnected", impl, client, client->name);
-		SPA_FALLTHROUGH;
-	case -EPROTO:
-		/*
-		 * drop the server's reference to the client
-		 * (if it hasn't been dropped already),
-		 * it is guaranteed that this will not call `client_free()`
-		 * since at the beginning of this function an extra reference
-		 * has been acquired which will keep the client alive
-		 */
-		if (client_detach(client))
-			client_unref(client);
-
-		/* then disconnect the client */
-		client_disconnect(client);
-		break;
-	default:
-		pw_log_error(NAME" %p: client:%p [%s] error %d (%s)", impl,
-			     client, client->name, res, spa_strerror(res));
-		break;
-	}
-	goto done;
-}
-
-static int check_flatpak(struct client *client, int pid)
-{
-	char root_path[2048];
-	int root_fd, info_fd, res;
-	struct stat stat_buf;
-
-	sprintf(root_path, "/proc/%u/root", pid);
-	root_fd = openat(AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
-	if (root_fd == -1) {
-		res = -errno;
-		if (res == -EACCES) {
-			struct statfs buf;
-			/* Access to the root dir isn't allowed. This can happen if the root is on a fuse
-			 * filesystem, such as in a toolbox container. We will never have a fuse rootfs
-			 * in the flatpak case, so in that case its safe to ignore this and
-			 * continue to detect other types of apps. */
-			if (statfs(root_path, &buf) == 0 &&
-			    buf.f_type == 0x65735546) /* FUSE_SUPER_MAGIC */
-				return 0;
-		}
-		/* Not able to open the root dir shouldn't happen. Probably the app died and
-		 * we're failing due to /proc/$pid not existing. In that case fail instead
-		 * of treating this as privileged. */
-		pw_log_info("failed to open \"%s\": %s", root_path, spa_strerror(res));
-		return res;
-	}
-	info_fd = openat(root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
-	close(root_fd);
-	if (info_fd == -1) {
-		if (errno == ENOENT) {
-			pw_log_debug("no .flatpak-info, client on the host");
-			/* No file => on the host */
-			return 0;
-		}
-		res = -errno;
-		pw_log_error("error opening .flatpak-info: %m");
-		return res;
-        }
-	if (fstat(info_fd, &stat_buf) != 0 || !S_ISREG(stat_buf.st_mode)) {
-		/* Some weird fd => failure, assume sandboxed */
-		pw_log_error("error fstat .flatpak-info: %m");
-	}
-	close(info_fd);
-	return 1;
-}
-
-static int get_client_pid(struct client *client, int client_fd)
-{
-	socklen_t len;
-#if defined(__linux__)
-	struct ucred ucred;
-	len = sizeof(ucred);
-	if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
-                pw_log_warn(NAME": client %p: no peercred: %m", client);
-	} else
-		return ucred.pid;
-#elif defined(__FreeBSD__)
-	struct xucred xucred;
-	len = sizeof(xucred);
-	if (getsockopt(client_fd, 0, LOCAL_PEERCRED, &xucred, &len) < 0) {
-                pw_log_warn(NAME": client %p: no peercred: %m", client);
-	} else {
-#if __FreeBSD__ >= 13
-		return xucred.cr_pid;
-#endif
-	}
-#endif
-	return 0;
-}
-
-static void
-on_connect(void *data, int fd, uint32_t mask)
-{
-	struct server *server = data;
-	struct impl *impl = server->impl;
-	struct sockaddr_storage name;
-	socklen_t length;
-	int client_fd, val, pid;
-	struct client *client;
-
-	client = calloc(1, sizeof(struct client));
-	if (client == NULL)
-		goto error;
-
-	client->impl = impl;
-	client->ref = 1;
-	client->server = server;
-	client->connect_tag = SPA_ID_INVALID;
-	spa_list_append(&server->clients, &client->link);
-	pw_map_init(&client->streams, 16, 16);
-	spa_list_init(&client->out_messages);
-	spa_list_init(&client->operations);
-	spa_list_init(&client->pending_samples);
-
-	client->props = pw_properties_new(
-			PW_KEY_CLIENT_API, "pipewire-pulse",
-			NULL);
-	if (client->props == NULL)
-		goto error;
-
-	pw_properties_setf(client->props,
-			"pulse.server.type", "%s",
-			server->addr.ss_family == AF_UNIX ? "unix" : "tcp");
-
-	client->routes = pw_properties_new(NULL, NULL);
-	if (client->routes == NULL)
-		goto error;
-
-	length = sizeof(name);
-	client_fd = accept4(fd, (struct sockaddr *) &name, &length, SOCK_CLOEXEC);
-	if (client_fd < 0)
-		goto error;
-
-	pw_log_debug(NAME": client %p fd:%d", client, client_fd);
-
-	if (server->addr.ss_family == AF_UNIX) {
-#ifdef SO_PRIORITY
-		val = 6;
-		if (setsockopt(client_fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
-			pw_log_warn("setsockopt(SO_PRIORITY) failed: %m");
-#endif
-		pid = get_client_pid(client, client_fd);
-		if (pid != 0 && check_flatpak(client, pid) == 1)
-			pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "flatpak");
-	}
-	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
-		val = 1;
-		if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
-			pw_log_warn("setsockopt(TCP_NODELAY) failed: %m");
-
-		if (server->addr.ss_family == AF_INET) {
-			val = IPTOS_LOWDELAY;
-			if (setsockopt(client_fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
-				pw_log_warn("setsockopt(IP_TOS) failed: %m");
-		}
-
-		pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "restricted");
-	}
-
-	client->source = pw_loop_add_io(impl->loop,
-					client_fd,
-					SPA_IO_ERR | SPA_IO_HUP | SPA_IO_IN,
-					true, on_client_data, client);
-	if (client->source == NULL)
-		goto error;
-
-	return;
-error:
-	pw_log_error(NAME" %p: failed to create client: %m", impl);
-	if (client)
-		client_free(client);
-	return;
-}
-
-static int
-get_runtime_dir(char *buf, size_t buflen, const char *dir)
-{
-	const char *runtime_dir;
-	struct stat stat_buf;
-	int res, size;
-
-	runtime_dir = getenv("PULSE_RUNTIME_PATH");
-	if (runtime_dir == NULL)
-		runtime_dir = getenv("XDG_RUNTIME_DIR");
-	if (runtime_dir == NULL)
-		runtime_dir = getenv("HOME");
-	if (runtime_dir == NULL) {
-		struct passwd pwd, *result = NULL;
-		char buffer[4096];
-		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
-			runtime_dir = result ? result->pw_dir : NULL;
-	}
-	size = snprintf(buf, buflen, "%s/%s", runtime_dir, dir) + 1;
-	if (size > (int) buflen) {
-		pw_log_error(NAME": path %s/%s too long", runtime_dir, dir);
-		return -ENAMETOOLONG;
-	}
-	if (stat(buf, &stat_buf) < 0) {
-		res = -errno;
-		if (res != -ENOENT) {
-			pw_log_error(NAME": stat() %s failed: %m", buf);
-			return res;
-		}
-		if (mkdir(buf, 0700) < 0) {
-			res = -errno;
-			pw_log_error(NAME": mkdir() %s failed: %m", buf);
-			return res;
-		}
-		pw_log_info(NAME": created %s", buf);
-	} else if ((stat_buf.st_mode & S_IFMT) != S_IFDIR) {
-		pw_log_error(NAME": %s is not a directory", buf);
-		return -ENOTDIR;
-	}
-	return 0;
-}
-
-void server_free(struct server *server)
-{
-	struct impl *impl = server->impl;
-	struct client *c, *t;
-
-	pw_log_debug(NAME" %p: free server %p", impl, server);
-
-	spa_list_remove(&server->link);
-
-	spa_list_for_each_safe(c, t, &server->clients, link) {
-		spa_assert_se(client_detach(c));
-		client_unref(c);
-	}
-
-	if (server->source)
-		pw_loop_destroy_source(impl->loop, server->source);
-	if (server->addr.ss_family == AF_UNIX && !server->activated)
-		unlink(((const struct sockaddr_un *) &server->addr)->sun_path);
-	free(server);
-}
-
-static const char *
-get_server_name(struct pw_context *context)
-{
-	const char *name = NULL;
-	const struct pw_properties *props = pw_context_get_properties(context);
-
-	if (props)
-		name = pw_properties_get(props, PW_KEY_REMOTE_NAME);
-	if (name == NULL || name[0] == '\0')
-		name = getenv("PIPEWIRE_REMOTE");
-	if (name == NULL || name[0] == '\0')
-		name = PW_DEFAULT_REMOTE;
-	return name;
-}
-
-static int parse_unix_address(const char *address, struct pw_array *addrs)
-{
-	struct sockaddr_un addr = {0}, *s;
-	int res;
-
-	if (address[0] != '/') {
-		char runtime_dir[PATH_MAX];
-
-		if ((res = get_runtime_dir(runtime_dir, sizeof(runtime_dir), "pulse")) < 0)
-			return res;
-
-		res = snprintf(addr.sun_path, sizeof(addr.sun_path),
-			       "%s/%s", runtime_dir, address);
-	}
-	else {
-		res = snprintf(addr.sun_path, sizeof(addr.sun_path),
-			       "%s", address);
-	}
-
-	if (res < 0)
-		return -EINVAL;
-
-	if ((size_t) res >= sizeof(addr.sun_path)) {
-		pw_log_warn(NAME": '%s...' too long",
-			    addr.sun_path);
-		return -ENAMETOOLONG;
-	}
-
-	s = pw_array_add(addrs, sizeof(struct sockaddr_storage));
-	if (s == NULL)
-		return -ENOMEM;
-
-	addr.sun_family = AF_UNIX;
-
-	*s = addr;
-
-	return 0;
-}
-
-#ifndef SUN_LEN
-#define SUN_LEN(addr_un) \
-	(offsetof(struct sockaddr_un, sun_path) + strlen((addr_un)->sun_path))
-#endif
-
-static bool is_stale_socket(int fd, const struct sockaddr_un *addr_un)
-{
-	if (connect(fd, (const struct sockaddr *) addr_un, SUN_LEN(addr_un)) < 0) {
-		if (errno == ECONNREFUSED)
-			return true;
-	}
-
-	return false;
-}
-
-#ifdef HAVE_SYSTEMD
-static int check_systemd_activation(const char *path)
-{
-	const int n = sd_listen_fds(0);
-
-	for (int i = 0; i < n; i++) {
-		const int fd = SD_LISTEN_FDS_START + i;
-
-		if (sd_is_socket_unix(fd, SOCK_STREAM, 1, path, 0) > 0)
-			return fd;
-	}
-
-	return -1;
-}
-#else
-static inline int check_systemd_activation(SPA_UNUSED const char *path)
-{
-	return -1;
-}
-#endif
-
-static int start_unix_server(struct server *server, const struct sockaddr_storage *addr)
-{
-	const struct sockaddr_un * const addr_un = (const struct sockaddr_un *) addr;
-	struct stat socket_stat;
-	int fd, res;
-
-	spa_assert(addr_un->sun_family == AF_UNIX);
-
-	fd = check_systemd_activation(addr_un->sun_path);
-	if (fd >= 0) {
-		server->activated = true;
-		pw_log_info(NAME" %p: found systemd socket activation socket for '%s'",
-			    server, addr_un->sun_path);
-		goto done;
-	}
-	else {
-		server->activated = false;
-	}
-
-	fd = socket(addr_un->sun_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-	if (fd < 0) {
-		res = -errno;
-		pw_log_info(NAME" %p: socket() failed: %m", server);
-		goto error;
-	}
-
-	if (stat(addr_un->sun_path, &socket_stat) < 0) {
-		if (errno != ENOENT) {
-			res = -errno;
-			pw_log_warn(NAME" %p: stat('%s') failed: %m",
-				    server, addr_un->sun_path);
-			goto error_close;
-		}
-	}
-	else if (socket_stat.st_mode & S_IWUSR || socket_stat.st_mode & S_IWGRP) {
-		if (!S_ISSOCK(socket_stat.st_mode)) {
-			res = -EEXIST;
-			pw_log_warn(NAME" %p: '%s' exists and is not a socket",
-				    server, addr_un->sun_path);
-			goto error_close;
-		}
-
-		/* socket is there, check if it's stale */
-		if (!is_stale_socket(fd, addr_un)) {
-			res = -EADDRINUSE;
-			pw_log_warn(NAME" %p: socket '%s' is in use",
-				    server, addr_un->sun_path);
-			goto error_close;
-		}
-
-		pw_log_warn(NAME" %p: unlinking stale socket '%s'",
-			    server, addr_un->sun_path);
-
-		if (unlink(addr_un->sun_path) < 0)
-			pw_log_warn(NAME" %p: unlink('%s') failed: %m",
-				    server, addr_un->sun_path);
-	}
-
-	if (bind(fd, (const struct sockaddr *) addr_un, SUN_LEN(addr_un)) < 0) {
-		res = -errno;
-		pw_log_warn(NAME" %p: bind() to '%s' failed: %m",
-			    server, addr_un->sun_path);
-		goto error_close;
-	}
-
-	if (listen(fd, LISTEN_BACKLOG) < 0) {
-		res = -errno;
-		pw_log_warn(NAME" %p: listen() on '%s' failed: %m",
-			    server, addr_un->sun_path);
-		goto error_close;
-	}
-
-	pw_log_info(NAME" %p: listening on unix:%s", server, addr_un->sun_path);
-
-done:
-	server->addr = *addr;
-
-	return fd;
-
-error_close:
-	close(fd);
-error:
-	return res;
-}
-
-static int parse_port(const char *port)
-{
-	const char *end;
-	long p;
-
-	if (port[0] == ':')
-		port += 1;
-
-	errno = 0;
-	p = strtol(port, (char **) &end, 0);
-
-	if (errno != 0)
-		return -errno;
-
-	if (end == port || *end != '\0')
-		return -EINVAL;
-
-	if (!(1 <= p && p <= 65535))
-		return -EINVAL;
-
-	return p;
-}
-
-static int parse_ipv6_address(const char *address, struct sockaddr_in6 *out)
-{
-	char addr_str[INET6_ADDRSTRLEN];
-	struct sockaddr_in6 addr = {0};
-	const char *end;
-	size_t len;
-	int res;
-
-	if (address[0] != '[')
-		return -EINVAL;
-
-	address += 1;
-
-	end = strchr(address, ']');
-	if (end == NULL)
-		return -EINVAL;
-
-	len = end - address;
-	if (len >= sizeof(addr_str))
-		return -ENAMETOOLONG;
-
-	memcpy(addr_str, address, len);
-	addr_str[len] = '\0';
-
-	res = inet_pton(AF_INET6, addr_str, &addr.sin6_addr.s6_addr);
-	if (res < 0)
-		return -errno;
-	if (res == 0)
-		return -EINVAL;
-
-	res = parse_port(end + 1);
-	if (res < 0)
-		return res;
-
-	addr.sin6_port = htons(res);
-	addr.sin6_family = AF_INET6;
-
-	*out = addr;
-
-	return 0;
-}
-
-static int parse_ipv4_address(const char *address, struct sockaddr_in *out)
-{
-	char addr_str[INET_ADDRSTRLEN];
-	struct sockaddr_in addr = {0};
-	size_t len;
-	int res;
-
-	len = strspn(address, "0123456789.");
-	if (len == 0)
-		return -EINVAL;
-	if (len >= sizeof(addr_str))
-		return -ENAMETOOLONG;
-
-	memcpy(addr_str, address, len);
-	addr_str[len] = '\0';
-
-	res = inet_pton(AF_INET, addr_str, &addr.sin_addr.s_addr);
-	if (res < 0)
-		return -errno;
-	if (res == 0)
-		return -EINVAL;
-
-	res = parse_port(address + len);
-	if (res < 0)
-		return res;
-
-	addr.sin_port = htons(res);
-	addr.sin_family = AF_INET;
-
-	*out = addr;
-
-	return 0;
-}
-
-#define FORMATTED_IP_ADDR_STRLEN (INET6_ADDRSTRLEN + 2 + 1 + 5)
-
-static int format_ip_address(const struct sockaddr_storage *addr, char *buffer, size_t buflen)
-{
-	char ip[INET6_ADDRSTRLEN];
-	const void *src;
-	const char *fmt;
-	int port;
-
-	switch (addr->ss_family) {
-	case AF_INET:
-		fmt = "%s:%d";
-		src = &((struct sockaddr_in *) addr)->sin_addr.s_addr;
-		port = ntohs(((struct sockaddr_in *) addr)->sin_port);
-		break;
-	case AF_INET6:
-		fmt = "[%s]:%d";
-		src = &((struct sockaddr_in6 *) addr)->sin6_addr.s6_addr;
-		port = ntohs(((struct sockaddr_in6 *) addr)->sin6_port);
-		break;
-	default:
-		return -EAFNOSUPPORT;
-	}
-
-	if (inet_ntop(addr->ss_family, src, ip, sizeof(ip)) == NULL)
-		return -errno;
-
-	return snprintf(buffer, buflen, fmt, ip, port);
-}
-
-static int get_ip_address_length(const struct sockaddr_storage *addr)
-{
-	switch (addr->ss_family) {
-	case AF_INET:
-		return sizeof(struct sockaddr_in);
-	case AF_INET6:
-		return sizeof(struct sockaddr_in6);
-	default:
-		return -EAFNOSUPPORT;
-	}
-}
-
-static int parse_ip_address(const char *address, struct pw_array *addrs)
-{
-	char ip[FORMATTED_IP_ADDR_STRLEN];
-	struct sockaddr_storage addr, *s;
-	int res;
-
-	res = parse_ipv6_address(address, (struct sockaddr_in6 *) &addr);
-	if (res == 0) {
-		s = pw_array_add(addrs, sizeof(*s));
-		if (s == NULL)
-			return -ENOMEM;
-
-		*s = addr;
-		return 0;
-	}
-
-	res = parse_ipv4_address(address, (struct sockaddr_in *) &addr);
-	if (res == 0) {
-		s = pw_array_add(addrs, sizeof(*s));
-		if (s == NULL)
-			return -ENOMEM;
-
-		*s = addr;
-		return 0;
-	}
-
-	res = parse_port(address);
-	if (res < 0)
-		return res;
-
-	s = pw_array_add(addrs, sizeof(*s) * 2);
-	if (s == NULL)
-		return -ENOMEM;
-
-	snprintf(ip, sizeof(ip), "[::]:%d", res);
-	spa_assert_se(parse_ipv6_address(ip, (struct sockaddr_in6 *) &addr) == 0);
-	*s++ = addr;
-
-	snprintf(ip, sizeof(ip), "0.0.0.0:%d", res);
-	spa_assert_se(parse_ipv4_address(ip, (struct sockaddr_in *) &addr) == 0);
-	*s++ = addr;
-
-	return 0;
-}
-
-static int start_ip_server(struct server *server, const struct sockaddr_storage *addr)
-{
-	char ip[FORMATTED_IP_ADDR_STRLEN];
-	int fd, res;
-
-	spa_assert(addr->ss_family == AF_INET || addr->ss_family == AF_INET6);
-
-	fd = socket(addr->ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP);
-	if (fd < 0) {
-		res = -errno;
-		pw_log_warn(NAME" %p: socket() failed: %m", server);
-		goto error;
-	}
-
-	{
-		int on = 1;
-		if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-			pw_log_warn(NAME" %p: setsockopt(SO_REUSEADDR) failed: %m", server);
-	}
-
-	if (addr->ss_family == AF_INET6) {
-		int on = 1;
-		if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on)) < 0)
-			pw_log_warn(NAME" %p: setsockopt(IPV6_V6ONLY) failed: %m", server);
-	}
-
-	if (bind(fd, (const struct sockaddr *) addr, get_ip_address_length(addr)) < 0) {
-		res = -errno;
-		pw_log_warn(NAME" %p: bind() failed: %m", server);
-		goto error_close;
-	}
-
-	if (listen(fd, LISTEN_BACKLOG) < 0) {
-		res = -errno;
-		pw_log_warn(NAME" %p: listen() failed: %m", server);
-		goto error_close;
-	}
-
-	spa_assert_se(format_ip_address(addr, ip, sizeof(ip)) >= 0);
-	pw_log_info(NAME" %p: listening on tcp:%s", server, ip);
-
-	server->addr = *addr;
-
-	return fd;
-
-error_close:
-	close(fd);
-error:
-	return res;
-}
-
-static struct server *server_new(struct impl *impl)
-{
-	struct server * const server = calloc(1, sizeof(*server));
-	if (server == NULL)
-		return NULL;
-
-	server->impl = impl;
-	server->addr.ss_family = AF_UNSPEC;
-	spa_list_init(&server->clients);
-	spa_list_append(&impl->servers, &server->link);
-
-	return server;
-}
-
-static int server_start(struct server *server, const struct sockaddr_storage *addr)
-{
-	const struct impl * const impl = server->impl;
-	int res = 0, fd;
-
-	switch (addr->ss_family) {
-	case AF_INET:
-	case AF_INET6:
-		fd = start_ip_server(server, addr);
-		break;
-	case AF_UNIX:
-		fd = start_unix_server(server, addr);
-		break;
-	default:
-		/* shouldn't happen */
-		fd = -EAFNOSUPPORT;
-		break;
-	}
-
-	if (fd < 0)
-		return fd;
-
-	server->source = pw_loop_add_io(impl->loop, fd, SPA_IO_IN, true, on_connect, server);
-	if (server->source == NULL) {
-		res = -errno;
-		pw_log_error(NAME" %p: can't create server source: %m", impl);
-	}
-
-	return res;
-}
-
-static int parse_address(const char *address, struct pw_array *addrs)
-{
-	if (strncmp(address, "tcp:", strlen("tcp:")) == 0)
-		return parse_ip_address(address + strlen("tcp:"), addrs);
-
-	if (strncmp(address, "unix:", strlen("unix:")) == 0)
-		return parse_unix_address(address + strlen("unix:"), addrs);
-
-	return -EAFNOSUPPORT;
-}
-
-#define SUN_PATH_SIZE (sizeof(((struct sockaddr_un *) NULL)->sun_path))
-#define FORMATTED_UNIX_ADDR_STRLEN (SUN_PATH_SIZE + 5)
-#define FORMATTED_TCP_ADDR_STRLEN (FORMATTED_IP_ADDR_STRLEN + 4)
-#define FORMATTED_SOCKET_ADDR_STRLEN \
-	(FORMATTED_UNIX_ADDR_STRLEN > FORMATTED_TCP_ADDR_STRLEN ? \
-		FORMATTED_UNIX_ADDR_STRLEN : \
-		FORMATTED_TCP_ADDR_STRLEN)
-
-static int format_socket_address(const struct sockaddr_storage *addr, char *buffer, size_t buflen)
-{
-	if (addr->ss_family == AF_INET || addr->ss_family == AF_INET6) {
-		char ip[FORMATTED_IP_ADDR_STRLEN];
-
-		spa_assert_se(format_ip_address(addr, ip, sizeof(ip)) >= 0);
-
-		return snprintf(buffer, buflen, "tcp:%s", ip);
-	}
-	else if (addr->ss_family == AF_UNIX) {
-		const struct sockaddr_un *addr_un = (const struct sockaddr_un *) addr;
-
-		return snprintf(buffer, buflen, "unix:%s", addr_un->sun_path);
-	}
-
-	return -EAFNOSUPPORT;
-}
-
-int create_and_start_servers(struct impl *impl, const char *addresses, struct pw_array *servers)
-{
-	struct pw_array addrs = PW_ARRAY_INIT(sizeof(struct sockaddr_storage));
-	const struct sockaddr_storage *addr;
-	char addr_str[FORMATTED_SOCKET_ADDR_STRLEN];
-	int res, count = 0, err = 0; /* store the first error to return when no servers could be created */
-	struct spa_json it[2];
-
-	/* update `err` if it hasn't been set to an errno */
-#define UPDATE_ERR(e) do { if (err == 0) err = (e); } while (false)
-
-	/* collect addresses into an array of `struct sockaddr_storage` */
-	spa_json_init(&it[0], addresses, strlen(addresses));
-
-	if (spa_json_enter_array(&it[0], &it[1]) < 0)
-		return -EINVAL;
-
-	while (spa_json_get_string(&it[1], addr_str, sizeof(addr_str) - 1) > 0) {
-		res = parse_address(addr_str, &addrs);
-		if (res < 0) {
-			pw_log_warn(NAME" %p: failed to parse address '%s': %s",
-				    impl, addr_str, spa_strerror(res));
-
-			UPDATE_ERR(res);
-		}
-	}
-
-	/* try to create sockets for each address in the list */
-	pw_array_for_each (addr, &addrs) {
-		struct server * const server = server_new(impl);
-		if (server == NULL) {
-			UPDATE_ERR(-errno);
-			continue;
-		}
-
-		res = server_start(server, addr);
-		if (res < 0) {
-			spa_assert_se(format_socket_address(addr, addr_str, sizeof(addr_str)) >= 0);
-			pw_log_warn(NAME" %p: failed to start server on '%s': %s",
-				    impl, addr_str, spa_strerror(res));
-
-			UPDATE_ERR(res);
-			server_free(server);
-
-			continue;
-		}
-
-		if (servers != NULL)
-			pw_array_add_ptr(servers, server);
-
-		count += 1;
-	}
-
-	pw_array_clear(&addrs);
-
-	if (count == 0) {
-		UPDATE_ERR(-EINVAL);
-		return err;
-	}
-
-	return count;
-
-#undef UPDATE_ERR
-}
-
-static int create_pid_file(void) {
-	char pid_file[PATH_MAX];
-	FILE *f;
-	int res;
-
-	if ((res = get_runtime_dir(pid_file, sizeof(pid_file), "pulse")) < 0)
-		return res;
-
-	if (strlen(pid_file) > PATH_MAX - 5) {
-		pw_log_error(NAME": path too long: %s/pid", pid_file);
-		return -ENAMETOOLONG;
-	}
-
-	strcat(pid_file, "/pid");
-
-	if ((f = fopen(pid_file, "w")) == NULL) {
-		res = -errno;
-		pw_log_error(NAME": failed to open pid file: %m");
-		return res;
-	}
-
-	fprintf(f, "%lu\n", (unsigned long) getpid());
-	fclose(f);
-
-	return 0;
-}
 
 static int impl_free_sample(void *item, void *data)
 {
@@ -6650,9 +5013,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	spa_list_init(&impl->cleanup_clients);
 	spa_list_init(&impl->free_messages);
 
-	pw_context_add_listener(context, &impl->context_listener,
-			&context_events, impl);
-
 	str = pw_properties_get(props, "server.address");
 	if (str == NULL) {
 		pw_properties_setf(props, "server.address",
@@ -6665,7 +5025,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	if (str == NULL)
 		goto error_free;
 
-	if ((res = create_and_start_servers(impl, str, NULL)) < 0) {
+	if ((res = servers_create_and_start(impl, str, NULL)) < 0) {
 		pw_log_error(NAME" %p: no servers could be started: %s",
 			     impl, spa_strerror(res));
 		goto error_free;
@@ -6675,6 +5035,8 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		pw_log_warn(NAME" %p: can't create pid file: %s",
 			    impl, spa_strerror(res));
 	}
+	pw_context_add_listener(context, &impl->context_listener,
+			&context_events, impl);
 
 	impl->dbus_name = dbus_request_name(context, "org.pulseaudio.Server");
 

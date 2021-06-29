@@ -9,6 +9,7 @@
 #include <limits.h>
 
 #include <spa/pod/filter.h>
+#include <spa/utils/string.h>
 #include <spa/support/system.h>
 
 #define NAME "alsa-pcm"
@@ -23,6 +24,7 @@ int spa_alsa_init(struct state *state)
 
 	if (state->open_ucm) {
 		char card_name[64];
+		const char *alibpref = NULL;
 
 		snprintf(card_name, sizeof(card_name), "hw:%i", state->card_index);
 		err = snd_use_case_mgr_open(&state->ucm, card_name);
@@ -37,11 +39,21 @@ int spa_alsa_init(struct state *state)
 			}
 			snprintf(card_name, sizeof(card_name), "%s", name);
 			free(name);
+
+			err = snd_use_case_mgr_open(&state->ucm, card_name);
+			if (err < 0) {
+				spa_log_error(state->log, "UCM not available for card %s", card_name);
+				return err;
+			}
 		}
-		err = snd_use_case_mgr_open(&state->ucm, card_name);
-		if (err < 0) {
-			spa_log_error(state->log, "UCM not available for card %s", card_name);
-			return err;
+
+		if ((snd_use_case_get(state->ucm, "_alibpref", &alibpref) != 0))
+			alibpref = NULL;
+		if (alibpref != NULL) {
+			char name[sizeof(state->props.device)];
+			spa_scnprintf(name, sizeof(name), "%s%s", alibpref,
+					state->props.device);
+			strcpy(state->props.device, name);
 		}
 	}
 	return 0;
@@ -670,7 +682,8 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
 	state->start_delay = state->default_start_delay;
 
-	state->latency.min_rate = state->latency.max_rate = state->headroom;
+	state->latency[state->port_direction].min_rate = state->headroom;
+	state->latency[state->port_direction].max_rate = state->headroom;
 
 	state->period_frames = period_size;
 	periods = state->buffer_frames / state->period_frames;
@@ -958,6 +971,43 @@ static int update_time(struct state *state, uint64_t nsec, snd_pcm_sframes_t del
 	return 0;
 }
 
+static inline bool is_following(struct state *state)
+{
+	return state->position && state->clock && state->position->clock.id != state->clock->id;
+}
+
+static int setup_matching(struct state *state)
+{
+	int card;
+
+	state->matching = state->following;
+
+	if (state->position == NULL)
+		return -ENOTSUP;
+
+	spa_log_debug(state->log, "clock:%s card:%d", state->position->clock.name, state->card);
+	if (sscanf(state->position->clock.name, "api.alsa.%d", &card) == 1 &&
+	    card == state->card) {
+		state->matching = false;
+	}
+	state->resample = ((uint32_t)state->rate != state->rate_denom) || state->matching;
+	return 0;
+}
+
+static inline void check_position_config(struct state *state)
+{
+	if (SPA_UNLIKELY(state->position  == NULL))
+		return;
+
+	if (SPA_UNLIKELY((state->duration != state->position->clock.duration) ||
+	    (state->rate_denom != state->position->clock.rate.denom))) {
+		state->duration = state->position->clock.duration;
+		state->rate_denom = state->position->clock.rate.denom;
+		state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
+		state->resample = ((uint32_t)state->rate != state->rate_denom) || state->matching;
+	}
+}
+
 int spa_alsa_write(struct state *state)
 {
 	snd_pcm_t *hndl = state->hndl;
@@ -966,10 +1016,7 @@ int spa_alsa_write(struct state *state)
 	snd_pcm_sframes_t commitres;
 	int res = 0;
 
-	if (SPA_LIKELY(state->position && state->duration != state->position->clock.duration)) {
-		state->duration = state->position->clock.duration;
-		state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
-	}
+	check_position_config(state);
 
 	if (state->following && state->alsa_started) {
 		uint64_t nsec;
@@ -1210,10 +1257,8 @@ int spa_alsa_read(struct state *state)
 	int res = 0;
 
 	if (state->position) {
-		if (state->duration != state->position->clock.duration) {
-			state->duration = state->position->clock.duration;
-			state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
-		}
+		check_position_config(state);
+
 		if (!state->following) {
 			uint64_t position;
 
@@ -1412,17 +1457,13 @@ static void alsa_on_timeout_event(struct spa_source *source)
 	struct state *state = source->data;
 	snd_pcm_uframes_t delay, target;
 	uint64_t expire;
-	int res;
 
 	if (SPA_UNLIKELY(state->started && spa_system_timerfd_read(state->data_system, state->timerfd, &expire) < 0))
 		spa_log_warn(state->log, NAME" %p: error reading timerfd: %m", state);
 
-	if (SPA_UNLIKELY(state->position && state->duration != state->position->clock.duration)) {
-		state->duration = state->position->clock.duration;
-		state->threshold = (state->duration * state->rate + state->rate_denom-1) / state->rate_denom;
-	}
+	check_position_config(state);
 
-	if (SPA_UNLIKELY((res = get_status(state, &delay, &target)) < 0))
+	if (SPA_UNLIKELY(get_status(state, &delay, &target) < 0))
 		return;
 
 	state->current_time = state->next_time;
@@ -1431,7 +1472,8 @@ static void alsa_on_timeout_event(struct spa_source *source)
 	if (SPA_UNLIKELY(spa_log_level_enabled(state->log, SPA_LOG_LEVEL_TRACE))) {
 		struct timespec now;
 		uint64_t nsec;
-		spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now);
+		if (spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now) < 0)
+		    return;
 		nsec = SPA_TIMESPEC_TO_NSEC(&now);
 		spa_log_trace_fp(state->log, NAME" %p: timeout %lu %lu %"PRIu64" %"PRIu64" %"PRIi64
 				" %d %"PRIi64, state, delay, target, nsec, state->current_time,
@@ -1469,7 +1511,10 @@ static void reset_buffers(struct state *this)
 static int set_timers(struct state *state)
 {
 	struct timespec now;
-	spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now);
+	int res;
+
+	if ((res = spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now)) < 0)
+	    return res;
 	state->next_time = SPA_TIMESPEC_TO_NSEC(&now);
 
 	if (state->following) {
@@ -1477,29 +1522,6 @@ static int set_timers(struct state *state)
 	} else {
 		set_timeout(state, state->next_time);
 	}
-	return 0;
-}
-
-static inline bool is_following(struct state *state)
-{
-	return state->position && state->clock && state->position->clock.id != state->clock->id;
-}
-
-static int setup_matching(struct state *state)
-{
-	int card;
-
-	state->matching = state->following;
-
-	if (state->position == NULL)
-		return -ENOTSUP;
-
-	spa_log_debug(state->log, "clock:%s card:%d", state->position->clock.name, state->card);
-	if (sscanf(state->position->clock.name, "api.alsa.%d", &card) == 1 &&
-	    card == state->card) {
-		state->matching = false;
-	}
-	state->resample = (state->rate != state->rate_denom) || state->matching;
 	return 0;
 }
 

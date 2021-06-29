@@ -38,7 +38,7 @@
 #include <spa/utils/ansi.h>
 
 #include <pipewire/pipewire.h>
-#include <extensions/metadata.h>
+#include <pipewire/extensions/metadata.h>
 
 #define INDENT 2
 
@@ -1149,6 +1149,7 @@ static int metadata_property(void *object,
 		if (e == NULL)
 			return -errno;
 
+		e->subject = subject;
 		e->key = SPA_PTROFF(e, sizeof(*e), void);
 		strcpy(e->key, key);
 		e->value = SPA_PTROFF(e->key, strlen(e->key) + 1, void);

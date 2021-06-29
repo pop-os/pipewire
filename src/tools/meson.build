@@ -13,7 +13,6 @@ tools_sources = [
 foreach t : tools_sources
   executable(t.get(0),
 	t.get(1),
-	c_args : [ '-D_GNU_SOURCE' ],
 	install: true,
 	dependencies : [pipewire_dep, mathlib],
   )
@@ -22,13 +21,14 @@ endforeach
 if ncurses_dep.found()
   executable('pw-top',
 	'pw-top.c',
-	c_args : [ '-D_GNU_SOURCE' ],
 	install: true,
 	dependencies : [pipewire_dep, ncurses_dep],
   )
 endif
 
+build_pw_cat = false
 if not get_option('pw-cat').disabled() and sndfile_dep.found()
+  build_pw_cat = true
 
   pwcat_sources = [
     'pw-cat.c',
@@ -44,7 +44,6 @@ if not get_option('pw-cat').disabled() and sndfile_dep.found()
 
   executable('pw-cat',
     pwcat_sources,
-    c_args : [ '-D_GNU_SOURCE' ],
     install: true,
     dependencies : [sndfile_dep, pipewire_dep, mathlib],
   )
@@ -57,3 +56,4 @@ if not get_option('pw-cat').disabled() and sndfile_dep.found()
 elif not sndfile_dep.found() and get_option('pw-cat').enabled()
 	error('pw-cat is enabled but required dependency `sndfile` was not found.')
 endif
+summary({'Build pw-cat tool': build_pw_cat}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump tool')

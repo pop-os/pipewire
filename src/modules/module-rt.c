@@ -38,6 +38,9 @@
 
 #include "config.h"
 
+/** \page page_module_rt PipeWire Module: RT
+ */
+
 #define DEFAULT_NICE_LEVEL -11
 #define DEFAULT_RT_PRIO 88
 #define DEFAULT_RT_TIME_SOFT 200000
@@ -48,6 +51,10 @@
 	"[rt.prio=<priority: default " SPA_STRINGIFY(DEFAULT_RT_PRIO) ">] " \
 	"[rt.time.soft=<in usec: default " SPA_STRINGIFY(DEFAULT_RT_TIME_SOFT)"] " \
 	"[rt.time.hard=<in usec: default " SPA_STRINGIFY(DEFAULT_RT_TIME_HARD)"] "
+
+#ifndef RLIMIT_RTTIME
+#define RLIMIT_RTTIME 15
+#endif
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Jonas Holmberg <jonashg@axis.com>" },
@@ -102,7 +109,7 @@ static void idle_func(struct spa_source *source)
 {
 	struct impl *impl = source->data;
 	uint64_t count;
-	int policy = SCHED_RR;
+	int policy = SCHED_FIFO;
 	int rtprio = impl->rt_prio;
 	struct rlimit rl;
 	struct sched_param sp;

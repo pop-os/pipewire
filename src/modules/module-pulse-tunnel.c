@@ -51,6 +51,9 @@
 
 #include <pulse/pulseaudio.h>
 
+/** \page page_module_pulse_tunnel PipeWire Module: Pulse Tunnel
+ */
+
 #define NAME "pulse-tunnel"
 
 #define MODULE_USAGE	"[ remote.name=<remote> ] "				\
@@ -328,7 +331,8 @@ static int create_stream(struct impl *impl)
 			impl->mode == MODE_CAPTURE ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,
 			PW_ID_ANY,
 			PW_STREAM_FLAG_AUTOCONNECT |
-			PW_STREAM_FLAG_MAP_BUFFERS,
+			PW_STREAM_FLAG_MAP_BUFFERS |
+			PW_STREAM_FLAG_RT_PROCESS,
 			params, n_params)) < 0)
 		return res;
 
@@ -649,7 +653,8 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
-	pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
+	if (impl->work)
+		pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	free(impl->buffer);
 	free(impl);
 }
@@ -752,6 +757,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->work = pw_context_get_work_queue(context);
+	if (impl->work == NULL) {
+		res = -errno;
+		pw_log_error( "can't get work queue: %m");
+		goto error;
+	}
 
 	spa_ringbuffer_init(&impl->ring);
 	impl->buffer = calloc(1, RINGBUFFER_SIZE);

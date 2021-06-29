@@ -45,6 +45,9 @@
 
 #include <pipewire/impl.h>
 
+/** \page page_module_rtkit PipeWire Module: RTKit
+ */
+
 #define DEFAULT_NICE_LEVEL	-11
 #define DEFAULT_RT_PRIO		88
 #define DEFAULT_RT_TIME_SOFT	200000
@@ -109,9 +112,7 @@ struct impl {
 
 #include <dbus/dbus.h>
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "config.h"
 
 #include <sys/syscall.h>
 

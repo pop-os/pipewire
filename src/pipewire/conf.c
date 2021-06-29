@@ -200,7 +200,6 @@ found:
 SPA_EXPORT
 int pw_conf_save_state(const char *prefix, const char *name, struct pw_properties *conf)
 {
-	const struct spa_dict_item *it;
 	char path[PATH_MAX];
 	char *tmp_name;
 	int res, sfd, fd, count = 0;
@@ -219,14 +218,7 @@ int pw_conf_save_state(const char *prefix, const char *name, struct pw_propertie
 
 	f = fdopen(fd, "w");
 	fprintf(f, "{");
-	spa_dict_for_each(it, &conf->dict) {
-		char key[1024];
-
-		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
-			continue;
-
-		fprintf(f, "%s\n  %s: %s", count++ == 0 ? "" : ",", key, it->value);
-	}
+	count += pw_properties_serialize_dict(f, &conf->dict, PW_PROPERTIES_FLAG_NL);
 	fprintf(f, "%s}", count == 0 ? " " : "\n");
 	fclose(f);
 
@@ -308,12 +300,7 @@ static int parse_spa_libs(struct pw_context *context, char *str)
 	}
 
 	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
-		if (key[0] == '#') {
-			if (spa_json_next(&it[1], &val) <= 0)
-				break;
-		}
-		else if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
+		if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
 			pw_context_add_spa_lib(context, key, value);
 			count++;
 		}
