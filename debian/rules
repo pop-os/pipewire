@@ -30,6 +30,7 @@ override_dh_auto_configure:
 		-Dffmpeg=disabled \
 		-Dinstalled_tests=enabled \
 		-Dman=enabled \
+		-Droc=disabled \
 		-Dtest=enabled \
 		-Dvideotestsrc=enabled \
 		-Dvolume=enabled \
