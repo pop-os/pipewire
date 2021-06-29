@@ -4,6 +4,7 @@ pipewire (0.3.31-1) UNRELEASED; urgency=medium
   * New upstream release
   * Add libusb-1.0-0-dev to Build-Depends
   * Disable roc module at least for now
+  * Install bluez-hardware.conf in pipewire-media-session
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 29 Jun 2021 10:12:43 +0200
 
