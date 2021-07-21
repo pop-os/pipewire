@@ -2,6 +2,7 @@ pipewire (0.3.32-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 21 Jul 2021 11:48:54 +0200
 
