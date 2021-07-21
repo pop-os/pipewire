@@ -2534,7 +2534,7 @@ static int a2dp_codec_switch_cmp(const void *a, const void *b)
 }
 
 /* Ensure there's a transport for at least one of the listed codecs */
-int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec **codecs)
+int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec * const *codecs)
 {
 	struct spa_bt_a2dp_codec_switch *sw;
 	struct spa_bt_remote_endpoint *ep;
@@ -2693,11 +2693,11 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	is_new = transport == NULL;
 
 	if (is_new) {
-		char *path = strdup(transport_path);
+		char *tpath = strdup(transport_path);
 
-		transport = spa_bt_transport_create(monitor, path, 0);
+		transport = spa_bt_transport_create(monitor, tpath, 0);
 		if (transport == NULL) {
-			free(path);
+			free(tpath);
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		}
 
@@ -3039,7 +3039,7 @@ static int adapter_register_endpoints(struct spa_bt_adapter *a)
 
 	if (!a->endpoints_registered) {
 		/* Should never happen as SBC support is always enabled */
-		spa_log_error(monitor->log, "Broken Pipewire build - unable to locate SBC codec");
+		spa_log_error(monitor->log, "Broken PipeWire build - unable to locate SBC codec");
 		err = -ENOSYS;
 	}
 

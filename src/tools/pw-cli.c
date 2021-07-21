@@ -202,7 +202,7 @@ static bool do_dump(struct data *data, const char *cmd, char *args, char **error
 
 #define DUMP_NAMES "Core|Module|Device|Node|Port|Factory|Client|Link|Session|Endpoint|EndpointStream"
 
-static struct command command_list[] = {
+static const struct command command_list[] = {
 	{ "help", "h", "Show this help", do_help },
 	{ "load-module", "lm", "Load a module. <module-name> [<module-arguments>]", do_load_module },
 	{ "unload-module", "um", "Unload a module. <module-var>", do_not_implemented },
@@ -1387,10 +1387,14 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 	else
 		props = pw_properties_new(NULL, NULL);
 
-	pw_properties_set(props, PW_KEY_LINK_OUTPUT_NODE, a[0]);
-	pw_properties_set(props, PW_KEY_LINK_OUTPUT_PORT, a[1]);
-	pw_properties_set(props, PW_KEY_LINK_INPUT_NODE, a[2]);
-	pw_properties_set(props, PW_KEY_LINK_INPUT_PORT, a[3]);
+	if (!spa_streq(a[0], "-"))
+		pw_properties_set(props, PW_KEY_LINK_OUTPUT_NODE, a[0]);
+	if (!spa_streq(a[1], "-"))
+		pw_properties_set(props, PW_KEY_LINK_OUTPUT_PORT, a[1]);
+	if (!spa_streq(a[2], "-"))
+		pw_properties_set(props, PW_KEY_LINK_INPUT_NODE, a[2]);
+	if (!spa_streq(a[3], "-"))
+		pw_properties_set(props, PW_KEY_LINK_INPUT_PORT, a[3]);
 
 	proxy = (struct pw_proxy*)pw_core_create_object(rd->core,
 					  "link-factory",
@@ -1998,7 +2002,7 @@ enum dump_flags {
 	is_notype = BIT(3)
 };
 
-static const char *dump_types[] = {
+static const char * const dump_types[] = {
 	PW_TYPE_INTERFACE_Core,
 	PW_TYPE_INTERFACE_Module,
 	PW_TYPE_INTERFACE_Device,

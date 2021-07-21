@@ -98,7 +98,7 @@ struct global {
 
 	snd_ctl_pipewire_t *ctl;
 
-	struct global_info *ginfo;
+	const struct global_info *ginfo;
 
 	uint32_t id;
 	uint32_t permissions;
@@ -600,17 +600,19 @@ static int pipewire_write_integer(snd_ctl_ext_t * ext, snd_ctl_ext_key_t key,
 			vol->values[i] = value[i];
 
 		if (key == 0)
-			set_volume_mute(ctl, ctl->default_source, vol, NULL);
+			err = set_volume_mute(ctl, ctl->default_source, vol, NULL);
 		else
-			set_volume_mute(ctl, ctl->default_sink, vol, NULL);
+			err = set_volume_mute(ctl, ctl->default_sink, vol, NULL);
 	} else {
 		if (key == 1)
-			set_volume_mute(ctl, ctl->default_source, NULL, &ctl->source_muted);
+			err = set_volume_mute(ctl, ctl->default_source, NULL, &ctl->source_muted);
 		else
-			set_volume_mute(ctl, ctl->default_sink, NULL, &ctl->sink_muted);
+			err = set_volume_mute(ctl, ctl->default_sink, NULL, &ctl->sink_muted);
 	}
+	if (err < 0)
+		goto finish;
 
-	wait_resync(ctl);
+	err = wait_resync(ctl);
 
 	if (err < 0)
 		goto finish;
@@ -857,14 +859,14 @@ static void device_event_param(void *object, int seq,
 	switch (id) {
 	case SPA_PARAM_Route:
 	{
-		uint32_t index, device;
+		uint32_t idx, device;
 		enum spa_direction direction;
 		struct spa_pod *props = NULL;
 		struct global *ng;
 
 		if (spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
-				SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(&idx),
 				SPA_PARAM_ROUTE_direction, SPA_POD_Id(&direction),
 				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
 				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props)) < 0) {
@@ -872,13 +874,13 @@ static void device_event_param(void *object, int seq,
 			return;
 		}
 		if (direction == SPA_DIRECTION_OUTPUT)
-			g->device.active_route_output = index;
+			g->device.active_route_output = idx;
                 else
-                        g->device.active_route_input = index;
+                        g->device.active_route_input = idx;
 
 		pw_log_debug("device %d: active %s route %d", g->id,
 				direction == SPA_DIRECTION_OUTPUT ? "output" : "input",
-				index);
+				idx);
 
 		ng = find_node_for_route(ctl, g->id, device);
 		if (props && ng)
@@ -896,7 +898,7 @@ static const struct pw_device_events device_events = {
 	.param = device_event_param,
 };
 
-struct global_info device_info = {
+static const struct global_info device_info = {
 	.type = PW_TYPE_INTERFACE_Device,
 	.version = PW_VERSION_DEVICE,
 	.events = &device_events,
@@ -974,7 +976,7 @@ static const struct pw_node_events node_events = {
 	.param = node_event_param,
 };
 
-struct global_info node_info = {
+static const struct global_info node_info = {
 	.type = PW_TYPE_INTERFACE_Node,
 	.version = PW_VERSION_NODE,
 	.events = &node_events,
@@ -1044,7 +1046,7 @@ static const struct pw_metadata_events metadata_events = {
 	.property = metadata_property,
 };
 
-struct global_info metadata_info = {
+static const struct global_info metadata_info = {
 	.type = PW_TYPE_INTERFACE_Metadata,
 	.version = PW_VERSION_METADATA,
 	.events = &metadata_events,
@@ -1076,7 +1078,7 @@ static void registry_event_global(void *data, uint32_t id,
 		const struct spa_dict *props)
 {
 	snd_ctl_pipewire_t *ctl = data;
-	struct global_info *info = NULL;
+	const struct global_info *info = NULL;
 	struct pw_proxy *proxy;
 	const char *str;
 
@@ -1100,6 +1102,10 @@ static void registry_event_global(void *data, uint32_t id,
 		pw_log_debug("found node %d type:%s", id, str);
 		info = &node_info;
 	} else if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
+		if (props == NULL ||
+		    ((str = spa_dict_lookup(props, PW_KEY_METADATA_NAME)) == NULL) ||
+		    (!spa_streq(str, "default")))
+			return;
 		if (ctl->metadata != NULL)
 			return;
 		info = &metadata_info;
@@ -1349,7 +1355,9 @@ SND_CTL_PLUGIN_DEFINE_FUNC(pipewire)
 			&ctl->registry_listener,
 			&registry_events, ctl);
 
-	wait_resync(ctl);
+	err = wait_resync(ctl);
+	if (err < 0)
+		goto error_unlock;
 
 	pw_thread_loop_unlock(ctl->mainloop);
 

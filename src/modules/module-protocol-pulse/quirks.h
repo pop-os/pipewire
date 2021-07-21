@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2021 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,43 +22,15 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PIPEWIRE_TYPE_H
-#define PIPEWIRE_TYPE_H
+#ifndef PULSER_SERVER_QUIRKS_H
+#define PULSER_SERVER_QUIRKS_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "client.h"
 
-#include <spa/utils/type.h>
+#define QUIRK_FORCE_S16_FORMAT			(1ull<<0)	/** forces S16 sample format in sink and source
+								  * info */
+#define QUIRK_REMOVE_CAPTURE_DONT_MOVE		(1ull<<1)	/** removes the capture stream DONT_MOVE flag */
 
-/** \defgroup pw_type PipeWire Types
- */
+int client_update_quirks(struct client *client);
 
-/**
- * \addtogroup pw_type
- * \{
- */
-
-enum {
-	PW_TYPE_FIRST = SPA_TYPE_VENDOR_PipeWire,
-};
-
-#define PW_TYPE_INFO_BASE		"PipeWire:"
-
-#define PW_TYPE_INFO_Object		PW_TYPE_INFO_BASE "Object"
-#define PW_TYPE_INFO_OBJECT_BASE	PW_TYPE_INFO_Object ":"
-
-#define PW_TYPE_INFO_Interface		PW_TYPE_INFO_BASE "Interface"
-#define PW_TYPE_INFO_INTERFACE_BASE	PW_TYPE_INFO_Interface ":"
-
-const struct spa_type_info * pw_type_info(void);
-
-/**
- * \}
- */
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* PIPEWIRE_TYPE_H */
+#endif /* PULSER_SERVER_QUIRKS_H */

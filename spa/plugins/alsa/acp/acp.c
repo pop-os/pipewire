@@ -242,24 +242,18 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	dev->ports = pa_hashmap_new(pa_idxset_string_hash_func,
 			pa_idxset_string_compare_func);
 	if (m->ucm_context.ucm) {
-		const char *alibpref = NULL;
 		dev->ucm_context = &m->ucm_context;
-		if ((snd_use_case_get(impl->ucm.ucm_mgr, "_alibpref", &alibpref) != 0))
-			alibpref = NULL;
-		if (alibpref == NULL)
-			alibpref = strdup("_ucm");
-		if (alibpref != NULL) {
+		if (impl->ucm.alibpref != NULL) {
 			char **d;
 			for (d = m->device_strings; *d; d++) {
-				if (pa_startswith(*d, alibpref)) {
-					size_t plen = strlen(alibpref);
+				if (pa_startswith(*d, impl->ucm.alibpref)) {
+					size_t plen = strlen(impl->ucm.alibpref);
 					size_t len = strlen(*d);
 					memmove(*d, (*d) + plen, len - plen + 1);
 					dev->device.flags |= ACP_DEVICE_UCM_DEVICE;
 					break;
 				}
 			}
-			free((void*)alibpref);
 		}
 	}
 	pa_dynarray_init(&dev->port_array, NULL);
@@ -324,8 +318,10 @@ static int add_pro_profile(pa_card *impl, uint32_t index)
 	if ((err = snd_ctl_open(&ctl_hndl, device, 0)) < 0) {
 		pa_log_error("can't open control for card %s: %s",
 				device, snd_strerror(err));
+	        free(device);
 		return err;
 	}
+	free(device);
 
 	snd_pcm_info_alloca(&pcminfo);
 

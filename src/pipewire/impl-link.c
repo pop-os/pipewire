@@ -41,6 +41,8 @@
 
 #define NAME "link"
 
+#define MAX_HOPS	32
+
 #define pw_link_resource_info(r,...)      pw_resource_call(r,struct pw_link_events,info,0,__VA_ARGS__)
 
 /** \cond */
@@ -850,14 +852,16 @@ static void input_port_latency_changed(void *data)
 {
 	struct impl *impl = data;
 	struct pw_impl_link *this = &impl->this;
-	pw_impl_port_recalc_latency(this->output);
+	if (!this->feedback)
+		pw_impl_port_recalc_latency(this->output);
 }
 
 static void output_port_latency_changed(void *data)
 {
 	struct impl *impl = data;
 	struct pw_impl_link *this = &impl->this;
-	pw_impl_port_recalc_latency(this->input);
+	if (!this->feedback)
+		pw_impl_port_recalc_latency(this->input);
 }
 
 static const struct pw_impl_port_events input_port_events = {
@@ -926,26 +930,30 @@ static const struct pw_impl_node_events output_node_events = {
 	.active_changed = node_active_changed,
 };
 
-static bool pw_impl_node_can_reach(struct pw_impl_node *output, struct pw_impl_node *input)
+static bool pw_impl_node_can_reach(struct pw_impl_node *output, struct pw_impl_node *input, int hop)
 {
 	struct pw_impl_port *p;
+	struct pw_impl_link *l;
+
+	output->loopchecked = true;
 
 	if (output == input)
 		return true;
 
-	spa_list_for_each(p, &output->output_ports, link) {
-		struct pw_impl_link *l;
+	if (hop == MAX_HOPS) {
+		pw_log_warn("exceeded hops (%d) %s -> %s", hop, output->name, input->name);
+		return false;
+	}
 
+	spa_list_for_each(p, &output->output_ports, link) {
+		spa_list_for_each(l, &p->links, output_link)
+			l->input->node->loopchecked = l->feedback;
+	}
+	spa_list_for_each(p, &output->output_ports, link) {
 		spa_list_for_each(l, &p->links, output_link) {
-			if (l->feedback)
+			if (l->input->node->loopchecked)
 				continue;
-			if (l->input->node == input)
-				return true;
-		}
-		spa_list_for_each(l, &p->links, output_link) {
-			if (l->feedback)
-				continue;
-			if (pw_impl_node_can_reach(l->input->node, input))
+			if (pw_impl_node_can_reach(l->input->node, input, hop+1))
 				return true;
 		}
 	}
@@ -1089,7 +1097,7 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 		goto error_no_mem;
 
 	this = &impl->this;
-	this->feedback = pw_impl_node_can_reach(input_node, output_node);
+	this->feedback = pw_impl_node_can_reach(input_node, output_node, 0);
 	pw_properties_set(properties, PW_KEY_LINK_FEEDBACK, this->feedback ? "true" : NULL);
 
 	pw_log_debug(NAME" %p: new out-port:%p -> in-port:%p", this, output, input);
@@ -1228,9 +1236,7 @@ SPA_EXPORT
 int pw_impl_link_register(struct pw_impl_link *link,
 		     struct pw_properties *properties)
 {
-	struct pw_context *context = link->context;
-	struct pw_impl_node *output_node, *input_node;
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_ID,
@@ -1241,6 +1247,9 @@ int pw_impl_link_register(struct pw_impl_link *link,
 		PW_KEY_LINK_INPUT_NODE,
 		NULL
 	};
+
+	struct pw_context *context = link->context;
+	struct pw_impl_node *output_node, *input_node;
 
 	if (link->registered)
 		goto error_existed;

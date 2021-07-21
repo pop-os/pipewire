@@ -273,10 +273,10 @@ static void capture_process(void *d)
 	int32_t stride = 0;
 
 	if ((in = pw_stream_dequeue_buffer(impl->capture)) == NULL)
-		pw_log_warn("out of capture buffers: %m");
+		pw_log_debug("out of capture buffers: %m");
 
 	if ((out = pw_stream_dequeue_buffer(impl->playback)) == NULL)
-		pw_log_warn("out of playback buffers: %m");
+		pw_log_debug("out of playback buffers: %m");
 
 	if (in == NULL || out == NULL)
 		goto done;
@@ -1758,6 +1758,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_GROUP, "filter-chain-%u", id);
+	if (pw_properties_get(props, PW_KEY_NODE_LINK_GROUP) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_LINK_GROUP, "filter-chain-%u", id);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
@@ -1772,6 +1774,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);
+	copy_props(impl, props, PW_KEY_NODE_LINK_GROUP);
 	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_MEDIA_NAME);

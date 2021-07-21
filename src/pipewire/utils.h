@@ -31,12 +31,14 @@ extern "C" {
 
 #include <string.h>
 #include <sys/un.h>
-#include <sys/mount.h>
+#ifndef _POSIX_C_SOURCE
+# include <sys/mount.h>
+#endif
 
 #include <spa/utils/defs.h>
 #include <spa/pod/pod.h>
 
-/** \defgroup pw_utils Pipewire Utility Functions
+/** \defgroup pw_utils PipeWire Utility Functions
  *
  * Various utility functions
  */

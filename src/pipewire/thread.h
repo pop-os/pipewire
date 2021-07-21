@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2021 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,43 +22,34 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PIPEWIRE_TYPE_H
-#define PIPEWIRE_TYPE_H
+#ifndef PIPEWIRE_THREAD_H
+#define PIPEWIRE_THREAD_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#include <spa/utils/type.h>
+#include <string.h>
+#include <errno.h>
 
-/** \defgroup pw_type PipeWire Types
+#include <spa/support/thread.h>
+
+/** \defgroup spa_thread Thread related functions
+ *
+ * \brief functions to manipulate threads
  */
 
-/**
- * \addtogroup pw_type
- * \{
- */
+void pw_thread_utils_set(struct spa_thread_utils *impl);
+struct spa_thread_utils *pw_thread_utils_get(void);
 
-enum {
-	PW_TYPE_FIRST = SPA_TYPE_VENDOR_PipeWire,
-};
-
-#define PW_TYPE_INFO_BASE		"PipeWire:"
-
-#define PW_TYPE_INFO_Object		PW_TYPE_INFO_BASE "Object"
-#define PW_TYPE_INFO_OBJECT_BASE	PW_TYPE_INFO_Object ":"
-
-#define PW_TYPE_INFO_Interface		PW_TYPE_INFO_BASE "Interface"
-#define PW_TYPE_INFO_INTERFACE_BASE	PW_TYPE_INFO_Interface ":"
-
-const struct spa_type_info * pw_type_info(void);
-
-/**
- * \}
- */
+#define pw_thread_utils_create(...)		spa_thread_utils_create(pw_thread_utils_get(), ##__VA_ARGS__)
+#define pw_thread_utils_join(...)		spa_thread_utils_join(pw_thread_utils_get(), ##__VA_ARGS__)
+#define pw_thread_utils_get_rt_range(...)	spa_thread_utils_get_rt_range(pw_thread_utils_get(), ##__VA_ARGS__)
+#define pw_thread_utils_acquire_rt(...)		spa_thread_utils_acquire_rt(pw_thread_utils_get(), ##__VA_ARGS__)
+#define pw_thread_utils_drop_rt(...)		spa_thread_utils_drop_rt(pw_thread_utils_get(), ##__VA_ARGS__)
 
 #ifdef __cplusplus
-}
+}  /* extern "C" */
 #endif
 
-#endif /* PIPEWIRE_TYPE_H */
+#endif /* PIPEWIRE_THREAD_H */

@@ -1,6 +1,6 @@
 ## Building
 
-Pipewire uses a build tool called *Meson* as a basis for its build
+PipeWire uses a build tool called *Meson* as a basis for its build
 process.  It's a tool with some resemblance to Autotools and CMake. Meson
 again generates build files for a lower level build tool called *Ninja*,
 working in about the same level of abstraction as more familiar GNU Make
@@ -16,6 +16,11 @@ Generate the build files for Ninja:
 $ meson setup builddir
 ```
 
+For distribution-specific build dependencies, please check our
+[CI pipeline](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/master/.gitlab-ci.yml)
+(search for `FDO_DISTRIBUTION_PACKAGES`). Note that some dependencies are
+optional and depend on options passed to meson.
+
 Once this is done, the next step is to review the build options:
 
 ```
@@ -28,7 +33,7 @@ Define the installation prefix:
 $ meson configure builddir -Dprefix=/usr # Default: /usr/local
 ```
 
-Pipewire specific build options are listed in the "Project options"
+PipeWire specific build options are listed in the "Project options"
 section. They are defined in `meson_options.txt`.
 
 Finally, invoke the build:

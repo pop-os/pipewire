@@ -4,7 +4,9 @@ doxyfile_conf.set('PACKAGE_VERSION', meson.project_version())
 doxyfile_conf.set('top_srcdir', meson.source_root())
 doxyfile_conf.set('top_builddir', meson.build_root())
 
-if find_program('dot', required: false).found()
+dot_found = find_program('dot', required: false).found()
+summary({'dot (used with doxygen)': dot_found}, bool_yn: true, section: 'Optional programs')
+if dot_found
   doxyfile_conf.set('HAVE_DOT', 'YES')
 else
   doxyfile_conf.set('HAVE_DOT', 'NO')
@@ -22,11 +24,6 @@ foreach h : module_sources
 endforeach
 inputs += meson.source_root() / 'test' / 'pwtest.h'
 
-find = find_program('find', required: false)
-if find.found()
-
-endif
-
 # SPA headers use static inline functions. Doxygen doesn't extract those
 # unless we have EXTRACT_STATIC set - but we don't want it to extract
 # everything in the rest of the tree.
@@ -37,6 +34,7 @@ endif
 # Because this uses globbing, this target won't rebuild if the headers
 # change but meh.
 sed = find_program('sed', required: false)
+summary({'sed (for SPA docs)': sed.found()}, bool_yn: true, section: 'Optional programs')
 if sed.found()
   spa_srcdir = meson.source_root() / 'spa' / 'include' / 'spa'
   spa_dstdir = meson.current_build_dir() / 'spa'

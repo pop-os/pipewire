@@ -270,8 +270,7 @@ int pw_impl_port_release_mix(struct pw_impl_port *port, struct pw_impl_port_mix 
 
 static int update_properties(struct pw_impl_port *port, const struct spa_dict *dict, bool filter)
 {
-	int changed;
-	const char *ignored[] = {
+	static const char * const ignored[] = {
 		PW_KEY_OBJECT_ID,
 		PW_KEY_PORT_DIRECTION,
 		PW_KEY_PORT_CONTROL,
@@ -279,6 +278,8 @@ static int update_properties(struct pw_impl_port *port, const struct spa_dict *d
 		PW_KEY_PORT_ID,
 		NULL
 	};
+
+	int changed;
 
 	changed = pw_properties_update_ignore(port->properties, dict, filter ? ignored : NULL);
 	port->info.props = &port->properties->dict;
@@ -876,8 +877,7 @@ static const struct pw_global_events global_events = {
 int pw_impl_port_register(struct pw_impl_port *port,
 		     struct pw_properties *properties)
 {
-	struct pw_impl_node *node = port->node;
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
 		PW_KEY_NODE_ID,
@@ -893,6 +893,8 @@ int pw_impl_port_register(struct pw_impl_port *port,
 		PW_KEY_PORT_EXTRA,
 		NULL
 	};
+
+	struct pw_impl_node *node = port->node;
 
 	if (node == NULL || node->global == NULL)
 		return -EIO;
@@ -1081,6 +1083,7 @@ void pw_impl_port_destroy(struct pw_impl_port *port)
 
 	pw_log_debug(NAME" %p: destroy", port);
 
+	port->destroying = true;
 	pw_impl_port_emit_destroy(port);
 
 	pw_impl_port_unlink(port);
@@ -1295,39 +1298,17 @@ int pw_impl_port_for_each_link(struct pw_impl_port *port,
 	return res;
 }
 
-static int port_set_latency(struct pw_impl_port *port, struct spa_latency_info *latency)
+int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 {
-	struct spa_latency_info *current;
+	struct pw_impl_link *l;
+	struct spa_latency_info latency, *current;
+	struct pw_impl_port *other;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[1024];
 
-	current = &port->latency[latency->direction];
-
-	if (spa_latency_info_compare(current, latency) == 0)
+	if (port->destroying)
 		return 0;
-
-	*current = *latency;
-
-	pw_log_debug("port %p: set %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, port,
-			pw_direction_as_string(latency->direction),
-			latency->min_quantum, latency->max_quantum,
-			latency->min_rate, latency->max_rate,
-			latency->min_ns, latency->max_ns);
-
-	if (!port->have_latency_param)
-		return 0;
-
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	param = spa_latency_build(&b, SPA_PARAM_Latency, latency);
-	return pw_impl_port_set_param(port, SPA_PARAM_Latency, 0, param);
-}
-
-int pw_impl_port_recalc_latency(struct pw_impl_port *port)
-{
-	struct pw_impl_link *l;
-	struct spa_latency_info latency;
-	struct pw_impl_port *other;
 
 	latency = SPA_LATENCY_INFO(SPA_DIRECTION_REVERSE(port->direction));
 
@@ -1335,8 +1316,8 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 		spa_list_for_each(l, &port->links, output_link) {
 			other = l->input;
 			spa_latency_info_combine(&latency, &other->latency[other->direction]);
-			pw_log_debug("port %p: peer %p: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
-					port, other,
+			pw_log_debug("port %d: peer %d: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port->info.id, other->info.id,
 					latency.min_quantum, latency.max_quantum,
 					latency.min_rate, latency.max_rate,
 					latency.min_ns, latency.max_ns);
@@ -1345,15 +1326,33 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 		spa_list_for_each(l, &port->links, input_link) {
 			other = l->output;
 			spa_latency_info_combine(&latency, &other->latency[other->direction]);
-			pw_log_debug("port %p: peer %p: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
-					port, other,
+			pw_log_debug("port %d: peer %d: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port->info.id, other->info.id,
 					latency.min_quantum, latency.max_quantum,
 					latency.min_rate, latency.max_rate,
 					latency.min_ns, latency.max_ns);
 		}
 	}
-	port_set_latency(port, &latency);
-	return 0;
+
+	current = &port->latency[latency.direction];
+
+	if (spa_latency_info_compare(current, &latency) == 0)
+		return 0;
+
+	*current = latency;
+
+	pw_log_debug("port %d: set %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+			port->info.id, pw_direction_as_string(latency.direction),
+			latency.min_quantum, latency.max_quantum,
+			latency.min_rate, latency.max_rate,
+			latency.min_ns, latency.max_ns);
+
+	if (!port->have_latency_param)
+		return 0;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	param = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+	return pw_impl_port_set_param(port, SPA_PARAM_Latency, 0, param);
 }
 
 SPA_EXPORT
