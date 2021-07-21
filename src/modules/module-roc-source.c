@@ -52,8 +52,8 @@
  *
  * - `source.props = {}`: properties to be passed to the source stream
  * - `local.ip = <str>`: local sender ip
- * - `local.source.port = <str>`: local receiver port for source packets
- * - `local.repair.port = <str>`: local receiver port for receiver packets
+ * - `local.source.port = <str>`: local receiver TCP/UDP port for source packets
+ * - `local.repair.port = <str>`: local receiver TCP/UDP port for receiver packets
  * - `sess.latency.msec = <str>`: target network latency in milliseconds
  * - `resampler.profile = <str>`: Possible values: `disable`, `high`,
  *   `medium`, `low`.
@@ -173,7 +173,7 @@ static void playback_process(void *data)
 	uint8_t *dst;
 
 	if ((b = pw_stream_dequeue_buffer(impl->playback)) == NULL) {
-		pw_log_warn("Out of playback buffers: %m");
+		pw_log_debug("Out of playback buffers: %m");
 		return;
 	}
 

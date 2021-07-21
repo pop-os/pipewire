@@ -315,18 +315,20 @@ static AvahiStringList* txt_record_server_data(struct pw_core_info *info, AvahiS
 {
 	const char *t;
 	struct utsname u;
-	static char sysname[256];
 
 	spa_assert(info);
-	spa_assert(uname(&u) >= 0);
 
 	l = avahi_string_list_add_pair(l, "server-version", PACKAGE_NAME" "PACKAGE_VERSION);
 
 	t = pw_get_user_name();
 	l = avahi_string_list_add_pair(l, "user-name", t);
 
-	snprintf(sysname, sizeof(sysname), "%s %s %s", u.sysname, u.machine, u.release);
-	l = avahi_string_list_add_pair(l, "uname", sysname);
+	if (uname(&u) >= 0) {
+		char sysname[sizeof(u.sysname) + sizeof(u.machine) + sizeof(u.release)];
+
+		snprintf(sysname, sizeof(sysname), "%s %s %s", u.sysname, u.machine, u.release);
+		l = avahi_string_list_add_pair(l, "uname", sysname);
+	}
 
 	t = pw_get_host_name();
 	l = avahi_string_list_add_pair(l, "fqdn", t);
@@ -377,15 +379,15 @@ static void service_entry_group_callback(AvahiEntryGroup *g, AvahiEntryGroupStat
 
 static void publish_service(struct service *s)
 {
-	AvahiStringList *txt = NULL;
-	const char *t;
-	char cm[PA_CHANNEL_MAP_SNPRINT_MAX];
-
-	const char * const subtype_text[] = {
+	static const char * const subtype_text[] = {
 		[SUBTYPE_HARDWARE] = "hardware",
 		[SUBTYPE_VIRTUAL] = "virtual",
 		[SUBTYPE_MONITOR] = "monitor"
 	};
+
+	AvahiStringList *txt = NULL;
+	const char *t;
+	char cm[PA_CHANNEL_MAP_SNPRINT_MAX];
 
 	spa_assert(s);
 
@@ -516,25 +518,7 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *d)
 		break;
 	default:
 		break;
-}
-}
-
-static void manager_updated(void *d, struct pw_manager_object *o)
-{
-	struct service *s;
-	char *service_name;
-
-	if (!pw_manager_object_is_sink(o) && !pw_manager_object_is_source(o))
-		return;
-
-	service_name = get_service_name(o);
-
-	s = pw_manager_object_add_data(o, service_name, sizeof(struct service));
-
-	free(service_name);
-	spa_assert(s);
-
-	publish_service(s);
+	}
 }
 
 static void manager_removed(void *d, struct pw_manager_object *o)
@@ -560,7 +544,6 @@ static void manager_added(void *d, struct pw_manager_object *o)
 static const struct pw_manager_events manager_events = {
 	PW_VERSION_MANAGER_EVENTS,
 	.added = manager_added,
-	.updated = manager_updated,
 	.removed = manager_removed,
 };
 

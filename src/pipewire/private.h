@@ -450,6 +450,7 @@ struct pw_context {
 	struct pw_impl_client *current_client;	/**< client currently executing code in mainloop */
 
 	long sc_pagesize;
+	unsigned int freewheeling:1;
 
 	void *user_data;		/**< extra user data */
 };
@@ -671,6 +672,7 @@ struct pw_impl_node {
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */
 	unsigned int passive:1;		/**< driver graph only has passive links */
 	unsigned int freewheel:1;	/**< if this is the freewheel driver */
+	unsigned int loopchecked:1;	/**< for feedback loop checking */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 
@@ -824,6 +826,7 @@ struct pw_impl_port {
 		struct spa_list node_link;
 	} rt;					/**< data only accessed from the data thread */
 	unsigned int added:1;
+	unsigned int destroying:1;
 
 	struct spa_latency_info latency[2];	/**< latencies */
 	unsigned int have_latency_param:1;

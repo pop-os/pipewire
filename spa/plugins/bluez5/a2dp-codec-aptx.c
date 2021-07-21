@@ -76,7 +76,7 @@ static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
 	return actual_conf_size;
 }
 
-static struct a2dp_codec_config
+static const struct a2dp_codec_config
 aptx_frequencies[] = {
 	{ APTX_SAMPLING_FREQ_48000, 48000, 3 },
 	{ APTX_SAMPLING_FREQ_44100, 44100, 2 },
@@ -287,7 +287,7 @@ static int codec_start_encode (void *data,
 	memset(this->header, 0, sizeof(struct rtp_header));
 
 	this->header->v = 2;
-	this->header->pt = 1;
+	this->header->pt = 96;
 	this->header->sequence_number = htons(seqnum);
 	this->header->timestamp = htonl(timestamp);
 	return sizeof(struct rtp_header);

@@ -223,7 +223,7 @@ static void capture_process(void *data)
 	int res;
 
 	if ((buf = pw_stream_dequeue_buffer(client->capture)) == NULL) {
-		pw_log_warn("%p: client:%p [%s] out of capture buffers: %m", impl,
+		pw_log_debug("%p: client:%p [%s] out of capture buffers: %m", impl,
 				client, client->name);
 		return;
 	}
@@ -262,7 +262,7 @@ static void playback_process(void *data)
 	int res;
 
 	if ((buf = pw_stream_dequeue_buffer(client->playback)) == NULL) {
-		pw_log_warn("%p: client:%p [%s] out of playback buffers: %m", impl,
+		pw_log_debug("%p: client:%p [%s] out of playback buffers: %m", impl,
 				client, client->name);
 		return;
 	}
@@ -451,7 +451,7 @@ static void on_core_proxy_destroy(void *data)
 	client_cleanup(client);
 }
 
-static struct pw_proxy_events core_proxy_events = {
+static const struct pw_proxy_events core_proxy_events = {
 	PW_VERSION_CORE_EVENTS,
 	.destroy = on_core_proxy_destroy,
 };

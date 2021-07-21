@@ -63,6 +63,7 @@ test('test lib',
 test('test context',
     executable('test-context',
                'test-context.c',
+               'test-config.c',
                include_directories: pwtest_inc,
                link_with: pwtest_lib)
 )
@@ -85,6 +86,7 @@ test('test spa',
 )
 
 valgrind = find_program('valgrind', required: false)
+summary({'valgrind (test setup)': valgrind.found()}, bool_yn: true, section: 'Optional programs')
 if valgrind.found()
   valgrind_env = environment()
   add_test_setup('valgrind',

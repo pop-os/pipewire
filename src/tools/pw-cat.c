@@ -940,7 +940,7 @@ static void do_print_delay(void *userdata, uint64_t expirations)
 	struct data *data = userdata;
 	struct pw_time time;
 	pw_stream_get_time(data->stream, &time);
-	printf("now=%li rate=%u/%u ticks=%lu delay=%li queued=%lu\n",
+	printf("now=%"PRIi64" rate=%u/%u ticks=%"PRIu64" delay=%"PRIi64" queued=%"PRIu64"\n",
 		time.now,
 		time.rate.num, time.rate.denom,
 		time.ticks, time.delay, time.queued);
@@ -1163,7 +1163,7 @@ static int setup_midifile(struct data *data)
 
 static int fill_properties(struct data *data)
 {
-	static const char* table[] = {
+	static const char * const table[] = {
 		[SF_STR_TITLE] = PW_KEY_MEDIA_TITLE,
 		[SF_STR_COPYRIGHT] = PW_KEY_MEDIA_COPYRIGHT,
 		[SF_STR_SOFTWARE] = PW_KEY_MEDIA_SOFTWARE,
@@ -1171,6 +1171,7 @@ static int fill_properties(struct data *data)
 		[SF_STR_COMMENT] = PW_KEY_MEDIA_COMMENT,
 		[SF_STR_DATE] = PW_KEY_MEDIA_DATE
 	};
+
 	SF_INFO sfi;
 	SF_FORMAT_INFO fi;
 	int res;

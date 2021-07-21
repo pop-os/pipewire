@@ -725,7 +725,7 @@ port_set_format(struct impl *this,
 	} else {
 		struct spa_audio_info info = { 0 };
 		int idx;
-		int sizes[4] = { 2, 4, 4, 8 };
+		const size_t sizes[4] = { 2, 4, 4, 8 };
 
 		if ((res = spa_format_parse(format, &info.media_type, &info.media_subtype)) < 0)
 			return res;
@@ -1050,7 +1050,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->timer_source.func = on_output;
 	this->timer_source.data = this;
 	this->timer_source.fd = spa_system_timerfd_create(this->data_system,
-			CLOCK_MONOTONIC, SPA_FD_CLOEXEC);
+			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	this->timer_source.mask = SPA_IO_IN;
 	this->timer_source.rmask = 0;
 	this->timerspec.it_value.tv_sec = 0;
