@@ -40,6 +40,9 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_suspend_node Media Session Module: Suspend Node
+ */
+
 #define NAME		"suspend-node"
 #define SESSION_KEY	"suspend-node"
 
@@ -88,7 +91,7 @@ static void idle_timeout(void *data, uint64_t expirations)
 	struct impl *impl = node->impl;
 	struct spa_command *cmd = &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Suspend);
 
-	pw_log_debug(NAME " %p: node %d idle timeout", impl, node->id);
+	pw_log_info(NAME " %p: node %d suspend", impl, node->id);
 
 	remove_idle_timeout(node);
 
@@ -178,8 +181,8 @@ handle_node(struct impl *impl, struct sm_object *object)
 	if (media_class == NULL)
 		return 0;
 
-	if (strstr(media_class, "Audio/") != media_class &&
-	    (strstr(media_class, "Video/") != media_class))
+	if (!spa_strstartswith(media_class, "Audio/") &&
+	    (!spa_strstartswith(media_class, "Video/")))
 		return 0;
 
 	node = sm_object_add_data(object, SESSION_KEY, sizeof(struct node));

@@ -57,11 +57,11 @@ enum spa_log_level {
  */
 #define SPA_TYPE_INTERFACE_Log	SPA_TYPE_INFO_INTERFACE_BASE "Log"
 
-#define SPA_VERSION_LOG		0
 
 struct spa_log {
 	/** the version of this log. This can be used to expand this
 	 * structure in the future */
+#define SPA_VERSION_LOG		0
 	struct spa_interface iface;
 	/**
 	 * Logging level, everything above this level is not logged
@@ -174,7 +174,7 @@ static inline void spa_log_trace_fp (struct spa_log *l, const char *format, ...)
 
 #endif
 
-/** \fn spa_log_error foo */
+/** \fn spa_log_error */
 
 /** keys can be given when initializing the logger handle */
 #define SPA_KEY_LOG_LEVEL		"log.level"		/**< the default log level */

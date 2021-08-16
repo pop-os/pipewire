@@ -38,6 +38,7 @@
 #include <spa/utils/string.h>
 #include <spa/debug/format.h>
 #include <spa/debug/types.h>
+#include <spa/utils/json.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/private.h>
@@ -136,12 +137,41 @@ static bool get_default_bool(struct pw_properties *properties, const char *name,
 	return val;
 }
 
+static uint32_t parse_clock_rate(struct pw_properties *properties, const char *name,
+		uint32_t *rates, uint32_t def)
+{
+	const char *str;
+	uint32_t count = 0, r;
+	struct spa_json it[2];
+	char v[256];
+
+	if ((str = pw_properties_get(properties, name)) == NULL)
+		goto fallback;
+
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+		spa_json_init(&it[1], str, strlen(str));
+
+	while (spa_json_get_string(&it[1], v, sizeof(v)-1) > 0 &&
+	    count < MAX_RATES) {
+		if (spa_atou32(v, &r, 0))
+	                rates[count++] = r;
+        }
+	if (count == 0)
+		goto fallback;
+	return count;
+fallback:
+	rates[0] = def;
+	return 1;
+}
+
 static void fill_defaults(struct pw_context *this)
 {
 	struct pw_properties *p = this->properties;
 	struct settings *d = &this->defaults;
 
 	d->clock_rate = get_default_int(p, "default.clock.rate", DEFAULT_CLOCK_RATE);
+	d->n_clock_rates = parse_clock_rate(p, "default.clock.allowed-rates", d->clock_rates, d->clock_rate);
 	d->clock_quantum = get_default_int(p, "default.clock.quantum", DEFAULT_CLOCK_QUANTUM);
 	d->clock_min_quantum = get_default_int(p, "default.clock.min-quantum", DEFAULT_CLOCK_MIN_QUANTUM);
 	d->clock_max_quantum = get_default_int(p, "default.clock.max-quantum", DEFAULT_CLOCK_MAX_QUANTUM);
@@ -944,13 +974,14 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 			spa_list_for_each(l, &p->links, input_link) {
 				t = l->output->node;
 
-				if (l->passive)
-					pw_impl_link_prepare(l);
-				else if (t->active)
-					driver->passive = n->passive = false;
-
 				if (t->visited || !t->active)
 					continue;
+
+				pw_impl_link_prepare(l);
+
+				if (!l->passive)
+					driver->passive = n->passive = false;
+
 				if (l->prepared) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
@@ -961,21 +992,22 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 			spa_list_for_each(l, &p->links, output_link) {
 				t = l->input->node;
 
-				if (l->passive)
-					pw_impl_link_prepare(l);
-				else if (t->active)
-					driver->passive = n->passive = false;
-
 				if (t->visited || !t->active)
 					continue;
+
+				pw_impl_link_prepare(l);
+
+				if (!l->passive)
+					driver->passive = n->passive = false;
+
 				if (l->prepared) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
 				}
 			}
 		}
-		/* now go through all the followers of this driver and add the
-		 * nodes that have the same group and that are not yet visited */
+		/* now go through all the nodes that have the same group and
+		 * that are not yet visited */
 		if (n->group[0] == '\0')
 			continue;
 
@@ -999,18 +1031,71 @@ static inline void get_quantums(struct pw_context *context, uint32_t *def, uint3
 	*min = s->clock_force_quantum == 0 ? s->clock_min_quantum : s->clock_force_quantum;
 	*max = s->clock_force_quantum == 0 ? s->clock_max_quantum : s->clock_force_quantum;
 }
-static inline void get_rate(struct pw_context *context, uint32_t *def)
+
+static inline uint32_t *get_rates(struct pw_context *context, uint32_t *def, uint32_t *n_rates,
+		bool *force_rate)
 {
 	struct settings *s = &context->settings;
-	*def = s->clock_force_rate == 0 ? s->clock_rate : s->clock_force_rate;
+	if (s->clock_force_rate != 0) {
+		*force_rate = true;
+		*n_rates = 1;
+		*def = s->clock_force_rate;
+		return &s->clock_force_rate;
+	} else {
+		*force_rate = false;
+		*n_rates = s->n_clock_rates;
+		*def = s->clock_rate;
+		return s->clock_rates;
+	}
+}
+static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
+{
+	uint32_t i;
+	for (i = 0; i < n_rates; i++)
+		if (rates[i] == rate)
+			return true;
+	return false;
+}
+
+static void suspend_driver(struct pw_context *context, struct pw_impl_node *n)
+{
+	struct pw_impl_node *s;
+
+	spa_list_for_each(s, &n->follower_list, follower_link) {
+		if (s == n)
+			continue;
+		pw_log_debug(NAME" %p: follower %p: '%s' suspend",
+				context, s, s->name);
+		pw_impl_node_set_state(s, PW_NODE_STATE_SUSPENDED);
+	}
+	pw_log_debug(NAME" %p: driver %p: '%s' suspend",
+			context, n, n->name);
+	pw_impl_node_set_state(n, PW_NODE_STATE_SUSPENDED);
+}
+
+/* find smaller power of 2 */
+static uint32_t flp2(uint32_t x)
+{
+	x = x | (x >> 1);
+	x = x | (x >> 2);
+	x = x | (x >> 4);
+	x = x | (x >> 8);
+	x = x | (x >> 16);
+	return x - (x >> 1);
+}
+
+static int64_t fraction_compare(const struct spa_fraction *a, const struct spa_fraction *b)
+{
+	return (int64_t)(a->num * b->denom) - (int64_t)(b->num * a->denom);
 }
 
 int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 {
 	struct impl *impl = SPA_CONTAINER_OF(context, struct impl, this);
 	struct pw_impl_node *n, *s, *target, *fallback;
-	uint32_t max_quantum, min_quantum, def_quantum, def_rate;
-	bool freewheel = false;
+	uint32_t max_quantum, min_quantum, def_quantum;
+	uint32_t *rates, n_rates, def_rate;
+	bool freewheel = false, force_rate;
 
 	pw_log_info(NAME" %p: busy:%d reason:%s", context, impl->recalc, reason);
 
@@ -1023,7 +1108,7 @@ again:
 	impl->recalc = true;
 
 	get_quantums(context, &def_quantum, &min_quantum, &max_quantum);
-	get_rate(context, &def_rate);
+	rates = get_rates(context, &def_rate, &n_rates, &force_rate);
 
 	/* start from all drivers and group all nodes that are linked
 	 * to it. Some nodes are not (yet) linked to anything and they
@@ -1098,33 +1183,94 @@ again:
 
 	/* assign final quantum and set state for followers and drivers */
 	spa_list_for_each(n, &context->driver_list, driver_link) {
-		bool running = false;
-		uint32_t quantum = 0;
+		bool running = false, lock_quantum = false, lock_rate = false;
+		struct spa_fraction latency = SPA_FRACTION(0, 0);
+		struct spa_fraction max_latency = SPA_FRACTION(0, 0);
+		struct spa_fraction rate = SPA_FRACTION(0, 0);
+		uint32_t quantum, target_rate, current_rate;
 
 		if (!n->driving || n->exported)
 			continue;
 
-		/* collect quantum and count active nodes */
+		/* collect quantum and rate */
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 
-			if (s->quantum_size > 0) {
-				if (quantum == 0 || s->quantum_size < quantum)
-					quantum = s->quantum_size;
-			}
-			if (s->max_quantum_size > 0) {
-				if (s->max_quantum_size < max_quantum)
-					max_quantum = s->max_quantum_size;
-			}
+			lock_quantum |= s->lock_quantum;
+			lock_rate |= s->lock_rate;
+
+			/* smallest latencies */
+			if (latency.denom == 0 ||
+			    (s->latency.denom > 0 &&
+			     fraction_compare(&s->latency, &latency) < 0))
+				latency = s->latency;
+			if (max_latency.denom == 0 ||
+			    (s->max_latency.denom > 0 &&
+			     fraction_compare(&s->max_latency, &max_latency) < 0))
+				max_latency = s->max_latency;
+
+			/* largest rate */
+			if (rate.denom == 0 ||
+			    (s->rate.denom > 0 &&
+			     fraction_compare(&s->rate, &rate) > 0))
+				rate = s->rate;
+
 			if (s->active)
 				running = !n->passive;
 		}
-		if (quantum == 0)
-			quantum = def_quantum;
 
+		/* calculate desired rate */
+		target_rate = def_rate;
+		if (rate.denom != 0 && rate.num == 1) {
+			if (rates_contains(rates, n_rates, rate.denom))
+				target_rate = rate.denom;
+		}
+		if (force_rate)
+			lock_rate = false;
+
+		current_rate = n->rt.position->clock.rate.denom;
+		if (target_rate != current_rate && lock_rate)
+			target_rate = current_rate;
+		else if (target_rate != current_rate && !force_rate &&
+		    (n->info.state > PW_NODE_STATE_IDLE))
+			target_rate = current_rate;
+
+		if (target_rate != current_rate) {
+			pw_log_info("(%s-%u) state:%s new rate:%u->%u",
+					n->name, n->info.id,
+					pw_node_state_as_string(n->info.state),
+					n->rt.position->clock.rate.denom,
+					target_rate);
+
+			if (force_rate) {
+				if (context->settings.clock_rate_update_mode == CLOCK_RATE_UPDATE_MODE_HARD)
+					suspend_driver(context, n);
+			} else {
+				if (n->info.state >= PW_NODE_STATE_IDLE)
+					suspend_driver(context, n);
+			}
+			n->rt.position->clock.rate = SPA_FRACTION(1, target_rate);
+			current_rate = target_rate;
+			/* we might be suspended now and the links need to be prepared again */
+			goto again;
+		}
+
+
+		/* calculate desired quantum */
+		if (max_latency.denom != 0) {
+			uint32_t tmp = (max_latency.num * current_rate / max_latency.denom);
+			if (tmp < max_quantum)
+				max_quantum = tmp;
+		}
+
+		quantum = def_quantum;
+		if (latency.denom != 0)
+			quantum = (latency.num * current_rate / latency.denom);
 		quantum = SPA_CLAMP(quantum, min_quantum, max_quantum);
 
-		n->rt.position->clock.rate = SPA_FRACTION(1, def_rate);
-		if (n->rt.position && quantum != n->rt.position->clock.duration) {
+		if (context->settings.clock_power_of_two_quantum)
+			quantum = flp2(quantum);
+
+		if (quantum != n->rt.position->clock.duration && !lock_quantum) {
 			pw_log_info("(%s-%u) new quantum:%"PRIu64"->%u",
 					n->name, n->info.id,
 					n->rt.position->clock.duration,

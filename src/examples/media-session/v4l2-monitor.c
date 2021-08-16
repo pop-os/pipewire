@@ -44,6 +44,8 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_v4l2_monitor Media Session Module: V4L2 Monitor
+ */
 #define SESSION_CONF	"v4l2-monitor.conf"
 
 struct device;
@@ -154,7 +156,7 @@ static struct node *v4l2_create_node(struct device *dev, uint32_t id,
 		str = pw_properties_get(dev->props, SPA_KEY_DEVICE_ALIAS);
 	if (str == NULL)
 		str = "v4l2-device";
-	if (strstr(str, "v4l2_device.") == str)
+	if (spa_strstartswith(str, "v4l2_device."))
 			str += 12;
 
 	if (strstr(info->factory_name, "sink") != NULL)

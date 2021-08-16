@@ -47,6 +47,9 @@
 #include "pipewire/impl.h"
 #include "media-session.h"
 
+/** \page page_media_session_module_bluez_monitor Media Session Module: BlueZ Monitor
+ */
+
 #define NAME		"bluez5-monitor"
 #define SESSION_CONF	"bluez-monitor.conf"
 #define FEATURES_CONF	"bluez-hardware.conf"
@@ -405,7 +408,7 @@ static int update_device_props(struct device *device)
 		snprintf(temp, sizeof(temp), "%d", device->id);
 		s = temp;
 	}
-	if (strstr(s, "bluez_card.") == s)
+	if (spa_strstartswith(s, "bluez_card."))
 		s += strlen("bluez_card.");
 
 	pw_properties_set(p, PW_KEY_DEVICE_NAME,

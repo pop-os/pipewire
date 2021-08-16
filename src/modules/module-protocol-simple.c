@@ -376,7 +376,7 @@ static int create_streams(struct impl *impl, struct client *client)
 
 	if (impl->capture) {
 		props = pw_properties_new(
-			PW_KEY_NODE_GROUP, client->name,
+			PW_KEY_NODE_GROUP, "pipewire.dummy",
 			PW_KEY_NODE_LATENCY, DEFAULT_LATENCY,
 			PW_KEY_NODE_TARGET, pw_properties_get(impl->props, "capture.node"),
 			NULL);
@@ -396,7 +396,7 @@ static int create_streams(struct impl *impl, struct client *client)
 	}
 	if (impl->playback) {
 		props = pw_properties_new(
-			PW_KEY_NODE_GROUP, client->name,
+			PW_KEY_NODE_GROUP, "pipewire.dummy",
 			PW_KEY_NODE_LATENCY, DEFAULT_LATENCY,
 			PW_KEY_NODE_TARGET, pw_properties_get(impl->props, "playback.node"),
 			NULL);
@@ -634,7 +634,7 @@ static struct server *create_server(struct impl *impl, const char *address)
 	spa_list_init(&server->client_list);
 	spa_list_append(&impl->server_list, &server->link);
 
-	if (strstr(address, "tcp:") == address) {
+	if (spa_strstartswith(address, "tcp:")) {
 		fd = make_inet_socket(server, address+4);
 	} else {
 		fd = -EINVAL;

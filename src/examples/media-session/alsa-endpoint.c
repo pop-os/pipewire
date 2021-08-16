@@ -49,6 +49,15 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_alsa_endpoint Media Session Module: ALSA Endpoint
+ *
+ * The ALSA endpoint module creates an endpoint and corresponding endpoint
+ * stream for each Node on ALSA devices.
+ *
+ * ALSA devices are defined as devices with a \ref PW_KEY_MEDIA_CLASS
+ * starting with `"Audio/"` and a \ref PW_KEY_DEVICE_API of `"alsa"`.
+ */
+
 #define NAME		"alsa-endpoint"
 #define SESSION_KEY	"alsa-endpoint"
 
@@ -610,6 +619,8 @@ static int setup_alsa_ucm_endpoint(struct device *device)
 		pw_log_debug("verb: %s", verb_list[i]);
 	}
 
+	/* FIXME: implement this */
+
 	snd_use_case_free_list(verb_list, num_verbs);
 
 	res = -ENOTSUP;
@@ -679,7 +690,7 @@ handle_device(struct impl *impl, struct sm_object *obj)
 
 	pw_log_debug(NAME" %p: device "PW_KEY_MEDIA_CLASS":%s api:%s", impl, media_class, str);
 
-	if (strstr(media_class, "Audio/") != media_class)
+	if (!spa_strstartswith(media_class, "Audio/"))
 		return 0;
 	if (!spa_streq(str, "alsa"))
 		return 0;

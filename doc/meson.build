@@ -22,6 +22,9 @@ endforeach
 foreach h : module_sources
   inputs += meson.source_root() / 'src' / 'modules' / h
 endforeach
+foreach h : media_session_sources
+  inputs += meson.source_root() / 'src' / 'examples' / h
+endforeach
 inputs += meson.source_root() / 'test' / 'pwtest.h'
 
 # SPA headers use static inline functions. Doxygen doesn't extract those
@@ -51,15 +54,20 @@ endif
 # Note: order here is how doxygen will expose the pages in the sidebar
 extra_docs = [
   'index.dox',
+  'overview.dox',
   'pipewire.dox',
-  'pipewire-overview.dox',
   'pipewire-design.dox',
+  'pipewire-access.dox',
+  'pipewire-midi.dox',
+  'pipewire-portal.dox',
   'pipewire-daemon.dox',
   'pipewire-library.dox',
   'pipewire-modules.dox',
   'pipewire-tools.dox',
   'pipewire-session-manager.dox',
   'pipewire-objects-design.dox',
+  'pipewire-audio.dox',
+  'media-session.dox',
   'api.dox',
   'tutorial.dox',
   'tutorial1.dox',
@@ -74,6 +82,7 @@ extra_docs = [
   'spa-pod.dox',
   'spa-buffer.dox',
   'pulseaudio.dox',
+  'dma-buf.dox',
 ]
 
 foreach extra : extra_docs

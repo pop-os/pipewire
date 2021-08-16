@@ -94,6 +94,7 @@ int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
 int sm_libcamera_monitor_start(struct sm_media_session *sess);
 int sm_bluez5_monitor_start(struct sm_media_session *sess);
+int sm_bluez5_autoswitch_start(struct sm_media_session *sess);
 int sm_alsa_monitor_start(struct sm_media_session *sess);
 int sm_suspend_node_start(struct sm_media_session *sess);
 #ifdef HAVE_SYSTEMD
@@ -2031,11 +2032,14 @@ char *sm_media_session_sanitize_name(char *name, int size, char sub, const char 
 {
 	char *p;
 	va_list varargs;
+	int res;
 
 	va_start(varargs, fmt);
-	if (vsnprintf(name, size, fmt, varargs) < 0)
-		return NULL;
+	res = vsnprintf(name, size, fmt, varargs);
 	va_end(varargs);
+
+	if (res < 0)
+		return NULL;
 
 	for (p = name; *p; p++) {
 		switch(*p) {
@@ -2056,11 +2060,14 @@ char *sm_media_session_sanitize_description(char *name, int size, char sub, cons
 {
 	char *p;
 	va_list varargs;
+	int res;
 
 	va_start(varargs, fmt);
-	if (vsnprintf(name, size, fmt, varargs) < 0)
-		return NULL;
+	res = vsnprintf(name, size, fmt, varargs);
 	va_end(varargs);
+
+	if (res < 0)
+		return NULL;
 
 	for (p = name; *p; p++) {
 		switch(*p) {
@@ -2388,6 +2395,7 @@ static const struct {
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },
 	{ "libcamera", "libcamera udev detection", sm_libcamera_monitor_start, NULL },
 	{ "bluez5", "bluetooth support", sm_bluez5_monitor_start, NULL },
+	{ "bluez5-autoswitch", "switch bluetooth profiles automatically", sm_bluez5_autoswitch_start, NULL },
 	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start, NULL },
 	{ "policy-node", "configure and link nodes", sm_policy_node_start, NULL },
 	{ "pulse-bridge", "accept pulseaudio clients", sm_pulse_bridge_start, NULL },

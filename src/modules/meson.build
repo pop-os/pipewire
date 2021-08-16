@@ -112,7 +112,7 @@ pipewire_module_portal = shared_library('pipewire-module-portal', [ 'module-port
 )
 endif
 
-pipewire_module_client_node = shared_library('pipewire-module-client-device',
+pipewire_module_client_device = shared_library('pipewire-module-client-device',
   [ 'module-client-device.c',
     'module-client-device/resource-device.c',
     'module-client-device/proxy-device.c',
@@ -194,6 +194,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-remap-sink.c',
   'module-protocol-pulse/modules/module-remap-source.c',
   'module-protocol-pulse/modules/module-simple-protocol-tcp.c',
+  'module-protocol-pulse/modules/module-switch-on-connect.c',
   'module-protocol-pulse/modules/module-tunnel-sink.c',
   'module-protocol-pulse/modules/module-tunnel-source.c',
   'module-protocol-pulse/modules/module-zeroconf-discover.c',
