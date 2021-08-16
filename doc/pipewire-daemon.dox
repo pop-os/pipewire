@@ -1,5 +1,57 @@
 /** \page page_daemon PipeWire Daemon
 
+The PipeWire daemon is the central process that manages data exchange between
+devices and clients.
+
+Typically general, users run one PipeWire daemon that listens for incoming
+connections and manages devices. Clients (including the \ref
+page_session_manager) are separate processes that talk to the daemon using the
+PipeWire socket (default: `$XDG_RUNTIME_DIR/pipewire-0`). This approach
+provides provides address-space separation between the privileged daemon and
+non-privileged clients.
+
+@dot
+digraph pw {
+  compound=true;
+  node [shape="box"];
+
+  subgraph cluster_pw {
+	rankdir="TB";
+	label="PipeWire daemon";
+	style="dashed";
+
+	subgraph cluster_prot_native {
+		label="pipewire-module-protocol-native";
+		style="solid";
+		socket [label="$XDG_RUNTIME_DIR/pipewire-0"];
+		mod_impl [label="module implementation"];
+
+		socket -> mod_impl;
+	}
+	core [label="PipeWire Core"];
+	alsa [label="PipeWire ALSA support"];
+
+	mod_impl -> core;
+	core -> alsa;
+  }
+
+  kernel
+
+  client1 [ label="Media Player" ];
+  client2 [ label="Audio Software" ];
+  sm [ label="Session Manager", style="dotted" ];
+
+  client1 -> socket;
+  client2 -> socket;
+  sm -> socket;
+  alsa -> kernel;
+}
+@enddot
+
+As shown above, the protocol is handled by the \ref
+page_module_protocol_native. From PipeWire's point-of-view this module is just
+another module.
+
 \section sec_config Configuration Files
 
 On startup, the daemon reads a configuration file to configure itself.
@@ -17,11 +69,13 @@ The environment variables `PIPEWIRE_CONFIG_DIR`, `PIPEWIRE_CONFIG_PREFIX`
 and `PIPEWIRE_CONFIG_NAME` can be used to specify an alternative config
 directory, subdirectory and filename, respectively.
 
-\subsection subsec Configuration File Format
+\subsection sec_config_format Configuration File Format
 
-PipeWire's configuration file format resembles JSON. Unlike true JSON, no
-trailing commas are required and comments starting with `#` are permitted as
-shown below.
+PipeWire's configuration file format is JSON. In addition to true JSON,
+PipeWire also understands a more compact JSON representation where
+`"` can be omitted around strings, no trailing commas are required and
+`:` or `=` can be used to separate object keys from their values.
+Also, `#` can be used to start a comment until the end of the line.
 
 The configuration file format is grouped into sections.  A section is
 either a dictionary (`{}`) or an array (`[]`). Dictionary and array entries
@@ -89,24 +143,5 @@ more debugging. The format is:
 - `<category>`:  Specifies a string category to enable. Many categories
      	  can be separated by commas. Current categories are:
   + `connection`: to log connection messages
-
-
-\subsection sec_errors Error reporting
-
-Functions return either NULL with errno set or a negative int error
-code when an error occurs. Error codes are used from the SPA plugin
-library on which PipeWire is built.
-
-Some functions might return asynchronously. The error code for such
-functions is positive and SPA_RESULT_IS_ASYNC() will return true.
-SPA_RESULT_ASYNC_SEQ() can be used to get the unique sequence number
-associated with the async operation.
-
-The object returning the async result code will have some way to
-signal the completion of the async operation (with, for example, a
-callback). The sequence number can be used to see which operation
-completed.
-
-
 
 */

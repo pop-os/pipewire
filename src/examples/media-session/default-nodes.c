@@ -43,6 +43,9 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_default_nodes Media Session Module: Default Nodes
+ */
+
 #define NAME		"default-nodes"
 #define SESSION_KEY	"default-nodes"
 #define PREFIX		"default."
@@ -194,6 +197,7 @@ static int metadata_property(void *object, uint32_t subject,
 
 			if (value == NULL) {
 				def->value = SPA_ID_INVALID;
+				changed += pw_properties_set(impl->properties, key, NULL);
 			} else {
 				if (json_object_find(value, "name", name, sizeof(name)) < 0)
 					return 0;

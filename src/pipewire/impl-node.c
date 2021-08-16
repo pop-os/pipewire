@@ -802,21 +802,12 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 	return 0;
 }
 
-static uint32_t flp2(uint32_t x)
-{
-	x = x | (x >> 1);
-	x = x | (x >> 2);
-	x = x | (x >> 4);
-	x = x | (x >> 8);
-	x = x | (x >> 16);
-	return x - (x >> 1);
-}
-
 static void check_properties(struct pw_impl_node *node)
 {
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	struct pw_context *context = node->context;
 	const char *str, *recalc_reason = NULL;
+	struct spa_fraction frac;
 	bool driver;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
@@ -831,20 +822,14 @@ static void check_properties(struct pw_impl_node *node)
 		pw_log_debug(NAME" %p: name '%s'", node, node->name);
 	}
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_PAUSE_ON_IDLE)))
-		impl->pause_on_idle = pw_properties_parse_bool(str);
-	else
-		impl->pause_on_idle = true;
+	str = pw_properties_get(node->properties, PW_KEY_NODE_PAUSE_ON_IDLE);
+	impl->pause_on_idle = str ? pw_properties_parse_bool(str) : true;
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_CACHE_PARAMS)))
-		impl->cache_params = pw_properties_parse_bool(str);
-	else
-		impl->cache_params = true;
+	str = pw_properties_get(node->properties, PW_KEY_NODE_CACHE_PARAMS);
+	impl->cache_params = str ? pw_properties_parse_bool(str) : true;
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_DRIVER)))
-		driver = pw_properties_parse_bool(str);
-	else
-		driver = false;
+	str = pw_properties_get(node->properties, PW_KEY_NODE_DRIVER);
+	driver = str ? pw_properties_parse_bool(str) : false;
 
 	if (node->driver != driver) {
 		pw_log_debug(NAME" %p: driver %d -> %d", node, node->driver, driver);
@@ -869,53 +854,53 @@ static void check_properties(struct pw_impl_node *node)
 		recalc_reason = "group changed";
 	}
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS)))
-		node->want_driver = pw_properties_parse_bool(str);
-	else
-		node->want_driver = false;
+	str = pw_properties_get(node->properties, PW_KEY_NODE_WANT_DRIVER);
+	node->want_driver = str ? pw_properties_parse_bool(str) : false;
+
+	str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS);
+	node->always_process = str ? pw_properties_parse_bool(str) : false;
+
+	if (node->always_process)
+		node->want_driver = true;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_LATENCY))) {
-		uint32_t num, denom;
-                if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
-			uint32_t quantum_size;
-
-			node->latency = SPA_FRACTION(num, denom);
-			quantum_size = (num * context->settings.clock_rate / denom);
-			if (context->settings.clock_power_of_two_quantum)
-				quantum_size = flp2(quantum_size);
-
-			if (quantum_size != node->quantum_size) {
-				pw_log_debug(NAME" %p: latency '%s' quantum %u/%u",
-						node, str, quantum_size, context->settings.clock_rate);
-				pw_log_info("(%s-%u) latency:%s ->quantum %u/%u", node->name,
-						node->info.id, str, quantum_size,
-						context->settings.clock_rate);
-				node->quantum_size = quantum_size;
+                if (sscanf(str, "%u/%u", &frac.num, &frac.denom) == 2 && frac.denom != 0) {
+			if (node->latency.num != frac.num || node->latency.denom != frac.denom) {
+				pw_log_info("(%s-%u) latency:%u/%u -> %u/%u", node->name,
+						node->info.id, node->latency.num,
+						node->latency.denom, frac.num, frac.denom);
+				node->latency = frac;
 				recalc_reason = "quantum changed";
 			}
 		}
 	}
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_MAX_LATENCY))) {
-		uint32_t num, denom;
-                if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {
-			uint32_t max_quantum_size;
-
-			node->max_latency = SPA_FRACTION(num, denom);
-			max_quantum_size = (num * context->settings.clock_rate / denom);
-			if (context->settings.clock_power_of_two_quantum)
-				max_quantum_size = flp2(max_quantum_size);
-
-			if (max_quantum_size != node->max_quantum_size) {
-				pw_log_debug(NAME" %p: max latency '%s' quantum %u/%u",
-						node, str, max_quantum_size, context->settings.clock_rate);
-				pw_log_info("(%s-%u) max latency:%s ->quantum %u/%u", node->name,
-						node->info.id, str, max_quantum_size,
-						context->settings.clock_rate);
-				node->max_quantum_size = max_quantum_size;
+                if (sscanf(str, "%u/%u", &frac.num, &frac.denom) == 2 && frac.denom != 0) {
+			if (node->max_latency.num != frac.num || node->max_latency.denom != frac.denom) {
+				pw_log_info("(%s-%u) max-latency:%u/%u -> %u/%u", node->name,
+						node->info.id, node->max_latency.num,
+						node->max_latency.denom, frac.num, frac.denom);
+				node->max_latency = frac;
 				recalc_reason = "max quantum changed";
 			}
 		}
 	}
+	str = pw_properties_get(node->properties, PW_KEY_NODE_LOCK_QUANTUM);
+	node->lock_quantum = str ? pw_properties_parse_bool(str) : false;
+
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_RATE))) {
+                if (sscanf(str, "%u/%u", &frac.num, &frac.denom) == 2 && frac.denom != 0) {
+			if (node->rate.num != frac.num || node->rate.denom != frac.denom) {
+				pw_log_info("(%s-%u) rate:%u/%u -> %u/%u", node->name,
+						node->info.id, node->rate.num,
+						node->rate.denom, frac.num, frac.denom);
+				node->rate = frac;
+				recalc_reason = "node rate changed";
+			}
+		}
+	}
+	str = pw_properties_get(node->properties, PW_KEY_NODE_LOCK_RATE);
+	node->lock_rate = str ? pw_properties_parse_bool(str) : false;
 
 	pw_log_debug(NAME" %p: driver:%d recalc:%s active:%d", node, node->driver,
 			recalc_reason, node->active);
@@ -952,7 +937,7 @@ static void dump_states(struct pw_impl_node *driver)
 			continue;
 		if (a->status == PW_NODE_ACTIVATION_TRIGGERED ||
 		    a->status == PW_NODE_ACTIVATION_AWAKE) {
-			pw_log_warn("(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s",
+			pw_log_info("(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s",
 				t->node->name, t->node->info.id,
 				(uint32_t)(cl->rate.num * cl->duration), cl->rate.denom,
 				cl->position, str_status(a->status));
@@ -1089,7 +1074,7 @@ static void node_on_fd_events(struct spa_source *source)
 		if (SPA_UNLIKELY(spa_system_eventfd_read(data_system, this->source.fd, &cmd) < 0))
 			pw_log_warn(NAME" %p: read failed %m", this);
 		else if (SPA_UNLIKELY(cmd > 1))
-			pw_log_warn("(%s-%u) client missed %"PRIu64" wakeups",
+			pw_log_info("(%s-%u) client missed %"PRIu64" wakeups",
 				this->name, this->info.id, cmd - 1);
 
 		pw_log_trace_fp(NAME" %p: got process", this);
@@ -1655,7 +1640,7 @@ static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_po
 		} else {
 			rate = SPA_FRACTION(0,0);
 		}
-		pw_log_error("(%s-%d) XRun! rate:%u/%u count:%u time:%"PRIu64
+		pw_log_info("(%s-%d) XRun! rate:%u/%u count:%u time:%"PRIu64
 				" delay:%"PRIu64" max:%"PRIu64,
 				this->name, this->info.id,
 				rate.num, rate.denom, a->xrun_count,

@@ -182,12 +182,16 @@ void pw_rtkit_bus_free(struct pw_rtkit_bus *system_bus)
 
 static pid_t _gettid(void)
 {
-#ifndef __FreeBSD__
+#if defined(HAVE_GETTID)
 	return (pid_t) gettid();
-#else
+#elif defined(__linux__)
+	return syscall(SYS_gettid);
+#elif defined(__FreeBSD__)
 	long pid;
 	thr_self(&pid);
 	return (pid_t)pid;
+#else
+#error "No gettid impl"
 #endif
 }
 
@@ -518,7 +522,7 @@ static void *custom_start(void *data)
 	struct impl *impl = this->impl;
 
 	pthread_mutex_lock(&impl->lock);
-	this->pid = gettid();
+	this->pid = _gettid();
 	pthread_cond_broadcast(&impl->cond);
 	pthread_mutex_unlock(&impl->lock);
 
@@ -592,7 +596,7 @@ static pid_t impl_gettid(struct impl *impl, pthread_t pt)
 	if ((thr = find_thread_by_pt(impl, pt)) != NULL)
 		pid = thr->pid;
 	else
-		pid = getpid();
+		pid = _gettid();
 	pthread_mutex_unlock(&impl->lock);
 
 	return pid;

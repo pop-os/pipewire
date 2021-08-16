@@ -47,6 +47,8 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_bluez_endpoint Media Session Module: BlueZ Endpoint
+ */
 #define NAME		"bluez-endpoint"
 #define SESSION_KEY	"bluez-endpoint"
 
@@ -616,7 +618,7 @@ handle_device(struct impl *impl, struct sm_object *obj)
 
 	pw_log_debug(NAME" %p: device "PW_KEY_MEDIA_CLASS":%s api:%s", impl, media_class, str);
 
-	if (strstr(media_class, "Audio/") != media_class)
+	if (!spa_strstartswith(media_class, "Audio/"))
 		return 0;
 	if (!spa_streq(str, "bluez5"))
 		return 0;

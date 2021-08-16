@@ -152,6 +152,7 @@ struct object {
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
 	struct spa_hook object_listener;
+	unsigned int removing:1;
 };
 
 struct midi_buffer {
@@ -193,6 +194,7 @@ struct mix {
 	struct spa_list link;
 	struct spa_list port_link;
 	uint32_t id;
+	uint32_t peer_id;
 	struct port *port;
 
 	struct spa_io_buffers *io;
@@ -346,6 +348,7 @@ struct client {
 	uint32_t buffer_frames;
 	struct spa_fraction latency;
 
+	struct spa_list mix;
 	struct spa_list free_mix;
 
 	uint32_t n_port_pool[2];
@@ -393,6 +396,10 @@ struct client {
 static int do_sync(struct client *client);
 
 #include "metadata.c"
+
+int pw_jack_match_rules(const char *rules, size_t size, const struct spa_dict *props,
+		int (*matched) (void *data, const char *action, const char *val, int len),
+		void *data);
 
 static void init_port_pool(struct client *c, enum spa_direction direction)
 {
@@ -451,6 +458,15 @@ static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port)
 	if (mix_id == SPA_ID_INVALID)
 		port->global_mix = mix;
 }
+static struct mix *find_mix_peer(struct client *c, uint32_t peer_id)
+{
+	struct mix *mix;
+	spa_list_for_each(mix, &c->mix, link) {
+		if (mix->peer_id == peer_id)
+			return mix;
+	}
+	return NULL;
+}
 
 static struct mix *find_mix(struct client *c, struct port *port, uint32_t mix_id)
 {
@@ -480,6 +496,7 @@ static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_
 	}
 	mix = spa_list_first(&c->free_mix, struct mix, link);
 	spa_list_remove(&mix->link);
+	spa_list_append(&c->mix, &mix->link);
 
 	spa_list_append(&port->mix, &mix->port_link);
 
@@ -515,6 +532,7 @@ static void free_mix(struct client *c, struct mix *mix)
 	spa_list_remove(&mix->port_link);
 	if (mix->id == SPA_ID_INVALID)
 		mix->port->global_mix = NULL;
+	spa_list_remove(&mix->link);
 	spa_list_append(&c->free_mix, &mix->link);
 }
 
@@ -588,7 +606,7 @@ static struct object *find_node(struct client *c, const char *name)
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if (spa_streq(o->node.name, name))
+		if (!o->removing && spa_streq(o->node.name, name))
 			return o;
 	}
 	return NULL;
@@ -718,7 +736,7 @@ void jack_get_version(int *major_ptr, int *minor_ptr, int *micro_ptr, int *proto
 
 #define do_callback(c,callback,...)				\
 ({								\
-	if (c->callback) {					\
+	if (c->callback && c->active) {				\
 		pw_thread_loop_unlock(c->context.loop);		\
 		pthread_mutex_lock(&c->rt_lock);		\
 		c->callback(__VA_ARGS__);			\
@@ -2248,6 +2266,35 @@ static int client_node_set_activation(void *object,
 	return res;
 }
 
+static int client_node_port_set_mix_info(void *object,
+                                  enum spa_direction direction,
+                                  uint32_t port_id,
+                                  uint32_t mix_id,
+                                  uint32_t peer_id,
+                                  const struct spa_dict *props)
+{
+	struct client *c = (struct client *) object;
+	struct port *p = GET_PORT(c, direction, port_id);
+	struct mix *mix;
+	int res = 0;
+
+	if (p == NULL || !p->valid) {
+		res = -EINVAL;
+		goto exit;
+	}
+
+	if ((mix = ensure_mix(c, p, mix_id)) == NULL) {
+		res = -ENOMEM;
+		goto exit;
+	}
+	mix->peer_id = peer_id;
+
+exit:
+	if (res < 0)
+		pw_proxy_error((struct pw_proxy*)c->node, res, spa_strerror(res));
+	return res;
+}
+
 static const struct pw_client_node_events client_node_events = {
 	PW_VERSION_CLIENT_NODE_EVENTS,
 	.transport = client_node_transport,
@@ -2261,6 +2308,7 @@ static const struct pw_client_node_events client_node_events = {
 	.port_use_buffers = client_node_port_use_buffers,
 	.port_set_io = client_node_port_set_io,
 	.set_activation = client_node_set_activation,
+	.port_set_mix_info = client_node_port_set_mix_info,
 };
 
 static jack_port_type_id_t string_to_type(const char *port_type)
@@ -2529,7 +2577,7 @@ static void registry_event_global(void *data, uint32_t id,
 		node_id = atoi(str);
 
 		if ((str = spa_dict_lookup(props, PW_KEY_PORT_EXTRA)) != NULL &&
-		    strstr(str, "jack:flags:") == str)
+		    spa_strstartswith(str, "jack:flags:"))
 			flags = atoi(str+11);
 
 		if ((str = spa_dict_lookup(props, PW_KEY_PORT_NAME)) == NULL)
@@ -2713,6 +2761,8 @@ static void registry_event_global(void *data, uint32_t id,
 		break;
 
 	case INTERFACE_Link:
+		pw_log_info(NAME" %p: link %u %d -> %d added", c, o->id,
+				o->port_link.src, o->port_link.dst);
 		do_callback(c, connect_callback,
 				o->port_link.src, o->port_link.dst, 1, c->connect_arg);
 		graph_changed = true;
@@ -2743,6 +2793,7 @@ static void registry_event_global_remove(void *object, uint32_t id)
 		pw_proxy_destroy(o->proxy);
 		o->proxy = NULL;
 	}
+	o->removing = true;
 
 	switch (o->type) {
 	case INTERFACE_Node:
@@ -2784,6 +2835,7 @@ static void registry_event_global_remove(void *object, uint32_t id)
 	/* JACK clients expect the objects to hang around after
 	 * they are unregistered. We keep the memory around for that
 	 * reason but reuse it when we can. */
+	o->removing = false;
 	unlink_object(c, o);
 	recycle_object(c, o);
 	/* we keep the object available with the id because jack clients
@@ -2817,6 +2869,15 @@ static void varargs_parse (struct client *c, jack_options_t options, va_list ap)
 				c->session_id = id;
 		}
 	}
+}
+
+
+static int execute_match(void *data, const char *action, const char *val, int len)
+{
+	struct client *client = data;
+	if (spa_streq(action, "update-props"))
+		pw_properties_update_string(client->props, val, len);
+	return 1;
 }
 
 SPA_EXPORT
@@ -2883,6 +2944,16 @@ jack_client_t * jack_client_open (const char *client_name,
         if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
 		pw_properties_update_string(client->props, str, strlen(str));
 
+
+	if ((str = pw_context_get_conf_section(client->context.context,
+					"jack.rules")) != NULL) {
+		const struct pw_properties *p =
+			pw_context_get_properties(client->context.context);
+		if (p != NULL)
+			pw_jack_match_rules(str, strlen(str), &p->dict,
+				execute_match, client);
+	}
+
 	if ((str = pw_properties_get(client->props, "jack.merge-monitor")) != NULL)
 		client->merge_monitor = pw_properties_parse_bool(str);
 	if ((str = pw_properties_get(client->props, "jack.short-name")) != NULL)
@@ -2932,6 +3003,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	client->sample_rate = (uint32_t)-1;
 	client->latency = SPA_FRACTION(-1, -1);
 
+        spa_list_init(&client->mix);
         spa_list_init(&client->free_mix);
 
 	init_port_pool(client, SPA_DIRECTION_INPUT);
@@ -3900,25 +3972,34 @@ done:
 	return res;
 }
 
+static struct buffer *get_mix_buffer(struct mix *mix)
+{
+	struct spa_io_buffers *io;
+
+	io = mix->io;
+	if (io == NULL ||
+	    io->status != SPA_STATUS_HAVE_DATA ||
+	    io->buffer_id >= mix->n_buffers)
+		return NULL;
+
+	return &mix->buffers[io->buffer_id];
+}
+
 static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	struct buffer *b;
-	struct spa_io_buffers *io;
 	int layer = 0;
 	void *ptr = NULL;
 
 	spa_list_for_each(mix, &p->mix, port_link) {
 		pw_log_trace_fp(NAME" %p: port %p mix %d.%d get buffer %d",
 				p->client, p, p->id, mix->id, frames);
-		io = mix->io;
-		if (io == NULL ||
-		    io->status != SPA_STATUS_HAVE_DATA ||
-		    io->buffer_id >= mix->n_buffers)
+
+		if ((b = get_mix_buffer(mix)) == NULL)
 			continue;
 
-		io->status = SPA_STATUS_NEED_DATA;
-		b = &mix->buffers[io->buffer_id];
+		mix->io->status = SPA_STATUS_NEED_DATA;
 		if (layer++ == 0)
 			ptr = b->datas[0].data;
 		else  {
@@ -4006,8 +4087,17 @@ void * jack_port_get_buffer (jack_port_t *port, jack_nframes_t frames)
 
 	spa_return_val_if_fail(o != NULL, NULL);
 
-	if ((p = o->port.port) == NULL)
-		return NULL;
+	if ((p = o->port.port) == NULL) {
+		struct mix *mix;
+		struct buffer *b;
+
+		if ((mix = find_mix_peer(o->client, o->id)) == NULL)
+			return NULL;
+		if ((b = get_mix_buffer(mix)) == NULL)
+			return NULL;
+		pw_log_trace("peer mix: %p %d", mix, mix->peer_id);
+		return b->datas[0].data;
+	}
 
 	ptr = p->get_buffer(p, frames);
 	pw_log_trace_fp(NAME" %p: port %p buffer %p empty:%u", p->client, p, ptr, p->empty_out);

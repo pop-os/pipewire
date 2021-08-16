@@ -42,6 +42,9 @@
 
 #include "media-session.h"
 
+/** \page page_media_session_module_policy_endpoint Media Session Module: Policy Endpoint
+ */
+
 #define NAME "policy-ep"
 #define SESSION_KEY	"policy-endpoint"
 
@@ -130,14 +133,14 @@ handle_endpoint(struct impl *impl, struct sm_object *object)
 	ep->enabled = true;
 	spa_list_append(&impl->endpoint_list, &ep->link);
 
-	if (strstr(media_class, "Stream/") == media_class) {
+	if (spa_strstartswith(media_class, "Stream/")) {
 		media_class += strlen("Stream/");
 
-		if (strstr(media_class, "Output/") == media_class) {
+		if (spa_strstartswith(media_class, "Output/")) {
 			direction = PW_DIRECTION_OUTPUT;
 			media_class += strlen("Output/");
 		}
-		else if (strstr(media_class, "Input/") == media_class) {
+		else if (spa_strstartswith(media_class, "Input/")) {
 			direction = PW_DIRECTION_INPUT;
 			media_class += strlen("Input/");
 		}
@@ -151,11 +154,11 @@ handle_endpoint(struct impl *impl, struct sm_object *object)
 	}
 	else {
 		const char *media;
-		if (strstr(media_class, "Audio/") == media_class) {
+		if (spa_strstartswith(media_class, "Audio/")) {
 			media_class += strlen("Audio/");
 			media = "Audio";
 		}
-		else if (strstr(media_class, "Video/") == media_class) {
+		else if (spa_strstartswith(media_class, "Video/")) {
 			media_class += strlen("Video/");
 			media = "Video";
 		}

@@ -60,19 +60,21 @@ int get_runtime_dir(char *buf, size_t buflen, const char *dir)
 	runtime_dir = getenv("PULSE_RUNTIME_PATH");
 	if (runtime_dir == NULL)
 		runtime_dir = getenv("XDG_RUNTIME_DIR");
-	if (runtime_dir == NULL)
-		runtime_dir = getenv("HOME");
+
 	if (runtime_dir == NULL) {
-		struct passwd pwd, *result = NULL;
-		char buffer[4096];
-		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
-			runtime_dir = result ? result->pw_dir : NULL;
+		pw_log_error(NAME": could not find a suitable runtime directory in"
+				"$PULSE_RUNTIME_PATH and $XDG_RUNTIME_DIR");
+		return -ENOENT;
 	}
-	size = snprintf(buf, buflen, "%s/%s", runtime_dir, dir) + 1;
-	if (size > (int) buflen) {
+
+	size = snprintf(buf, buflen, "%s/%s", runtime_dir, dir);
+	if (size < 0)
+		return -errno;
+	if ((size_t) size >= buflen) {
 		pw_log_error(NAME": path %s/%s too long", runtime_dir, dir);
 		return -ENAMETOOLONG;
 	}
+
 	if (stat(buf, &stat_buf) < 0) {
 		res = -errno;
 		if (res != -ENOENT) {
@@ -85,20 +87,20 @@ int get_runtime_dir(char *buf, size_t buflen, const char *dir)
 			return res;
 		}
 		pw_log_info(NAME": created %s", buf);
-	} else if ((stat_buf.st_mode & S_IFMT) != S_IFDIR) {
+	} else if (!S_ISDIR(stat_buf.st_mode)) {
 		pw_log_error(NAME": %s is not a directory", buf);
 		return -ENOTDIR;
 	}
 	return 0;
 }
 
-int check_flatpak(struct client *client, int pid)
+int check_flatpak(struct client *client, pid_t pid)
 {
 	char root_path[2048];
 	int root_fd, info_fd, res;
 	struct stat stat_buf;
 
-	sprintf(root_path, "/proc/%u/root", pid);
+	sprintf(root_path, "/proc/%ld/root", (long) pid);
 	root_fd = openat(AT_FDCWD, root_path, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC | O_NOCTTY);
 	if (root_fd == -1) {
 		res = -errno;
@@ -138,7 +140,7 @@ int check_flatpak(struct client *client, int pid)
 	return 1;
 }
 
-int get_client_pid(struct client *client, int client_fd)
+pid_t get_client_pid(struct client *client, int client_fd)
 {
 	socklen_t len;
 #if defined(__linux__)
@@ -184,7 +186,7 @@ int create_pid_file(void) {
 	if ((res = get_runtime_dir(pid_file, sizeof(pid_file), "pulse")) < 0)
 		return res;
 
-	if (strlen(pid_file) > PATH_MAX - 5) {
+	if (strlen(pid_file) > PATH_MAX - sizeof("/pid")) {
 		pw_log_error(NAME": path too long: %s/pid", pid_file);
 		return -ENAMETOOLONG;
 	}

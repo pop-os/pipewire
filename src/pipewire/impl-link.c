@@ -89,6 +89,7 @@ static void info_changed(struct pw_impl_link *link)
 
 static void link_update_state(struct pw_impl_link *link, enum pw_link_state state, int res, char *error)
 {
+	struct impl *impl = SPA_CONTAINER_OF(link, struct impl, this);
 	enum pw_link_state old = link->info.state;
 
 	link->info.state = state;
@@ -133,6 +134,11 @@ static void link_update_state(struct pw_impl_link *link, enum pw_link_state stat
 		link->prepared = false;
 		link->preparing = false;
 		pw_context_recalc_graph(link->context, "link unprepared");
+	} else if (state == PW_LINK_STATE_INIT) {
+		link->prepared = false;
+		link->preparing = false;
+		pw_work_queue_cancel(impl->work, link->output, SPA_ID_INVALID);
+		pw_work_queue_cancel(impl->work, link->input, SPA_ID_INVALID);
 	}
 }
 
@@ -673,7 +679,12 @@ int pw_impl_link_prepare(struct pw_impl_link *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 
-	pw_log_debug(NAME" %p: prepare prepared:%d busy:%d", this, this->prepared, this->preparing);
+	pw_log_debug(NAME" %p: prepared:%d preparing:%d in_active:%d out_active:%d",
+			this, this->prepared, this->preparing,
+			impl->inode->active, impl->onode->active);
+
+	if (!impl->inode->active || !impl->onode->active)
+		return 0;
 
 	if (this->preparing || this->prepared)
 		return 0;
@@ -766,10 +777,12 @@ error_resource:
 	return -errno;
 }
 
-static void port_state_changed(struct pw_impl_link *this, struct pw_impl_port *port, struct pw_impl_port *other,
-			enum pw_impl_port_state state, const char *error)
+static void port_state_changed(struct pw_impl_link *this, struct pw_impl_port *port,
+		struct pw_impl_port *other, enum pw_impl_port_state old,
+		enum pw_impl_port_state state, const char *error)
 {
-	pw_log_debug(NAME" %p: port %p state %d", this, port, state);
+	pw_log_debug(NAME" %p: port %p old:%d -> state:%d prepared:%d preparing:%d",
+			this, port, old, state, this->prepared, this->preparing);
 
 	switch (state) {
 	case PW_IMPL_PORT_STATE_ERROR:
@@ -777,13 +790,13 @@ static void port_state_changed(struct pw_impl_link *this, struct pw_impl_port *p
 		break;
 	case PW_IMPL_PORT_STATE_INIT:
 	case PW_IMPL_PORT_STATE_CONFIGURE:
-		if (this->prepared) {
+		if (this->prepared || state < old) {
 			this->prepared = false;
 			link_update_state(this, PW_LINK_STATE_INIT, 0, NULL);
 		}
 		break;
 	case PW_IMPL_PORT_STATE_READY:
-		if (this->prepared) {
+		if (this->prepared || state < old) {
 			this->prepared = false;
 			link_update_state(this, PW_LINK_STATE_NEGOTIATING, 0, NULL);
 		}
@@ -830,7 +843,7 @@ static void input_port_state_changed(void *data, enum pw_impl_port_state old,
 {
 	struct impl *impl = data;
 	struct pw_impl_link *this = &impl->this;
-	port_state_changed(this, this->input, this->output, state, error);
+	port_state_changed(this, this->input, this->output, old, state, error);
 }
 
 static void output_port_param_changed(void *data, uint32_t id)
@@ -845,7 +858,7 @@ static void output_port_state_changed(void *data, enum pw_impl_port_state old,
 {
 	struct impl *impl = data;
 	struct pw_impl_link *this = &impl->this;
-	port_state_changed(this, this->output, this->input, state, error);
+	port_state_changed(this, this->output, this->input, old, state, error);
 }
 
 static void input_port_latency_changed(void *data)
@@ -903,19 +916,10 @@ static void output_node_result(void *data, int seq, int res, uint32_t type, cons
 	node_result(impl, port, seq, res, type, result);
 }
 
-static void check_prepare(struct pw_impl_link *this)
-{
-	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
-	pw_log_debug(NAME" %p: input active:%d output active:%d", impl,
-			impl->inode->active, impl->onode->active);
-	if (impl->inode->active && impl->onode->active)
-		pw_impl_link_prepare(this);
-}
-
 static void node_active_changed(void *data, bool active)
 {
 	struct impl *impl = data;
-	check_prepare(&impl->this);
+	pw_impl_link_prepare(&impl->this);
 }
 
 static const struct pw_impl_node_events input_node_events = {
@@ -1144,6 +1148,9 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	impl->io = SPA_IO_BUFFERS_INIT;
 
+	this->rt.out_mix.peer_id = input->global->id;
+	this->rt.in_mix.peer_id = output->global->id;
+
 	pw_impl_port_init_mix(output, &this->rt.out_mix);
 	pw_impl_port_init_mix(input, &this->rt.in_mix);
 
@@ -1287,7 +1294,7 @@ int pw_impl_link_register(struct pw_impl_link *link,
 	pw_global_add_listener(link->global, &link->global_listener, &global_events, link);
 	pw_global_register(link->global);
 
-	check_prepare(link);
+	pw_impl_link_prepare(link);
 
 	return 0;
 
