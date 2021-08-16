@@ -33,6 +33,13 @@
 #define U8_TO_F32(v)	((((uint8_t)(v)) * (1.0f / U8_OFFS)) - 1.0)
 #define F32_TO_U8(v)	(uint8_t)((SPA_CLAMP(v, -1.0f, 1.0f) * U8_SCALE) + U8_OFFS)
 
+#define S8_MIN		-127
+#define S8_MAX		127
+#define S8_MAX_F	127.0f
+#define S8_SCALE	127.0f
+#define S8_TO_F32(v)	(((int8_t)(v)) * (1.0f / S8_SCALE))
+#define F32_TO_S8(v)	(int8_t)(SPA_CLAMP(v, -1.0f, 1.0f) * S8_SCALE)
+
 #define S16_MIN		-32767
 #define S16_MAX		32767
 #define S16_MAX_F	32767.0f
@@ -52,6 +59,9 @@
 
 #define S32_TO_F32(v)	S24_TO_F32((v) >> 8)
 #define F32_TO_S32(v)	(F32_TO_S24(v) << 8)
+
+#define S24_32_TO_F32(v)	S32_TO_F32((v)<<8)
+#define F32_TO_S24_32(v)	F32_TO_S24(v)
 
 static inline int32_t read_s24(const void *src)
 {
@@ -140,6 +150,10 @@ DEFINE_FUNCTION(u8d_to_f32d, c);
 DEFINE_FUNCTION(u8_to_f32, c);
 DEFINE_FUNCTION(u8_to_f32d, c);
 DEFINE_FUNCTION(u8d_to_f32, c);
+DEFINE_FUNCTION(s8d_to_f32d, c);
+DEFINE_FUNCTION(s8_to_f32, c);
+DEFINE_FUNCTION(s8_to_f32d, c);
+DEFINE_FUNCTION(s8d_to_f32, c);
 DEFINE_FUNCTION(s16d_to_f32d, c);
 DEFINE_FUNCTION(s16_to_f32, c);
 DEFINE_FUNCTION(s16_to_f32d, c);
@@ -161,6 +175,10 @@ DEFINE_FUNCTION(f32d_to_u8d, c);
 DEFINE_FUNCTION(f32_to_u8, c);
 DEFINE_FUNCTION(f32_to_u8d, c);
 DEFINE_FUNCTION(f32d_to_u8, c);
+DEFINE_FUNCTION(f32d_to_s8d, c);
+DEFINE_FUNCTION(f32_to_s8, c);
+DEFINE_FUNCTION(f32_to_s8d, c);
+DEFINE_FUNCTION(f32d_to_s8, c);
 DEFINE_FUNCTION(f32d_to_s16d, c);
 DEFINE_FUNCTION(f32_to_s16, c);
 DEFINE_FUNCTION(f32_to_s16d, c);
@@ -173,6 +191,7 @@ DEFINE_FUNCTION(f32d_to_s24d, c);
 DEFINE_FUNCTION(f32_to_s24, c);
 DEFINE_FUNCTION(f32_to_s24d, c);
 DEFINE_FUNCTION(f32d_to_s24, c);
+DEFINE_FUNCTION(f32d_to_s24s, c);
 DEFINE_FUNCTION(f32d_to_s24_32d, c);
 DEFINE_FUNCTION(f32_to_s24_32, c);
 DEFINE_FUNCTION(f32_to_s24_32d, c);
@@ -217,3 +236,5 @@ DEFINE_FUNCTION(f32d_to_s16_4, avx2);
 DEFINE_FUNCTION(f32d_to_s16_2, avx2);
 DEFINE_FUNCTION(f32d_to_s16, avx2);
 #endif
+
+#undef DEFINE_FUNCTION

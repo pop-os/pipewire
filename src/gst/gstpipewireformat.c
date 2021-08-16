@@ -28,6 +28,7 @@
 #include <gst/video/video.h>
 #include <gst/audio/audio.h>
 
+#include <spa/utils/string.h>
 #include <spa/utils/type.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/audio/format-utils.h>
@@ -188,7 +189,7 @@ find_media_types (const char *name)
 {
   int i;
   for (i = 0; media_type_map[i].name; i++) {
-    if (!strcmp (media_type_map[i].name, name))
+    if (spa_streq(media_type_map[i].name, name))
       return &media_type_map[i];
   }
   return NULL;
@@ -478,9 +479,9 @@ handle_audio_fields (ConvertData *d)
     for (i = 0; (v = get_nth_string (value, i)); i++) {
       enum spa_audio_layout layout;
 
-      if (!strcmp (v, "interleaved"))
+      if (spa_streq(v, "interleaved"))
         layout = SPA_AUDIO_LAYOUT_INTERLEAVED;
-      else if (!strcmp (v, "non-interleaved"))
+      else if (spa_streq(v, "non-interleaved"))
         layout = SPA_AUDIO_LAYOUT_NON_INTERLEAVED;
       else
         break;
@@ -577,7 +578,7 @@ convert_1 (ConvertData *d)
 
   spa_pod_builder_pop (&d->b, &f);
 
-  return SPA_MEMBER (d->b.data, 0, struct spa_pod);
+  return SPA_PTROFF (d->b.data, 0, struct spa_pod);
 }
 
 struct spa_pod *
@@ -884,8 +885,6 @@ gst_caps_from_format (const struct spa_pod *format)
       if ((prop = spa_pod_object_find_prop (obj, prop, SPA_FORMAT_AUDIO_channels))) {
         handle_int_prop (prop, "channels", res);
       }
-    }
-    else if (media_subtype == SPA_MEDIA_SUBTYPE_aac) {
     }
   }
   return res;

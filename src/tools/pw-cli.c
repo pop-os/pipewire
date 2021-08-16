@@ -33,16 +33,19 @@
 #endif
 #include <getopt.h>
 
+#define spa_debug(...) fprintf(stdout,__VA_ARGS__);fputc('\n', stdout)
+
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/debug/pod.h>
-#include <spa/debug/format.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/json.h>
 #include <spa/pod/builder.h>
 
 #include <pipewire/impl.h>
+#include <pipewire/i18n.h>
 
-#include <extensions/session-manager.h>
+#include <pipewire/extensions/session-manager.h>
 
 static const char WHITESPACE[] = " \t";
 
@@ -115,44 +118,21 @@ struct command {
 static int pw_split_ip(char *str, const char *delimiter, int max_tokens, char *tokens[])
 {
 	const char *state = NULL;
-	char *s;
-	size_t len;
+	char *s, *t;
+	size_t len, l2;
 	int n = 0;
 
-        s = (char *)pw_split_walk(str, delimiter, &len, &state);
-        while (s && n + 1 < max_tokens) {
+	s = (char *)pw_split_walk(str, delimiter, &len, &state);
+	while (s && n + 1 < max_tokens) {
+		t = (char*)pw_split_walk(str, delimiter, &l2, &state);
 		s[len] = '\0';
 		tokens[n++] = s;
-                s = (char*)pw_split_walk(str, delimiter, &len, &state);
-        }
-        if (s) {
-		tokens[n++] = s;
-        }
-        return n;
-}
-
-static struct pw_properties *parse_props(char *str)
-{
-	const char *state = NULL;
-	char *s, *p[3];
-	size_t len, n;
-	struct pw_properties *props = NULL;
-
-	while (true) {
-		s = (char *)pw_split_walk(str, WHITESPACE, &len, &state);
-		if (s == NULL)
-			break;
-
-		s[len] = '\0';
-		n = pw_split_ip(s, "=", 2, p);
-		if (n == 2) {
-			if (props == NULL)
-				props = pw_properties_new(p[0], p[1], NULL);
-			else
-				pw_properties_set(props, p[0], p[1]);
-		}
+		s = t;
+		len = l2;
 	}
-	return props;
+	if (s)
+		tokens[n++] = s;
+	return n;
 }
 
 static void print_properties(struct spa_dict *props, char mark, bool header)
@@ -222,7 +202,7 @@ static bool do_dump(struct data *data, const char *cmd, char *args, char **error
 
 #define DUMP_NAMES "Core|Module|Device|Node|Port|Factory|Client|Link|Session|Endpoint|EndpointStream"
 
-static struct command command_list[] = {
+static const struct command command_list[] = {
 	{ "help", "h", "Show this help", do_help },
 	{ "load-module", "lm", "Load a module. <module-name> [<module-arguments>]", do_load_module },
 	{ "unload-module", "um", "Unload a module. <module-var>", do_not_implemented },
@@ -377,8 +357,7 @@ static int destroy_global(void *obj, void *data)
 		return 0;
 
 	pw_map_remove(&global->rd->globals, global->id);
-	if (global->properties)
-		pw_properties_free(global->properties);
+	pw_properties_free(global->properties);
 	free(global->type);
 	free(global);
 	return 0;
@@ -436,7 +415,6 @@ static void on_core_destroy(void *_data)
 	spa_list_remove(&rd->link);
 
 	spa_hook_remove(&rd->core_listener);
-	spa_hook_remove(&rd->registry_listener);
 	spa_hook_remove(&rd->proxy_core_listener);
 
 	pw_map_remove(&data->vars, rd->id);
@@ -455,6 +433,7 @@ static const struct pw_proxy_events proxy_core_events = {
 
 static void remote_data_free(struct remote_data *rd)
 {
+	spa_hook_remove(&rd->registry_listener);
 	pw_proxy_destroy((struct pw_proxy*)rd->registry);
 	pw_core_disconnect(rd->core);
 }
@@ -681,7 +660,7 @@ static void info_link(struct proxy_data *pd)
 		printf("\n");
 	fprintf(stdout, "%c\tformat:\n", MARK_CHANGE(PW_LINK_CHANGE_MASK_FORMAT));
 	if (info->format)
-		spa_debug_format(2, NULL, info->format);
+		spa_debug_pod(2, NULL, info->format);
 	else
 		fprintf(stdout, "\t\tnone\n");
 	print_properties(info->props, MARK_CHANGE(PW_LINK_CHANGE_MASK_PROPS), true);
@@ -815,10 +794,7 @@ static void event_param(void *object, int seq, uint32_t id,
 		fprintf(stdout, "remote %d object %d param %d index %d\n",
 				rd->id, data->global->id, id, index);
 
-	if (spa_pod_is_object_type(param, SPA_TYPE_OBJECT_Format))
-		spa_debug_format(2, NULL, param);
-	else
-		spa_debug_pod(2, NULL, param);
+	spa_debug_pod(2, NULL, param);
 }
 
 static const struct pw_node_events node_events = {
@@ -955,8 +931,7 @@ static const struct pw_device_events device_events = {
 static void session_info_free(struct pw_session_info *info)
 {
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -979,8 +954,7 @@ static void session_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -1004,8 +978,7 @@ static void endpoint_info_free(struct pw_endpoint_info *info)
 	free(info->name);
 	free(info->media_class);
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -1036,8 +1009,7 @@ static void endpoint_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -1060,8 +1032,7 @@ static void endpoint_stream_info_free(struct pw_endpoint_stream_info *info)
 {
 	free(info->name);
 	free(info->params);
-	if (info->props)
-		pw_properties_free ((struct pw_properties *)info->props);
+	pw_properties_free ((struct pw_properties *)info->props);
 	free(info);
 }
 
@@ -1086,8 +1057,7 @@ static void endpoint_stream_event_info(void *object,
 			info->n_params * sizeof(struct spa_param_info));
 	}
 	if (update->change_mask & PW_ENDPOINT_STREAM_CHANGE_MASK_PROPS) {
-		if (info->props)
-			pw_properties_free ((struct pw_properties *)info->props);
+		pw_properties_free ((struct pw_properties *)info->props);
 		info->props =
 			(struct spa_dict *) pw_properties_new_dict (update->props);
 	}
@@ -1154,57 +1124,57 @@ static bool bind_global(struct remote_data *rd, struct global *global, char **er
 	struct proxy_data *pd;
 	struct pw_proxy *proxy;
 
-	if (strcmp(global->type, PW_TYPE_INTERFACE_Core) == 0) {
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Core)) {
 		events = &core_events;
 		client_version = PW_VERSION_CORE;
 		destroy = (pw_destroy_t) pw_core_info_free;
 		info_func = info_core;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Module) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Module)) {
 		events = &module_events;
 		client_version = PW_VERSION_MODULE;
 		destroy = (pw_destroy_t) pw_module_info_free;
 		info_func = info_module;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Device) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device)) {
 		events = &device_events;
 		client_version = PW_VERSION_DEVICE;
 		destroy = (pw_destroy_t) pw_device_info_free;
 		info_func = info_device;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Node) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Node)) {
 		events = &node_events;
 		client_version = PW_VERSION_NODE;
 		destroy = (pw_destroy_t) pw_node_info_free;
 		info_func = info_node;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Port) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Port)) {
 		events = &port_events;
 		client_version = PW_VERSION_PORT;
 		destroy = (pw_destroy_t) pw_port_info_free;
 		info_func = info_port;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Factory) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Factory)) {
 		events = &factory_events;
 		client_version = PW_VERSION_FACTORY;
 		destroy = (pw_destroy_t) pw_factory_info_free;
 		info_func = info_factory;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Client) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {
 		events = &client_events;
 		client_version = PW_VERSION_CLIENT;
 		destroy = (pw_destroy_t) pw_client_info_free;
 		info_func = info_client;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Link) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Link)) {
 		events = &link_events;
 		client_version = PW_VERSION_LINK;
 		destroy = (pw_destroy_t) pw_link_info_free;
 		info_func = info_link;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Session) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Session)) {
 		events = &session_events;
 		client_version = PW_VERSION_SESSION;
 		destroy = (pw_destroy_t) session_info_free;
 		info_func = info_session;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_Endpoint) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint)) {
 		events = &endpoint_events;
 		client_version = PW_VERSION_ENDPOINT;
 		destroy = (pw_destroy_t) endpoint_info_free;
 		info_func = info_endpoint;
-	} else if (strcmp(global->type, PW_TYPE_INTERFACE_EndpointStream) == 0) {
+	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_EndpointStream)) {
 		events = &endpoint_stream_events;
 		client_version = PW_VERSION_ENDPOINT_STREAM;
 		destroy = (pw_destroy_t) endpoint_stream_info_free;
@@ -1280,7 +1250,7 @@ static bool do_info(struct data *data, const char *cmd, char *args, char **error
 		*error = spa_aprintf("%s <object-id>|all", cmd);
 		return false;
 	}
-	if (strcmp(a[0], "all") == 0) {
+	if (spa_streq(a[0], "all")) {
 		pw_map_for_each(&rd->globals, do_global_info_all, NULL);
 	}
 	else {
@@ -1311,13 +1281,15 @@ static bool do_create_device(struct data *data, const char *cmd, char *args, cha
 		return false;
 	}
 	if (n == 2)
-		props = parse_props(a[1]);
+		props = pw_properties_new_string(a[1]);
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Device,
 					    PW_VERSION_DEVICE,
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
+
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1348,13 +1320,15 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 	if (n == 2)
-		props = parse_props(a[1]);
+		props = pw_properties_new_string(a[1]);
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Node,
 					    PW_VERSION_NODE,
 					    props ? &props->dict : NULL,
 					    sizeof(struct proxy_data));
+
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1409,14 +1383,18 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 	if (n == 5)
-		props = parse_props(a[4]);
+		props = pw_properties_new_string(a[4]);
 	else
 		props = pw_properties_new(NULL, NULL);
 
-	pw_properties_set(props, PW_KEY_LINK_OUTPUT_NODE, a[0]);
-	pw_properties_set(props, PW_KEY_LINK_OUTPUT_PORT, a[1]);
-	pw_properties_set(props, PW_KEY_LINK_INPUT_NODE, a[2]);
-	pw_properties_set(props, PW_KEY_LINK_INPUT_PORT, a[3]);
+	if (!spa_streq(a[0], "-"))
+		pw_properties_set(props, PW_KEY_LINK_OUTPUT_NODE, a[0]);
+	if (!spa_streq(a[1], "-"))
+		pw_properties_set(props, PW_KEY_LINK_OUTPUT_PORT, a[1]);
+	if (!spa_streq(a[2], "-"))
+		pw_properties_set(props, PW_KEY_LINK_INPUT_NODE, a[2]);
+	if (!spa_streq(a[3], "-"))
+		pw_properties_set(props, PW_KEY_LINK_INPUT_PORT, a[3]);
 
 	proxy = (struct pw_proxy*)pw_core_create_object(rd->core,
 					  "link-factory",
@@ -1424,6 +1402,8 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 					  PW_VERSION_LINK,
 					  props ? &props->dict : NULL,
 					  sizeof(struct proxy_data));
+
+	pw_properties_free(props);
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
@@ -1482,12 +1462,27 @@ static bool do_export_node(struct data *data, const char *cmd, char *args, char 
 	return false;
 }
 
+static const struct spa_type_info *find_type_info(const struct spa_type_info *info, const char *name)
+{
+	while (info && info->name) {
+                if (spa_streq(info->name, name))
+                        return info;
+                if (spa_streq(spa_debug_type_short_name(info->name), name))
+                        return info;
+                if (info->type != 0 && info->type == (uint32_t)atoi(name))
+                        return info;
+                info++;
+        }
+        return NULL;
+}
+
 static bool do_enum_params(struct data *data, const char *cmd, char *args, char **error)
 {
 	struct remote_data *rd = data->current;
 	char *a[2];
-        int n;
+	int n;
 	uint32_t id, param_id;
+	const struct spa_type_info *ti;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 2, a);
@@ -1497,7 +1492,12 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 	}
 
 	id = atoi(a[0]);
-	param_id = atoi(a[1]);
+	ti = find_type_info(spa_type_param, a[1]);
+	if (ti == NULL) {
+		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
+		return false;
+	}
+	param_id = ti->type;
 
 	global = pw_map_lookup(&rd->globals, id);
 	if (global == NULL) {
@@ -1509,16 +1509,16 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 			return false;
 	}
 
-	if (strcmp(global->type, PW_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Node))
 		pw_node_enum_params((struct pw_node*)global->proxy, 0,
 			param_id, 0, 0, NULL);
-	else if (strcmp(global->type, PW_TYPE_INTERFACE_Port) == 0)
+	else if (spa_streq(global->type, PW_TYPE_INTERFACE_Port))
 		pw_port_enum_params((struct pw_port*)global->proxy, 0,
 			param_id, 0, 0, NULL);
-	else if (strcmp(global->type, PW_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device))
 		pw_device_enum_params((struct pw_device*)global->proxy, 0,
 			param_id, 0, 0, NULL);
-	else if (strcmp(global->type, PW_TYPE_INTERFACE_Endpoint) == 0)
+	else if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint))
 		pw_endpoint_enum_params((struct pw_endpoint*)global->proxy, 0,
 			param_id, 0, 0, NULL);
 	else {
@@ -1529,20 +1529,6 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 	return true;
 }
 
-static const struct spa_type_info *find_type_info(const struct spa_type_info *info, const char *name)
-{
-	while (info && info->name) {
-                if (strcmp(info->name, name) == 0)
-                        return info;
-                if (strcmp(spa_debug_type_short_name(info->name), name) == 0)
-                        return info;
-                if (info->type != 0 && info->type == (uint32_t)atoi(name))
-                        return info;
-                info++;
-        }
-        return NULL;
-}
-
 static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 		const struct spa_type_info *info, struct spa_json *iter, const char *value, int len)
 {
@@ -1550,10 +1536,11 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 	char key[256];
 	struct spa_pod_frame f[1];
 	struct spa_json it[1];
-	int l;
+	int l, res;
 	const char *v;
+	uint32_t type;
 
-	if (spa_json_is_object(value, len)) {
+	if (spa_json_is_object(value, len) && info != NULL) {
 		if ((ti = spa_debug_type_find(NULL, info->parent)) == NULL)
 			return -EINVAL;
 
@@ -1564,24 +1551,33 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 			const struct spa_type_info *pi;
 			if ((l = spa_json_next(&it[0], &v)) <= 0)
 				break;
-			if ((pi = find_type_info(ti->values, key)) == NULL)
+			if ((pi = find_type_info(ti->values, key)) != NULL)
+				type = pi->type;
+			else if ((type = atoi(key)) == 0)
 				continue;
-			spa_pod_builder_prop(b, pi->type, 0);
-			json_to_pod(b, id, pi, &it[0], v, l);
+			spa_pod_builder_prop(b, type, 0);
+			if ((res = json_to_pod(b, id, pi, &it[0], v, l)) < 0)
+				return res;
 		}
 		spa_pod_builder_pop(b, &f[0]);
 	}
 	else if (spa_json_is_array(value, len)) {
-		spa_pod_builder_push_array(b, &f[0]);
+		if (info == NULL || info->parent == SPA_TYPE_Struct) {
+			spa_pod_builder_push_struct(b, &f[0]);
+		} else {
+			spa_pod_builder_push_array(b, &f[0]);
+			info = info->values;
+		}
 		spa_json_enter(iter, &it[0]);
 		while ((l = spa_json_next(&it[0], &v)) > 0)
-			json_to_pod(b, id, info->values, &it[0], v, l);
+			if ((res = json_to_pod(b, id, info, &it[0], v, l)) < 0)
+				return res;
 		spa_pod_builder_pop(b, &f[0]);
 	}
 	else if (spa_json_is_float(value, len)) {
 		float val = 0.0f;
 		spa_json_parse_float(value, len, &val);
-		switch (info->parent) {
+		switch (info ? info->parent : SPA_TYPE_Struct) {
 		case SPA_TYPE_Bool:
 			spa_pod_builder_bool(b, val >= 0.5f);
 			break;
@@ -1594,27 +1590,17 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 		case SPA_TYPE_Long:
 			spa_pod_builder_long(b, val);
 			break;
+		case SPA_TYPE_Struct:
+			if (spa_json_is_int(value, len))
+				spa_pod_builder_int(b, val);
+			else
+				spa_pod_builder_float(b, val);
+			break;
 		case SPA_TYPE_Float:
 			spa_pod_builder_float(b, val);
 			break;
 		case SPA_TYPE_Double:
 			spa_pod_builder_double(b, val);
-			break;
-		default:
-			spa_pod_builder_none(b);
-			break;
-		}
-	}
-	else if (spa_json_is_string(value, len)) {
-		char *val = alloca(len);
-		spa_json_parse_string(value, len, val);
-		switch (info->parent) {
-		case SPA_TYPE_Id:
-			if ((ti = find_type_info(info ? info->values : info, val)) != NULL)
-				spa_pod_builder_id(b, ti->type);
-			break;
-		case SPA_TYPE_String:
-			spa_pod_builder_string(b, val);
 			break;
 		default:
 			spa_pod_builder_none(b);
@@ -1629,9 +1615,26 @@ static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
 	else if (spa_json_is_null(value, len)) {
 		spa_pod_builder_none(b);
 	}
-	else
-		return -EINVAL;
-
+	else {
+		char *val = alloca(len+1);
+		spa_json_parse_string(value, len, val);
+		switch (info ? info->parent : SPA_TYPE_Struct) {
+		case SPA_TYPE_Id:
+			if ((ti = find_type_info(info->values, val)) != NULL)
+				type = ti->type;
+			else if ((type = atoi(val)) == 0)
+				return -EINVAL;
+			spa_pod_builder_id(b, type);
+			break;
+		case SPA_TYPE_Struct:
+		case SPA_TYPE_String:
+			spa_pod_builder_string(b, val);
+			break;
+		default:
+			spa_pod_builder_none(b);
+			break;
+		}
+	}
 	return 0;
 }
 
@@ -1656,7 +1659,6 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 	}
 
 	id = atoi(a[0]);
-	param_id = atoi(a[1]);
 
 	global = pw_map_lookup(&rd->globals, id);
 	if (global == NULL) {
@@ -1668,11 +1670,12 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 			return false;
 	}
 
-	ti = spa_debug_type_find(spa_type_param, param_id);
+	ti = find_type_info(spa_type_param, a[1]);
 	if (ti == NULL) {
-		*error = spa_aprintf("%s: unknown param type: %d", cmd, param_id);
+		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
 		return false;
 	}
+	param_id = ti->type;
 
 	spa_json_init(&it[0], a[2], strlen(a[2]));
 	if ((len = spa_json_next(&it[0], &val)) <= 0) {
@@ -1689,13 +1692,13 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 	}
 	spa_debug_pod(0, NULL, pod);
 
-	if (strcmp(global->type, PW_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Node))
 		pw_node_set_param((struct pw_node*)global->proxy,
 				param_id, 0, pod);
-	else if (strcmp(global->type, PW_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device))
 		pw_device_set_param((struct pw_device*)global->proxy,
 				param_id, 0, pod);
-	else if (strcmp(global->type, PW_TYPE_INTERFACE_Endpoint) == 0)
+	else if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint))
 		pw_endpoint_set_param((struct pw_endpoint*)global->proxy,
 				param_id, 0, pod);
 	else {
@@ -1727,7 +1730,7 @@ static bool do_permissions(struct data *data, const char *cmd, char *args, char 
 		*error = spa_aprintf("%s: unknown global %d", cmd, id);
 		return false;
 	}
-	if (strcmp(global->type, PW_TYPE_INTERFACE_Client) != 0) {
+	if (!spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {
 		*error = spa_aprintf("object %d is not a client", atoi(a[0]));
 		return false;
 	}
@@ -1767,7 +1770,7 @@ static bool do_get_permissions(struct data *data, const char *cmd, char *args, c
 		*error = spa_aprintf("%s: unknown global %d", cmd, id);
 		return false;
 	}
-	if (strcmp(global->type, PW_TYPE_INTERFACE_Client) != 0) {
+	if (!spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {
 		*error = spa_aprintf("object %d is not a client", atoi(a[0]));
 		return false;
 	}
@@ -1827,27 +1830,27 @@ global_props(struct global *global)
 	if (!pd || !pd->info)
 		return NULL;
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Core))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Core))
 		return ((struct pw_core_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Module))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Module))
 		return ((struct pw_module_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Device))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Device))
 		return ((struct pw_device_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Node))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Node))
 		return ((struct pw_node_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Port))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Port))
 		return ((struct pw_port_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Factory))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Factory))
 		return ((struct pw_factory_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Client))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Client))
 		return ((struct pw_client_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Link))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Link))
 		return ((struct pw_link_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Session))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Session))
 		return ((struct pw_session_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Endpoint))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint))
 		return ((struct pw_endpoint_info *)pd->info)->props;
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_EndpointStream))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_EndpointStream))
 		return ((struct pw_endpoint_stream_info *)pd->info)->props;
 
 	return NULL;
@@ -1914,20 +1917,20 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 		return -1;
 
 	/* supported combinations */
-	if (!strcmp(parent_type, PW_TYPE_INTERFACE_Device) &&
-	    !strcmp(child_type, PW_TYPE_INTERFACE_Node)) {
+	if (spa_streq(parent_type, PW_TYPE_INTERFACE_Device) &&
+	    spa_streq(child_type, PW_TYPE_INTERFACE_Node)) {
 		parent_key = PW_KEY_OBJECT_ID;
 		child_key = PW_KEY_DEVICE_ID;
-	} else if (!strcmp(parent_type, PW_TYPE_INTERFACE_Node) &&
-		   !strcmp(child_type, PW_TYPE_INTERFACE_Port)) {
+	} else if (spa_streq(parent_type, PW_TYPE_INTERFACE_Node) &&
+		   spa_streq(child_type, PW_TYPE_INTERFACE_Port)) {
 		parent_key = PW_KEY_OBJECT_ID;
 		child_key = PW_KEY_NODE_ID;
-	} else if (!strcmp(parent_type, PW_TYPE_INTERFACE_Module) &&
-		   !strcmp(child_type, PW_TYPE_INTERFACE_Factory)) {
+	} else if (spa_streq(parent_type, PW_TYPE_INTERFACE_Module) &&
+		   spa_streq(child_type, PW_TYPE_INTERFACE_Factory)) {
 		parent_key = PW_KEY_OBJECT_ID;
 		child_key = PW_KEY_MODULE_ID;
-	} else if (!strcmp(parent_type, PW_TYPE_INTERFACE_Factory) &&
-		   !strcmp(child_type, PW_TYPE_INTERFACE_Device)) {
+	} else if (spa_streq(parent_type, PW_TYPE_INTERFACE_Factory) &&
+		   spa_streq(child_type, PW_TYPE_INTERFACE_Device)) {
 		parent_key = PW_KEY_OBJECT_ID;
 		child_key = PW_KEY_FACTORY_ID;
 	} else
@@ -1960,7 +1963,7 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 
 			global = item->data;
 
-			if (strcmp(global->type, child_type))
+			if (!spa_streq(global->type, child_type))
 				continue;
 
 			pd = pw_proxy_get_user_data(global->proxy);
@@ -1975,7 +1978,7 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 			}
 
 			/* match? */
-			if (strcmp(parent_value, child_value))
+			if (!spa_streq(parent_value, child_value))
 				continue;
 
 			if (*children)
@@ -1999,7 +2002,7 @@ enum dump_flags {
 	is_notype = BIT(3)
 };
 
-static const char *dump_types[] = {
+static const char * const dump_types[] = {
 	PW_TYPE_INTERFACE_Core,
 	PW_TYPE_INTERFACE_Module,
 	PW_TYPE_INTERFACE_Device,
@@ -2021,7 +2024,7 @@ int dump_type_index(const char *type)
 		return -1;
 
 	for (i = 0; i < SPA_N_ELEMENTS(dump_types); i++) {
-		if (!strcmp(dump_types[i], type))
+		if (spa_streq(dump_types[i], type))
 			return (int)i;
 	}
 
@@ -2041,7 +2044,7 @@ static const char *name_to_dump_type(const char *name)
 		return NULL;
 
 	for (i = 0; i < SPA_N_ELEMENTS(dump_types); i++) {
-		if (!strcmp(name, pw_interface_short(dump_types[i])))
+		if (!strcasecmp(name, pw_interface_short(dump_types[i])))
 			return dump_types[i];
 	}
 
@@ -2085,20 +2088,19 @@ dump_properties(struct data *data, struct global *global,
 				ind, item->key, item->value);
 
 		extra = NULL;
-		id = -1;
-		if (!strcmp(global->type, PW_TYPE_INTERFACE_Port) && !strcmp(item->key, PW_KEY_NODE_ID)) {
+		if (spa_streq(global->type, PW_TYPE_INTERFACE_Port) && spa_streq(item->key, PW_KEY_NODE_ID)) {
 			id = atoi(item->value);
 			if (id >= 0)
 				extra = obj_lookup(rd, id, PW_KEY_NODE_NAME);
-		} else if (!strcmp(global->type, PW_TYPE_INTERFACE_Factory) && !strcmp(item->key, PW_KEY_MODULE_ID)) {
+		} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Factory) && spa_streq(item->key, PW_KEY_MODULE_ID)) {
 			id = atoi(item->value);
 			if (id >= 0)
 				extra = obj_lookup(rd, id, PW_KEY_MODULE_NAME);
-		} else if (!strcmp(global->type, PW_TYPE_INTERFACE_Device) && !strcmp(item->key, PW_KEY_FACTORY_ID)) {
+		} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device) && spa_streq(item->key, PW_KEY_FACTORY_ID)) {
 			id = atoi(item->value);
 			if (id >= 0)
 				extra = obj_lookup(rd, id, PW_KEY_FACTORY_NAME);
-		} else if (!strcmp(global->type, PW_TYPE_INTERFACE_Device) && !strcmp(item->key, PW_KEY_CLIENT_ID)) {
+		} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device) && spa_streq(item->key, PW_KEY_CLIENT_ID)) {
 			id = atoi(item->value);
 			if (id >= 0)
 				extra = obj_lookup(rd, id, PW_KEY_CLIENT_NAME);
@@ -2295,8 +2297,8 @@ dump_device(struct data *data, struct global *global,
 				api ? api : "",
 				api ? "\"" : "");
 
-		if (media_class && !strcmp(media_class, "Audio/Device") &&
-		    api && !strcmp(api, "alsa:pcm")) {
+		if (media_class && spa_streq(media_class, "Audio/Device") &&
+		    api && spa_streq(api, "alsa:pcm")) {
 
 			alsa_path = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_PATH);
 			alsa_card_id = spa_dict_lookup(info->props, SPA_KEY_API_ALSA_CARD_ID);
@@ -2567,7 +2569,7 @@ dump_link(struct data *data, struct global *global,
 			printf("\n");
 		fprintf(stdout, "%sformat:\n", ind);
 		if (info->format)
-			spa_debug_format(8 * (level + 1) + 2, NULL, info->format);
+			spa_debug_pod(8 * (level + 1) + 2, NULL, info->format);
 		else
 			fprintf(stdout, "%s\tnone\n", ind);
 
@@ -2723,37 +2725,37 @@ dump(struct data *data, struct global *global,
 	if (!global)
 		return;
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Core))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Core))
 		dump_core(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Module))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Module))
 		dump_module(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Device))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Device))
 		dump_device(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Node))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Node))
 		dump_node(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Port))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Port))
 		dump_port(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Factory))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Factory))
 		dump_factory(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Client))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Client))
 		dump_client(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Link))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Link))
 		dump_link(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Session))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Session))
 		dump_session(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_Endpoint))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint))
 		dump_endpoint(data, global, flags, level);
 
-	if (!strcmp(global->type, PW_TYPE_INTERFACE_EndpointStream))
+	if (spa_streq(global->type, PW_TYPE_INTERFACE_EndpointStream))
 		dump_endpoint_stream(data, global, flags, level);
 }
 
@@ -2775,17 +2777,17 @@ static bool do_dump(struct data *data, const char *cmd, char *args, char **error
 
 	a = aa;
 	while (n > 0 &&
-		(!strcmp(a[0], "short") ||
-		 !strcmp(a[0], "deep") ||
-		 !strcmp(a[0], "resolve") ||
-		 !strcmp(a[0], "notype"))) {
-		if (!strcmp(a[0], "short"))
+		(spa_streq(a[0], "short") ||
+		 spa_streq(a[0], "deep") ||
+		 spa_streq(a[0], "resolve") ||
+		 spa_streq(a[0], "notype"))) {
+		if (spa_streq(a[0], "short"))
 			flags |= is_short;
-		else if (!strcmp(a[0], "deep"))
+		else if (spa_streq(a[0], "deep"))
 			flags |= is_deep;
-		else if (!strcmp(a[0], "resolve"))
+		else if (spa_streq(a[0], "resolve"))
 			flags |= is_resolve;
-		else if (!strcmp(a[0], "notype"))
+		else if (spa_streq(a[0], "notype"))
 			flags |= is_notype;
 		n--;
 		a++;
@@ -2808,7 +2810,7 @@ static bool do_dump(struct data *data, const char *cmd, char *args, char **error
 		a++;
 	}
 
-	if (n == 0 || !strcmp(a[0], "all")) {
+	if (n == 0 || spa_streq(a[0], "all")) {
 		type_mask = (1U << dump_type_count()) - 1;
 		flags &= ~is_notype;
 	} else {
@@ -2892,8 +2894,8 @@ static bool parse(struct data *data, char *buf, size_t size, char **error)
 	args = n > 1 ? a[1] : "";
 
 	for (i = 0; i < SPA_N_ELEMENTS(command_list); i++) {
-		if (!strcmp(command_list[i].name, cmd) ||
-		    !strcmp(command_list[i].alias, cmd)) {
+		if (spa_streq(command_list[i].name, cmd) ||
+		    spa_streq(command_list[i].alias, cmd)) {
 			return command_list[i].func(data, cmd, args, error);
 		}
 	}
@@ -2949,11 +2951,11 @@ static void do_quit(void *data, int signal_number)
 
 static void show_help(struct data *data, const char *name)
 {
-        fprintf(stdout, "%s [options] [command]\n"
+        fprintf(stdout, _("%s [options] [command]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -d, --daemon                          Start as daemon (Default false)\n"
-		"  -r, --remote                          Remote daemon name\n\n",
+		"  -r, --remote                          Remote daemon name\n\n"),
 		name);
 
 	do_help(data, "help", "", NULL);
@@ -3004,6 +3006,10 @@ int main(int argc, char *argv[])
 	}
 
 	data.loop = pw_main_loop_new(NULL);
+	if (data.loop == NULL) {
+		fprintf(stderr, "Broken installation: %m\n");
+		return -1;
+	}
 	l = pw_main_loop_get_loop(data.loop);
 	pw_loop_add_signal(l, SIGINT, do_quit, &data);
 	pw_loop_add_signal(l, SIGTERM, do_quit, &data);
@@ -3016,6 +3022,10 @@ int main(int argc, char *argv[])
 				PW_KEY_CORE_DAEMON, daemon ? "true" : NULL,
 				NULL),
 			0);
+	if (data.context == NULL) {
+		fprintf(stderr, "Can't create context: %m\n");
+		return -1;
+	}
 
 	pw_context_load_module(data.context, "libpipewire-module-link-factory", NULL, NULL);
 

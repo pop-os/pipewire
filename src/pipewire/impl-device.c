@@ -27,6 +27,7 @@
 #include <spa/debug/types.h>
 #include <spa/monitor/utils.h>
 #include <spa/pod/filter.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -53,6 +54,7 @@ struct result_device_params_data {
 			uint32_t id, uint32_t index, uint32_t next,
 			struct spa_pod *param);
 	int seq;
+	uint32_t count;
 	unsigned int cache:1;
 };
 
@@ -128,7 +130,7 @@ static void check_properties(struct pw_impl_device *device)
 	const char *str;
 
 	if ((str = pw_properties_get(device->properties, PW_KEY_DEVICE_NAME)) &&
-	    (device->name == NULL || strcmp(str, device->name) != 0)) {
+	    (device->name == NULL || !spa_streq(str, device->name))) {
 		free(device->name);
 		device->name = strdup(str);
 		pw_log_debug(NAME" %p: name '%s'", device, device->name);
@@ -174,7 +176,7 @@ struct pw_impl_device *pw_context_create_device(struct pw_context *context,
 	spa_list_init(&this->object_list);
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(this, sizeof(struct impl), void);
+		this->user_data = SPA_PTROFF(this, sizeof(struct impl), void);
 
 	check_properties(this);
 
@@ -183,8 +185,7 @@ struct pw_impl_device *pw_context_create_device(struct pw_context *context,
 error_free:
 	free(impl);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -277,6 +278,8 @@ static void result_device_params(void *data, int seq, int res, uint32_t type, co
 		d->callback(d->data, seq, r->id, r->index, r->next, r->param);
 		if (d->cache) {
 			pw_log_debug(NAME" %p: add param %d", impl, r->id);
+			if (d->count++ == 0)
+				pw_param_add(&impl->pending_list, r->id, NULL);
 			pw_param_add(&impl->pending_list, r->id, r->param);
 		}
 		break;
@@ -298,7 +301,7 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 {
 	int res;
 	struct impl *impl = SPA_CONTAINER_OF(device, struct impl, this);
-	struct result_device_params_data user_data = { impl, data, callback, seq, false };
+	struct result_device_params_data user_data = { impl, data, callback, seq, 0, false };
 	struct spa_hook listener;
 	struct spa_param_info *pi;
 	static const struct spa_device_events device_events = {
@@ -347,7 +350,8 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 		}
 		res = 0;
 	} else {
-		user_data.cache = impl->cache_params && filter == NULL;
+		user_data.cache = impl->cache_params &&
+			(filter == NULL && index == 0 && max == UINT32_MAX);
 
 		spa_zero(listener);
 		spa_device_add_listener(device->device, &listener,
@@ -412,7 +416,9 @@ static int device_enum_params(void *object, int seq, uint32_t id, uint32_t start
 		data->data.impl = impl;
 		data->data.data = data;
 		data->data.callback = reply_param;
-		data->data.cache = impl->cache_params && filter == NULL;
+		data->data.count = 0;
+		data->data.cache = impl->cache_params &&
+			(filter == NULL && start == 0);
 		if (data->end == -1)
 			spa_device_add_listener(device->device, &data->listener,
 				&device_events, data);
@@ -548,9 +554,7 @@ SPA_EXPORT
 int pw_impl_device_register(struct pw_impl_device *device,
 		       struct pw_properties *properties)
 {
-	struct pw_context *context = device->context;
-	struct object_data *od;
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_ID,
@@ -562,6 +566,9 @@ int pw_impl_device_register(struct pw_impl_device *device,
 		PW_KEY_MEDIA_CLASS,
 		NULL
 	};
+
+	struct pw_context *context = device->context;
+	struct object_data *od;
 
 	if (device->registered)
 		goto error_existed;
@@ -595,8 +602,7 @@ int pw_impl_device_register(struct pw_impl_device *device,
 	return 0;
 
 error_existed:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	return -EEXIST;
 }
 
@@ -637,11 +643,19 @@ static void emit_info_changed(struct pw_impl_device *device)
 	device->info.change_mask = 0;
 }
 
-static int update_properties(struct pw_impl_device *device, const struct spa_dict *dict)
+static int update_properties(struct pw_impl_device *device, const struct spa_dict *dict, bool filter)
 {
+	static const char * const ignored[] = {
+		PW_KEY_OBJECT_ID,
+		PW_KEY_MODULE_ID,
+		PW_KEY_FACTORY_ID,
+		PW_KEY_CLIENT_ID,
+		NULL
+	};
+
 	int changed;
 
-	changed = pw_properties_update(device->properties, dict);
+	changed = pw_properties_update_ignore(device->properties, dict, filter ? ignored : NULL);
 	device->info.props = &device->properties->dict;
 
 	pw_log_debug(NAME" %p: updated %d properties", device, changed);
@@ -714,14 +728,13 @@ static void emit_params(struct pw_impl_device *device, uint32_t *changed_ids, ui
 static void device_info(void *data, const struct spa_device_info *info)
 {
 	struct pw_impl_device *device = data;
-	struct impl *impl = SPA_CONTAINER_OF(device, struct impl, this);
 	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
 
 	pw_log_debug(NAME" %p: flags:%08"PRIx64" change_mask:%08"PRIx64,
 			device, info->flags, info->change_mask);
 
 	if (info->change_mask & SPA_DEVICE_CHANGE_MASK_PROPS) {
-		update_properties(device, info->props);
+		update_properties(device, info->props, true);
 	}
 	if (info->change_mask & SPA_DEVICE_CHANGE_MASK_PARAMS) {
 		uint32_t i;
@@ -741,7 +754,6 @@ static void device_info(void *data, const struct spa_device_info *info)
 				continue;
 
 			pw_log_debug(NAME" %p: update param %d", device, id);
-			pw_param_clear(&impl->pending_list, id);
 			device->info.params[i] = info->params[i];
 			device->info.params[i].user = 0;
 
@@ -787,7 +799,7 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 	if (info->props && props)
 		pw_properties_update(props, info->props);
 
-	if (strcmp(info->type, SPA_TYPE_INTERFACE_Node) == 0) {
+	if (spa_streq(info->type, SPA_TYPE_INTERFACE_Node)) {
 		struct pw_impl_node *node;
 		node = pw_context_create_node(context, props, sizeof(struct object_data));
 
@@ -796,7 +808,7 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 		od->type = OBJECT_NODE;
 		pw_impl_node_add_listener(node, &od->listener, &node_object_events, od);
 		pw_impl_node_set_implementation(node, iface);
-	} else if (strcmp(info->type, SPA_TYPE_INTERFACE_Device) == 0) {
+	} else if (spa_streq(info->type, SPA_TYPE_INTERFACE_Device)) {
 		struct pw_impl_device *dev;
 		dev = pw_context_create_device(context, props, sizeof(struct object_data));
 
@@ -890,7 +902,7 @@ const struct pw_properties *pw_impl_device_get_properties(struct pw_impl_device 
 SPA_EXPORT
 int pw_impl_device_update_properties(struct pw_impl_device *device, const struct spa_dict *dict)
 {
-	int changed = update_properties(device, dict);
+	int changed = update_properties(device, dict, false);
 	emit_info_changed(device);
 	return changed;
 }

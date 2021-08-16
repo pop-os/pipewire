@@ -35,6 +35,13 @@
 #include "rtp.h"
 #include "a2dp-codecs.h"
 
+#define DEFAULT_AAC_BITRATE	320000
+#define MIN_AAC_BITRATE		64000
+
+struct props {
+	int bitratemode;
+};
+
 struct impl {
 	HANDLE_AACENCODER aacenc;
 
@@ -54,7 +61,7 @@ struct impl {
 static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
 		uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
-	const a2dp_aac_t a2dp_aac = {
+	static const a2dp_aac_t a2dp_aac = {
 		.object_type =
 			/* NOTE: AAC Long Term Prediction and AAC Scalable are
 			 *       not supported by the FDK-AAC library. */
@@ -77,37 +84,52 @@ static int codec_fill_caps(const struct a2dp_codec *codec, uint32_t flags,
 			AAC_CHANNELS_1 |
 			AAC_CHANNELS_2,
 		.vbr = 1,
-		AAC_INIT_BITRATE(0xFFFFF)
+		AAC_INIT_BITRATE(DEFAULT_AAC_BITRATE)
 	};
+
 	memcpy(caps, &a2dp_aac, sizeof(a2dp_aac));
 	return sizeof(a2dp_aac);
 }
 
-static struct {
-	int config;
-	int freq;
-} aac_frequencies[] = {
-	{ AAC_SAMPLING_FREQ_48000, 48000 },
-	{ AAC_SAMPLING_FREQ_44100, 44100 },
-	{ AAC_SAMPLING_FREQ_96000, 96000 },
-	{ AAC_SAMPLING_FREQ_88200, 88200 },
-	{ AAC_SAMPLING_FREQ_64000, 64000 },
-	{ AAC_SAMPLING_FREQ_32000, 32000 },
-	{ AAC_SAMPLING_FREQ_24000, 24000 },
-	{ AAC_SAMPLING_FREQ_22050, 22050 },
-	{ AAC_SAMPLING_FREQ_16000, 16000 },
-	{ AAC_SAMPLING_FREQ_12000, 12000 },
-	{ AAC_SAMPLING_FREQ_11025, 11025 },
-	{ AAC_SAMPLING_FREQ_8000,  8000 },
+static const struct a2dp_codec_config
+aac_frequencies[] = {
+	{ AAC_SAMPLING_FREQ_48000, 48000, 11 },
+	{ AAC_SAMPLING_FREQ_44100, 44100, 10 },
+	{ AAC_SAMPLING_FREQ_96000, 96000, 9 },
+	{ AAC_SAMPLING_FREQ_88200, 88200, 8 },
+	{ AAC_SAMPLING_FREQ_64000, 64000, 7 },
+	{ AAC_SAMPLING_FREQ_32000, 32000, 6 },
+	{ AAC_SAMPLING_FREQ_24000, 24000, 5 },
+	{ AAC_SAMPLING_FREQ_22050, 22050, 4 },
+	{ AAC_SAMPLING_FREQ_16000, 16000, 3 },
+	{ AAC_SAMPLING_FREQ_12000, 12000, 2 },
+	{ AAC_SAMPLING_FREQ_11025, 11025, 1 },
+	{ AAC_SAMPLING_FREQ_8000,  8000,  0 },
 };
+
+static const struct a2dp_codec_config
+aac_channel_modes[] = {
+	{ AAC_CHANNELS_2, 2, 1 },
+	{ AAC_CHANNELS_1, 1, 0 },
+};
+
+static int get_valid_aac_bitrate(a2dp_aac_t *conf)
+{
+	if (AAC_GET_BITRATE(*conf) < MIN_AAC_BITRATE) {
+		/* Unknown (0) or bogus bitrate */
+		return DEFAULT_AAC_BITRATE;
+	} else {
+		return SPA_MIN(AAC_GET_BITRATE(*conf), DEFAULT_AAC_BITRATE);
+	}
+}
 
 static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size,
-		const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE])
+		const struct a2dp_codec_audio_info *info,
+		const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_aac_t conf;
-	int freq;
-	bool freq_found;
+	int i;
 
 	if (caps_size < sizeof(conf))
 		return -EINVAL;
@@ -119,30 +141,29 @@ static int codec_select_config(const struct a2dp_codec *codec, uint32_t flags,
 	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LC)
 		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_LC;
 	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_LTP)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_LTP;
+		return -ENOTSUP;  /* Not supported by FDK-AAC */
 	else if (conf.object_type & AAC_OBJECT_TYPE_MPEG4_AAC_SCA)
-		conf.object_type = AAC_OBJECT_TYPE_MPEG4_AAC_SCA;
+		return -ENOTSUP;  /* Not supported by FDK-AAC */
 	else
 		return -ENOTSUP;
 
-	freq = AAC_GET_FREQUENCY(conf);
-	freq_found = false;
-	for (size_t i = 0; i < SPA_N_ELEMENTS(aac_frequencies); i++) {
-		if (freq & aac_frequencies[i].config) {
-			AAC_SET_FREQUENCY(conf, aac_frequencies[i].config);
-			freq_found = true;
-			break;
-		}
-	}
-	if (!freq_found)
+	if ((i = a2dp_codec_select_config(aac_frequencies,
+					  SPA_N_ELEMENTS(aac_frequencies),
+					  AAC_GET_FREQUENCY(conf),
+				    	  info ? info->rate : A2DP_CODEC_DEFAULT_RATE
+				    	  )) < 0)
 		return -ENOTSUP;
+	AAC_SET_FREQUENCY(conf, aac_frequencies[i].config);
 
-	if (conf.channels & AAC_CHANNELS_2)
-		conf.channels = AAC_CHANNELS_2;
-	else if (conf.channels & AAC_CHANNELS_1)
-		conf.channels = AAC_CHANNELS_1;
-	else
+	if ((i = a2dp_codec_select_config(aac_channel_modes,
+					  SPA_N_ELEMENTS(aac_channel_modes),
+					  conf.channels,
+				    	  info ? info->channels : A2DP_CODEC_DEFAULT_CHANNELS
+				    	  )) < 0)
 		return -ENOTSUP;
+	conf.channels = aac_channel_modes[i].config;
+
+	AAC_SET_BITRATE(conf, get_valid_aac_bitrate(&conf));
 
 	memcpy(config, &conf, sizeof(conf));
 
@@ -181,8 +202,8 @@ static int codec_enum_config(const struct a2dp_codec *codec,
 	for (size_t j = 0; j < SPA_N_ELEMENTS(aac_frequencies); j++) {
 		if (AAC_GET_FREQUENCY(conf) & aac_frequencies[j].config) {
 			if (i++ == 0)
-				spa_pod_builder_int(b, aac_frequencies[j].freq);
-			spa_pod_builder_int(b, aac_frequencies[j].freq);
+				spa_pod_builder_int(b, aac_frequencies[j].value);
+			spa_pod_builder_int(b, aac_frequencies[j].value);
 		}
 	}
 	if (i == 0)
@@ -218,11 +239,34 @@ static int codec_enum_config(const struct a2dp_codec *codec,
 	return *param == NULL ? -EIO : 1;
 }
 
+static void *codec_init_props(const struct a2dp_codec *codec, const struct spa_dict *settings)
+{
+	struct props *p = calloc(1, sizeof(struct props));
+	const char *str;
+
+	if (p == NULL)
+		return NULL;
+
+	if (settings == NULL || (str = spa_dict_lookup(settings, "bluez5.a2dp.aac.bitratemode")) == NULL)
+		str = "0";
+
+	p->bitratemode = SPA_CLAMP(atoi(str), 0, 5);
+	return p;
+}
+
+static void codec_clear_props(void *props)
+{
+	free(props);
+}
+
 static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
-		void *config, size_t config_len, const struct spa_audio_info *info, size_t mtu)
+		void *config, size_t config_len, const struct spa_audio_info *info,
+		void *props, size_t mtu)
 {
 	struct impl *this;
 	a2dp_aac_t *conf = config;
+	struct props *p = props;
+	UINT bitratemode;
 	int res;
 
 	this = calloc(1, sizeof(struct impl));
@@ -241,6 +285,8 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		goto error;
 	}
 	this->samplesize = 2;
+
+	bitratemode = p ? p->bitratemode : 0;
 
 	res = aacEncOpen(&this->aacenc, 0, this->channels);
 	if (res != AACENC_OK)
@@ -263,10 +309,25 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 	if (res != AACENC_OK)
 		goto error;
 
+	if (conf->vbr) {
+		res = aacEncoder_SetParam(this->aacenc, AACENC_BITRATEMODE,
+				bitratemode);
+		if (res != AACENC_OK)
+			goto error;
+	}
+
+	res = aacEncoder_SetParam(this->aacenc, AACENC_AUDIOMUXVER, 2);
+	if (res != AACENC_OK)
+		goto error;
+
+	res = aacEncoder_SetParam(this->aacenc, AACENC_SIGNALING_MODE, 1);
+	if (res != AACENC_OK)
+		goto error;
+
 	// Fragmentation is not implemented yet,
 	// so make sure every encoded AAC frame fits in (mtu - header)
 	this->max_bitrate = ((this->mtu - sizeof(struct rtp_header)) * 8 * this->rate) / 1024;
-	this->max_bitrate = SPA_MIN(this->max_bitrate, AAC_GET_BITRATE(*conf));
+	this->max_bitrate = SPA_MIN(this->max_bitrate, get_valid_aac_bitrate(conf));
 	this->cur_bitrate = this->max_bitrate;
 
 	res = aacEncoder_SetParam(this->aacenc, AACENC_BITRATE, this->cur_bitrate);
@@ -278,6 +339,10 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 		goto error;
 
 	res = aacEncoder_SetParam(this->aacenc, AACENC_TRANSMUX, TT_MP4_LATM_MCP1);
+	if (res != AACENC_OK)
+		goto error;
+
+	res = aacEncoder_SetParam(this->aacenc, AACENC_HEADER_PERIOD, 1);
 	if (res != AACENC_OK)
 		goto error;
 
@@ -314,11 +379,6 @@ static void codec_deinit(void *data)
 	free(this);
 }
 
-static int codec_get_num_blocks(void *data)
-{
-	return 1;
-}
-
 static int codec_get_block_size(void *data)
 {
 	struct impl *this = data;
@@ -344,7 +404,7 @@ static int codec_start_encode (void *data,
 static int codec_encode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
-		size_t *dst_out)
+		size_t *dst_out, int *need_flush)
 {
 	struct impl *this = data;
 	int res;
@@ -382,6 +442,11 @@ static int codec_encode(void *data,
 		return -EINVAL;
 
 	*dst_out = out_args.numOutBytes;
+	*need_flush = 1;
+
+	/* RFC6416: It is set to 1 to indicate that the RTP packet contains a complete
+   	 * audioMuxElement or the last fragment of an audioMuxElement */
+	this->header->m = 1;
 
 	return out_args.numInSamples * this->samplesize;
 }
@@ -423,16 +488,18 @@ static int codec_increase_bitpool(void *data)
 }
 
 const struct a2dp_codec a2dp_codec_aac = {
+	.id = SPA_BLUETOOTH_AUDIO_CODEC_AAC,
 	.codec_id = A2DP_CODEC_MPEG24,
 	.name = "aac",
 	.description = "AAC",
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
+	.init_props = codec_init_props,
+	.clear_props = codec_clear_props,
 	.init = codec_init,
 	.deinit = codec_deinit,
 	.get_block_size = codec_get_block_size,
-	.get_num_blocks = codec_get_num_blocks,
 	.start_encode = codec_start_encode,
 	.encode = codec_encode,
 	.abr_process = codec_abr_process,

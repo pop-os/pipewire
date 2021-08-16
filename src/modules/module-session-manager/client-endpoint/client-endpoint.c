@@ -29,7 +29,7 @@
 #include <spa/utils/result.h>
 #include <pipewire/impl.h>
 
-#include <extensions/session-manager.h>
+#include <pipewire/extensions/session-manager.h>
 
 #include "client-endpoint.h"
 #include "endpoint.h"
@@ -78,8 +78,7 @@ static int client_endpoint_stream_update(void *object,
 	struct pw_properties *props = NULL;
 
 	if (!stream) {
-		struct pw_context *context = pw_global_get_context(endpoint->global);
-		const char *keys[] = {
+		static const char * const keys[] = {
 			PW_KEY_FACTORY_ID,
 			PW_KEY_CLIENT_ID,
 			PW_KEY_ENDPOINT_ID,
@@ -89,6 +88,8 @@ static int client_endpoint_stream_update(void *object,
 			PW_KEY_ENDPOINT_STREAM_DESCRIPTION,
 			NULL
 		};
+
+		struct pw_context *context = pw_global_get_context(endpoint->global);
 
 		stream = calloc(1, sizeof(struct endpoint_stream));
 		if (!stream)
@@ -120,8 +121,7 @@ static int client_endpoint_stream_update(void *object,
 		: 0;
 
        no_mem:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	free(stream);
 	pw_log_error(NAME" %p: cannot update stream: no memory", this);
 	pw_resource_errorf(this->resource, -ENOMEM,
@@ -129,7 +129,7 @@ static int client_endpoint_stream_update(void *object,
 	return -ENOMEM;
 }
 
-static struct pw_client_endpoint_methods methods = {
+static const struct pw_client_endpoint_methods methods = {
 	PW_VERSION_CLIENT_ENDPOINT_METHODS,
 	.update = client_endpoint_update,
 	.stream_update = client_endpoint_stream_update,
@@ -204,8 +204,7 @@ static void *create_object(void *data,
 	return this;
 
       no_mem:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	if (this && this->resource)
 		pw_resource_destroy(this->resource);
 	free(this);

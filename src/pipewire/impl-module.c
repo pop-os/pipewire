@@ -23,15 +23,15 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include <stdio.h>
 #include <dlfcn.h>
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -49,7 +49,7 @@ struct impl {
 
 /** \endcond */
 
-static char *find_module(const char *path, const char *name)
+static char *find_module(const char *path, const char *name, int level)
 {
 	char *filename;
 	struct dirent *entry;
@@ -70,6 +70,8 @@ static char *find_module(const char *path, const char *name)
 	filename = NULL;
 
 	/* now recurse down in subdirectories and look for it there */
+	if (level <= 0)
+		return NULL;
 
 	dir = opendir(path);
 	if (dir == NULL) {
@@ -82,16 +84,16 @@ static char *find_module(const char *path, const char *name)
 	while ((entry = readdir(dir))) {
 		char *newpath;
 
-		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+		if (spa_streq(entry->d_name, ".") || spa_streq(entry->d_name, ".."))
 			continue;
 
 		newpath = spa_aprintf("%s/%s", path, entry->d_name);
 		if (newpath == NULL)
 			break;
 
-		if (stat(newpath, &s) == 0 && S_ISDIR(s.st_mode)) {
-			filename = find_module(newpath, name);
-		}
+		if (stat(newpath, &s) == 0 && S_ISDIR(s.st_mode))
+			filename = find_module(newpath, name, level - 1);
+
 		free(newpath);
 
 		if (filename != NULL)
@@ -147,10 +149,9 @@ static const struct pw_global_events global_events = {
  * \param context a \ref pw_context
  * \param name name of the module to load
  * \param args A string with arguments for the module
- * \param[out] error Return location for an error string, or NULL
+ * \param properties extra global properties
  * \return A \ref pw_impl_module if the module could be loaded, or NULL on failure.
  *
- * \memberof pw_impl_module
  */
 SPA_EXPORT
 struct pw_impl_module *
@@ -167,25 +168,15 @@ pw_context_load_module(struct pw_context *context,
 	pw_impl_module_init_func_t init_func;
 
 	module_dir = getenv("PIPEWIRE_MODULE_DIR");
-	if (module_dir != NULL) {
-		char **l;
-		int i, n_paths;
-
+	if (module_dir == NULL) {
+		module_dir = MODULEDIR;
+		pw_log_debug("moduledir set to: %s", module_dir);
+	}
+	else {
 		pw_log_debug("PIPEWIRE_MODULE_DIR set to: %s", module_dir);
-
-		l = pw_split_strv(module_dir, "/", 0, &n_paths);
-		for (i = 0; l[i] != NULL; i++) {
-			filename = find_module(l[i], name);
-			if (filename != NULL)
-				break;
-		}
-		pw_free_strv(l);
-	} else {
-		pw_log_debug("moduledir set to: %s", MODULEDIR);
-
-		filename = find_module(MODULEDIR, name);
 	}
 
+	filename = find_module(module_dir, name, 8);
 	if (filename == NULL)
 		goto error_not_found;
 
@@ -236,7 +227,7 @@ pw_context_load_module(struct pw_context *context,
 	if (this->global == NULL)
 		goto error_no_global;
 
-	spa_list_append(&context->module_list, &this->link);
+	spa_list_prepend(&context->module_list, &this->link);
 
 	this->info.id = this->global->id;
 	pw_properties_setf(this->properties, PW_KEY_OBJECT_ID, "%d", this->info.id);
@@ -278,7 +269,7 @@ error_no_global:
 	pw_log_error("\"%s\": failed to create global: %m", this->info.filename);
 	goto error_free_module;
 error_init_failed:
-	pw_log_error("\"%s\": failed to initialize: %s", this->info.filename, spa_strerror(res));
+	pw_log_debug("\"%s\": failed to initialize: %s", this->info.filename, spa_strerror(res));
 	goto error_free_module;
 
 error_free_module:
@@ -290,15 +281,13 @@ error_free_filename:
 	if (filename)
 		free(filename);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
 
 /** Destroy a module
  * \param module the module to destroy
- * \memberof pw_impl_module
  */
 SPA_EXPORT
 void pw_impl_module_destroy(struct pw_impl_module *module)

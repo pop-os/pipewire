@@ -31,6 +31,7 @@
 #include <spa/support/cpu.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -171,22 +172,24 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
 				port->direction, port->id, &port->info);
-		port->info.change_mask = 0;
+		port->info.change_mask = old;
 	}
 }
 
@@ -658,10 +661,10 @@ add_port_data(struct impl *this, void *out, size_t outsize, struct port *port, i
 	n_src = 0;
 	if (layer > 0) {
 		s0[n_src] = out;
-		s1[n_src] = SPA_MEMBER(out, len1, void);
+		s1[n_src] = SPA_PTROFF(out, len1, void);
 		n_src++;
 	}
-	s0[n_src] = SPA_MEMBER(data, offset, void);
+	s0[n_src] = SPA_PTROFF(data, offset, void);
 	s1[n_src] = data;
 	n_src++;
 
@@ -671,7 +674,7 @@ add_port_data(struct impl *this, void *out, size_t outsize, struct port *port, i
 	else {
 		mix_ops_process(&this->ops, out, s0, n_src, len1);
 		if (len2 > 0)
-			mix_ops_process(&this->ops, SPA_MEMBER(out, len1, void), s1, n_src, len2);
+			mix_ops_process(&this->ops, SPA_PTROFF(out, len1, void), s1, n_src, len2);
 	}
 	port->queued_bytes -= outsize;
 
@@ -733,7 +736,7 @@ static int mix_output(struct impl *this, size_t n_bytes)
 			continue;
 		}
 
-		add_port_data(this, SPA_MEMBER(od[0].data, offset, void), len1, in_port, layer);
+		add_port_data(this, SPA_PTROFF(od[0].data, offset, void), len1, in_port, layer);
 		if (len2 > 0)
 			add_port_data(this, od[0].data, len2, in_port, layer);
 		layer++;
@@ -835,7 +838,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

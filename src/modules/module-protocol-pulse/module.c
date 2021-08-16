@@ -1,6 +1,7 @@
 /* PipeWire
  *
  * Copyright © 2020 Georges Basile Stavracas Neto
+ * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,98 +23,113 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-struct module;
+#include <stdlib.h>
+#include <string.h>
 
-typedef void (*module_loaded_cb)(struct module *module, int error, void *userdata);
+#include <spa/utils/defs.h>
+#include <spa/utils/list.h>
+#include <spa/utils/hook.h>
+#include <spa/utils/string.h>
+#include <pipewire/log.h>
+#include <pipewire/map.h>
+#include <pipewire/properties.h>
+#include <pipewire/work-queue.h>
 
-struct module_events {
-	void (*removed) (void *data, struct module *module);
-	void (*error) (void *data);
-};
+#include "client.h"
+#include "defs.h"
+#include "format.h"
+#include "internal.h"
+#include "module.h"
 
-struct module {
-	struct spa_list link;           /**< link in client modules */
-	struct pw_proxy *proxy;
-	struct spa_hook listener;
-	struct client *client;
-	struct message *reply;
-
-	module_loaded_cb cb;
-	void *cb_data;
-
-	struct module_events *events;
-	void *events_data;
-
-	uint32_t idx;
-};
-
-static void module_proxy_removed(void *data)
+static void on_module_unload(void *obj, void *data, int res, uint32_t id)
 {
-	struct module *module = data;
-
-	if (module->events)
-		module->events->removed(module->events_data, module);
-
-	pw_proxy_destroy(module->proxy);
+	struct module *module = obj;
+	module_unload(NULL, module);
 }
 
-static void module_proxy_destroy(void *data)
+void module_schedule_unload(struct module *module)
 {
-	struct module *module = data;
-	pw_log_info(NAME" %p: proxy %p destroy", module, module->proxy);
-	spa_hook_remove(&module->listener);
+	struct impl *impl = module->impl;
+	pw_work_queue_add(impl->work_queue, module, 0, on_module_unload, impl);
+}
+
+struct module *module_new(struct impl *impl, const struct module_methods *methods, size_t user_data)
+{
+	struct module *module;
+
+	module = calloc(1, sizeof(struct module) + user_data);
+	if (module == NULL)
+		return NULL;
+
+	module->impl = impl;
+	module->methods = methods;
+	spa_hook_list_init(&module->listener_list);
+	module->user_data = SPA_PTROFF(module, sizeof(*module), void);
+	module->loaded = false;
+
+	return module;
+}
+
+void module_add_listener(struct module *module,
+			 struct spa_hook *listener,
+			 const struct module_events *events, void *data)
+{
+	spa_hook_list_append(&module->listener_list, listener, events, data);
+}
+
+int module_load(struct client *client, struct module *module)
+{
+	pw_log_info("load module id:%u name:%s", module->idx, module->name);
+	if (module->methods->load == NULL)
+		return -ENOTSUP;
+	/* subscription event is sent when the module does a
+	 * module_emit_loaded() */
+	return module->methods->load(client, module);
+}
+
+void module_free(struct module *module)
+{
+	struct impl *impl = module->impl;
+
+	if (module->idx != SPA_ID_INVALID)
+		pw_map_remove(&impl->modules, module->idx & INDEX_MASK);
+
+	spa_hook_list_clean(&module->listener_list);
+	pw_work_queue_cancel(impl->work_queue, module, SPA_ID_INVALID);
+	pw_properties_free(module->props);
+
+	free((char*)module->name);
+	free((char*)module->args);
+
 	free(module);
 }
 
-static void module_proxy_bound(void *data, uint32_t global_id)
+int module_unload(struct client *client, struct module *module)
 {
-	struct module *module = data;
+	struct impl *impl = module->impl;
+	int res = 0;
 
-	pw_log_info(NAME" module %p proxy %p bound", module, module->proxy);
+	/* Note that client can be NULL (when the module is being unloaded
+	 * internally and not by a client request */
 
-	module->idx = global_id;
+	pw_log_info("unload module id:%u name:%s", module->idx, module->name);
 
-	if (module->cb)
-		module->cb(module, 0, module->cb_data);
+	if (module->methods->unload)
+		res = module->methods->unload(client, module);
+
+	if (module->loaded)
+		broadcast_subscribe_event(impl,
+			SUBSCRIPTION_MASK_MODULE,
+			SUBSCRIPTION_EVENT_REMOVE | SUBSCRIPTION_EVENT_MODULE,
+			module->idx);
+
+	module_free(module);
+
+	return res;
 }
 
-static void module_proxy_error(void *data, int seq, int res, const char *message)
-{
-	struct module *module = data;
-	struct impl *impl = module->client->impl;
-
-	pw_log_info(NAME" %p module %p error %d", impl, module, res);
-
-	module->idx = 0;
-
-	if (module->cb)
-		module->cb(module, res, module->cb_data);
-
-	pw_proxy_destroy(module->proxy);
-}
-
-static int load_null_sink_module(struct client *client, struct module *module, struct pw_properties *props)
-{
-	static const struct pw_proxy_events proxy_events = {
-		.removed = module_proxy_removed,
-		.bound = module_proxy_bound,
-		.error = module_proxy_error,
-		.destroy = module_proxy_destroy,
-	};
-
-	module->proxy = pw_core_create_object(client->core,
-                                "adapter",
-                                PW_TYPE_INTERFACE_Node,
-                                PW_VERSION_NODE,
-                                props ? &props->dict : NULL, 0);
-	if (module->proxy == NULL)
-		return -errno;
-
-	pw_proxy_add_listener(module->proxy, &module->listener, &proxy_events, module);
-	return 0;
-}
-
-static void add_props(struct pw_properties *props, const char *str)
+/** utils */
+void module_args_add_props(struct pw_properties *props, const char *str)
 {
 	char *s = strdup(str), *p = s, *e, f;
 	const char *k, *v;
@@ -129,104 +145,148 @@ static void add_props(struct pw_properties *props, const char *str)
 		if (*p == '\"') {
 			p++;
 			f = '\"';
+		} else if (*p == '\'') {
+			p++;
+			f = '\'';
 		} else {
 			f = ' ';
 		}
-		e = strchr(p, f);
-		if (e == NULL)
-			e = strchr(p, '\0');
-		if (e == NULL)
-			break;
-		*e = '\0';
 		v = p;
-		p = e + 1;
+		for (e = p; *e ; e++) {
+			if (*e == f)
+				break;
+			if (*e == '\\')
+				e++;
+		}
+		p = e;
+		if (*e != '\0')
+			p++;
+		*e = '\0';
 		pw_properties_set(props, k, v);
 	}
 	free(s);
 }
 
-static int load_module(struct client *client, const char *name, const char *argument, module_loaded_cb cb, void *data)
+int module_args_to_audioinfo(struct impl *impl, struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	struct module *module = NULL;
-	int res = -ENOENT;
+	const char *str;
+	uint32_t i;
 
-	if (strcmp(name, "module-null-sink") == 0) {
-		struct pw_properties *props = NULL;
-		const char *str;
+	/* We don't use any incoming format setting and use our native format */
+	spa_zero(*info);
+	info->format = SPA_AUDIO_FORMAT_F32P;
 
-		if (argument == NULL) {
-			res = -EINVAL;
-			goto out;
+	if ((str = pw_properties_get(props, "channels")) != NULL) {
+		info->channels = pw_properties_parse_int(str);
+		if (info->channels == 0 || info->channels > SPA_AUDIO_MAX_CHANNELS) {
+			pw_log_error("invalid channels '%s'", str);
+			return -EINVAL;
 		}
-		props = pw_properties_new(NULL, NULL);
-		if (props == NULL) {
-			res = -EINVAL;
-			goto out;
-		}
-		add_props(props, argument);
+		pw_properties_set(props, "channels", NULL);
+	}
+	if ((str = pw_properties_get(props, "channel_map")) != NULL) {
+		struct channel_map map;
 
-		if ((str = pw_properties_get(props, "sink_name")) != NULL) {
-			pw_properties_set(props, PW_KEY_NODE_NAME, str);
-			pw_properties_set(props, "sink_name", NULL);
+		channel_map_parse(str, &map);
+		if (map.channels == 0 || map.channels > SPA_AUDIO_MAX_CHANNELS) {
+			pw_log_error("invalid channel_map '%s'", str);
+			return -EINVAL;
+		}
+		if (info->channels == 0)
+			info->channels = map.channels;
+		if (info->channels != map.channels) {
+			pw_log_error("Mismatched channel map");
+			return -EINVAL;
+		}
+		channel_map_to_positions(&map, info->position);
+		pw_properties_set(props, "channel_map", NULL);
+	} else {
+		if (info->channels == 0)
+			info->channels = impl->defs.sample_spec.channels;
+
+		if (info->channels == impl->defs.channel_map.channels) {
+			channel_map_to_positions(&impl->defs.channel_map, info->position);
+		} else if (info->channels == 1) {
+			info->position[0] = SPA_AUDIO_CHANNEL_MONO;
+		} else if (info->channels == 2) {
+			info->position[0] = SPA_AUDIO_CHANNEL_FL;
+			info->position[1] = SPA_AUDIO_CHANNEL_FR;
 		} else {
-			pw_properties_set(props, PW_KEY_NODE_NAME, "null");
+			/* FIXME add more mappings */
+			for (i = 0; i < info->channels; i++)
+				info->position[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
 		}
-		if ((str = pw_properties_get(props, "sink_properties")) != NULL) {
-			add_props(props, str);
-			pw_properties_set(props, "sink_properties", NULL);
-		}
-		if ((str = pw_properties_get(props, "channels")) != NULL) {
-			pw_properties_set(props, SPA_KEY_AUDIO_CHANNELS, str);
-			pw_properties_set(props, "channels", NULL);
-		}
-		if ((str = pw_properties_get(props, "rate")) != NULL) {
-			pw_properties_set(props, SPA_KEY_AUDIO_RATE, str);
-			pw_properties_set(props, "rate", NULL);
-		}
-		if ((str = pw_properties_get(props, "channel_map")) != NULL) {
-			struct channel_map map = CHANNEL_MAP_INIT;
-			uint32_t i;
-			char *s, *p;
-
-			channel_map_parse(str, &map);
-			p = s = alloca(map.channels * 6);
-
-			for (i = 0; i < map.channels; i++)
-				p += snprintf(p, 6, "%s%s", i == 0 ? "" : ",",
-						channel_id2name(map.map[i]));
-			pw_properties_set(props, SPA_KEY_AUDIO_POSITION, s);
-			pw_properties_set(props, "channel_map", NULL);
-		}
-		if ((str = pw_properties_get(props, "device.description")) != NULL) {
-			pw_properties_set(props, PW_KEY_NODE_DESCRIPTION, str);
-			pw_properties_set(props, "device.description", NULL);
-		}
-		pw_properties_set(props, PW_KEY_FACTORY_NAME, "support.null-audio-sink");
-
-		module = calloc(1, sizeof(struct module));
-		module->client = client;
-		module->cb = cb;
-		module->cb_data = data;
-
-		if ((res = load_null_sink_module(client, module, props)) < 0)
-			goto out;
-	}
-out:
-	if (res < 0) {
-		free(module);
-		module = NULL;
 	}
 
-	return res;
+	if ((str = pw_properties_get(props, "rate")) != NULL) {
+		info->rate = pw_properties_parse_int(str);
+		pw_properties_set(props, "rate", NULL);
+	} else {
+		info->rate = 0;
+	}
+	return 0;
 }
 
-static void module_add_listener(struct module *module, struct module_events *events, void *userdata)
+#include "modules/registry.h"
+
+static const struct module_info module_list[] = {
+	{ "module-combine-sink", create_module_combine_sink, },
+	{ "module-echo-cancel", create_module_echo_cancel, },
+	{ "module-ladspa-sink", create_module_ladspa_sink, },
+	{ "module-ladspa-source", create_module_ladspa_source, },
+	{ "module-loopback", create_module_loopback, },
+	{ "module-null-sink", create_module_null_sink, },
+	{ "module-native-protocol-tcp", create_module_native_protocol_tcp, },
+	{ "module-pipe-source", create_module_pipe_source, },
+	{ "module-pipe-sink", create_module_pipe_sink, },
+	{ "module-remap-sink", create_module_remap_sink, },
+	{ "module-remap-source", create_module_remap_source, },
+	{ "module-simple-protocol-tcp", create_module_simple_protocol_tcp, },
+	{ "module-tunnel-sink", create_module_tunnel_sink, },
+	{ "module-tunnel-source", create_module_tunnel_source, },
+	{ "module-zeroconf-discover", create_module_zeroconf_discover, },
+#ifdef HAVE_AVAHI
+	{ "module-zeroconf-publish", create_module_zeroconf_publish, },
+#endif
+#ifdef HAVE_ROC
+	{ "module-roc-sink", create_module_roc_sink, },
+	{ "module-roc-source", create_module_roc_source, },
+#endif
+	{ NULL, }
+};
+
+static const struct module_info *find_module_info(const char *name)
 {
-	module->events = events;
-	module->events_data = userdata;
+	int i;
+	for (i = 0; module_list[i].name != NULL; i++) {
+		if (spa_streq(module_list[i].name, name))
+			return &module_list[i];
+	}
+	return NULL;
 }
 
-static void unload_module(struct module *module)
+struct module *module_create(struct client *client, const char *name, const char *args)
 {
-	pw_proxy_destroy(module->proxy);
+	struct impl *impl = client->impl;
+	const struct module_info *info;
+	struct module *module;
+
+	info = find_module_info(name);
+	if (info == NULL) {
+		errno = ENOENT;
+		return NULL;
+	}
+	module = info->create(impl, args);
+	if (module == NULL)
+		return NULL;
+
+	module->idx = pw_map_insert_new(&impl->modules, module);
+	if (module->idx == SPA_ID_INVALID) {
+		module_unload(client, module);
+		return NULL;
+	}
+	module->name = strdup(name);
+	module->args = args ? strdup(args) : NULL;
+	module->idx |= MODULE_FLAG;
+	return module;
 }

@@ -29,7 +29,7 @@
 #include <spa/utils/result.h>
 
 #include <pipewire/impl.h>
-#include <extensions/session-manager.h>
+#include <pipewire/extensions/session-manager.h>
 
 #include "client-session.h"
 #include "session.h"
@@ -78,8 +78,7 @@ static int client_session_link_update(void *object,
 	struct pw_properties *props = NULL;
 
 	if (!link) {
-		struct pw_context *context = pw_global_get_context(session->global);
-		const char *keys[] = {
+		static const char * const keys[] = {
 			PW_KEY_FACTORY_ID,
 			PW_KEY_CLIENT_ID,
 			PW_KEY_SESSION_ID,
@@ -89,6 +88,8 @@ static int client_session_link_update(void *object,
 			PW_KEY_ENDPOINT_LINK_INPUT_STREAM,
 			NULL
 		};
+
+		struct pw_context *context = pw_global_get_context(session->global);
 
 		link = calloc(1, sizeof(struct endpoint_link));
 		if (!link)
@@ -119,8 +120,7 @@ static int client_session_link_update(void *object,
 		: 0;
 
        no_mem:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	free(link);
 	pw_log_error(NAME" %p: cannot update link: no memory", this);
 	pw_resource_error(this->resource, -ENOMEM,
@@ -128,7 +128,7 @@ static int client_session_link_update(void *object,
 	return -ENOMEM;
 }
 
-static struct pw_client_session_methods methods = {
+static const struct pw_client_session_methods methods = {
 	PW_VERSION_CLIENT_SESSION_METHODS,
 	.update = client_session_update,
 	.link_update = client_session_link_update,
@@ -203,8 +203,7 @@ static void *create_object(void *data,
 	return this;
 
       no_mem:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	if (this && this->resource)
 		pw_resource_destroy(this->resource);
 	free(this);

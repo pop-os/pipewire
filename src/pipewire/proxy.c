@@ -84,8 +84,6 @@ error:
  * proxy object will have an id assigned from the client id space.
  *
  * \sa pw_core
- *
- * \memberof pw_proxy
  */
 SPA_EXPORT
 struct pw_proxy *pw_proxy_new(struct pw_proxy *factory,
@@ -107,7 +105,7 @@ struct pw_proxy *pw_proxy_new(struct pw_proxy *factory,
 		goto error_init;
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(impl, sizeof(struct proxy), void);
+		this->user_data = SPA_PTROFF(impl, sizeof(struct proxy), void);
 
 	pw_log_debug(NAME" %p: new %u type %s/%d core-proxy:%p, marshal:%p",
 			this, this->id, type, version, this->core, this->marshal);
@@ -226,7 +224,6 @@ static inline void remove_from_map(struct pw_proxy *proxy)
  *
  * \note This is normally called by \ref pw_core when the server
  *       decides to destroy the server side object
- * \memberof pw_proxy
  */
 SPA_EXPORT
 void pw_proxy_destroy(struct pw_proxy *proxy)

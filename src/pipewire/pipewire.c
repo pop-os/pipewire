@@ -22,9 +22,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include <unistd.h>
 #include <limits.h>
@@ -35,9 +33,17 @@
 #include <pwd.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include <pthread.h>
+
+#include <locale.h>
+#include <libintl.h>
+
+#include <valgrind/valgrind.h>
 
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/support/cpu.h>
+#include <spa/support/i18n.h>
 
 #include "pipewire.h"
 #include "private.h"
@@ -45,6 +51,10 @@
 #define MAX_SUPPORT	32
 
 #define SUPPORTLIB	"support/libspa-support"
+
+static char *prgname;
+
+static struct spa_i18n *_pipewire_i18n = NULL;
 
 struct plugin {
 	struct spa_list link;
@@ -60,7 +70,7 @@ struct handle {
 	struct plugin *plugin;
 	char *factory_name;
 	int ref;
-	struct spa_handle handle;
+	struct spa_handle handle SPA_ALIGNED(8);
 };
 
 struct registry {
@@ -72,9 +82,13 @@ struct support {
 	const char *plugin_dir;
 	const char *support_lib;
 	struct registry *registry;
+	char *i18n_domain;
+	struct spa_interface i18n_iface;
 	struct spa_support support[MAX_SUPPORT];
 	uint32_t n_support;
 	unsigned int in_valgrind:1;
+	unsigned int no_color:1;
+	unsigned int no_config:1;
 };
 
 static struct registry global_registry;
@@ -85,7 +99,7 @@ find_plugin(struct registry *registry, const char *filename)
 {
 	struct plugin *p;
 	spa_list_for_each(p, &registry->plugins, link) {
-		if (!strcmp(p->filename, filename))
+		if (spa_streq(p->filename, filename))
 			return p;
 	}
 	return NULL;
@@ -178,7 +192,7 @@ static const struct spa_handle_factory *find_factory(struct plugin *plugin, cons
 					factory->version);
 			continue;
 		}
-                if (strcmp(factory->name, factory_name) == 0)
+                if (spa_streq(factory->name, factory_name))
                         return factory;
 	}
 	res = -ENOENT;
@@ -212,8 +226,7 @@ static void configure_debug(struct support *support, const char *str)
 	if (n_tokens > 1)
 		support->categories = pw_split_strv(level[1], ",", INT_MAX, &n_tokens);
 
-	if (level)
-		pw_free_strv(level);
+	pw_free_strv(level);
 }
 
 SPA_EXPORT
@@ -340,6 +353,80 @@ static void *add_interface(struct support *support,
 	return iface;
 }
 
+SPA_EXPORT
+int pw_set_domain(const char *domain)
+{
+	struct support *support = &global_support;
+	free(support->i18n_domain);
+	if (domain == NULL)
+		support->i18n_domain = NULL;
+	else if ((support->i18n_domain = strdup(domain)) == NULL)
+		return -errno;
+	return 0;
+}
+SPA_EXPORT
+const char *pw_get_domain(void)
+{
+	struct support *support = &global_support;
+	return support->i18n_domain;
+}
+
+static const char *i18n_text(void *object, const char *msgid)
+{
+	struct support *support = object;
+	return dgettext(support->i18n_domain, msgid);
+}
+
+static const char *i18n_ntext(void *object, const char *msgid, const char *msgid_plural,
+		unsigned long int n)
+{
+	struct support *support = object;
+	return dngettext(support->i18n_domain, msgid, msgid_plural, n);
+}
+
+static void init_i18n(struct support *support)
+{
+	/* Load locale from the environment. */
+	setlocale(LC_ALL, "");
+	/* Set LC_NUMERIC to C so that floating point strings are consistently
+	 * formatted and parsed across locales. */
+	setlocale(LC_NUMERIC, "C");
+	bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
+	bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
+	pw_set_domain(GETTEXT_PACKAGE);
+}
+
+static void *add_i18n(struct support *support)
+{
+	static const struct spa_i18n_methods i18n_methods = {
+		SPA_VERSION_I18N_METHODS,
+		.text = i18n_text,
+		.ntext = i18n_ntext,
+	};
+
+	support->i18n_iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_I18N,
+			SPA_VERSION_I18N,
+			&i18n_methods, support);
+	_pipewire_i18n = (struct spa_i18n*) &support->i18n_iface;
+
+	support->support[support->n_support++] =
+		SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_I18N, _pipewire_i18n);
+
+	return 0;
+}
+
+SPA_EXPORT
+const char *pw_gettext(const char *msgid)
+{
+	return spa_i18n_text(_pipewire_i18n, msgid);
+}
+SPA_EXPORT
+const char *pw_ngettext(const char *msgid, const char *msgid_plural, unsigned long int n)
+{
+	return spa_i18n_ntext(_pipewire_i18n, msgid, msgid_plural, n);
+}
+
 #ifdef HAVE_SYSTEMD
 static struct spa_log *load_journal_logger(struct support *support)
 {
@@ -370,7 +457,7 @@ static struct spa_log *load_journal_logger(struct support *support)
 		/* look for an existing logger, and
 		 * replace it with the journal logger */
 		for (i = 0; i < support->n_support; i++) {
-			if (strcmp(support->support[i].type, SPA_TYPE_INTERFACE_Log) == 0) {
+			if (spa_streq(support->support[i].type, SPA_TYPE_INTERFACE_Log)) {
 				support->support[i].data = iface;
 				break;
 			}
@@ -391,7 +478,6 @@ static struct spa_log *load_journal_logger(struct support *support)
  *
  * The environment variable \a PIPEWIRE_DEBUG
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 void pw_init(int *argc, char **argv[])
@@ -407,11 +493,18 @@ void pw_init(int *argc, char **argv[])
 	if (support->registry != NULL)
 		return;
 
-	if ((str = getenv("VALGRIND")))
-		support->in_valgrind = pw_properties_parse_bool(str);
+	support->in_valgrind = RUNNING_ON_VALGRIND;
 
-	if ((str = getenv("PIPEWIRE_DEBUG")))
+	if ((str = getenv("NO_COLOR")) != NULL)
+		support->no_color = true;
+
+	if ((str = getenv("PIPEWIRE_NO_CONFIG")) != NULL)
+		support->no_config = pw_properties_parse_bool(str);
+
+	if ((str = getenv("PIPEWIRE_DEBUG")) != NULL)
 		configure_debug(support, str);
+
+	init_i18n(support);
 
 	if ((str = getenv("SPA_PLUGIN_DIR")) == NULL)
 		str = PLUGINDIR;
@@ -426,7 +519,8 @@ void pw_init(int *argc, char **argv[])
 
 	if (pw_log_is_default()) {
 		n_items = 0;
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
+		if (!support->no_color)
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_TIMESTAMP, "true");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LINE, "true");
 		snprintf(level, sizeof(level), "%d", pw_log_level);
@@ -440,9 +534,11 @@ void pw_init(int *argc, char **argv[])
 			pw_log_set(log);
 
 #ifdef HAVE_SYSTEMD
-		log = load_journal_logger(support);
-		if (log)
-			pw_log_set(log);
+		if ((str = getenv("PIPEWIRE_LOG_SYSTEMD")) == NULL || spa_atob(str)) {
+			log = load_journal_logger(support);
+			if (log)
+				pw_log_set(log);
+		}
 #endif
 	} else {
 		support->support[support->n_support++] =
@@ -452,9 +548,14 @@ void pw_init(int *argc, char **argv[])
 	n_items = 0;
 	if ((str = getenv("PIPEWIRE_CPU")))
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_CPU_FORCE, str);
+	if ((str = getenv("PIPEWIRE_VM")))
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_CPU_VM_TYPE, str);
 	info = SPA_DICT_INIT(items, n_items);
 
 	add_interface(support, SPA_NAME_SUPPORT_CPU, SPA_TYPE_INTERFACE_CPU, &info);
+
+	add_i18n(support);
+
 	pw_log_info("version %s", pw_get_library_version());
 }
 
@@ -473,8 +574,8 @@ void pw_deinit(void)
 			unref_handle(h);
 		unref_plugin(p);
 	}
-	if (support->categories)
-		pw_free_strv(support->categories);
+	pw_free_strv(support->categories);
+	free(support->i18n_domain);
 	spa_zero(global_support);
 	spa_zero(global_registry);
 
@@ -488,7 +589,6 @@ void pw_deinit(void)
  * Debugging categories can be enabled by using the PIPEWIRE_DEBUG
  * environment variable
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 bool pw_debug_is_category_enabled(const char *name)
@@ -499,13 +599,13 @@ bool pw_debug_is_category_enabled(const char *name)
 		return false;
 
 	for (i = 0; global_support.categories[i]; i++) {
-		if (strcmp(global_support.categories[i], name) == 0)
+		if (spa_streq(global_support.categories[i], name))
 			return true;
 	}
 	return false;
 }
 
-/** Get the application name \memberof pw_pipewire */
+/** Get the application name */
 SPA_EXPORT
 const char *pw_get_application_name(void)
 {
@@ -513,38 +613,52 @@ const char *pw_get_application_name(void)
 	return NULL;
 }
 
-/** Get the program name \memberof pw_pipewire */
-SPA_EXPORT
-const char *pw_get_prgname(void)
+static void init_prgname(void)
 {
-	static char prgname[PATH_MAX];
-	spa_memzero(prgname, sizeof(prgname));
+	static char name[PATH_MAX];
+
+	spa_memzero(name, sizeof(name));
 #if defined(__linux__) || defined(__FreeBSD_kernel__)
 	{
-		ssize_t len;
-		if ((len = readlink("/proc/self/exe", prgname, sizeof(prgname)-1)) > 0)
-			return strrchr(prgname, '/') + 1;
+		if (readlink("/proc/self/exe", name, sizeof(name)-1) > 0) {
+			prgname = strrchr(name, '/') + 1;
+			return;
+		}
 	}
 #endif
 #if defined __FreeBSD__
 	{
 		ssize_t len;
-		spa_memzero(prgname, sizeof(prgname));
-		if ((len = readlink("/proc/curproc/file", prgname, sizeof(prgname)-1)) > 0)
-			return strrchr(prgname, '/') + 1;
+
+		if ((len = readlink("/proc/curproc/file", name, sizeof(name)-1)) > 0) {
+			prgname = strrchr(name, '/') + 1;
+			return;
+		}
 	}
 #endif
 #ifndef __FreeBSD__
 	{
-		if (prctl(PR_GET_NAME, (unsigned long) prgname, 0, 0, 0) == 0)
-			return prgname;
+		if (prctl(PR_GET_NAME, (unsigned long) name, 0, 0, 0) == 0) {
+			prgname = name;
+			return;
+		}
 	}
 #endif
-	snprintf(prgname, sizeof(prgname)-1, "pid-%d", getpid());
+	snprintf(name, sizeof(name), "pid-%d", getpid());
+	prgname = name;
+}
+
+/** Get the program name */
+SPA_EXPORT
+const char *pw_get_prgname(void)
+{
+	static pthread_once_t prgname_is_initialized = PTHREAD_ONCE_INIT;
+
+	pthread_once(&prgname_is_initialized, init_prgname);
 	return prgname;
 }
 
-/** Get the user name \memberof pw_pipewire */
+/** Get the user name */
 SPA_EXPORT
 const char *pw_get_user_name(void)
 {
@@ -556,7 +670,7 @@ const char *pw_get_user_name(void)
 	return NULL;
 }
 
-/** Get the host name \memberof pw_pipewire */
+/** Get the host name */
 SPA_EXPORT
 const char *pw_get_host_name(void)
 {
@@ -575,11 +689,23 @@ bool pw_in_valgrind(void)
 	return global_support.in_valgrind;
 }
 
+SPA_EXPORT
+bool pw_check_option(const char *option, const char *value)
+{
+	if (spa_streq(option, "in-valgrind"))
+		return global_support.in_valgrind == spa_atob(value);
+	else if (spa_streq(option, "no-color"))
+		return global_support.no_color == spa_atob(value);
+	else if (spa_streq(option, "no-config"))
+		return global_support.no_config == spa_atob(value);
+	else
+		return false;
+}
+
 /** Get the client name
  *
  * Make a new PipeWire client name that can be used to construct a remote.
  *
- * \memberof pw_pipewire
  */
 SPA_EXPORT
 const char *pw_get_client_name(void)
@@ -594,12 +720,11 @@ const char *pw_get_client_name(void)
 	else {
 		if (snprintf(cname, sizeof(cname), "pipewire-pid-%zd", (size_t) getpid()) < 0)
 			return NULL;
-		cname[255] = 0;
 		return cname;
 	}
 }
 
-/** Reverse the direction \memberof pw_pipewire */
+/** Reverse the direction */
 SPA_EXPORT
 enum pw_direction pw_direction_reverse(enum pw_direction direction)
 {

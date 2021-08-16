@@ -38,6 +38,9 @@
 
 #include "module-protocol-pulse/pulse-server.h"
 
+/** \page page_module_protocol_pulse PipeWire Module: Protocol Pulse
+ */
+
 #define NAME "protocol-pulse"
 
 #define MODULE_USAGE	PW_PROTOCOL_PULSE_USAGE
@@ -51,7 +54,6 @@ static const struct spa_dict_item module_props[] = {
 
 struct impl {
 	struct pw_context *context;
-	struct pw_properties *properties;
 
 	struct spa_hook module_listener;
 
@@ -63,8 +65,6 @@ static void impl_free(struct impl *impl)
 	spa_hook_remove(&impl->module_listener);
 	if (impl->pulse)
 		pw_protocol_pulse_destroy(impl->pulse);
-	if (impl->properties)
-		pw_properties_free(impl->properties);
 	free(impl);
 }
 
@@ -92,8 +92,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (impl == NULL)
 		return -errno;
 
-	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
-
 	pw_log_debug("module %p: new %s", impl, args);
 
 	if (args)
@@ -101,19 +99,16 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	else
 		props = NULL;
 
-	impl->properties = props;
-
-	impl->pulse = pw_protocol_pulse_new(context,
-			props ? pw_properties_copy(props) : NULL, 0);
+	impl->pulse = pw_protocol_pulse_new(context, props, 0);
 	if (impl->pulse == NULL) {
 		res = -errno;
-		goto error;
+		free(impl);
+		return res;
 	}
+
+	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
 	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
 
 	return 0;
-error:
-	impl_free(impl);
-	return res;
 }

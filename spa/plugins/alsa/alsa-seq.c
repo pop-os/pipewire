@@ -47,8 +47,6 @@
 static int seq_open(struct seq_state *state, struct seq_conn *conn, bool with_queue)
 {
 	struct props *props = &state->props;
-	struct pollfd pfd;
-        snd_seq_port_info_t *pinfo;
 	int res;
 
 	spa_log_debug(state->log, "%p: ALSA seq open '%s' duplex", state, props->device);
@@ -57,9 +55,16 @@ static int seq_open(struct seq_state *state, struct seq_conn *conn, bool with_qu
 			   props->device,
 			   SND_SEQ_OPEN_DUPLEX,
 			   0)) < 0) {
-		spa_log_error(state->log, "open failed: %s", snd_strerror(res));
 		return res;
 	}
+	return 0;
+}
+
+static int seq_init(struct seq_state *state, struct seq_conn *conn, bool with_queue)
+{
+	struct pollfd pfd;
+	snd_seq_port_info_t *pinfo;
+	int res;
 
 	/* client id */
 	if ((res = snd_seq_client_id(conn->hndl)) < 0) {
@@ -249,10 +254,11 @@ static void alsa_seq_on_sys(struct spa_source *source)
 
 int spa_alsa_seq_open(struct seq_state *state)
 {
-	int res;
+	int n, i, res;
 	snd_seq_port_subscribe_t *sub;
 	snd_seq_addr_t addr;
 	snd_seq_queue_timer_t *timer;
+	struct seq_conn reserve[16];
 
 	if (state->opened)
 		return 0;
@@ -260,13 +266,33 @@ int spa_alsa_seq_open(struct seq_state *state)
 	init_stream(state, SPA_DIRECTION_INPUT);
 	init_stream(state, SPA_DIRECTION_OUTPUT);
 
-	if ((res = seq_open(state, &state->sys, false)) < 0)
+	spa_zero(reserve);
+	for (i = 0; i < 16; i++) {
+		spa_log_debug(state->log, "close %d", i);
+		if ((res = seq_open(state, &reserve[i], false)) < 0)
+			break;
+	}
+	if (i >= 2) {
+		state->event = reserve[--i];
+		state->sys = reserve[--i];
+		res = 0;
+	}
+	for (n = --i; n >= 0; n--) {
+		spa_log_debug(state->log, "close %d", n);
+		seq_close(state, &reserve[n]);
+	}
+	if (res < 0) {
+		spa_log_error(state->log, "open failed: %s", snd_strerror(res));
 		return res;
+	}
+
+	if ((res = seq_init(state, &state->sys, false)) < 0)
+		goto error_close;
 
 	snd_seq_set_client_name(state->sys.hndl, "PipeWire-System");
 
-	if ((res = seq_open(state, &state->event, true)) < 0)
-		goto error_close_sys;
+	if ((res = seq_init(state, &state->event, true)) < 0)
+		goto error_close;
 
 	snd_seq_set_client_name(state->event.hndl, "PipeWire-RT-Event");
 
@@ -305,7 +331,7 @@ int spa_alsa_seq_open(struct seq_state *state)
 
 	if ((res = spa_system_timerfd_create(state->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
-		goto error_close_event;
+		goto error_close;
 
 	state->timerfd = res;
 
@@ -313,9 +339,8 @@ int spa_alsa_seq_open(struct seq_state *state)
 
 	return 0;
 
-error_close_event:
+error_close:
 	seq_close(state, &state->event);
-error_close_sys:
 	seq_close(state, &state->sys);
 	return res;
 }
@@ -528,7 +553,7 @@ static int process_read(struct seq_state *state)
 		/* convert the age to samples and convert to an offset */
 		offset = (diff * state->rate.denom) / (state->rate.num * SPA_NSEC_PER_SEC);
 		if (state->duration > offset)
-			offset = state->duration - offset;
+			offset = state->duration - 1 - offset;
 		else
 			offset = 0;
 
@@ -710,7 +735,7 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 
 	if (state->dll.bw == 0.0) {
 		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold,
-				state->rate.num / state->rate.denom);
+				state->rate.denom);
 		state->next_time = nsec;
 		state->base_time = nsec;
 	}
@@ -718,10 +743,6 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 
 	if ((state->next_time - state->base_time) > BW_PERIOD) {
 		state->base_time = state->next_time;
-		if (state->dll.bw > SPA_DLL_BW_MIN)
-			spa_dll_set_bw(&state->dll, state->dll.bw / 2.0,
-					state->threshold, state->rate.num / state->rate.denom);
-
 		spa_log_debug(state->log, NAME" %p: follower:%d rate:%f bw:%f err:%f (%f %f %f)",
 				state, follower, corr, state->dll.bw, err,
 				state->dll.z1, state->dll.z2, state->dll.z3);
@@ -738,8 +759,8 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 		state->clock->next_nsec = state->next_time;
 	}
 
-	spa_log_trace_fp(state->log, "now:%"PRIu64" queue:%"PRIu64" err:%f next:%"PRIu64" thr:%d",
-			nsec, queue_real, err, state->next_time, state->threshold);
+	spa_log_trace_fp(state->log, "now:%"PRIu64" queue:%"PRIu64" err:%f corr:%f next:%"PRIu64" thr:%d",
+			nsec, queue_real, err, corr, state->next_time, state->threshold);
 
 	return 0;
 }
@@ -813,8 +834,10 @@ static void reset_stream(struct seq_state *this, struct seq_stream *stream, bool
 static int set_timers(struct seq_state *state)
 {
 	struct timespec now;
+	int res;
 
-	spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now);
+	if ((res = spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now)) < 0)
+	    return res;
 
 	state->next_time = SPA_TIMESPEC_TO_NSEC(&now);
 	if (state->following) {
@@ -852,8 +875,11 @@ int spa_alsa_seq_start(struct seq_state *state)
 		struct spa_io_clock *clock = &state->position->clock;
 		state->rate = clock->rate;
 		state->duration = clock->duration;
-		state->threshold = state->duration;
+	} else {
+		state->rate = SPA_FRACTION(1, 48000);
+		state->duration = 1024;
 	}
+	state->threshold = state->duration;
 
 	state->started = true;
 

@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include <pipewire/impl.h>
-#include <extensions/session-manager.h>
+#include <pipewire/extensions/session-manager.h>
 
 #include <spa/pod/filter.h>
 
@@ -275,7 +275,7 @@ int session_init(struct session *this,
 		struct pw_context *context,
 		struct pw_properties *properties)
 {
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_FACTORY_ID,
 		PW_KEY_CLIENT_ID,
 		NULL
@@ -325,6 +325,5 @@ void session_clear(struct session *this)
 
 	free(this->info.params);
 
-	if (this->props)
-		pw_properties_free(this->props);
+	pw_properties_free(this->props);
 }

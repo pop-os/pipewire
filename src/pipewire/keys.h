@@ -30,6 +30,8 @@ extern "C" {
 #endif
 
 /**
+ * \defgroup pw_keys PipeWire Keys
+ *
  * A collection of keys that are used to add extra information on objects.
  *
  * Keys that start with "pipewire." are in general set-once and then
@@ -38,6 +40,9 @@ extern "C" {
  *
  * Properties from other objects can also appear. This usually suggests some
  * sort of parent/child or owner/owned relationship.
+ *
+ * \addtogroup pw_keys
+ * \{
  */
 #define PW_KEY_PROTOCOL			"pipewire.protocol"	/**< protocol used for connection */
 #define PW_KEY_ACCESS			"pipewire.access"	/**< how the client access is controlled */
@@ -56,17 +61,26 @@ extern "C" {
 #define PW_KEY_LIBRARY_NAME_LOOP	"library.name.loop"	/**< name of the loop library to use */
 #define PW_KEY_LIBRARY_NAME_DBUS	"library.name.dbus"	/**< name of the dbus library to use */
 
+/** object properties */
 #define PW_KEY_OBJECT_PATH		"object.path"		/**< unique path to construct the object */
 #define PW_KEY_OBJECT_ID		"object.id"		/**< a global object id */
+#define PW_KEY_OBJECT_LINGER		"object.linger"		/**< the object lives on even after the client
+								  *  that created it has been destroyed */
+#define PW_KEY_OBJECT_REGISTER		"object.register"	/**< If the object should be registered. */
+
+
+/* config */
+#define PW_KEY_CONFIG_PREFIX		"config.prefix"		/**< a config prefix directory */
+#define PW_KEY_CONFIG_NAME		"config.name"		/**< a config file name */
 
 /* context */
-#define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules */
+#define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules, deprecated */
 #define PW_KEY_USER_NAME		"context.user-name"	/**< The user name that runs pipewire */
 #define PW_KEY_HOST_NAME		"context.host-name"	/**< The host name of the machine */
 
 /* core */
 #define PW_KEY_CORE_NAME		"core.name"		/**< The name of the core. Default is
-								  *  pipewire-<user-name>-<pid>, overwritten
+								  *  `pipewire-<username>-<pid>`, overwritten
 								  *  by env(PIPEWIRE_CORE) */
 #define PW_KEY_CORE_VERSION		"core.version"		/**< The version of the core. */
 #define PW_KEY_CORE_DAEMON		"core.daemon"		/**< If the core is listening for connections. */
@@ -94,7 +108,7 @@ extern "C" {
 #define PW_KEY_APP_NAME			"application.name"	/**< application name. Ex: "Totem Music Player" */
 #define PW_KEY_APP_ID			"application.id"	/**< a textual id for identifying an
 								  *  application logically. Ex: "org.gnome.Totem" */
-#define PW_KEY_APP_VERSION		"application.version"
+#define PW_KEY_APP_VERSION		"application.version"   /**< application version. Ex: "1.2.0" */
 #define PW_KEY_APP_ICON			"application.icon"	/**< aa base64 blob with PNG image data */
 #define PW_KEY_APP_ICON_NAME		"application.icon-name"	/**< an XDG icon name for the application.
 								  *  Ex: "totem" */
@@ -139,6 +153,8 @@ extern "C" {
 								  *  node/session */
 #define PW_KEY_NODE_LATENCY		"node.latency"		/**< the requested latency of the node as
 								  *  a fraction. Ex: 128/48000 */
+#define PW_KEY_NODE_MAX_LATENCY		"node.max-latency"	/**< the maximum supported latency of the
+								  *  node as a fraction. Ex: 1024/48000 */
 #define PW_KEY_NODE_DONT_RECONNECT	"node.dont-reconnect"	/**< don't reconnect this node */
 #define PW_KEY_NODE_ALWAYS_PROCESS	"node.always-process"	/**< process even when unlinked */
 #define PW_KEY_NODE_PAUSE_ON_IDLE	"node.pause-on-idle"	/**< pause the node when idle */
@@ -146,6 +162,14 @@ extern "C" {
 #define PW_KEY_NODE_DRIVER		"node.driver"		/**< node can drive the graph */
 #define PW_KEY_NODE_STREAM		"node.stream"		/**< node is a stream, the server side should
 								  *  add a converter */
+#define PW_KEY_NODE_VIRTUAL		"node.virtual"		/**< the node is some sort of virtual
+								  *  object */
+#define PW_KEY_NODE_PASSIVE		"node.passive"		/**< indicate that a node wants passive links
+								  *  on output/input/all ports when the value is
+								  *  "out"/"in"/"true" respectively */
+#define PW_KEY_NODE_LINK_GROUP		"node.link-group"	/**< the node is internally linked to
+								  *  nodes with the same link-group */
+
 /** Port keys */
 #define PW_KEY_PORT_ID			"port.id"		/**< port id */
 #define PW_KEY_PORT_NAME		"port.name"		/**< port name */
@@ -157,6 +181,8 @@ extern "C" {
 #define PW_KEY_PORT_CONTROL		"port.control"		/**< if this port is a control port */
 #define PW_KEY_PORT_MONITOR		"port.monitor"		/**< if this port is a monitor port */
 #define PW_KEY_PORT_CACHE_PARAMS	"port.cache-params"	/**< cache the node port params */
+#define PW_KEY_PORT_EXTRA		"port.extra"		/**< api specific extra port info, API name
+								  *  should be prefixed. "jack:flags:56" */
 
 /** link properties */
 #define PW_KEY_LINK_ID			"link.id"		/**< a link id */
@@ -238,15 +264,11 @@ extern "C" {
 #define PW_KEY_STREAM_CAPTURE_SINK	"stream.capture.sink"	/**< Try to capture the sink output instead of
 								  *  source output */
 
-/** object properties */
-#define PW_KEY_OBJECT_LINGER		"object.linger"		/**< the object lives on even after the client
-								  *  that created it has been destroyed */
-
 /** Media */
 #define PW_KEY_MEDIA_TYPE		"media.type"		/**< Media type, one of
 								  *  Audio, Video, Midi */
 #define PW_KEY_MEDIA_CATEGORY		"media.category"	/**< Media Category:
-								  *  Playback, Capture, Duplex, Monitor */
+								  *  Playback, Capture, Duplex, Monitor, Manager */
 #define PW_KEY_MEDIA_ROLE		"media.role"		/**< Role: Movie, Music, Camera,
 								  *  Screen, Communication, Game,
 								  *  Notification, DSP, Production,
@@ -272,7 +294,7 @@ extern "C" {
 								  *  Ex: "32 bit float mono audio" */
 /** audio related properties */
 #define PW_KEY_AUDIO_CHANNEL		"audio.channel"		/**< an audio channel. Ex: "FL" */
-#define PW_KEY_AUDIO_RATE		"audio.samplerate"	/**< an audio samplerate */
+#define PW_KEY_AUDIO_RATE		"audio.rate"		/**< an audio samplerate */
 #define PW_KEY_AUDIO_CHANNELS		"audio.channels"	/**< number of audio channels */
 #define PW_KEY_AUDIO_FORMAT		"audio.format"		/**< an audio format. Ex: "S16LE" */
 
@@ -284,6 +306,9 @@ extern "C" {
 #ifdef PW_ENABLE_DEPRECATED
 #define PW_KEY_PRIORITY_MASTER		"priority.master"	/**< deprecated */
 #endif /* PW_ENABLE_DEPRECATED */
+
+/** \}
+ */
 
 #ifdef __cplusplus
 }

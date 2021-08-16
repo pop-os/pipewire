@@ -32,6 +32,7 @@
 
 #include <spa/node/node.h>
 #include <spa/utils/hook.h>
+#include <spa/utils/string.h>
 #include <spa/param/props.h>
 #include <spa/debug/pod.h>
 
@@ -101,11 +102,20 @@ static void add_idle_timeout(struct node *node)
 	struct timespec value;
 	struct impl *impl = node->impl;
 	struct pw_loop *main_loop = pw_context_get_main_loop(impl->context);
+	const char *str;
+
+	if (node->obj->info && node->obj->info->props &&
+	    (str = spa_dict_lookup(node->obj->info->props, "session.suspend-timeout-seconds")) != NULL)
+		value.tv_sec = atoi(str);
+	else
+		value.tv_sec = DEFAULT_IDLE_SECONDS;
+
+	if (value.tv_sec == 0)
+		return;
 
 	if (node->idle_timeout == NULL)
 		node->idle_timeout = pw_loop_add_timer(main_loop, idle_timeout, node);
 
-	value.tv_sec = DEFAULT_IDLE_SECONDS;
 	value.tv_nsec = 0;
 	pw_loop_update_timer(main_loop, node->idle_timeout, &value, NULL, false);
 }
@@ -137,6 +147,7 @@ static void object_update(void *data)
 
 		if (info->change_mask & PW_NODE_CHANGE_MASK_STATE) {
 			switch (info->state) {
+			case PW_NODE_STATE_ERROR:
 			case PW_NODE_STATE_IDLE:
 				on_node_idle(impl, node);
 				break;
@@ -174,6 +185,7 @@ handle_node(struct impl *impl, struct sm_object *object)
 	node = sm_object_add_data(object, SESSION_KEY, sizeof(struct node));
 	node->obj = (struct sm_node*)object;
 	node->impl = impl;
+	node->id = object->id;
 	spa_list_append(&impl->node_list, &node->link);
 
 	node->obj->obj.mask |= SM_NODE_CHANGE_MASK_INFO;
@@ -195,15 +207,13 @@ static void session_create(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	int res;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Node))
 		res = handle_node(impl, object);
 	else
 		res = 0;
 
-	if (res < 0) {
+	if (res < 0)
 		pw_log_warn(NAME" %p: can't handle global %d", impl, object->id);
-	} else
-		sm_media_session_schedule_rescan(impl->session);
 }
 
 static void session_remove(void *data, struct sm_object *object)
@@ -211,25 +221,10 @@ static void session_remove(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	pw_log_debug(NAME " %p: remove global '%d'", impl, object->id);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Node)) {
 		struct node *node;
-
 		if ((node = sm_object_get_data(object, SESSION_KEY)) != NULL)
 			destroy_node(impl, node);
-	}
-
-	sm_media_session_schedule_rescan(impl->session);
-}
-
-static void session_rescan(void *data, int seq)
-{
-	struct impl *impl = data;
-	struct node *node;
-
-	clock_gettime(CLOCK_MONOTONIC, &impl->now);
-	pw_log_debug(NAME" %p: rescan", impl);
-
-	spa_list_for_each(node, &impl->node_list, link) {
 	}
 }
 
@@ -244,7 +239,6 @@ static const struct sm_media_session_events session_events = {
 	SM_VERSION_MEDIA_SESSION_EVENTS,
 	.create = session_create,
 	.remove = session_remove,
-	.rescan = session_rescan,
 	.destroy = session_destroy,
 };
 

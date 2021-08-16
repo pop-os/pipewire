@@ -192,6 +192,9 @@ int main(int argc, char *argv[])
 		goto exit;
 	}
 
+	/* XXX: we don't handle dbus reconnection yet, so ref the handle instead */
+	dbus_connection_ref(impl.conn);
+
 	impl.device = rd_device_new(impl.conn,
 			opt_name,
 			opt_appname,
@@ -207,8 +210,14 @@ int main(int argc, char *argv[])
 		rd_device_release(impl.device);
 
 exit:
-	pw_context_destroy(impl.context);
-	pw_main_loop_destroy(impl.mainloop);
+	if (impl.conn)
+		dbus_connection_unref(impl.conn);
+	if (impl.dbus)
+		spa_dbus_connection_destroy(impl.dbus_connection);
+	if (impl.context)
+		pw_context_destroy(impl.context);
+	if (impl.mainloop)
+		pw_main_loop_destroy(impl.mainloop);
 
 	pw_deinit();
 

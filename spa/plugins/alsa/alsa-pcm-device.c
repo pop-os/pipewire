@@ -36,6 +36,7 @@
 #include <spa/node/node.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
 #include <spa/monitor/device.h>
@@ -355,7 +356,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		desc = "On";
 		break;
 	default:
-		errno = -EINVAL;
+		errno = EINVAL;
 		return NULL;
 	}
 
@@ -456,17 +457,17 @@ static int impl_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
-		uint32_t id;
+		uint32_t idx;
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&id))) < 0) {
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_pod(0, NULL, param);
 			return res;
 		}
 
-		set_profile(this, id);
+		set_profile(this, idx);
 		break;
 	}
 	default:
@@ -492,7 +493,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		*interface = &this->device;
 	else
 		return -ENOENT;

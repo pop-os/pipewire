@@ -29,6 +29,7 @@
 #include <stddef.h>
 
 #include <spa/param/audio/format.h>
+#include <spa/param/bluetooth/audio.h>
 #include <spa/pod/pod.h>
 #include <spa/pod/builder.h>
 
@@ -292,65 +293,63 @@ typedef struct {
 #error "Unknown byte order"
 #endif
 
-static inline int a2dp_sbc_get_channels(a2dp_sbc_t *config)
-{
-	switch (config->channel_mode) {
-	case SBC_CHANNEL_MODE_MONO:
-                return 1;
-	case SBC_CHANNEL_MODE_DUAL_CHANNEL:
-	case SBC_CHANNEL_MODE_STEREO:
-	case SBC_CHANNEL_MODE_JOINT_STEREO:
-                return 2;
-	default:
-                return -1;
-        }
-}
+#define A2DP_CODEC_DEFAULT_RATE		48000
+#define A2DP_CODEC_DEFAULT_CHANNELS	2
 
-static inline int a2dp_sbc_get_frequency(a2dp_sbc_t *config)
-{
-	switch (config->frequency) {
-	case SBC_SAMPLING_FREQ_16000:
-                return 16000;
-	case SBC_SAMPLING_FREQ_32000:
-                return 32000;
-	case SBC_SAMPLING_FREQ_44100:
-                return 44100;
-	case SBC_SAMPLING_FREQ_48000:
-                return 48000;
-	default:
-                return -1;
-        }
-}
+struct a2dp_codec_audio_info {
+	uint32_t rate;
+	uint32_t channels;
+};
 
 struct a2dp_codec_handle;
 
 struct a2dp_codec {
-	uint32_t flags;
-
+	enum spa_bluetooth_audio_codec id;
 	uint8_t codec_id;
 	a2dp_vendor_codec_t vendor;
 
 	const char *name;
 	const char *description;
+	const struct spa_dict *info;
 
-	const int send_fill_frames;
-	const int recv_fill_frames;
+	const size_t send_buf_size;
+
+	const char *feature_flag;
 
 	int (*fill_caps) (const struct a2dp_codec *codec, uint32_t flags,
 			uint8_t caps[A2DP_MAX_CAPS_SIZE]);
 	int (*select_config) (const struct a2dp_codec *codec, uint32_t flags,
 			const void *caps, size_t caps_size,
-			const struct spa_audio_info *info, uint8_t config[A2DP_MAX_CAPS_SIZE]);
+			const struct a2dp_codec_audio_info *info,
+			const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE]);
 	int (*enum_config) (const struct a2dp_codec *codec,
 			const void *caps, size_t caps_size, uint32_t id, uint32_t idx,
 			struct spa_pod_builder *builder, struct spa_pod **param);
+	int (*validate_config) (const struct a2dp_codec *codec, uint32_t flags,
+			const void *caps, size_t caps_size,
+			struct spa_audio_info *info);
+
+	/** qsort comparison sorting caps in order of preference for the codec.
+	 * Used in codec switching to select best remote endpoints.
+	 * The caps handed in correspond to this codec_id, but are
+	 * otherwise not checked beforehand.
+	 */
+	int (*caps_preference_cmp) (const struct a2dp_codec *codec, const void *caps1, size_t caps1_size,
+			const void *caps2, size_t caps2_size, const struct a2dp_codec_audio_info *info);
+
+	void *(*init_props) (const struct a2dp_codec *codec, const struct spa_dict *settings);
+	void (*clear_props) (void *);
+	int (*enum_props) (void *props, const struct spa_dict *settings, uint32_t id, uint32_t idx,
+			struct spa_pod_builder *builder, struct spa_pod **param);
+	int (*set_props) (void *props, const struct spa_pod *param);
 
 	void *(*init) (const struct a2dp_codec *codec, uint32_t flags, void *config, size_t config_size,
-			const struct spa_audio_info *info, size_t mtu);
+			const struct spa_audio_info *info, void *props, size_t mtu);
 	void (*deinit) (void *data);
 
+	int (*update_props) (void *data, void *props);
+
 	int (*get_block_size) (void *data);
-	int (*get_num_blocks) (void *data);
 
 	int (*abr_process) (void *data, size_t unsent);
 
@@ -359,7 +358,7 @@ struct a2dp_codec {
 	int (*encode) (void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
-		size_t *dst_out);
+		size_t *dst_out, int *need_flush);
 
 	int (*start_decode) (void *data,
 		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp);
@@ -372,6 +371,18 @@ struct a2dp_codec {
 	int (*increase_bitpool) (void *data);
 };
 
-extern const struct a2dp_codec **a2dp_codecs;
+extern const struct a2dp_codec * const * const a2dp_codecs;
+
+struct a2dp_codec_config {
+	uint32_t config;
+	int value;
+	unsigned int priority;
+};
+
+int a2dp_codec_select_config(const struct a2dp_codec_config configs[], size_t n,
+	uint32_t cap, int preferred_value);
+
+bool a2dp_codec_check_caps(const struct a2dp_codec *codec, unsigned int codec_id,
+	const void *caps, size_t caps_size, const struct a2dp_codec_audio_info *info);
 
 #endif

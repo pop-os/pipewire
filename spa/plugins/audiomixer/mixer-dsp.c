@@ -31,6 +31,7 @@
 #include <spa/support/cpu.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -175,22 +176,24 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
 				port->direction, port->id, &port->info);
-		port->info.change_mask = 0;
+		port->info.change_mask = old;
 	}
 }
 
@@ -263,7 +266,8 @@ static int impl_node_add_port(void *object, enum spa_direction direction, uint32
 		this->last_port = port_id + 1;
 	port->valid = true;
 
-	spa_log_debug(this->log, NAME " %p: add port %d %d", this, port_id, this->last_port);
+	spa_log_debug(this->log, NAME " %p: add port %d:%d %d", this,
+			direction, port_id, this->last_port);
 	emit_port_info(this, port, true);
 
 	return 0;
@@ -297,7 +301,8 @@ impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_
 
 		this->last_port = i + 1;
 	}
-	spa_log_debug(this->log, NAME " %p: remove port %d %d", this, port_id, this->last_port);
+	spa_log_debug(this->log, NAME " %p: remove port %d:%d %d", this,
+			direction, port_id, this->last_port);
 
 	spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 
@@ -566,12 +571,13 @@ impl_node_port_use_buffers(void *object,
 	uint32_t i;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	spa_log_debug(this->log, NAME " %p: use %d buffers on port %d:%d",
+			this, n_buffers, direction, port_id);
+
 	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
 	port = GET_PORT(this, direction, port_id);
-
-	spa_log_debug(this->log, NAME " %p: use buffers %d on port %d:%d",
-			this, n_buffers, direction, port_id);
 
 	spa_return_val_if_fail(port->have_format, -EIO);
 
@@ -597,8 +603,8 @@ impl_node_port_use_buffers(void *object,
 		if (direction == SPA_DIRECTION_OUTPUT)
 			queue_buffer(this, port, b);
 
-		spa_log_debug(this->log, NAME " %p: port %d.%d buffer %d n_data:%d data:%p maxsize:%d",
-				this, i, direction, port_id,
+		spa_log_debug(this->log, NAME " %p: port %d:%d buffer:%d n_data:%d data:%p maxsize:%d",
+				this, direction, port_id, i,
 				buffers[i]->n_datas, d[0].data, d[0].maxsize);
 	}
 	port->n_buffers = n_buffers;
@@ -615,12 +621,13 @@ impl_node_port_set_io(void *object,
 	struct port *port;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
-
-	port = GET_PORT(this, direction, port_id);
 
 	spa_log_debug(this->log, NAME " %p: port %d:%d io %d %p/%zd", this,
 			direction, port_id, id, data, size);
+
+	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+
+	port = GET_PORT(this, direction, port_id);
 
 	switch (id) {
 	case SPA_IO_Buffers:
@@ -766,7 +773,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;

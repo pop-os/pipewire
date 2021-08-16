@@ -25,14 +25,16 @@
 #include <stdio.h>
 #include <signal.h>
 #include <getopt.h>
+#include <locale.h>
 #include <ncurses.h>
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/pod/parser.h>
 #include <spa/debug/pod.h>
 
 #include <pipewire/impl.h>
-#include <extensions/profiler.h>
+#include <pipewire/extensions/profiler.h>
 
 #define MAX_NAME		128
 
@@ -46,7 +48,7 @@ struct driver {
 struct measurement {
 	int32_t index;
 	int32_t status;
-	int64_t period;
+	int64_t quantum;
 	int64_t prev_signal;
 	int64_t signal;
 	int64_t awake;
@@ -94,18 +96,17 @@ struct point {
 
 static int process_info(struct data *d, const struct spa_pod *pod, struct driver *info)
 {
-	spa_pod_parse_struct(pod,
+	return spa_pod_parse_struct(pod,
 			SPA_POD_Long(&info->count),
 			SPA_POD_Float(&info->cpu_load[0]),
 			SPA_POD_Float(&info->cpu_load[1]),
 			SPA_POD_Float(&info->cpu_load[2]),
 			SPA_POD_Int(&info->xrun_count));
-	return 0;
 }
 
 static int process_clock(struct data *d, const struct spa_pod *pod, struct driver *info)
 {
-	spa_pod_parse_struct(pod,
+	return spa_pod_parse_struct(pod,
 			SPA_POD_Int(&info->clock.flags),
 			SPA_POD_Int(&info->clock.id),
 			SPA_POD_Stringn(info->clock.name, sizeof(info->clock.name)),
@@ -116,7 +117,6 @@ static int process_clock(struct data *d, const struct spa_pod *pod, struct drive
 			SPA_POD_Long(&info->clock.delay),
 			SPA_POD_Double(&info->clock.rate_diff),
 			SPA_POD_Long(&info->clock.next_nsec));
-	return 0;
 }
 
 static struct node *find_node(struct data *d, uint32_t id)
@@ -139,7 +139,7 @@ static struct node *add_node(struct data *d, uint32_t id, const char *name)
 	if (name)
 		strncpy(n->name, name, MAX_NAME-1);
 	else
-		snprintf(n->name, sizeof(n->name)-1, "%u", id);
+		snprintf(n->name, sizeof(n->name), "%u", id);
 	n->id = id;
 	n->driver = n;
 	spa_list_append(&d->node_list, &n->link);
@@ -161,9 +161,10 @@ static int process_driver_block(struct data *d, const struct spa_pod *pod, struc
 	uint32_t id = 0;
 	struct measurement m;
 	struct node *n;
+	int res;
 
 	spa_zero(m);
-	spa_pod_parse_struct(pod,
+	if ((res = spa_pod_parse_struct(pod,
 			SPA_POD_Int(&id),
 			SPA_POD_String(&name),
 			SPA_POD_Long(&m.prev_signal),
@@ -171,7 +172,8 @@ static int process_driver_block(struct data *d, const struct spa_pod *pod, struc
 			SPA_POD_Long(&m.awake),
 			SPA_POD_Long(&m.finish),
 			SPA_POD_Int(&m.status),
-			SPA_POD_Fraction(&m.latency));
+			SPA_POD_Fraction(&m.latency))) < 0)
+		return res;
 
 	if ((n = find_node(d, id)) == NULL)
 		return -ENOENT;
@@ -195,9 +197,10 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 	const char *name =  NULL;
 	struct measurement m;
 	struct node *n;
+	int res;
 
 	spa_zero(m);
-	spa_pod_parse_struct(pod,
+	if ((res = spa_pod_parse_struct(pod,
 			SPA_POD_Int(&id),
 			SPA_POD_String(&name),
 			SPA_POD_Long(&m.prev_signal),
@@ -205,7 +208,8 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 			SPA_POD_Long(&m.awake),
 			SPA_POD_Long(&m.finish),
 			SPA_POD_Int(&m.status),
-			SPA_POD_Fraction(&m.latency));
+			SPA_POD_Fraction(&m.latency))) < 0)
+		return res;
 
 	if ((n = find_node(d, id)) == NULL)
 		return -ENOENT;
@@ -231,9 +235,9 @@ static const char *print_time(char *buf, size_t len, uint64_t val)
 	return buf;
 }
 
-static const char *print_perc(char *buf, size_t len, float val, float period)
+static const char *print_perc(char *buf, size_t len, float val, float quantum)
 {
-	snprintf(buf, len, "%5.2f", period == 0.0f ? 0.0f : val/period);
+	snprintf(buf, len, "%5.2f", quantum == 0.0f ? 0.0f : val/quantum);
 	return buf;
 }
 
@@ -244,7 +248,7 @@ static void print_node(struct data *d, struct driver *i, struct node *n)
 	char buf2[64];
 	char buf3[64];
 	char buf4[64];
-	float waiting, busy, period;
+	float waiting, busy, quantum;
 	struct spa_fraction frac;
 
 	if (n->driver == n)
@@ -253,26 +257,26 @@ static void print_node(struct data *d, struct driver *i, struct node *n)
 		frac = SPA_FRACTION(n->measurement.latency.num, n->measurement.latency.denom);
 
 	if (i->clock.rate.denom)
-		period = (float)i->clock.duration * i->clock.rate.num / (float)i->clock.rate.denom;
+		quantum = (float)i->clock.duration * i->clock.rate.num / (float)i->clock.rate.denom;
 	else
-		period = 0.0;
+		quantum = 0.0;
 
 	waiting = (n->measurement.awake - n->measurement.signal) / 1000000000.f,
 	busy = (n->measurement.finish - n->measurement.awake) / 1000000000.f,
 
-	snprintf(line, sizeof(line), "%s %4.1u %6.1u/%-6.1u %s %s %s %s  %3.1u  %s%s",
+	snprintf(line, sizeof(line), "%s %4.1u %6.1u %6.1u %s %s %s %s  %3.1u  %s%s",
 			n->measurement.status != 3 ? "!" : " ",
 			n->id,
 			frac.num, frac.denom,
 			print_time(buf1, 64, n->measurement.awake - n->measurement.signal),
 			print_time(buf2, 64, n->measurement.finish - n->measurement.awake),
-			print_perc(buf3, 64, waiting, period),
-			print_perc(buf4, 64, busy, period),
+			print_perc(buf3, 64, waiting, quantum),
+			print_perc(buf4, 64, busy, quantum),
 			i->xrun_count + n->errors,
 			n->driver == n ? "" : " + ",
 			n->name);
 
-	wprintw(d->win, "%.*s\n", COLS, line);
+	wprintw(d->win, "%.*s\n", COLS-1, line);
 }
 
 static void do_refresh(struct data *d)
@@ -281,7 +285,7 @@ static void do_refresh(struct data *d)
 
 	wclear(d->win);
 	wattron(d->win, A_REVERSE);
-	wprintw(d->win, "%-*.*s", COLS, COLS, "S   ID PERIOD/RATE      WAIT    BUSY   W/P   B/P  ERR  NAME ");
+	wprintw(d->win, "%-*.*s", COLS, COLS, "S   ID  QUANT   RATE    WAIT    BUSY   W/Q   B/Q  ERR  NAME ");
 	wattroff(d->win, A_REVERSE);
 	wprintw(d->win, "\n");
 
@@ -357,8 +361,7 @@ static void registry_event_global(void *data, uint32_t id,
 	struct data *d = data;
 	struct pw_proxy *proxy;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
-		struct node *n;
+	if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 		const char *str;
 
 		if ((str = spa_dict_lookup(props, PW_KEY_NODE_NAME)) == NULL &&
@@ -366,10 +369,10 @@ static void registry_event_global(void *data, uint32_t id,
 				str = spa_dict_lookup(props, PW_KEY_APP_NAME);
 		}
 
-		if ((n = add_node(d, id, str)) == NULL) {
+		if (add_node(d, id, str) == NULL) {
 			pw_log_warn("can add node %u: %m", id);
 		}
-	} else if (strcmp(type, PW_TYPE_INTERFACE_Profiler) == 0) {
+	} else if (spa_streq(type, PW_TYPE_INTERFACE_Profiler)) {
 		if (d->profiler != NULL) {
 			fprintf(stderr, "Ignoring profiler %d: already attached\n", id);
 			return;
@@ -423,7 +426,8 @@ static void on_core_done(void *_data, uint32_t id, int seq)
 		if (d->profiler == NULL) {
 			pw_log_error("no Profiler Interface found, please load one in the server");
 			pw_main_loop_quit(d->loop);
-		}
+		} else
+			do_refresh(d);
 	}
 }
 
@@ -494,6 +498,7 @@ int main(int argc, char *argv[])
 	struct timespec value, interval;
 	struct node *n;
 
+	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
 	spa_list_init(&data.node_list);

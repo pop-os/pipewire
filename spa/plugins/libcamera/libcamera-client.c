@@ -38,6 +38,7 @@
 #include <spa/utils/type.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
 
@@ -94,12 +95,13 @@ static const struct spa_dict_item device_info_items[] = {
 
 static void emit_device_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		this->info.props = &SPA_DICT_INIT_ARRAY(device_info_items);
 		spa_device_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -146,7 +148,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		*interface = &this->device;
 	else
 		return -ENOENT;

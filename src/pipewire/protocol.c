@@ -25,6 +25,7 @@
 #include <errno.h>
 
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #include <pipewire/protocol.h>
 #include <pipewire/private.h>
@@ -63,7 +64,7 @@ struct pw_protocol *pw_protocol_new(struct pw_context *context,
 	spa_hook_list_init(&protocol->listener_list);
 
 	if (user_data_size > 0)
-		protocol->user_data = SPA_MEMBER(protocol, sizeof(struct impl), void);
+		protocol->user_data = SPA_PTROFF(protocol, sizeof(struct impl), void);
 
 	spa_list_append(&context->protocol_list, &protocol->link);
 
@@ -85,7 +86,7 @@ void *pw_protocol_get_user_data(struct pw_protocol *protocol)
 }
 
 SPA_EXPORT
-const struct pw_protocol_implementaton *
+const struct pw_protocol_implementation *
 pw_protocol_get_implementation(struct pw_protocol *protocol)
 {
 	return protocol->implementation;
@@ -164,7 +165,7 @@ pw_protocol_get_marshal(struct pw_protocol *protocol, const char *type, uint32_t
 	struct marshal *impl;
 
 	spa_list_for_each(impl, &protocol->marshal_list, link) {
-		if (strcmp(impl->marshal->type, type) == 0 &&
+		if (spa_streq(impl->marshal->type, type) &&
 		    impl->marshal->version == version &&
 		    (impl->marshal->flags & flags) == flags)
                         return impl->marshal;
@@ -180,7 +181,7 @@ struct pw_protocol *pw_context_find_protocol(struct pw_context *context, const c
 	struct pw_protocol *protocol;
 
 	spa_list_for_each(protocol, &context->protocol_list, link) {
-		if (strcmp(protocol->name, name) == 0)
+		if (spa_streq(protocol->name, name))
 			return protocol;
 	}
 	return NULL;

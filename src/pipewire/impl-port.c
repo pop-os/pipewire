@@ -25,11 +25,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <float.h>
 
 #include <spa/pod/parser.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/node/utils.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/debug/types.h>
 #include <spa/pod/filter.h>
 
@@ -266,11 +268,20 @@ int pw_impl_port_release_mix(struct pw_impl_port *port, struct pw_impl_port_mix 
 	return res;
 }
 
-static int update_properties(struct pw_impl_port *port, const struct spa_dict *dict)
+static int update_properties(struct pw_impl_port *port, const struct spa_dict *dict, bool filter)
 {
+	static const char * const ignored[] = {
+		PW_KEY_OBJECT_ID,
+		PW_KEY_PORT_DIRECTION,
+		PW_KEY_PORT_CONTROL,
+		PW_KEY_NODE_ID,
+		PW_KEY_PORT_ID,
+		NULL
+	};
+
 	int changed;
 
-	changed = pw_properties_update(port->properties, dict);
+	changed = pw_properties_update_ignore(port->properties, dict, filter ? ignored : NULL);
 	port->info.props = &port->properties->dict;
 
 	if (changed) {
@@ -342,20 +353,46 @@ static void emit_params(struct pw_impl_port *port, uint32_t *changed_ids, uint32
 	}
 }
 
+static int process_latency_param(void *data, int seq,
+		uint32_t id, uint32_t index, uint32_t next, struct spa_pod *param)
+{
+	struct pw_impl_port *this = data;
+	struct spa_latency_info latency;
+
+	if (id != SPA_PARAM_Latency)
+		return -EINVAL;
+
+	if (spa_latency_parse(param, &latency) < 0)
+		return 0;
+	if (spa_latency_info_compare(&this->latency[latency.direction], &latency) == 0)
+		return 0;
+
+	pw_log_debug("port %p: got %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
+			pw_direction_as_string(latency.direction),
+			latency.min_quantum, latency.max_quantum,
+			latency.min_rate, latency.max_rate,
+			latency.min_ns, latency.max_ns);
+
+	this->latency[latency.direction] = latency;
+	if (latency.direction == this->direction)
+		pw_impl_port_emit_latency_changed(this);
+
+	return 0;
+}
+
 static void update_info(struct pw_impl_port *port, const struct spa_port_info *info)
 {
-	struct impl *impl = SPA_CONTAINER_OF(port, struct impl, this);
 	uint32_t changed_ids[MAX_PARAMS], n_changed_ids = 0;
 
-	pw_log_debug(NAME" %p: flags:%08"PRIx64" change_mask:%08"PRIx64,
-			port, info->flags, info->change_mask);
+	pw_log_debug(NAME" %p: %p flags:%08"PRIx64" change_mask:%08"PRIx64,
+			port, info, info->flags, info->change_mask);
 
 	if (info->change_mask & SPA_PORT_CHANGE_MASK_FLAGS) {
 		port->spa_flags = info->flags;
 	}
 	if (info->change_mask & SPA_PORT_CHANGE_MASK_PROPS) {
 		if (info->props) {
-			update_properties(port, info->props);
+			update_properties(port, info->props, true);
 		} else {
 			pw_log_warn(NAME" %p: port PROPS update but no properties", port);
 		}
@@ -378,12 +415,23 @@ static void update_info(struct pw_impl_port *port, const struct spa_port_info *i
 				continue;
 
 			pw_log_debug(NAME" %p: update param %d", port, id);
-			pw_param_clear(&impl->pending_list, id);
 			port->info.params[i] = info->params[i];
 			port->info.params[i].user = 0;
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ)
 				changed_ids[n_changed_ids++] = id;
+
+			switch (id) {
+			case SPA_PARAM_Latency:
+				port->have_latency_param =
+					SPA_FLAG_IS_SET(info->params[i].flags, SPA_PARAM_INFO_WRITE);
+				if (port->node != NULL)
+					pw_impl_port_for_each_param(port, 0, id, 0, UINT32_MAX,
+							NULL, process_latency_param, port);
+				break;
+			default:
+				break;
+			}
 		}
 	}
 
@@ -426,6 +474,7 @@ struct pw_impl_port *pw_context_create_port(
 		res = -errno;
 		goto error_no_mem;
 	}
+	pw_properties_setf(properties, PW_KEY_PORT_ID, "%u", port_id);
 
 	if (info) {
 		if (SPA_FLAG_IS_SET(info->flags, SPA_PORT_FLAG_PHYSICAL))
@@ -442,7 +491,7 @@ struct pw_impl_port *pw_context_create_port(
 	this->rt.io = SPA_IO_BUFFERS_INIT;
 
         if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
+		this->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
 	this->info.direction = direction;
 	this->info.params = this->params;
@@ -470,6 +519,9 @@ struct pw_impl_port *pw_context_create_port(
 	pw_impl_port_set_mix(this, NULL, 0);
 
 	pw_map_init(&this->mix_port_map, 64, 64);
+
+	this->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	this->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	if (info)
 		update_info(this, info);
@@ -588,7 +640,7 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 		return res;
 	}
 
-	pw_log_debug("mix node %p", iface);
+	pw_log_debug("mix node handle:%p iface:%p", handle, iface);
 	pw_impl_port_set_mix(port, (struct spa_node*)iface,
 			PW_IMPL_PORT_MIX_FLAG_MULTI |
 			PW_IMPL_PORT_MIX_FLAG_NEGOTIATE);
@@ -618,10 +670,8 @@ const struct pw_properties *pw_impl_port_get_properties(struct pw_impl_port *por
 SPA_EXPORT
 int pw_impl_port_update_properties(struct pw_impl_port *port, const struct spa_dict *dict)
 {
-	int changed = update_properties(port, dict);
-
+	int changed = update_properties(port, dict, false);
 	emit_info_changed(port);
-
 	return changed;
 }
 
@@ -663,6 +713,7 @@ static int do_add_port(struct spa_loop *loop,
 {
         struct pw_impl_port *this = user_data;
 
+	pw_log_trace(NAME" %p: add port", this);
 	if (this->direction == PW_DIRECTION_INPUT)
 		spa_list_append(&this->node->rt.input_mix, &this->rt.node_link);
 	else
@@ -826,20 +877,24 @@ static const struct pw_global_events global_events = {
 int pw_impl_port_register(struct pw_impl_port *port,
 		     struct pw_properties *properties)
 {
-	struct pw_impl_node *node = port->node;
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
 		PW_KEY_NODE_ID,
 		PW_KEY_AUDIO_CHANNEL,
+		PW_KEY_PORT_ID,
 		PW_KEY_PORT_NAME,
 		PW_KEY_PORT_DIRECTION,
+		PW_KEY_PORT_MONITOR,
 		PW_KEY_PORT_PHYSICAL,
 		PW_KEY_PORT_TERMINAL,
 		PW_KEY_PORT_CONTROL,
 		PW_KEY_PORT_ALIAS,
+		PW_KEY_PORT_EXTRA,
 		NULL
 	};
+
+	struct pw_impl_node *node = port->node;
 
 	if (node == NULL || node->global == NULL)
 		return -EIO;
@@ -901,6 +956,7 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	pw_impl_node_emit_port_init(node, port);
 
 	pw_impl_port_for_each_param(port, 0, SPA_PARAM_IO, 0, 0, NULL, check_param_io, port);
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Latency, 0, 0, NULL, process_latency_param, port);
 
 	control = PW_IMPL_PORT_IS_CONTROL(port);
 	if (control) {
@@ -912,9 +968,9 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	}
 	pw_properties_set(port->properties, PW_KEY_PORT_DIRECTION, dir);
 
-	if ((str = pw_properties_get(port->properties, PW_KEY_PORT_NAME)) == NULL) {
+	if (pw_properties_get(port->properties, PW_KEY_PORT_NAME) == NULL) {
 		if ((str = pw_properties_get(port->properties, PW_KEY_AUDIO_CHANNEL)) != NULL &&
-		    strcmp(str, "UNK") != 0) {
+		    !spa_streq(str, "UNK")) {
 			pw_properties_setf(port->properties, PW_KEY_PORT_NAME, "%s_%s", dir, str);
 		}
 		else {
@@ -953,8 +1009,6 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	if (node->global)
 		pw_impl_port_register(port, NULL);
 
-	pw_loop_invoke(node->data_loop, do_add_port, SPA_ID_INVALID, NULL, 0, false, port);
-
 	if (port->state <= PW_IMPL_PORT_STATE_INIT)
 		pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_CONFIGURE, 0, NULL);
 
@@ -978,8 +1032,9 @@ void pw_impl_port_unlink(struct pw_impl_port *port)
 static int do_remove_port(struct spa_loop *loop,
 			  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
-        struct pw_impl_port *this = user_data;
+	struct pw_impl_port *this = user_data;
 
+	pw_log_trace(NAME" %p: remove port", this);
 	spa_list_remove(&this->rt.node_link);
 
 	return 0;
@@ -993,10 +1048,13 @@ static void pw_impl_port_remove(struct pw_impl_port *port)
 	if (node == NULL)
 		return;
 
-	pw_log_debug(NAME" %p: remove", port);
+	pw_log_debug(NAME" %p: remove added:%d", port, port->added);
 
-	pw_loop_invoke(port->node->data_loop, do_remove_port,
-		       SPA_ID_INVALID, NULL, 0, true, port);
+	if (port->added) {
+		pw_loop_invoke(node->data_loop, do_remove_port,
+			       SPA_ID_INVALID, NULL, 0, true, port);
+		port->added = false;
+	}
 
 	if (SPA_FLAG_IS_SET(port->flags, PW_IMPL_PORT_FLAG_TO_REMOVE)) {
 		if ((res = spa_node_remove_port(node->node, port->direction, port->port_id)) < 0)
@@ -1025,6 +1083,7 @@ void pw_impl_port_destroy(struct pw_impl_port *port)
 
 	pw_log_debug(NAME" %p: destroy", port);
 
+	port->destroying = true;
 	pw_impl_port_emit_destroy(port);
 
 	pw_impl_port_unlink(port);
@@ -1068,6 +1127,7 @@ struct result_port_params_data {
 			uint32_t id, uint32_t index, uint32_t next,
 			struct spa_pod *param);
 	int seq;
+	uint32_t count;
 	unsigned int cache:1;
 };
 
@@ -1081,8 +1141,11 @@ static void result_port_params(void *data, int seq, int res, uint32_t type, cons
 		const struct spa_result_node_params *r = result;
 		if (d->seq == seq) {
 			d->callback(d->data, seq, r->id, r->index, r->next, r->param);
-			if (d->cache)
+			if (d->cache) {
+				if (d->count++ == 0)
+					pw_param_add(&impl->pending_list, r->id, NULL);
 				pw_param_add(&impl->pending_list, r->id, r->param);
+			}
 		}
 		break;
 	}
@@ -1104,7 +1167,7 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 	int res;
 	struct impl *impl = SPA_CONTAINER_OF(port, struct impl, this);
 	struct pw_impl_node *node = port->node;
-	struct result_port_params_data user_data = { impl, data, callback, seq, false };
+	struct result_port_params_data user_data = { impl, data, callback, seq, 0, false };
 	struct spa_hook listener;
 	struct spa_param_info *pi;
 	static const struct spa_node_events node_events = {
@@ -1153,7 +1216,8 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 		}
 		res = 0;
 	} else {
-		user_data.cache = filter == NULL;
+		user_data.cache = impl->cache_params &&
+			(filter == NULL && index == 0 && max == UINT32_MAX);
 
 		spa_zero(listener);
 		spa_node_add_listener(node->node, &listener, &node_events, &user_data);
@@ -1234,6 +1298,63 @@ int pw_impl_port_for_each_link(struct pw_impl_port *port,
 	return res;
 }
 
+int pw_impl_port_recalc_latency(struct pw_impl_port *port)
+{
+	struct pw_impl_link *l;
+	struct spa_latency_info latency, *current;
+	struct pw_impl_port *other;
+	struct spa_pod *param;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[1024];
+
+	if (port->destroying)
+		return 0;
+
+	latency = SPA_LATENCY_INFO(SPA_DIRECTION_REVERSE(port->direction));
+
+	if (port->direction == PW_DIRECTION_OUTPUT) {
+		spa_list_for_each(l, &port->links, output_link) {
+			other = l->input;
+			spa_latency_info_combine(&latency, &other->latency[other->direction]);
+			pw_log_debug("port %d: peer %d: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port->info.id, other->info.id,
+					latency.min_quantum, latency.max_quantum,
+					latency.min_rate, latency.max_rate,
+					latency.min_ns, latency.max_ns);
+		}
+	} else {
+		spa_list_for_each(l, &port->links, input_link) {
+			other = l->output;
+			spa_latency_info_combine(&latency, &other->latency[other->direction]);
+			pw_log_debug("port %d: peer %d: latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+					port->info.id, other->info.id,
+					latency.min_quantum, latency.max_quantum,
+					latency.min_rate, latency.max_rate,
+					latency.min_ns, latency.max_ns);
+		}
+	}
+
+	current = &port->latency[latency.direction];
+
+	if (spa_latency_info_compare(current, &latency) == 0)
+		return 0;
+
+	*current = latency;
+
+	pw_log_debug("port %d: set %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
+			port->info.id, pw_direction_as_string(latency.direction),
+			latency.min_quantum, latency.max_quantum,
+			latency.min_rate, latency.max_rate,
+			latency.min_ns, latency.max_ns);
+
+	if (!port->have_latency_param)
+		return 0;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	param = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+	return pw_impl_port_set_param(port, SPA_PARAM_Latency, 0, param);
+}
+
 SPA_EXPORT
 int pw_impl_port_is_linked(struct pw_impl_port *port)
 {
@@ -1282,6 +1403,10 @@ int pw_impl_port_set_param(struct pw_impl_port *port, uint32_t id, uint32_t flag
 	if (id == SPA_PARAM_Format) {
 		pw_log_debug(NAME" %p: %d %p %d", port, port->state, param, res);
 
+		if (port->added) {
+			pw_loop_invoke(node->data_loop, do_remove_port, SPA_ID_INVALID, NULL, 0, true, port);
+			port->added = false;
+		}
 		/* setting the format always destroys the negotiated buffers */
 		pw_buffers_clear(&port->buffers);
 		pw_buffers_clear(&port->mix_buffers);
@@ -1314,6 +1439,11 @@ static int negotiate_mixer_buffers(struct pw_impl_port *port, uint32_t flags,
 		pw_log_debug(NAME" %p: %d.%d negotiate %d buffers on node: %p",
 				port, port->direction, port->port_id, n_buffers, node->node);
 
+		if (port->added) {
+			pw_loop_invoke(node->data_loop, do_remove_port, SPA_ID_INVALID, NULL, 0, true, port);
+			port->added = false;
+		}
+
 		pw_buffers_clear(&port->mix_buffers);
 
 		if (n_buffers > 0) {
@@ -1342,6 +1472,10 @@ static int negotiate_mixer_buffers(struct pw_impl_port *port, uint32_t flags,
 		spa_node_port_use_buffers(port->mix,
 			     pw_direction_reverse(port->direction), 0,
 			     0, buffers, n_buffers);
+	}
+	if (!port->added && n_buffers > 0) {
+		pw_loop_invoke(node->data_loop, do_add_port, SPA_ID_INVALID, NULL, 0, false, port);
+		port->added = true;
 	}
 	return res;
 }

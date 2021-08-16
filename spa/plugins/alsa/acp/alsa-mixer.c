@@ -18,73 +18,17 @@
   along with PulseAudio; if not, see <http://www.gnu.org/licenses/>.
 ***/
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "config.h"
 
 #include <sys/types.h>
 #include <alsa/asoundlib.h>
 #include <math.h>
 
-#ifdef HAVE_VALGRIND_MEMCHECK_H
 #include <valgrind/memcheck.h>
-#endif
 
 #include "conf-parser.h"
 #include "alsa-mixer.h"
 #include "alsa-util.h"
-
-#ifdef HAVE_VALGRIND_MEMCHECK_H
-/* These macros are workarounds for a bug in valgrind, which is not handling the
- * ALSA TLV syscalls correctly. See
- * http://valgrind.10908.n7.nabble.com/Missing-ioctl-for-SNDRV-CTL-IOCTL-TLV-READ-td42711.html */
-
-static inline int vgfix_get_capture_dB(snd_mixer_elem_t *a, snd_mixer_selem_channel_id_t b, long *c) {
-    int r = snd_mixer_selem_get_capture_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_playback_dB(snd_mixer_elem_t *a, snd_mixer_selem_channel_id_t b, long *c) {
-    int r = snd_mixer_selem_get_playback_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_ask_capture_vol_dB(snd_mixer_elem_t *a, long b, long *c) {
-    int r = snd_mixer_selem_ask_capture_vol_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_ask_playback_vol_dB(snd_mixer_elem_t *a, long b, long *c) {
-    int r = snd_mixer_selem_ask_playback_vol_dB(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_capture_dB_range(snd_mixer_elem_t *a, long *b, long *c) {
-    int r = snd_mixer_selem_get_capture_dB_range(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(b, sizeof(*b));
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-static inline int vgfix_get_playback_dB_range(snd_mixer_elem_t *a, long *b, long *c) {
-    int r = snd_mixer_selem_get_playback_dB_range(a, b, c);
-    VALGRIND_MAKE_MEM_DEFINED(b, sizeof(*b));
-    VALGRIND_MAKE_MEM_DEFINED(c, sizeof(*c));
-    return r;
-}
-
-#define snd_mixer_selem_get_capture_dB(a, b, c) vgfix_get_capture_dB(a, b, c)
-#define snd_mixer_selem_get_playback_dB(a, b, c) vgfix_get_playback_dB(a, b, c)
-#define snd_mixer_selem_ask_capture_vol_dB(a, b, c) vgfix_ask_capture_vol_dB(a, b, c)
-#define snd_mixer_selem_ask_playback_vol_dB(a, b, c) vgfix_ask_playback_vol_dB(a, b, c)
-#define snd_mixer_selem_get_capture_dB_range(a, b, c) vgfix_get_capture_dB_range(a, b, c)
-#define snd_mixer_selem_get_playback_dB_range(a, b, c) vgfix_get_playback_dB_range(a, b, c)
-
-#endif
 
 static int setting_select(pa_alsa_setting *s, snd_mixer_t *m);
 
@@ -918,9 +862,7 @@ static int element_get_volume(pa_alsa_element *e, snd_mixer_t *m, const pa_chann
             if (r < 0)
                 continue;
 
-#ifdef HAVE_VALGRIND_MEMCHECK_H
-                VALGRIND_MAKE_MEM_DEFINED(&value, sizeof(value));
-#endif
+	    VALGRIND_MAKE_MEM_DEFINED(&value, sizeof(value));
 
             f = from_alsa_dB(value);
 
@@ -1711,6 +1653,14 @@ static bool element_probe_volume(pa_alsa_element *e, snd_mixer_elem_t *me) {
         e->has_dB = snd_mixer_selem_get_playback_dB_range(me, &min_dB, &max_dB) >= 0;
     else
         e->has_dB = snd_mixer_selem_get_capture_dB_range(me, &min_dB, &max_dB) >= 0;
+
+    /* Assume decibel data to be incorrect if max_dB is negative. */
+    if (e->has_dB && max_dB < 0 && !e->db_fix) {
+        pa_alsa_mixer_id_to_string(buf, sizeof(buf), &e->alsa_id);
+        pa_log_warn("The decibel volume range for element %s (%li dB - %li dB) has negative maximum. "
+                    "Disabling the decibel range.", buf, min_dB, max_dB);
+        e->has_dB = false;
+    }
 
     /* Check that the kernel driver returns consistent limits with
      * both _get_*_dB_range() and _ask_*_vol_dB(). */
@@ -2545,6 +2495,7 @@ static int element_parse_override_map(pa_config_parser_state *state) {
 
         if (i >= (unsigned)channel_count) {
             pa_log("[%s:%u] Invalid override map size (>%d) in '%s'", state->filename, state->lineno, channel_count, state->section);
+            pa_xfree(n);
             return -1;
         }
         channel_position = alsa_channel_positions[i];
@@ -2831,7 +2782,7 @@ static int path_verify(pa_alsa_path *p) {
         if (p->device_port_type == PA_DEVICE_PORT_TYPE_UNKNOWN)
             p->device_port_type = map->type;
         if (!p->description)
-            p->description = pa_xstrdup(map->description);
+            p->description = pa_xstrdup(_(map->description));
     }
 
     if (!p->description) {
@@ -2937,6 +2888,12 @@ pa_alsa_path* pa_alsa_path_new(const char *paths_dir, const char *fname, pa_alsa
 
     if (path_verify(p) < 0)
         goto fail;
+
+    if (p->description) {
+	    char *tmp = p->description;
+	    p->description = pa_xstrdup(_(tmp));
+	    free(tmp);
+    }
 
     return p;
 
@@ -3517,6 +3474,7 @@ finish:
                      * object. */
                     e->db_fix = pa_xnewdup(pa_alsa_decibel_fix, db_fix, 1);
                     e->db_fix->profile_set = NULL;
+                    e->db_fix->key = pa_xstrdup(db_fix->key);
                     e->db_fix->name = pa_xstrdup(db_fix->name);
                     e->db_fix->db_values = pa_xmemdup(db_fix->db_values, (db_fix->max_step - db_fix->min_step + 1) * sizeof(long));
                 }
@@ -3822,7 +3780,7 @@ static void path_set_make_path_descriptions_unique(pa_alsa_path_set *ps) {
     }
 }
 
-static void mapping_free(pa_alsa_mapping *m) {
+void pa_alsa_mapping_free(pa_alsa_mapping *m) {
     pa_assert(m);
 
     pa_xfree(m->name);
@@ -3852,7 +3810,7 @@ static void mapping_free(pa_alsa_mapping *m) {
     pa_xfree(m);
 }
 
-static void profile_free(pa_alsa_profile *p) {
+void pa_alsa_profile_free(pa_alsa_profile *p) {
     pa_assert(p);
 
     pa_xfree(p->name);
@@ -4122,10 +4080,10 @@ static int mapping_parse_description(pa_config_parser_state *state) {
 
     if ((m = pa_alsa_mapping_get(ps, state->section))) {
         pa_xfree(m->description);
-        m->description = pa_xstrdup(state->rvalue);
+        m->description = pa_xstrdup(_(state->rvalue));
     } else if ((p = profile_get(ps, state->section))) {
         pa_xfree(p->description);
-        p->description = pa_xstrdup(state->rvalue);
+        p->description = pa_xstrdup(_(state->rvalue));
     } else {
         pa_log("[%s:%u] Section name %s invalid.", state->filename, state->lineno, state->section);
         return -1;
@@ -4930,20 +4888,27 @@ pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel
     };
 
     ps = pa_xnew0(pa_alsa_profile_set, 1);
-    ps->mappings = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) mapping_free);
-    ps->profiles = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) profile_free);
+    ps->mappings = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) pa_alsa_mapping_free);
+    ps->profiles = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) pa_alsa_profile_free);
     ps->decibel_fixes = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) decibel_fix_free);
     ps->input_paths = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) pa_alsa_path_free);
     ps->output_paths = pa_hashmap_new_full(pa_idxset_string_hash_func, pa_idxset_string_compare_func, NULL, (pa_free_cb_t) pa_alsa_path_free);
 
     items[0].data = &ps->auto_profiles;
 
-    if (!fname)
-        fname = "default.conf";
-
-    fn = pa_maybe_prefix_path(fname,
+    fn = pa_maybe_prefix_path(fname ? fname : "default.conf",
 		    get_default_profile_dir());
-
+    if ((r = access(fn, R_OK)) != 0) {
+        if (fname != NULL) {
+            pa_log_warn("profile-set '%s' can't be accessed: %m", fn);
+            fn = pa_maybe_prefix_path("default.conf",
+			    get_default_profile_dir());
+            r = access(fn, R_OK);
+	}
+	if (r != 0) {
+            pa_log_warn("profile-set '%s' can't be accessed: %m", fn);
+	}
+    }
     r = pa_config_parse(fn, NULL, items, NULL, false, ps);
     pa_xfree(fn);
 
@@ -4994,6 +4959,7 @@ static void profile_finalize_probing(pa_alsa_profile *to_be_finalized, pa_alsa_p
             if (next && next->output_mappings && pa_idxset_get_by_data(next->output_mappings, m, NULL))
                 continue;
 
+            pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
             snd_pcm_close(m->output_pcm);
             m->output_pcm = NULL;
         }
@@ -5013,6 +4979,7 @@ static void profile_finalize_probing(pa_alsa_profile *to_be_finalized, pa_alsa_p
             if (next && next->input_mappings && pa_idxset_get_by_data(next->input_mappings, m, NULL))
                 continue;
 
+            pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
             snd_pcm_close(m->input_pcm);
             m->input_pcm = NULL;
         }
@@ -5119,6 +5086,7 @@ void pa_alsa_profile_set_probe(
     pa_alsa_profile **pp, **probe_order;
     pa_alsa_mapping *m;
     pa_hashmap *broken_inputs, *broken_outputs, *used_paths;
+    pa_alsa_mapping *selected_fallback_input = NULL, *selected_fallback_output = NULL;
 
     pa_assert(ps);
     pa_assert(dev_id);
@@ -5135,17 +5103,22 @@ void pa_alsa_profile_set_probe(
     pp += add_profiles_to_probe(pp, ps->profiles, false, false);
     pp += add_profiles_to_probe(pp, ps->profiles, false, true);
     pp += add_profiles_to_probe(pp, ps->profiles, true, false);
-    pp += add_profiles_to_probe(pp, ps->profiles, true, true);
+    add_profiles_to_probe(pp, ps->profiles, true, true);
 
     for (pp = probe_order; *pp; pp++) {
         uint32_t idx;
         p = *pp;
 
-        /* Skip if fallback and already found something */
+        /* Skip if fallback and already found something, but still probe already selected fallbacks.
+         * If UCM is used then both fallback_input and fallback_output flags are false.
+         * If UCM is not used then there will be only a single entry in mappings.
+         */
         if (found_input && p->fallback_input)
-            continue;
+            if (selected_fallback_input == NULL || pa_idxset_get_by_index(p->input_mappings, 0) != selected_fallback_input)
+                continue;
         if (found_output && p->fallback_output)
-            continue;
+            if (selected_fallback_output == NULL || pa_idxset_get_by_index(p->output_mappings, 0) != selected_fallback_output)
+                continue;
 
         /* Skip if this is already marked that it is supported (i.e. from the config file) */
         if (!p->supported) {
@@ -5236,17 +5209,21 @@ void pa_alsa_profile_set_probe(
         if (p->output_mappings)
             PA_IDXSET_FOREACH(m, p->output_mappings, idx)
                 if (m->output_pcm) {
-                    found_output |= !p->fallback_output;
+                    found_output = true;
+                    if (p->fallback_output && selected_fallback_output == NULL) {
+                        selected_fallback_output = m;
+                    }
                     mapping_paths_probe(m, p, PA_ALSA_DIRECTION_OUTPUT, used_paths, mixers);
-                    pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
                 }
 
         if (p->input_mappings)
             PA_IDXSET_FOREACH(m, p->input_mappings, idx)
                 if (m->input_pcm) {
-                    found_input |= !p->fallback_input;
+                    found_input = true;
+                    if (p->fallback_input && selected_fallback_input == NULL) {
+                        selected_fallback_input = m;
+                    }
                     mapping_paths_probe(m, p, PA_ALSA_DIRECTION_INPUT, used_paths, mixers);
-                    pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
                 }
     }
 

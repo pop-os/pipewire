@@ -26,6 +26,8 @@
 #include <pipewire/main-loop.h>
 #include <pipewire/stream.h>
 
+#include <spa/utils/string.h>
+
 #define TEST_FUNC(a,b,func)	\
 do {				\
 	a.func = b.func;	\
@@ -34,13 +36,12 @@ do {				\
 
 static void test_abi(void)
 {
-	struct pw_stream_events ev;
-	struct {
+	static const struct {
 		uint32_t version;
 		void (*destroy) (void *data);
 		void (*state_changed) (void *data, enum pw_stream_state old,
 			enum pw_stream_state state, const char *error);
-	        void (*control_info) (void *data, uint32_t id, const struct pw_stream_control *control);
+		void (*control_info) (void *data, uint32_t id, const struct pw_stream_control *control);
 		void (*io_changed) (void *data, uint32_t id, void *area, uint32_t size);
 		void (*param_changed) (void *data, uint32_t id, const struct spa_pod *param);
 		void (*add_buffer) (void *data, struct pw_buffer *buffer);
@@ -48,6 +49,8 @@ static void test_abi(void)
 		void (*process) (void *data);
 		void (*drained) (void *data);
 	} test = { PW_VERSION_STREAM_EVENTS, NULL };
+
+	struct pw_stream_events ev;
 
 	TEST_FUNC(ev, test, destroy);
 	TEST_FUNC(ev, test, state_changed);
@@ -159,7 +162,7 @@ static void test_create(void)
 	spa_assert(pw_stream_get_state(stream, &error) == PW_STREAM_STATE_UNCONNECTED);
 	spa_assert(error == NULL);
 	/* check name */
-	spa_assert(!strcmp(pw_stream_get_name(stream), "test"));
+	spa_assert(spa_streq(pw_stream_get_name(stream), "test"));
 
 	/* check id, only when connected */
 	spa_assert(pw_stream_get_node_id(stream) == SPA_ID_INVALID);
@@ -209,8 +212,8 @@ static void test_properties(void)
 
 	props = pw_stream_get_properties(stream);
 	spa_assert(props != NULL);
-	spa_assert(!strcmp(pw_properties_get(props, "foo"), "bar"));
-	spa_assert(!strcmp(pw_properties_get(props, "biz"), "fuzz"));
+	spa_assert(spa_streq(pw_properties_get(props, "foo"), "bar"));
+	spa_assert(spa_streq(pw_properties_get(props, "biz"), "fuzz"));
 	spa_assert(pw_properties_get(props, "buzz") == NULL);
 
 	/* remove foo */
@@ -223,8 +226,8 @@ static void test_properties(void)
 
 	spa_assert(props == pw_stream_get_properties(stream));
 	spa_assert(pw_properties_get(props, "foo") == NULL);
-	spa_assert(!strcmp(pw_properties_get(props, "biz"), "buzz"));
-	spa_assert(!strcmp(pw_properties_get(props, "buzz"), "frizz"));
+	spa_assert(spa_streq(pw_properties_get(props, "biz"), "buzz"));
+	spa_assert(spa_streq(pw_properties_get(props, "buzz"), "frizz"));
 
 	/* check destroy */
 	destroy_count = 0;

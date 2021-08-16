@@ -38,8 +38,8 @@
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
 
-#include "extensions/protocol-native.h"
-#include "extensions/client-node.h"
+#include "pipewire/extensions/protocol-native.h"
+#include "pipewire/extensions/client-node.h"
 
 #define MAX_MIX	4096
 
@@ -156,6 +156,7 @@ static void clean_transport(struct node_data *data)
 
 static void mix_init(struct mix *mix, struct pw_impl_port *port, uint32_t mix_id)
 {
+	pw_log_debug("port %p: mix init %d.%d", port, port->port_id, mix_id);
 	mix->port = port;
 	mix->mix_id = mix_id;
 	pw_impl_port_init_mix(port, &mix->mix);
@@ -214,8 +215,11 @@ static struct mix *find_mix(struct node_data *data,
 
 	spa_list_for_each(mix, &data->mix[direction], link) {
 		if (mix->port->port_id == port_id &&
-		    mix->mix_id == mix_id)
+		    mix->mix_id == mix_id) {
+			pw_log_debug("port %p: found mix %d:%d.%d", mix->port,
+					direction, port_id, mix_id);
 			return mix;
+		}
 	}
 	return NULL;
 }
@@ -453,8 +457,7 @@ client_node_set_io(void *object,
 
 	res =  spa_node_set_io(data->node->node, id, ptr, size);
 
-	if (old != NULL)
-		pw_memmap_free(old);
+	pw_memmap_free(old);
 exit:
 	if (res < 0) {
 		pw_log_error("node %p: set_io: %s", proxy, spa_strerror(res));
@@ -668,8 +671,8 @@ client_node_port_use_buffers(void *object,
 		}
 		memcpy(b, buffers[i].buffer, sizeof(struct spa_buffer));
 
-		b->metas = SPA_MEMBER(b, sizeof(struct spa_buffer), struct spa_meta);
-		b->datas = SPA_MEMBER(b->metas, sizeof(struct spa_meta) * b->n_metas,
+		b->metas = SPA_PTROFF(b, sizeof(struct spa_buffer), struct spa_meta);
+		b->datas = SPA_PTROFF(b->metas, sizeof(struct spa_meta) * b->n_metas,
 				       struct spa_data);
 
 		pw_log_debug("add buffer mem:%d id:%d offset:%u size:%u %p", mm->block->id,
@@ -679,7 +682,7 @@ client_node_port_use_buffers(void *object,
 		for (j = 0; j < b->n_metas; j++) {
 			struct spa_meta *m = &b->metas[j];
 			memcpy(m, &buffers[i].buffer->metas[j], sizeof(struct spa_meta));
-			m->data = SPA_MEMBER(mm->ptr, offset, void);
+			m->data = SPA_PTROFF(mm->ptr, offset, void);
 			offset += SPA_ROUND_UP_N(m->size, 8);
 		}
 
@@ -688,7 +691,7 @@ client_node_port_use_buffers(void *object,
 
 			memcpy(d, &buffers[i].buffer->datas[j], sizeof(struct spa_data));
 			d->chunk =
-			    SPA_MEMBER(mm->ptr, offset + sizeof(struct spa_chunk) * j,
+			    SPA_PTROFF(mm->ptr, offset + sizeof(struct spa_chunk) * j,
 				       struct spa_chunk);
 
 			if (flags & SPA_NODE_BUFFERS_FLAG_ALLOC)
@@ -713,7 +716,7 @@ client_node_port_use_buffers(void *object,
 						j, bm->id, bm->fd, d->maxsize);
 			} else if (d->type == SPA_DATA_MemPtr) {
 				int offs = SPA_PTR_TO_INT(d->data);
-				d->data = SPA_MEMBER(mm->ptr, offs, void);
+				d->data = SPA_PTROFF(mm->ptr, offs, void);
 				d->fd = -1;
 				pw_log_debug(" data %d id:%u -> mem:%p offs:%d maxsize:%d",
 						j, bid->id, d->data, offs, d->maxsize);
@@ -793,7 +796,7 @@ client_node_port_set_io(void *object,
 	}
 
 	if ((res = spa_node_port_set_io(mix->port->mix,
-			     direction, mix_id, id, ptr, size)) < 0) {
+			     direction, mix->mix.port.port_id, id, ptr, size)) < 0) {
 		if (res == -ENOTSUP)
 			res = 0;
 		else
@@ -805,8 +808,7 @@ client_node_port_set_io(void *object,
 			activate_mix(data, mix);
 	}
 exit_free:
-	if (old != NULL)
-		pw_memmap_free(old);
+	pw_memmap_free(old);
 exit:
 	if (res < 0) {
 		pw_log_error("port %p: set_io: %s", mix, spa_strerror(res));
@@ -962,6 +964,8 @@ static void do_node_init(struct node_data *data)
 
 static void clear_mix(struct node_data *data, struct mix *mix)
 {
+	pw_log_debug("port %p: mix clear %d.%d", mix->port, mix->port->port_id, mix->mix_id);
+
 	deactivate_mix(data, mix);
 
 	spa_list_remove(&mix->link);
@@ -971,6 +975,7 @@ static void clear_mix(struct node_data *data, struct mix *mix)
 
 	spa_list_remove(&mix->mix.link);
 	spa_list_append(&data->free_mix, &mix->link);
+	pw_impl_port_release_mix(mix->port, &mix->mix);
 }
 
 static void clean_node(struct node_data *d)
@@ -1206,7 +1211,7 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 		goto error;
 
 	data = pw_proxy_get_user_data(client_node);
-	data = SPA_MEMBER(data, user_data_size, struct node_data);
+	data = SPA_PTROFF(data, user_data_size, struct node_data);
 	data->pool = pw_core_get_mempool(core);
 	data->node = node;
 	data->do_free = do_free;
@@ -1214,11 +1219,11 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 	data->client_node = (struct pw_client_node *)client_node;
 	data->remote_id = SPA_ID_INVALID;
 
-	data->allow_mlock = data->context->defaults.mem_allow_mlock;
+	data->allow_mlock = data->context->settings.mem_allow_mlock;
 	if ((str = pw_properties_get(node->properties, "mem.allow-mlock")) != NULL)
 		data->allow_mlock = pw_properties_parse_bool(str);
 
-	data->warn_mlock = true;
+	data->warn_mlock = data->context->settings.mem_warn_mlock;
 	if ((str = pw_properties_get(node->properties, "mem.warn-mlock")) != NULL)
 		data->warn_mlock = pw_properties_parse_bool(str);
 
@@ -1270,6 +1275,11 @@ struct pw_proxy *pw_core_spa_node_export(struct pw_core *core,
 {
 	struct pw_impl_node *node;
 	struct pw_proxy *proxy;
+	const char *str;
+	bool do_register;
+
+	str = props ? spa_dict_lookup(props, PW_KEY_OBJECT_REGISTER) : NULL;
+	do_register = str ? pw_properties_parse_bool(str) : true;
 
 	node = pw_context_create_node(pw_core_get_context(core),
 			props ? pw_properties_new_dict(props) : NULL, 0);
@@ -1277,7 +1287,9 @@ struct pw_proxy *pw_core_spa_node_export(struct pw_core *core,
 		return NULL;
 
 	pw_impl_node_set_implementation(node, (struct spa_node*)object);
-	pw_impl_node_register(node, NULL);
+
+	if (do_register)
+		pw_impl_node_register(node, NULL);
 
 	proxy = node_export(core, node, true, user_data_size);
 	if (proxy)

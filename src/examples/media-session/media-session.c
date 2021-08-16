@@ -45,6 +45,7 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/debug/pod.h>
@@ -53,14 +54,16 @@
 
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
-#include "extensions/session-manager.h"
-#include "extensions/client-node.h"
+#include "pipewire/conf.h"
+#include "pipewire/extensions/session-manager.h"
+#include "pipewire/extensions/client-node.h"
 
 #include <dbus/dbus.h>
 
 #include "media-session.h"
 
 #define NAME		"media-session"
+#define SESSION_PREFIX	"media-session.d"
 #define SESSION_CONF	"media-session.conf"
 
 #define sm_object_emit(o,m,v,...) spa_hook_list_call(&(o)->hooks, struct sm_object_events, m, v, ##__VA_ARGS__)
@@ -77,6 +80,8 @@
 #define sm_media_session_emit_rescan(s,seq)		sm_media_session_emit(s, rescan, 0, seq)
 #define sm_media_session_emit_shutdown(s)		sm_media_session_emit(s, shutdown, 0)
 #define sm_media_session_emit_destroy(s)		sm_media_session_emit(s, destroy, 0)
+#define sm_media_session_emit_seat_active(s,...)	sm_media_session_emit(s, seat_active, 0, __VA_ARGS__)
+#define sm_media_session_emit_dbus_disconnected(s)	sm_media_session_emit(s, dbus_disconnected, 0)
 
 int sm_access_flatpak_start(struct sm_media_session *sess);
 int sm_access_portal_start(struct sm_media_session *sess);
@@ -84,12 +89,16 @@ int sm_default_nodes_start(struct sm_media_session *sess);
 int sm_default_profile_start(struct sm_media_session *sess);
 int sm_default_routes_start(struct sm_media_session *sess);
 int sm_restore_stream_start(struct sm_media_session *sess);
+int sm_streams_follow_default_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
 int sm_libcamera_monitor_start(struct sm_media_session *sess);
 int sm_bluez5_monitor_start(struct sm_media_session *sess);
 int sm_alsa_monitor_start(struct sm_media_session *sess);
 int sm_suspend_node_start(struct sm_media_session *sess);
+#ifdef HAVE_SYSTEMD
+int sm_logind_start(struct sm_media_session *sess);
+#endif
 
 int sm_policy_node_start(struct sm_media_session *sess);
 
@@ -121,6 +130,7 @@ struct impl {
 
 	struct pw_main_loop *loop;
 	struct spa_dbus *dbus;
+	struct spa_hook dbus_connection_listener;
 
 	struct pw_core *monitor_core;
 	struct spa_hook monitor_listener;
@@ -133,8 +143,13 @@ struct impl {
 	struct pw_registry *registry;
 	struct spa_hook registry_listener;
 
+	struct pw_registry *monitor_registry;
+	struct spa_hook monitor_registry_listener;
+
 	struct pw_map globals;
-	struct spa_list global_list;
+	struct spa_list object_list;		/**< all sm_objects */
+
+	struct spa_list registry_event_list;	/**< pending registry events */
 
 	struct spa_hook_list hooks;
 
@@ -147,11 +162,9 @@ struct impl {
 	int rescan_seq;
 	int last_seq;
 
-	int state_dir_fd;
-	char state_dir[PATH_MAX];
-
 	unsigned int scanning:1;
 	unsigned int rescan_pending:1;
+	unsigned int seat_active:1;
 };
 
 struct endpoint_link {
@@ -188,23 +201,38 @@ struct object_info {
 	void (*destroy) (void *object);
 };
 
+struct registry_event {
+	uint32_t id;
+	uint32_t permissions;
+	const char *type;
+	uint32_t version;
+	const struct spa_dict *props;
+
+	struct pw_proxy *proxy;
+
+	int seq;
+	struct pw_properties *props_store;
+
+	struct spa_list link;
+	unsigned int monitor:1;
+	unsigned int allocated:1;
+};
+
 static void add_object(struct impl *impl, struct sm_object *obj, uint32_t id)
 {
 	size_t size = pw_map_get_size(&impl->globals);
 	obj->id = id;
-	pw_log_debug("add %u %p", obj->id, obj);
+	pw_log_debug("add global '%u' %p monitor:%d", obj->id, obj, obj->monitor_global);
 	while (obj->id > size)
 		pw_map_insert_at(&impl->globals, size++, NULL);
 	pw_map_insert_at(&impl->globals, obj->id, obj);
-	spa_list_append(&impl->global_list, &obj->link);
 	sm_media_session_emit_create(impl, obj);
 }
 
 static void remove_object(struct impl *impl, struct sm_object *obj)
 {
-	pw_log_debug("remove %u %p", obj->id, obj);
+	pw_log_debug("remove global '%u' %p monitor:%d", obj->id, obj, obj->monitor_global);
 	pw_map_insert_at(&impl->globals, obj->id, NULL);
-	spa_list_remove(&obj->link);
 	sm_media_session_emit_remove(impl, obj);
 	obj->id = SPA_ID_INVALID;
 }
@@ -214,7 +242,7 @@ static void *find_object(struct impl *impl, uint32_t id, const char *type)
 	struct sm_object *obj;
 	if ((obj = pw_map_lookup(&impl->globals, id)) == NULL)
 		return NULL;
-	if (type != NULL && strcmp(obj->type, type) != 0)
+	if (type != NULL && !spa_streq(obj->type, type))
 		return NULL;
 	return obj;
 }
@@ -223,7 +251,7 @@ static struct data *object_find_data(struct sm_object *obj, const char *id)
 {
 	struct data *d;
 	spa_list_for_each(d, &obj->data, link) {
-		if (strcmp(d->id, id) == 0)
+		if (spa_streq(d->id, id))
 			return d;
 	}
 	return NULL;
@@ -246,7 +274,7 @@ void *sm_object_add_data(struct sm_object *obj, const char *id, size_t size)
 
 	spa_list_append(&obj->data, &d->link);
 done:
-	return SPA_MEMBER(d, sizeof(struct data), void);
+	return SPA_PTROFF(d, sizeof(struct data), void);
 }
 
 void *sm_object_get_data(struct sm_object *obj, const char *id)
@@ -255,7 +283,7 @@ void *sm_object_get_data(struct sm_object *obj, const char *id)
 	d = object_find_data(obj, id);
 	if (d == NULL)
 		return NULL;
-	return SPA_MEMBER(d, sizeof(struct data), void);
+	return SPA_PTROFF(d, sizeof(struct data), void);
 }
 
 int sm_object_remove_data(struct sm_object *obj, const char *id)
@@ -269,17 +297,18 @@ int sm_object_remove_data(struct sm_object *obj, const char *id)
 	return 0;
 }
 
-int sm_object_destroy(struct sm_object *obj)
+static int sm_object_destroy_maybe_free(struct sm_object *obj)
 {
 	struct impl *impl = SPA_CONTAINER_OF(obj->session, struct impl, this);
 	struct data *d;
-	struct pw_proxy *p, *h;
 
-	p = obj->proxy;
-	h = obj->handle;
+	pw_log_debug(NAME" %p: destroy object %p id:%d proxy:%p handle:%p monitor:%d destroyed:%d discarded:%d", obj->session,
+			obj, obj->id, obj->proxy, obj->handle, obj->monitor_global, obj->destroyed, obj->discarded);
 
-	pw_log_debug(NAME" %p: object %d proxy:%p handle:%p", obj->session,
-			obj->id, p, h);
+	if (obj->destroyed)
+		goto unref;
+
+	obj->destroyed = true;
 
 	sm_object_emit_destroy(obj);
 
@@ -294,42 +323,46 @@ int sm_object_destroy(struct sm_object *obj)
 	if (obj->destroy)
 		obj->destroy(obj);
 
-	if (p) {
-		pw_proxy_ref(p);
+	spa_hook_remove(&obj->handle_listener);
+
+	if (obj->proxy) {
 		spa_hook_remove(&obj->proxy_listener);
+		if (obj->proxy != obj->handle)
+			pw_proxy_destroy(obj->proxy);
+		obj->proxy = NULL;
 	}
-	if (h) {
-		pw_proxy_ref(h);
-		spa_hook_remove(&obj->handle_listener);
-	}
-	if (p)
-		pw_proxy_destroy(p);
-	if (h != p)
-		pw_proxy_destroy(h);
+
+	pw_proxy_ref(obj->handle);
+	pw_proxy_destroy(obj->handle);
 
 	sm_object_emit_free(obj);
 
-	if (obj->props)
-		pw_properties_free(obj->props);
+unref:
+	if (!obj->discarded)
+		return 0;
+
+	pw_properties_free(obj->props);
 	obj->props = NULL;
 
 	spa_list_consume(d, &obj->data, link) {
 		spa_list_remove(&d->link);
 		free(d);
 	}
-	if (p)
-		pw_proxy_unref(p);
-	if (h)
-		pw_proxy_unref(h);
 
-	obj->proxy = NULL;
-	obj->handle = NULL;
+	spa_list_remove(&obj->link);
+	pw_proxy_unref(obj->handle);  /* frees obj */
 
 	return 0;
 }
 
+int sm_object_destroy(struct sm_object *obj)
+{
+	sm_object_discard(obj);
+	return sm_object_destroy_maybe_free(obj);
+}
+
 static struct param *add_param(struct spa_list *param_list,
-		uint32_t id, const struct spa_pod *param)
+		int seq, int *param_seq, uint32_t id, const struct spa_pod *param)
 {
 	struct param *p;
 
@@ -340,12 +373,25 @@ static struct param *add_param(struct spa_list *param_list,
 	if (id == SPA_ID_INVALID)
 		id = SPA_POD_OBJECT_ID(param);
 
+	if (id >= SM_MAX_PARAMS) {
+		pw_log_error(NAME": too big param id %d", id);
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (seq != param_seq[id]) {
+		pw_log_debug(NAME": ignoring param %d, seq:%d != current_seq:%d",
+				id, seq, param_seq[id]);
+		errno = EBUSY;
+		return NULL;
+	}
+
 	p = malloc(sizeof(struct param) + SPA_POD_SIZE(param));
 	if (p == NULL)
 		return NULL;
 
 	p->this.id = id;
-	p->this.param = SPA_MEMBER(p, sizeof(struct param), struct spa_pod);
+	p->this.param = SPA_PTROFF(p, sizeof(struct param), struct spa_pod);
 	memcpy(p->this.param, param, SPA_POD_SIZE(param));
 
 	spa_list_append(param_list, &p->this.link);
@@ -458,18 +504,27 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 			if (info->params[i].user == 0)
 				continue;
 
+			if (id >= SM_MAX_PARAMS) {
+				pw_log_error(NAME" %p: too big param id %d", impl, id);
+				continue;
+			}
+
 			device->n_params -= clear_params(&device->param_list, id);
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
-				pw_log_debug(NAME" %p: device %d enum params %d", impl,
-						device->obj.id, id);
-				pw_device_enum_params((struct pw_device*)device->obj.proxy,
-						1, id, 0, UINT32_MAX, NULL);
+				int res;
+				res = pw_device_enum_params((struct pw_device*)device->obj.proxy,
+						++device->param_seq[id], id, 0, UINT32_MAX, NULL);
+				if (SPA_RESULT_IS_ASYNC(res))
+					device->param_seq[id] = res;
+				pw_log_debug(NAME" %p: device %d enum params %d seq:%d", impl,
+						device->obj.id, id, device->param_seq[id]);
 			}
 			info->params[i].user = 0;
 		}
 	}
 	sm_object_sync_update(&device->obj);
+	sm_media_session_schedule_rescan(&impl->this);
 }
 
 static void device_event_param(void *object, int seq,
@@ -479,8 +534,8 @@ static void device_event_param(void *object, int seq,
 	struct sm_device *device = object;
 	struct impl *impl = SPA_CONTAINER_OF(device->obj.session, struct impl, this);
 
-	pw_log_debug(NAME" %p: device %p param %d index:%d", impl, device, id, index);
-	if (add_param(&device->param_list, id, param) != NULL)
+	pw_log_debug(NAME" %p: device %p param %d index:%d seq:%d", impl, device, id, index, seq);
+	if (add_param(&device->param_list, seq, device->param_seq, id, param) != NULL)
 		device->n_params++;
 
 	device->obj.avail |= SM_DEVICE_CHANGE_MASK_PARAMS;
@@ -558,18 +613,27 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 			if (info->params[i].user == 0)
 				continue;
 
+			if (id >= SM_MAX_PARAMS) {
+				pw_log_error(NAME" %p: too big param id %d", impl, id);
+				continue;
+			}
+
 			node->n_params -= clear_params(&node->param_list, id);
 
 			if (info->params[i].flags & SPA_PARAM_INFO_READ) {
-				pw_log_debug(NAME" %p: node %d enum params %d", impl,
-						node->obj.id, id);
-				pw_node_enum_params((struct pw_node*)node->obj.proxy,
-						1, id, 0, UINT32_MAX, NULL);
+				int res;
+				res = pw_node_enum_params((struct pw_node*)node->obj.proxy,
+						++node->param_seq[id], id, 0, UINT32_MAX, NULL);
+				if (SPA_RESULT_IS_ASYNC(res))
+					node->param_seq[id] = res;
+				pw_log_debug(NAME" %p: node %d enum params %d seq:%d", impl,
+						node->obj.id, id, node->param_seq[id]);
 			}
 			info->params[i].user = 0;
 		}
 	}
 	sm_object_sync_update(&node->obj);
+	sm_media_session_schedule_rescan(&impl->this);
 }
 
 static void node_event_param(void *object, int seq,
@@ -579,8 +643,8 @@ static void node_event_param(void *object, int seq,
 	struct sm_node *node = object;
 	struct impl *impl = SPA_CONTAINER_OF(node->obj.session, struct impl, this);
 
-	pw_log_debug(NAME" %p: node %p param %d index:%d", impl, node, id, index);
-	if (add_param(&node->param_list, id, param) != NULL)
+	pw_log_debug(NAME" %p: node %p param %d index:%d seq:%d", impl, node, id, index, seq);
+	if (add_param(&node->param_list, seq, node->param_seq, id, param) != NULL)
 		node->n_params++;
 
 	node->obj.avail |= SM_NODE_CHANGE_MASK_PARAMS;
@@ -675,7 +739,7 @@ static enum spa_audio_channel find_channel(const char *name)
 {
         int i;
         for (i = 0; spa_type_audio_channel[i].name; i++) {
-                if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+                if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
                         return spa_type_audio_channel[i].type;
         }
         return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -690,12 +754,12 @@ static int port_init(void *object)
 
 	if (props) {
 		if ((str = pw_properties_get(props, PW_KEY_PORT_DIRECTION)) != NULL)
-			port->direction = strcmp(str, "out") == 0 ?
+			port->direction = spa_streq(str, "out") ?
 				PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT;
 		if ((str = pw_properties_get(props, PW_KEY_FORMAT_DSP)) != NULL) {
-			if (strcmp(str, "32 bit float mono audio") == 0)
+			if (spa_streq(str, "32 bit float mono audio"))
 				port->type = SM_PORT_TYPE_DSP_AUDIO;
-			else if (strcmp(str, "8 bit raw midi") == 0)
+			else if (spa_streq(str, "8 bit raw midi"))
 				port->type = SM_PORT_TYPE_DSP_MIDI;
 		}
 		if ((str = pw_properties_get(props, PW_KEY_AUDIO_CHANNEL)) != NULL)
@@ -752,8 +816,7 @@ static void session_event_info(void *object, const struct pw_session_info *info)
 	if (info) {
 		i->change_mask = info->change_mask;
 		if (info->change_mask & PW_SESSION_CHANGE_MASK_PROPS) {
-			if (i->props)
-				pw_properties_free ((struct pw_properties *)i->props);
+			pw_properties_free ((struct pw_properties *)i->props);
 			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
 		}
 	}
@@ -791,8 +854,7 @@ static void session_destroy(void *object)
 		spa_list_remove(&endpoint->link);
 	}
 	if (i) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
+		pw_properties_free ((struct pw_properties *)i->props);
 		free(i);
 	}
 
@@ -832,8 +894,7 @@ static void endpoint_event_info(void *object, const struct pw_endpoint_info *inf
 			i->session_id = info->session_id;
 		}
 		if (info->change_mask & PW_ENDPOINT_CHANGE_MASK_PROPS) {
-			if (i->props)
-				pw_properties_free ((struct pw_properties *)i->props);
+			pw_properties_free ((struct pw_properties *)i->props);
 			i->props = (struct spa_dict *) pw_properties_new_dict (info->props);
 			if ((str = spa_dict_lookup(i->props, PW_KEY_PRIORITY_SESSION)) != NULL)
 				endpoint->priority = pw_properties_parse_int(str);
@@ -888,8 +949,7 @@ static void endpoint_destroy(void *object)
 		spa_list_remove(&endpoint->link);
 	}
 	if (i) {
-		if (i->props)
-			pw_properties_free ((struct pw_properties *)i->props);
+		pw_properties_free ((struct pw_properties *)i->props);
 		free(i->name);
 		free(i->media_class);
 		free(i);
@@ -1060,7 +1120,12 @@ static void done_proxy(void *data, int seq)
 	}
 }
 
-static void bound_proxy(void *data, uint32_t id)
+static const struct pw_proxy_events proxy_events = {
+	PW_VERSION_PROXY_EVENTS,
+	.done = done_proxy,
+};
+
+static void bound_handle(void *data, uint32_t id)
 {
 	struct sm_object *obj = data;
 	struct impl *impl = SPA_CONTAINER_OF(obj->session, struct impl, this);
@@ -1068,14 +1133,30 @@ static void bound_proxy(void *data, uint32_t id)
 	pw_log_debug("bound %p proxy %p handle %p id:%d->%d",
 			obj, obj->proxy, obj->handle, obj->id, id);
 
-	if (obj->id == SPA_ID_INVALID)
+	if (obj->id == SPA_ID_INVALID) {
+		struct sm_object *old_obj = find_object(impl, id, NULL);
+
+		if (old_obj != NULL) {
+			/*
+			 * Monitor core is always more up-to-date in object creation
+			 * events (see registry_global), so in case of duplicate objects
+			 * we should prefer monitor globals.
+			 */
+			if (obj->monitor_global)
+				sm_object_destroy_maybe_free(old_obj);
+			else {
+				sm_object_destroy_maybe_free(obj);
+				return;
+			}
+		}
+
 		add_object(impl, obj, id);
+	}
 }
 
-static const struct pw_proxy_events proxy_events = {
+static const struct pw_proxy_events handle_events = {
 	PW_VERSION_PROXY_EVENTS,
-	.done = done_proxy,
-	.bound = bound_proxy,
+	.bound = bound_handle,
 };
 
 int sm_object_sync_update(struct sm_object *obj)
@@ -1089,29 +1170,29 @@ static const struct object_info *get_object_info(struct impl *impl, const char *
 {
 	const struct object_info *info;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Core) == 0)
+	if (spa_streq(type, PW_TYPE_INTERFACE_Core))
 		info = &core_object_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Module) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Module))
 		info = &module_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Factory) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Factory))
 		info = &factory_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Client) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Client))
 		info = &client_info;
-	else if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		info = &spa_device_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Device) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Device))
 		info = &device_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Node))
 		info = &node_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Port) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Port))
 		info = &port_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Session) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Session))
 		info = &session_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_Endpoint) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_Endpoint))
 		info = &endpoint_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_EndpointStream) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_EndpointStream))
 		info = &endpoint_stream_info;
-	else if (strcmp(type, PW_TYPE_INTERFACE_EndpointLink) == 0)
+	else if (spa_streq(type, PW_TYPE_INTERFACE_EndpointLink))
 		info = &endpoint_link_info;
 	else
 		info = NULL;
@@ -1121,7 +1202,7 @@ static const struct object_info *get_object_info(struct impl *impl, const char *
 
 static struct sm_object *init_object(struct impl *impl, const struct object_info *info,
 		struct pw_proxy *proxy, struct pw_proxy *handle, uint32_t id,
-		const struct spa_dict *props)
+		const struct spa_dict *props, bool monitor_global)
 {
 	struct sm_object *obj;
 
@@ -1135,8 +1216,11 @@ static struct sm_object *init_object(struct impl *impl, const struct object_info
 	obj->destroy = info->destroy;
 	obj->mask |= SM_OBJECT_CHANGE_MASK_PROPERTIES | SM_OBJECT_CHANGE_MASK_BIND;
 	obj->avail |= obj->mask;
+	obj->monitor_global = monitor_global;
 	spa_hook_list_init(&obj->hooks);
 	spa_list_init(&obj->data);
+
+	spa_list_append(&impl->object_list, &obj->link);
 
 	if (proxy) {
 		pw_proxy_add_listener(obj->proxy, &obj->proxy_listener, &proxy_events, obj);
@@ -1144,20 +1228,17 @@ static struct sm_object *init_object(struct impl *impl, const struct object_info
 			pw_proxy_add_object_listener(obj->proxy, &obj->object_listener, info->events, obj);
 		SPA_FLAG_UPDATE(obj->mask, SM_OBJECT_CHANGE_MASK_LISTENER, info->events != NULL);
 	}
-	pw_proxy_add_listener(obj->handle, &obj->handle_listener, &proxy_events, obj);
+	pw_proxy_add_listener(obj->handle, &obj->handle_listener, &handle_events, obj);
 
 	if (info->init)
 		info->init(obj);
-
-	if (id != SPA_ID_INVALID)
-		add_object(impl, obj, id);
 
 	return obj;
 }
 
 static struct sm_object *
 create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle,
-		const struct spa_dict *props)
+		const struct spa_dict *props, bool monitor_global)
 {
 	const char *type;
 	const struct object_info *info;
@@ -1165,7 +1246,7 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 
 	type = pw_proxy_get_type(handle, NULL);
 
-	if (strcmp(type, PW_TYPE_INTERFACE_ClientNode) == 0)
+	if (spa_streq(type, PW_TYPE_INTERFACE_ClientNode))
 		type = PW_TYPE_INTERFACE_Node;
 
 	info = get_object_info(impl, type);
@@ -1174,7 +1255,7 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 		errno = ENOTSUP;
 		return NULL;
 	}
-	obj = init_object(impl, info, proxy, handle, SPA_ID_INVALID, props);
+	obj = init_object(impl, info, proxy, handle, SPA_ID_INVALID, props, monitor_global);
 
 	pw_log_debug(NAME" %p: created new object %p proxy:%p handle:%p", impl,
 			obj, obj->proxy, obj->handle);
@@ -1183,50 +1264,40 @@ create_object(struct impl *impl, struct pw_proxy *proxy, struct pw_proxy *handle
 }
 
 static struct sm_object *
-bind_object(struct impl *impl, const struct object_info *info, uint32_t id,
-		uint32_t permissions, const char *type, uint32_t version,
-		const struct spa_dict *props)
+bind_object(struct impl *impl, const struct object_info *info, struct registry_event *re)
 {
-	int res;
 	struct pw_proxy *proxy;
 	struct sm_object *obj;
 
-	proxy = pw_registry_bind(impl->registry,
-			id, type, info->version, info->size);
-	if (proxy == NULL) {
-		res = -errno;
-		goto error;
-	}
-	obj = init_object(impl, info, proxy, proxy, id, props);
+	proxy = re->proxy;
+	re->proxy = NULL;
+
+	obj = init_object(impl, info, proxy, proxy, re->id, re->props, false);
+	sm_object_discard(obj);
+	add_object(impl, obj, re->id);
 
 	pw_log_debug(NAME" %p: bound new object %p proxy %p id:%d", impl, obj, obj->proxy, obj->id);
 
 	return obj;
-
-error:
-	pw_log_warn(NAME" %p: can't handle global %d: %s", impl, id, spa_strerror(res));
-	errno = -res;
-	return NULL;
 }
 
 static int
-update_object(struct impl *impl, const struct object_info *info,
-		struct sm_object *obj, uint32_t id,
-		uint32_t permissions, const char *type, uint32_t version,
-		const struct spa_dict *props)
+update_object(struct impl *impl, const struct object_info *info, struct sm_object *obj,
+              struct registry_event *re)
 {
-	pw_properties_update(obj->props, props);
+	struct pw_proxy *proxy;
+
+	pw_properties_update(obj->props, re->props);
 
 	if (obj->proxy != NULL)
 		return 0;
 
 	pw_log_debug(NAME" %p: update type:%s", impl, obj->type);
 
-	obj->proxy = pw_registry_bind(impl->registry,
-			id, info->type, info->version, 0);
-	if (obj->proxy == NULL)
-		return -errno;
+	proxy = re->proxy;
+	re->proxy = NULL;
 
+	obj->proxy = proxy;
 	obj->type = info->type;
 
 	pw_proxy_add_listener(obj->proxy, &obj->proxy_listener, &proxy_events, obj);
@@ -1240,30 +1311,202 @@ update_object(struct impl *impl, const struct object_info *info,
 	return 0;
 }
 
+static void registry_event_free(struct registry_event *re)
+{
+	if (re->proxy)
+		pw_proxy_destroy(re->proxy);
+	pw_properties_free(re->props_store);
+	if (re->allocated) {
+		spa_list_remove(&re->link);
+		free(re);
+	} else {
+		spa_zero(*re);
+	}
+}
+
+static int handle_registry_event(struct impl *impl, struct registry_event *re)
+{
+	struct sm_object *obj;
+	const struct object_info *info = NULL;
+
+	obj = find_object(impl, re->id, NULL);
+
+	pw_log_debug(NAME " %p: new global '%d' %s/%d obj:%p monitor:%d seq:%d",
+			impl, re->id, re->type, re->version, obj, re->monitor, re->seq);
+
+	info = get_object_info(impl, re->type);
+	if (info == NULL)
+		return 0;
+
+	if (obj == NULL && !re->monitor) {
+		/*
+		 * Only policy core binds new objects.
+		 *
+		 * The monitor core event corresponding to this one has already been
+		 * processed. If monitor doesn't have the id now, the object either has
+		 * not been created there, or there is a race condition and it was already
+		 * removed. In that case, we create a zombie object here, but its remove
+		 * event is already queued and arrives soon.
+		 */
+		bind_object(impl, info, re);
+	} else if (obj != NULL && obj->monitor_global == re->monitor) {
+		/* Each core handles their own object updates */
+		update_object(impl, info, obj, re);
+	}
+
+	sm_media_session_schedule_rescan(&impl->this);
+	return 0;
+}
+
+static int handle_postponed_registry_events(struct impl *impl, int seq)
+{
+	struct registry_event *re, *t;
+
+	spa_list_for_each_safe(re, t, &impl->registry_event_list, link) {
+		if (re->seq == seq) {
+			handle_registry_event(impl, re);
+			registry_event_free(re);
+		}
+	}
+	return 0;
+}
+
+static int monitor_sync(struct impl *impl)
+{
+	pw_core_set_paused(impl->policy_core, true);
+	impl->monitor_seq = pw_core_sync(impl->monitor_core, 0, impl->monitor_seq);
+	pw_log_debug(NAME " %p: monitor sync start %d", impl, impl->monitor_seq);
+	sm_media_session_schedule_rescan(&impl->this);
+	return impl->monitor_seq;
+}
+
 static void
 registry_global(void *data, uint32_t id,
 		uint32_t permissions, const char *type, uint32_t version,
 		const struct spa_dict *props)
 {
 	struct impl *impl = data;
-        struct sm_object *obj;
 	const struct object_info *info;
-
-	pw_log_debug(NAME " %p: new global '%d' %s/%d", impl, id, type, version);
+	struct registry_event *re = NULL;
 
 	info = get_object_info(impl, type);
 	if (info == NULL)
 		return;
 
-	obj = find_object(impl, id, NULL);
-	if (obj == NULL) {
-		bind_object(impl, info, id, permissions, type, version, props);
-	} else {
-		pw_log_debug(NAME " %p: our object %d appeared %s/%s",
-				impl, id, obj->type, type);
-		update_object(impl, info, obj, id, permissions, type, version, props);
+	pw_log_debug(NAME " %p: registry event (policy) for new global '%d'", impl, id);
+
+	/*
+	 * Handle policy core events after monitor core ones.
+	 *
+	 * Monitor sync pauses policy core, so the event will be handled before
+	 * further registry or proxy events are received via policy core.
+	 */
+	re = calloc(1, sizeof(struct registry_event));
+	if (re == NULL)
+		goto error;
+
+	re->allocated = true;
+	spa_list_append(&impl->registry_event_list, &re->link);
+
+	re->id = id;
+	re->monitor = false;
+	re->permissions = permissions;
+	re->type = info->type;
+	re->version = version;
+
+	/* Bind proxy now */
+	re->proxy = pw_registry_bind(impl->registry, id, type, info->version, info->size);
+	if (re->proxy == NULL)
+		goto error;
+
+	if (props) {
+		re->props_store = pw_properties_new_dict(props);
+		if (re->props_store == NULL)
+			goto error;
+		re->props = &re->props_store->dict;
 	}
+
+	re->seq = monitor_sync(impl);
+
+	return;
+
+error:
+	if (re)
+		registry_event_free(re);
+	pw_log_warn(NAME" %p: can't handle global %d: %s", impl, id, spa_strerror(-errno));
 }
+
+static void
+registry_global_remove(void *data, uint32_t id)
+{
+	struct impl *impl = data;
+	struct sm_object *obj;
+
+	obj = find_object(impl, id, NULL);
+	obj = (obj && !obj->monitor_global) ? obj : NULL;
+
+	pw_log_debug(NAME " %p: registry event (policy) for remove global '%d' obj:%p",
+			impl, id, obj);
+
+	if (obj)
+		sm_object_destroy_maybe_free(obj);
+}
+
+static const struct pw_registry_events registry_events = {
+	PW_VERSION_REGISTRY_EVENTS,
+	.global = registry_global,
+	.global_remove = registry_global_remove,
+};
+
+static void
+monitor_registry_global(void *data, uint32_t id,
+		uint32_t permissions, const char *type, uint32_t version,
+		const struct spa_dict *props)
+{
+	struct impl *impl = data;
+	const struct object_info *info;
+	struct registry_event re = {
+		.id = id, .permissions = permissions, .type = type, .version = version,
+		.props = props,	.monitor = true
+	};
+
+	pw_log_debug(NAME " %p: registry event (monitor) for new global '%d'", impl, id);
+
+	info = get_object_info(impl, type);
+	if (info == NULL)
+		return;
+
+	/* Bind proxy now from policy core */
+	re.proxy = pw_registry_bind(impl->registry, id, type, info->version, 0);
+	if (re.proxy)
+		handle_registry_event(impl, &re);
+	else
+		pw_log_warn(NAME" %p: can't handle global %d: %s", impl, id, spa_strerror(-errno));
+
+	registry_event_free(&re);
+	return;
+}
+
+static void
+monitor_registry_global_remove(void *data, uint32_t id)
+{
+	struct impl *impl = data;
+	struct sm_object *obj;
+
+	obj = find_object(impl, id, NULL);
+	obj = (obj && obj->monitor_global) ? obj : NULL;
+
+	pw_log_debug(NAME " %p: registry event (monitor) for remove global '%d' obj:%p", impl, id, obj);
+
+	if (obj)
+		sm_object_destroy_maybe_free(obj);
+}
+
+static const struct pw_registry_events monitor_registry_events = {
+      PW_VERSION_REGISTRY_EVENTS,
+      .global = monitor_registry_global,
+      .global_remove = monitor_registry_global_remove,
+};
 
 int sm_object_add_listener(struct sm_object *obj, struct spa_hook *listener,
 		const struct sm_object_events *events, void *data)
@@ -1281,8 +1524,11 @@ int sm_media_session_add_listener(struct sm_media_session *sess, struct spa_hook
 
 	spa_hook_list_isolate(&impl->hooks, &save, listener, events, data);
 
-	spa_list_for_each(obj, &impl->global_list, link)
+	spa_list_for_each(obj, &impl->object_list, link) {
+		if (obj->id == SPA_ID_INVALID)
+			continue;
 		sm_media_session_emit_create(impl, obj);
+	}
 
         spa_hook_list_join(&impl->hooks, &save);
 
@@ -1310,7 +1556,9 @@ int sm_media_session_for_each_object(struct sm_media_session *sess,
 	struct sm_object *obj;
 	int res;
 
-	spa_list_for_each(obj, &impl->global_list, link) {
+	spa_list_for_each(obj, &impl->object_list, link) {
+		if (obj->id == SPA_ID_INVALID)
+			continue;
 		if ((res = callback(data, obj)) != 0)
 			return res;
 	}
@@ -1385,33 +1633,6 @@ int sm_media_session_roundtrip(struct sm_media_session *sess)
 	return 0;
 }
 
-static void
-registry_global_remove(void *data, uint32_t id)
-{
-	struct impl *impl = data;
-	struct sm_object *obj;
-
-	pw_log_debug(NAME " %p: remove global '%d'", impl, id);
-
-	if ((obj = find_object(impl, id, NULL)) == NULL)
-		return;
-
-	sm_object_destroy(obj);
-}
-
-static const struct pw_registry_events registry_events = {
-	PW_VERSION_REGISTRY_EVENTS,
-        .global = registry_global,
-        .global_remove = registry_global_remove,
-};
-
-static void monitor_sync(struct impl *impl)
-{
-	pw_core_set_paused(impl->policy_core, true);
-	impl->monitor_seq = pw_core_sync(impl->monitor_core, 0, impl->monitor_seq);
-	pw_log_debug(NAME " %p: monitor sync start %d", impl, impl->monitor_seq);
-}
-
 struct pw_proxy *sm_media_session_export(struct sm_media_session *sess,
 		const char *type, const struct spa_dict *props,
 		void *object, size_t user_data_size)
@@ -1441,7 +1662,7 @@ struct sm_node *sm_media_session_export_node(struct sm_media_session *sess,
 	handle = pw_core_export(impl->monitor_core, PW_TYPE_INTERFACE_Node,
 			props, object, sizeof(struct sm_node));
 
-	node = (struct sm_node *) create_object(impl, NULL, handle, props);
+	node = (struct sm_node *) create_object(impl, NULL, handle, props, true);
 
 	monitor_sync(impl);
 
@@ -1460,7 +1681,7 @@ struct sm_device *sm_media_session_export_device(struct sm_media_session *sess,
 	handle = pw_core_export(impl->monitor_core, SPA_TYPE_INTERFACE_Device,
 			props, object, sizeof(struct sm_device));
 
-	device = (struct sm_device *) create_object(impl, NULL, handle, props);
+	device = (struct sm_device *) create_object(impl, NULL, handle, props, true);
 
 	monitor_sync(impl);
 
@@ -1492,7 +1713,7 @@ struct sm_node *sm_media_session_create_node(struct sm_media_session *sess,
 				props,
 				sizeof(struct sm_node));
 
-	node = (struct sm_node *)create_object(impl, proxy, proxy, props);
+	node = (struct sm_node *)create_object(impl, proxy, proxy, props, false);
 
 	return node;
 }
@@ -1606,12 +1827,20 @@ static int link_nodes(struct impl *impl, struct endpoint_link *link,
 	struct pw_properties *props;
 	struct sm_port *outport, *inport;
 	int count = 0;
+	bool passive = false;
+	const char *str;
 
 	pw_log_debug(NAME" %p: linking %d -> %d", impl, outnode->obj.id, innode->obj.id);
+
+	if ((str = spa_dict_lookup(outnode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
+		passive |= (pw_properties_parse_bool(str) || spa_streq(str, "out"));
+	if ((str = spa_dict_lookup(innode->info->props, PW_KEY_NODE_PASSIVE)) != NULL)
+		passive |= (pw_properties_parse_bool(str) || spa_streq(str, "in"));
 
 	props = pw_properties_new(NULL, NULL);
 	pw_properties_setf(props, PW_KEY_LINK_OUTPUT_NODE, "%d", outnode->obj.id);
 	pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%d", innode->obj.id);
+	pw_properties_setf(props, PW_KEY_LINK_PASSIVE, "%s", passive ? "true" : "false");
 
 	spa_list_for_each(inport, &innode->port_list, link)
 		inport->visited = false;
@@ -1783,169 +2012,72 @@ int sm_media_session_remove_links(struct sm_media_session *sess,
 int sm_media_session_load_conf(struct sm_media_session *sess, const char *name,
 		struct pw_properties *conf)
 {
-	const char *dir;
-	char path[PATH_MAX];
-	int count, fd;
-	struct stat sbuf;
-	char *data;
-
-	if ((count = sm_media_session_load_state(sess, name, NULL, conf)) >= 0)
-		return count;
-
-	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
-		dir = PIPEWIRE_CONFIG_DIR;
-	if (dir == NULL)
-		return -ENOENT;
-
-	snprintf(path, sizeof(path)-1, "%s/media-session.d/%s", dir, name);
-	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)  {
-		pw_log_warn(NAME" %p: error loading config '%s': %m", sess, path);
-		return -errno;
-	}
-
-	pw_log_info(NAME" %p: loading config '%s'", sess, path);
-	if (fstat(fd, &sbuf) < 0)
-		goto error_close;
-	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
-		goto error_close;
-	close(fd);
-
-	count = pw_properties_update_string(conf, data, sbuf.st_size);
-	munmap(data, sbuf.st_size);
-
-	return count;
-
-error_close:
-	pw_log_debug("can't read file %s: %m", path);
-	close(fd);
-	return -errno;
-}
-
-static int state_dir(struct sm_media_session *sess)
-{
-	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
-	const char *home_dir;
-	int res;
-
-	if (impl->state_dir_fd != -1)
-		return impl->state_dir_fd;
-
-	home_dir = getenv("XDG_CONFIG_HOME");
-	if (home_dir != NULL)
-		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
-				"%s/pipewire-media-session/", home_dir);
-	else {
-		home_dir = getenv("HOME");
-		if (home_dir == NULL)
-			home_dir = getenv("USERPROFILE");
-		if (home_dir == NULL) {
-			struct passwd pwd, *result = NULL;
-			char buffer[4096];
-			if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
-				home_dir = result ? result->pw_dir : NULL;
-		}
-		if (home_dir == NULL) {
-			pw_log_error("Can't determine home directory");
-			return -ENOTSUP;
-		}
-		snprintf(impl->state_dir, sizeof(impl->state_dir)-1,
-				"%s/.config/pipewire-media-session/", home_dir);
-	}
-
-#ifndef O_PATH
-#define O_PATH 0
-#endif
-
-	if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
-		if (errno == ENOENT) {
-			pw_log_info("creating state directory %s", impl->state_dir);
-			if (mkdir(impl->state_dir, 0700) < 0) {
-				pw_log_info("Can't create state directory %s: %m", impl->state_dir);
-				return -errno;
-			}
-		} else {
-			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
-			return -errno;
-		}
-		if ((res = open(impl->state_dir, O_CLOEXEC | O_DIRECTORY | O_PATH)) < 0) {
-			pw_log_error("Can't open state directory %s: %m", impl->state_dir);
-			return -EINVAL;
-		}
-	}
-	impl->state_dir_fd = res;
-	return res;
+	return pw_conf_load_conf(SESSION_PREFIX, name, conf);
 }
 
 int sm_media_session_load_state(struct sm_media_session *sess,
-		const char *name, const char *prefix, struct pw_properties *props)
+		const char *name, struct pw_properties *props)
 {
-	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
-	int count, sfd, fd;
-	struct stat sbuf;
-	void *data;
-
-	if ((sfd = state_dir(sess)) < 0)
-		return sfd;
-
-	if ((fd = openat(sfd, name, O_CLOEXEC | O_RDONLY)) < 0) {
-		pw_log_debug("can't open file %s%s: %m", impl->state_dir, name);
-		return -errno;
-	}
-	pw_log_info(NAME" %p: loading state '%s%s'", sess, impl->state_dir, name);
-	if (fstat(fd, &sbuf) < 0)
-		goto error_close;
-	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
-		goto error_close;
-	close(fd);
-
-	count = pw_properties_update_string(props, data, sbuf.st_size);
-	munmap(data, sbuf.st_size);
-
-	return count;
-
-error_close:
-	pw_log_debug("can't read file %s: %m", name);
-	close(fd);
-	return -errno;
+	return pw_conf_load_state(SESSION_PREFIX, name, props);
 }
 
 int sm_media_session_save_state(struct sm_media_session *sess,
-		const char *name, const char *prefix, const struct pw_properties *props)
+		const char *name, const struct pw_properties *props)
 {
-	const struct spa_dict_item *it;
-	char *tmp_name;
-	int sfd, fd;
-	FILE *f;
+	return pw_conf_save_state(SESSION_PREFIX, name, props);
+}
 
-	pw_log_info(NAME" %p: saving state '%s'", sess, name);
-	if ((sfd = state_dir(sess)) < 0)
-		return sfd;
+char *sm_media_session_sanitize_name(char *name, int size, char sub, const char *fmt, ...)
+{
+	char *p;
+	va_list varargs;
 
-	tmp_name = alloca(strlen(name)+5);
-	sprintf(tmp_name, "%s.tmp", name);
-	if ((fd = openat(sfd, tmp_name,  O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC, 0700)) < 0) {
-		pw_log_error("can't open file '%s': %m", tmp_name);
-		return -errno;
+	va_start(varargs, fmt);
+	if (vsnprintf(name, size, fmt, varargs) < 0)
+		return NULL;
+	va_end(varargs);
+
+	for (p = name; *p; p++) {
+		switch(*p) {
+		case '0' ... '9':
+		case 'a' ... 'z':
+		case 'A' ... 'Z':
+		case '.': case '-': case '_':
+			break;
+		default:
+			*p = sub;
+			break;
+		}
 	}
+	return name;
+}
 
-	f = fdopen(fd, "w");
-	fprintf(f, "{ \n");
-	spa_dict_for_each(it, &props->dict) {
-		char key[1024];
-		if (prefix != NULL && strstr(it->key, prefix) != it->key)
-			continue;
+char *sm_media_session_sanitize_description(char *name, int size, char sub, const char *fmt, ...)
+{
+	char *p;
+	va_list varargs;
 
-		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
-			continue;
+	va_start(varargs, fmt);
+	if (vsnprintf(name, size, fmt, varargs) < 0)
+		return NULL;
+	va_end(varargs);
 
-		fprintf(f, " %s: %s\n", key, it->value);
+	for (p = name; *p; p++) {
+		switch(*p) {
+		case ':':
+			*p = sub;
+			break;
+		}
 	}
-	fprintf(f, "}\n");
-	fclose(f);
+	return name;
+}
 
-	if (renameat(sfd, tmp_name, sfd, name) < 0) {
-		pw_log_error("can't rename temp file '%s': %m", tmp_name);
-		return -errno;
+int sm_media_session_seat_active_changed(struct sm_media_session *sess, bool active)
+{
+	struct impl *impl = SPA_CONTAINER_OF(sess, struct impl, this);
+	if (active != impl->seat_active) {
+		impl->seat_active = active;
+		sm_media_session_emit_seat_active(impl, active);
 	}
 	return 0;
 }
@@ -1953,6 +2085,9 @@ int sm_media_session_save_state(struct sm_media_session *sess,
 static void monitor_core_done(void *data, uint32_t id, int seq)
 {
 	struct impl *impl = data;
+
+	if (id == 0)
+		handle_postponed_registry_events(impl, seq);
 
 	if (seq == impl->monitor_seq) {
 		pw_log_debug(NAME " %p: monitor sync stop %d", impl, seq);
@@ -1976,6 +2111,12 @@ static int start_session(struct impl *impl)
 	pw_core_add_listener(impl->monitor_core,
 			&impl->monitor_listener,
 			&monitor_core_events, impl);
+
+	impl->monitor_registry = pw_core_get_registry(impl->monitor_core,
+			PW_VERSION_REGISTRY, 0);
+	pw_registry_add_listener(impl->monitor_registry,
+			&impl->monitor_registry_listener,
+			&monitor_registry_events, impl);
 
 	return 0;
 }
@@ -2018,7 +2159,9 @@ static void core_done(void *data, uint32_t id, int seq)
 			}
 		}
 
-		spa_list_for_each_safe(obj, to, &impl->global_list, link) {
+		spa_list_for_each_safe(obj, to, &impl->object_list, link) {
+			if (obj->id == SPA_ID_INVALID)
+				continue;
 			pw_log_trace(NAME" %p: obj %p %08x", impl, obj, obj->changed);
 			if (obj->changed)
 				sm_object_emit_update(obj);
@@ -2088,20 +2231,47 @@ static int start_policy(struct impl *impl)
 static void session_shutdown(struct impl *impl)
 {
 	struct sm_object *obj;
+	struct registry_event *re;
+	struct spa_list free_list;
 
 	pw_log_info(NAME" %p", impl);
 	sm_media_session_emit_shutdown(impl);
 
-	spa_list_consume(obj, &impl->global_list, link)
-		sm_object_destroy(obj);
+	/*
+	 * Monitors may still hold references to objects, which they
+	 * drop in session destroy event, so don't free undiscarded
+	 * objects yet. Destroy event handlers may remove any objects
+	 * in the list, so iterate carefully.
+	 */
+	spa_list_init(&free_list);
+	spa_list_consume(obj, &impl->object_list, link) {
+		if (obj->destroyed) {
+			spa_list_remove(&obj->link);
+			spa_list_append(&free_list, &obj->link);
+		} else {
+			sm_object_destroy_maybe_free(obj);
+		}
+	}
+
+	spa_list_consume(re, &impl->registry_event_list, link)
+		registry_event_free(re);
 
 	impl->this.metadata = NULL;
 
 	sm_media_session_emit_destroy(impl);
 
+	spa_list_consume(obj, &free_list, link)
+		sm_object_destroy(obj);
+	spa_list_consume(obj, &impl->object_list, link)
+		sm_object_destroy(obj);  /* in case emit_destroy created new objects */
+
 	if (impl->registry) {
 		spa_hook_remove(&impl->registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)impl->registry);
+	}
+	if (impl->monitor_registry) {
+		spa_hook_remove(&impl->monitor_registry_listener);
+		pw_proxy_destroy((struct pw_proxy*)impl->monitor_registry);
 	}
 	if (impl->policy_core) {
 		spa_hook_remove(&impl->policy_listener);
@@ -2133,33 +2303,22 @@ static int sm_pulse_bridge_start(struct sm_media_session *sess)
 	return 0;
 }
 
+static void dbus_connection_disconnected(void *data)
+{
+	struct impl *impl = data;
+	pw_log_info("DBus disconnected");
+	sm_media_session_emit_dbus_disconnected(impl);
+}
+
+static const struct spa_dbus_connection_events dbus_connection_events = {
+	SPA_VERSION_DBUS_CONNECTION_EVENTS,
+	.disconnected = dbus_connection_disconnected
+};
+
 static void do_quit(void *data, int signal_number)
 {
 	struct impl *impl = data;
 	pw_main_loop_quit(impl->loop);
-}
-
-static int load_spa_libs(struct impl *impl, const char *str)
-{
-	struct spa_json it[2];
-	char key[512], value[512];
-
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_object(&it[0], &it[1]) < 0)
-		return -EINVAL;
-
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		const char *val;
-		if (key[0] == '#') {
-			if (spa_json_next(&it[1], &val) <= 0)
-				break;
-		}
-		else if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
-			pw_log_debug("spa-libs: '%s' -> '%s'", key, value);
-			pw_context_add_spa_lib(impl->this.context, key, value);
-		}
-	}
-	return 0;
 }
 
 static int collect_modules(struct impl *impl, const char *str)
@@ -2172,7 +2331,7 @@ static int collect_modules(struct impl *impl, const char *str)
 	int count = 0;
 
 	if ((dir = getenv("PIPEWIRE_CONFIG_DIR")) == NULL)
-		dir = PIPEWIRE_CONFIG_DIR;
+		dir = PIPEWIRE_CONFDATADIR;
 	if (dir == NULL)
 		return -ENOENT;
 
@@ -2184,13 +2343,11 @@ again:
 	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
 		bool add = false;
 
-		if (key[0] == '#') {
-			add = false;
-		} else if (pw_properties_get(impl->modules, key) != NULL) {
+		if (pw_properties_get(impl->modules, key) != NULL) {
 			add = true;
 		} else {
 			snprintf(check_path, sizeof(check_path),
-					"%s/media-session.d/%s", dir, key);
+					"%s/"SESSION_PREFIX"/%s", dir, key);
 			add = (stat(check_path, &statbuf) == 0);
 		}
 		if (add) {
@@ -2198,8 +2355,6 @@ again:
 				continue;
 
 			while (spa_json_get_string(&it[2], value, sizeof(value)-1) > 0) {
-				if (value[0] == '#')
-					continue;
 				pw_properties_set(impl->modules, value, "true");
 			}
 		}
@@ -2227,6 +2382,7 @@ static const struct {
 	{ "default-profile", "restore default profiles", sm_default_profile_start, NULL },
 	{ "default-routes", "restore default route", sm_default_routes_start, NULL },
 	{ "restore-stream", "restore stream settings", sm_restore_stream_start, NULL },
+	{ "streams-follow-default", "move streams when default changes", sm_streams_follow_default_start, NULL },
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
 	{ "alsa-monitor", "alsa card udev detection", sm_alsa_monitor_start, NULL },
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },
@@ -2235,6 +2391,9 @@ static const struct {
 	{ "suspend-node", "suspend inactive nodes", sm_suspend_node_start, NULL },
 	{ "policy-node", "configure and link nodes", sm_policy_node_start, NULL },
 	{ "pulse-bridge", "accept pulseaudio clients", sm_pulse_bridge_start, NULL },
+#ifdef HAVE_SYSTEMD
+	{ "logind", "systemd-logind seat support", sm_logind_start, NULL },
+#endif
 };
 
 static bool is_module_enabled(struct impl *impl, const char *val)
@@ -2243,17 +2402,17 @@ static bool is_module_enabled(struct impl *impl, const char *val)
 	return str ? pw_properties_parse_bool(str) : false;
 }
 
-static void show_help(const char *name, struct impl *impl)
+static void show_help(const char *name, struct impl *impl, const char *config_name)
 {
 	size_t i;
 
         fprintf(stdout, "%s [options]\n"
-             "  -h, --help                            Show this help\n"
-             "      --version                         Show version\n",
-	     name);
+		"  -h, --help                            Show this help\n"
+		"      --version                         Show version\n"
+		"  -c, --config                          Load config (Default %s)\n",
+		name, config_name);
 
-        fprintf(stdout,
-             "\noptions: (*=enabled)\n");
+	fprintf(stdout, "\noptions: (*=enabled)\n");
 	for (i = 0; i < SPA_N_ELEMENTS(modules); i++) {
 		fprintf(stdout, "\t  %c %-15.15s: %s\n",
 				is_module_enabled(impl, modules[i].name) ? '*' : ' ',
@@ -2263,14 +2422,16 @@ static void show_help(const char *name, struct impl *impl)
 
 int main(int argc, char *argv[])
 {
-	struct impl impl = { 0, };
+	struct impl impl = { .seat_active = true };
 	const struct spa_support *support;
-	const char *str;
+	const char *str, *config_name = SESSION_CONF;
+	bool do_show_help = false;
 	uint32_t n_support;
 	int res = 0, c;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
 		{ "version",	no_argument,		NULL, 'V' },
+		{ "config",	required_argument,	NULL, 'c' },
 		{ NULL, 0, NULL, 0}
 	};
         size_t i;
@@ -2278,27 +2439,11 @@ int main(int argc, char *argv[])
 
 	pw_init(&argc, &argv);
 
-	impl.state_dir_fd = -1;
-	impl.this.props = pw_properties_new(NULL, NULL);
-	if (impl.this.props == NULL)
-		return -1;
-
-	if ((impl.conf = pw_properties_new(NULL, NULL)) == NULL)
-		return -1;
-	sm_media_session_load_conf(&impl.this, SESSION_CONF, impl.conf);
-	if ((str = pw_properties_get(impl.conf, "properties")) != NULL)
-		pw_properties_update_string(impl.this.props, str, strlen(str));
-
-	if ((impl.modules = pw_properties_new("default", "true", NULL)) == NULL)
-		return -1;
-	if ((str = pw_properties_get(impl.conf, "modules")) != NULL)
-		collect_modules(&impl, str);
-
-	while ((c = getopt_long(argc, argv, "hV", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVc:", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
-			show_help(argv[0], &impl);
-			return 0;
+			do_show_help = true;
+			break;
 		case 'V':
 			fprintf(stdout, "%s\n"
 				"Compiled with libpipewire %s\n"
@@ -2307,9 +2452,37 @@ int main(int argc, char *argv[])
 				pw_get_headers_version(),
 				pw_get_library_version());
 			return 0;
+		case 'c':
+			config_name = optarg;
+			break;
 		default:
 			return -1;
 		}
+	}
+
+	impl.this.props = pw_properties_new(
+			PW_KEY_CONFIG_PREFIX, SESSION_PREFIX,
+			PW_KEY_CONFIG_NAME, config_name,
+			NULL);
+	if (impl.this.props == NULL)
+		return -1;
+
+	if ((impl.conf = pw_properties_new(NULL, NULL)) == NULL)
+		return -1;
+
+	pw_conf_load_conf(SESSION_PREFIX, config_name, impl.conf);
+
+	if ((str = pw_properties_get(impl.conf, "context.properties")) != NULL)
+		pw_properties_update_string(impl.this.props, str, strlen(str));
+
+	if ((impl.modules = pw_properties_new("default", "true", NULL)) == NULL)
+		return -1;
+	if ((str = pw_properties_get(impl.conf, "session.modules")) != NULL)
+		collect_modules(&impl, str);
+
+	if (do_show_help) {
+		show_help(argv[0], &impl, config_name);
+		return 0;
 	}
 
 	spa_dict_for_each(item, &impl.this.props->dict)
@@ -2324,21 +2497,17 @@ int main(int argc, char *argv[])
 	pw_loop_add_signal(impl.this.loop, SIGTERM, do_quit, &impl);
 
 	impl.this.context = pw_context_new(impl.this.loop,
-				pw_properties_new(
-					PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
-					NULL),
+				pw_properties_copy(impl.this.props),
 				0);
 
 	if (impl.this.context == NULL)
 		return -1;
 
-	if ((str = pw_properties_get(impl.conf, "spa-libs")) != NULL)
-		load_spa_libs(&impl, str);
-
 	pw_context_set_object(impl.this.context, SM_TYPE_MEDIA_SESSION, &impl);
 
 	pw_map_init(&impl.globals, 64, 64);
-	spa_list_init(&impl.global_list);
+	spa_list_init(&impl.object_list);
+	spa_list_init(&impl.registry_event_list);
 	spa_list_init(&impl.link_list);
 	pw_map_init(&impl.endpoint_links, 64, 64);
 	spa_list_init(&impl.endpoint_link_list);
@@ -2348,12 +2517,19 @@ int main(int argc, char *argv[])
 	support = pw_context_get_support(impl.this.context, &n_support);
 
 	impl.dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
-	if (impl.dbus)
+	if (impl.dbus) {
 		impl.this.dbus_connection = spa_dbus_get_connection(impl.dbus, SPA_DBUS_TYPE_SESSION);
-	if (impl.this.dbus_connection == NULL)
-		pw_log_warn("no dbus connection");
-	else
-		pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
+		if (impl.this.dbus_connection == NULL)
+			pw_log_warn("no dbus connection");
+		else {
+			pw_log_debug("got dbus connection %p", impl.this.dbus_connection);
+			spa_dbus_connection_add_listener(impl.this.dbus_connection,
+					&impl.dbus_connection_listener,
+					&dbus_connection_events, &impl);
+		}
+	} else {
+		pw_log_info("dbus disabled");
+	}
 
 	if ((res = start_session(&impl)) < 0)
 		goto exit;
@@ -2383,9 +2559,6 @@ exit:
 	pw_properties_free(impl.this.props);
 	pw_properties_free(impl.conf);
 	pw_properties_free(impl.modules);
-
-	if (impl.state_dir_fd != -1)
-		close(impl.state_dir_fd);
 
 	pw_deinit();
 

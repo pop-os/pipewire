@@ -37,13 +37,20 @@
 #define pw_thread_loop_events_destroy(o)	pw_thread_loop_events_emit(o, destroy, 0)
 
 #ifdef __FreeBSD__
-#define pthread_setname_np pthread_set_name_np
+#include <sys/param.h>
+#if __FreeBSD_version < 1202000
+int pthread_setname_np(pthread_t thread, const char *name)
+{
+	pthread_set_name_np(thread, name);
+	return 0;
+}
+#endif
 #endif
 
 /** \cond */
 struct pw_thread_loop {
 	struct pw_loop *loop;
-	char *name;
+	char name[16];
 
 	struct spa_hook_list listener_list;
 
@@ -111,7 +118,7 @@ static struct pw_thread_loop *loop_new(struct pw_loop *loop,
 	if (this == NULL)
 		return NULL;
 
-	pw_log_debug(NAME" %p: new", this);
+	pw_log_debug(NAME" %p: new name:%s", this, name);
 
 	if (loop == NULL) {
 		loop = pw_loop_new(props);
@@ -122,7 +129,7 @@ static struct pw_thread_loop *loop_new(struct pw_loop *loop,
 		goto clean_this;
 	}
 	this->loop = loop;
-	this->name = name ? strdup(name) : NULL;
+	snprintf(this->name, sizeof(this->name), "%s", name ? name : "pw-thread-loop");
 
 	spa_hook_list_init(&this->listener_list);
 
@@ -154,7 +161,6 @@ clean_lock:
 clean_this:
 	if (this->created && this->loop)
 		pw_loop_destroy(this->loop);
-	free(this->name);
 	free(this);
 	errno = -res;
 	return NULL;
@@ -162,17 +168,16 @@ clean_this:
 
 /** Create a new \ref pw_thread_loop
  *
- * \param loop the loop to wrap
  * \param name the name of the thread or NULL
+ * \param props a dict of properties for the thread loop
  * \return a newly allocated \ref  pw_thread_loop
  *
- * Make a new \ref pw_thread_loop that will run \a loop in
+ * Make a new \ref pw_thread_loop that will run in
  * a thread with \a name.
  *
  * After this function you should probably call pw_thread_loop_start() to
  * actually start the thread
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 struct pw_thread_loop *pw_thread_loop_new(const char *name,
@@ -181,6 +186,20 @@ struct pw_thread_loop *pw_thread_loop_new(const char *name,
 	return loop_new(NULL, name, props);
 }
 
+/** Create a new \ref pw_thread_loop
+ *
+ * \param loop the loop to wrap
+ * \param name the name of the thread or NULL
+ * \param props a dict of properties for the thread loop
+ * \return a newly allocated \ref  pw_thread_loop
+ *
+ * Make a new \ref pw_thread_loop that will run \a loop in
+ * a thread with \a name.
+ *
+ * After this function you should probably call pw_thread_loop_start() to
+ * actually start the thread
+ *
+ */
 SPA_EXPORT
 struct pw_thread_loop *pw_thread_loop_new_full(struct pw_loop *loop,
 		const char *name, const struct spa_dict *props)
@@ -188,7 +207,7 @@ struct pw_thread_loop *pw_thread_loop_new_full(struct pw_loop *loop,
 	return loop_new(loop, name, props);
 }
 
-/** Destroy a threaded loop \memberof pw_thread_loop */
+/** Destroy a threaded loop */
 SPA_EXPORT
 void pw_thread_loop_destroy(struct pw_thread_loop *loop)
 {
@@ -209,7 +228,6 @@ void pw_thread_loop_destroy(struct pw_thread_loop *loop)
 	pthread_cond_destroy(&loop->cond);
 	pthread_mutex_destroy(&loop->lock);
 
-	free(loop->name);
 	free(loop);
 }
 
@@ -236,7 +254,6 @@ static void *do_loop(void *user_data)
 
 	pthread_mutex_lock(&this->lock);
 	pw_log_debug(NAME" %p: enter thread", this);
-	pthread_setname_np(this->thread, this->name ? this->name : "pipewire-thread");
 	pw_loop_enter(this->loop);
 
 	while (this->running) {
@@ -259,7 +276,6 @@ static void *do_loop(void *user_data)
  * \param loop a \ref pw_thread_loop
  * \return 0 on success
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 int pw_thread_loop_start(struct pw_thread_loop *loop)
@@ -274,6 +290,8 @@ int pw_thread_loop_start(struct pw_thread_loop *loop)
 			loop->running = false;
 			return -err;
 		}
+		if ((err = pthread_setname_np(loop->thread, loop->name)) != 0)
+			pw_log_warn(NAME" %p: error: %s", loop, strerror(err));
 	}
 	return 0;
 }
@@ -282,7 +300,6 @@ int pw_thread_loop_start(struct pw_thread_loop *loop)
  *
  * \param loop a \ref pw_thread_loop
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_stop(struct pw_thread_loop *loop)
@@ -303,7 +320,6 @@ void pw_thread_loop_stop(struct pw_thread_loop *loop)
  *
  * \param loop a \ref pw_thread_loop
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_lock(struct pw_thread_loop *loop)
@@ -316,7 +332,6 @@ void pw_thread_loop_lock(struct pw_thread_loop *loop)
  *
  * \param loop a \ref pw_thread_loop
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_unlock(struct pw_thread_loop *loop)
@@ -333,7 +348,6 @@ void pw_thread_loop_unlock(struct pw_thread_loop *loop)
  * Signal the thread of \a loop. If \a wait_for_accept is true,
  * this function waits until \ref pw_thread_loop_accept() is called.
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_signal(struct pw_thread_loop *loop, bool wait_for_accept)
@@ -355,7 +369,6 @@ void pw_thread_loop_signal(struct pw_thread_loop *loop, bool wait_for_accept)
  *
  * \param loop a \ref pw_thread_loop to signal
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_wait(struct pw_thread_loop *loop)
@@ -374,7 +387,6 @@ void pw_thread_loop_wait(struct pw_thread_loop *loop)
  * \param wait_max_sec the maximum number of seconds to wait for a \ref pw_thread_loop_signal()
  * \return 0 on success or ETIMEDOUT on timeout or a negative errno value.
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 int pw_thread_loop_timed_wait(struct pw_thread_loop *loop, int wait_max_sec)
@@ -396,7 +408,6 @@ int pw_thread_loop_timed_wait(struct pw_thread_loop *loop, int wait_max_sec)
  * \param timeout the time in nanoseconds to add to \a tp
  * \return 0 on success or a negative errno value on error.
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 int pw_thread_loop_get_time(struct pw_thread_loop *loop, struct timespec *abstime, int64_t timeout)
@@ -420,7 +431,6 @@ int pw_thread_loop_get_time(struct pw_thread_loop *loop, struct timespec *abstim
  * \param abstime the absolute time to wait for a \ref pw_thread_loop_signal()
  * \return 0 on success or -ETIMEDOUT on timeout or a negative error value
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 int pw_thread_loop_timed_wait_full(struct pw_thread_loop *loop, struct timespec *abstime)
@@ -436,7 +446,6 @@ int pw_thread_loop_timed_wait_full(struct pw_thread_loop *loop, struct timespec 
  *
  * \param loop a \ref pw_thread_loop to signal
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 void pw_thread_loop_accept(struct pw_thread_loop *loop)
@@ -450,7 +459,6 @@ void pw_thread_loop_accept(struct pw_thread_loop *loop)
  * \param loop a \ref pw_thread_loop to signal
  * \return true when called inside the thread of \a loop.
  *
- * \memberof pw_thread_loop
  */
 SPA_EXPORT
 bool pw_thread_loop_in_thread(struct pw_thread_loop *loop)

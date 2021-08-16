@@ -22,9 +22,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -124,7 +122,7 @@ pw_spa_node_new(struct pw_context *context,
 	impl->flags = flags;
 
 	if (user_data_size > 0)
-                impl->user_data = SPA_MEMBER(impl, sizeof(struct impl), void);
+                impl->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
 	pw_impl_node_add_listener(this, &impl->node_listener, &node_events, impl);
 	if ((res = pw_impl_node_set_implementation(this, impl->node)) < 0)
@@ -281,8 +279,7 @@ struct pw_impl_node *pw_spa_node_load(struct pw_context *context,
 error_exit_unload:
 	pw_unload_spa_handle(handle);
 error_exit:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }

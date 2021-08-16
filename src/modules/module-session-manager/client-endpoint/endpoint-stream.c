@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include <pipewire/impl.h>
-#include <extensions/session-manager.h>
+#include <pipewire/extensions/session-manager.h>
 
 #include <spa/pod/filter.h>
 
@@ -333,6 +333,5 @@ void endpoint_stream_clear(struct endpoint_stream *this)
 	free(this->info.link_params);
 	free(this->info.params);
 
-	if (this->props)
-		pw_properties_free(this->props);
+	pw_properties_free(this->props);
 }

@@ -35,10 +35,11 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/debug/pod.h>
 
 #include "pipewire/pipewire.h"
-#include "extensions/metadata.h"
+#include "pipewire/extensions/metadata.h"
 
 #include "media-session.h"
 
@@ -48,9 +49,14 @@
 
 #define SAVE_INTERVAL	1
 
-#define DEFAULT_AUDIO_SINK	"default.audio.sink"
-#define DEFAULT_AUDIO_SOURCE	"default.audio.source"
-#define DEFAULT_VIDEO_SOURCE	"default.video.source"
+#define DEFAULT_CONFIG_AUDIO_SINK_KEY	"default.configured.audio.sink"
+#define DEFAULT_CONFIG_AUDIO_SOURCE_KEY	"default.configured.audio.source"
+#define DEFAULT_CONFIG_VIDEO_SOURCE_KEY	"default.configured.video.source"
+
+struct default_node {
+	char *key;
+	uint32_t value;
+};
 
 struct impl {
 	struct timespec now;
@@ -63,12 +69,22 @@ struct impl {
 
 	struct spa_hook meta_listener;
 
-	uint32_t default_audio_source;
-	uint32_t default_audio_sink;
-	uint32_t default_video_source;
+	struct default_node defaults[4];
 
 	struct pw_properties *properties;
+
+	unsigned int sync:1;
 };
+
+static struct default_node *find_default(struct impl *impl, const char *key)
+{
+	struct default_node *def;
+	/* Check that the item key is a valid default key */
+	for (def = impl->defaults; def->key != NULL; ++def)
+		if (spa_streq(key, def->key))
+			return def;
+	return NULL;
+}
 
 struct find_data {
 	struct impl *impl;
@@ -81,42 +97,44 @@ static int find_name(void *data, struct sm_object *object)
 	struct find_data *d = data;
 	const char *str;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) == 0 &&
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Node) &&
 	    object->props &&
 	    (str = pw_properties_get(object->props, PW_KEY_NODE_NAME)) != NULL &&
-	    strcmp(str, d->name) == 0) {
+	    spa_streq(str, d->name)) {
 		d->id = object->id;
 		return 1;
 	}
 	return 0;
 }
 
-#if 0
 static uint32_t find_id_for_name(struct impl *impl, const char *name)
 {
 	struct find_data d = { impl, name, SPA_ID_INVALID };
 	sm_media_session_for_each_object(impl->session, find_name, &d);
 	return d.id;
 }
-#endif
 
-static const char *find_name_for_id(struct impl *impl, uint32_t id)
+static int json_object_find(const char *obj, const char *key, char *value, size_t len)
 {
-	struct sm_object *obj;
-	const char *str;
+	struct spa_json it[2];
+	const char *v;
+	char k[128];
 
-	if (id == SPA_ID_INVALID)
-		return NULL;
+	spa_json_init(&it[0], obj, strlen(obj));
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		return -EINVAL;
 
-	obj = sm_media_session_find_object(impl->session, id);
-	if (obj == NULL)
-		return NULL;
-
-	if (strcmp(obj->type, PW_TYPE_INTERFACE_Node) == 0 &&
-	    obj->props &&
-	    (str = pw_properties_get(obj->props, PW_KEY_NODE_NAME)) != NULL)
-		return str;
-	return NULL;
+	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
+		if (spa_streq(k, key)) {
+			if (spa_json_get_string(&it[1], value, len) <= 0)
+				continue;
+			return 0;
+		} else {
+			if (spa_json_next(&it[1], &v) <= 0)
+				break;
+		}
+	}
+	return -ENOENT;
 }
 
 static void remove_idle_timeout(struct impl *impl)
@@ -126,7 +144,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->properties)) < 0)
+						SESSION_KEY, impl->properties)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -157,32 +175,41 @@ static int metadata_property(void *object, uint32_t subject,
 		const char *key, const char *type, const char *value)
 {
 	struct impl *impl = object;
-	uint32_t val;
-	bool changed = false;
+	int changed = 0;
+
+	if (impl->sync)
+		return 0;
 
 	if (subject == PW_ID_CORE) {
-		val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		if (key == NULL || strcmp(key, DEFAULT_AUDIO_SINK) == 0) {
-			changed = val != impl->default_audio_sink;
-			impl->default_audio_sink = val;
-		}
-		if (key == NULL || strcmp(key, DEFAULT_AUDIO_SOURCE) == 0) {
-			changed = val != impl->default_audio_source;
-			impl->default_audio_source = val;
-		}
-		if (key == NULL || strcmp(key, DEFAULT_VIDEO_SOURCE) == 0) {
-			changed = val != impl->default_video_source;
-			impl->default_video_source = val;
-		}
-	}
-	if (changed) {
-		const char *name = find_name_for_id(impl, val);
-		if (key == NULL)
+		if (key == NULL) {
 			pw_properties_clear(impl->properties);
-		else
-			pw_properties_setf(impl->properties, key, "{ \"name\": \"%s\" }", name);
-		add_idle_timeout(impl);
+			changed++;
+		} else {
+			uint32_t id;
+			struct default_node *def;
+			char name[1024];
+
+			if ((def = find_default(impl, key)) == NULL)
+				return 0;
+
+			if (value == NULL) {
+				def->value = SPA_ID_INVALID;
+			} else {
+				if (json_object_find(value, "name", name, sizeof(name)) < 0)
+					return 0;
+
+				if ((id = find_id_for_name(impl, name)) == SPA_ID_INVALID)
+					return 0;
+
+				def->value = id;
+				changed += pw_properties_set(impl->properties,
+							key, value);
+			}
+		}
 	}
+	if (changed)
+		add_idle_timeout(impl);
+
 	return 0;
 }
 
@@ -194,39 +221,29 @@ static const struct pw_metadata_events metadata_events = {
 static void session_create(void *data, struct sm_object *object)
 {
 	struct impl *impl = data;
-	const struct spa_dict_item *it;
+	const struct spa_dict_item *item;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) != 0)
+	if (!spa_streq(object->type, PW_TYPE_INTERFACE_Node))
 		return;
 
-	spa_dict_for_each(it, &impl->properties->dict) {
-		struct spa_json json[2];
-		int len;
-		const char *value;
+	spa_dict_for_each(item, &impl->properties->dict) {
 		char name [1024] = "\0";
 		struct find_data d;
 
-		spa_json_init(&json[0], it->value, strlen(it->value));
-		if (spa_json_enter_object(&json[0], &json[1]) <= 0)
+		if (find_default(impl, item->key) == NULL)
 			continue;
 
-		while ((len = spa_json_next(&json[1], &value)) > 0) {
-			if (strncmp(value, "\"name\"", len) == 0) {
-				if (spa_json_get_string(&json[1], name, sizeof(name)) <= 0)
-					continue;
-			} else {
-				if (spa_json_next(&json[1], &value) <= 0)
-					break;
-			}
-		}
+		if (json_object_find(item->value, "name", name, sizeof(name)) < 0)
+			continue;
+
 		d = (struct find_data){ impl, name, SPA_ID_INVALID };
 		if (find_name(&d, object)) {
-			char val[16];
-			snprintf(val, sizeof(val)-1, "%u", d.id);
-			pw_log_info("found %s with id:%s restore as %s",
-					name, val, it->key);
-			pw_metadata_set_property(impl->session->metadata,
-				PW_ID_CORE, it->key, SPA_TYPE_INFO_BASE"Id", val);
+			if (impl->session->metadata != NULL) {
+				pw_log_info("found %s with id:%u restore as %s",
+						name, d.id, item->key);
+				pw_metadata_set_property(impl->session->metadata,
+					PW_ID_CORE, item->key, "Spa:String:JSON", item->value);
+			}
 		}
 	}
 }
@@ -234,24 +251,19 @@ static void session_create(void *data, struct sm_object *object)
 static void session_remove(void *data, struct sm_object *object)
 {
 	struct impl *impl = data;
+	struct default_node *def;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) != 0)
+	if (!spa_streq(object->type, PW_TYPE_INTERFACE_Node))
 		return;
 
-	if (impl->default_audio_sink == object->id) {
-		impl->default_audio_sink = SPA_ID_INVALID;
-		pw_metadata_set_property(impl->session->metadata,
-			PW_ID_CORE, DEFAULT_AUDIO_SINK, SPA_TYPE_INFO_BASE"Id", NULL);
-	}
-	if (impl->default_audio_source == object->id) {
-		impl->default_audio_source = SPA_ID_INVALID;
-		pw_metadata_set_property(impl->session->metadata,
-			PW_ID_CORE, DEFAULT_AUDIO_SOURCE, SPA_TYPE_INFO_BASE"Id", NULL);
-	}
-	if (impl->default_video_source == object->id) {
-		impl->default_video_source = SPA_ID_INVALID;
-		pw_metadata_set_property(impl->session->metadata,
-			PW_ID_CORE, DEFAULT_VIDEO_SOURCE, SPA_TYPE_INFO_BASE"Id", NULL);
+	for (def = impl->defaults; def->key != NULL; ++def) {
+		if (def->value == object->id) {
+			def->value = SPA_ID_INVALID;
+			if (impl->session->metadata != NULL) {
+				pw_metadata_set_property(impl->session->metadata,
+						PW_ID_CORE, def->key, NULL, NULL);
+			}
+		}
 	}
 }
 
@@ -285,9 +297,10 @@ int sm_default_nodes_start(struct sm_media_session *session)
 	impl->session = session;
 	impl->context = session->context;
 
-	impl->default_audio_sink = SPA_ID_INVALID;
-	impl->default_audio_source = SPA_ID_INVALID;
-	impl->default_video_source = SPA_ID_INVALID;
+	impl->defaults[0] = (struct default_node){ DEFAULT_CONFIG_AUDIO_SINK_KEY, };
+	impl->defaults[1] = (struct default_node){ DEFAULT_CONFIG_AUDIO_SOURCE_KEY, };
+	impl->defaults[2] = (struct default_node){ DEFAULT_CONFIG_VIDEO_SOURCE_KEY, };
+	impl->defaults[3] = (struct default_node){ NULL, };
 
 	impl->properties = pw_properties_new(NULL, NULL);
 	if (impl->properties == NULL) {
@@ -296,7 +309,7 @@ int sm_default_nodes_start(struct sm_media_session *session)
 	}
 
 	if ((res = sm_media_session_load_state(impl->session,
-					SESSION_KEY, PREFIX, impl->properties)) < 0)
+					SESSION_KEY, impl->properties)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sm_media_session_add_listener(impl->session, &impl->listener, &session_events, impl);

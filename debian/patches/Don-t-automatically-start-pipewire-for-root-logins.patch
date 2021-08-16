@@ -9,7 +9,7 @@ Closes: #979791
  2 files changed, 2 insertions(+)
 
 diff --git a/src/daemon/systemd/user/pipewire.service.in b/src/daemon/systemd/user/pipewire.service.in
-index 71cfc26..60c7f2f 100644
+index 2303418..98edc9a 100644
 --- a/src/daemon/systemd/user/pipewire.service.in
 +++ b/src/daemon/systemd/user/pipewire.service.in
 @@ -14,6 +14,7 @@ Description=Multimedia Service
@@ -19,7 +19,7 @@ index 71cfc26..60c7f2f 100644
 +ConditionUser=!root
  
  [Service]
- Type=simple
+ LockPersonality=yes
 diff --git a/src/daemon/systemd/user/pipewire.socket b/src/daemon/systemd/user/pipewire.socket
 index df0c79c..c889ac4 100644
 --- a/src/daemon/systemd/user/pipewire.socket

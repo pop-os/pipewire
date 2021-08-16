@@ -38,6 +38,8 @@
 #include "modules/spa/spa-node.h"
 #include "module-adapter/adapter.h"
 
+/** \page page_module_adapter PipeWire Module: Adapter
+ */
 #define NAME "adapter"
 
 #define FACTORY_USAGE	SPA_KEY_FACTORY_NAME"=<factory-name> " \
@@ -67,6 +69,7 @@ struct node_data {
 	struct pw_impl_node *follower;
 	struct spa_hook adapter_listener;
 	struct pw_resource *resource;
+	struct pw_resource *bound_resource;
 	struct spa_hook resource_listener;
 	uint32_t new_id;
 	unsigned int linger;
@@ -78,6 +81,7 @@ static void resource_destroy(void *data)
 
 	pw_log_debug(NAME" %p: destroy %p", nd, nd->adapter);
 	spa_hook_remove(&nd->resource_listener);
+	nd->bound_resource = NULL;
 	if (nd->adapter && !nd->linger)
 		pw_impl_node_destroy(nd->adapter);
 }
@@ -98,8 +102,14 @@ static void node_destroy(void *data)
 static void node_free(void *data)
 {
 	struct node_data *nd = data;
+
 	pw_log_debug(NAME" %p: free %p", nd, nd->follower);
+
+	if (nd->bound_resource != NULL)
+		spa_hook_remove(&nd->resource_listener);
+
 	spa_hook_remove(&nd->adapter_listener);
+
 	pw_impl_node_destroy(nd->follower);
 }
 
@@ -127,6 +137,7 @@ static void node_initialized(void *data)
 		goto error_bind;
 	}
 
+	nd->bound_resource = bound_resource;
 	pw_resource_add_listener(bound_resource, &nd->resource_listener, &resource_events, nd);
 	return;
 
@@ -157,7 +168,7 @@ static void *create_object(void *_data,
 	const char *str, *factory_name;
 	int res;
 	struct node_data *nd;
-	bool linger;
+	bool linger, do_register;
 
 	if (properties == NULL)
 		goto error_properties;
@@ -165,9 +176,14 @@ static void *create_object(void *_data,
 	pw_properties_setf(properties, PW_KEY_FACTORY_ID, "%d",
 			pw_impl_factory_get_info(d->this)->id);
 
-	client = resource ? pw_resource_get_client(resource): NULL;
+	str = pw_properties_get(properties, PW_KEY_OBJECT_LINGER);
+	linger = str ? pw_properties_parse_bool(str) : false;
 
-	if (client) {
+	str = pw_properties_get(properties, PW_KEY_OBJECT_REGISTER);
+	do_register = str ? pw_properties_parse_bool(str) : true;
+
+	client = resource ? pw_resource_get_client(resource): NULL;
+	if (client && !linger) {
 		pw_properties_setf(properties, PW_KEY_CLIENT_ID, "%d",
 				pw_impl_client_get_info(client)->id);
 	}
@@ -180,9 +196,6 @@ static void *create_object(void *_data,
 
 		pw_properties_setf(properties, "audio.adapt.follower", "pointer:%p", follower);
 	}
-	str = pw_properties_get(properties, PW_KEY_OBJECT_LINGER);
-	linger = str ? pw_properties_parse_bool(str) : false;
-
 	if (follower == NULL) {
 		factory_name = pw_properties_get(properties, SPA_KEY_FACTORY_NAME);
 		if (factory_name == NULL)
@@ -221,7 +234,10 @@ static void *create_object(void *_data,
 
 	pw_impl_node_add_listener(adapter, &nd->adapter_listener, &node_events, nd);
 
-	pw_impl_node_register(adapter, NULL);
+	if (do_register)
+		pw_impl_node_register(adapter, NULL);
+	else
+		pw_impl_node_initialized(adapter);
 
 	return adapter;
 
@@ -244,8 +260,7 @@ error_usage:
 		pw_resource_errorf_id(resource, new_id, res, "usage: "ADAPTER_USAGE);
 	goto error_cleanup;
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }

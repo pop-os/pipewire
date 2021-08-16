@@ -226,7 +226,7 @@ static void impl_native_process(struct resample *r,
 
 	if (SPA_LIKELY(hist)) {
 		/* first work on the history if any. */
-		if (SPA_UNLIKELY(hist < n_taps)) {
+		if (SPA_UNLIKELY(hist <= n_taps)) {
 			/* we need at least n_taps to completely process the
 			 * history before we can work on the new input. When
 			 * we have less, refill the history. */
@@ -265,7 +265,7 @@ static void impl_native_process(struct resample *r,
 				r, *in_len, in, *out_len, out);
 
 		remain = *in_len - skip - in;
-		if (remain > 0 && remain < n_taps) {
+		if (remain > 0 && remain <= n_taps) {
 			/* not enough input data remaining for more output,
 			 * copy to history */
 			for (c = 0; c < r->channels; c++)
@@ -370,17 +370,22 @@ int resample_native_init(struct resample *r)
 	d->n_phases = n_phases;
 	d->in_rate = in_rate;
 	d->out_rate = out_rate;
-	d->filter = SPA_MEMBER_ALIGN(d, sizeof(struct native_data), 64, float);
-	d->hist_mem = SPA_MEMBER_ALIGN(d->filter, filter_size, 64, float);
-	d->history = SPA_MEMBER(d->hist_mem, history_size, float*);
+	d->filter = SPA_PTROFF_ALIGN(d, sizeof(struct native_data), 64, float);
+	d->hist_mem = SPA_PTROFF_ALIGN(d->filter, filter_size, 64, float);
+	d->history = SPA_PTROFF(d->hist_mem, history_size, float*);
 	d->filter_stride = filter_stride / sizeof(float);
 	d->filter_stride_os = d->filter_stride * oversample;
 	for (c = 0; c < r->channels; c++)
-		d->history[c] = SPA_MEMBER(d->hist_mem, c * history_stride, float);
+		d->history[c] = SPA_PTROFF(d->hist_mem, c * history_stride, float);
 
 	build_filter(d->filter, d->filter_stride, n_taps, n_phases, scale);
 
 	d->info = find_resample_info(SPA_AUDIO_FORMAT_F32, r->cpu_flags);
+	if (SPA_UNLIKELY(!d->info))
+	{
+	    spa_log_error(r->log, "failed to find suitable resample format!");
+	    return -1;
+	}
 
 	spa_log_debug(r->log, "native %p: q:%d in:%d out:%d n_taps:%d n_phases:%d features:%08x:%08x",
 			r, r->quality, in_rate, out_rate, n_taps, n_phases,

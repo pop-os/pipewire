@@ -32,6 +32,7 @@
 #include <spa/utils/result.h>
 #include <spa/utils/list.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/buffer/alloc.h>
 #include <spa/node/io.h>
@@ -81,7 +82,12 @@ struct impl {
 
 	uint64_t info_all;
 	struct spa_node_info info;
-	struct spa_param_info params[8];
+#define IDX_EnumPortConfig	0
+#define IDX_PortConfig		1
+#define IDX_PropInfo		2
+#define IDX_Props		3
+	struct spa_param_info params[4];
+	uint32_t param_flags[4];
 
 	int n_links;
 	struct link links[8];
@@ -121,14 +127,25 @@ struct impl {
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint32_t i;
+	uint64_t old = full ? this->info.change_mask : 0;
+
 	if (this->add_listener)
 		return;
 
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
+		if (this->info.change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < SPA_N_ELEMENTS(this->params); i++) {
+				if (this->params[i].user > 0) {
+					this->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					this->params[i].user = 0;
+				}
+			}
+		}
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -508,7 +525,10 @@ static int impl_node_enum_params(void *object, int seq,
 		return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
 
 	case SPA_PARAM_Props:
-		return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
+		if (this->fmt[SPA_DIRECTION_INPUT] == this->merger)
+			return spa_node_enum_params(this->merger, seq, id, start, num, filter);
+		else
+			return spa_node_enum_params(this->channelmix, seq, id, start, num, filter);
 
 	default:
 		return -ENOENT;
@@ -537,6 +557,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	switch (id) {
 	case SPA_IO_Position:
 		res = spa_node_set_io(this->resample, id, data, size);
+		res = spa_node_set_io(this->channelmix, id, data, size);
 		res = spa_node_set_io(this->fmt[0], id, data, size);
 		res = spa_node_set_io(this->fmt[1], id, data, size);
 		break;
@@ -563,12 +584,14 @@ static void fmt_input_port_info(void *data,
 	if (this->fmt_removing[direction])
 		info = NULL;
 
+	spa_log_debug(this->log, "%p: %d.%d info", this, direction, port);
+
 	if (direction == SPA_DIRECTION_INPUT ||
 	    IS_MONITOR_PORT(this, direction, port))
 		spa_node_emit_port_info(&this->hooks, direction, port, info);
 }
 
-static struct spa_node_events fmt_input_events = {
+static const struct spa_node_events fmt_input_events = {
 	SPA_VERSION_NODE_EVENTS,
 	.port_info = fmt_input_port_info,
 	.result = on_node_result,
@@ -583,11 +606,13 @@ static void fmt_output_port_info(void *data,
 	if (this->fmt_removing[direction])
 		info = NULL;
 
+	spa_log_debug(this->log, "%p: %d.%d info", this, direction, port);
+
 	if (direction == SPA_DIRECTION_OUTPUT)
 		spa_node_emit_port_info(&this->hooks, direction, port, info);
 }
 
-static struct spa_node_events fmt_output_events = {
+static const struct spa_node_events fmt_output_events = {
 	SPA_VERSION_NODE_EVENTS,
 	.port_info = fmt_output_port_info,
 	.result = on_node_result,
@@ -598,32 +623,45 @@ static void on_channelmix_info(void *data, const struct spa_node_info *info)
 	struct impl *this = data;
 	uint32_t i;
 
+	if ((info->change_mask & SPA_NODE_CHANGE_MASK_PARAMS) == 0)
+		return;
+
 	for (i = 0; i < info->n_params; i++) {
-		uint32_t idx = SPA_ID_INVALID;
+		uint32_t idx;
 
 		switch (info->params[i].id) {
 		case SPA_PARAM_PropInfo:
-			idx = 2;
+			idx = IDX_PropInfo;
 			break;
 		case SPA_PARAM_Props:
-			idx = 3;
+			idx = IDX_Props;
 			break;
+		default:
+			continue;
 		}
-		if (idx != SPA_ID_INVALID) {
-			this->params[idx] = info->params[i];
-			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
-		}
+		if (!this->add_listener &&
+		    this->param_flags[idx] == info->params[i].flags)
+			continue;
+
+		this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+		this->param_flags[idx] = info->params[i].flags;
+		this->params[idx].flags =
+			(this->params[idx].flags & SPA_PARAM_INFO_SERIAL) |
+			(info->params[i].flags & SPA_PARAM_INFO_READWRITE);
+
+		if (!this->add_listener)
+			this->params[idx].user++;
 	}
 	emit_node_info(this, false);
 }
 
-static struct spa_node_events channelmix_events = {
+static const struct spa_node_events channelmix_events = {
 	SPA_VERSION_NODE_EVENTS,
 	.info = on_channelmix_info,
 	.result = on_node_result,
 };
 
-static struct spa_node_events resample_events = {
+static const struct spa_node_events resample_events = {
 	SPA_VERSION_NODE_EVENTS,
 	.result = on_node_result,
 };
@@ -701,8 +739,9 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 		if (res < 0)
 			return res;
 
-		this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS;
+		this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS | SPA_NODE_CHANGE_MASK_PARAMS;
 		this->info.flags &= ~SPA_NODE_FLAG_NEED_CONFIGURE;
+		this->params[IDX_Props].user++;
 	}
 
 	/* notify ports of new node */
@@ -790,6 +829,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	}
 	case SPA_PARAM_Props:
 	{
+		if (this->fmt[SPA_DIRECTION_INPUT] == this->merger)
+			res = spa_node_set_param(this->merger, id, flags, param);
 		res = spa_node_set_param(this->channelmix, id, flags, param);
 		break;
 	}
@@ -1005,15 +1046,29 @@ impl_node_port_set_param(void *object,
 	spa_log_debug(this->log, NAME " %p: set param %u on port %d:%d %p",
 				this, id, direction, port_id, param);
 
-	is_monitor = IS_MONITOR_PORT(this, direction, port_id);
-	if (is_monitor)
-		target = this->fmt[SPA_DIRECTION_INPUT];
-	else
-		target = this->fmt[direction];
+	switch (id) {
+	default:
+		is_monitor = IS_MONITOR_PORT(this, direction, port_id);
+		if (is_monitor)
+			target = this->fmt[SPA_DIRECTION_INPUT];
+		else
+			target = this->fmt[direction];
+		break;
+	}
 
 	if ((res = spa_node_port_set_param(target,
 					direction, port_id, id, flags, param)) < 0)
 		return res;
+
+	switch (id) {
+	case SPA_PARAM_Latency:
+		target = this->fmt[SPA_DIRECTION_REVERSE(direction)];
+		port_id = 0;
+		if ((res = spa_node_port_set_param(target,
+					direction, port_id, id, flags, param)) < 0)
+			return res;
+		break;
+	}
 
 	return res;
 }
@@ -1156,7 +1211,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1247,44 +1302,44 @@ impl_init(const struct spa_handle_factory *factory,
 		SPA_NODE_FLAG_IN_PORT_CONFIG |
 		SPA_NODE_FLAG_OUT_PORT_CONFIG |
 		SPA_NODE_FLAG_NEED_CONFIGURE;
-	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumPortConfig, SPA_PARAM_INFO_READ);
-	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_PortConfig, SPA_PARAM_INFO_READWRITE);
-	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
-	this->params[3] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
+	this->params[IDX_EnumPortConfig] = SPA_PARAM_INFO(SPA_PARAM_EnumPortConfig, SPA_PARAM_INFO_READ);
+	this->params[IDX_PortConfig] = SPA_PARAM_INFO(SPA_PARAM_PortConfig, SPA_PARAM_INFO_READWRITE);
+	this->params[IDX_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
 	this->info.n_params = 4;
 
-	this->hnd_merger = SPA_MEMBER(this, sizeof(struct impl), struct spa_handle);
+	this->hnd_merger = SPA_PTROFF(this, sizeof(struct impl), struct spa_handle);
 	spa_handle_factory_init(&spa_merger_factory,
 				this->hnd_merger,
 				info, support, n_support);
 	size = spa_handle_factory_get_size(&spa_merger_factory, info);
 
-	this->hnd_convert_in = SPA_MEMBER(this->hnd_merger, size, struct spa_handle);
+	this->hnd_convert_in = SPA_PTROFF(this->hnd_merger, size, struct spa_handle);
 	spa_handle_factory_init(&spa_fmtconvert_factory,
 				this->hnd_convert_in,
 				info, support, n_support);
 	size = spa_handle_factory_get_size(&spa_fmtconvert_factory, info);
 
-	this->hnd_channelmix = SPA_MEMBER(this->hnd_convert_in, size, struct spa_handle);
+	this->hnd_channelmix = SPA_PTROFF(this->hnd_convert_in, size, struct spa_handle);
 	spa_handle_factory_init(&spa_channelmix_factory,
 				this->hnd_channelmix,
 				info, support, n_support);
 	size = spa_handle_factory_get_size(&spa_channelmix_factory, info);
 
-	this->hnd_resample = SPA_MEMBER(this->hnd_channelmix, size, struct spa_handle);
+	this->hnd_resample = SPA_PTROFF(this->hnd_channelmix, size, struct spa_handle);
 	spa_handle_factory_init(&spa_resample_factory,
 				this->hnd_resample,
 				info, support, n_support);
 	size = spa_handle_factory_get_size(&spa_resample_factory, info);
 
-	this->hnd_convert_out = SPA_MEMBER(this->hnd_resample, size, struct spa_handle);
+	this->hnd_convert_out = SPA_PTROFF(this->hnd_resample, size, struct spa_handle);
 	spa_handle_factory_init(&spa_fmtconvert_factory,
 				this->hnd_convert_out,
 				info, support, n_support);
 	size = spa_handle_factory_get_size(&spa_fmtconvert_factory, info);
 
-	this->hnd_splitter = SPA_MEMBER(this->hnd_convert_out, size, struct spa_handle);
+	this->hnd_splitter = SPA_PTROFF(this->hnd_convert_out, size, struct spa_handle);
 	spa_handle_factory_init(&spa_splitter_factory,
 				this->hnd_splitter,
 				info, support, n_support);

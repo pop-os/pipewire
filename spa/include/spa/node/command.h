@@ -29,15 +29,20 @@
 extern "C" {
 #endif
 
+/**
+ * \addtogroup spa_node
+ * \{
+ */
+
 #include <spa/pod/command.h>
 
 /* object id of SPA_TYPE_COMMAND_Node */
 enum spa_node_command {
 	SPA_NODE_COMMAND_Suspend,	/**< suspend a node, this removes all configured
 					  * formats and closes any devices */
-	SPA_NODE_COMMAND_Pause,		/**< pause a node. this makes it stop emiting
+	SPA_NODE_COMMAND_Pause,		/**< pause a node. this makes it stop emitting
 					  *  scheduling events */
-	SPA_NODE_COMMAND_Start,		/**< start a node, this makes it start emiting
+	SPA_NODE_COMMAND_Start,		/**< start a node, this makes it start emitting
 					  *  scheduling events */
 	SPA_NODE_COMMAND_Enable,
 	SPA_NODE_COMMAND_Disable,
@@ -54,6 +59,10 @@ enum spa_node_command {
 #define SPA_NODE_COMMAND_ID(cmd)	SPA_COMMAND_ID(cmd, SPA_TYPE_COMMAND_Node)
 #define SPA_NODE_COMMAND_INIT(id)	SPA_COMMAND_INIT(SPA_TYPE_COMMAND_Node, id)
 
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

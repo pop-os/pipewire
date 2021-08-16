@@ -32,12 +32,18 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 
-/** \class spa_hook
+/** \defgroup spa_hook SPA Hooks
  *
  * \brief a list of hooks
  *
  * The hook list provides a way to keep track of hooks.
  */
+
+/**
+ * \addtogroup spa_hook
+ * \{
+ */
+
 /** A list of hooks */
 struct spa_hook_list {
 	struct spa_list list;
@@ -51,7 +57,7 @@ struct spa_callbacks {
 	void *data;
 };
 
-/** Check if a callback \c has method \m of version \v */
+/** Check if a callback \a c has method \a m of version \a v */
 #define SPA_CALLBACK_CHECK(c,m,v) ((c) && ((v) == 0 || (c)->version > (v)-1) && (c)->m)
 
 #define SPA_CALLBACKS_INIT(_funcs,_data) (struct spa_callbacks){ _funcs, _data, }
@@ -87,7 +93,7 @@ static inline bool spa_hook_list_is_empty(struct spa_hook_list *list)
 	return spa_list_is_empty(&list->list);
 }
 
-/** Append a hook \memberof spa_hook. */
+/** Append a hook. */
 static inline void spa_hook_list_append(struct spa_hook_list *list,
 					struct spa_hook *hook,
 					const void *funcs, void *data)
@@ -97,7 +103,7 @@ static inline void spa_hook_list_append(struct spa_hook_list *list,
 	spa_list_append(&list->list, &hook->link);
 }
 
-/** Prepend a hook \memberof spa_hook */
+/** Prepend a hook */
 static inline void spa_hook_list_prepend(struct spa_hook_list *list,
 					 struct spa_hook *hook,
 					 const void *funcs, void *data)
@@ -107,10 +113,10 @@ static inline void spa_hook_list_prepend(struct spa_hook_list *list,
 	spa_list_prepend(&list->list, &hook->link);
 }
 
-/** Remove a hook \memberof spa_hook */
+/** Remove a hook */
 static inline void spa_hook_remove(struct spa_hook *hook)
 {
-        spa_list_remove(&hook->link);
+	spa_list_remove(&hook->link);
 	if (hook->removed)
 		hook->removed(hook);
 }
@@ -200,6 +206,10 @@ spa_hook_list_join(struct spa_hook_list *list,
 
 #define spa_hook_list_call_start(l,s,t,m,v,...)		spa_hook_list_do_call(l,s,t,m,v,false,##__VA_ARGS__)
 #define spa_hook_list_call_once_start(l,s,t,m,v,...)	spa_hook_list_do_call(l,s,t,m,v,true,##__VA_ARGS__)
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }

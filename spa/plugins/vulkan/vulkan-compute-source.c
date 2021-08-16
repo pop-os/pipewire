@@ -34,6 +34,7 @@
 #include <spa/utils/list.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/utils.h>
 #include <spa/node/io.h>
@@ -441,17 +442,19 @@ static const struct spa_dict_item node_info_items[] = {
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		this->info.props = &SPA_DICT_INIT_ARRAY(node_info_items);
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
@@ -461,7 +464,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 		port->info.props = &SPA_DICT_INIT(items, 1);
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_OUTPUT, 0, &port->info);
-		port->info.change_mask = 0;
+		port->info.change_mask = old;
 	}
 }
 
@@ -844,7 +847,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -917,7 +920,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->timer_source.func = on_output;
 	this->timer_source.data = this;
-	this->timer_source.fd = spa_system_timerfd_create(this->data_system, CLOCK_MONOTONIC, SPA_FD_CLOEXEC);
+	this->timer_source.fd = spa_system_timerfd_create(this->data_system, CLOCK_MONOTONIC,
+							  SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	this->timer_source.mask = SPA_IO_IN;
 	this->timer_source.rmask = 0;
 	this->timerspec.it_value.tv_sec = 0;

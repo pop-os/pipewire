@@ -32,10 +32,11 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/pod/pod.h>
 
-/** \page page_meta Metadata
- *
- * Metadata contains extra information on a buffer.
+/**
+ * \addtogroup spa_buffer
+ * \{
  */
+
 enum spa_meta_type {
 	SPA_META_Invalid,
 	SPA_META_Header,	/**< struct spa_meta_header */
@@ -45,8 +46,9 @@ enum spa_meta_type {
 	SPA_META_Cursor,	/**< struct spa_meta_cursor */
 	SPA_META_Control,	/**< metadata contains a spa_meta_control
 				  *  associated with the data */
+	SPA_META_Busy,		/**< don't write to buffer when count > 0 */
 
-	SPA_META_LAST,		/**< not part of ABI/API */
+	_SPA_META_LAST,		/**< not part of ABI/API */
 };
 
 /**
@@ -63,8 +65,8 @@ struct spa_meta {
 };
 
 #define spa_meta_first(m)	((m)->data)
-#define spa_meta_end(m)		SPA_MEMBER((m)->data,(m)->size,void)
-#define spa_meta_check(p,m)	(SPA_MEMBER(p,sizeof(*p),void) <= spa_meta_end(m))
+#define spa_meta_end(m)		SPA_PTROFF((m)->data,(m)->size,void)
+#define spa_meta_check(p,m)	(SPA_PTROFF(p,sizeof(*p),void) <= spa_meta_end(m))
 
 /**
  * Describes essential buffer header metadata such as flags and
@@ -143,6 +145,16 @@ struct spa_meta_cursor {
 struct spa_meta_control {
 	struct spa_pod_sequence sequence;
 };
+
+/** a busy counter for the buffer */
+struct spa_meta_busy {
+	uint32_t flags;
+	uint32_t count;			/**< number of users busy with the buffer */
+};
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

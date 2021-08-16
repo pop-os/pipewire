@@ -32,6 +32,7 @@
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/list.h>
+#include <spa/utils/string.h>
 #include <spa/monitor/device.h>
 #include <spa/param/audio/format.h>
 #include <spa/pod/filter.h>
@@ -271,31 +272,39 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	return 0;
 }
 
-static const struct spa_dict_item node_info_items[] = {
-	{ SPA_KEY_DEVICE_API, "alsa" },
-	{ SPA_KEY_MEDIA_CLASS, "Audio/Source" },
-	{ SPA_KEY_NODE_DRIVER, "true" },
-};
-
 static void emit_node_info(struct state *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
-		this->info.props = &SPA_DICT_INIT_ARRAY(node_info_items);
+		struct spa_dict_item items[4];
+		uint32_t n_items = 0;
+		char latency[64];
+
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "alsa");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Source");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_DRIVER, "true");
+		if (this->have_format) {
+			snprintf(latency, sizeof(latency), "%lu/%d", this->buffer_frames / 4, this->rate);
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_MAX_LATENCY, latency);
+		}
+		this->info.props = &SPA_DICT_INIT(items, n_items);
+
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct state *this, bool full)
 {
+	uint64_t old = full ? this->port_info.change_mask : 0;
 	if (full)
 		this->port_info.change_mask = this->port_info_all;
 	if (this->port_info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_OUTPUT, 0, &this->port_info);
-		this->port_info.change_mask = 0;
+		this->port_info.change_mask = old;
 	}
 }
 
@@ -445,6 +454,16 @@ impl_node_port_enum_params(void *object, int seq,
 		}
 		break;
 
+	case SPA_PARAM_Latency:
+		switch (result.index) {
+		case 0: case 1:
+			param = spa_latency_build(&b, id, &this->latency[result.index]);
+			break;
+		default:
+			return 0;
+		}
+		break;
+
 	default:
 		return -ENOENT;
 	}
@@ -505,15 +524,19 @@ static int port_set_format(void *object,
 		this->have_format = true;
 	}
 
+	this->info.change_mask |= SPA_NODE_CHANGE_MASK_PROPS;
+	emit_node_info(this, false);
+
 	this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_RATE;
 	this->port_info.rate = SPA_FRACTION(1, this->rate);
 	this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 	if (this->have_format) {
-		this->port_params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
-		this->port_params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		this->port_params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
+		this->port_params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		this->port_params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 	} else {
-		this->port_params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-		this->port_params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+		this->port_params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+		this->port_params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	}
 	emit_port_info(this, false);
 
@@ -537,7 +560,20 @@ impl_node_port_set_param(void *object,
 	case SPA_PARAM_Format:
 		res = port_set_format(this, direction, port_id, flags, param);
 		break;
+	case SPA_PARAM_Latency:
+	{
+		struct spa_latency_info info;
+		if ((res = spa_latency_parse(param, &info)) < 0)
+			return res;
+		if (direction == info.direction)
+			return -EINVAL;
 
+		this->latency[info.direction] = info;
+		this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+		this->port_params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
+		emit_port_info(this, false);
+		break;
+	}
 	default:
 		res = -ENOENT;
 		break;
@@ -658,9 +694,12 @@ static int impl_node_process(void *object)
 		io->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (spa_list_is_empty(&this->ready) && this->following)
-		spa_alsa_read(this, 0);
-
+	if (spa_list_is_empty(&this->ready) && this->following) {
+		if (this->freewheel)
+			spa_alsa_skip(this);
+		else
+			spa_alsa_read(this);
+	}
 	if (spa_list_is_empty(&this->ready) || !this->following)
 		return SPA_STATUS_OK;
 
@@ -704,7 +743,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct state *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -718,6 +757,7 @@ static int impl_clear(struct spa_handle *handle)
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 	this = (struct state *) handle;
 	spa_alsa_close(this);
+	spa_alsa_clear(this);
 	return 0;
 }
 
@@ -763,17 +803,23 @@ impl_init(const struct spa_handle_factory *factory,
 
 	spa_hook_list_init(&this->hooks);
 	this->stream = SND_PCM_STREAM_CAPTURE;
+	this->port_direction = SPA_DIRECTION_OUTPUT;
+	this->latency[this->port_direction] = SPA_LATENCY_INFO(
+			this->port_direction,
+			.min_quantum = 1.0f,
+			.max_quantum = 1.0f);
+	this->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
 
 	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS |
 			SPA_NODE_CHANGE_MASK_PROPS |
 			SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info.max_output_ports = 1;
 	this->info.flags = SPA_NODE_FLAG_RT;
-	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
-	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
-	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	this->params[NODE_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[NODE_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
+	this->params[NODE_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
 	this->info.params = this->params;
-	this->info.n_params = 3;
+	this->info.n_params = N_NODE_PARAMS;
 	reset_props(&this->props);
 
 	this->port_info_all = SPA_PORT_CHANGE_MASK_FLAGS |
@@ -782,43 +828,48 @@ impl_init(const struct spa_handle_factory *factory,
 	this->port_info.flags = SPA_PORT_FLAG_LIVE |
 			   SPA_PORT_FLAG_PHYSICAL |
 			   SPA_PORT_FLAG_TERMINAL;
-	this->port_params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
-	this->port_params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
-	this->port_params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
-	this->port_params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	this->port_params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	this->port_params[PORT_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	this->port_params[PORT_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
+	this->port_params[PORT_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	this->port_params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	this->port_params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	this->port_params[PORT_Latency] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_READWRITE);
 	this->port_info.params = this->port_params;
-	this->port_info.n_params = 5;
+	this->port_info.n_params = N_PORT_PARAMS;
 
 	spa_list_init(&this->free);
 	spa_list_init(&this->ready);
 
-	snd_config_update_free_global();
-
 	for (i = 0; info && i < info->n_items; i++) {
-		if (!strcmp(info->items[i].key, SPA_KEY_API_ALSA_PATH)) {
-			snprintf(this->props.device, 63, "%s", info->items[i].value);
-		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_CHANNELS)) {
-			this->default_channels = atoi(info->items[i].value);
-		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_RATE)) {
-			this->default_rate = atoi(info->items[i].value);
-		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_FORMAT)) {
-			this->default_format = spa_alsa_format_from_name(info->items[i].value, 128);
-		} else if (!strcmp(info->items[i].key, SPA_KEY_AUDIO_POSITION)) {
-			size_t len;
-			const char *p = info->items[i].value;
-			while (*p && this->default_pos.channels < SPA_AUDIO_MAX_CHANNELS) {
-				if ((len = strcspn(p, ",")) == 0)
-					break;
-				this->default_pos.pos[this->default_pos.channels++] =
-					spa_alsa_channel_from_name(p, len);
-				p += len + strspn(p+len, ",");
-			}
-		} else if (!strcmp(info->items[i].key, "api.alsa.period-size")) {
-			this->default_period_size = atoi(info->items[i].value);
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, SPA_KEY_API_ALSA_PATH)) {
+			snprintf(this->props.device, 63, "%s", s);
+		} else if (spa_streq(k, SPA_KEY_API_ALSA_PCM_CARD)) {
+			this->card_index = atoi(s);
+		} else if (spa_streq(k, SPA_KEY_API_ALSA_OPEN_UCM)) {
+			this->open_ucm = spa_atob(s);
+		} else if (spa_streq(k, SPA_KEY_AUDIO_CHANNELS)) {
+			this->default_channels = atoi(s);
+		} else if (spa_streq(k, SPA_KEY_AUDIO_RATE)) {
+			this->default_rate = atoi(s);
+		} else if (spa_streq(k, SPA_KEY_AUDIO_FORMAT)) {
+			this->default_format = spa_alsa_format_from_name(s, strlen(s));
+		} else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
+			spa_alsa_parse_position(&this->default_pos, s, strlen(s));
+		} else if (spa_streq(k, "api.alsa.period-size")) {
+			this->default_period_size = atoi(s);
+		} else if (spa_streq(k, "api.alsa.headroom")) {
+			this->default_headroom = atoi(s);
+		} else if (spa_streq(k, "api.alsa.disable-mmap")) {
+			this->disable_mmap = spa_atob(s);
+		} else if (spa_streq(k, "api.alsa.disable-batch")) {
+			this->disable_batch = spa_atob(s);
+		} else if (spa_streq(k, "api.alsa.use-chmap")) {
+			this->props.use_chmap = spa_atob(s);
 		}
 	}
-	return 0;
+	return spa_alsa_init(this);
 }
 
 static const struct spa_interface_info impl_interfaces[] = {

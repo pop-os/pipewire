@@ -29,6 +29,11 @@
 extern "C" {
 #endif
 
+/**
+ * \addtogroup spa_param
+ * \{
+ */
+
 #include <spa/utils/defs.h>
 #include <spa/param/props.h>
 #include <spa/param/format.h>
@@ -54,6 +59,8 @@ static const struct spa_type_info spa_type_param[] = {
 	{ SPA_PARAM_EnumRoute, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "EnumRoute", NULL },
 	{ SPA_PARAM_Route, SPA_TYPE_OBJECT_ParamRoute, SPA_TYPE_INFO_PARAM_ID_BASE "Route", NULL },
 	{ SPA_PARAM_Control, SPA_TYPE_Sequence, SPA_TYPE_INFO_PARAM_ID_BASE "Control", NULL },
+	{ SPA_PARAM_Latency, SPA_TYPE_OBJECT_ParamLatency, SPA_TYPE_INFO_PARAM_ID_BASE "Latency", NULL },
+	{ SPA_PARAM_ProcessLatency, SPA_TYPE_OBJECT_ParamProcessLatency, SPA_TYPE_INFO_PARAM_ID_BASE "ProcessLatency", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -66,9 +73,10 @@ static const struct spa_type_info spa_type_param[] = {
 
 #include <spa/param/audio/type-info.h>
 #include <spa/param/video/type-info.h>
+#include <spa/param/bluetooth/type-info.h>
 
-static const struct spa_type_info spa_type_prop_channel_volume[] = {
-	{ SPA_PROP_START, SPA_TYPE_Float, SPA_TYPE_INFO_BASE "channelVolumes", NULL, },
+static const struct spa_type_info spa_type_prop_float_array[] = {
+	{ SPA_PROP_START, SPA_TYPE_Float, SPA_TYPE_INFO_BASE "floatArray", NULL, },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -93,6 +101,7 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_live, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "live", NULL },
 	{ SPA_PROP_rate, SPA_TYPE_Double, SPA_TYPE_INFO_PROPS_BASE "rate", NULL },
 	{ SPA_PROP_quality, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "quality", NULL },
+	{ SPA_PROP_bluetoothAudioCodec, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "bluetoothAudioCodec", spa_type_bluetooth_audio_codec },
 
 	{ SPA_PROP_waveType, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "waveType", NULL },
 	{ SPA_PROP_frequency, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "frequency", NULL },
@@ -101,10 +110,15 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_patternType, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "patternType", NULL },
 	{ SPA_PROP_ditherType, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "ditherType", NULL },
 	{ SPA_PROP_truncate, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "truncate", NULL },
-	{ SPA_PROP_channelVolumes, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "channelVolumes", spa_type_prop_channel_volume },
+	{ SPA_PROP_channelVolumes, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "channelVolumes", spa_type_prop_float_array },
 	{ SPA_PROP_volumeBase, SPA_TYPE_Float, SPA_TYPE_INFO_PROPS_BASE "volumeBase", NULL },
 	{ SPA_PROP_volumeStep, SPA_TYPE_Float, SPA_TYPE_INFO_PROPS_BASE "volumeStep", NULL },
 	{ SPA_PROP_channelMap, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "channelMap", spa_type_prop_channel_map },
+	{ SPA_PROP_monitorMute, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "monitorMute", NULL },
+	{ SPA_PROP_monitorVolumes, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "monitorVolumes", spa_type_prop_float_array },
+	{ SPA_PROP_latencyOffsetNsec, SPA_TYPE_Long, SPA_TYPE_INFO_PROPS_BASE "latencyOffsetNsec", NULL },
+	{ SPA_PROP_softMute, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "softMute", NULL },
+	{ SPA_PROP_softVolumes, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "softVolumes", spa_type_prop_float_array },
 
 	{ SPA_PROP_brightness, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "brightness", NULL },
 	{ SPA_PROP_contrast, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "contrast", NULL },
@@ -114,6 +128,8 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_exposure, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "exposure", NULL },
 	{ SPA_PROP_gain, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "gain", NULL },
 	{ SPA_PROP_sharpness, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "sharpness", NULL },
+
+	{ SPA_PROP_params, SPA_TYPE_Struct, SPA_TYPE_INFO_PROPS_BASE "params", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -128,6 +144,7 @@ static const struct spa_type_info spa_type_prop_info[] = {
 	{ SPA_PROP_INFO_type, SPA_TYPE_Pod, SPA_TYPE_INFO_PROP_INFO_BASE "type", NULL },
 	{ SPA_PROP_INFO_labels, SPA_TYPE_Struct, SPA_TYPE_INFO_PROP_INFO_BASE "labels", NULL },
 	{ SPA_PROP_INFO_container, SPA_TYPE_Id, SPA_TYPE_INFO_PROP_INFO_BASE "container", NULL },
+	{ SPA_PROP_INFO_params, SPA_TYPE_Bool, SPA_TYPE_INFO_PROP_INFO_BASE "params", NULL },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -304,6 +321,7 @@ static const struct spa_type_info spa_type_param_profile[] = {
 	{ SPA_PARAM_PROFILE_available, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_PROFILE_BASE "available", spa_type_param_availability, },
 	{ SPA_PARAM_PROFILE_info, SPA_TYPE_Struct, SPA_TYPE_INFO_PARAM_PROFILE_BASE "info", NULL, },
 	{ SPA_PARAM_PROFILE_classes, SPA_TYPE_Struct, SPA_TYPE_INFO_PARAM_PROFILE_BASE "classes", NULL, },
+	{ SPA_PARAM_PROFILE_save, SPA_TYPE_Bool, SPA_TYPE_INFO_PARAM_PROFILE_BASE "save", NULL, },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -349,6 +367,7 @@ static const struct spa_type_info spa_type_param_route[] = {
 	{ SPA_PARAM_ROUTE_props, SPA_TYPE_OBJECT_Props, SPA_TYPE_INFO_PARAM_ROUTE_BASE "props", NULL, },
 	{ SPA_PARAM_ROUTE_devices, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_BASE "devices", NULL, },
 	{ SPA_PARAM_ROUTE_profile, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_ROUTE_BASE "profile", NULL, },
+	{ SPA_PARAM_ROUTE_save, SPA_TYPE_Bool, SPA_TYPE_INFO_PARAM_ROUTE_BASE "save", NULL, },
 	{ 0, 0, NULL, NULL },
 };
 
@@ -366,6 +385,35 @@ static const struct spa_type_info spa_type_profiler[] = {
 	{ 0, 0, NULL, NULL },
 };
 
+#define SPA_TYPE_INFO_PARAM_Latency		SPA_TYPE_INFO_PARAM_BASE "Latency"
+#define SPA_TYPE_INFO_PARAM_LATENCY_BASE	SPA_TYPE_INFO_PARAM_Latency ":"
+
+static const struct spa_type_info spa_type_param_latency[] = {
+	{ SPA_PARAM_LATENCY_START, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_LATENCY_BASE, spa_type_param, },
+	{ SPA_PARAM_LATENCY_direction, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_LATENCY_BASE "direction", spa_type_direction, },
+	{ SPA_PARAM_LATENCY_minQuantum, SPA_TYPE_Float, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minQuantum", NULL, },
+	{ SPA_PARAM_LATENCY_maxQuantum, SPA_TYPE_Float, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxQuantum", NULL, },
+	{ SPA_PARAM_LATENCY_minRate, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minRate", NULL, },
+	{ SPA_PARAM_LATENCY_maxRate, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxRate", NULL, },
+	{ SPA_PARAM_LATENCY_minNs, SPA_TYPE_Long, SPA_TYPE_INFO_PARAM_LATENCY_BASE "minNs", NULL, },
+	{ SPA_PARAM_LATENCY_maxNs, SPA_TYPE_Long, SPA_TYPE_INFO_PARAM_LATENCY_BASE "maxNs", NULL, },
+	{ 0, 0, NULL, NULL },
+};
+
+#define SPA_TYPE_INFO_PARAM_ProcessLatency		SPA_TYPE_INFO_PARAM_BASE "ProcessLatency"
+#define SPA_TYPE_INFO_PARAM_PROCESS_LATENCY_BASE	SPA_TYPE_INFO_PARAM_ProcessLatency ":"
+
+static const struct spa_type_info spa_type_param_process_latency[] = {
+	{ SPA_PARAM_PROCESS_LATENCY_START, SPA_TYPE_Id, SPA_TYPE_INFO_PARAM_LATENCY_BASE, spa_type_param, },
+	{ SPA_PARAM_PROCESS_LATENCY_quantum, SPA_TYPE_Float, SPA_TYPE_INFO_PARAM_PROCESS_LATENCY_BASE "quantum", NULL, },
+	{ SPA_PARAM_PROCESS_LATENCY_rate, SPA_TYPE_Int, SPA_TYPE_INFO_PARAM_PROCESS_LATENCY_BASE "rate", NULL, },
+	{ SPA_PARAM_PROCESS_LATENCY_ns, SPA_TYPE_Long, SPA_TYPE_INFO_PARAM_PROCESS_LATENCY_BASE "ns", NULL, },
+	{ 0, 0, NULL, NULL },
+};
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

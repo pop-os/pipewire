@@ -31,22 +31,24 @@
 #include <math.h>
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/pod/iter.h>
 #include <spa/debug/types.h>
 #include <spa/utils/json.h>
+#include <spa/utils/ansi.h>
 
 #include <pipewire/pipewire.h>
-#include <extensions/metadata.h>
+#include <pipewire/extensions/metadata.h>
 
 #define INDENT 2
 
 static bool colors = false;
 
-#define NORMAL	(colors ? "\x1B[0m":"")
-#define LITERAL	(colors ? "\x1B[95m":"")
-#define NUMBER	(colors ? "\x1B[96m":"")
-#define STRING	(colors ? "\x1B[92m":"")
-#define KEY	(colors ? "\x1B[94m":"")
+#define NORMAL	(colors ? SPA_ANSI_RESET : "")
+#define LITERAL	(colors ? SPA_ANSI_BRIGHT_MAGENTA : "")
+#define NUMBER	(colors ? SPA_ANSI_BRIGHT_CYAN : "")
+#define STRING	(colors ? SPA_ANSI_BRIGHT_GREEN : "")
+#define KEY	(colors ? SPA_ANSI_BRIGHT_BLUE : "")
 
 struct data {
 	struct pw_main_loop *loop;
@@ -72,6 +74,8 @@ struct data {
 #define STATE_MASK	0xffff0000
 #define STATE_SIMPLE	(1<<16)
 	uint32_t state;
+
+	unsigned int monitor:1;
 };
 
 struct param {
@@ -86,7 +90,6 @@ struct class {
 	const char *type;
 	uint32_t version;
 	const void *events;
-	void (*init) (struct object *object);
 	void (*destroy) (struct object *object);
 	void (*dump) (struct object *object);
 };
@@ -97,16 +100,18 @@ struct object {
 	struct data *data;
 
 	uint32_t id;
-	uint32_t version;
-	const struct class *class;
 	uint32_t permissions;
-
+	char *type;
+	uint32_t version;
 	struct pw_properties *props;
+
+	const struct class *class;
 	void *info;
 
 	int changed;
 	struct spa_list param_list;
 	struct spa_list pending_list;
+	struct spa_list data_list;
 
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
@@ -117,29 +122,6 @@ static void core_sync(struct data *d)
 {
 	d->sync_seq = pw_core_sync(d->core, PW_ID_CORE, d->sync_seq);
 	pw_log_debug("sync start %u", d->sync_seq);
-}
-
-static struct param *add_param(struct spa_list *params, uint32_t id, const struct spa_pod *param)
-{
-	struct param *p;
-
-	if (param == NULL || !spa_pod_is_object(param)) {
-		errno = EINVAL;
-		return NULL;
-	}
-	if (id == SPA_ID_INVALID)
-		id = SPA_POD_OBJECT_ID(param);
-
-	p = malloc(sizeof(*p) + SPA_POD_SIZE(param));
-	if (p == NULL)
-		return NULL;
-
-	p->id = id;
-	p->param = SPA_MEMBER(p, sizeof(*p), struct spa_pod);
-	memcpy(p->param, param, SPA_POD_SIZE(param));
-	spa_list_append(params, &p->link);
-
-	return p;
 }
 
 static uint32_t clear_params(struct spa_list *param_list, uint32_t id)
@@ -157,6 +139,35 @@ static uint32_t clear_params(struct spa_list *param_list, uint32_t id)
 	return count;
 }
 
+static struct param *add_param(struct spa_list *params, uint32_t id, const struct spa_pod *param)
+{
+	struct param *p;
+
+	if (id == SPA_ID_INVALID) {
+		if (param == NULL || !spa_pod_is_object(param)) {
+			errno = EINVAL;
+			return NULL;
+		}
+		id = SPA_POD_OBJECT_ID(param);
+	}
+
+	p = malloc(sizeof(*p) + (param != NULL ? SPA_POD_SIZE(param) : 0));
+	if (p == NULL)
+		return NULL;
+
+	p->id = id;
+	if (param != NULL) {
+		p->param = SPA_PTROFF(p, sizeof(*p), struct spa_pod);
+		memcpy(p->param, param, SPA_POD_SIZE(param));
+	} else {
+		clear_params(params, id);
+		p->param = NULL;
+	}
+	spa_list_append(params, &p->link);
+
+	return p;
+}
+
 static struct object *find_object(struct data *d, uint32_t id)
 {
 	struct object *o;
@@ -171,12 +182,14 @@ static void object_update_params(struct object *o)
 {
 	struct param *p;
 
-	spa_list_for_each(p, &o->pending_list, link)
-		clear_params(&o->param_list, p->id);
-
 	spa_list_consume(p, &o->pending_list, link) {
 		spa_list_remove(&p->link);
-		spa_list_append(&o->param_list, &p->link);
+		if (p->param == NULL) {
+			clear_params(&o->param_list, p->id);
+			free(p);
+		} else {
+			spa_list_append(&o->param_list, &p->link);
+		}
 	}
 }
 
@@ -185,10 +198,10 @@ static void object_destroy(struct object *o)
 	spa_list_remove(&o->link);
 	if (o->proxy)
 		pw_proxy_destroy(o->proxy);
-	if (o->props)
-		pw_properties_free(o->props);
+	pw_properties_free(o->props);
 	clear_params(&o->param_list, SPA_ID_INVALID);
 	clear_params(&o->pending_list, SPA_ID_INVALID);
+	free(o->type);
 	free(o);
 }
 
@@ -233,12 +246,16 @@ static void put_end(struct data *d, const char *type, uint32_t flags)
 	d->state = (d->state & STATE_MASK) + STATE_COMMA - (flags & STATE_SIMPLE);
 }
 
+static void put_encoded_string(struct data *d, const char *key, const char *val)
+{
+	put_fmt(d, key, "%s%s%s", STRING, val, NORMAL);
+}
 static void put_string(struct data *d, const char *key, const char *val)
 {
 	int size = (strlen(val) + 1) * 4;
 	char *str = alloca(size);
 	spa_json_encode_string(str, size, val);
-	put_fmt(d, key, "%s%s%s", STRING, str, NORMAL);
+	put_encoded_string(d, key, str);
 }
 
 static void put_literal(struct data *d, const char *key, const char *val)
@@ -258,20 +275,16 @@ static void put_double(struct data *d, const char *key, double val)
 
 static void put_value(struct data *d, const char *key, const char *val)
 {
-	char *end;
-	long int li;
+	int64_t li;
 	double dv;
 
 	if (val == NULL)
 		put_literal(d, key, "null");
-	else if (strcmp(val, "true") == 0 ||
-	    strcmp(val, "false") == 0)
+	else if (spa_streq(val, "true") || spa_streq(val, "false"))
 		put_literal(d, key, val);
-	else if ((li = strtol(val, &end, 10)) != LONG_MIN &&
-	    errno != -ERANGE && *end == '\0')
+	else if (spa_atoi64(val, &li, 10))
 		put_int(d, key, li);
-	else if ((dv = strtod(val, &end)) != HUGE_VAL &&
-	    errno != -ERANGE && *end == '\0')
+	else if (spa_atod(val, &dv))
 		put_double(d, key, dv);
 	else
 		put_string(d, key, val);
@@ -302,7 +315,7 @@ static void put_pod_value(struct data *d, const char *key, const struct spa_type
 		uint32_t id = *(uint32_t*)body;
 		str = spa_debug_type_find_short_name(info, *(uint32_t*)body);
 		if (str == NULL) {
-			snprintf(fallback, sizeof(fallback)-1, "id-%08x", id);
+			snprintf(fallback, sizeof(fallback), "id-%08x", id);
 			str = fallback;
 		}
 		put_value(d, NULL, str);
@@ -363,14 +376,16 @@ static void put_pod_value(struct data *d, const char *key, const struct spa_type
 					SPA_POD_CONTENTS(struct spa_pod, &b->child),
 					b->child.size);
 		} else {
-			void *p;
-			static const char *range_labels[] = { "default", "min", "max", NULL };
-			static const char *step_labels[] = { "default", "min", "max", "step", NULL };
-			static const char *enum_labels[] = { "default", "alt%u" };
-			static const char *flags_labels[] = { "default", "flag%u" };
-			const char **labels, *label;
+			static const char * const range_labels[] = { "default", "min", "max", NULL };
+			static const char * const step_labels[] = { "default", "min", "max", "step", NULL };
+			static const char * const enum_labels[] = { "default", "alt%u" };
+			static const char * const flags_labels[] = { "default", "flag%u" };
+
+			const char * const *labels;
+			const char *label;
 			char buffer[64];
 			int max_labels, flags = 0;
+			void *p;
 
 			switch (b->type) {
 			case SPA_CHOICE_Range:
@@ -424,9 +439,16 @@ static void put_pod_value(struct data *d, const char *key, const struct spa_type
 		info = ti ? ti->values : info;
 
 		SPA_POD_OBJECT_BODY_FOREACH(b, size, p) {
+			char fallback[32];
+			const char *name;
+
 			ii = spa_debug_type_find(info, p->key);
-			put_pod_value(d,
-					ii ? spa_debug_type_short_name(ii->name) : "unknown",
+			name = ii ? spa_debug_type_short_name(ii->name) : NULL;
+			if (name == NULL) {
+				snprintf(fallback, sizeof(fallback), "id-%08x", p->key);
+				name = fallback;
+			}
+			put_pod_value(d, name,
 					ii ? ii->values : NULL,
 					p->value.type,
 					SPA_POD_CONTENTS(struct spa_pod_prop, p),
@@ -445,7 +467,7 @@ static void put_pod_value(struct data *d, const char *key, const struct spa_type
 		break;
 	}
 	case SPA_TYPE_None:
-		put_value(d, NULL, "null");
+		put_value(d, NULL, NULL);
 		break;
 	}
 }
@@ -492,7 +514,7 @@ struct flags_info {
 };
 
 static void put_flags(struct data *d, const char *key,
-		uint64_t flags, struct flags_info *info)
+		uint64_t flags, const struct flags_info *info)
 {
 	uint32_t i;
 	put_begin(d, key, "[", STATE_SIMPLE);
@@ -506,18 +528,19 @@ static void put_flags(struct data *d, const char *key,
 /* core */
 static void core_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_core_info *i = d->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_CORE_CHANGE_MASK_PROPS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_core_info *i = d->info;
+
 	put_begin(d, "info", "{", 0);
 	put_int(d, "cookie", i->cookie);
 	put_value(d, "user-name", i->user_name);
 	put_value(d, "host-name", i->host_name);
 	put_value(d, "version", i->version);
-	put_value(d, "name", i->name);
 	put_value(d, "name", i->name);
 	put_flags(d, "change-mask", i->change_mask, fl);
 	put_dict(d, "props", i->props);
@@ -533,12 +556,14 @@ static const struct class core_class = {
 /* client */
 static void client_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_client_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_CLIENT_CHANGE_MASK_PROPS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_client_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_flags(d, "change-mask", i->change_mask, fl);
 	put_dict(d, "props", i->props);
@@ -587,12 +612,14 @@ static const struct class client_class = {
 /* module */
 static void module_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_module_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_MODULE_CHANGE_MASK_PROPS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_module_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_value(d, "name", i->name);
 	put_value(d, "filename", i->filename);
@@ -644,12 +671,14 @@ static const struct class module_class = {
 /* factory */
 static void factory_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_factory_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_FACTORY_CHANGE_MASK_PROPS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_factory_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_value(d, "name", i->name);
 	put_value(d, "type", i->type);
@@ -701,13 +730,15 @@ static const struct class factory_class = {
 /* device */
 static void device_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_device_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_DEVICE_CHANGE_MASK_PROPS },
 		{ "params", PW_DEVICE_CHANGE_MASK_PARAMS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_device_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_flags(d, "change-mask", i->change_mask, fl);
 	put_dict(d, "props", i->props);
@@ -783,9 +814,7 @@ static const struct class device_class = {
 /* node */
 static void node_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_node_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "input-ports", PW_NODE_CHANGE_MASK_INPUT_PORTS },
 		{ "output-ports", PW_NODE_CHANGE_MASK_OUTPUT_PORTS },
 		{ "state", PW_NODE_CHANGE_MASK_STATE },
@@ -793,6 +822,10 @@ static void node_dump(struct object *o)
 		{ "params", PW_NODE_CHANGE_MASK_PARAMS },
 		{ NULL, 0 },
 	};
+
+	struct data *d = o->data;
+	struct pw_node_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_int(d, "max-input-ports", i->max_input_ports);
 	put_int(d, "max-output-ports", i->max_output_ports);
@@ -830,7 +863,7 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 			info->params[i].user = 0;
 
 			changed++;
-			clear_params(&o->pending_list, id);
+			add_param(&o->pending_list, id, NULL);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
 
@@ -877,13 +910,15 @@ static const struct class node_class = {
 /* port */
 static void port_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_port_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "props", PW_PORT_CHANGE_MASK_PROPS },
 		{ "params", PW_PORT_CHANGE_MASK_PARAMS },
 		{ NULL, },
 	};
+
+	struct data *d = o->data;
+	struct pw_port_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_value(d, "direction", pw_direction_as_string(i->direction));
 	put_flags(d, "change-mask", i->change_mask, fl);
@@ -913,7 +948,7 @@ static void port_event_info(void *object, const struct pw_port_info *info)
 			info->params[i].user = 0;
 
 			changed++;
-			clear_params(&o->pending_list, id);
+			add_param(&o->pending_list, id, NULL);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
 
@@ -960,14 +995,16 @@ static const struct class port_class = {
 /* link */
 static void link_dump(struct object *o)
 {
-	struct data *d = o->data;
-	struct pw_link_info *i = o->info;
-	struct flags_info fl[] = {
+	static const struct flags_info fl[] = {
 		{ "state", PW_LINK_CHANGE_MASK_STATE },
 		{ "format", PW_LINK_CHANGE_MASK_FORMAT },
 		{ "props", PW_LINK_CHANGE_MASK_PROPS },
 		{ NULL, },
 	};
+
+	struct data *d = o->data;
+	struct pw_link_info *i = o->info;
+
 	put_begin(d, "info", "{", 0);
 	put_int(d, "output-node-id", i->output_node_id);
 	put_int(d, "output-port-id", i->output_port_id);
@@ -1026,13 +1063,125 @@ static const struct class link_class = {
 	.dump = link_dump,
 };
 
+static void json_dump_val(struct data *d, const char *key, struct spa_json *it, const char *value, int len)
+{
+	struct spa_json sub;
+	if (spa_json_is_array(value, len)) {
+		put_begin(d, key, "[", STATE_SIMPLE);
+		spa_json_enter(it, &sub);
+		while ((len = spa_json_next(&sub, &value)) > 0) {
+			json_dump_val(d, NULL, &sub, value, len);
+		}
+		put_end(d, "]", STATE_SIMPLE);
+	} else if (spa_json_is_object(value, len)) {
+		char val[1024];
+		put_begin(d, key, "{", STATE_SIMPLE);
+		spa_json_enter(it, &sub);
+		while (spa_json_get_string(&sub, val, sizeof(val)) > 0) {
+			if ((len = spa_json_next(&sub, &value)) <= 0)
+				break;
+			json_dump_val(d, val, &sub, value, len);
+		}
+		put_end(d, "}", STATE_SIMPLE);
+	} else if (spa_json_is_string(value, len)) {
+		put_encoded_string(d, key, strndupa(value, len));
+	} else {
+		put_value(d, key, strndupa(value, len));
+	}
+}
+
+static void json_dump(struct data *d, const char *key, const char *value)
+{
+	struct spa_json it[1];
+	int len;
+	const char *val;
+	spa_json_init(&it[0], value, strlen(value));
+	if ((len = spa_json_next(&it[0], &val)) >= 0)
+		json_dump_val(d, key, &it[0], val, len);
+}
+
 /* metadata */
+
+struct metadata_entry {
+	struct spa_list link;
+	uint32_t changed;
+	uint32_t subject;
+	char *key;
+	char *value;
+	char *type;
+};
+
+static void metadata_dump(struct object *o)
+{
+	struct data *d = o->data;
+	struct metadata_entry *e;
+	put_dict(d, "props", &o->props->dict);
+	put_begin(d, "metadata", "[", 0);
+	spa_list_for_each(e, &o->data_list, link) {
+		if (e->changed == 0)
+			continue;
+		put_begin(d, NULL, "{", STATE_SIMPLE);
+		put_int(d, "subject", e->subject);
+		put_value(d, "key", e->key);
+		put_value(d, "type", e->type);
+		if (e->type != NULL && spa_streq(e->type, "Spa:String:JSON"))
+			json_dump(d, "value", e->value);
+		else
+			put_value(d, "value", e->value);
+		put_end(d, "}", STATE_SIMPLE);
+		e->changed = 0;
+	}
+	put_end(d, "]", 0);
+}
+
+static struct metadata_entry *metadata_find(struct object *o, uint32_t subject, const char *key)
+{
+	struct metadata_entry *e;
+	spa_list_for_each(e, &o->data_list, link) {
+		if ((e->subject == subject) &&
+		    (key == NULL || spa_streq(e->key, key)))
+			return e;
+	}
+	return NULL;
+}
+
 static int metadata_property(void *object,
 			uint32_t subject,
 			const char *key,
 			const char *type,
 			const char *value)
 {
+	struct object *o = object;
+	struct metadata_entry *e;
+
+	while ((e = metadata_find(o, subject, key)) != NULL) {
+		spa_list_remove(&e->link);
+		free(e);
+	}
+	if (key != NULL && value != NULL) {
+		size_t size = strlen(key) + 1;
+		size += strlen(value) + 1;
+		size += type ? strlen(type) + 1 : 0;
+
+		e = calloc(1, sizeof(*e) + size);
+		if (e == NULL)
+			return -errno;
+
+		e->subject = subject;
+		e->key = SPA_PTROFF(e, sizeof(*e), void);
+		strcpy(e->key, key);
+		e->value = SPA_PTROFF(e->key, strlen(e->key) + 1, void);
+		strcpy(e->value, value);
+		if (type) {
+			e->type = SPA_PTROFF(e->value, strlen(e->value) + 1, void);
+			strcpy(e->type, type);
+		} else {
+			e->type = NULL;
+		}
+		spa_list_append(&o->data_list, &e->link);
+		e->changed++;
+	}
+	o->changed++;
 	return 0;
 }
 
@@ -1041,10 +1190,21 @@ static const struct pw_metadata_events metadata_events = {
 	.property = metadata_property,
 };
 
+static void metadata_destroy(struct object *o)
+{
+	struct metadata_entry *e;
+	spa_list_consume(e, &o->data_list, link) {
+		spa_list_remove(&e->link);
+		free(e);
+	}
+}
+
 static const struct class metadata_class = {
 	.type = PW_TYPE_INTERFACE_Metadata,
 	.version = PW_VERSION_METADATA,
 	.events = &metadata_events,
+	.destroy = metadata_destroy,
+	.dump = metadata_dump,
 };
 
 static const struct class *classes[] =
@@ -1064,7 +1224,7 @@ static const struct class *find_class(const char *type, uint32_t version)
 {
 	size_t i;
 	for (i = 0; i < SPA_N_ELEMENTS(classes); i++) {
-		if (strcmp(classes[i]->type, type) == 0 &&
+		if (spa_streq(classes[i]->type, type) &&
 		    classes[i]->version <= version)
 			return classes[i];
 	}
@@ -1083,13 +1243,13 @@ destroy_proxy(void *data)
 {
 	struct object *o = data;
 
-	if (o->class->events)
-		spa_hook_remove(&o->object_listener);
 	spa_hook_remove(&o->proxy_listener);
-
-	if (o->class && o->class->destroy)
-                o->class->destroy(o);
-
+	if (o->class != NULL) {
+		if (o->class->events)
+			spa_hook_remove(&o->object_listener);
+		if (o->class->destroy)
+	                o->class->destroy(o);
+	}
         o->proxy = NULL;
 }
 
@@ -1105,48 +1265,52 @@ static void registry_event_global(void *data, uint32_t id,
 {
 	struct data *d = data;
 	struct object *o;
-	const struct class *class;
-	struct pw_proxy *proxy;
-
-	class = find_class(type, version);
-	if (class == NULL)
-		return;
-
-	proxy = pw_registry_bind(d->registry,
-			id, type, class->version, 0);
-        if (proxy == NULL)
-		return;
 
 	o = calloc(1, sizeof(*o));
 	if (o == NULL) {
 		pw_log_error("can't alloc object for %u %s/%d: %m", id, type, version);
-		pw_proxy_destroy(proxy);
 		return;
 	}
+	o->data = d;
 	o->id = id;
 	o->permissions = permissions;
+	o->type = strdup(type);
 	o->version = version;
 	o->props = props ? pw_properties_new_dict(props) : NULL;
-	o->proxy = proxy;
 	spa_list_init(&o->param_list);
 	spa_list_init(&o->pending_list);
+	spa_list_init(&o->data_list);
 
-	o->data = d;
-	o->class = class;
+	o->class = find_class(type, version);
+	if (o->class != NULL) {
+		o->proxy = pw_registry_bind(d->registry,
+				id, type, o->class->version, 0);
+		if (o->proxy == NULL)
+			goto bind_failed;
+
+		pw_proxy_add_listener(o->proxy,
+				&o->proxy_listener,
+				&proxy_events, o);
+
+		if (o->class->events)
+			pw_proxy_add_object_listener(o->proxy,
+					&o->object_listener,
+					o->class->events, o);
+		else
+			o->changed++;
+	} else {
+		o->changed++;
+	}
 	spa_list_append(&d->object_list, &o->link);
 
-	if (class->events)
-		pw_proxy_add_object_listener(proxy,
-				&o->object_listener,
-				o->class->events, o);
-	pw_proxy_add_listener(proxy,
-			&o->proxy_listener,
-			&proxy_events, o);
-
-	if (class->init)
-		class->init(o);
-
 	core_sync(d);
+	return;
+
+bind_failed:
+	pw_log_error("can't bind object for %u %s/%d: %m", id, type, version);
+	pw_properties_free(o->props);
+	free(o);
+	return;
 }
 
 static void registry_event_global_remove(void *object, uint32_t id)
@@ -1165,6 +1329,42 @@ static const struct pw_registry_events registry_events = {
 	.global = registry_event_global,
 	.global_remove = registry_event_global_remove,
 };
+
+static void dump_objects(struct data *d)
+{
+	static const struct flags_info fl[] = {
+		{ "r", PW_PERM_R },
+		{ "w", PW_PERM_W },
+		{ "x", PW_PERM_X },
+		{ "m", PW_PERM_M },
+		{ NULL, },
+	};
+
+	struct object *o;
+
+	d->state = STATE_FIRST;
+	spa_list_for_each(o, &d->object_list, link) {
+		if (d->id != SPA_ID_INVALID && d->id != o->id)
+			continue;
+		if (o->changed == 0)
+			continue;
+		if (d->state == STATE_FIRST)
+			put_begin(d, NULL, "[", 0);
+		put_begin(d, NULL, "{", 0);
+		put_int(d, "id", o->id);
+		put_value(d, "type", o->type);
+		put_int(d, "version", o->version);
+		put_flags(d, "permissions", o->permissions, fl);
+		if (o->class && o->class->dump)
+			o->class->dump(o);
+		else if (o->props)
+			put_dict(d, "props", &o->props->dict);
+		put_end(d, "}", 0);
+		o->changed = 0;
+	}
+	if (d->state != STATE_FIRST)
+		put_end(d, "]\n", 0);
+}
 
 static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
@@ -1197,7 +1397,9 @@ static void on_core_done(void *data, uint32_t id, int seq)
 		spa_list_for_each(o, &d->object_list, link)
 			object_update_params(o);
 
-		pw_main_loop_quit(d->loop);
+		dump_objects(d);
+		if (!d->monitor)
+			pw_main_loop_quit(d->loop);
 	}
 }
 
@@ -1207,33 +1409,6 @@ static const struct pw_core_events core_events = {
 	.info = on_core_info,
 	.error = on_core_error,
 };
-
-static void dump_objects(struct data *d)
-{
-	struct object *o;
-	struct flags_info fl[] = {
-		{ "r", PW_PERM_R },
-		{ "w", PW_PERM_W },
-		{ "x", PW_PERM_X },
-		{ "m", PW_PERM_M },
-		{ NULL, },
-	};
-	d->state = STATE_FIRST;
-	put_begin(d, NULL, "[", 0);
-	spa_list_for_each(o, &d->object_list, link) {
-		if (d->id != SPA_ID_INVALID && d->id != o->id)
-			continue;
-		put_begin(d, NULL, "{", 0);
-		put_int(d, "id", o->id);
-		put_value(d, "type", o->class->type);
-		put_int(d, "version", o->version);
-		put_flags(d, "permissions", o->permissions, fl);
-		if (o->class->dump)
-			o->class->dump(o);
-		put_end(d, "}", 0);
-	}
-	put_end(d, "]\n", 0);
-}
 
 static void do_quit(void *data, int signal_number)
 {
@@ -1246,26 +1421,35 @@ static void show_help(struct data *data, const char *name)
         fprintf(stdout, "%s [options] [<id>]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
-		"  -r, --remote                          Remote daemon name\n",
+		"  -r, --remote                          Remote daemon name\n"
+		"  -m, --monitor                         monitor changes\n"
+		"  -N, --no-colors                       disable color output\n",
 		name);
 }
 
 int main(int argc, char *argv[])
 {
 	struct data data = { 0 };
+	struct object *o;
 	struct pw_loop *l;
 	const char *opt_remote = NULL;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
 		{ "version",	no_argument,		NULL, 'V' },
 		{ "remote",	required_argument,	NULL, 'r' },
+		{ "monitor",	no_argument,		NULL, 'm' },
+		{ "no-colors",	no_argument,		NULL, 'N' },
 		{ NULL, 0, NULL, 0}
 	};
 	int c;
 
 	pw_init(&argc, &argv);
 
-	while ((c = getopt_long(argc, argv, "hVr:", long_options, NULL)) != -1) {
+	data.out = stdout;
+	if (isatty(fileno(data.out)) && getenv("NO_COLOR") == NULL)
+		colors = true;
+
+	while ((c = getopt_long(argc, argv, "hVr:mN", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h' :
 			show_help(&data, argv[0]);
@@ -1281,15 +1465,22 @@ int main(int argc, char *argv[])
 		case 'r' :
 			opt_remote = optarg;
 			break;
+		case 'm' :
+			data.monitor = true;
+			break;
+		case 'N' :
+			colors = false;
+			break;
 		default:
 			show_help(&data, argv[0]);
 			return -1;
 		}
 	}
-	if (optind < argc)
-		data.id = atoi(argv[optind++]);
-	else
-		data.id = SPA_ID_INVALID;
+
+	data.id = SPA_ID_INVALID;
+	if (optind < argc) {
+		spa_atou32(argv[optind++], &data.id, 0);
+	}
 
 	data.loop = pw_main_loop_new(NULL);
 	if (data.loop == NULL) {
@@ -1300,10 +1491,6 @@ int main(int argc, char *argv[])
 	l = pw_main_loop_get_loop(data.loop);
 	pw_loop_add_signal(l, SIGINT, do_quit, &data);
 	pw_loop_add_signal(l, SIGTERM, do_quit, &data);
-
-	data.out = stdout;
-	if (isatty(fileno(data.out)))
-		colors = true;
 
 	data.context = pw_context_new(l, NULL, 0);
 	if (data.context == NULL) {
@@ -1334,7 +1521,10 @@ int main(int argc, char *argv[])
 
 	pw_main_loop_run(data.loop);
 
-	dump_objects(&data);
+	spa_list_consume(o, &data.object_list, link)
+		object_destroy(o);
+	if (data.info)
+		pw_core_info_free(data.info);
 
 	pw_proxy_destroy((struct pw_proxy*)data.registry);
 	pw_context_destroy(data.context);

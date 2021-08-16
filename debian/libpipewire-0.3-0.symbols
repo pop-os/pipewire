@@ -2,8 +2,12 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
 * Build-Depends-Package: libpipewire-0.3-dev
  pw_buffers_clear@Base 0.3.1
  pw_buffers_negotiate@Base 0.3.1
+ pw_check_option@Base 0.3.30
  pw_client_info_free@Base 0.3.1
  pw_client_info_update@Base 0.3.1
+ pw_conf_load_conf@Base 0.3.22
+ pw_conf_load_state@Base 0.3.22
+ pw_conf_save_state@Base 0.3.22
  pw_context_add_listener@Base 0.3.1
  pw_context_add_spa_lib@Base 0.3.1
  pw_context_connect@Base 0.3.1
@@ -14,6 +18,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_create_device@Base 0.3.1
  pw_context_create_factory@Base 0.3.1
  pw_context_create_link@Base 0.3.1
+ pw_context_create_metadata@Base 0.3.31
  pw_context_create_node@Base 0.3.1
  pw_context_create_port@Base 0.3.1
  pw_context_destroy@Base 0.3.1
@@ -23,15 +28,18 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_find_protocol@Base 0.3.1
  pw_context_find_spa_lib@Base 0.3.1
  pw_context_for_each_global@Base 0.3.1
+ pw_context_get_conf_section@Base 0.3.22
  pw_context_get_default_core@Base 0.3.1
  pw_context_get_main_loop@Base 0.3.1
  pw_context_get_object@Base 0.3.1
  pw_context_get_properties@Base 0.3.1
  pw_context_get_support@Base 0.3.1
  pw_context_get_user_data@Base 0.3.1
+ pw_context_get_work_queue@Base 0.3.26
  pw_context_load_module@Base 0.3.1
  pw_context_load_spa_handle@Base 0.3.1
  pw_context_new@Base 0.3.1
+ pw_context_parse_conf_section@Base 0.3.22
  pw_context_register_export_type@Base 0.3.1
  pw_context_set_object@Base 0.3.1
  pw_context_update_properties@Base 0.3.1
@@ -55,6 +63,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_data_loop_add_listener@Base 0.3.1
  pw_data_loop_destroy@Base 0.3.1
  pw_data_loop_exit@Base 0.3.1
+ pw_data_loop_get_thread@Base 0.3.32
  pw_data_loop_in_thread@Base 0.3.1
  pw_data_loop_invoke@Base 0.3.5
  pw_data_loop_new@Base 0.3.1
@@ -95,11 +104,13 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_free_strv@Base 0.3.1
  pw_get_application_name@Base 0.3.1
  pw_get_client_name@Base 0.3.1
+ pw_get_domain@Base 0.3.26
  pw_get_host_name@Base 0.3.1
  pw_get_library_version@Base 0.3.1
  pw_get_prgname@Base 0.3.1
  pw_get_support@Base 0.3.1
  pw_get_user_name@Base 0.3.1
+ pw_gettext@Base 0.3.26
  pw_global_add_listener@Base 0.3.1
  pw_global_add_resource@Base 0.3.1
  pw_global_bind@Base 0.3.1
@@ -168,6 +179,15 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_impl_link_get_output@Base 0.3.1
  pw_impl_link_get_user_data@Base 0.3.1
  pw_impl_link_register@Base 0.3.1
+ pw_impl_metadata_add_listener@Base 0.3.31
+ pw_impl_metadata_destroy@Base 0.3.31
+ pw_impl_metadata_get_global@Base 0.3.31
+ pw_impl_metadata_get_implementation@Base 0.3.31
+ pw_impl_metadata_get_user_data@Base 0.3.31
+ pw_impl_metadata_register@Base 0.3.31
+ pw_impl_metadata_set_implementation@Base 0.3.31
+ pw_impl_metadata_set_property@Base 0.3.31
+ pw_impl_metadata_set_propertyf@Base 0.3.31
  pw_impl_module_add_listener@Base 0.3.1
  pw_impl_module_destroy@Base 0.3.1
  pw_impl_module_get_context@Base 0.3.1
@@ -245,6 +265,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_mempool_map_id@Base 0.3.1
  pw_module_info_free@Base 0.3.1
  pw_module_info_update@Base 0.3.1
+ pw_ngettext@Base 0.3.26
  pw_node_info_free@Base 0.3.1
  pw_node_info_update@Base 0.3.1
  pw_node_state_as_string@Base 0.3.1
@@ -260,10 +281,12 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_properties_new@Base 0.3.1
  pw_properties_new_dict@Base 0.3.1
  pw_properties_new_string@Base 0.3.1
+ pw_properties_serialize_dict@Base 0.3.28
  pw_properties_set@Base 0.3.1
  pw_properties_setf@Base 0.3.1
  pw_properties_setva@Base 0.3.1
  pw_properties_update@Base 0.3.1
+ pw_properties_update_ignore@Base 0.3.23
  pw_properties_update_keys@Base 0.3.1
  pw_properties_update_string@Base 0.3.19
  pw_protocol_add_listener@Base 0.3.1
@@ -314,6 +337,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_resource_ping@Base 0.3.1
  pw_resource_remove@Base 0.3.1
  pw_resource_set_bound_id@Base 0.3.1
+ pw_set_domain@Base 0.3.26
  pw_split_strv@Base 0.3.1
  pw_split_walk@Base 0.3.1
  pw_stream_add_listener@Base 0.3.1
@@ -355,5 +379,10 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_thread_loop_timed_wait_full@Base 0.3.8
  pw_thread_loop_unlock@Base 0.3.1
  pw_thread_loop_wait@Base 0.3.1
+ pw_thread_utils_get@Base 0.3.32
+ pw_thread_utils_set@Base 0.3.32
  pw_type_info@Base 0.3.1
  pw_unload_spa_handle@Base 0.3.1
+ pw_work_queue_add@Base 0.3.26
+ pw_work_queue_cancel@Base 0.3.26
+ pw_work_queue_complete@Base 0.3.26

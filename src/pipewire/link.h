@@ -34,12 +34,27 @@ extern "C" {
 
 #include <pipewire/proxy.h>
 
+/** \defgroup pw_link PipeWire Link
+ *
+ * A link is the connection between 2 nodes (\ref pw_node). Nodes are
+ * linked together on ports.
+ *
+ * The link is responsible for negotiating the format and buffers for
+ * the nodes.
+ *
+ */
+
+/**
+ * \addtogroup pw_link
+ * \{
+ */
+
 #define PW_TYPE_INTERFACE_Link	PW_TYPE_INFO_INTERFACE_BASE "Link"
 
 #define PW_VERSION_LINK		3
 struct pw_link;
 
-/** \enum pw_link_state The different link states \memberof pw_link */
+/** \enum pw_link_state The different link states */
 enum pw_link_state {
 	PW_LINK_STATE_ERROR = -2,	/**< the link is in error */
 	PW_LINK_STATE_UNLINKED = -1,	/**< the link is unlinked */
@@ -50,9 +65,9 @@ enum pw_link_state {
 	PW_LINK_STATE_ACTIVE = 4,	/**< the link is active */
 };
 
-/** Convert a \ref pw_link_state to a readable string \memberof pw_link */
+/** Convert a \ref pw_link_state to a readable string */
 const char * pw_link_state_as_string(enum pw_link_state state);
-/** The link information. Extra information can be added in later versions \memberof pw_introspect */
+/** The link information. Extra information can be added in later versions */
 struct pw_link_info {
 	uint32_t id;			/**< id of the global */
 	uint32_t output_node_id;	/**< server side output node id */
@@ -117,6 +132,10 @@ struct pw_link_methods {
 })
 
 #define pw_link_add_listener(c,...)		pw_link_method(c,add_listener,0,__VA_ARGS__)
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

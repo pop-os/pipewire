@@ -22,6 +22,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include "config.h"
+
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -143,14 +145,14 @@ static void on_timeout(void *userdata, uint64_t expirations)
 		mcs->hotspot.y = 0;
 		mcs->bitmap_offset = sizeof(struct spa_meta_cursor);
 
-		mb = SPA_MEMBER(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
+		mb = SPA_PTROFF(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
 		mb->format = SPA_VIDEO_FORMAT_ARGB;
 		mb->size.width = CURSOR_WIDTH;
 		mb->size.height = CURSOR_HEIGHT;
 		mb->stride = CURSOR_WIDTH * CURSOR_BPP;
 		mb->offset = sizeof(struct spa_meta_bitmap);
 
-		bitmap = SPA_MEMBER(mb, mb->offset, uint32_t);
+		bitmap = SPA_PTROFF(mb, mb->offset, uint32_t);
 		color = (cos(data->accumulator) + 1.0) * (1 << 23);
 		color |= 0xff000000;
 
@@ -216,7 +218,9 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 	struct data *data = _data;
 	struct spa_buffer *buf = buffer->buffer;
 	struct spa_data *d;
+#ifdef HAVE_MEMFD_CREATE
 	unsigned int seals;
+#endif
 
 	pw_log_info("add buffer %p", buffer);
 	d = buf->datas;
@@ -229,7 +233,7 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 	/* create the memfd on the buffer, set the type and flags */
 	d[0].type = SPA_DATA_MemFd;
 	d[0].flags = SPA_DATA_FLAG_READWRITE;
-#ifndef __FreeBSD__
+#ifdef HAVE_MEMFD_CREATE
 	d[0].fd = memfd_create("video-src-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 #else
 	d[0].fd = -1;
@@ -246,7 +250,7 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 		pw_log_error("can't truncate to %d: %m", d[0].maxsize);
 		return;
 	}
-#ifndef __FreeBSD__
+#ifdef HAVE_MEMFD_CREATE
 	/* not enforced yet but server might require SEAL_SHRINK later */
 	seals = F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
 	if (fcntl(d[0].fd, F_ADD_SEALS, seals) == -1) {

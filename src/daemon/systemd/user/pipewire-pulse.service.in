@@ -15,11 +15,21 @@ Description=PipeWire PulseAudio
 # socket-service relationship, see systemd.socket(5).
 Requires=pipewire-pulse.socket
 ConditionUser=!root
+Wants=pipewire.service
+After=pipewire.service
+Conflicts=pulseaudio.service
 
 [Service]
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 Type=simple
 ExecStart=@PW_PULSE_BINARY@
 Restart=on-failure
+Slice=session.slice
 
 [Install]
 Also=pipewire-pulse.socket

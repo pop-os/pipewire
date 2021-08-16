@@ -26,9 +26,13 @@
 #include "alsa-mixer.h"
 #include "alsa-ucm.h"
 
+#include <spa/utils/string.h>
+
 int _acp_log_level = 1;
 acp_log_func _acp_log_func;
 void *_acp_log_data;
+
+struct spa_i18n *acp_i18n;
 
 #define VOLUME_ACCURACY (PA_VOLUME_NORM/100)  /* don't require volume adjustments to be perfectly correct. don't necessarily extend granularity in software unless the differences get greater than this level */
 
@@ -212,7 +216,8 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 	dev->device.format.format_mask = m->sample_spec.format;
 	dev->device.format.rate_mask = m->sample_spec.rate;
 	dev->device.format.channels = m->channel_map.channels;
-	pa_cvolume_reset(&dev->real_volume, m->channel_map.channels);
+	pa_cvolume_reset(&dev->real_volume, dev->device.format.channels);
+	pa_cvolume_reset(&dev->soft_volume, dev->device.format.channels);
 	for (i = 0; i < m->channel_map.channels; i++)
 		dev->device.format.map[i]= channel_pa2acp(m->channel_map.map[i]);
 	dev->direction = direction;
@@ -236,8 +241,21 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 
 	dev->ports = pa_hashmap_new(pa_idxset_string_hash_func,
 			pa_idxset_string_compare_func);
-	if (m->ucm_context.ucm)
+	if (m->ucm_context.ucm) {
 		dev->ucm_context = &m->ucm_context;
+		if (impl->ucm.alibpref != NULL) {
+			char **d;
+			for (d = m->device_strings; *d; d++) {
+				if (pa_startswith(*d, impl->ucm.alibpref)) {
+					size_t plen = strlen(impl->ucm.alibpref);
+					size_t len = strlen(*d);
+					memmove(*d, (*d) + plen, len - plen + 1);
+					dev->device.flags |= ACP_DEVICE_UCM_DEVICE;
+					break;
+				}
+			}
+		}
+	}
 	pa_dynarray_init(&dev->port_array, NULL);
 }
 
@@ -266,6 +284,133 @@ static void profile_free(void *data)
 	}
 }
 
+static int add_pro_profile(pa_card *impl, uint32_t index)
+{
+	snd_ctl_t *ctl_hndl;
+	int err, dev, count = 0;
+	pa_alsa_profile *ap;
+	pa_alsa_profile_set *ps = impl->profile_set;
+	pa_alsa_mapping *m;
+	char *device;
+	snd_pcm_info_t *pcminfo;
+	pa_sample_spec ss;
+	snd_pcm_uframes_t try_period_size, try_buffer_size;
+
+	ss.format = PA_SAMPLE_S32LE;
+	ss.rate = 48000;
+	ss.channels = 64;
+
+	ap = pa_xnew0(pa_alsa_profile, 1);
+	ap->profile_set = ps;
+	ap->profile.name = ap->name = pa_xstrdup("pro-audio");
+	ap->profile.description = ap->description = pa_xstrdup(_("Pro Audio"));
+	ap->profile.available = ACP_AVAILABLE_YES;
+	ap->output_mappings = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+	ap->input_mappings = pa_idxset_new(pa_idxset_trivial_hash_func, pa_idxset_trivial_compare_func);
+	pa_hashmap_put(ps->profiles, ap->name, ap);
+
+	ap->output_name = pa_xstrdup("pro-output");
+	ap->input_name = pa_xstrdup("pro-input");
+	ap->priority = 1;
+
+	pa_assert_se(asprintf(&device, "hw:%d", index) >= 0);
+
+	if ((err = snd_ctl_open(&ctl_hndl, device, 0)) < 0) {
+		pa_log_error("can't open control for card %s: %s",
+				device, snd_strerror(err));
+	        free(device);
+		return err;
+	}
+	free(device);
+
+	snd_pcm_info_alloca(&pcminfo);
+
+	dev = -1;
+	while (1) {
+		char desc[128], devstr[128], *name;
+
+		if ((err = snd_ctl_pcm_next_device(ctl_hndl, &dev)) < 0) {
+			pa_log_error("error iterating devices: %s", snd_strerror(err));
+			break;
+		}
+		if (dev < 0)
+			break;
+
+		snd_pcm_info_set_device(pcminfo, dev);
+		snd_pcm_info_set_subdevice(pcminfo, 0);
+
+		snprintf(devstr, sizeof(devstr), "hw:%d,%d", index, dev);
+		if (count++ == 0)
+			snprintf(desc, sizeof(desc), "Pro");
+		else
+			snprintf(desc, sizeof(desc), "Pro %d", dev);
+
+		snd_pcm_info_set_stream(pcminfo, SND_PCM_STREAM_PLAYBACK);
+		if ((err = snd_ctl_pcm_info(ctl_hndl, pcminfo)) < 0) {
+			if (err != -ENOENT)
+				pa_log_error("error pcm info: %s", snd_strerror(err));
+		}
+		if (err >= 0) {
+			pa_assert_se(asprintf(&name, "Mapping pro-output-%d", dev) >= 0);
+			m = pa_alsa_mapping_get(ps, name);
+			m->description = pa_xstrdup(desc);
+			m->device_strings = pa_split_spaces_strv(devstr);
+
+			try_period_size = 1024;
+			try_buffer_size = 1024 * 64;
+			m->sample_spec = ss;
+
+			if ((m->output_pcm = pa_alsa_open_by_template(m->device_strings,
+							devstr, NULL, &m->sample_spec,
+							&m->channel_map, SND_PCM_STREAM_PLAYBACK,
+							&try_period_size, &try_buffer_size,
+							0, NULL, NULL, false))) {
+				pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
+				snd_pcm_close(m->output_pcm);
+				m->output_pcm = NULL;
+				m->supported = true;
+				pa_channel_map_init_pro(&m->channel_map, m->sample_spec.channels);
+			}
+			pa_idxset_put(ap->output_mappings, m, NULL);
+			free(name);
+		}
+
+		snd_pcm_info_set_stream(pcminfo, SND_PCM_STREAM_CAPTURE);
+		if ((err = snd_ctl_pcm_info(ctl_hndl, pcminfo)) < 0) {
+			if (err != -ENOENT)
+				pa_log_error("error pcm info: %s", snd_strerror(err));
+		}
+		if (err >= 0) {
+			pa_assert_se(asprintf(&name, "Mapping pro-input-%d", dev) >= 0);
+			m = pa_alsa_mapping_get(ps, name);
+			m->description = pa_xstrdup(desc);
+			m->device_strings = pa_split_spaces_strv(devstr);
+
+			try_period_size = 1024;
+			try_buffer_size = 1024 * 64;
+			m->sample_spec = ss;
+
+			if ((m->input_pcm = pa_alsa_open_by_template(m->device_strings,
+							devstr, NULL, &m->sample_spec,
+							&m->channel_map, SND_PCM_STREAM_CAPTURE,
+							&try_period_size, &try_buffer_size,
+							0, NULL, NULL, false))) {
+				pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
+				snd_pcm_close(m->input_pcm);
+				m->input_pcm = NULL;
+				m->supported = true;
+				pa_channel_map_init_pro(&m->channel_map, m->sample_spec.channels);
+			}
+			pa_idxset_put(ap->input_mappings, m, NULL);
+			free(name);
+		}
+	}
+	snd_ctl_close(ctl_hndl);
+
+	return 0;
+}
+
+
 static void add_profiles(pa_card *impl)
 {
 	pa_alsa_profile *ap;
@@ -285,6 +430,9 @@ static void add_profiles(pa_card *impl)
 	ap->profile.available = ACP_AVAILABLE_YES;
 	ap->profile.flags = ACP_PROFILE_OFF;
 	pa_hashmap_put(impl->profiles, ap->name, ap);
+
+	if (!impl->use_ucm)
+		add_pro_profile(impl, impl->card.index);
 
 	PA_HASHMAP_FOREACH(ap, impl->profile_set->profiles, state) {
 		pa_alsa_mapping *m;
@@ -419,7 +567,7 @@ static pa_available_t calc_port_state(pa_device_port *p, pa_card *impl)
 				break;
 			}
 
-			/* If the current availablility is unknown go the more precise no,
+			/* If the current availability is unknown go the more precise no,
 			* but otherwise don't change state */
 			if (pa == PA_AVAILABLE_UNKNOWN)
 				pa = cpa;
@@ -446,7 +594,7 @@ static void profile_set_available(pa_card *impl, uint32_t index,
 
 	p->available = status;
 
-	if (emit && impl && impl->events && impl->events->profile_available)
+	if (emit && impl->events && impl->events->profile_available)
 		impl->events->profile_available(impl->user_data, index,
 				old, status);
 }
@@ -736,7 +884,7 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 		changed |= old_monitor_name != NULL;
 		pa_proplist_unset(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME);
 	} else {
-		changed |= (old_monitor_name == NULL) || (strcmp(old_monitor_name, eld.monitor_name) != 0);
+		changed |= (old_monitor_name == NULL) || (!spa_streq(old_monitor_name, eld.monitor_name));
 		pa_proplist_sets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME, eld.monitor_name);
 	}
 	pa_proplist_as_dict(p->proplist, &p->port.props);
@@ -807,11 +955,9 @@ uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *nam
 		struct acp_card_profile *p = profiles[i];
 
 		if (name) {
-			if (strcmp(name, p->name))
+			if (spa_streq(name, p->name))
 				best = i;
-			continue;
-		}
-		if (p->flags & ACP_PROFILE_OFF) {
+		} else if (p->flags & ACP_PROFILE_OFF) {
 			off = i;
 		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > profiles[best]->priority)
@@ -905,9 +1051,14 @@ static int read_volume(pa_alsa_device *dev)
 		return 0;
 
 	dev->real_volume = r;
-	pa_log_info("New hardware volume:");
+
+	pa_log_info("New hardware volume: min:%d max:%d",
+			pa_cvolume_min(&r), pa_cvolume_max(&r));
+
 	for (i = 0; i < r.channels; i++)
 		pa_log_debug("  %d: %d", i, r.values[i]);
+
+	pa_cvolume_reset(&dev->soft_volume, r.channels);
 
 	if (impl->events && impl->events->volume_changed)
 		impl->events->volume_changed(impl->user_data, &dev->device);
@@ -917,7 +1068,6 @@ static int read_volume(pa_alsa_device *dev)
 
 static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 {
-	pa_card *impl = dev->card;
 	pa_cvolume r;
 
 	dev->real_volume = *v;
@@ -957,18 +1107,7 @@ static void set_volume(pa_alsa_device *dev, const pa_cvolume *v)
 		if (accurate_enough)
 			pa_cvolume_reset(&new_soft_volume, new_soft_volume.channels);
 
-		if (!pa_cvolume_equal(&dev->soft_volume, &new_soft_volume)) {
-			dev->soft_volume = new_soft_volume;
-
-			if (impl->events && impl->events->set_soft_volume) {
-				uint32_t i, n_volumes = new_soft_volume.channels;
-				float volumes[n_volumes];
-				for (i = 0; i < n_volumes; i++)
-					volumes[i] = pa_sw_volume_to_linear(new_soft_volume.values[i]);
-				impl->events->set_soft_volume(impl->user_data, &dev->device, volumes, n_volumes);
-			}
-		}
-
+		dev->soft_volume = new_soft_volume;
 	} else {
 		pa_log_debug("Wrote hardware volume: %d", pa_cvolume_max(&r));
 		/* We can't match exactly what the user requested, hence let's
@@ -1048,7 +1187,7 @@ static void mixer_volume_init(pa_card *impl, pa_alsa_device *dev)
 		pa_log_info("Using hardware volume control. Hardware dB scale %s.",
 				dev->mixer_path->has_dB ? "supported" : "not supported");
 	}
-	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);;
+	dev->device.base_volume = pa_sw_volume_to_linear(dev->base_volume);
 	dev->device.volume_step = 1.0f / dev->n_volume_steps;
 
 	if (impl->soft_mixer || !dev->mixer_path || !dev->mixer_path->has_mute) {
@@ -1155,7 +1294,7 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 {
 	const char *mod_name;
 	bool ignore_dB = false;
-	uint32_t port_index;
+	uint32_t i, port_index;
 	int res;
 
 	if (impl->use_ucm &&
@@ -1173,11 +1312,22 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 
 	find_mixer(impl, dev, NULL, ignore_dB);
 
-	port_index = acp_device_find_best_port_index(&dev->device, NULL);
+	/* Synchronize priority values, as it may have changed when setting the profile */
+	for (i = 0; i < impl->card.n_ports; i++) {
+		pa_device_port *p = (pa_device_port *)impl->card.ports[i];
+		p->port.priority = p->priority;
+	}
+
+	if (impl->auto_port)
+		port_index = acp_device_find_best_port_index(&dev->device, NULL);
+	else
+		port_index = ACP_INVALID_INDEX;
+
 	if (port_index == ACP_INVALID_INDEX)
 		dev->active_port = NULL;
 	else
 		dev->active_port = (pa_device_port*)impl->card.ports[port_index];
+
 	if (dev->active_port)
 		dev->active_port->port.flags |= ACP_PORT_ACTIVE;
 
@@ -1186,12 +1336,19 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 
 	if (dev->read_volume)
 		dev->read_volume(dev);
+	else {
+		pa_cvolume_reset(&dev->real_volume, dev->device.format.channels);
+		pa_cvolume_reset(&dev->soft_volume, dev->device.format.channels);
+	}
 	if (dev->read_mute)
 		dev->read_mute(dev);
+	else
+		dev->muted = false;
+
 	return 0;
 }
 
-int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
+int acp_card_set_profile(struct acp_card *card, uint32_t new_index, uint32_t flags)
 {
 	pa_card *impl = (pa_card *)card;
 	pa_alsa_mapping *am;
@@ -1242,18 +1399,26 @@ int acp_card_set_profile(struct acp_card *card, uint32_t new_index)
 
 	if (np->output_mappings) {
 		PA_IDXSET_FOREACH(am, np->output_mappings, idx) {
+			if (impl->use_ucm)
+				/* Update ports priorities */
+				pa_alsa_ucm_add_ports_combination(am->output.ports, &am->ucm_context,
+					true, impl->ports, np, NULL);
 			device_enable(impl, am, &am->output);
 		}
 	}
 
 	if (np->input_mappings) {
 		PA_IDXSET_FOREACH(am, np->input_mappings, idx) {
+			if (impl->use_ucm)
+				/* Update ports priorities */
+				pa_alsa_ucm_add_ports_combination(am->input.ports, &am->ucm_context,
+					false, impl->ports, np, NULL);
 			device_enable(impl, am, &am->input);
 		}
 	}
 	if (op)
-		op->profile.flags &= ~ACP_PROFILE_ACTIVE;
-	np->profile.flags |= ACP_PROFILE_ACTIVE;
+		op->profile.flags &= ~(ACP_PROFILE_ACTIVE | ACP_PROFILE_SAVE);
+	np->profile.flags |= ACP_PROFILE_ACTIVE | flags;
 	impl->card.active_profile_index = new_index;
 
 	if (impl->events && impl->events->profile_changed)
@@ -1301,7 +1466,7 @@ static const char *acp_dict_lookup(const struct acp_dict *dict, const char *key)
 {
 	const struct acp_dict_item *it;
 	acp_dict_for_each(it, dict) {
-		if (strcmp(key, it->key) == 0)
+		if (spa_streq(key, it->key))
 			return it->value;
 	}
 	return NULL;
@@ -1332,18 +1497,24 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	card->active_profile_index = ACP_INVALID_INDEX;
 
 	impl->use_ucm = true;
+	impl->auto_profile = true;
+	impl->auto_port = true;
 
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
-			impl->use_ucm = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->use_ucm = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.soft-mixer")) != NULL)
-			impl->soft_mixer = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			impl->soft_mixer = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.ignore-dB")) != NULL)
-			ignore_dB = (strcmp(s, "true") == 0 || atoi(s) == 1);
+			ignore_dB = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "device.profile-set")) != NULL)
 			profile_set = s;
 		if ((s = acp_dict_lookup(props, "device.profile")) != NULL)
 			profile = s;
+		if ((s = acp_dict_lookup(props, "api.acp.auto-profile")) != NULL)
+			impl->auto_profile = spa_atob(s);
+		if ((s = acp_dict_lookup(props, "api.acp.auto-port")) != NULL)
+			impl->auto_port = spa_atob(s);
 	}
 
 	impl->ucm.default_sample_spec.format = PA_SAMPLE_S16NE;
@@ -1411,8 +1582,11 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 
 	init_jacks(impl);
 
+	if (!impl->auto_profile && profile == NULL)
+		profile = "off";
+
 	profile_index = acp_card_find_best_profile_index(&impl->card, profile);
-	acp_card_set_profile(&impl->card, profile_index);
+	acp_card_set_profile(&impl->card, profile_index, 0);
 
 	init_eld_ctls(impl);
 
@@ -1565,11 +1739,9 @@ uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *nam
 		struct acp_port *p = ports[i];
 
 		if (name) {
-			if (strcmp(name, p->name))
+			if (spa_streq(name, p->name))
 				best = i;
-			continue;
-		}
-		if (p->available == ACP_AVAILABLE_YES) {
+		} else if (p->available == ACP_AVAILABLE_YES) {
 			if (best == ACP_INVALID_INDEX || p->priority > ports[best]->priority)
 				best = i;
 		} else if (p->available != ACP_AVAILABLE_NO) {
@@ -1592,7 +1764,7 @@ uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *nam
 		return ACP_INVALID_INDEX;
 }
 
-int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
+int acp_device_set_port(struct acp_device *dev, uint32_t port_index, uint32_t flags)
 {
 	pa_alsa_device *d = (pa_alsa_device*)dev;
 	pa_card *impl = d->card;
@@ -1603,16 +1775,15 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 		return -EINVAL;
 
 	p = (pa_device_port*)impl->card.ports[port_index];
-	if (p == old)
-		return 0;
-
 	if (!pa_hashmap_get(d->ports, p->name))
 		return -EINVAL;
 
+	p->port.flags = ACP_PORT_ACTIVE | flags;
+	if (p == old)
+		return 0;
 	if (old)
-		old->port.flags &= ~ACP_PORT_ACTIVE;
+		old->port.flags &= ~(ACP_PORT_ACTIVE | ACP_PORT_SAVE);
 	d->active_port = p;
-	p->port.flags |= ACP_PORT_ACTIVE;
 
 	if (impl->use_ucm) {
 		pa_alsa_ucm_port_data *data;
@@ -1622,7 +1793,8 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index)
 		mixer_volume_init(impl, d);
 
 		sync_mixer(d, p);
-		res = pa_alsa_ucm_set_port(d->ucm_context, p, true);
+		res = pa_alsa_ucm_set_port(d->ucm_context, p,
+					dev->direction == ACP_DIRECTION_PLAYBACK);
 	} else {
 		pa_alsa_port_data *data;
 
@@ -1659,9 +1831,12 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 
 	v.channels = d->mapping->channel_map.channels;
 	for (i = 0; i < v.channels; i++)
-		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);;
+		v.values[i] = pa_sw_volume_from_linear(volume[i % n_volume]);
 
-	pa_log_info("Set %s volume: %d", d->set_volume ? "hardware" : "software", pa_cvolume_max(&v));
+	pa_log_info("Set %s volume: min:%d max:%d",
+			d->set_volume ? "hardware" : "software",
+			pa_cvolume_min(&v), pa_cvolume_max(&v));
+
 	for (i = 0; i < v.channels; i++)
 		pa_log_debug("  %d: %d", i, v.values[i]);
 
@@ -1670,8 +1845,6 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 	} else {
 		d->real_volume = v;
 		d->soft_volume = v;
-		if (impl->events && impl->events->set_soft_volume)
-			impl->events->set_soft_volume(impl->user_data, dev, volume, n_volume);
 	}
 	if (!pa_cvolume_equal(&d->real_volume, &old_volume))
 		if (impl->events && impl->events->volume_changed)
@@ -1679,17 +1852,26 @@ int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t 
 	return 0;
 }
 
+static int get_volume(pa_cvolume *v, float *volume, uint32_t n_volume)
+{
+	uint32_t i;
+	if (v->channels == 0)
+		return -EIO;
+	for (i = 0; i < n_volume; i++)
+		volume[i] = pa_sw_volume_to_linear(v->values[i % v->channels]);
+	return 0;
+}
+
+int acp_device_get_soft_volume(struct acp_device *dev, float *volume, uint32_t n_volume)
+{
+	pa_alsa_device *d = (pa_alsa_device*)dev;
+	return get_volume(&d->soft_volume, volume, n_volume);
+}
+
 int acp_device_get_volume(struct acp_device *dev, float *volume, uint32_t n_volume)
 {
 	pa_alsa_device *d = (pa_alsa_device*)dev;
-	pa_cvolume v;
-	uint32_t i;
-	v = d->real_volume;
-	if (v.channels == 0)
-		return -EIO;
-	for (i = 0; i < n_volume; i++)
-		volume[i] = pa_sw_volume_to_linear(v.values[i % v.channels]);
-	return 0;
+	return get_volume(&d->real_volume, volume, n_volume);
 }
 
 int acp_device_set_mute(struct acp_device *dev, bool mute)
@@ -1707,8 +1889,6 @@ int acp_device_set_mute(struct acp_device *dev, bool mute)
 		d->set_mute(d, mute);
 	} else  {
 		d->muted = mute;
-		if (impl->events && impl->events->set_soft_mute)
-			impl->events->set_soft_mute(impl->user_data, dev, mute);
 	}
 	if (old_muted != mute)
 		if (impl->events && impl->events->mute_changed)

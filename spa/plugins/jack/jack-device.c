@@ -34,6 +34,7 @@
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
@@ -168,14 +169,15 @@ static int emit_info(struct impl *this, bool full)
 	dinfo.change_mask = SPA_DEVICE_CHANGE_MASK_PROPS;
 	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API,  "jack");
 	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NICK, "jack");
-	if (strcmp(this->props.server, "default") == 0)
+	if (spa_streq(this->props.server, "default"))
 		snprintf(name, sizeof(name), "JACK Client");
 	else
 		snprintf(name, sizeof(name), "JACK Client (%s)", this->props.server);
 	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, name);
-	items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_API_JACK_SERVER, this->props.server);
-	items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
-	dinfo.props = &SPA_DICT_INIT(items, 5);
+	items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, name);
+	items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_API_JACK_SERVER, this->props.server);
+	items[5] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
+	dinfo.props = &SPA_DICT_INIT(items, 6);
 
 	dinfo.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
 	params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumProfile, SPA_PARAM_INFO_READ);
@@ -243,7 +245,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		desc = "On";
 		break;
 	default:
-		errno = -EINVAL;
+		errno = EINVAL;
 		return NULL;
 	}
 
@@ -329,16 +331,16 @@ static int impl_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
-		uint32_t id;
+		uint32_t idx;
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&id))) < 0) {
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_pod(0, NULL, param);
 			return res;
 		}
-		activate_profile(this, id);
+		activate_profile(this, idx);
 		break;
 	}
 	default:
@@ -364,7 +366,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		*interface = &this->device;
 	else
 		return -ENOENT;

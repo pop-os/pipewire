@@ -31,6 +31,8 @@
 #include <stdbool.h>
 #include <getopt.h>
 
+#include <spa/utils/string.h>
+
 #include <acp/acp.h>
 
 #define WHITESPACE	"\n\r\t "
@@ -38,6 +40,7 @@
 struct data {
 	int verbose;
 	int card_index;
+	char *properties;
 	struct acp_card *card;
 	bool quit;
 };
@@ -132,7 +135,7 @@ static void on_mute_changed(void *data, struct acp_device *dev)
 	fprintf(stderr, "*** mute %s changed to %d\n", dev->name, mute);
 }
 
-struct acp_card_events card_events = {
+static const struct acp_card_events card_events = {
 	ACP_VERSION_CARD_EVENTS,
         .props_changed = card_props_changed,
         .profile_changed = card_profile_changed,
@@ -276,7 +279,7 @@ static int cmd_list(struct data *data, const struct command *cmd, int argc, char
 	uint32_t i;
 	int level = 0;
 
-	if (!strcmp(cmd->name, "list-verbose"))
+	if (spa_streq(cmd->name, "list-verbose"))
 		level = 2;
 
 	print_card(data, card, 0, level);
@@ -319,7 +322,7 @@ static int cmd_set_profile(struct data *data, const struct command *cmd, int arg
 	else
 		index = card->active_profile_index;
 
-	return acp_card_set_profile(card, index);
+	return acp_card_set_profile(card, index, 0);
 }
 
 static int cmd_list_ports(struct data *data, const struct command *cmd, int argc, char *argv[])
@@ -354,7 +357,7 @@ static int cmd_set_port(struct data *data, const struct command *cmd, int argc, 
 	if (dev_id >= card->n_devices)
 		return -EINVAL;
 
-	return acp_device_set_port(card->devices[dev_id], port_id);
+	return acp_device_set_port(card->devices[dev_id], port_id, 0);
 }
 
 static int cmd_list_devices(struct data *data, const struct command *cmd, int argc, char *argv[])
@@ -405,7 +408,7 @@ static int cmd_set_volume(struct data *data, const struct command *cmd, int argc
 		return -EINVAL;
 	}
 	dev_id = atoi(argv[1]);
-	vol = atof(argv[1]);
+	vol = atof(argv[2]);
 
 	if (dev_id >= card->n_devices)
 		return -EINVAL;
@@ -529,8 +532,8 @@ static const struct command *find_command(struct data *data, const char *cmd)
 {
 	size_t i;
 	for (i = 0; i < N_COMMANDS; i++) {
-		if (!strcmp(command_list[i].name, cmd) ||
-		    !strcmp(command_list[i].alias, cmd))
+		if (spa_streq(command_list[i].name, cmd) ||
+		    spa_streq(command_list[i].alias, cmd))
 			return &command_list[i];
 	}
 	return NULL;
@@ -599,7 +602,7 @@ static int handle_input(struct data *data)
 static int do_probe(struct data *data)
 {
 	uint32_t n_items = 0;
-	struct acp_dict_item items[2];
+	struct acp_dict_item items[64];
 	struct acp_dict props;
 
 	acp_set_log_func(log_func, data);
@@ -607,6 +610,35 @@ static int do_probe(struct data *data)
 
 	items[n_items++] = ACP_DICT_ITEM_INIT("use-ucm", "true");
 	items[n_items++] = ACP_DICT_ITEM_INIT("verbose", data->verbose ? "true" : "false");
+	if (data->properties != NULL) {
+		char *p = data->properties, *e, f;
+
+		while (*p) {
+			const char *k, *v;
+
+			if ((e = strchr(p, '=')) == NULL)
+				break;
+			*e = '\0';
+			k = p;
+			p = e+1;
+
+			if (*p == '\"') {
+				p++;
+				f = '\"';
+			} else {
+				f = ' ';
+			}
+			if ((e = strchr(p, f)) == NULL &&
+			    (e = strchr(p, '\0')) == NULL)
+				break;
+			*e = '\0';
+			v = p;
+			p = e+1;
+			items[n_items++] = ACP_DICT_ITEM_INIT(k, v);
+			if (n_items == 64)
+				break;
+		}
+	}
 	props = ACP_DICT_INIT(items, n_items);
 
 	data->card = acp_card_new(data->card_index, &props);
@@ -663,12 +695,13 @@ static int do_prompt(struct data *data)
 	return 0;
 }
 
-#define OPTIONS		"hvc:"
+#define OPTIONS		"hvc:p:"
 static const struct option long_options[] = {
 	{ "help",	no_argument,		NULL, 'h'},
 	{ "verbose",	no_argument,		NULL, 'v'},
 
 	{ "card",	required_argument,	NULL, 'c' },
+	{ "properties",	required_argument,	NULL, 'p' },
 
         { NULL, 0, NULL, 0 }
 };
@@ -684,6 +717,8 @@ static void show_usage(struct data *data, const char *name, bool is_error)
 		"  -h, --help                            Show this help\n"
 		"  -v  --verbose                         Be verbose\n"
 		"  -c  --card                            Card number\n"
+		"  -p  --properties                      Extra properties:\n"
+		"                                         'key=value ... '\n"
 		"\n");
 	cmd_help(data, NULL, 0, NULL);
 }
@@ -712,6 +747,9 @@ int main(int argc, char *argv[])
 			}
 			data.card_index = ret;
 			break;
+		case 'p':
+			data.properties = strdup(optarg);
+			break;
                 default:
 			fprintf(stderr, "error: unknown option '%c'\n", c);
 			goto error_usage;
@@ -730,6 +768,8 @@ int main(int argc, char *argv[])
 
 	if (data.card)
 		acp_card_destroy(data.card);
+
+	free(data.properties);
 
 	return 0;
 

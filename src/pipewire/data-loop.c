@@ -29,6 +29,7 @@
 #include "pipewire/log.h"
 #include "pipewire/data-loop.h"
 #include "pipewire/private.h"
+#include "pipewire/thread.h"
 
 #define NAME "data-loop"
 
@@ -147,7 +148,6 @@ error_cleanup:
 /** Create a new \ref pw_data_loop.
  * \return a newly allocated data loop
  *
- * \memberof pw_data_loop
  */
 SPA_EXPORT
 struct pw_data_loop *pw_data_loop_new(const struct spa_dict *props)
@@ -158,7 +158,6 @@ struct pw_data_loop *pw_data_loop_new(const struct spa_dict *props)
 
 /** Destroy a data loop
  * \param loop the data loop to destroy
- * \memberof pw_data_loop
  */
 SPA_EXPORT
 void pw_data_loop_destroy(struct pw_data_loop *loop)
@@ -200,19 +199,20 @@ pw_data_loop_get_loop(struct pw_data_loop *loop)
  *
  * This will start the realtime thread that manages the loop.
  *
- * \memberof pw_data_loop
  */
 SPA_EXPORT
 int pw_data_loop_start(struct pw_data_loop *loop)
 {
 	if (!loop->running) {
-		int err;
+		struct spa_thread *thr;
 
 		loop->running = true;
-		if ((err = pthread_create(&loop->thread, NULL, do_loop, loop)) != 0) {
-			pw_log_error(NAME" %p: can't create thread: %s", loop, strerror(err));
+		thr = pw_thread_utils_create(NULL, do_loop, loop);
+		loop->thread = (pthread_t)thr;
+		if (thr == NULL) {
+			pw_log_error(NAME" %p: can't create thread: %m", loop);
 			loop->running = false;
-			return -err;
+			return -errno;
 		}
 	}
 	return 0;
@@ -224,7 +224,6 @@ int pw_data_loop_start(struct pw_data_loop *loop)
  *
  * This will stop and join the realtime thread that manages the loop.
  *
- * \memberof pw_data_loop
  */
 SPA_EXPORT
 int pw_data_loop_stop(struct pw_data_loop *loop)
@@ -239,7 +238,7 @@ int pw_data_loop_stop(struct pw_data_loop *loop)
 			pthread_cancel(loop->thread);
 		}
 		pw_log_debug(NAME": %p join", loop);
-		pthread_join(loop->thread, NULL);
+		pw_thread_utils_join((struct spa_thread*)loop->thread, NULL);
 		pw_log_debug(NAME": %p joined", loop);
 	}
 	pw_log_debug(NAME": %p stopped", loop);
@@ -250,12 +249,23 @@ int pw_data_loop_stop(struct pw_data_loop *loop)
  * \param loop the data loop to check
  * \return true is the current thread is the data loop thread
  *
- * \memberof pw_data_loop
  */
 SPA_EXPORT
 bool pw_data_loop_in_thread(struct pw_data_loop * loop)
 {
 	return pthread_equal(loop->thread, pthread_self());
+}
+
+/** Get the thread object.
+ * \param loop the data loop to get the thread of
+ * \return the thread object or NULL when the thread is not running
+ *
+ * On posix based systems this returns a pthread_t
+ */
+SPA_EXPORT
+struct spa_thread *pw_data_loop_get_thread(struct pw_data_loop * loop)
+{
+	return loop->running ? (struct spa_thread*)loop->thread : NULL;
 }
 
 SPA_EXPORT

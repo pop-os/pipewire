@@ -1,36 +1,45 @@
 ## Building
 
-Pipewire uses a build tool called *Meson* as a basis for its build
+PipeWire uses a build tool called *Meson* as a basis for its build
 process.  It's a tool with some resemblance to Autotools and CMake. Meson
 again generates build files for a lower level build tool called *Ninja*,
 working in about the same level of abstraction as more familiar GNU Make
 does.
 
+Meson uses a user-specified build directory and all files produced by Meson
+are in that build directory. This build directory will be called `builddir`
+in this document.
+
 Generate the build files for Ninja:
 
 ```
-$ meson setup build
+$ meson setup builddir
 ```
+
+For distribution-specific build dependencies, please check our
+[CI pipeline](https://gitlab.freedesktop.org/pipewire/pipewire/-/blob/master/.gitlab-ci.yml)
+(search for `FDO_DISTRIBUTION_PACKAGES`). Note that some dependencies are
+optional and depend on options passed to meson.
 
 Once this is done, the next step is to review the build options:
 
 ```
-$ meson configure build
+$ meson configure builddir
 ```
 
 Define the installation prefix:
 
 ```
-$ meson configure -Dprefix=/usr # Default: /usr/local
+$ meson configure builddir -Dprefix=/usr # Default: /usr/local
 ```
 
-Pipewire specific build options are listed in the "Project options"
+PipeWire specific build options are listed in the "Project options"
 section. They are defined in `meson_options.txt`.
 
 Finally, invoke the build:
 
 ```
-$ ninja -C build
+$ ninja -C builddir
 ```
 
 Just to avoid any confusion: `autogen.sh` is a script invoked by *Jhbuild*,
@@ -45,7 +54,7 @@ will use the PipeWire emulation libraries automatically
 in this environment. You can get into this environment with:
 
 ```
-$ ./pw-uninstalled.sh
+$ ./pw-uninstalled.sh -b builddir
 ```
 
 In most cases you would want to run the default pipewire daemon. Look
@@ -54,32 +63,37 @@ If you want to run pipewire from the build directory, you can do this
 by doing:
 
 ```
+cd builddir/
 make run
 ```
 
 This will use the default config file to configure and start the daemon.
 The default config will also start pipewire-media-session, a default
-example media session.
+example media session and pipewire-pulse, a PulseAudio compatible server.
 
 You can also enable more debugging with the PIPEWIRE_DEBUG environment
 variable like so:
 
 ```
+cd builddir/
 PIPEWIRE_DEBUG=4 make run
 ```
 
 You might have to stop the pipewire service/socket that might have been
-started already, with: 
+started already, with:
 
 ```
-systemctl --user stop pipewire.service
-systemctl --user stop pipewire.socket
+systemctl --user stop pipewire.service \
+                      pipewire.socket \
+                      pipewire-media-session.service \
+                      pipewire-pulse.service \
+                      pipewire-pulse.socket
 ```
 
 ## Installing
 
 PipeWire comes with quite a bit of libraries and tools, run
-inside `build`:
+inside `builddir`:
 
 ```
 sudo meson install
@@ -97,15 +111,36 @@ running. PipeWire is usually started as a systemd unit using
 socket activation or as a service.
 
 Configuration of the PipeWire daemon can be found in
-/etc/pipewire/pipewire.conf. Please refer to the comments in the 
+/etc/pipewire/pipewire.conf. Please refer to the comments in the
 config file for more information about the configuration options.
+
+The daemon is started with:
+```
+systemctl --user start pipewire.service pipewire.socket
+```
+
+If you did not start the media-session in pipewire.conf, you will
+also need to start it like this:
+```
+systemctl --user start pipewire-media-session.service
+```
+To make it start on system startup:
+```
+systemctl --user enable pipewire-media-session.service
+```
+you can write ```enable --now``` to start service immediately.
 
 ### ALSA plugin
 
 The ALSA plugin is usually installed in:
 
+On Fedora:
 ```
 /usr/lib64/alsa-lib/libasound_module_pcm_pipewire.so
+```
+On Ubuntu:
+```
+/usr/lib/x86_64-linux-gnu/alsa-lib/libasound_module_pcm_pipewire.so
 ```
 
 There is also a config file installed in:
@@ -145,7 +180,7 @@ These libraries are found here:
 
 ```
 
-The provides pw-jack script uses LD_LIBRARY_PATH to set the library
+The provided pw-jack script uses LD_LIBRARY_PATH to set the library
 search path to these replacement libraries. This allows you to run
 jack apps on both the real JACK server or on PipeWire with the script.
 
@@ -177,8 +212,7 @@ The server can be started with provided systemd activation files or
 from PipeWire itself. (See `/etc/pipewire/pipewire.conf`)
 
 ```
-systemctl --user stop pipewire-pulse.service
-systemctl --user stop pipewire-pulse.socket
+systemctl --user start pipewire-pulse.service pipewire-pulse.socket
 ```
 
 You can also start additional PulseAudio servers listening on other

@@ -50,9 +50,9 @@ get_remote(const struct spa_dict *props)
 
 	if (props)
 		name = spa_dict_lookup(props, PW_KEY_REMOTE_NAME);
-	if (name == NULL)
+	if (name == NULL || name[0] == '\0')
 		name = getenv("PIPEWIRE_REMOTE");
-	if (name == NULL)
+	if (name == NULL || name[0] == '\0')
 		name = PW_DEFAULT_REMOTE;
 	return name;
 }
@@ -124,8 +124,12 @@ static int try_connect(struct pw_protocol_client *client,
 		pw_log_debug("connect to '%s' failed: %m", name);
 		if (errno == ENOENT)
 			errno = EHOSTDOWN;
-		res = -errno;
-		goto error_close;
+		if (errno == EAGAIN) {
+			pw_log_info("client %p: connect pending, fd %d", client, fd);
+		} else {
+			res = -errno;
+			goto error_close;
+		}
 	}
 
 	res = pw_protocol_client_connect_fd(client, fd, true);

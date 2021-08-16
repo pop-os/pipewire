@@ -31,6 +31,7 @@
 #include <spa/node/keys.h>
 #include <spa/utils/result.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/buffer/alloc.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/filter.h>
@@ -189,9 +190,9 @@ static int link_io(struct impl *this)
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
-
 	if (this->info.change_mask) {
 		struct spa_dict_item items[1];
 
@@ -200,7 +201,7 @@ static void emit_node_info(struct impl *this, bool full)
 		this->info.props = &SPA_DICT_INIT(items, 1);
 
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -336,7 +337,7 @@ static void follower_info(void *data, const struct spa_node_info *info)
 
 	if (info->props) {
 		if ((str = spa_dict_lookup(info->props, SPA_KEY_NODE_DRIVER)) != NULL)
-			this->driver = strcmp(str, "true") == 0 || atoi(str) == 1;
+			this->driver = spa_atob(str);
 	}
 }
 
@@ -810,7 +811,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -893,8 +894,8 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_hook_list_init(&this->hooks);
 
 #if 0
-	this->hnd_convert = SPA_MEMBER(this, sizeof(struct impl), struct spa_handle);
-	spa_handle_factory_init(&spa_videooconvert_factory,
+	this->hnd_convert = SPA_PTROFF(this, sizeof(struct impl), struct spa_handle);
+	spa_handle_factory_init(&spa_videoconvert_factory,
 				this->hnd_convert,
 				info, support, n_support);
 

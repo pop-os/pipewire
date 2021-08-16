@@ -121,7 +121,7 @@ static int alloc_buffers(struct pw_mempool *pool,
 	if (buffers == NULL)
 		return -errno;
 
-	skel = SPA_MEMBER(buffers, n_buffers * sizeof(struct spa_buffer *), void);
+	skel = SPA_PTROFF(buffers, n_buffers * sizeof(struct spa_buffer *), void);
 	skel = SPA_PTR_ALIGN(skel, info.max_align, void);
 
 	if (SPA_FLAG_IS_SET(flags, PW_BUFFERS_FLAG_SHARED)) {
@@ -143,7 +143,8 @@ static int alloc_buffers(struct pw_mempool *pool,
 		data = NULL;
 	}
 
-	pw_log_debug(NAME" %p: layout buffers skel:%p data:%p", allocation, skel, data);
+	pw_log_debug(NAME" %p: layout buffers skel:%p data:%p buffers:%p",
+			allocation, skel, data, buffers);
 	spa_buffer_alloc_layout_array(&info, n_buffers, buffers, skel, data);
 
 	allocation->mem = m;
@@ -270,14 +271,14 @@ int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 
 	params = alloca(n_params * sizeof(struct spa_pod *));
 	for (i = 0, offset = 0; i < n_params; i++) {
-		params[i] = SPA_MEMBER(buffer, offset, struct spa_pod);
+		params[i] = SPA_PTROFF(buffer, offset, struct spa_pod);
 		spa_pod_fixate(params[i]);
 		pw_log_debug(NAME" %p: fixated param %d:", result, i);
 		pw_log_pod(SPA_LOG_LEVEL_DEBUG, params[i]);
 		offset += SPA_ROUND_UP_N(SPA_POD_SIZE(params[i]), 8);
 	}
 
-	max_buffers = context->defaults.link_max_buffers;
+	max_buffers = context->settings.link_max_buffers;
 
 	if ((str = pw_properties_get(context->properties, PW_KEY_CPU_MAX_ALIGN)) != NULL)
 		align = pw_properties_parse_int(str);

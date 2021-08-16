@@ -658,9 +658,11 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 			goto exit;
 		}
 		if (filter) {
+			static const struct spa_rectangle step = {1, 1};
+
+			const struct spa_rectangle *values;
 			const struct spa_pod_prop *p;
 			struct spa_pod *val;
-			const struct spa_rectangle step = { 1, 1 }, *values;
 			uint32_t choice, i, n_values;
 
 			/* check if we have a fixed frame size */
@@ -749,10 +751,12 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 			goto exit;
 		}
 		if (filter) {
+			static const struct spa_fraction step = {1, 1};
+
+			const struct spa_fraction *values;
 			const struct spa_pod_prop *p;
 			struct spa_pod *val;
 			uint32_t i, n_values, choice;
-			const struct spa_fraction step = { 1, 1 }, *values;
 
 			if (!(p = spa_pod_find_prop(filter, NULL, SPA_FORMAT_VIDEO_framerate)))
 				goto have_framerate;
@@ -1374,8 +1378,11 @@ static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, 
 		else if (port->memtype == V4L2_MEMORY_DMABUF) {
 			b->v4l2_buffer.m.fd = d[0].fd;
 		}
-		else
+		else {
+			spa_log_error(this->log, "v4l2: invalid port memory %d",
+					port->memtype);
 			return -EIO;
+		}
 
 		spa_v4l2_buffer_recycle(this, i);
 	}
@@ -1392,6 +1399,7 @@ mmap_init(struct impl *this,
 	struct spa_v4l2_device *dev = &port->dev;
 	struct v4l2_requestbuffers reqbuf;
 	unsigned int i;
+	bool use_expbuf = false;
 
 	port->memtype = V4L2_MEMORY_MMAP;
 
@@ -1454,7 +1462,11 @@ mmap_init(struct impl *this,
 		d[0].chunk->stride = port->fmt.fmt.pix.bytesperline;
 		d[0].chunk->flags = 0;
 
-		if (port->have_expbuf) {
+		spa_log_debug(this->log, "v4l2: data types %08x", d[0].type);
+
+		if (port->have_expbuf &&
+		    d[0].type != SPA_ID_INVALID &&
+		    (d[0].type & ((1u << SPA_DATA_DmaBuf)|(1u<<SPA_DATA_MemFd)))) {
 			struct v4l2_exportbuffer expbuf;
 
 			spa_zero(expbuf);
@@ -1471,17 +1483,21 @@ mmap_init(struct impl *this,
 				spa_log_error(this->log, "v4l2: '%s' VIDIOC_EXPBUF: %m", this->props.device);
 				return -errno;
 			}
-			d[0].type = SPA_DATA_DmaBuf;
+			if (d[0].type & (1u<<SPA_DATA_DmaBuf))
+				d[0].type = SPA_DATA_DmaBuf;
+			else
+				d[0].type = SPA_DATA_MemFd;
 			d[0].flags = SPA_DATA_FLAG_READABLE;
 			d[0].fd = expbuf.fd;
 			d[0].data = NULL;
 			SPA_FLAG_SET(b->flags, BUFFER_FLAG_ALLOCATED);
 			spa_log_debug(this->log, "v4l2: EXPBUF fd:%d", expbuf.fd);
-		} else {
+			use_expbuf = true;
+		} else if (d[0].type & (1u << SPA_DATA_MemPtr)) {
 fallback:
-			d[0].type = SPA_DATA_MemFd;
+			d[0].type = SPA_DATA_MemPtr;
 			d[0].flags = SPA_DATA_FLAG_READABLE;
-			d[0].fd = dev->fd;
+			d[0].fd = -1;
 			d[0].mapoffset = b->v4l2_buffer.m.offset;
 			d[0].data = mmap(NULL,
 					b->v4l2_buffer.length,
@@ -1495,11 +1511,15 @@ fallback:
 			b->ptr = d[0].data;
 			SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 			spa_log_debug(this->log, "v4l2: mmap offset:%u data:%p", d[0].mapoffset, b->ptr);
+			use_expbuf = false;
+		} else {
+			spa_log_error(this->log, "v4l2: unsupported data type:%08x", d[0].type);
+			return -ENOTSUP;
 		}
 		spa_v4l2_buffer_recycle(this, i);
 	}
 	spa_log_info(this->log, "v4l2: have %u buffers using %s", n_buffers,
-			port->have_expbuf ? "EXPBUF" : "MMAP");
+			use_expbuf ? "EXPBUF" : "MMAP");
 
 	port->n_buffers = n_buffers;
 
@@ -1535,8 +1555,11 @@ spa_v4l2_alloc_buffers(struct impl *this,
 	} else if (dev->cap.capabilities & V4L2_CAP_READWRITE) {
 		if ((res = read_init(this)) < 0)
 			return res;
-	} else
+	} else {
+		spa_log_error(this->log, "v4l2: invalid capabilities %08x",
+					dev->cap.capabilities);
 		return -EIO;
+	}
 
 	return 0;
 }

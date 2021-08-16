@@ -30,16 +30,25 @@ extern "C" {
 #endif
 
 #include <string.h>
+#include <sys/un.h>
+#ifndef _POSIX_C_SOURCE
+# include <sys/mount.h>
+#endif
 
 #include <spa/utils/defs.h>
 #include <spa/pod/pod.h>
 
-/** \class pw_utils
+/** \defgroup pw_utils PipeWire Utility Functions
  *
  * Various utility functions
  */
 
-/** a function to destroy an item \memberof pw_utils */
+/**
+ * \addtogroup pw_utils
+ * \{
+ */
+
+/** a function to destroy an item */
 typedef void (*pw_destroy_t) (void *object);
 
 const char *
@@ -65,6 +74,20 @@ pw_strip(char *str, const char *whitespace);
 		__new;								      \
 	})
 #endif
+
+#if !defined(strdupa)
+# define strdupa(s)								      \
+	({									      \
+		const char *__old = (s);					      \
+		size_t __len = strlen(__old) + 1;				      \
+		char *__new = (char *) alloca(__len);				      \
+		(char *) memcpy(__new, __old, __len);				      \
+	})
+#endif
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 } /* extern "C" */

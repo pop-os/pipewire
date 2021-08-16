@@ -35,13 +35,10 @@
 #include "pipewire/pipewire.h"
 #include "pipewire/private.h"
 
-#include "extensions/protocol-native.h"
+#include "pipewire/extensions/protocol-native.h"
 
 #define NAME "core"
 
-/** \cond */
-
-/** \endcond */
 static void core_event_ping(void *data, uint32_t id, int seq)
 {
 	struct pw_core *this = data;
@@ -105,8 +102,8 @@ static void core_event_add_mem(void *data, uint32_t id, uint32_t type, int fd, u
 
 	m = pw_mempool_import(this->pool, flags, type, fd);
 	if (m->id != id) {
-		pw_log_error(NAME" %p: invalid mem id %u, expected %u",
-				this, id, m->id);
+		pw_log_error(NAME" %p: invalid mem id %u, fd:%d expected %u",
+				this, id, fd, m->id);
 		pw_proxy_errorf(&this->proxy, -EINVAL, "invalid mem id %u, expected %u", id, m->id);
 		pw_memblock_unref(m);
 	}
@@ -335,7 +332,7 @@ static struct pw_core *core_new(struct pw_context *context,
 	p->pool = pw_mempool_new(NULL);
 	p->core = p;
 	if (user_data_size > 0)
-		p->user_data = SPA_MEMBER(p, sizeof(struct pw_core), void);
+		p->user_data = SPA_PTROFF(p, sizeof(struct pw_core), void);
 	p->proxy.user_data = p->user_data;
 
 	pw_map_init(&p->objects, 64, 32);
@@ -394,8 +391,7 @@ error_proxy:
 exit_free:
 	free(p);
 exit_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }

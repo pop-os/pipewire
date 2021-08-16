@@ -30,6 +30,8 @@
 
 #include "config.h"
 
+#include <spa/utils/string.h>
+
 #include "pipewire/pipewire.h"
 
 #include "media-session.h"
@@ -67,16 +69,26 @@ static void object_update(void *data)
 	if (client->obj->obj.avail & SM_CLIENT_CHANGE_MASK_INFO &&
 	    !client->active) {
 		struct pw_permission permissions[1];
+		uint32_t perms;
 
 		if (client->obj->info == NULL || client->obj->info->props == NULL ||
 		    (str = spa_dict_lookup(client->obj->info->props, PW_KEY_ACCESS)) == NULL ||
-		    strcmp(str, "flatpak") != 0)
+		    !spa_streq(str, "flatpak"))
 			return;
 
-		/* limited access for now */
-		pw_log_info(NAME" %p: flatpak client %d granted RX permissions"
-				, impl, client->id);
-		permissions[0] = PW_PERMISSION_INIT(PW_ID_ANY, PW_PERM_R | PW_PERM_X);
+		if ((str = spa_dict_lookup(client->obj->info->props, PW_KEY_MEDIA_CATEGORY)) != NULL &&
+		    (spa_streq(str, "Manager"))) {
+			/* FIXME, use permission store to check if this app is allowed to
+			 * be a manager app */
+			perms = PW_PERM_ALL;
+		} else {
+			/* limited access for everything else */
+			perms = PW_PERM_R | PW_PERM_X;
+		}
+
+		pw_log_info(NAME" %p: flatpak client %d granted 0x%08x permissions"
+				, impl, client->id, perms);
+		permissions[0] = PW_PERMISSION_INIT(PW_ID_ANY, perms);
 		pw_client_update_permissions(client->obj->obj.proxy,
 				1, permissions);
 		client->active = true;
@@ -121,7 +133,7 @@ static void session_create(void *data, struct sm_object *object)
 
 	pw_log_debug(NAME " %p: create global '%d'", impl, object->id);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Client) == 0)
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Client))
 		res = handle_client(impl, object);
 	else
 		res = 0;
@@ -135,7 +147,7 @@ static void session_remove(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	pw_log_debug(NAME " %p: remove global '%d'", impl, object->id);
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Client) == 0) {
+	if (spa_streq(object->type, PW_TYPE_INTERFACE_Client)) {
 		struct client *client;
 
 		if ((client = sm_object_get_data(object, SESSION_KEY)) != NULL)

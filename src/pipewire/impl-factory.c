@@ -25,6 +25,7 @@
 #include <errno.h>
 
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -65,15 +66,14 @@ struct pw_impl_factory *pw_context_create_factory(struct pw_context *context,
 	spa_hook_list_init(&this->listener_list);
 
 	if (user_data_size > 0)
-		this->user_data = SPA_MEMBER(this, sizeof(*this), void);
+		this->user_data = SPA_PTROFF(this, sizeof(*this), void);
 
 	pw_log_debug(NAME" %p: new %s", this, name);
 
 	return this;
 
 error_exit:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -176,14 +176,15 @@ SPA_EXPORT
 int pw_impl_factory_register(struct pw_impl_factory *factory,
 			 struct pw_properties *properties)
 {
-	struct pw_context *context = factory->context;
-	const char *keys[] = {
+	static const char * const keys[] = {
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_NAME,
 		PW_KEY_FACTORY_TYPE_NAME,
 		PW_KEY_FACTORY_TYPE_VERSION,
 		NULL
 	};
+
+	struct pw_context *context = factory->context;
 
 	if (factory->registered)
 		goto error_existed;
@@ -217,8 +218,7 @@ int pw_impl_factory_register(struct pw_impl_factory *factory,
 	return 0;
 
 error_existed:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	return -EEXIST;
 }
 
@@ -281,7 +281,7 @@ void *pw_impl_factory_create_object(struct pw_impl_factory *factory,
  * Find in the list of factories registered in \a context for one with
  * the given \a name.
  *
- * \memberof pw_context
+ * \ingroup pw_context
  */
 SPA_EXPORT
 struct pw_impl_factory *pw_context_find_factory(struct pw_context *context,
@@ -290,7 +290,7 @@ struct pw_impl_factory *pw_context_find_factory(struct pw_context *context,
 	struct pw_impl_factory *factory;
 
 	spa_list_for_each(factory, &context->factory_list, link) {
-		if (strcmp(factory->info.name, name) == 0)
+		if (spa_streq(factory->info.name, name))
 			return factory;
 	}
 	return NULL;

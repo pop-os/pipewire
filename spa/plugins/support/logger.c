@@ -36,6 +36,8 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/type.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
+#include <spa/utils/ansi.h>
 
 #ifdef __FreeBSD__
 #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
@@ -73,9 +75,13 @@ impl_log_logv(void *object,
 	      const char *fmt,
 	      va_list args)
 {
+#define RESERVED_LENGTH 24
+
 	struct impl *impl = object;
-	char location[1024], *p, *s;
-	static const char *levels[] = { "-", "E", "W", "I", "D", "T", "*T*" };
+	char timestamp[15] = {0};
+	char filename[64] = {0};
+	char location[1000 + RESERVED_LENGTH], *p, *s;
+	static const char * const levels[] = { "-", "E", "W", "I", "D", "T", "*T*" };
 	const char *prefix = "", *suffix = "";
 	int size, len;
 	bool do_trace;
@@ -85,37 +91,58 @@ impl_log_logv(void *object,
 
 	if (impl->colors) {
 		if (level <= SPA_LOG_LEVEL_ERROR)
-			prefix = "\x1B[1;31m";
+			prefix = SPA_ANSI_BOLD_RED;
 		else if (level <= SPA_LOG_LEVEL_WARN)
-			prefix = "\x1B[1;33m";
+			prefix = SPA_ANSI_BOLD_YELLOW;
 		else if (level <= SPA_LOG_LEVEL_INFO)
-			prefix = "\x1B[1;32m";
+			prefix = SPA_ANSI_BOLD_GREEN;
 		if (prefix[0])
-			suffix = "\x1B[0m";
+			suffix = SPA_ANSI_RESET;
 	}
 
 	p = location;
-	len = sizeof(location);
-
-	size = snprintf(p, len, "%s[%s]", prefix, levels[level]);
+	len = sizeof(location) - RESERVED_LENGTH;
 
 	if (impl->timestamp) {
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC_RAW, &now);
-		size += snprintf(p + size, len - size, "[%09lu.%06lu]",
-			now.tv_sec & 0x1FFFFFFF, now.tv_nsec / 1000);
-
+		spa_scnprintf(timestamp, sizeof(timestamp), "[%05lu.%06lu]",
+			(now.tv_sec & 0x1FFFFFFF) % 100000, now.tv_nsec / 1000);
 	}
 	if (impl->line && line != 0) {
 		s = strrchr(file, '/');
-		size += snprintf(p + size, len - size, "[%s:%i %s()]",
+		spa_scnprintf(filename, sizeof(filename), "[%16.16s:%5i %s()]",
 			s ? s + 1 : file, line, func);
 	}
-	size += snprintf(p + size, len - size, " ");
-	size += vsnprintf(p + size, len - size, fmt, args);
 
-	if (impl->colors)
-		size += snprintf(p + size, len - size, "%s\n", suffix);
+	size = spa_scnprintf(p, len, "%s[%s]%s%s ", prefix, levels[level],
+			     timestamp, filename);
+	/*
+	 * it is assumed that at this point `size` <= `len`,
+	 * which is reasonable as long as file names and function names
+	 * don't become very long
+	 */
+
+	size += spa_vscnprintf(p + size, len - size, fmt, args);
+
+	/*
+	 * `RESERVED_LENGTH` bytes are reserved for printing the suffix
+	 * (at the moment it's "... (truncated)\x1B[0m\n" at its longest - 21 bytes),
+	 * its length must be less than `RESERVED_LENGTH` (including the null byte),
+	 * otherwise a stack buffer overrun could ensue
+	 */
+
+	/* if the message could not fit entirely... */
+	if (size >= len - 1) {
+		size = len - 1; /* index of the null byte */
+		len = sizeof(location);
+		size += spa_scnprintf(p + size, len - size, "... (truncated)");
+	}
+	else {
+		len = sizeof(location);
+	}
+
+	size += spa_scnprintf(p + size, len - size, "%s\n", suffix);
 
 	if (SPA_UNLIKELY(do_trace)) {
 		uint32_t index;
@@ -129,7 +156,8 @@ impl_log_logv(void *object,
 			fprintf(impl->file, "error signaling eventfd: %s\n", strerror(errno));
 	} else
 		fputs(location, impl->file);
-	fflush(impl->file);
+
+#undef RESERVED_LENGTH
 }
 
 
@@ -172,7 +200,6 @@ static void on_trace_event(struct spa_source *source)
 			fwrite(impl->trace_data, avail - first, 1, impl->file);
 		}
 		spa_ringbuffer_read_update(&impl->trace_rb, index + avail);
-		fflush(impl->file);
         }
 }
 
@@ -191,7 +218,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Log) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Log))
 		*interface = &this->log;
 	else
 		return -ENOENT;
@@ -266,11 +293,11 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (info) {
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_TIMESTAMP)) != NULL)
-			this->timestamp = (strcmp(str, "true") == 0 || atoi(str) == 1);
+			this->timestamp = spa_atob(str);
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_LINE)) != NULL)
-			this->line = (strcmp(str, "true") == 0 || atoi(str) == 1);
+			this->line = spa_atob(str);
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_COLORS)) != NULL)
-			this->colors = (strcmp(str, "true") == 0 || atoi(str) == 1);
+			this->colors = spa_atob(str);
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_LEVEL)) != NULL)
 			this->log.level = atoi(str);
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_FILE)) != NULL) {
@@ -281,10 +308,14 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (this->file == NULL)
 		this->file = stderr;
+	if (!isatty(fileno(this->file)))
+		this->colors = false;
 
 	spa_ringbuffer_init(&this->trace_rb);
 
 	spa_log_debug(&this->log, NAME " %p: initialized", this);
+
+	setlinebuf(this->file);
 
 	return 0;
 }

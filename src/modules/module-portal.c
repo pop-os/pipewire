@@ -1,21 +1,26 @@
 /* PipeWire
- * Copyright (C) 2016 Wim Taymans <wim.taymans@gmail.com>
- * Copyright (C) 2019 Red Hat Inc.
  *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Library General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
+ * Copyright © 2016 Wim Taymans <wim.taymans@gmail.com>
+ * Copyright © 2019 Red Hat Inc.
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Library General Public License for more details.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * You should have received a copy of the GNU Library General Public
- * License along with this library; if not, write to the
- * Free Software Foundation, Inc., 51 Franklin St, Fifth Floor,
- * Boston, MA 02110-1301, USA.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <string.h>
@@ -30,6 +35,7 @@
 
 #include <dbus/dbus.h>
 
+#include <spa/utils/string.h>
 #include <spa/support/dbus.h>
 
 #include "pipewire/context.h"
@@ -38,6 +44,9 @@
 #include "pipewire/module.h"
 #include "pipewire/utils.h"
 #include "pipewire/private.h"
+
+/** \page page_module_portal PipeWire Module: Portal
+ */
 
 #define NAME "portal"
 
@@ -102,10 +111,11 @@ static void module_destroy(void *data)
 	spa_hook_remove(&impl->context_listener);
 	spa_hook_remove(&impl->module_listener);
 
+	if (impl->bus)
+		dbus_connection_unref(impl->bus);
 	spa_dbus_connection_destroy(impl->conn);
 
-	if (impl->properties)
-		pw_properties_free(impl->properties);
+	pw_properties_free(impl->properties);
 
 	free(impl);
 }
@@ -131,10 +141,14 @@ static void on_portal_pid_received(DBusPendingCall *pending,
 		pw_log_error("Failed to receive portal pid");
 		return;
 	}
+	if (dbus_message_is_error(m, DBUS_ERROR_NAME_HAS_NO_OWNER)) {
+		pw_log_info("Portal is not running");
+		return;
+	}
 	if (dbus_message_get_type(m) == DBUS_MESSAGE_TYPE_ERROR) {
 		const char *message = "unknown";
 		dbus_message_get_args(m, NULL, DBUS_TYPE_STRING, &message, DBUS_TYPE_INVALID);
-		pw_log_error("Failed to receive portal pid: %s: %s",
+		pw_log_warn("Failed to receive portal pid: %s: %s",
 				dbus_message_get_error_name(m), message);
 		return;
 	}
@@ -163,7 +177,7 @@ static void update_portal_pid(struct impl *impl)
 	impl->portal_pid = 0;
 
 	m = dbus_message_new_method_call("org.freedesktop.DBus",
-					 "/",
+					 "/org/freedesktop/DBus",
 					 "org.freedesktop.DBus",
 					 "GetConnectionUnixProcessID");
 
@@ -203,10 +217,10 @@ static DBusHandlerResult name_owner_changed_handler(DBusConnection *connection,
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
 
-	if (strcmp(name, "org.freedesktop.portal.Desktop") != 0)
+	if (!spa_streq(name, "org.freedesktop.portal.Desktop"))
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 
-	if (strcmp(new_owner, "") == 0) {
+	if (spa_streq(new_owner, "")) {
 		impl->portal_pid = 0;
 		if (impl->portal_pid_pending != NULL) {
 			dbus_pending_call_cancel(impl->portal_pid_pending);
@@ -225,6 +239,11 @@ static int init_dbus_connection(struct impl *impl)
 	DBusError error;
 
 	impl->bus = spa_dbus_connection_get(impl->conn);
+	if (impl->bus == NULL)
+		return -EIO;
+
+	/* XXX: we don't handle dbus reconnection yet, so ref the handle instead */
+	dbus_connection_ref(impl->bus);
 
 	dbus_error_init(&error);
 
@@ -238,7 +257,7 @@ static int init_dbus_connection(struct impl *impl)
 		pw_log_error("Failed to add name owner changed listener: %s",
 			     error.message);
 		dbus_error_free(&error);
-		return -1;
+		return -EIO;
 	}
 
 	dbus_connection_add_filter(impl->bus, name_owner_changed_handler,
@@ -257,6 +276,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct spa_dbus *dbus;
 	const struct spa_support *support;
 	uint32_t n_support;
+	int res;
 
 	support = pw_context_get_support(context, &n_support);
 
@@ -274,10 +294,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->properties = args ? pw_properties_new_string(args) : NULL;
 
 	impl->conn = spa_dbus_get_connection(dbus, SPA_DBUS_TYPE_SESSION);
-	if (impl->conn == NULL)
+	if (impl->conn == NULL) {
+		res = -errno;
 		goto error;
+	}
 
-	if (init_dbus_connection(impl) != 0)
+	if ((res = init_dbus_connection(impl)) < 0)
 		goto error;
 
 	pw_context_add_listener(context, &impl->context_listener, &context_events, impl);
@@ -287,6 +309,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
       error:
 	free(impl);
-	pw_log_error("Failed to connect to system bus");
-	return -ENOMEM;
+	pw_log_error("Failed to connect to session bus: %s", spa_strerror(res));
+	return res;
 }

@@ -7,11 +7,15 @@ ABOUT-NLS
 *.tar.xz
 *.o
 build/
+builddir/
 config.h.meson
 cscope.out
 cscope.in.out
 cscope.po.out
 Makefile
+subprojects/lua*
+subprojects/wireplumber
+subprojects/packagecache
 
 # Created by https://www.gitignore.io/api/vim
 

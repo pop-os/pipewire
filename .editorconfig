@@ -17,3 +17,11 @@ indent_size = 2
 [*.yml]
 indent_style = space
 indent_size = 2
+
+[*.{conf,conf.in}]
+indent_style = space
+indent_size = 4
+
+[*.{xml,xml.in}]
+indent_style = space
+indent_size = 2

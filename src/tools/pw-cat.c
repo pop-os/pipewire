@@ -42,11 +42,14 @@
 #include <spa/param/audio/type-info.h>
 #include <spa/param/props.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
+#include <spa/utils/json.h>
 #include <spa/debug/types.h>
+#include <spa/debug/pod.h>
 
 #include <pipewire/pipewire.h>
-#include <pipewire/global.h>
-#include <extensions/metadata.h>
+#include <pipewire/i18n.h>
+#include <pipewire/extensions/metadata.h>
 
 #include "midifile.h"
 
@@ -56,7 +59,8 @@
 #define DEFAULT_MEDIA_CATEGORY_RECORD	"Capture"
 #define DEFAULT_MEDIA_ROLE	"Music"
 #define DEFAULT_TARGET		"auto"
-#define DEFAULT_LATENCY		"100ms"
+#define DEFAULT_LATENCY_PLAY	"100ms"
+#define DEFAULT_LATENCY_REC	"none"
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 #define DEFAULT_FORMAT		"s16"
@@ -104,8 +108,8 @@ struct data {
 	struct spa_hook registry_listener;
 	struct pw_metadata *metadata;
 	struct spa_hook metadata_listener;
-	uint32_t default_sink;
-	uint32_t default_source;
+	char default_sink[1024];
+	char default_source[1024];
 
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
@@ -164,17 +168,19 @@ sf_str_to_fmt(const char *str)
 	if (!str)
 		return -1;
 
-	if (!strcmp(str, "s8"))
+	if (spa_streq(str, "s8"))
 		return SF_FORMAT_PCM_S8;
-	if (!strcmp(str, "s16"))
+	if (spa_streq(str, "u8"))
+		return SF_FORMAT_PCM_U8;
+	if (spa_streq(str, "s16"))
 		return SF_FORMAT_PCM_16;
-	if (!strcmp(str, "s24"))
+	if (spa_streq(str, "s24"))
 		return SF_FORMAT_PCM_24;
-	if (!strcmp(str, "s32"))
+	if (spa_streq(str, "s32"))
 		return SF_FORMAT_PCM_32;
-	if (!strcmp(str, "f32"))
+	if (spa_streq(str, "f32"))
 		return SF_FORMAT_FLOAT;
-	if (!strcmp(str, "f64"))
+	if (spa_streq(str, "f64"))
 		return SF_FORMAT_DOUBLE;
 
 	return -1;
@@ -185,6 +191,8 @@ sf_fmt_to_str(int format)
 {
 	int sub_type = (format & SF_FORMAT_SUBMASK);
 
+	if (sub_type == SF_FORMAT_PCM_U8)
+		return "u8";
 	if (sub_type == SF_FORMAT_PCM_S8)
 		return "s8";
 	if (sub_type == SF_FORMAT_PCM_16)
@@ -200,7 +208,7 @@ sf_fmt_to_str(int format)
 	return "(invalid)";
 }
 
-#define STR_FMTS "(s8|s16|s32|f32|f64)"
+#define STR_FMTS "(u8|s8|s16|s32|f32|f64)"
 
 /* 0 = native, 1 = le, 2 = be */
 static inline int
@@ -219,6 +227,8 @@ sf_format_to_pw(int format)
 		return SPA_AUDIO_FORMAT_UNKNOWN;
 
 	switch (format & SF_FORMAT_SUBMASK) {
+	case SF_FORMAT_PCM_U8:
+		return SPA_AUDIO_FORMAT_U8;
 	case SF_FORMAT_PCM_S8:
 		return SPA_AUDIO_FORMAT_S8;
 	case SF_FORMAT_PCM_16:
@@ -252,6 +262,7 @@ sf_format_samplesize(int format)
 
 	switch (sub_type) {
 	case SF_FORMAT_PCM_S8:
+	case SF_FORMAT_PCM_U8:
 		return 1;
 	case SF_FORMAT_PCM_16:
 		return 2;
@@ -266,7 +277,7 @@ sf_format_samplesize(int format)
 	return -1;
 }
 
-static int sf_playback_fill_s8(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_x8(struct data *d, void *dest, unsigned int n_frames)
 {
 	sf_count_t rn;
 
@@ -317,7 +328,8 @@ sf_fmt_playback_fill_fn(int format)
 
 	switch (fmt) {
 	case SPA_AUDIO_FORMAT_S8:
-		return sf_playback_fill_s8;
+	case SPA_AUDIO_FORMAT_U8:
+		return sf_playback_fill_x8;
 	case SPA_AUDIO_FORMAT_S16_LE:
 	case SPA_AUDIO_FORMAT_S16_BE:
 		/* sndfile check */
@@ -347,7 +359,7 @@ sf_fmt_playback_fill_fn(int format)
 	return NULL;
 }
 
-static int sf_record_fill_s8(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_x8(struct data *d, void *src, unsigned int n_frames)
 {
 	sf_count_t rn;
 
@@ -398,7 +410,8 @@ sf_fmt_record_fill_fn(int format)
 
 	switch (fmt) {
 	case SPA_AUDIO_FORMAT_S8:
-		return sf_record_fill_s8;
+	case SPA_AUDIO_FORMAT_U8:
+		return sf_record_fill_x8;
 	case SPA_AUDIO_FORMAT_S16_LE:
 	case SPA_AUDIO_FORMAT_S16_BE:
 		/* sndfile check */
@@ -493,7 +506,7 @@ static unsigned int find_channel(const char *name)
 	int i;
 
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -505,7 +518,7 @@ static int parse_channelmap(const char *channel_map, struct channelmap *map)
 	char **ch;
 
 	for (i = 0; i < (int) SPA_N_ELEMENTS(maps); i++) {
-		if (strcmp(maps[i].name, channel_map) == 0) {
+		if (spa_streq(maps[i].name, channel_map)) {
 			map->n_channels = maps[i].channels;
 			spa_memcpy(map->channels, &maps[i].values,
 					map->n_channels * sizeof(unsigned int));
@@ -646,17 +659,47 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
+static int json_object_find(const char *obj, const char *key, char *value, size_t len)
+{
+	struct spa_json it[2];
+	const char *v;
+	char k[128];
+
+	spa_json_init(&it[0], obj, strlen(obj));
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
+		if (spa_streq(k, key)) {
+			if (spa_json_get_string(&it[1], value, len) <= 0)
+				continue;
+			return 0;
+		} else {
+			if (spa_json_next(&it[1], &v) <= 0)
+				break;
+		}
+	}
+	return -ENOENT;
+}
+
 static int metadata_property(void *object,
 		uint32_t subject, const char *key, const char *type, const char *value)
 {
 	struct data *data = object;
 
 	if (subject == PW_ID_CORE) {
-		uint32_t val = (key && value) ? (uint32_t)atoi(value) : SPA_ID_INVALID;
-		if (key == NULL || strcmp(key, "default.audio.sink") == 0)
-			data->default_sink = val;
-		if (key == NULL || strcmp(key, "default.audio.source") == 0)
-			data->default_source = val;
+		if (key == NULL || spa_streq(key, "default.audio.sink")) {
+			if (value == NULL ||
+			    json_object_find(value, "name",
+					data->default_sink, sizeof(data->default_sink)) < 0)
+				data->default_sink[0] = '\0';
+		}
+		if (key == NULL || spa_streq(key, "default.audio.source")) {
+			if (value == NULL ||
+			    json_object_find(value, "name",
+					data->default_source, sizeof(data->default_source)) < 0)
+				data->default_source[0] = '\0';
+		}
 	}
 	return 0;
 }
@@ -685,7 +728,7 @@ static void registry_event_global(void *userdata, uint32_t id,
 	if (!data->list_targets)
 		return;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+	if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
 		if (data->metadata != NULL)
 			return;
 
@@ -697,7 +740,7 @@ static void registry_event_global(void *userdata, uint32_t id,
 
 		data->sync = pw_core_sync(data->core, 0, data->sync);
 
-	} else if (strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+	} else if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 		name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
 		desc = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
 		media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
@@ -709,9 +752,9 @@ static void registry_event_global(void *userdata, uint32_t id,
 
 		/* get allowed mode from the media class */
 		/* TODO extend to something else besides Audio/Source|Sink */
-		if (!strcmp(media_class, "Audio/Source"))
+		if (spa_streq(media_class, "Audio/Source"))
 			mode = mode_record;
-		else if (!strcmp(media_class, "Audio/Sink"))
+		else if (spa_streq(media_class, "Audio/Sink"))
 			mode = mode_playback;
 
 		/* modes must match */
@@ -802,13 +845,11 @@ on_io_changed(void *userdata, uint32_t id, void *data, uint32_t size)
 }
 
 static void
-on_param_changed(void *userdata, uint32_t id, const struct spa_pod *format)
+on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param)
 {
 	struct data *data = userdata;
-
 	if (data->verbose)
-		printf("stream param change: id=%"PRIu32"\n",
-				id);
+		printf("stream param change: id=%"PRIu32"\n", id);
 }
 
 static void on_process(void *userdata)
@@ -899,7 +940,7 @@ static void do_print_delay(void *userdata, uint64_t expirations)
 	struct data *data = userdata;
 	struct pw_time time;
 	pw_stream_get_time(data->stream, &time);
-	printf("now=%li rate=%u/%u ticks=%lu delay=%li queued=%lu\n",
+	printf("now=%"PRIi64" rate=%u/%u ticks=%"PRIu64" delay=%"PRIi64" queued=%"PRIu64"\n",
 		time.now,
 		time.rate.num, time.rate.denom,
 		time.ticks, time.delay, time.queued);
@@ -926,7 +967,7 @@ static const struct option long_options[] = {
 	{ "verbose",		no_argument,	   NULL, 'v' },
 
 	{ "record",		no_argument,	   NULL, 'r' },
-	{ "playback",		no_argument,	   NULL, 's' },
+	{ "playback",		no_argument,	   NULL, 'p' },
 	{ "midi",		no_argument,	   NULL, 'm' },
 
 	{ "remote",		required_argument, NULL, 'R' },
@@ -955,16 +996,15 @@ static void show_usage(const char *name, bool is_error)
 
 	fp = is_error ? stderr : stdout;
 
-        fprintf(fp, "%s [options] <file>\n", name);
-
-	fprintf(fp,
+        fprintf(fp,
+	   _("%s [options] <file>\n"
              "  -h, --help                            Show this help\n"
              "      --version                         Show version\n"
              "  -v, --verbose                         Enable verbose operations\n"
-	     "\n");
+	     "\n"), name);
 
 	fprintf(fp,
-             "  -R, --remote                          Remote daemon name\n"
+           _("  -R, --remote                          Remote daemon name\n"
              "      --media-type                      Set media type (default %s)\n"
              "      --media-category                  Set media category (default %s)\n"
              "      --media-role                      Set media role (default %s)\n"
@@ -975,14 +1015,14 @@ static void show_usage(const char *name, bool is_error)
 	     "                                          or direct samples (256)\n"
 	     "                                          the rate is the one of the source file\n"
 	     "      --list-targets                    List available targets for --target\n"
-	     "\n",
+	     "\n"),
 	     DEFAULT_MEDIA_TYPE,
 	     DEFAULT_MEDIA_CATEGORY_PLAYBACK,
 	     DEFAULT_MEDIA_ROLE,
-	     DEFAULT_TARGET, DEFAULT_LATENCY);
+	     DEFAULT_TARGET, DEFAULT_LATENCY_PLAY);
 
 	fprintf(fp,
-             "      --rate                            Sample rate (req. for rec) (default %u)\n"
+           _("      --rate                            Sample rate (req. for rec) (default %u)\n"
              "      --channels                        Number of channels (req. for rec) (default %u)\n"
              "      --channel-map                     Channel map\n"
 	     "                                            one of: \"stereo\", \"surround-51\",... or\n"
@@ -990,19 +1030,19 @@ static void show_usage(const char *name, bool is_error)
              "      --format                          Sample format %s (req. for rec) (default %s)\n"
 	     "      --volume                          Stream volume 0-1.0 (default %.3f)\n"
 	     "  -q  --quality                         Resampler quality (0 - 15) (default %d)\n"
-	     "\n",
+	     "\n"),
 	     DEFAULT_RATE,
 	     DEFAULT_CHANNELS,
 	     STR_FMTS, DEFAULT_FORMAT,
 	     DEFAULT_VOLUME,
 	     DEFAULT_QUALITY);
 
-	if (!strcmp(name, "pw-cat")) {
-		fprintf(fp,
-		     "  -p, --playback                        Playback mode\n"
+	if (spa_streq(name, "pw-cat")) {
+		fputs(
+		   _("  -p, --playback                        Playback mode\n"
 		     "  -r, --record                          Recording mode\n"
 		     "  -m, --midi                            Midi mode\n"
-		     "\n");
+		     "\n"), fp);
 	}
 }
 
@@ -1123,7 +1163,7 @@ static int setup_midifile(struct data *data)
 
 static int fill_properties(struct data *data)
 {
-	static const char* table[] = {
+	static const char * const table[] = {
 		[SF_STR_TITLE] = PW_KEY_MEDIA_TITLE,
 		[SF_STR_COPYRIGHT] = PW_KEY_MEDIA_COPYRIGHT,
 		[SF_STR_SOFTWARE] = PW_KEY_MEDIA_SOFTWARE,
@@ -1131,6 +1171,7 @@ static int fill_properties(struct data *data)
 		[SF_STR_COMMENT] = PW_KEY_MEDIA_COMMENT,
 		[SF_STR_DATE] = PW_KEY_MEDIA_DATE
 	};
+
 	SF_INFO sfi;
 	SF_FORMAT_INFO fi;
 	int res;
@@ -1260,15 +1301,15 @@ static int setup_sndfile(struct data *data)
 		s++;
 	if (!*s)
 		data->latency_unit = unit_samples;
-	else if (!strcmp(s, "none"))
+	else if (spa_streq(s, "none"))
 		data->latency_unit = unit_none;
-	else if (!strcmp(s, "s") || !strcmp(s, "sec") || !strcmp(s, "secs"))
+	else if (spa_streq(s, "s") || spa_streq(s, "sec") || spa_streq(s, "secs"))
 		data->latency_unit = unit_sec;
-	else if (!strcmp(s, "ms") || !strcmp(s, "msec") || !strcmp(s, "msecs"))
+	else if (spa_streq(s, "ms") || spa_streq(s, "msec") || spa_streq(s, "msecs"))
 		data->latency_unit = unit_msec;
-	else if (!strcmp(s, "us") || !strcmp(s, "usec") || !strcmp(s, "usecs"))
+	else if (spa_streq(s, "us") || spa_streq(s, "usec") || spa_streq(s, "usecs"))
 		data->latency_unit = unit_usec;
-	else if (!strcmp(s, "ns") || !strcmp(s, "nsec") || !strcmp(s, "nsecs"))
+	else if (spa_streq(s, "ns") || spa_streq(s, "nsec") || spa_streq(s, "nsecs"))
 		data->latency_unit = unit_nsec;
 	else {
 		fprintf(stderr, "error: bad latency value %s (bad unit)\n", data->latency);
@@ -1325,7 +1366,6 @@ int main(int argc, char *argv[])
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	const char *prog;
 	int exit_code = EXIT_FAILURE, c, ret;
-	struct target *target, *target_default;
 	enum pw_stream_flags flags = 0;
 
 	pw_init(&argc, &argv);
@@ -1338,18 +1378,15 @@ int main(int argc, char *argv[])
 	else
 		prog = argv[0];
 
-	data.default_source = SPA_ID_INVALID;
-	data.default_sink = SPA_ID_INVALID;
-
 	/* prime the mode from the program name */
-	if (!strcmp(prog, "pw-play"))
+	if (spa_streq(prog, "pw-play"))
 		data.mode = mode_playback;
-	else if (!strcmp(prog, "pw-record"))
+	else if (spa_streq(prog, "pw-record"))
 		data.mode = mode_record;
-	else if (!strcmp(prog, "pw-midiplay")) {
+	else if (spa_streq(prog, "pw-midiplay")) {
 		data.mode = mode_playback;
 		data.is_midi = true;
-	} else if (!strcmp(prog, "pw-midirecord")) {
+	} else if (spa_streq(prog, "pw-midirecord")) {
 		data.mode = mode_record;
 		data.is_midi = true;
 	} else
@@ -1417,7 +1454,7 @@ int main(int argc, char *argv[])
 
 		case OPT_TARGET:
 			data.target = optarg;
-			if (!strcmp(optarg, "auto")) {
+			if (spa_streq(optarg, "auto")) {
 				data.target_id = PW_ID_ANY;
 				break;
 			}
@@ -1498,7 +1535,9 @@ int main(int argc, char *argv[])
 		data.target_id = PW_ID_ANY;
 	}
 	if (!data.latency)
-		data.latency = DEFAULT_LATENCY;
+		data.latency = data.mode == mode_playback ?
+			DEFAULT_LATENCY_PLAY :
+			DEFAULT_LATENCY_REC;
 	if (data.channel_map != NULL) {
 		if (parse_channelmap(data.channel_map, &data.channelmap) < 0) {
 			fprintf(stderr, "error: can parse channel-map \"%s\"\n", data.channel_map);
@@ -1550,7 +1589,7 @@ int main(int argc, char *argv[])
 
 	data.context = pw_context_new(l,
 			pw_properties_new(
-				PW_KEY_CONTEXT_PROFILE_MODULES, "default,rtkit",
+				PW_KEY_CONFIG_NAME, "client-rt.conf",
 				NULL),
 			0);
 	if (!data.context) {
@@ -1673,9 +1712,10 @@ int main(int argc, char *argv[])
 			exit_code = EXIT_SUCCESS;
 	} else {
 		if (data.targets_listed) {
-			uint32_t default_id;
+			struct target *target, *target_default;
+			char *default_name;
 
-			default_id = (data.mode == mode_record) ?
+			default_name = (data.mode == mode_record) ?
 				data.default_source : data.default_sink;
 
 			exit_code = EXIT_SUCCESS;
@@ -1684,12 +1724,12 @@ int main(int argc, char *argv[])
 			target_default = NULL;
 			spa_list_for_each(target, &data.targets, link) {
 				if (target_default == NULL ||
-				    default_id == target->id ||
-				    (default_id == SPA_ID_INVALID &&
+				    spa_streq(default_name, target->name) ||
+				    (default_name[0] == '\0' &&
 				     target->prio > target_default->prio))
 					target_default = target;
 			}
-			printf("Available targets (\"*\" denotes default): %d\n", default_id);
+			printf("Available targets (\"*\" denotes default): %s\n", default_name);
 			spa_list_for_each(target, &data.targets, link) {
 				printf("%s\t%"PRIu32": description=\"%s\" prio=%d\n",
 				       target == target_default ? "*" : "",
@@ -1700,6 +1740,7 @@ int main(int argc, char *argv[])
 
 	/* destroy targets */
 	while (!spa_list_is_empty(&data.targets)) {
+		struct target *target;
 		target = spa_list_last(&data.targets, struct target, link);
 		spa_list_remove(&target->link);
 		target_destroy(target);
@@ -1722,8 +1763,7 @@ error_no_context:
 error_no_props:
 error_no_main_loop:
 error_bad_file:
-	if (data.props)
-		pw_properties_free(data.props);
+	pw_properties_free(data.props);
 	if (data.file)
 		sf_close(data.file);
 	if (data.midi.file)

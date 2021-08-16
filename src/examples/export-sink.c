@@ -141,13 +141,15 @@ static int impl_add_listener(void *object,
 {
 	struct data *d = object;
 	struct spa_hook_list save;
+	uint64_t old;
 
 	spa_hook_list_isolate(&d->hooks, &save, listener, events, data);
 
+	old = d->info.change_mask;
 	d->info.change_mask = SPA_PORT_CHANGE_MASK_FLAGS |
 				SPA_PORT_CHANGE_MASK_PARAMS;
 	spa_node_emit_port_info(&d->hooks, SPA_DIRECTION_INPUT, 0, &d->info);
-	d->info.change_mask = 0;
+	d->info.change_mask = old;
 
 	spa_hook_list_join(&d->hooks, &save);
 
@@ -375,7 +377,7 @@ static int do_render(struct spa_loop *loop, bool async, uint32_t seq,
 	    buf->datas[0].type == SPA_DATA_DmaBuf) {
 		map = mmap(NULL, buf->datas[0].maxsize + buf->datas[0].mapoffset, PROT_READ,
 			   MAP_PRIVATE, buf->datas[0].fd, 0);
-		sdata = SPA_MEMBER(map, buf->datas[0].mapoffset, uint8_t);
+		sdata = SPA_PTROFF(map, buf->datas[0].mapoffset, uint8_t);
 	} else if (buf->datas[0].type == SPA_DATA_MemPtr) {
 		map = NULL;
 		sdata = buf->datas[0].data;
@@ -526,7 +528,7 @@ int main(int argc, char *argv[])
 	data.info = SPA_PORT_INFO_INIT();
 	data.info.change_mask = SPA_PORT_CHANGE_MASK_FLAGS;
 	data.info.flags = 0;
-	data.info.change_mask = SPA_PORT_CHANGE_MASK_PARAMS;
+	data.info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 	data.params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
 	data.params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
 	data.params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);

@@ -35,12 +35,13 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/json.h>
+#include <spa/utils/string.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/builder.h>
 #include <spa/debug/pod.h>
 
 #include "pipewire/pipewire.h"
-#include "extensions/metadata.h"
+#include "pipewire/extensions/metadata.h"
 
 #include "media-session.h"
 
@@ -86,7 +87,7 @@ static void remove_idle_timeout(struct impl *impl)
 
 	if (impl->idle_timeout) {
 		if ((res = sm_media_session_save_state(impl->session,
-						SESSION_KEY, PREFIX, impl->props)) < 0)
+						SESSION_KEY, impl->props)) < 0)
 			pw_log_error("can't save "SESSION_KEY" state: %s", spa_strerror(res));
 		pw_loop_destroy_source(main_loop, impl->idle_timeout);
 		impl->idle_timeout = NULL;
@@ -126,7 +127,7 @@ static uint32_t channel_from_name(const char *name)
 {
 	int i;
 	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -158,11 +159,13 @@ static char *serialize_props(struct stream *str, const struct spa_pod *param)
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {
 		case SPA_PROP_volume:
-			spa_pod_get_float(&prop->value, &val);
+			if (spa_pod_get_float(&prop->value, &val) < 0)
+				continue;
 			fprintf(f, "%s\"volume\": %f", (comma ? ", " : ""), val);
 			break;
 		case SPA_PROP_mute:
-			spa_pod_get_bool(&prop->value, &b);
+			if (spa_pod_get_bool(&prop->value, &b) < 0)
+				continue;
 			fprintf(f, "%s\"mute\": %s", (comma ? ", " : ""), b ? "true" : "false");
 			break;
 		case SPA_PROP_channelVolumes:
@@ -208,6 +211,11 @@ static char *serialize_props(struct stream *str, const struct spa_pod *param)
 
 	fprintf(f, " }");
         fclose(f);
+
+	if (strlen(ptr) < 5) {
+		free(ptr);
+		ptr = NULL;
+	}
 	return ptr;
 }
 
@@ -217,7 +225,8 @@ static void sync_metadata(struct impl *impl)
 
 	impl->sync = true;
 	spa_dict_for_each(it, &impl->props->dict)
-		pw_metadata_set_property(impl->metadata, 0, it->key, "Spa:String:JSON", it->value);
+		pw_metadata_set_property(impl->metadata,
+				PW_ID_CORE, it->key, "Spa:String:JSON", it->value);
 	impl->sync = false;
 }
 
@@ -256,31 +265,41 @@ static int handle_props(struct stream *str, struct sm_param *p)
 	const char *key;
 	int changed = 0;
 
-	key = str->key;
-	if (key == NULL)
+	if ((key = str->key) == NULL)
 		return -EBUSY;
 
 	if (p->param) {
 		char *val = serialize_props(str, p->param);
-		pw_log_debug("stream %d: current props %s %s", str->id, key, val);
-		changed += pw_properties_set(impl->props, key, val);
-		free(val);
-		add_idle_timeout(impl);
+		if (val) {
+			pw_log_info("stream %d: save props %s %s", str->id, key, val);
+			changed += pw_properties_set(impl->props, key, val);
+			free(val);
+			add_idle_timeout(impl);
+		}
 	}
 	if (changed)
 		sync_metadata(impl);
 	return 0;
 }
 
-static int restore_stream(struct stream *str, const char *val)
+static int restore_stream(struct stream *str)
 {
+	struct impl *impl = str->impl;
 	struct spa_json it[3];
-	const char *value;
-	int len;
-	char buf[1024];
+	const char *val, *value;
+	char buf[1024], key[128];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct spa_pod_frame f[2];
 	struct spa_pod *param;
+
+	if (str->key == NULL)
+		return -EBUSY;
+
+	val = pw_properties_get(impl->props, str->key);
+	if (val == NULL)
+		return -ENOENT;
+
+	pw_log_info("stream %d: restore '%s' to %s", str->id, str->key, val);
 
 	spa_json_init(&it[0], val, strlen(val));
 
@@ -290,22 +309,22 @@ static int restore_stream(struct stream *str, const char *val)
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
 
-	while ((len = spa_json_next(&it[1], &value)) > 0) {
-		if (strncmp(value, "\"volume\"", len) == 0) {
+	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
+		if (spa_streq(key, "volume")) {
 			float vol;
 			if (spa_json_get_float(&it[1], &vol) <= 0)
                                 continue;
 			spa_pod_builder_prop(&b, SPA_PROP_volume, 0);
 			spa_pod_builder_float(&b, vol);
 		}
-		else if (strncmp(value, "\"mute\"", len) == 0) {
+		else if (spa_streq(key, "mute")) {
 			bool mute;
 			if (spa_json_get_bool(&it[1], &mute) <= 0)
                                 continue;
 			spa_pod_builder_prop(&b, SPA_PROP_mute, 0);
 			spa_pod_builder_bool(&b, mute);
 		}
-		else if (strncmp(value, "\"volumes\"", len) == 0) {
+		else if (spa_streq(key, "volumes")) {
 			uint32_t n_vols;
 			float vols[SPA_AUDIO_MAX_CHANNELS];
 
@@ -323,7 +342,7 @@ static int restore_stream(struct stream *str, const char *val)
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, vols);
 		}
-		else if (strncmp(value, "\"channels\"", len) == 0) {
+		else if (spa_streq(key, "channels")) {
 			uint32_t n_ch;
 			uint32_t map[SPA_AUDIO_MAX_CHANNELS];
 
@@ -343,7 +362,7 @@ static int restore_stream(struct stream *str, const char *val)
 			spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id,
 					n_ch, map);
 		}
-		else if (strncmp(value, "\"target-node\"", len) == 0) {
+		else if (spa_streq(key, "target-node")) {
 			char name[1024];
 
 			if (spa_json_get_string(&it[1], name, sizeof(name)) <= 0)
@@ -363,23 +382,45 @@ static int restore_stream(struct stream *str, const char *val)
 
 	pw_node_set_param((struct pw_node*)str->obj->obj.proxy,
 			SPA_PARAM_Props, 0, param);
+
+	sm_media_session_schedule_rescan(str->impl->session);
+
 	return 0;
 }
 
-static void update_key(struct stream *str)
+static int save_stream(struct stream *str)
 {
-	struct impl *impl = str->impl;
-	uint32_t i;
-	const char *p, *val;
-	char *key;
-	struct sm_object *obj = &str->obj->obj;
-	bool changed;
-	const char *keys[] = {
+	struct sm_param *p;
+	spa_list_for_each(p, &str->obj->param_list, link) {
+		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+			spa_debug_pod(2, NULL, p->param);
+
+		switch (p->id) {
+		case SPA_PARAM_Props:
+			handle_props(str, p);
+			break;
+		default:
+			break;
+		}
+	}
+	return 0;
+}
+
+static void update_stream(struct stream *str)
+{
+	static const char * const keys[] = {
 		PW_KEY_MEDIA_ROLE,
 		PW_KEY_APP_ID,
 		PW_KEY_APP_NAME,
 		PW_KEY_MEDIA_NAME,
+		PW_KEY_NODE_NAME,
 	};
+
+	struct impl *impl = str->impl;
+	uint32_t i;
+	const char *p;
+	char *key;
+	struct sm_object *obj = &str->obj->obj;
 
 	key = NULL;
 	for (i = 0; i < SPA_N_ELEMENTS(keys); i++) {
@@ -392,17 +433,14 @@ static void update_key(struct stream *str)
 		return;
 
 	pw_log_debug(NAME " %p: stream %p key '%s'", impl, str, key);
-	changed = str->key == NULL || strcmp(str->key, key) != 0;
 	free(str->key);
 	str->key = key;
-	if (!changed || str->restored)
-		return;
 
-	val = pw_properties_get(impl->props, key);
-	if (val != NULL) {
-		pw_log_info("stream %d: restore '%s' to %s", str->id, key, val);
-		restore_stream(str, val);
+	if (!str->restored) {
+		restore_stream(str);
 		str->restored = true;
+	} else {
+		save_stream(str);
 	}
 }
 
@@ -410,33 +448,12 @@ static void object_update(void *data)
 {
 	struct stream *str = data;
 	struct impl *impl = str->impl;
-	bool rescan = false;
 
-	pw_log_debug(NAME" %p: stream %p %08x/%08x", impl, str,
+	pw_log_info(NAME" %p: stream %p %08x/%08x", impl, str,
 			str->obj->obj.changed, str->obj->obj.avail);
 
-	if (str->obj->obj.changed & SM_OBJECT_CHANGE_MASK_PROPERTIES) {
-		if (str->key == NULL)
-			update_key(str);
-	}
 	if (str->obj->obj.changed & SM_NODE_CHANGE_MASK_PARAMS)
-		rescan = true;
-
-	if (rescan) {
-		struct sm_param *p;
-		spa_list_for_each(p, &str->obj->param_list, link) {
-			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-				spa_debug_pod(2, NULL, p->param);
-
-			switch (p->id) {
-			case SPA_PARAM_Props:
-				handle_props(str, p);
-				break;
-			default:
-				break;
-			}
-		}
-	}
+		update_stream(str);
 }
 
 static const struct sm_object_events object_events = {
@@ -448,24 +465,29 @@ static void session_create(void *data, struct sm_object *object)
 {
 	struct impl *impl = data;
 	struct stream *str;
-	const char *media_class;
+	const char *media_class, *routes;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) != 0 ||
+	if (!spa_streq(object->type, PW_TYPE_INTERFACE_Node) ||
 	    object->props == NULL ||
-	    (media_class = pw_properties_get(object->props, PW_KEY_MEDIA_CLASS)) == NULL ||
-	    strstr(media_class, "Stream/") != media_class)
+	    (media_class = pw_properties_get(object->props, PW_KEY_MEDIA_CLASS)) == NULL)
 		return;
 
-	media_class += strlen("Stream/");
-
-	pw_log_debug(NAME " %p: add stream '%d' %s", impl, object->id, media_class);
+	if (strstr(media_class, "Stream/") == media_class) {
+		media_class += strlen("Stream/");
+		pw_log_debug(NAME " %p: add stream '%d' %s", impl, object->id, media_class);
+	} else if (strstr(media_class, "Audio/") == media_class &&
+	    ((routes = pw_properties_get(object->props, "device.routes")) == NULL ||
+	    atoi(routes) == 0)) {
+		pw_log_debug(NAME " %p: add node '%d' %s", impl, object->id, media_class);
+	} else {
+		return;
+	}
 
 	str = sm_object_add_data(object, SESSION_KEY, sizeof(struct stream));
 	str->obj = (struct sm_node*)object;
 	str->id = object->id;
 	str->impl = impl;
 	str->media_class = strdup(media_class);
-	update_key(str);
 
 	str->obj->obj.mask |= SM_OBJECT_CHANGE_MASK_PROPERTIES | SM_NODE_CHANGE_MASK_PARAMS;
 	sm_object_add_listener(&str->obj->obj, &str->listener, &object_events, str);
@@ -485,7 +507,7 @@ static void session_remove(void *data, struct sm_object *object)
 	struct impl *impl = data;
 	struct stream *str;
 
-	if (strcmp(object->type, PW_TYPE_INTERFACE_Node) != 0)
+	if (!spa_streq(object->type, PW_TYPE_INTERFACE_Node))
 		return;
 
 	pw_log_debug(NAME " %p: remove node '%d'", impl, object->id);
@@ -525,7 +547,7 @@ int sm_restore_stream_start(struct sm_media_session *session)
 			&metadata_events, impl);
 
 	if ((res = sm_media_session_load_state(impl->session,
-					SESSION_KEY, PREFIX, impl->props)) < 0)
+					SESSION_KEY, impl->props)) < 0)
 		pw_log_info("can't load "SESSION_KEY" state: %s", spa_strerror(res));
 
 	sync_metadata(impl);
@@ -536,8 +558,7 @@ int sm_restore_stream_start(struct sm_media_session *session)
 
 exit_errno:
 	res = -errno;
-	if (impl->props)
-		pw_properties_free(impl->props);
+	pw_properties_free(impl->props);
 	free(impl);
 	return res;
 }

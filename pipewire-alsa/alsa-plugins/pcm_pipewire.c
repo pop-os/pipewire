@@ -23,7 +23,6 @@
  */
 
 #define __USE_GNU
-#define _GNU_SOURCE
 
 #include <limits.h>
 #ifndef __FreeBSD__
@@ -41,6 +40,7 @@
 #include <spa/debug/types.h>
 #include <spa/param/props.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 
 #include <pipewire/pipewire.h>
 
@@ -59,6 +59,7 @@ typedef struct {
 
 	char *node_name;
 	char *target;
+	char *role;
 
 	int fd;
 	int error;
@@ -86,27 +87,39 @@ typedef struct {
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
 
+	struct pw_time time;
+	struct spa_io_rate_match *rate_match;
+
 	struct spa_audio_info_raw format;
 } snd_pcm_pipewire_t;
 
 static int snd_pcm_pipewire_stop(snd_pcm_ioplug_t *io);
 
+static int block_check(snd_pcm_ioplug_t *io)
+{
+	snd_pcm_pipewire_t *pw = io->private_data;
+	snd_pcm_sframes_t avail;
+	uint64_t val;
+
+	avail = snd_pcm_ioplug_avail(io, pw->hw_ptr, io->appl_ptr);
+	if (avail >= 0 && avail < (snd_pcm_sframes_t)pw->min_avail) {
+		spa_system_eventfd_read(pw->system, io->poll_fd, &val);
+		return 1;
+	}
+	return 0;
+}
+
 static int pcm_poll_block_check(snd_pcm_ioplug_t *io)
 {
-	uint64_t val;
-	snd_pcm_sframes_t avail;
 	snd_pcm_pipewire_t *pw = io->private_data;
 
 	if (io->state == SND_PCM_STATE_DRAINING) {
+		uint64_t val;
 		spa_system_eventfd_read(pw->system, io->poll_fd, &val);
 		return 0;
 	} else if (io->state == SND_PCM_STATE_RUNNING ||
 			   (io->state == SND_PCM_STATE_PREPARED && io->stream == SND_PCM_STREAM_CAPTURE)) {
-		avail = snd_pcm_avail_update(io->pcm);
-		if (avail >= 0 && avail < (snd_pcm_sframes_t)pw->min_avail) {
-			spa_system_eventfd_read(pw->system, io->poll_fd, &val);
-			return 1;
-		}
+		return block_check(io);
 	}
 	return 0;
 }
@@ -114,8 +127,14 @@ static int pcm_poll_block_check(snd_pcm_ioplug_t *io)
 static inline int pcm_poll_unblock_check(snd_pcm_ioplug_t *io)
 {
 	snd_pcm_pipewire_t *pw = io->private_data;
-	spa_system_eventfd_write(pw->system, pw->fd, 1);
-	return 1;
+	snd_pcm_uframes_t avail;
+
+	avail = snd_pcm_ioplug_avail(io, pw->hw_ptr, io->appl_ptr);
+	if (avail >= pw->min_avail || io->state == SND_PCM_STATE_DRAINING) {
+		spa_system_eventfd_write(pw->system, pw->fd, 1);
+		return 1;
+	}
+	return 0;
 }
 
 static void snd_pcm_pipewire_free(snd_pcm_pipewire_t *pw)
@@ -142,6 +161,15 @@ static int snd_pcm_pipewire_close(snd_pcm_ioplug_t *io)
 	pw_log_debug(NAME" %p:", pw);
 	snd_pcm_pipewire_free(pw);
 	return 0;
+}
+
+static int snd_pcm_pipewire_poll_descriptors(snd_pcm_ioplug_t *io, struct pollfd *pfds, unsigned int space)
+{
+	snd_pcm_pipewire_t *pw = io->private_data;
+	pcm_poll_unblock_check(io); /* unblock socket for polling if needed */
+	pfds->fd = pw->fd;
+	pfds->events = POLLIN | POLLERR | POLLNVAL;
+	return 1;
 }
 
 static int snd_pcm_pipewire_poll_revents(snd_pcm_ioplug_t *io,
@@ -178,8 +206,33 @@ static snd_pcm_sframes_t snd_pcm_pipewire_pointer(snd_pcm_ioplug_t *io)
 #endif
 }
 
+static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp)
+{
+	snd_pcm_pipewire_t *pw = io->private_data;
+	int64_t elapsed = 0, filled;
+
+	if (pw->time.rate.num != 0) {
+		struct timespec ts;
+		int64_t diff;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		diff = SPA_TIMESPEC_TO_NSEC(&ts) - pw->time.now;
+	        elapsed = (pw->time.rate.denom * diff) / (pw->time.rate.num * SPA_NSEC_PER_SEC);
+		if (elapsed > pw->time.delay)
+			elapsed = pw->time.delay;
+	}
+	filled = pw->time.delay + snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
+
+	if (io->stream == SND_PCM_STREAM_PLAYBACK)
+		*delayp = filled - SPA_MIN(elapsed, filled);
+	else
+		*delayp = filled + elapsed;
+
+	return 0;
+}
+
 static int
-snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uframes_t *hw_avail)
+snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
+		snd_pcm_uframes_t *hw_avail,snd_pcm_uframes_t want)
 {
 	snd_pcm_ioplug_t *io = &pw->io;
 	snd_pcm_channel_area_t *pwareas;
@@ -199,13 +252,15 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uf
 	} else {
 		nframes = d[0].chunk->size / pw->stride;
 	}
+	want = SPA_MIN(nframes, want);
+	nframes = SPA_MIN(want, *hw_avail);
 
 	if (pw->blocks == 1) {
 		if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-			d[0].chunk->size = nframes * pw->stride;
+			d[0].chunk->size = want * pw->stride;
 			d[0].chunk->offset = 0;
 		}
-		ptr = SPA_MEMBER(d[0].data, d[0].chunk->offset, void);
+		ptr = SPA_PTROFF(d[0].data, d[0].chunk->offset, void);
 		for (channel = 0; channel < io->channels; channel++) {
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = channel * pw->sample_bits;
@@ -214,10 +269,10 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uf
 	} else {
 		for (channel = 0; channel < io->channels; channel++) {
 			if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-				d[channel].chunk->size = nframes * pw->stride;
+				d[channel].chunk->size = want * pw->stride;
 				d[channel].chunk->offset = 0;
 			}
-			ptr = SPA_MEMBER(d[channel].data, d[channel].chunk->offset, void);
+			ptr = SPA_PTROFF(d[channel].data, d[channel].chunk->offset, void);
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = 0;
 			pwareas[channel].step = pw->sample_bits;
@@ -227,7 +282,7 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uf
 	if (io->state == SND_PCM_STATE_RUNNING ||
 		io->state == SND_PCM_STATE_DRAINING) {
 		snd_pcm_uframes_t hw_ptr = pw->hw_ptr;
-		xfer = SPA_MIN(nframes, *hw_avail);
+		xfer = nframes;
 		if (xfer > 0) {
 			const snd_pcm_channel_area_t *areas = snd_pcm_ioplug_mmap_areas(io);
 			const snd_pcm_uframes_t offset = hw_ptr % io->buffer_size;
@@ -253,13 +308,13 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uf
 		}
 	}
 	/* check if requested frames were copied */
-	if (xfer < nframes) {
-		/* always fill the not yet written JACK buffer with silence */
+	if (xfer < want) {
+		/* always fill the not yet written PipeWire buffer with silence */
 		if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-			const snd_pcm_uframes_t frames = nframes - xfer;
+			const snd_pcm_uframes_t frames = want - xfer;
 
 			snd_pcm_areas_silence(pwareas, xfer, io->channels,
-								  frames, io->format);
+							  frames, io->format);
 		}
 		if (io->state == SND_PCM_STATE_RUNNING ||
 			io->state == SND_PCM_STATE_DRAINING) {
@@ -267,7 +322,6 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b, snd_pcm_uf
 			pw->xrun_detected = true;
 		}
 	}
-
 	return 0;
 }
 
@@ -303,12 +357,35 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 	pw_stream_update_params(pw->stream, params, n_params);
 }
 
+static void on_stream_io_changed(void *data, uint32_t id, void *area, uint32_t size)
+{
+	snd_pcm_pipewire_t *pw = data;
+	switch (id) {
+	case SPA_IO_RateMatch:
+		pw->rate_match = area;
+		break;
+	default:
+		break;
+	}
+}
+
+static void on_stream_drained(void *data)
+{
+	snd_pcm_pipewire_t *pw = data;
+	pw->drained = true;
+	pw->draining = false;
+	pw_log_debug(NAME" %p: drained", pw);
+	pw_thread_loop_signal(pw->main_loop, false);
+}
+
 static void on_stream_process(void *data)
 {
 	snd_pcm_pipewire_t *pw = data;
 	snd_pcm_ioplug_t *io = &pw->io;
 	struct pw_buffer *b;
-	snd_pcm_uframes_t hw_avail;
+	snd_pcm_uframes_t hw_avail, want;
+
+	pw_stream_get_time(pw->stream, &pw->time);
 
 	hw_avail = snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
 
@@ -321,33 +398,41 @@ static void on_stream_process(void *data)
 	if (b == NULL)
 		return;
 
-	snd_pcm_pipewire_process(pw, b, &hw_avail);
+	want = pw->rate_match ? pw->rate_match->size : hw_avail;
+	pw_log_trace(NAME" %p: avail:%lu want:%lu", pw, hw_avail, want);
+
+	snd_pcm_pipewire_process(pw, b, &hw_avail, want);
 
 	pw_stream_queue_buffer(pw->stream, b);
 
 	if (io->state == SND_PCM_STATE_DRAINING && !pw->draining && hw_avail == 0) {
-		pw_stream_flush(pw->stream, true);
-		pw->draining = true;
-		pw->drained = false;
+		if (io->stream == SND_PCM_STREAM_CAPTURE) {
+			on_stream_drained (pw); /* since pw_stream does not call drained() for capture */
+		} else {
+			pw_stream_flush(pw->stream, true);
+			pw->draining = true;
+			pw->drained = false;
+		}
 	}
 	pcm_poll_unblock_check(io); /* unblock socket for polling if needed */
-}
-
-static void on_stream_drained(void *data)
-{
-	snd_pcm_pipewire_t *pw = data;
-	pw->drained = true;
-	pw->draining = false;
-	pw_log_debug(NAME" %p: drained", pw);
-	pw_thread_loop_signal(pw->main_loop, false);
 }
 
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.param_changed = on_stream_param_changed,
+	.io_changed = on_stream_io_changed,
 	.process = on_stream_process,
 	.drained = on_stream_drained,
 };
+
+static int pipewire_start(snd_pcm_pipewire_t *pw)
+{
+	if (!pw->activated && pw->stream != NULL) {
+		pw_stream_set_active(pw->stream, true);
+		pw->activated = true;
+	}
+	return 0;
+}
 
 static int snd_pcm_pipewire_drain(snd_pcm_ioplug_t *io)
 {
@@ -355,8 +440,10 @@ static int snd_pcm_pipewire_drain(snd_pcm_ioplug_t *io)
 	snd_pcm_pipewire_t *pw = io->private_data;
 
 	pw_thread_loop_lock(pw->main_loop);
+	pw_log_debug(NAME" %p: drain", pw);
 	pw->drained = false;
 	pw->draining = false;
+	pipewire_start(pw);
 	while (!pw->drained && pw->error >= 0 && pw->activated) {
 		pw_thread_loop_wait(pw->main_loop);
 	}
@@ -374,13 +461,12 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	struct pw_properties *props;
-	int res;
 	uint32_t min_period;
 
 	pw_thread_loop_lock(pw->main_loop);
 
 	snd_pcm_sw_params_alloca(&swparams);
-	if ((res = snd_pcm_sw_params_current(io->pcm, swparams)) == 0) {
+	if (snd_pcm_sw_params_current(io->pcm, swparams) == 0) {
 		snd_pcm_sw_params_get_avail_min(swparams, &pw->min_avail);
 		snd_pcm_sw_params_get_boundary(swparams, &pw->boundary);
 	} else {
@@ -410,6 +496,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 		goto error;
 
 	pw_properties_set(props, PW_KEY_CLIENT_API, "alsa");
+	pw_properties_setf(props, PW_KEY_APP_NAME, "%s", pw_get_prgname());
 
 	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%lu/%u", pw->min_avail, io->rate);
@@ -423,6 +510,9 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 		pw_properties_set(props, PW_KEY_MEDIA_CATEGORY,
 				io->stream == SND_PCM_STREAM_PLAYBACK ?
 				"Playback" : "Capture");
+	if (pw->role != NULL &&
+		pw_properties_get(props, PW_KEY_MEDIA_ROLE) == NULL)
+		pw_properties_setf(props, PW_KEY_MEDIA_ROLE, "%s", pw->role);
 
 	pw->stream = pw_stream_new(pw->core, pw->node_name, props);
 	if (pw->stream == NULL)
@@ -463,10 +553,8 @@ static int snd_pcm_pipewire_start(snd_pcm_ioplug_t *io)
 
 	pw_thread_loop_lock(pw->main_loop);
 	pw_log_debug(NAME" %p:", pw);
-	if (!pw->activated && pw->stream != NULL) {
-		pw_stream_set_active(pw->stream, true);
-		pw->activated = true;
-	}
+	pipewire_start(pw);
+	block_check(io); /* unblock socket for polling if needed */
 	pw_thread_loop_unlock(pw->main_loop);
 	return 0;
 }
@@ -510,30 +598,19 @@ static int snd_pcm_pipewire_pause(snd_pcm_ioplug_t * io, int enable)
 static int set_default_channels(struct spa_audio_info_raw *info)
 {
 	switch (info->channels) {
-	case 7:
-		info->position[5] = SPA_AUDIO_CHANNEL_SL;
-		info->position[6] = SPA_AUDIO_CHANNEL_SR;
-		SPA_FALLTHROUGH
-	case 5:
-		info->position[3] = SPA_AUDIO_CHANNEL_RL;
-		info->position[4] = SPA_AUDIO_CHANNEL_RR;
-		info->position[2] = SPA_AUDIO_CHANNEL_FC;
-		info->position[0] = SPA_AUDIO_CHANNEL_FL;
-		info->position[1] = SPA_AUDIO_CHANNEL_FR;
-		return 1;
 	case 8:
 		info->position[6] = SPA_AUDIO_CHANNEL_SL;
 		info->position[7] = SPA_AUDIO_CHANNEL_SR;
 		SPA_FALLTHROUGH
 	case 6:
-		info->position[4] = SPA_AUDIO_CHANNEL_RL;
-		info->position[5] = SPA_AUDIO_CHANNEL_RR;
+		info->position[5] = SPA_AUDIO_CHANNEL_LFE;
+		SPA_FALLTHROUGH
+	case 5:
+		info->position[4] = SPA_AUDIO_CHANNEL_FC;
 		SPA_FALLTHROUGH
 	case 4:
-		info->position[3] = SPA_AUDIO_CHANNEL_LFE;
-		SPA_FALLTHROUGH
-	case 3:
-		info->position[2] = SPA_AUDIO_CHANNEL_FC;
+		info->position[2] = SPA_AUDIO_CHANNEL_RL;
+		info->position[3] = SPA_AUDIO_CHANNEL_RR;
 		SPA_FALLTHROUGH
 	case 2:
 		info->position[0] = SPA_AUDIO_CHANNEL_FL;
@@ -681,9 +758,24 @@ static enum snd_pcm_chmap_position channel_to_chmap(enum spa_audio_channel chann
 	return SND_CHMAP_UNKNOWN;
 }
 
+static enum spa_audio_channel chmap_to_channel(enum snd_pcm_chmap_position pos)
+{
+	if (pos < 0 || pos >= SPA_N_ELEMENTS(chmap_info))
+		return SPA_AUDIO_CHANNEL_UNKNOWN;
+	return chmap_info[pos].channel;
+}
+
 static int snd_pcm_pipewire_set_chmap(snd_pcm_ioplug_t * io,
 				const snd_pcm_chmap_t * map)
 {
+	snd_pcm_pipewire_t *pw = io->private_data;
+	unsigned int i;
+
+	pw->format.channels = map->channels;
+	for (i = 0; i < map->channels; i++) {
+		pw->format.position[i] = chmap_to_channel(map->pos[i]);
+		pw_log_debug("map %d: %d %d", i, map->pos[i], pw->format.position[i]);
+	}
 	return 1;
 }
 
@@ -720,17 +812,16 @@ static snd_pcm_chmap_query_t **snd_pcm_pipewire_query_chmaps(snd_pcm_ioplug_t *i
 {
 	snd_pcm_chmap_query_t **maps;
 
-	maps = calloc(9, sizeof(*maps));
+	maps = calloc(7, sizeof(*maps));
 	make_map(maps,  0, 1, SND_CHMAP_MONO);
 	make_map(maps,  1, 2, SND_CHMAP_FL, SND_CHMAP_FR);
-	make_map(maps,  2, 3, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC);
-	make_map(maps,  3, 4, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC, SND_CHMAP_LFE);
-	make_map(maps,  4, 5, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC, SND_CHMAP_RL, SND_CHMAP_RR);
-	make_map(maps,  5, 6, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC, SND_CHMAP_LFE, SND_CHMAP_RL, SND_CHMAP_RR);
-	make_map(maps,  6, 7, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC,
-			SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_RL, SND_CHMAP_RR);
-	make_map(maps,  7, 8, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_FC, SND_CHMAP_LFE,
-			SND_CHMAP_SL, SND_CHMAP_SR, SND_CHMAP_RL, SND_CHMAP_RR);
+	make_map(maps,  2, 4, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_RL, SND_CHMAP_RR);
+	make_map(maps,  3, 5, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_RL, SND_CHMAP_RR,
+			SND_CHMAP_FC);
+	make_map(maps,  4, 6, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_RL, SND_CHMAP_RR,
+			SND_CHMAP_FC, SND_CHMAP_LFE);
+	make_map(maps,  5, 8, SND_CHMAP_FL, SND_CHMAP_FR, SND_CHMAP_RL, SND_CHMAP_RR,
+			SND_CHMAP_FC, SND_CHMAP_LFE, SND_CHMAP_SL, SND_CHMAP_SR);
 
 	return maps;
 }
@@ -741,8 +832,10 @@ static snd_pcm_ioplug_callback_t pipewire_pcm_callback = {
 	.stop = snd_pcm_pipewire_stop,
 	.pause = snd_pcm_pipewire_pause,
 	.pointer = snd_pcm_pipewire_pointer,
+	.delay = snd_pcm_pipewire_delay,
 	.drain = snd_pcm_pipewire_drain,
 	.prepare = snd_pcm_pipewire_prepare,
+	.poll_descriptors = snd_pcm_pipewire_poll_descriptors,
 	.poll_revents = snd_pcm_pipewire_poll_revents,
 	.hw_params = snd_pcm_pipewire_hw_params,
 	.set_chmap = snd_pcm_pipewire_set_chmap,
@@ -760,16 +853,21 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
 		SND_PCM_ACCESS_RW_NONINTERLEAVED
 	};
 	unsigned int format_list[] = {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
 		SND_PCM_FORMAT_FLOAT_LE,
-		SND_PCM_FORMAT_FLOAT_BE,
 		SND_PCM_FORMAT_S32_LE,
-		SND_PCM_FORMAT_S32_BE,
-		SND_PCM_FORMAT_S16_LE,
-		SND_PCM_FORMAT_S16_BE,
 		SND_PCM_FORMAT_S24_LE,
+		SND_PCM_FORMAT_S24_3LE,
+		SND_PCM_FORMAT_S24_3BE,
+		SND_PCM_FORMAT_S16_LE,
+#elif __BYTE_ORDER == __BIG_ENDIAN
+		SND_PCM_FORMAT_FLOAT_BE,
+		SND_PCM_FORMAT_S32_BE,
 		SND_PCM_FORMAT_S24_BE,
 		SND_PCM_FORMAT_S24_3LE,
 		SND_PCM_FORMAT_S24_3BE,
+		SND_PCM_FORMAT_S16_BE,
+#endif
 		SND_PCM_FORMAT_U8,
 	};
 	int min_rate;
@@ -806,7 +904,8 @@ static int pipewire_set_hw_constraint(snd_pcm_pipewire_t *pw, int rate,
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_RATE,
 						   min_rate, max_rate)) < 0 ||
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io, SND_PCM_IOPLUG_HW_BUFFER_BYTES,
-						   16*1024, 4*1024*1024)) < 0 ||
+						   MIN_BUFFERS*min_period_bytes,
+						   MIN_BUFFERS*max_period_bytes)) < 0 ||
 		(err = snd_pcm_ioplug_set_param_minmax(&pw->io,
 						   SND_PCM_IOPLUG_HW_PERIOD_BYTES,
 						   min_period_bytes,
@@ -863,6 +962,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 				const char *server_name,
 				const char *playback_node,
 				const char *capture_node,
+				const char *role,
 				snd_pcm_stream_t stream,
 				int mode,
 				uint32_t flags,
@@ -883,7 +983,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 		return -ENOMEM;
 
 	str = getenv("PIPEWIRE_REMOTE");
-	if (str != NULL)
+	if (str != NULL && str[0] != '\0')
 		server_name = str;
 
 	str = getenv("PIPEWIRE_NODE");
@@ -918,10 +1018,19 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 			pw->target = capture_node ? strdup(capture_node) : NULL;
 	}
 
+	pw->role = (role && *role) ? strdup(role) : NULL;
+
 	pw->main_loop = pw_thread_loop_new("alsa-pipewire", NULL);
+	if (pw->main_loop == NULL) {
+		err = -errno;
+		goto error;
+	}
 	loop = pw_thread_loop_get_loop(pw->main_loop);
 	pw->system = loop->system;
-	pw->context = pw_context_new(loop, NULL, 0);
+	if ((pw->context = pw_context_new(loop, NULL, 0)) == NULL) {
+		err = -errno;
+		goto error;
+	}
 
 	props = pw_properties_new(NULL, NULL);
 
@@ -975,8 +1084,7 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp, const char *name,
 	return 0;
 
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	snd_pcm_pipewire_free(pw);
 	return err;
 }
@@ -990,6 +1098,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 	const char *server_name = NULL;
 	const char *playback_node = NULL;
 	const char *capture_node = NULL;
+	const char *role = NULL;
 	snd_pcm_format_t format = SND_PCM_FORMAT_UNKNOWN;
 	int rate = 0;
 	int channels = 0;
@@ -1006,30 +1115,34 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 		const char *id;
 		if (snd_config_get_id(n, &id) < 0)
 			continue;
-		if (strcmp(id, "comment") == 0 || strcmp(id, "type") == 0 || strcmp(id, "hint") == 0)
+		if (spa_streq(id, "comment") || spa_streq(id, "type") || spa_streq(id, "hint"))
 			continue;
-		if (strcmp(id, "name") == 0) {
+		if (spa_streq(id, "name")) {
 			snd_config_get_string(n, &node_name);
 			continue;
 		}
-		if (strcmp(id, "server") == 0) {
+		if (spa_streq(id, "server")) {
 			snd_config_get_string(n, &server_name);
 			continue;
 		}
-		if (strcmp(id, "playback_node") == 0) {
+		if (spa_streq(id, "playback_node")) {
 			snd_config_get_string(n, &playback_node);
 			continue;
 		}
-		if (strcmp(id, "capture_node") == 0) {
+		if (spa_streq(id, "capture_node")) {
 			snd_config_get_string(n, &capture_node);
 			continue;
 		}
-		if (strcmp(id, "exclusive") == 0) {
+		if (spa_streq(id, "role")) {
+			snd_config_get_string(n, &role);
+			continue;
+		}
+		if (spa_streq(id, "exclusive")) {
 			if (snd_config_get_bool(n))
 				flags |= PW_STREAM_FLAG_EXCLUSIVE;
 			continue;
 		}
-		if (strcmp(id, "rate") == 0) {
+		if (spa_streq(id, "rate")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)
@@ -1038,7 +1151,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 				SNDERR("%s: invalid type", id);
 			continue;
 		}
-		if (strcmp(id, "format") == 0) {
+		if (spa_streq(id, "format")) {
 			const char *str;
 
 			if (snd_config_get_string(n, &str) == 0) {
@@ -1050,7 +1163,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 			}
 			continue;
 		}
-		if (strcmp(id, "channels") == 0) {
+		if (spa_streq(id, "channels")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)
@@ -1059,7 +1172,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 				SNDERR("%s: invalid type", id);
 			continue;
 		}
-		if (strcmp(id, "period_bytes") == 0) {
+		if (spa_streq(id, "period_bytes")) {
 			long val;
 
 			if (snd_config_get_integer(n, &val) == 0)
@@ -1073,7 +1186,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(pipewire)
 	}
 
 	err = snd_pcm_pipewire_open(pcmp, name, node_name, server_name, playback_node,
-			capture_node, stream, mode, flags, rate, format,
+			capture_node, role, stream, mode, flags, rate, format,
 			channels, period_bytes);
 
 	return err;

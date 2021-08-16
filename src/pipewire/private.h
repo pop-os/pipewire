@@ -36,6 +36,7 @@ extern "C" {
 
 #include <spa/support/plugin.h>
 #include <spa/pod/builder.h>
+#include <spa/param/latency-utils.h>
 #include <spa/utils/result.h>
 #include <spa/utils/type-info.h>
 
@@ -48,7 +49,11 @@ struct ucred {
 #define spa_debug(...) pw_log_trace(__VA_ARGS__)
 #endif
 
-struct defaults {
+#define CLOCK_MIN_QUANTUM			4u
+#define CLOCK_MAX_QUANTUM			8192u
+
+struct settings {
+	uint32_t log_level;
 	uint32_t clock_rate;
 	uint32_t clock_quantum;
 	uint32_t clock_min_quantum;
@@ -56,7 +61,11 @@ struct defaults {
 	struct spa_rectangle video_size;
 	struct spa_fraction video_rate;
 	uint32_t link_max_buffers;
-	unsigned int mem_allow_mlock;
+	unsigned int mem_warn_mlock:1;
+	unsigned int mem_allow_mlock:1;
+	unsigned int clock_power_of_two_quantum:1;
+	uint32_t clock_force_rate;
+	uint32_t clock_force_quantum;
 };
 
 struct ratelimit {
@@ -90,28 +99,6 @@ struct pw_param {
 	struct spa_pod *param;
 };
 
-static inline struct pw_param *pw_param_add(struct spa_list *params,
-		uint32_t id, const struct spa_pod *param)
-{
-	struct pw_param *p;
-
-	if (param == NULL || !spa_pod_is_object(param)) {
-		errno = EINVAL;
-		return NULL;
-	}
-	if (id == SPA_ID_INVALID)
-		id = SPA_POD_OBJECT_ID(param);
-
-	if ((p = malloc(sizeof(*p) + SPA_POD_SIZE(param))) == NULL)
-		return NULL;
-
-	p->id = id;
-	p->param = SPA_MEMBER(p, sizeof(*p), struct spa_pod);
-	memcpy(p->param, param, SPA_POD_SIZE(param));
-	spa_list_append(params, &p->link);
-	return p;
-}
-
 static inline uint32_t pw_param_clear(struct spa_list *param_list, uint32_t id)
 {
 	struct pw_param *p, *t;
@@ -127,16 +114,46 @@ static inline uint32_t pw_param_clear(struct spa_list *param_list, uint32_t id)
 	return count;
 }
 
+static inline struct pw_param *pw_param_add(struct spa_list *params,
+		uint32_t id, const struct spa_pod *param)
+{
+	struct pw_param *p;
+
+	if (id == SPA_ID_INVALID) {
+		if (param == NULL || !spa_pod_is_object(param)) {
+			errno = EINVAL;
+			return NULL;
+		}
+		id = SPA_POD_OBJECT_ID(param);
+	}
+
+	if ((p = malloc(sizeof(*p) + (param != NULL ? SPA_POD_SIZE(param) : 0))) == NULL)
+		return NULL;
+
+	p->id = id;
+	if (param != NULL) {
+		p->param = SPA_PTROFF(p, sizeof(*p), struct spa_pod);
+		memcpy(p->param, param, SPA_POD_SIZE(param));
+	} else {
+		pw_param_clear(params, id);
+		p->param = NULL;
+	}
+	spa_list_append(params, &p->link);
+	return p;
+}
+
 static inline void pw_param_update(struct spa_list *param_list, struct spa_list *pending_list)
 {
 	struct pw_param *p;
 
-	spa_list_for_each(p, pending_list, link)
-		pw_param_clear(param_list, p->id);
-
 	spa_list_consume(p, pending_list, link) {
 		spa_list_remove(&p->link);
-		spa_list_append(param_list, &p->link);
+		if (p->param == NULL) {
+			pw_param_clear(param_list, p->id);
+			free(p);
+		} else {
+			spa_list_append(param_list, &p->link);
+		}
 	}
 }
 
@@ -164,7 +181,7 @@ struct pw_protocol {
 	struct spa_list server_list;            /**< list of current servers */
 	struct spa_hook_list listener_list;	/**< event listeners */
 
-	const struct pw_protocol_implementaton *implementation; /**< implementation of the protocol */
+	const struct pw_protocol_implementation *implementation; /**< implementation of the protocol */
 
 	const void *extension;  /**< extension API */
 
@@ -220,6 +237,29 @@ struct pw_impl_core {
 
 	struct spa_hook_list listener_list;
 	void *user_data;			/**< extra user data */
+
+	unsigned int registered:1;
+};
+
+#define pw_impl_metadata_emit(s,m,v,...) spa_hook_list_call(&s->listener_list, struct pw_impl_metadata_events, m, v, ##__VA_ARGS__)
+
+#define pw_impl_metadata_emit_destroy(s)	pw_impl_metadata_emit(s, destroy, 0)
+#define pw_impl_metadata_emit_free(s)		pw_impl_metadata_emit(s, free, 0)
+#define pw_impl_metadata_emit_property(s, ...)	pw_impl_metadata_emit(s, property, 0, __VA_ARGS__)
+
+struct pw_impl_metadata {
+	struct pw_context *context;		/**< the context */
+	struct spa_list link;			/**< link in context metadata_list */
+	struct pw_global *global;		/**< global for this metadata */
+	struct spa_hook global_listener;
+
+	struct pw_properties *properties;	/**< properties of the metadata */
+
+	struct pw_metadata *metadata;
+	struct spa_hook metadata_listener;
+
+	struct spa_hook_list listener_list;	/**< event listeners */
+	void *user_data;
 
 	unsigned int registered:1;
 };
@@ -364,9 +404,13 @@ struct pw_context_driver_events {
 struct pw_context {
 	struct pw_impl_core *core;		/**< core object */
 
+	struct pw_properties *conf;		/**< configuration of the context */
 	struct pw_properties *properties;	/**< properties of the context */
 
-	struct defaults defaults;		/**< default parameters */
+	struct settings defaults;		/**< default parameters */
+	struct settings settings;		/**< current parameters */
+
+	void *settings_impl;		/**< settings metadata */
 
 	struct pw_mempool *pool;		/**< global memory pool */
 
@@ -382,6 +426,7 @@ struct pw_context {
 	struct spa_list client_list;		/**< list of clients */
 	struct spa_list node_list;		/**< list of nodes */
 	struct spa_list factory_list;		/**< list of factories */
+	struct spa_list metadata_list;		/**< list of metadata */
 	struct spa_list link_list;		/**< list of links */
 	struct spa_list control_list[2];	/**< list of controls, indexed by direction */
 	struct spa_list export_list;		/**< list of export types */
@@ -390,10 +435,11 @@ struct pw_context {
 	struct spa_hook_list driver_listener_list;
 	struct spa_hook_list listener_list;
 
-	struct pw_loop *main_loop;	/**< main loop for control */
-	struct pw_loop *data_loop;	/**< data loop for data passing */
-        struct pw_data_loop *data_loop_impl;
-	struct spa_system *data_system;	/**< data system for data passing */
+	struct pw_loop *main_loop;		/**< main loop for control */
+	struct pw_loop *data_loop;		/**< data loop for data passing */
+	struct pw_data_loop *data_loop_impl;
+	struct spa_system *data_system;		/**< data system for data passing */
+	struct pw_work_queue *work_queue;	/**< work queue */
 
 	struct spa_support support[16];	/**< support for spa plugins */
 	uint32_t n_support;		/**< number of support items */
@@ -404,6 +450,7 @@ struct pw_context {
 	struct pw_impl_client *current_client;	/**< client currently executing code in mainloop */
 
 	long sc_pagesize;
+	unsigned int freewheeling:1;
 
 	void *user_data;		/**< extra user data */
 };
@@ -503,6 +550,7 @@ struct pw_node_target {
 	struct pw_node_activation *activation;
 	int (*signal) (void *data);
 	void *data;
+	unsigned int active:1;
 };
 
 struct pw_node_activation {
@@ -609,7 +657,7 @@ struct pw_impl_node {
 	char *name;				/** for debug */
 
 	uint32_t priority_driver;	/** priority for being driver */
-	uint32_t group_id;		/** group to schedule this node in */
+	char group[128];		/** group to schedule this node in */
 	uint64_t spa_flags;
 
 	unsigned int registered:1;
@@ -623,6 +671,8 @@ struct pw_impl_node {
 	unsigned int visited:1;		/**< for sorting */
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */
 	unsigned int passive:1;		/**< driver graph only has passive links */
+	unsigned int freewheel:1;	/**< if this is the freewheel driver */
+	unsigned int loopchecked:1;	/**< for feedback loop checking */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 
@@ -647,6 +697,8 @@ struct pw_impl_node {
 
 	struct spa_fraction latency;		/**< requested latency */
 	uint32_t quantum_size;			/**< desired quantum */
+	struct spa_fraction max_latency;	/**< maximum latency */
+	uint32_t max_quantum_size;		/**< max supported quantum */
 	struct spa_source source;		/**< source to remotely trigger this node */
 	struct pw_memblock *activation;
 	struct {
@@ -714,6 +766,7 @@ struct pw_impl_port_implementation {
 #define pw_impl_port_emit_control_added(p,c)		pw_impl_port_emit(p, control_added, 0, c)
 #define pw_impl_port_emit_control_removed(p,c)		pw_impl_port_emit(p, control_removed, 0, c)
 #define pw_impl_port_emit_param_changed(p,i)		pw_impl_port_emit(p, param_changed, 1, i)
+#define pw_impl_port_emit_latency_changed(p)		pw_impl_port_emit(p, latency_changed, 2)
 
 #define PW_IMPL_PORT_IS_CONTROL(port)	SPA_FLAG_MASK(port->flags, \
 						PW_IMPL_PORT_FLAG_BUFFERS|PW_IMPL_PORT_FLAG_CONTROL,\
@@ -772,9 +825,14 @@ struct pw_impl_port {
 		struct spa_list mix_list;
 		struct spa_list node_link;
 	} rt;					/**< data only accessed from the data thread */
+	unsigned int added:1;
+	unsigned int destroying:1;
 
-        void *owner_data;		/**< extra owner data */
-        void *user_data;                /**< extra user data */
+	struct spa_latency_info latency[2];	/**< latencies */
+	unsigned int have_latency_param:1;
+
+	void *owner_data;		/**< extra owner data */
+	void *user_data;                /**< extra user data */
 };
 
 struct pw_control_link {
@@ -1001,7 +1059,7 @@ struct pw_filter {
 
 struct pw_impl_factory {
 	struct pw_context *context;		/**< the context */
-	struct spa_list link;		/**< link in context node_factory_list */
+	struct spa_list link;		/**< link in context factory_list */
 	struct pw_global *global;	/**< global for this factory */
 	struct spa_hook global_listener;
 
@@ -1089,10 +1147,10 @@ int pw_impl_port_release_mix(struct pw_impl_port *port, struct pw_impl_port_mix 
 
 void pw_impl_port_update_state(struct pw_impl_port *port, enum pw_impl_port_state state, int res, char *error);
 
-/** Unlink a port \memberof pw_impl_port */
+/** Unlink a port */
 void pw_impl_port_unlink(struct pw_impl_port *port);
 
-/** Destroy a port \memberof pw_impl_port */
+/** Destroy a port */
 void pw_impl_port_destroy(struct pw_impl_port *port);
 
 /** Iterate the params of the given port. The callback should return
@@ -1126,14 +1184,16 @@ int pw_impl_port_for_each_link(struct pw_impl_port *port,
 			   int (*callback) (void *data, struct pw_impl_link *link),
 			   void *data);
 
-/** Set a param on a port \memberof pw_impl_port, use SPA_ID_INVALID for mix_id to set
+/** Set a param on a port, use SPA_ID_INVALID for mix_id to set
  * the param on all mix ports */
 int pw_impl_port_set_param(struct pw_impl_port *port,
 		uint32_t id, uint32_t flags, const struct spa_pod *param);
 
-/** Use buffers on a port \memberof pw_impl_port */
+/** Use buffers on a port */
 int pw_impl_port_use_buffers(struct pw_impl_port *port, struct pw_impl_port_mix *mix, uint32_t flags,
 		struct spa_buffer **buffers, uint32_t n_buffers);
+
+int pw_impl_port_recalc_latency(struct pw_impl_port *port);
 
 /** Change the state of the node */
 int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state);
@@ -1145,13 +1205,13 @@ int pw_impl_node_update_ports(struct pw_impl_node *node);
 
 int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driver);
 
-/** Prepare a link \memberof pw_impl_link
+/** Prepare a link
   * Starts the negotiation of formats and buffers on \a link */
 int pw_impl_link_prepare(struct pw_impl_link *link);
 /** starts streaming on a link */
 int pw_impl_link_activate(struct pw_impl_link *link);
 
-/** Deactivate a link \memberof pw_impl_link */
+/** Deactivate a link */
 int pw_impl_link_deactivate(struct pw_impl_link *link);
 
 struct pw_control *
@@ -1185,6 +1245,9 @@ void pw_log_log_object(enum spa_log_level level, const char *file, int line,
 #define pw_log_format(lev,pod) pw_log_object(lev,PW_LOG_OBJECT_POD,pod)
 
 bool pw_log_is_default(void);
+
+int pw_settings_init(struct pw_context *context);
+void pw_settings_clean(struct pw_context *context);
 
 /** \endcond */
 

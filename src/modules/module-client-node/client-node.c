@@ -386,8 +386,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 		memid = SPA_ID_INVALID;
 		mem_offset = mem_size = 0;
 	}
-	if (old != NULL)
-		pw_memmap_free(old);
+	pw_memmap_free(old);
 
 	if (this->resource == NULL)
 		return data == NULL ? 0 : -EIO;
@@ -497,8 +496,7 @@ do_update_port(struct node *this,
 	}
 
 	if (change_mask & PW_CLIENT_NODE_PORT_UPDATE_INFO) {
-		if (port->properties)
-			pw_properties_free(port->properties);
+		pw_properties_free(port->properties);
 		port->properties = NULL;
 		port->info.props = NULL;
 		port->info.n_params = 0;
@@ -707,8 +705,7 @@ static int do_port_set_io(struct impl *impl,
 		memid = SPA_ID_INVALID;
 		mem_offset = mem_size = 0;
 	}
-	if (old != NULL)
-		pw_memmap_free(old);
+	pw_memmap_free(old);
 
 	if (this->resource == NULL)
 		return data == NULL ? 0 : -EIO;
@@ -798,14 +795,14 @@ do_port_use_buffers(struct impl *impl,
 		if ((mem = pw_mempool_find_ptr(impl->context->pool, baseptr)) == NULL)
 			return -EINVAL;
 
-		endptr = SPA_MEMBER(baseptr, buffers[i]->n_datas * sizeof(struct spa_chunk), void);
+		endptr = SPA_PTROFF(baseptr, buffers[i]->n_datas * sizeof(struct spa_chunk), void);
 		for (j = 0; j < buffers[i]->n_metas; j++) {
-			endptr = SPA_MEMBER(endptr, SPA_ROUND_UP_N(buffers[i]->metas[j].size, 8), void);
+			endptr = SPA_PTROFF(endptr, SPA_ROUND_UP_N(buffers[i]->metas[j].size, 8), void);
 		}
 		for (j = 0; j < buffers[i]->n_datas; j++) {
 			struct spa_data *d = buffers[i]->datas;
 			if (d->type == SPA_DATA_MemPtr)
-				endptr = SPA_MEMBER(d->data, d->maxsize, void);
+				endptr = SPA_PTROFF(d->data, d->maxsize, void);
 		}
 
 		m = pw_mempool_import_block(this->client->pool, mem);
@@ -1101,7 +1098,7 @@ static int client_node_port_buffers(void *data,
 	return 0;
 }
 
-static struct pw_client_node_methods client_node_methods = {
+static const struct pw_client_node_methods client_node_methods = {
 	PW_VERSION_CLIENT_NODE_METHODS,
 	.get_node = client_node_get_node,
 	.update = client_node_update,
@@ -1375,7 +1372,7 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 	if (mix->id == SPA_ID_INVALID)
 		return -errno;
 
-	mix->io = SPA_MEMBER(impl->io_areas->map->ptr,
+	mix->io = SPA_PTROFF(impl->io_areas->map->ptr,
 			mix->id * sizeof(struct spa_io_buffers), void);
 	*mix->io = SPA_IO_BUFFERS_INIT;
 
@@ -1764,8 +1761,7 @@ error_exit_free:
 error_exit_cleanup:
 	if (resource)
 		pw_resource_destroy(resource);
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }

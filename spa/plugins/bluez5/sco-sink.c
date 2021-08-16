@@ -35,6 +35,7 @@
 #include <spa/utils/list.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/monitor/device.h>
 
 #include <spa/node/node.h>
@@ -42,6 +43,7 @@
 #include <spa/node/io.h>
 #include <spa/node/keys.h>
 #include <spa/param/param.h>
+#include <spa/param/latency-utils.h>
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/filter.h>
@@ -74,7 +76,15 @@ struct port {
 	struct spa_port_info info;
 	struct spa_io_buffers *io;
 	struct spa_io_rate_match *rate_match;
-	struct spa_param_info params[8];
+	struct spa_latency_info latency;
+#define IDX_EnumFormat	0
+#define IDX_Meta	1
+#define IDX_IO		2
+#define IDX_Format	3
+#define IDX_Buffers	4
+#define IDX_Latency	5
+#define N_PORT_PARAMS	6
+	struct spa_param_info params[N_PORT_PARAMS];
 
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers;
@@ -104,7 +114,10 @@ struct impl {
 	/* Info */
 	uint64_t info_all;
 	struct spa_node_info info;
-	struct spa_param_info params[8];
+#define IDX_PropInfo	0
+#define IDX_Props	1
+#define N_NODE_PARAMS	2
+	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
 
 	/* Transport */
@@ -279,6 +292,27 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	return 0;
 }
 
+static void emit_node_info(struct impl *this, bool full);
+
+static int apply_props(struct impl *this, const struct spa_pod *param)
+{
+	struct props new_props = this->props;
+	int changed = 0;
+
+	if (param == NULL) {
+		reset_props(&new_props);
+	} else {
+		spa_pod_parse_object(param,
+				SPA_TYPE_OBJECT_Props, NULL,
+				SPA_PROP_minLatency, SPA_POD_OPT_Int(&new_props.min_latency),
+				SPA_PROP_maxLatency, SPA_POD_OPT_Int(&new_props.max_latency));
+	}
+
+	changed = (memcmp(&new_props, &this->props, sizeof(struct props)) != 0);
+	this->props = new_props;
+	return changed;
+}
+
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			       const struct spa_pod *param)
 {
@@ -289,16 +323,11 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	switch (id) {
 	case SPA_PARAM_Props:
 	{
-		struct props *p = &this->props;
-
-		if (param == NULL) {
-			reset_props(p);
-			return 0;
+		if (apply_props(this, param) > 0) {
+			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			this->params[IDX_Props].flags ^= SPA_PARAM_INFO_SERIAL;
+			emit_node_info(this, false);
 		}
-		spa_pod_parse_object(param,
-			SPA_TYPE_OBJECT_Props, NULL,
-			SPA_PROP_minLatency, SPA_POD_OPT_Int(&p->min_latency),
-			SPA_PROP_maxLatency, SPA_POD_OPT_Int(&p->max_latency));
 		break;
 	}
 	default:
@@ -316,7 +345,7 @@ static void flush_data(struct impl *this)
 	uint32_t min_in_size;
 	uint8_t *packet;
 
-	if (this->transport == NULL)
+	if (this->transport == NULL || this->transport->sco_io == NULL)
 		return;
 
 	/* get buffer */
@@ -441,12 +470,6 @@ static void flush_data(struct impl *this)
 
 		next_timeout = get_next_timeout(this, now_time, processed / port->frame_size);
 
-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
-			uint64_t min_delay = (this->transport->write_mtu / port->frame_size
-					      * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
-			next_timeout = SPA_MAX(next_timeout, min_delay);
-		}
-
 		if (this->clock) {
 			this->clock->nsec = now_time;
 			this->clock->position = this->total_samples;
@@ -477,13 +500,6 @@ static void sco_on_timeout(struct spa_source *source)
 	/* Read the timerfd */
 	if (this->started && spa_system_timerfd_read(this->data_system, this->timerfd, &exp) < 0)
 		spa_log_warn(this->log, "error reading timerfd: %s", strerror(errno));
-
-	/* Reset if start time is 0 */
-	if (this->start_time == 0) {
-		this->total_samples = 0;
-		port->ready_offset = 0;
-		port->write_buffer_size = 0;
-	}
 
 	/* delay if no buffers available */
 	if (spa_list_is_empty(&port->ready)) {
@@ -516,7 +532,7 @@ static int do_start(struct impl *this)
 	bool do_accept;
 	int res;
 
-	/* Dont do anything if the node has already started */
+	/* Don't do anything if the node has already started */
 	if (this->started)
 		return 0;
 
@@ -526,14 +542,14 @@ static int do_start(struct impl *this)
 	/* Do accept if Gateway; otherwise do connect for Head Unit */
 	do_accept = this->transport->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY;
 
-	/* acquire the socked fd (false -> connect | true -> accept) */
+	/* acquire the socket fd (false -> connect | true -> accept) */
 	if ((res = spa_bt_transport_acquire(this->transport, do_accept)) < 0)
 		return res;
 
 	/* Init mSBC if needed */
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
 		sbc_init_msbc(&this->msbc, 0);
-		/* Libsbc expects audio samples by default in host endianity, mSBC requires little endian */
+		/* Libsbc expects audio samples by default in host endianness, mSBC requires little endian */
 		this->msbc.endian = SBC_LE;
 
 		/* write_mtu might not be correct at this point, so we'll throw
@@ -550,7 +566,8 @@ static int do_start(struct impl *this)
 	spa_return_val_if_fail(this->transport->write_mtu <= sizeof(this->port.write_buffer), -EINVAL);
 
 	/* start socket i/o */
-	spa_bt_transport_ensure_sco_io(this->transport, this->data_loop);
+	if ((res = spa_bt_transport_ensure_sco_io(this->transport, this->data_loop)) < 0)
+		goto fail;
 
 	/* Add the timeout callback */
 	this->source.data = this;
@@ -567,6 +584,12 @@ static int do_start(struct impl *this)
 	this->started = true;
 
 	return 0;
+
+fail:
+	free(this->buffer);
+	this->buffer = NULL;
+	spa_bt_transport_release(this->transport);
+	return res;
 }
 
 /* Drop any buffered data remaining in the port */
@@ -576,6 +599,7 @@ static void drop_port_output(struct impl *this)
 
 	port->write_buffer_size = 0;
 	port->current_buffer = NULL;
+	port->ready_offset = 0;
 
 	while (!spa_list_is_empty(&port->ready)) {
 		struct buffer *b;
@@ -598,6 +622,7 @@ static int do_remove_source(struct spa_loop *loop,
 	struct impl *this = user_data;
 
 	this->start_time = 0;
+	this->total_samples = 0;
 	set_timeout(this, 0);
 	if (this->source.loop)
 		spa_loop_remove_source(this->data_loop, &this->source);
@@ -666,31 +691,43 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	return 0;
 }
 
-static const struct spa_dict_item node_info_items[] = {
-	{ SPA_KEY_DEVICE_API, "bluez5" },
-	{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
-	{ SPA_KEY_NODE_DRIVER, "true" },
-};
-
 static void emit_node_info(struct impl *this, bool full)
 {
+	static const struct spa_dict_item hu_node_info_items[] = {
+		{ SPA_KEY_DEVICE_API, "bluez5" },
+		{ SPA_KEY_MEDIA_CLASS, "Audio/Sink" },
+		{ SPA_KEY_NODE_DRIVER, "true" },
+	};
+
+	const struct spa_dict_item ag_node_info_items[] = {
+		{ SPA_KEY_DEVICE_API, "bluez5" },
+		{ SPA_KEY_MEDIA_CLASS, "Stream/Input/Audio" },
+		{ "media.name", ((this->transport && this->transport->device->name) ?
+		                 this->transport->device->name : "HSP/HFP") },
+	};
+	bool is_ag = (this->transport->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY);
+	uint64_t old = full ? this->info.change_mask : 0;
+
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
-		this->info.props = &SPA_DICT_INIT_ARRAY(node_info_items);
+		this->info.props = is_ag ?
+			&SPA_DICT_INIT_ARRAY(ag_node_info_items) :
+			&SPA_DICT_INIT_ARRAY(hu_node_info_items);
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_INPUT, 0, &port->info);
-		port->info.change_mask = 0;
+		port->info.change_mask = old;
 	}
 }
 
@@ -863,6 +900,16 @@ impl_node_port_enum_params(void *object, int seq,
 		}
 		break;
 
+	case SPA_PARAM_Latency:
+		switch (result.index) {
+		case 0:
+			param = spa_latency_build(&b, id, &port->latency);
+			break;
+		default:
+			return 0;
+		}
+		break;
+
 	default:
 		return -ENOENT;
 	}
@@ -922,11 +969,12 @@ static int port_set_format(struct impl *this, struct port *port,
 		port->info.flags = SPA_PORT_FLAG_LIVE;
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_RATE;
 		port->info.rate = SPA_FRACTION(1, port->current_format.info.raw.rate);
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
+		port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 	} else {
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+		port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	}
 	emit_port_info(this, port, false);
 
@@ -950,6 +998,9 @@ impl_node_port_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Format:
 		res = port_set_format(this, port, flags, param);
+		break;
+	case SPA_PARAM_Latency:
+		res = 0;
 		break;
 	default:
 		res = -ENOENT;
@@ -1118,7 +1169,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -1189,23 +1240,29 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info.max_input_ports = 1;
 	this->info.max_output_ports = 0;
 	this->info.flags = SPA_NODE_FLAG_RT;
-	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
-	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
+	this->params[IDX_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
-	this->info.n_params = 2;
+	this->info.n_params = N_NODE_PARAMS;
 
 	port = &this->port;
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
 			SPA_PORT_CHANGE_MASK_PARAMS;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = 0;
-	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
-	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
-	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
-	port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	port->params[IDX_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	port->params[IDX_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
+	port->params[IDX_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	port->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	port->params[IDX_Latency] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_READWRITE);
 	port->info.params = port->params;
-	port->info.n_params = 5;
+	port->info.n_params = N_PORT_PARAMS;
+
+	port->latency = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	port->latency.min_quantum = 1.0f;
+	port->latency.max_quantum = 1.0f;
+
 	spa_list_init(&port->ready);
 
 	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
@@ -1255,7 +1312,7 @@ static const struct spa_dict_item info_items[] = {
 
 static const struct spa_dict info = SPA_DICT_INIT_ARRAY(info_items);
 
-struct spa_handle_factory spa_sco_sink_factory = {
+const struct spa_handle_factory spa_sco_sink_factory = {
 	SPA_VERSION_HANDLE_FACTORY,
 	SPA_NAME_API_BLUEZ5_SCO_SINK,
 	&info,

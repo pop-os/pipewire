@@ -1,48 +1,53 @@
-if get_option('alsa')
+if alsa_dep.found()
   subdir('alsa')
 endif
-if get_option('audioconvert')
+if not get_option('audioconvert').disabled()
   subdir('audioconvert')
 endif
-if get_option('audiomixer')
+if not get_option('audiomixer').disabled()
   subdir('audiomixer')
 endif
-if get_option('control')
+if not get_option('control').disabled()
   subdir('control')
 endif
-if get_option('audiotestsrc')
+if not get_option('audiotestsrc').disabled()
   subdir('audiotestsrc')
 endif
-if get_option('bluez5')
+if bluez_dep.found()
   subdir('bluez5')
 endif
-if get_option('ffmpeg')
+if avcodec_dep.found()
   subdir('ffmpeg')
 endif
-if get_option('jack')
+if jack_dep.found()
   subdir('jack')
 endif
-if get_option('support')
+if not get_option('support').disabled()
   subdir('support')
 endif
-if get_option('test')
+if not get_option('test').disabled()
   subdir('test')
 endif
-if get_option('videoconvert')
+if not get_option('videoconvert').disabled()
   subdir('videoconvert')
 endif
-if get_option('videotestsrc')
+if not get_option('videotestsrc').disabled()
   subdir('videotestsrc')
 endif
-if get_option('volume')
+if not get_option('volume').disabled()
   subdir('volume')
 endif
-if get_option('vulkan')
+if vulkan_headers
   subdir('vulkan')
 endif
-if get_option('v4l2')
+
+v4l2_header_found = cc.has_header('linux/videodev2.h', required: get_option('v4l2'))
+v4l2_supported = libudev_dep.found() and v4l2_header_found
+summary({'V4L2 kernel header': v4l2_header_found}, bool_yn: true, section: 'Backend')
+summary({'V4L2 enabled': v4l2_supported}, bool_yn: true, section: 'Backend')
+if v4l2_supported
   subdir('v4l2')
 endif
-if get_option('libcamera')
+if libcamera_dep.found()
   subdir('libcamera')
 endif

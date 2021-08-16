@@ -29,10 +29,12 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <ctype.h>
 #if HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -42,13 +44,14 @@
 
 #include <spa/pod/iter.h>
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 
 #ifdef HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
 #endif
 
 #include <pipewire/impl.h>
-#include <extensions/protocol-native.h>
+#include <pipewire/extensions/protocol-native.h>
 
 #include "pipewire/private.h"
 
@@ -60,6 +63,9 @@
 
 #include <spa/debug/pod.h>
 #include <spa/debug/types.h>
+
+/** \page page_module_protocol_native PipeWire Module: Protocol Native
+ */
 
 #define NAME "protocol-native"
 
@@ -105,6 +111,7 @@ struct client {
 
 	int ref;
 
+	unsigned int connected:1;
 	unsigned int disconnecting:1;
 	unsigned int need_flush:1;
 	unsigned int paused:1;
@@ -230,7 +237,10 @@ process_messages(struct client_data *data)
 			continue;
 		}
 
-		if ((res = demarshal[msg->opcode].func(resource, msg)) < 0)
+		pw_protocol_native_connection_enter(conn);
+		res = demarshal[msg->opcode].func(resource, msg);
+		pw_protocol_native_connection_leave(conn);
+		if (res < 0)
 			goto invalid_message;
 	}
 	res = 0;
@@ -387,6 +397,17 @@ static const struct pw_protocol_native_connection_events server_conn_events = {
 	.need_flush = on_server_need_flush,
 };
 
+static bool check_print(const uint8_t *buffer, int len)
+{
+	int i;
+	while (len > 1 && buffer[len-1] == 0)
+		len--;
+	for (i = 0; i < len; i++)
+		if (!isprint(buffer[i]))
+			return false;
+	return true;
+}
+
 static struct client_data *client_new(struct server *s, int fd)
 {
 	struct client_data *this;
@@ -399,9 +420,9 @@ static struct client_data *client_new(struct server *s, int fd)
 #endif
 	struct pw_context *context = protocol->context;
 	struct pw_properties *props;
-	char buffer[1024];
+	uint8_t buffer[1024];
 	struct protocol_data *d = pw_protocol_get_user_data(protocol);
-	int res;
+	int i, res;
 
 	props = pw_properties_new(PW_KEY_PROTOCOL, "protocol-native", NULL);
 	if (props == NULL)
@@ -424,9 +445,22 @@ static struct client_data *client_new(struct server *s, int fd)
 		else
 			pw_log_warn("server %p: security label error: %m", s);
 	} else {
-		/* buffer is not null terminated, must use length explicitly */
-		pw_properties_setf(props, PW_KEY_SEC_LABEL, "%.*s",
-				(int)len, buffer);
+		if (!check_print(buffer, len)) {
+			char *hex, *p;
+			static const char *ch = "0123456789abcdef";
+
+			p = hex = alloca(len * 2 + 10);
+			p += snprintf(p, 5, "hex:");
+			for(i = 0; i < (int)len; i++)
+				p += snprintf(p, 3, "%c%c",
+						ch[buffer[i] >> 4], ch[buffer[i] & 0xf]);
+			pw_properties_set(props, PW_KEY_SEC_LABEL, hex);
+
+		} else {
+			/* buffer is not null terminated, must use length explicitly */
+			pw_properties_setf(props, PW_KEY_SEC_LABEL, "%.*s",
+					(int)len, buffer);
+		}
 	}
 #elif defined(__FreeBSD__)
 	len = sizeof(xucred);
@@ -759,7 +793,9 @@ process_remote(struct client *impl)
 			continue;
 		}
 		proxy->refcount++;
+		pw_protocol_native_connection_enter(conn);
 		res = demarshal[msg->opcode].func(proxy, msg);
+		pw_protocol_native_connection_leave(conn);
 		pw_proxy_unref(proxy);
 
 		if (res < 0) {
@@ -796,6 +832,21 @@ on_remote_data(void *data, int fd, uint32_t mask)
 			goto error;
 	}
 	if (mask & SPA_IO_OUT || impl->need_flush) {
+		if (!impl->connected) {
+			socklen_t len = sizeof res;
+
+			if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &res, &len) < 0) {
+				res = -errno;
+				pw_log_error(NAME" getsockopt: %m");
+				goto error;
+			}
+			if (res != 0) {
+				res = -res;
+				goto error;
+			}
+			impl->connected = true;
+			pw_log_debug(NAME" %p: connected, fd %d", impl, fd);
+		}
 		impl->need_flush = false;
 		res = pw_protocol_native_connection_flush(conn);
 		if (res >= 0) {
@@ -851,6 +902,7 @@ static int impl_connect_fd(struct pw_protocol_client *client, int fd, bool do_cl
 	struct client *impl = SPA_CONTAINER_OF(client, struct client, this);
 	int res;
 
+	impl->connected = false;
 	impl->disconnecting = false;
 
 	pw_protocol_native_connection_set_fd(impl->connection, fd);
@@ -995,7 +1047,7 @@ impl_new_client(struct pw_protocol *protocol,
 		str = spa_dict_lookup(props, PW_KEY_REMOTE_INTENTION);
 		if (str == NULL &&
 		   (str = spa_dict_lookup(props, PW_KEY_REMOTE_NAME)) != NULL &&
-		    strcmp(str, "internal") == 0)
+		    spa_streq(str, "internal"))
 			str = "internal";
 	}
 	if (str == NULL)
@@ -1003,9 +1055,9 @@ impl_new_client(struct pw_protocol *protocol,
 
 	pw_log_debug(NAME" %p: connect %s", protocol, str);
 
-	if (!strcmp(str, "screencast"))
+	if (spa_streq(str, "screencast"))
 		this->connect = pw_protocol_native_connect_portal_screencast;
-	else if (!strcmp(str, "internal"))
+	else if (spa_streq(str, "internal"))
 		this->connect = pw_protocol_native_connect_internal;
 	else
 		this->connect = pw_protocol_native_connect_local_socket;
@@ -1148,7 +1200,7 @@ error:
 	return NULL;
 }
 
-static const struct pw_protocol_implementaton protocol_impl = {
+static const struct pw_protocol_implementation protocol_impl = {
 	PW_VERSION_PROTOCOL_IMPLEMENTATION,
 	.new_client = impl_new_client,
 	.add_server = impl_add_server,

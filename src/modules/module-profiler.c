@@ -39,10 +39,14 @@
 
 #include <pipewire/private.h>
 #include <pipewire/impl.h>
-#include <extensions/profiler.h>
+#include <pipewire/extensions/profiler.h>
+
+/** \page page_module_profiler PipeWire Module: Profiler
+ */
 
 #define NAME "profiler"
 
+#define TMP_BUFFER		(16 * 1024)
 #define MAX_BUFFER		(8 * 1024 * 1024)
 #define MIN_FLUSH		(16 * 1024)
 #define DEFAULT_IDLE		5
@@ -79,7 +83,10 @@ struct impl {
 	unsigned int listening:1;
 
 	struct spa_ringbuffer buffer;
+	uint8_t tmp[TMP_BUFFER];
 	uint8_t data[MAX_BUFFER];
+
+	uint8_t flush[MAX_BUFFER + sizeof(struct spa_pod_struct)];
 };
 
 struct resource_data {
@@ -121,7 +128,7 @@ static void stop_flush(struct impl *impl)
 static void flush_timeout(void *data, uint64_t expirations)
 {
 	struct impl *impl = data;
-	int32_t avail, size;
+	int32_t avail;
 	uint32_t idx;
 	struct spa_pod_struct *p;
 	struct pw_resource *resource;
@@ -137,13 +144,12 @@ static void flush_timeout(void *data, uint64_t expirations)
 	}
 	impl->empty = 0;
 
-	size = avail + sizeof(struct spa_pod_struct);
-	p = alloca(size);
+	p = (struct spa_pod_struct *)impl->flush;
 	*p = SPA_POD_INIT_Struct(avail);
 
 	spa_ringbuffer_read_data(&impl->buffer, impl->data, MAX_BUFFER,
 			idx % MAX_BUFFER,
-			SPA_MEMBER(p, sizeof(struct spa_pod_struct), void), avail);
+			SPA_PTROFF(p, sizeof(struct spa_pod_struct), void), avail);
 	spa_ringbuffer_read_update(&impl->buffer, idx + avail);
 
 	spa_list_for_each(resource, &impl->global->resource_list, link)
@@ -153,7 +159,6 @@ static void flush_timeout(void *data, uint64_t expirations)
 static void context_do_profile(void *data, struct pw_impl_node *node)
 {
 	struct impl *impl = data;
-	char buffer[4096];
 	struct spa_pod_builder b;
 	struct spa_pod_frame f[2];
 	struct pw_node_activation *a = node->rt.activation;
@@ -162,7 +167,10 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 	int32_t filled;
 	uint32_t idx, avail;
 
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	if (SPA_FLAG_IS_SET(pos->clock.flags, SPA_IO_CLOCK_FLAG_FREEWHEEL))
+		return;
+
+	spa_pod_builder_init(&b, impl->tmp, sizeof(impl->tmp));
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Profiler, 0);
 
@@ -186,6 +194,7 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 			SPA_POD_Long(pos->clock.delay),
 			SPA_POD_Double(pos->clock.rate_diff),
 			SPA_POD_Long(pos->clock.next_nsec));
+
 
 	spa_pod_builder_prop(&b, SPA_PROFILER_driverBlock, 0);
 	spa_pod_builder_add_struct(&b,
@@ -218,6 +227,9 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 			SPA_POD_Fraction(&n->latency));
 	}
 	spa_pod_builder_pop(&b, &f[0]);
+
+	if (b.state.offset > sizeof(impl->tmp))
+		goto done;
 
 	filled = spa_ringbuffer_get_write_index(&impl->buffer, &idx);
 	if (filled < 0 || filled > MAX_BUFFER) {
@@ -327,8 +339,7 @@ static void module_destroy(void *data)
 
 	spa_hook_remove(&impl->module_listener);
 
-	if (impl->properties)
-		pw_properties_free(impl->properties);
+	pw_properties_free(impl->properties);
 
 	free(impl);
 }

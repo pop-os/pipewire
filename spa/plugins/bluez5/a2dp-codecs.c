@@ -10,6 +10,74 @@
 
 #include "a2dp-codecs.h"
 
+int a2dp_codec_select_config(const struct a2dp_codec_config configs[], size_t n,
+			     uint32_t cap, int preferred_value)
+{
+	size_t i;
+	int *scores, res;
+	unsigned int max_priority;
+
+	if (n == 0)
+		return -EINVAL;
+
+	scores = calloc(n, sizeof(int));
+	if (scores == NULL)
+		return -errno;
+
+	max_priority = configs[0].priority;
+	for (i = 1; i < n; ++i) {
+		if (configs[i].priority > max_priority)
+			max_priority = configs[i].priority;
+	}
+
+	for (i = 0; i < n; ++i) {
+		if (!(configs[i].config & cap)) {
+			scores[i] = -1;
+			continue;
+		}
+		if (configs[i].value == preferred_value)
+			scores[i] = 100 * (max_priority + 1);
+		else if (configs[i].value > preferred_value)
+			scores[i] = 10 * (max_priority + 1);
+		else
+			scores[i] = 1;
+
+		scores[i] *= configs[i].priority + 1;
+	}
+
+	res = 0;
+	for (i = 1; i < n; ++i) {
+		if (scores[i] > scores[res])
+			res = i;
+	}
+
+	if (scores[res] < 0)
+		res = -EINVAL;
+
+	free(scores);
+	return res;
+}
+
+bool a2dp_codec_check_caps(const struct a2dp_codec *codec, unsigned int codec_id,
+			   const void *caps, size_t caps_size,
+			   const struct a2dp_codec_audio_info *info)
+{
+	uint8_t config[A2DP_MAX_CAPS_SIZE];
+	int res;
+
+	if (codec_id != codec->codec_id)
+		return false;
+
+	if (caps == NULL)
+		return false;
+
+	res = codec->select_config(codec, 0, caps, caps_size, info, NULL, config);
+	if (res < 0)
+		return false;
+
+	return ((size_t)res == caps_size);
+}
+
 #if ENABLE_MP3
 const a2dp_mpeg_t bluez_a2dp_mpeg = {
 	.layer =
@@ -51,6 +119,7 @@ const a2dp_mpeg_t bluez_a2dp_mpeg = {
 #endif
 
 extern struct a2dp_codec a2dp_codec_sbc;
+extern struct a2dp_codec a2dp_codec_sbc_xq;
 #if ENABLE_LDAC
 extern struct a2dp_codec a2dp_codec_ldac;
 #endif
@@ -65,7 +134,7 @@ extern struct a2dp_codec a2dp_codec_aptx;
 extern struct a2dp_codec a2dp_codec_aptx_hd;
 #endif
 
-const struct a2dp_codec *a2dp_codec_list[] = {
+static const struct a2dp_codec * const a2dp_codec_list[] = {
 #if ENABLE_LDAC
 	&a2dp_codec_ldac,
 #endif
@@ -79,7 +148,9 @@ const struct a2dp_codec *a2dp_codec_list[] = {
 #if ENABLE_MP3
 	&a2dp_codec_mpeg,
 #endif
+	&a2dp_codec_sbc_xq,
 	&a2dp_codec_sbc,
-	NULL,
+	NULL
 };
-const struct a2dp_codec **a2dp_codecs = a2dp_codec_list;
+
+const struct a2dp_codec * const * const a2dp_codecs = a2dp_codec_list;

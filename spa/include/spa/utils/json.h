@@ -37,6 +37,14 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 
+/** \defgroup spa_json SPA JSON Parser
+ */
+
+/**
+ * \addtogroup spa_json
+ * \{
+ */
+
 /* a simple JSON compatible tokenizer */
 struct spa_json {
 	const char *cur;
@@ -66,6 +74,7 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 	int utf8_remain = 0;
 	enum { __NONE, __STRUCT, __BARE, __STRING, __UTF8, __ESC, __COMMENT };
 
+	*value = iter->cur;
 	for (; iter->cur < iter->end; iter->cur++) {
 		unsigned char cur = (unsigned char)*iter->cur;
  again:
@@ -76,7 +85,7 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 			goto again;
 		case __STRUCT:
 			switch (cur) {
-			case '\t': case ' ': case '\r': case '\n': case ':': case '=': case ',':
+			case '\0': case '\t': case ' ': case '\r': case '\n': case ':': case '=': case ',':
 				continue;
 			case '#':
 				iter->state = __COMMENT;
@@ -123,8 +132,7 @@ static inline int spa_json_next(struct spa_json * iter, const char **value)
 				iter->state = __STRUCT;
 				if (iter->depth > 0)
 					continue;
-				iter->cur++;
-				return iter->cur - *value;
+				return ++iter->cur - *value;
 			case 240 ... 247:
 				utf8_remain++;
 				SPA_FALLTHROUGH;
@@ -243,6 +251,27 @@ static inline int spa_json_get_float(struct spa_json *iter, float *res)
 	return spa_json_parse_float(value, len, res);
 }
 
+/* int */
+static inline int spa_json_parse_int(const char *val, int len, int *result)
+{
+	char *end;
+	*result = strtol(val, &end, 0);
+	return end == val + len;
+}
+static inline bool spa_json_is_int(const char *val, int len)
+{
+	int dummy;
+	return spa_json_parse_int(val, len, &dummy);
+}
+static inline int spa_json_get_int(struct spa_json *iter, int *res)
+{
+	const char *value;
+	int len;
+	if ((len = spa_json_next(iter, &value)) <= 0)
+		return -1;
+	return spa_json_parse_int(value, len, res);
+}
+
 /* bool */
 static inline bool spa_json_is_true(const char *val, int len)
 {
@@ -286,31 +315,43 @@ static inline int spa_json_parse_string(const char *val, int len, char *result)
 {
 	const char *p;
 	if (!spa_json_is_string(val, len)) {
-		strncpy(result, val, len);
-		result[len] = '\0';
-		return 1;
-	}
-	for (p = val+1; p < val + len; p++) {
-		if (*p == '\\') {
-			p++;
-			if (*p == 'n')
-				*result++ = '\n';
-			else if (*p == 'r')
-				*result++ = '\r';
-			else if (*p == 'b')
-				*result++ = '\b';
-			else if (*p == 't')
-				*result++ = '\t';
-			else if (*p == 'f')
-				*result++ = '\f';
-			else
+		if (result != val)
+			strncpy(result, val, len);
+		result += len;
+	} else {
+		for (p = val+1; p < val + len; p++) {
+			if (*p == '\\') {
+				p++;
+				if (*p == 'n')
+					*result++ = '\n';
+				else if (*p == 'r')
+					*result++ = '\r';
+				else if (*p == 'b')
+					*result++ = '\b';
+				else if (*p == 't')
+					*result++ = '\t';
+				else if (*p == 'f')
+					*result++ = '\f';
+				else if (*p == 'u') {
+					char *end;
+					uint16_t v = strtol(p+1, &end, 16);
+					if (p+1 == end) {
+						*result++ = *p;
+					} else {
+						p = end-1;
+						if (v > 0xff)
+							*result++ = (v >> 8) & 0xff;
+						*result++ = v & 0xff;
+					}
+				} else
+					*result++ = *p;
+			} else if (*p == '\"') {
+				break;
+			} else
 				*result++ = *p;
-		} else if (*p == '\"') {
-			break;
-		} else
-			*result++ = *p;
+		}
 	}
-	*result++ = '\0';
+	*result = '\0';
 	return 1;
 }
 
@@ -318,7 +359,7 @@ static inline int spa_json_get_string(struct spa_json *iter, char *res, int maxl
 {
 	const char *value;
 	int len;
-	if ((len = spa_json_next(iter, &value)) <= 0 || maxlen < len)
+	if ((len = spa_json_next(iter, &value)) <= 0 || maxlen <= len)
 		return -1;
 	return spa_json_parse_string(value, len, res);
 }
@@ -326,6 +367,7 @@ static inline int spa_json_get_string(struct spa_json *iter, char *res, int maxl
 static inline int spa_json_encode_string(char *str, int size, const char *val)
 {
 	int len = 0;
+	static const char hex[] = { "0123456789abcdef" };
 #define __PUT(c) { if (len < size) *str++ = c; len++; }
 	__PUT('"');
 	while (*val) {
@@ -345,8 +387,18 @@ static inline int spa_json_encode_string(char *str, int size, const char *val)
 		case '\f':
 			__PUT('\\'); __PUT('f');
 			break;
+		case '\\':
+		case '"':
+			__PUT('\\'); __PUT(*val);
+			break;
 		default:
-			__PUT(*val);
+			if (*val > 0 && *val < 0x20) {
+				__PUT('\\'); __PUT('u');
+				__PUT('0'); __PUT('0');
+				__PUT(hex[((*val)>>4)&0xf]); __PUT(hex[(*val)&0xf]);
+			} else {
+				__PUT(*val);
+			}
 			break;
 		}
 		val++;
@@ -356,6 +408,10 @@ static inline int spa_json_encode_string(char *str, int size, const char *val)
 #undef __PUT
 	return len-1;
 }
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -180,7 +180,6 @@ struct pa_alsa_jack {
 
     struct pa_alsa_mixer_id alsa_id;
     char *name; /* E g "Headphone" */
-    char *alsa_name; /* E g "Headphone Jack" */
     bool has_control; /* is the jack itself present? */
     bool plugged_in; /* is this jack currently plugged in? */
     snd_mixer_elem_t *melem; /* Jack detection handle */
@@ -422,6 +421,8 @@ void pa_alsa_mapping_dump(pa_alsa_mapping *m);
 void pa_alsa_profile_dump(pa_alsa_profile *p);
 void pa_alsa_decibel_fix_dump(pa_alsa_decibel_fix *db_fix);
 pa_alsa_mapping *pa_alsa_mapping_get(pa_alsa_profile_set *ps, const char *name);
+void pa_alsa_mapping_free (pa_alsa_mapping *m);
+void pa_alsa_profile_free (pa_alsa_profile *p);
 
 pa_alsa_profile_set* pa_alsa_profile_set_new(const char *fname, const pa_channel_map *bonus);
 void pa_alsa_profile_set_probe(pa_alsa_profile_set *ps, pa_hashmap *mixers, const char *dev_id, const pa_sample_spec *ss, unsigned default_n_fragments, unsigned default_fragment_size_msec);

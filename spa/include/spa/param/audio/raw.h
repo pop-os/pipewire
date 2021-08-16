@@ -35,6 +35,11 @@ extern "C" {
 #include <endian.h>
 #endif
 
+/**
+ * \addtogroup spa_param
+ * \{
+ */
+
 #define SPA_AUDIO_MAX_CHANNELS	64u
 
 enum spa_audio_format {
@@ -83,6 +88,7 @@ enum spa_audio_format {
 	SPA_AUDIO_FORMAT_S24P,
 	SPA_AUDIO_FORMAT_F32P,
 	SPA_AUDIO_FORMAT_F64P,
+	SPA_AUDIO_FORMAT_S8P,
 
 	/* other formats start here */
 	SPA_AUDIO_FORMAT_START_Other		= 0x400,
@@ -233,6 +239,10 @@ struct spa_audio_info_dsp {
 };
 
 #define SPA_AUDIO_INFO_DSP_INIT(...)		(struct spa_audio_info_dsp) { __VA_ARGS__ }
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */

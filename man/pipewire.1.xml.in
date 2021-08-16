@@ -35,9 +35,9 @@ This file is part of PipeWire.
     </option>
 
     <option>
-      <p><opt>-n | --name</opt><arg>=NAME</arg></p>
+      <p><opt>-c | --config</opt></p>
 
-      <optdesc><p>Set the daemon name (Default pipewire-0).</p></optdesc>
+      <optdesc><p>Load the given config file (Default: pipewire.conf).</p></optdesc>
     </option>
 
   </options>

@@ -69,7 +69,7 @@
 
 
 struct spa_bt_sco_io {
-	int started:1;
+	bool started;
 
 	uint8_t read_buffer[MAX_MTU];
 	uint32_t read_size;
@@ -186,8 +186,12 @@ int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *buf, int size)
 	uint16_t packet_size;
 	uint8_t *buf_start = buf;
 
-	packet_size = (io->read_size > 0) ? SPA_MIN(io->write_mtu, io->read_size) : io->write_mtu;
-	spa_assert(packet_size > 0);
+	if (io->read_size == 0) {
+		/* The proper write packet size is not known yet */
+		return 0;
+	}
+
+	packet_size = SPA_MIN(io->write_mtu, io->read_size);
 
 	if (size < packet_size) {
 		return 0;

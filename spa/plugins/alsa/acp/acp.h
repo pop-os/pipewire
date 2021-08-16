@@ -136,7 +136,7 @@ const char *acp_available_str(enum acp_available status);
 
 #define ACP_KEY_PORT_TYPE		"port.type"		/**< a Port type, like "aux", "speaker", ... */
 #define ACP_KEY_PORT_AVAILABILITY_GROUP	"port.availability-group"
-		/**< An indentifier for the group of ports that share their availability status with
+		/**< An identifier for the group of ports that share their availability status with
 		 * each other. This is meant especially for handling cases where one 3.5 mm connector
 		 * is used for headphones, headsets and microphones, and the hardware can only tell
 		 * that something was plugged in but not what exactly. In this situation the ports for
@@ -177,15 +177,12 @@ struct acp_card_events {
 
 	void (*volume_changed) (void *data, struct acp_device *dev);
 	void (*mute_changed) (void *data, struct acp_device *dev);
-
-	void (*set_soft_volume) (void *data, struct acp_device *dev,
-			const float *volume, uint32_t n_volume);
-	void (*set_soft_mute) (void *data, struct acp_device *dev, bool mute);
 };
 
 struct acp_port {
 	uint32_t index;			/**< unique index for this port */
 #define ACP_PORT_ACTIVE		(1<<0)
+#define ACP_PORT_SAVE		(1<<1)	/* if the port needs saving */
 	uint32_t flags;			/**< extra port flags */
 
 	const char *name;		/**< Name of this port */
@@ -207,6 +204,7 @@ struct acp_device {
 #define ACP_DEVICE_ACTIVE	(1<<0)
 #define ACP_DEVICE_HW_VOLUME	(1<<1)
 #define ACP_DEVICE_HW_MUTE	(1<<2)
+#define ACP_DEVICE_UCM_DEVICE	(1<<3)
 	uint32_t flags;
 
 	const char *name;
@@ -229,6 +227,7 @@ struct acp_card_profile {
 	uint32_t index;
 #define ACP_PROFILE_ACTIVE	(1<<0)
 #define ACP_PROFILE_OFF		(1<<1)		/* the Off profile */
+#define ACP_PROFILE_SAVE	(1<<2)		/* if the profile needs saving */
 	uint32_t flags;
 
 	const char *name;
@@ -274,12 +273,13 @@ int acp_card_poll_descriptors_revents(struct acp_card *card, struct pollfd *pfds
 int acp_card_handle_events(struct acp_card *card);
 
 uint32_t acp_card_find_best_profile_index(struct acp_card *card, const char *name);
-int acp_card_set_profile(struct acp_card *card, uint32_t profile_index);
+int acp_card_set_profile(struct acp_card *card, uint32_t profile_index, uint32_t flags);
 
 uint32_t acp_device_find_best_port_index(struct acp_device *dev, const char *name);
-int acp_device_set_port(struct acp_device *dev, uint32_t port_index);
+int acp_device_set_port(struct acp_device *dev, uint32_t port_index, uint32_t flags);
 
 int acp_device_set_volume(struct acp_device *dev, const float *volume, uint32_t n_volume);
+int acp_device_get_soft_volume(struct acp_device *dev, float *volume, uint32_t n_volume);
 int acp_device_get_volume(struct acp_device *dev, float *volume, uint32_t n_volume);
 int acp_device_set_mute(struct acp_device *dev, bool mute);
 int acp_device_get_mute(struct acp_device *dev, bool *mute);

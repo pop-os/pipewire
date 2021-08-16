@@ -27,16 +27,94 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "config.h"
 
+#if HAVE_SYS_VFS_H
+#include <sys/vfs.h>
+#endif
+#if HAVE_SYS_MOUNT_H
+#include <sys/mount.h>
+#endif
+
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
+#include <spa/utils/json.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/private.h>
+
+/** \page page_module_access PipeWire Module: Access
+ *
+ *
+ * The `access` module performs access checks on clients. The access check
+ * is only performed once per client, subsequent checks return the same
+ * resolution.
+ *
+ * This module sets the \ref PW_KEY_ACCESS property to one of
+ * - `allowed`: the client is explicitly allowed to access all resources
+ * - `rejected`: the client does not have access to any resources and a
+ *   resource error is generated
+ * - `restricted`: the client is restricted, see note below
+ * - `flatpak`: restricted, special case for clients running inside flatpak,
+ *   see note below
+ * - `unrestricted`: the client is allowed to access all resources. This is the
+ *   default for clients not listed in any of the `access.*` options
+ *   unless the client requested reduced permissions in \ref
+ *   PW_KEY_CLIENT_ACCESS.
+ *
+ * \note Clients with a resolution other than `allowed` or `rejected` rely
+ *       on an external actor to update that property once permission is
+ *       granted or rejected.
+ *
+ *
+ * ## Module Options
+ *
+ * Options specific to the behavior of this module
+ *
+ * - ``access.allowed = []``: an array of paths of allowed applications
+ * - ``access.rejected = []``: an array of paths of rejected applications
+ * - ``access.restricted = []``: an array of paths of restricted applications
+ * - ``access.force = <str>``: forces an external permissions check (e.g. a flatpak
+ *   portal)
+ *
+ * ## General options
+ *
+ * Options with well-known behavior:
+ *
+ * - \ref PW_KEY_ACCESS
+ * - \ref PW_KEY_CLIENT_ACCESS
+ *
+ * ## Example configuration
+ *
+ *\code{.unparsed}
+ * context.modules = [
+ *  {   name = libpipewire-module-access
+ *      args = {
+ *          access.allowed = [
+ *              /usr/bin/pipewire-media-session
+ *              /usr/bin/important-thing
+ *          ]
+ *
+ *          access.rejected = [
+ *              /usr/bin/microphone-snooper
+ *          ]
+ *
+ *          #access.restricted = [ ]
+ *
+ *          # Anything not in the above lists gets assigned the
+ *          # access.force permission.
+ *          #access.force = flatpak
+ *      }
+ *  }
+ *]
+ *\endcode
+ *
+ * \see pw_resource_error
+ * \see pw_impl_client_update_permissions
+ */
 
 #define NAME "access"
 
@@ -62,29 +140,39 @@ struct impl {
 
 static int check_cmdline(struct pw_impl_client *client, int pid, const char *str)
 {
-	char path[2048];
+	char path[2048], key[1024];
 	ssize_t len;
-	int fd;
+	int fd, res;
+	struct spa_json it[2];
 
 	sprintf(path, "/proc/%u/cmdline", pid);
 
 	fd = open(path, O_RDONLY);
-	if (fd < 0)
-		return -errno;
-
+	if (fd < 0) {
+		res = -errno;
+		goto exit;
+	}
 	if ((len = read(fd, path, sizeof(path)-1)) < 0) {
-		close(fd);
-		return -errno;
+		res = -errno;
+		goto exit_close;
 	}
 	path[len] = '\0';
 
-	if (strcmp(path, str) == 0) {
-		close(fd);
-		return 1;
-	}
+	spa_json_init(&it[0], str, strlen(str));
+	if ((res = spa_json_enter_array(&it[0], &it[1])) <= 0)
+		goto exit_close;
 
+	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
+		if (spa_streq(path, key)) {
+			res = 1;
+			goto exit_close;
+		}
+	}
+	res = 0;
+exit_close:
 	close(fd);
-	return 0;
+exit:
+	return res;
 }
 
 static int check_flatpak(struct pw_impl_client *client, int pid)
@@ -110,7 +198,7 @@ static int check_flatpak(struct pw_impl_client *client, int pid)
 		/* Not able to open the root dir shouldn't happen. Probably the app died and
 		 * we're failing due to /proc/$pid not existing. In that case fail instead
 		 * of treating this as privileged. */
-		pw_log_error("failed to open \"%s\": %s", root_path, spa_strerror(res));
+		pw_log_info("failed to open \"%s\": %s", root_path, spa_strerror(res));
 		return res;
 	}
 	info_fd = openat (root_fd, ".flatpak-info", O_RDONLY | O_CLOEXEC | O_NOCTTY);
@@ -127,9 +215,9 @@ static int check_flatpak(struct pw_impl_client *client, int pid)
         }
 	if (fstat (info_fd, &stat_buf) != 0 || !S_ISREG (stat_buf.st_mode)) {
 		/* Some weird fd => failure, assume sandboxed */
-		close(info_fd);
 		pw_log_error("error fstat .flatpak-info: %m");
 	}
+	close(info_fd);
 	return 1;
 }
 
@@ -204,12 +292,12 @@ context_check_access(void *data, struct pw_impl_client *client)
 	res = check_flatpak(client, pid);
 	if (res != 0) {
 		if (res < 0) {
-			pw_log_warn(NAME" %p: client %p sandbox check failed: %s",
-				impl, client, spa_strerror(res));
 			if (res == -EACCES) {
 				access = "unrestricted";
 				goto granted;
 			}
+			pw_log_warn(NAME" %p: client %p sandbox check failed: %s",
+				impl, client, spa_strerror(res));
 		}
 		else if (res > 0) {
 			pw_log_debug(NAME" %p: flatpak client %p added", impl, client);
@@ -218,7 +306,8 @@ context_check_access(void *data, struct pw_impl_client *client)
 		goto wait_permissions;
 	}
 #endif
-	access = "unrestricted";
+	if ((access = pw_properties_get(props, PW_KEY_CLIENT_ACCESS)) == NULL)
+		access = "unrestricted";
 
 granted:
 	pw_log_info(NAME" %p: client %p '%s' access granted", impl, client, access);
@@ -255,8 +344,7 @@ static void module_destroy(void *data)
 	spa_hook_remove(&impl->context_listener);
 	spa_hook_remove(&impl->module_listener);
 
-	if (impl->properties)
-		pw_properties_free(impl->properties);
+	pw_properties_free(impl->properties);
 
 	free(impl);
 }

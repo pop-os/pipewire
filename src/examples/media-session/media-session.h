@@ -35,6 +35,8 @@ extern "C" {
 
 #define SM_TYPE_MEDIA_SESSION	PW_TYPE_INFO_OBJECT_BASE "SessionManager"
 
+#define SM_MAX_PARAMS 32
+
 struct sm_media_session;
 
 struct sm_object_events {
@@ -83,6 +85,10 @@ struct sm_object {
 	struct spa_callbacks methods;
 
 	struct spa_list data;
+
+	unsigned int monitor_global:1;	/**< whether handle is from monitor core */
+	unsigned int destroyed:1;	/**< whether proxies have been destroyed */
+	unsigned int discarded:1;	/**< whether monitors hold no references */
 };
 
 int sm_object_add_listener(struct sm_object *obj, struct spa_hook *listener,
@@ -109,6 +115,8 @@ int sm_object_sync_update(struct sm_object *obj);
 
 int sm_object_destroy(struct sm_object *obj);
 
+#define sm_object_discard(o)	do { (o)->discarded = true; } while (0)
+
 struct sm_client {
 	struct sm_object obj;
 
@@ -127,6 +135,7 @@ struct sm_device {
 #define SM_DEVICE_CHANGE_MASK_NODES	(SM_OBJECT_CHANGE_MASK_LAST<<2)
 	uint32_t n_params;
 	struct spa_list param_list;	/**< list of sm_param */
+	int param_seq[SM_MAX_PARAMS];
 	struct pw_device_info *info;
 	struct spa_list node_list;
 };
@@ -142,6 +151,7 @@ struct sm_node {
 #define SM_NODE_CHANGE_MASK_PORTS	(SM_OBJECT_CHANGE_MASK_LAST<<2)
 	uint32_t n_params;
 	struct spa_list param_list;	/**< list of sm_param */
+	int param_seq[SM_MAX_PARAMS];
 	struct pw_node_info *info;
 	struct spa_list port_list;
 
@@ -230,6 +240,10 @@ struct sm_media_session_events {
 	void (*rescan) (void *data, int seq);
 	void (*shutdown) (void *data);
 	void (*destroy) (void *data);
+
+	void (*seat_active) (void *data, bool active);
+
+	void (*dbus_disconnected) (void *data);
 };
 
 struct sm_media_session {
@@ -293,9 +307,19 @@ int sm_media_session_load_conf(struct sm_media_session *sess,
 		const char *name, struct pw_properties *conf);
 
 int sm_media_session_load_state(struct sm_media_session *sess,
-		const char *name, const char *prefix, struct pw_properties *props);
+		const char *name, struct pw_properties *props);
 int sm_media_session_save_state(struct sm_media_session *sess,
-		const char *name, const char *prefix, const struct pw_properties *props);
+		const char *name, const struct pw_properties *props);
+
+int sm_media_session_match_rules(const char *rules, size_t size,
+		struct pw_properties *props);
+
+char *sm_media_session_sanitize_name(char *name, int size, char sub,
+		const char *fmt, ...) SPA_PRINTF_FUNC(4, 5);
+char *sm_media_session_sanitize_description(char *name, int size, char sub,
+		const char *fmt, ...) SPA_PRINTF_FUNC(4, 5);
+
+int sm_media_session_seat_active_changed(struct sm_media_session *sess, bool active);
 
 #ifdef __cplusplus
 }

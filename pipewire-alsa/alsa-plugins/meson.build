@@ -6,7 +6,6 @@ pipewire_alsa_plugin_ctl_sources = [
 ]
 
 pipewire_alsa_plugin_c_args = [
-  '-DHAVE_CONFIG_H',
   '-DPIC',
 ]
 
@@ -16,7 +15,7 @@ pipewire_alsa_pcm_plugin = shared_library('asound_module_pcm_pipewire',
     include_directories : [configinc],
     dependencies : [pipewire_dep, alsa_dep],
     install : true,
-    install_dir : join_paths(pipewire_libdir, 'alsa-lib'),
+    install_dir : pipewire_libdir / 'alsa-lib',
 )
 pipewire_alsa_ctl_plugin = shared_library('asound_module_ctl_pipewire',
     pipewire_alsa_plugin_ctl_sources,
@@ -24,5 +23,5 @@ pipewire_alsa_ctl_plugin = shared_library('asound_module_ctl_pipewire',
     include_directories : [configinc],
     dependencies : [pipewire_dep, alsa_dep],
     install : true,
-    install_dir : join_paths(pipewire_libdir, 'alsa-lib'),
+    install_dir : pipewire_libdir / 'alsa-lib',
 )

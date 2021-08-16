@@ -32,6 +32,7 @@
 #include <spa/support/log.h>
 #include <spa/support/loop.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/node/node.h>
 #include <spa/node/keys.h>
 #include <spa/node/io.h>
@@ -70,12 +71,76 @@ struct impl {
 	struct itimerspec timerspec;
 
 	bool started;
+	bool following;
 	uint64_t next_time;
 };
 
 static void reset_props(struct props *props)
 {
 	props->freewheel = DEFAULT_FREEWHEEL;
+}
+
+static void set_timeout(struct impl *this, uint64_t next_time)
+{
+	spa_log_trace(this->log, "set timeout %"PRIu64, next_time);
+	this->timerspec.it_value.tv_sec = next_time / SPA_NSEC_PER_SEC;
+	this->timerspec.it_value.tv_nsec = next_time % SPA_NSEC_PER_SEC;
+	spa_system_timerfd_settime(this->data_system,
+			this->timer_source.fd, SPA_FD_TIMER_ABSTIME, &this->timerspec, NULL);
+}
+
+static int set_timers(struct impl *this)
+{
+	struct timespec now;
+	int res;
+
+	if ((res = spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now)) < 0)
+	    return res;
+	this->next_time = SPA_TIMESPEC_TO_NSEC(&now);
+
+	if (this->following) {
+		set_timeout(this, 0);
+	} else {
+		set_timeout(this, this->next_time);
+	}
+	return 0;
+}
+
+static inline bool is_following(struct impl *this)
+{
+	return this->position && this->clock && this->position->clock.id != this->clock->id;
+}
+
+static int do_reassign_follower(struct spa_loop *loop,
+			    bool async,
+			    uint32_t seq,
+			    const void *data,
+			    size_t size,
+			    void *user_data)
+{
+	struct impl *this = user_data;
+	set_timers(this);
+	return 0;
+}
+
+static int reassign_follower(struct impl *this)
+{
+	bool following;
+
+	if (this->clock)
+		SPA_FLAG_UPDATE(this->clock->flags,
+				SPA_IO_CLOCK_FLAG_FREEWHEEL, this->props.freewheel);
+
+	if (!this->started)
+		return 0;
+
+	following = is_following(this);
+	if (following != this->following) {
+		spa_log_debug(this->log, NAME" %p: reassign follower %d->%d", this, this->following, following);
+		this->following = following;
+		spa_loop_invoke(this->data_loop, do_reassign_follower, 0, NULL, 0, true, this);
+	}
+	return 0;
 }
 
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
@@ -98,15 +163,9 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	default:
 		return -ENOENT;
 	}
-	return 0;
-}
+	reassign_follower(this);
 
-static void set_timer(struct impl *this, uint64_t next_time)
-{
-	this->timerspec.it_value.tv_sec = next_time / SPA_NSEC_PER_SEC;
-	this->timerspec.it_value.tv_nsec = next_time % SPA_NSEC_PER_SEC;
-	spa_system_timerfd_settime(this->data_system,
-			this->timer_source.fd, SPA_FD_TIMER_ABSTIME, &this->timerspec, NULL);
+	return 0;
 }
 
 static void on_timeout(struct spa_source *source)
@@ -118,8 +177,11 @@ static void on_timeout(struct spa_source *source)
 	spa_log_trace(this->log, "timeout");
 
 	if (spa_system_timerfd_read(this->data_system,
-				this->timer_source.fd, &expirations) < 0)
+				this->timer_source.fd, &expirations) < 0) {
+		if (errno == EAGAIN)
+			return;
 		perror("read timerfd");
+	}
 
 	nsec = this->next_time;
 
@@ -145,7 +207,27 @@ static void on_timeout(struct spa_source *source)
 	spa_node_call_ready(&this->callbacks,
 			SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA);
 
-	set_timer(this, this->next_time);
+	set_timeout(this, this->next_time);
+}
+
+static int do_start(struct impl *this)
+{
+	if (this->started)
+		return 0;
+
+	this->following = is_following(this);
+	set_timers(this);
+	this->started = true;
+	return 0;
+}
+
+static int do_stop(struct impl *this)
+{
+	if (!this->started)
+		return 0;
+	this->started = false;
+	set_timeout(this, 0);
+	return 0;
 }
 
 static int impl_node_send_command(void *object, const struct spa_command *command)
@@ -158,24 +240,11 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Start:
-	{
-		struct timespec now;
-
-		if (this->started)
-			return 0;
-
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		this->next_time = SPA_TIMESPEC_TO_NSEC(&now);
-		this->started = true;
-		set_timer(this, this->next_time);
+		do_start(this);
 		break;
-	}
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
-		if (!this->started)
-			return 0;
-		this->started = false;
-		set_timer(this, 0);
+		do_stop(this);
 		break;
 	default:
 		return -ENOTSUP;
@@ -189,12 +258,13 @@ static const struct spa_dict_item node_info_items[] = {
 
 static void emit_node_info(struct impl *this, bool full)
 {
+	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		this->info.props = &SPA_DICT_INIT_ARRAY(node_info_items);
 		spa_node_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 }
 
@@ -242,7 +312,7 @@ static int impl_node_process(void *object)
 	if (this->props.freewheel) {
 		clock_gettime(CLOCK_MONOTONIC, &now);
 		this->next_time = SPA_TIMESPEC_TO_NSEC(&now);
-		set_timer(this, this->next_time);
+		set_timeout(this, this->next_time);
 	}
 	return SPA_STATUS_OK;
 }
@@ -265,7 +335,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Node) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Node))
 		*interface = &this->node;
 	else
 		return -ENOENT;
@@ -302,6 +372,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
+	const char *str;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -344,7 +415,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->timer_source.func = on_timeout;
 	this->timer_source.data = this;
-	this->timer_source.fd = spa_system_timerfd_create(this->data_system, CLOCK_MONOTONIC, SPA_FD_CLOEXEC);
+	this->timer_source.fd = spa_system_timerfd_create(this->data_system, CLOCK_MONOTONIC,
+							  SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	this->timer_source.mask = SPA_IO_IN;
 	this->timer_source.rmask = 0;
 	this->timerspec.it_value.tv_sec = 0;
@@ -353,6 +425,11 @@ impl_init(const struct spa_handle_factory *factory,
 	this->timerspec.it_interval.tv_nsec = 0;
 
 	reset_props(&this->props);
+
+	if (info) {
+		if ((str = spa_dict_lookup(info, "node.freewheel")) != NULL)
+			this->props.freewheel = spa_atob(str);
+	}
 
 	spa_loop_add_source(this->data_loop, &this->timer_source);
 

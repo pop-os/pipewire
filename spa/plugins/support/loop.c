@@ -39,6 +39,7 @@
 #include <spa/utils/result.h>
 #include <spa/utils/type.h>
 #include <spa/utils/ringbuffer.h>
+#include <spa/utils/string.h>
 
 #define NAME "loop"
 
@@ -134,7 +135,7 @@ static void flush_items(struct impl *impl)
 		struct invoke_item *item;
 		bool block;
 
-		item = SPA_MEMBER(impl->buffer_data, index & (DATAS_SIZE - 1), struct invoke_item);
+		item = SPA_PTROFF(impl->buffer_data, index & (DATAS_SIZE - 1), struct invoke_item);
 		block = item->block;
 
 		spa_log_trace(impl->log, NAME " %p: flush item %p", impl, item);
@@ -181,25 +182,38 @@ loop_invoke(void *object,
 	}
 	offset = idx & (DATAS_SIZE - 1);
 
+	/* l0 is remaining size in ringbuffer, this should always be larger than
+	 * invoke_item, see below */
 	l0 = DATAS_SIZE - offset;
 
-	item = SPA_MEMBER(impl->buffer_data, offset, struct invoke_item);
+	item = SPA_PTROFF(impl->buffer_data, offset, struct invoke_item);
 	item->func = func;
 	item->seq = seq;
 	item->size = size;
-	item->block = block;
+	item->block = block && !in_thread;
 	item->user_data = user_data;
+	item->item_size = SPA_ROUND_UP_N(sizeof(struct invoke_item) + size, 8);
 
 	spa_log_trace(impl->log, NAME " %p: add item %p filled:%d", impl, item, filled);
 
-	if (l0 > sizeof(struct invoke_item) + size) {
-		item->data = SPA_MEMBER(item, sizeof(struct invoke_item), void);
-		item->item_size = SPA_ROUND_UP_N(sizeof(struct invoke_item) + size, 8);
-		if (l0 < sizeof(struct invoke_item) + item->item_size)
+	if (l0 >= item->item_size) {
+		/* item + size fit in current ringbuffer idx */
+		item->data = SPA_PTROFF(item, sizeof(struct invoke_item), void);
+		if (l0 < sizeof(struct invoke_item) + item->item_size) {
+			/* not enough space for next invoke_item, fill up till the end
+			 * so that the next item will be at the start */
 			item->item_size = l0;
+		}
 	} else {
+		/* item does not fit, place the invoke_item at idx and start the
+		 * data at the start of the ringbuffer */
 		item->data = impl->buffer_data;
 		item->item_size = SPA_ROUND_UP_N(l0 + size, 8);
+	}
+	if (avail < item->item_size) {
+		spa_log_warn(impl->log, NAME " %p: queue full %d, need %zd", impl, avail,
+				item->item_size);
+		return -EPIPE;
 	}
 	if (data && size > 0)
 		memcpy(item->data, data, size);
@@ -213,7 +227,7 @@ loop_invoke(void *object,
 		loop_signal_event(impl, impl->wakeup);
 	}
 
-	if (block) {
+	if (block && !in_thread) {
 		uint64_t count = 1;
 
 		spa_loop_control_hook_before(&impl->hooks_list);
@@ -453,7 +467,7 @@ error_exit:
 static void source_event_func(struct spa_source *source)
 {
 	struct source_impl *impl = SPA_CONTAINER_OF(source, struct source_impl, source);
-	uint64_t count;
+	uint64_t count = 0;
 	int res;
 
 	if ((res = spa_system_eventfd_read(impl->impl->system, source->fd, &count)) < 0)
@@ -516,7 +530,7 @@ static int loop_signal_event(void *object, struct spa_source *source)
 static void source_timer_func(struct spa_source *source)
 {
 	struct source_impl *impl = SPA_CONTAINER_OF(source, struct source_impl, source);
-	uint64_t expirations;
+	uint64_t expirations = 0;
 	int res;
 
 	if (SPA_UNLIKELY((res = spa_system_timerfd_read(impl->impl->system,
@@ -596,7 +610,7 @@ loop_update_timer(void *object, struct spa_source *source,
 static void source_signal_func(struct spa_source *source)
 {
 	struct source_impl *impl = SPA_CONTAINER_OF(source, struct source_impl, source);
-	int res, signal_number;
+	int res, signal_number = 0;
 
 	if ((res = spa_system_signalfd_read(impl->impl->system, source->fd, &signal_number)) < 0)
 		spa_log_warn(impl->impl->log, NAME " %p: failed to read signal fd %d: %s",
@@ -706,11 +720,11 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	impl = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Loop) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Loop))
 		*interface = &impl->loop;
-	else if (strcmp(type, SPA_TYPE_INTERFACE_LoopControl) == 0)
+	else if (spa_streq(type, SPA_TYPE_INTERFACE_LoopControl))
 		*interface = &impl->control;
-	else if (strcmp(type, SPA_TYPE_INTERFACE_LoopUtils) == 0)
+	else if (spa_streq(type, SPA_TYPE_INTERFACE_LoopUtils))
 		*interface = &impl->utils;
 	else
 		return -ENOENT;

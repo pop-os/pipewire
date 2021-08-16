@@ -8,28 +8,26 @@ spa_support_sources = ['cpu.c',
 
 spa_support_lib = shared_library('spa-support',
 			spa_support_sources,
-			c_args : [ '-D_GNU_SOURCE' ],
 			include_directories : [ spa_inc ],
 			dependencies : [ pthread_lib, epoll_shim_dep ],
 			install : true,
-		        install_dir : join_paths(spa_plugindir, 'support'))
+		        install_dir : spa_plugindir / 'support')
 
 
-if get_option('evl')
+if not get_option('evl').disabled()
   evl_inc = include_directories('/usr/evl/include')
   evl_lib = cc.find_library('evl',
-		dirs: ['/usr/evl/lib/'])
+		dirs: ['/usr/evl/lib/'], required: get_option('evl'))
 
   spa_evl_sources = ['evl-system.c',
 		   'evl-plugin.c']
 
   spa_evl_lib = shared_library('spa-evl',
 			spa_evl_sources,
-			c_args : [ '-D_GNU_SOURCE' ],
 			include_directories : [ spa_inc, evl_inc],
 			dependencies : [ pthread_lib, evl_lib],
 			install : true,
-		        install_dir : join_paths(spa_plugindir, 'support'))
+		        install_dir : spa_plugindir / 'support')
 endif
 
 spa_dbus_sources = ['dbus.c']
@@ -39,10 +37,10 @@ spa_dbus_lib = shared_library('spa-dbus',
 			include_directories : [ spa_inc],
 			dependencies : [dbus_dep, ],
 			install : true,
-		        install_dir : join_paths(spa_plugindir, 'support'))
+		        install_dir : spa_plugindir / 'support')
 
 
-if get_option('systemd') and systemd_dep.found()
+if systemd_dep.found()
   spa_journal_sources = ['journal.c']
 
   spa_journal_lib = shared_library('spa-journal',
@@ -50,5 +48,5 @@ if get_option('systemd') and systemd_dep.found()
 			  include_directories : spa_inc,
 			  dependencies : systemd_dep,
 			  install : true,
-		          install_dir : join_paths(spa_plugindir, 'support'))
+		          install_dir : spa_plugindir / 'support')
 endif

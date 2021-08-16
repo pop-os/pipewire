@@ -26,9 +26,9 @@ If you want to build and install PipeWire yourself, refer to
 
 The most important purpose of PipeWire is to run your favorite apps.
 
-Some application use the native PipeWire API, such as most compositors
-(gnome-shell, wayland, ..) to implement screen sharing. These apps will
-just work automatically. 
+Some applications use the native PipeWire API, such as most compositors
+(gnome-shell, wayland, ...) to implement screen sharing. These apps will
+just work automatically.
 
 Most audio applications can use either ALSA, JACK or PulseAudio as a
 backend. PipeWire provides support for all 3 backends. Depending on how
@@ -40,6 +40,7 @@ applications:
 
 * `PIPEWIRE_DEBUG=<level>`         to increase the debug level
 * `PIPEWIRE_LOG=<filename>`        to redirect log to filename
+* `PIPEWIRE_LOG_SYSTEMD=false`     to disable logging to systemd journal
 * `PIPEWIRE_LATENCY=<num/denom>`   to configure latency as a fraction. 10/1000
                                    configures a 10ms latency. Usually this is
 				   expressed as a fraction of the samplerate,
@@ -59,7 +60,7 @@ $ pw-play /home/wim/data/01.\ Firepower.wav
 
 ### Running JACK applications
 
-Depending on how the system was configured, your can either run PipeWire and
+Depending on how the system was configured, you can either run PipeWire and
 JACK side-by-side or have PipeWire take over the functionality of JACK
 completely.
 
@@ -73,15 +74,26 @@ $ pw-jack <appname>
 If you replaced JACK with PipeWire completely, `pw-jack` does not have any
 effect and can be omitted.
 
+JACK applications will automatically use the buffer-size chosen by the
+server. You can force a maximum buffer size (latency) by setting the
+`PIPEWIRE_LATENCY` environment variable like so:
+
+```
+PIPEWIRE_LATENCY=128/48000 jack_simple_client
+```
+Requests the `jack_simple_client` to run with a buffer of 128 or
+less samples.
+
+
 ### Running PulseAudio applications
 
 PipeWire can run a PulseAudio compatible replacement server. You can't
-use both servers at the same time. Usually you package manager will
+use both servers at the same time. Usually your package manager will
 make the server conflict so that you can only install one or the
 other.
 
-PulseAudio application still use the regular PulseAudio client
-libraries and you don't need to to anything else than change the
+PulseAudio applications still use the regular PulseAudio client
+libraries and you don't need to do anything else than change the
 server implementation.
 
 A successful swap of the server can be verified by checking the
@@ -97,6 +109,10 @@ Server Name: PulseAudio (on PipeWire 0.3.x)
 ...
 ```
 
+You can use pavucontrol to change profiles and ports, change volumes
+or redirect streams, just like with PulseAudio.
+
+
 ### Running ALSA applications
 
 If the PipeWire alsa module is installed, it can be seen with
@@ -105,7 +121,7 @@ If the PipeWire alsa module is installed, it can be seen with
 $ aplay -L
 ```
 
-ALSA application can then use the `pipewire:` device to use PipeWire
+ALSA applications can then use the `pipewire:` device to use PipeWire
 as the audio system.
 
 ### Running GStreamer applications
@@ -123,29 +139,39 @@ Or to play a beeping sound:
 $ gst-launch-1.0 audiotestsrc ! pipewiresink
 ```
 
-PipeWire provides a device monitor as well so that:
+PipeWire provides a device monitor as well so that
 
 ```
 $ gst-device-monitor-1.0
 ```
 
-Shows the PipeWire devices and applications like cheese will
+shows the PipeWire devices and applications like cheese will
 automatically use the PipeWire video source when possible.
 
 ### Inspecting the PipeWire state
 
-There is currently no native graphical tool to inspect the PipeWire graph
-but we recommend to use one of the excellent JACK tools, such as `Carla`,
-`catia`, `qjackctl`,... You will not be able to see all features like the video
-ports but it is a good start.
+To inspect and manipulate the PipeWire graph via GUI, you can use [Helvum](https://gitlab.freedesktop.org/ryuukyu/helvum).
+
+Alternatively, you can use use one of the excellent JACK tools, such as `Carla`,
+`catia`, `qjackctl`, ...
+However, you will not be able to see all features like the video
+ports.
 
 `pw-mon` dumps and monitors the state of the PipeWire daemon.
 
 `pw-dot` can dump a graph of the pipeline, check out the help for
 how to do this.
 
+`pw-top` monitors the real-time status of the graph. This is handy to
+find out what clients are running and how much DSP resources they
+use.
+
+`pw-dump` dumps the state of the PipeWire daemon in JSON format. This
+can be used to find out the properties and parameters of the objects
+in the PipeWire daemon.
+
 There is a more complicated tool to inspect the state of the server
-with `pw-cli`. This tools can be used interactively or it can execute
+with `pw-cli`. This tool can be used interactively or it can execute
 single commands like this to get the server information:
 
 ```
@@ -158,14 +184,19 @@ Find tutorials and design documentation [here](doc/index.md).
 
 The (incomplete) autogenerated API docs are [here](https://docs.pipewire.org).
 
+The Wiki can be found [here](https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/home)
+
 ## Contributing
 
-PipeWire is Free Software and is developed in the open. It is licensed under
-the [MIT license](COPYING).
+PipeWire is Free Software and is developed in the open. It is mostly
+licensed under the [MIT license](COPYING). Check [LICENSE](LICENSE) for
+more details about the exceptions.
 
 Contributors are encouraged to submit merge requests or file bugs on
 [gitlab](https://gitlab.freedesktop.org/pipewire).
 
-Join us on IRC at #pipewire on [Freenode](https://freenode.net/).
+Join us on IRC at #pipewire on [OFTC](https://www.oftc.net/).
 
 We adhere to the Contributor Covenant for our [code of conduct](CODE_OF_CONDUCT.md).
+
+[Donate using Liberapay](https://liberapay.com/PipeWire/donate).

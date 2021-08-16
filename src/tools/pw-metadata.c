@@ -28,11 +28,12 @@
 #include <getopt.h>
 
 #include <spa/utils/result.h>
+#include <spa/utils/string.h>
 #include <spa/utils/defs.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
-#include <extensions/metadata.h>
+#include <pipewire/extensions/metadata.h>
 
 struct data {
 	struct pw_main_loop *loop;
@@ -67,8 +68,8 @@ static int metadata_property(void *data, uint32_t id,
 	struct data *d = data;
 
 	if ((d->opt_id == SPA_ID_INVALID || d->opt_id == id) &&
-	    (d->opt_key == NULL || strcmp(d->opt_key, key) == 0)) {
-		if (value == NULL && key == NULL) {
+	    (d->opt_key == NULL || spa_streq(d->opt_key, key))) {
+		if (key == NULL) {
 			fprintf(stdout, "remove: id:%u all keys\n", id);
 		} else if (value == NULL) {
 			fprintf(stdout, "remove: id:%u key:'%s'\n", id, key);
@@ -92,11 +93,11 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 	struct data *d = data;
 	const char *str;
 
-	if (strcmp(type, PW_TYPE_INTERFACE_Metadata) != 0)
+	if (!spa_streq(type, PW_TYPE_INTERFACE_Metadata))
 		return;
 
 	if ((str = spa_dict_lookup(props, PW_KEY_METADATA_NAME)) != NULL &&
-	    strcmp(str, d->opt_name) != 0)
+	    !spa_streq(str, d->opt_name))
 		return;
 
 	if (d->metadata != NULL) {
@@ -240,6 +241,10 @@ int main(int argc, char *argv[])
 		data.opt_type = argv[optind++];
 
 	data.loop = pw_main_loop_new(NULL);
+	if (data.loop == NULL) {
+		fprintf(stderr, "can't create mainloop: %m\n");
+		return -1;
+	}
 	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGINT, do_quit, &data);
 	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGTERM, do_quit, &data);
 

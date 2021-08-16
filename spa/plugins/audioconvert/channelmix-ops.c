@@ -58,46 +58,47 @@ static const struct channelmix_info {
 
 	channelmix_func_t process;
 	uint32_t cpu_flags;
+	const char *name;
 } channelmix_table[] =
 {
 #if defined (HAVE_SSE)
-	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
-	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
-	{ EQ, 0, EQ, 0, channelmix_copy_sse, SPA_CPU_FLAG_SSE },
+	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
+	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
+	{ EQ, 0, EQ, 0, channelmix_copy_sse, SPA_CPU_FLAG_SSE, "copy_sse" },
 #endif
-	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_c, 0 },
-	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_c, 0 },
+	{ 2, MASK_MONO, 2, MASK_MONO, channelmix_copy_c, 0, "copy_c" },
+	{ 2, MASK_STEREO, 2, MASK_STEREO, channelmix_copy_c, 0, "copy_c" },
 	{ EQ, 0, EQ, 0, channelmix_copy_c, 0 },
 
-	{ 1, MASK_MONO, 2, MASK_STEREO, channelmix_f32_1_2_c, 0 },
-	{ 2, MASK_STEREO, 1, MASK_MONO, channelmix_f32_2_1_c, 0 },
-	{ 4, MASK_QUAD, 1, MASK_MONO, channelmix_f32_4_1_c, 0 },
-	{ 4, MASK_3_1, 1, MASK_MONO, channelmix_f32_3p1_1_c, 0 },
+	{ 1, MASK_MONO, 2, MASK_STEREO, channelmix_f32_1_2_c, 0, "f32_1_2_c" },
+	{ 2, MASK_STEREO, 1, MASK_MONO, channelmix_f32_2_1_c, 0, "f32_2_1_c" },
+	{ 4, MASK_QUAD, 1, MASK_MONO, channelmix_f32_4_1_c, 0, "f32_4_1_c" },
+	{ 4, MASK_3_1, 1, MASK_MONO, channelmix_f32_3p1_1_c, 0, "f32_3p1_1_c" },
 #if defined (HAVE_SSE)
-	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_sse, SPA_CPU_FLAG_SSE },
+	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_sse, SPA_CPU_FLAG_SSE, "f32_2_4_sse" },
 #endif
-	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_c, 0 },
-	{ 2, MASK_STEREO, 4, MASK_3_1, channelmix_f32_2_3p1_c, 0 },
-	{ 2, MASK_STEREO, 6, MASK_5_1, channelmix_f32_2_5p1_c, 0 },
+	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_c, 0, "f32_2_4_c" },
+	{ 2, MASK_STEREO, 4, MASK_3_1, channelmix_f32_2_3p1_c, 0, "f32_2_3p1_c" },
+	{ 2, MASK_STEREO, 6, MASK_5_1, channelmix_f32_2_5p1_c, 0, "f32_2_5p1_c" },
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_sse, SPA_CPU_FLAG_SSE, "f32_5p1_2_sse" },
 #endif
-	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_c, 0 },
+	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_c, 0, "f32_5p1_2_c" },
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_sse, SPA_CPU_FLAG_SSE, "f32_5p1_4_sse" },
 #endif
-	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_c, 0 },
+	{ 6, MASK_5_1, 4, MASK_QUAD, channelmix_f32_5p1_4_c, 0, "f32_5p1_4_c" },
 
 #if defined (HAVE_SSE)
-	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_sse, SPA_CPU_FLAG_SSE },
+	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_sse, SPA_CPU_FLAG_SSE, "f32_5p1_3p1_sse" },
 #endif
-	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_c, 0 },
+	{ 6, MASK_5_1, 4, MASK_3_1, channelmix_f32_5p1_3p1_c, 0, "f32_5p1_3p1_c" },
 
-	{ 8, MASK_7_1, 2, MASK_STEREO, channelmix_f32_7p1_2_c, 0 },
-	{ 8, MASK_7_1, 4, MASK_QUAD, channelmix_f32_7p1_4_c, 0 },
-	{ 8, MASK_7_1, 4, MASK_3_1, channelmix_f32_7p1_3p1_c, 0 },
+	{ 8, MASK_7_1, 2, MASK_STEREO, channelmix_f32_7p1_2_c, 0, "f32_7p1_2_c" },
+	{ 8, MASK_7_1, 4, MASK_QUAD, channelmix_f32_7p1_4_c, 0, "f32_7p1_4_c" },
+	{ 8, MASK_7_1, 4, MASK_3_1, channelmix_f32_7p1_3p1_c, 0, "f32_7p1_3p1_c" },
 
-	{ ANY, 0, ANY, 0, channelmix_f32_n_m_c, 0 },
+	{ ANY, 0, ANY, 0, channelmix_f32_n_m_c, 0, "f32_n_m_c" },
 };
 
 #define MATCH_CHAN(a,b)		((a) == ANY || (a) == (b))
@@ -124,27 +125,6 @@ static const struct channelmix_info *find_channelmix_info(uint32_t src_chan, uin
 	return NULL;
 }
 
-#define M		0
-#define FL		1
-#define FR		2
-#define FC		3
-#define LFE		4
-#define SL		5
-#define SR		6
-#define FLC		7
-#define FRC		8
-#define RC		9
-#define RL		10
-#define RR		11
-#define TC		12
-#define TFL		13
-#define TFC		14
-#define TFR		15
-#define TRL		16
-#define TRC		17
-#define TRR		18
-#define NUM_CHAN	19
-
 #define SQRT3_2      1.224744871f  /* sqrt(3/2) */
 #define SQRT1_2      0.707106781f
 #define SQRT2	     1.414213562f
@@ -153,12 +133,16 @@ static const struct channelmix_info *find_channelmix_info(uint32_t src_chan, uin
 #define MATRIX_DOLBY	1
 #define MATRIX_DPLII	2
 
-#define _MASK(ch)	(1ULL << SPA_AUDIO_CHANNEL_ ## ch)
-#define STEREO	(_MASK(FL)|_MASK(FR))
+#define _CH(ch)		((SPA_AUDIO_CHANNEL_ ## ch)-3)
+#define _MASK(ch)	(1ULL << _CH(ch))
+#define FRONT		(_MASK(FC))
+#define STEREO		(_MASK(FL)|_MASK(FR))
+#define REAR		(_MASK(RL)|_MASK(RR))
+#define SIDE		(_MASK(SL)|_MASK(SR))
 
 static int make_matrix(struct channelmix *mix)
 {
-	float matrix[NUM_CHAN][NUM_CHAN] = {{ 0.0f }};
+	float matrix[SPA_AUDIO_MAX_CHANNELS][SPA_AUDIO_MAX_CHANNELS] = {{ 0.0f }};
 	uint64_t src_mask = mix->src_mask;
 	uint64_t dst_mask = mix->dst_mask;
 	uint64_t unassigned;
@@ -167,40 +151,65 @@ static int make_matrix(struct channelmix *mix)
 	float slev = SQRT1_2;
 	float llev = 0.5f;
 	float maxsum = 0.0f;
+	bool do_upmix = SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_UPMIX);
+#define _MATRIX(s,d)	matrix[_CH(s)][_CH(d)]
 
 	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64,
 			src_mask, dst_mask);
 
-	if ((src_mask & _MASK(MONO)) == _MASK(MONO))
-		src_mask = _MASK(FC);
-	if ((dst_mask & _MASK(MONO)) == _MASK(MONO))
-		dst_mask = _MASK(FC);
+	/* move the MONO mask to FRONT so that the lower bits can be shifted
+	 * away. */
+	if ((src_mask & (1Ull << SPA_AUDIO_CHANNEL_MONO)) != 0)
+		src_mask |= (1ULL << SPA_AUDIO_CHANNEL_FC);
+	if ((dst_mask & (1Ull << SPA_AUDIO_CHANNEL_MONO)) != 0)
+		dst_mask |= (1ULL << SPA_AUDIO_CHANNEL_FC);
+
+	/* shift so that bit 0 is FL */
+	src_mask >>= 3;
+	dst_mask >>= 3;
 
 	if (src_mask == 0 || dst_mask == 0) {
+		if (src_mask == FRONT && mix->src_chan == 1) {
+			/* one FC/MONO src goes everywhere */
+			spa_log_debug(mix->log, "distribute FC/MONO");
+			for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+				matrix[i][0]= 1.0f;
+		} else if (dst_mask == FRONT && mix->dst_chan == 1) {
+			/* one FC/MONO dst get average of everything */
+			spa_log_debug(mix->log, "average FC/MONO");
+			for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+				matrix[0][i]= 1.0f / mix->src_chan;
+		} else {
+			/* just pair channels */
+			spa_log_debug(mix->log, "pairing channels");
+			for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+				matrix[i][i]= 1.0f;
+		}
 		src_mask = dst_mask = ~0LU;
-		for (i = 0; i < NUM_CHAN; i++)
-			matrix[i][i]= 1.0f;
 		goto done;
 	} else {
-		for (i = 0; i < NUM_CHAN; i++) {
-			if ((src_mask & dst_mask & (1ULL << (i + 2))))
+		spa_log_debug(mix->log, "matching channels");
+		for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++) {
+			if ((src_mask & dst_mask & (1ULL << i))) {
+				spa_log_debug(mix->log, "matched %u", i);
 				matrix[i][i]= 1.0f;
+			}
 		}
 	}
 
 	unassigned = src_mask & ~dst_mask;
 
-	spa_log_debug(mix->log, "unassigned %08" PRIx64, unassigned);
+	spa_log_debug(mix->log, "unassigned downmix %08" PRIx64, unassigned);
 
-	if (unassigned & _MASK(FC)){
+	if (unassigned & FRONT){
 		if ((dst_mask & STEREO) == STEREO){
 			spa_log_debug(mix->log, "assign FC to STEREO");
 			if(src_mask & STEREO) {
-				matrix[FL][FC] += clev;
-				matrix[FR][FC] += clev;
+				_MATRIX(FL,FC) += clev;
+				_MATRIX(FR,FC) += clev;
 			} else {
-				matrix[FL][FC] += SQRT1_2;
-				matrix[FR][FC] += SQRT1_2;
+				_MATRIX(FL,FC) += SQRT1_2;
+				_MATRIX(FR,FC) += SQRT1_2;
 			}
 		} else {
 			spa_log_warn(mix->log, "can't assign FC");
@@ -208,165 +217,232 @@ static int make_matrix(struct channelmix *mix)
 	}
 
 	if (unassigned & STEREO){
-		if (dst_mask & _MASK(FC)) {
+		if (dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign STEREO to FC");
-			matrix[FC][FL] += SQRT1_2;
-			matrix[FC][FR] += SQRT1_2;
-			if (src_mask & _MASK(FC))
-				matrix[FC][FC] = clev * SQRT2;
+			_MATRIX(FC,FL) += SQRT1_2;
+			_MATRIX(FC,FR) += SQRT1_2;
+			if (src_mask & FRONT)
+				_MATRIX(FC,FC) = clev * SQRT2;
 		} else {
 			spa_log_warn(mix->log, "can't assign STEREO");
 		}
 	}
 
 	if (unassigned & _MASK(RC)) {
-		if (dst_mask & _MASK(RL)){
+		if (dst_mask & REAR){
 			spa_log_debug(mix->log, "assign RC to RL+RR");
-			matrix[RL][RC] += SQRT1_2;
-			matrix[RR][RC] += SQRT1_2;
-		} else if (dst_mask & _MASK(SL)) {
+			_MATRIX(RL,RC) += SQRT1_2;
+			_MATRIX(RR,RC) += SQRT1_2;
+		} else if (dst_mask & SIDE) {
 			spa_log_debug(mix->log, "assign RC to SL+SR");
-			matrix[SL][RC] += SQRT1_2;
-			matrix[SR][RC] += SQRT1_2;
-		} else if(dst_mask & _MASK(FL)) {
+			_MATRIX(SL,RC) += SQRT1_2;
+			_MATRIX(SR,RC) += SQRT1_2;
+		} else if(dst_mask & STEREO) {
 			spa_log_debug(mix->log, "assign RC to FL+FR");
 			if (matrix_encoding == MATRIX_DOLBY ||
 			    matrix_encoding == MATRIX_DPLII) {
 				if (unassigned & (_MASK(RL)|_MASK(RR))) {
-					matrix[FL][RC] -= slev * SQRT1_2;
-					matrix[FR][RC] += slev * SQRT1_2;
+					_MATRIX(FL,RC) -= slev * SQRT1_2;
+					_MATRIX(FR,RC) += slev * SQRT1_2;
 		                } else {
-					matrix[FL][RC] -= slev;
-					matrix[FR][RC] += slev;
+					_MATRIX(FL,RC) -= slev;
+					_MATRIX(FR,RC) += slev;
 				}
 			} else {
-				matrix[FL][RC] += slev * SQRT1_2;
-				matrix[FR][RC] += slev * SQRT1_2;
+				_MATRIX(FL,RC) += slev * SQRT1_2;
+				_MATRIX(FR,RC) += slev * SQRT1_2;
 			}
-		} else if (dst_mask & _MASK(FC)) {
+		} else if (dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign RC to FC");
-			matrix[FC][RC] += slev * SQRT1_2;
+			_MATRIX(FC,RC) += slev * SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign RC");
 		}
 	}
 
-	if (unassigned & _MASK(RL)) {
+	if (unassigned & REAR) {
 		if (dst_mask & _MASK(RC)) {
 			spa_log_debug(mix->log, "assign RL+RR to RC");
-			matrix[RC][RL] += SQRT1_2;
-			matrix[RC][RR] += SQRT1_2;
-		} else if (dst_mask & _MASK(SL)) {
+			_MATRIX(RC,RL) += SQRT1_2;
+			_MATRIX(RC,RR) += SQRT1_2;
+		} else if (dst_mask & SIDE) {
 			spa_log_debug(mix->log, "assign RL+RR to SL+SR");
-			if (src_mask & _MASK(SL)) {
-				matrix[SL][RL] += SQRT1_2;
-				matrix[SR][RR] += SQRT1_2;
+			if (src_mask & SIDE) {
+				_MATRIX(SL,RL) += SQRT1_2;
+				_MATRIX(SR,RR) += SQRT1_2;
 			} else {
-				matrix[SL][RL] += 1.0f;
-				matrix[SR][RR] += 1.0f;
+				_MATRIX(SL,RL) += 1.0f;
+				_MATRIX(SR,RR) += 1.0f;
 			}
-		} else if (dst_mask & _MASK(FL)) {
+		} else if (dst_mask & STEREO) {
 			spa_log_debug(mix->log, "assign RL+RR to FL+FR %f", slev);
 			if (matrix_encoding == MATRIX_DOLBY) {
-				matrix[FL][RL] -= slev * SQRT1_2;
-				matrix[FL][RR] -= slev * SQRT1_2;
-				matrix[FR][RL] += slev * SQRT1_2;
-				matrix[FR][RR] += slev * SQRT1_2;
+				_MATRIX(FL,RL) -= slev * SQRT1_2;
+				_MATRIX(FL,RR) -= slev * SQRT1_2;
+				_MATRIX(FR,RL) += slev * SQRT1_2;
+				_MATRIX(FR,RR) += slev * SQRT1_2;
 			} else if (matrix_encoding == MATRIX_DPLII) {
-				matrix[FL][RL] -= slev * SQRT3_2;
-				matrix[FL][RR] -= slev * SQRT1_2;
-				matrix[FR][RL] += slev * SQRT1_2;
-				matrix[FR][RR] += slev * SQRT3_2;
+				_MATRIX(FL,RL) -= slev * SQRT3_2;
+				_MATRIX(FL,RR) -= slev * SQRT1_2;
+				_MATRIX(FR,RL) += slev * SQRT1_2;
+				_MATRIX(FR,RR) += slev * SQRT3_2;
 			} else {
-				matrix[FL][RL] += slev;
-				matrix[FR][RR] += slev;
+				_MATRIX(FL,RL) += slev;
+				_MATRIX(FR,RR) += slev;
 			}
-		} else if (dst_mask & _MASK(FC)) {
+		} else if (dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign RL+RR to FC");
-			matrix[FC][RL]+= slev * SQRT1_2;
-			matrix[FC][RR]+= slev * SQRT1_2;
+			_MATRIX(FC,RL)+= slev * SQRT1_2;
+			_MATRIX(FC,RR)+= slev * SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign RL");
 		}
 	}
 
-	if (unassigned & _MASK(SL)) {
-		if (dst_mask & _MASK(RL)) {
+	if (unassigned & SIDE) {
+		if (dst_mask & REAR) {
 			spa_log_debug(mix->log, "assign SL+SR to RL+RR");
 			if (src_mask & _MASK(RL)) {
-				matrix[RL][SL] += SQRT1_2;
-				matrix[RR][SR] += SQRT1_2;
+				_MATRIX(RL,SL) += SQRT1_2;
+				_MATRIX(RR,SR) += SQRT1_2;
 			} else {
-				matrix[RL][SL] += 1.0f;
-				matrix[RR][SR] += 1.0f;
+				_MATRIX(RL,SL) += 1.0f;
+				_MATRIX(RR,SR) += 1.0f;
 			}
 		} else if (dst_mask & _MASK(RC)) {
 			spa_log_debug(mix->log, "assign SL+SR to RC");
-			matrix[RC][SL]+= SQRT1_2;
-			matrix[RC][SR]+= SQRT1_2;
-		} else if (dst_mask & _MASK(FL)) {
+			_MATRIX(RC,SL)+= SQRT1_2;
+			_MATRIX(RC,SR)+= SQRT1_2;
+		} else if (dst_mask & STEREO) {
 			spa_log_debug(mix->log, "assign SL+SR to FL+FR");
 			if (matrix_encoding == MATRIX_DOLBY) {
-				matrix[FL][SL] -= slev * SQRT1_2;
-				matrix[FL][SR] -= slev * SQRT1_2;
-				matrix[FR][SL] += slev * SQRT1_2;
-				matrix[FR][SR] += slev * SQRT1_2;
+				_MATRIX(FL,SL) -= slev * SQRT1_2;
+				_MATRIX(FL,SR) -= slev * SQRT1_2;
+				_MATRIX(FR,SL) += slev * SQRT1_2;
+				_MATRIX(FR,SR) += slev * SQRT1_2;
 			} else if (matrix_encoding == MATRIX_DPLII) {
-				matrix[FL][SL] -= slev * SQRT3_2;
-				matrix[FL][SR] -= slev * SQRT1_2;
-				matrix[FR][SL] += slev * SQRT1_2;
-				matrix[FR][SR] += slev * SQRT3_2;
+				_MATRIX(FL,SL) -= slev * SQRT3_2;
+				_MATRIX(FL,SR) -= slev * SQRT1_2;
+				_MATRIX(FR,SL) += slev * SQRT1_2;
+				_MATRIX(FR,SR) += slev * SQRT3_2;
 			} else {
-				matrix[FL][SL] += slev;
-				matrix[FR][SR] += slev;
+				_MATRIX(FL,SL) += slev;
+				_MATRIX(FR,SR) += slev;
 			}
-		} else if (dst_mask & _MASK(FC)) {
+		} else if (dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign SL+SR to FC");
-			matrix[FC][SL] += slev * SQRT1_2;
-			matrix[FC][SR] += slev * SQRT1_2;
+			_MATRIX(FC,SL) += slev * SQRT1_2;
+			_MATRIX(FC,SR) += slev * SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign SL");
 		}
 	}
 
 	if (unassigned & _MASK(FLC)) {
-		if (dst_mask & _MASK(FL)) {
+		if (dst_mask & STEREO) {
 			spa_log_debug(mix->log, "assign FLC+FRC to FL+FR");
-			matrix[FL][FLC]+= 1.0f;
-			matrix[FR][FRC]+= 1.0f;
-		} else if(dst_mask & _MASK(FC)) {
+			_MATRIX(FL,FLC)+= 1.0f;
+			_MATRIX(FR,FRC)+= 1.0f;
+		} else if(dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign FLC+FRC to FC");
-			matrix[FC][FLC]+= SQRT1_2;
-			matrix[FC][FRC]+= SQRT1_2;
+			_MATRIX(FC,FLC)+= SQRT1_2;
+			_MATRIX(FC,FRC)+= SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign FLC");
 		}
 	}
 	if (unassigned & _MASK(LFE) &&
 	    SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_MIX_LFE)) {
-		if (dst_mask & _MASK(FC)) {
+		if (dst_mask & FRONT) {
 			spa_log_debug(mix->log, "assign LFE to FC");
-			matrix[FC][LFE] += llev;
-		} else if (dst_mask & _MASK(FL)) {
+			_MATRIX(FC,LFE) += llev;
+		} else if (dst_mask & STEREO) {
 			spa_log_debug(mix->log, "assign LFE to FL+FR");
-			matrix[FL][LFE] += llev * SQRT1_2;
-			matrix[FR][LFE] += llev * SQRT1_2;
+			_MATRIX(FL,LFE) += llev * SQRT1_2;
+			_MATRIX(FR,LFE) += llev * SQRT1_2;
 		} else {
 			spa_log_warn(mix->log, "can't assign LFE");
 		}
 	}
+
+	if (!do_upmix)
+		goto done;
+
+	unassigned = dst_mask & ~src_mask;
+
+	spa_log_debug(mix->log, "unassigned upmix %08" PRIx64, unassigned);
+
+	if (unassigned & FRONT) {
+		if ((src_mask & STEREO) == STEREO) {
+			spa_log_debug(mix->log, "produce FC from STEREO");
+			_MATRIX(FC,FL) += clev;
+			_MATRIX(FC,FR) += clev;
+		} else {
+			spa_log_warn(mix->log, "can't produce FC");
+		}
+	}
+	if (unassigned & _MASK(LFE) && mix->lfe_cutoff > 0.0f) {
+		if ((src_mask & STEREO) == STEREO) {
+			spa_log_debug(mix->log, "produce LFE from STEREO");
+			_MATRIX(LFE,FL) += llev;
+			_MATRIX(LFE,FR) += llev;
+		} else if ((src_mask & FRONT) == FRONT) {
+			spa_log_debug(mix->log, "produce LFE from FC");
+			_MATRIX(LFE,FC) += llev;
+		} else {
+			spa_log_warn(mix->log, "can't produce LFE");
+		}
+	}
+	if (unassigned & SIDE) {
+		if ((src_mask & REAR) == REAR) {
+			spa_log_debug(mix->log, "produce SIDE from REAR");
+			_MATRIX(SL,RL) += 1.0f;
+			_MATRIX(SR,RR) += 1.0f;
+		} else if ((src_mask & STEREO) == STEREO) {
+			spa_log_debug(mix->log, "produce SIDE from STEREO");
+			_MATRIX(SL,FL) += 1.0f;
+			_MATRIX(SR,FR) += 1.0f;
+		} else if ((src_mask & FRONT) == FRONT) {
+			spa_log_debug(mix->log, "produce SIDE from FC");
+			_MATRIX(SL,FC) += clev;
+			_MATRIX(SR,FC) += clev;
+		}
+	}
+	if (unassigned & REAR) {
+		if ((src_mask & SIDE) == SIDE) {
+			spa_log_debug(mix->log, "produce REAR from SIDE");
+			_MATRIX(RL,SL) += 1.0f;
+			_MATRIX(RR,SR) += 1.0f;
+		} else if ((src_mask & STEREO) == STEREO) {
+			spa_log_debug(mix->log, "produce REAR from STEREO");
+			_MATRIX(RL,FL) += 1.0f;
+			_MATRIX(RR,FR) += 1.0f;
+		} else if ((src_mask & FRONT) == FRONT) {
+			spa_log_debug(mix->log, "produce REAR from FC");
+			_MATRIX(RL,FC) += clev;
+			_MATRIX(RR,FC) += clev;
+		}
+	}
+
 done:
-	for (jc = 0, ic = 0, i = 0; i < NUM_CHAN; i++) {
+	for (jc = 0, ic = 0, i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++) {
 		float sum = 0.0f;
-		if ((dst_mask & (1UL << (i + 2))) == 0)
+		if ((dst_mask & (1UL << i)) == 0)
 			continue;
-		for (jc = 0, j = 0; j < NUM_CHAN; j++) {
-			if ((src_mask & (1UL << (j + 2))) == 0)
+		for (jc = 0, j = 0; j < SPA_AUDIO_MAX_CHANNELS; j++) {
+			if ((src_mask & (1UL << j)) == 0)
 				continue;
 			mix->matrix_orig[ic][jc++] = matrix[i][j];
 			sum += fabs(matrix[i][j]);
 		}
 		maxsum = SPA_MAX(maxsum, sum);
+		if (i == _CH(LFE) && do_upmix && mix->lfe_cutoff > 0.0f) {
+			spa_log_debug(mix->log, "channel %d is LFE", ic);
+			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->lfe_cutoff / mix->freq);
+			mix->lr4_info[ic] = 1;
+		} else {
+			mix->lr4_info[ic] = 0;
+		}
 		ic++;
 	}
 	if (SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_NORMALIZE) &&
@@ -449,6 +525,8 @@ int channelmix_init(struct channelmix *mix)
 			mix->cpu_flags);
 	if (info == NULL)
 		return -ENOTSUP;
+
+	spa_log_debug(mix->log, "selected %s", info->name);
 
 	mix->free = impl_channelmix_free;
 	mix->process = info->process;

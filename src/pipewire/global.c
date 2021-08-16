@@ -31,6 +31,7 @@
 #include <pipewire/private.h>
 
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #define NAME "global"
 
@@ -38,8 +39,8 @@
 struct impl {
 	struct pw_global this;
 };
-
 /** \endcond */
+
 SPA_EXPORT
 uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_client *client)
 {
@@ -55,11 +56,10 @@ uint32_t pw_global_get_permissions(struct pw_global *global, struct pw_impl_clie
  * \param type the type of the global
  * \param version the version of the type
  * \param properties extra properties
- * \param bind a function to bind to this global
+ * \param func a function to bind to this global
  * \param object the associated object
  * \return a result global
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 struct pw_global *
@@ -110,8 +110,7 @@ pw_global_new(struct pw_context *context,
 error_free:
 	free(impl);
 error_cleanup:
-	if (properties)
-		pw_properties_free(properties);
+	pw_properties_free(properties);
 	errno = -res;
 	return NULL;
 }
@@ -121,7 +120,6 @@ error_cleanup:
  * \param global a global to add
  * \return 0 on success < 0 errno value on failure
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 int pw_global_register(struct pw_global *global)
@@ -169,7 +167,6 @@ static int global_unregister(struct pw_global *global)
 	}
 
 	spa_list_remove(&global->link);
-	pw_map_remove(&context->globals, global->id);
 	global->registered = false;
 
 	pw_log_debug(NAME" %p: unregistered %u", global, global->id);
@@ -193,7 +190,7 @@ const char * pw_global_get_type(struct pw_global *global)
 SPA_EXPORT
 bool pw_global_is_type(struct pw_global *global, const char *type)
 {
-	return strcmp(global->type, type) == 0;
+	return spa_streq(global->type, type);
 }
 
 SPA_EXPORT
@@ -210,7 +207,7 @@ const struct pw_properties *pw_global_get_properties(struct pw_global *global)
 
 SPA_EXPORT
 int pw_global_update_keys(struct pw_global *global,
-		     const struct spa_dict *dict, const char *keys[])
+		     const struct spa_dict *dict, const char * const keys[])
 {
 	if (global->registered)
 		return -EINVAL;
@@ -267,6 +264,7 @@ void pw_global_add_listener(struct pw_global *global,
  *
  * \param global the global to bind to
  * \param client the client that binds
+ * \param permissions the \ref pw_permission
  * \param version the version
  * \param id the id of the resource
  *
@@ -274,7 +272,6 @@ void pw_global_add_listener(struct pw_global *global,
  * After binding, the client and the global object will be able to
  * exchange messages on the proxy/resource with \a id.
  *
- * \memberof pw_global
  */
 SPA_EXPORT int
 pw_global_bind(struct pw_global *global, struct pw_impl_client *client, uint32_t permissions,
@@ -367,12 +364,12 @@ int pw_global_update_permissions(struct pw_global *global, struct pw_impl_client
  *
  * \param global a global to destroy
  *
- * \memberof pw_global
  */
 SPA_EXPORT
 void pw_global_destroy(struct pw_global *global)
 {
 	struct pw_resource *resource;
+	struct pw_context *context = global->context;
 
 	global->destroyed = true;
 
@@ -387,6 +384,7 @@ void pw_global_destroy(struct pw_global *global)
 	pw_log_debug(NAME" %p: free", global);
 	pw_global_emit_free(global);
 
+	pw_map_remove(&context->globals, global->id);
 	spa_hook_list_clean(&global->listener_list);
 
 	pw_properties_free(global->properties);

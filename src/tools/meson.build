@@ -1,60 +1,34 @@
-executable('pw-mon',
-	'pw-mon.c',
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
-executable('pw-cli',
-	'pw-cli.c',
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
-executable('pw-dot',
-	'pw-dot.c',
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
+tools_sources = [
+  [ 'pw-mon', [ 'pw-mon.c' ] ],
+  [ 'pw-cli', [ 'pw-cli.c' ] ],
+  [ 'pw-dot', [ 'pw-dot.c' ] ],
+  [ 'pw-dump', [ 'pw-dump.c' ] ],
+  [ 'pw-profiler', [ 'pw-profiler.c' ] ],
+  [ 'pw-mididump', [ 'pw-mididump.c', 'midifile.c' ] ],
+  [ 'pw-metadata', [ 'pw-metadata.c' ] ],
+  [ 'pw-loopback', [ 'pw-loopback.c' ] ],
+  [ 'pw-link', [ 'pw-link.c' ] ],
+]
 
-executable('pw-dump',
-	'pw-dump.c',
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
-
-executable('pw-profiler',
-	'pw-profiler.c',
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
-
-executable('pw-mididump',
-	[ 'pw-mididump.c', 'midifile.c'],
-	c_args : [ '-D_GNU_SOURCE' ],
+foreach t : tools_sources
+  executable(t.get(0),
+	t.get(1),
 	install: true,
 	dependencies : [pipewire_dep, mathlib],
-)
-
-executable('pw-metadata',
-	[ 'pw-metadata.c'],
-	c_args : [ '-D_GNU_SOURCE' ],
-	install: true,
-	dependencies : [pipewire_dep],
-)
+  )
+endforeach
 
 if ncurses_dep.found()
   executable('pw-top',
 	'pw-top.c',
-	c_args : [ '-D_GNU_SOURCE' ],
 	install: true,
 	dependencies : [pipewire_dep, ncurses_dep],
   )
 endif
 
-if get_option('pw-cat') and sndfile_dep.found()
+build_pw_cat = false
+if not get_option('pw-cat').disabled() and sndfile_dep.found()
+  build_pw_cat = true
 
   pwcat_sources = [
     'pw-cat.c',
@@ -70,15 +44,16 @@ if get_option('pw-cat') and sndfile_dep.found()
 
   executable('pw-cat',
     pwcat_sources,
-    c_args : [ '-D_GNU_SOURCE' ],
     install: true,
     dependencies : [sndfile_dep, pipewire_dep, mathlib],
   )
 
   foreach alias : pwcat_aliases
-    dst = join_paths(pipewire_bindir, alias)
+    dst = pipewire_bindir / alias
     cmd = 'ln -fs @0@ $DESTDIR@1@'.format('pw-cat', dst)
     meson.add_install_script('sh', '-c', cmd)
   endforeach
-
+elif not sndfile_dep.found() and get_option('pw-cat').enabled()
+	error('pw-cat is enabled but required dependency `sndfile` was not found.')
 endif
+summary({'Build pw-cat tool': build_pw_cat}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump tool')

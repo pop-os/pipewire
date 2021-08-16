@@ -36,8 +36,10 @@
 #include <spa/node/node.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/support/loop.h>
 #include <spa/support/plugin.h>
+#include <spa/support/i18n.h>
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
 #include <spa/monitor/event.h>
@@ -47,6 +49,8 @@
 #include <spa/debug/pod.h>
 
 #include "acp/acp.h"
+
+extern struct spa_i18n *acp_i18n;
 
 #define NAME  "alsa-device"
 
@@ -87,7 +91,6 @@ struct impl {
 	struct spa_hook_list hooks;
 
 	struct props props;
-	uint32_t n_nodes;
 
 	uint32_t profile;
 
@@ -96,6 +99,8 @@ struct impl {
 	int n_pfds;
 	struct spa_source sources[MAX_POLL];
 };
+
+static int emit_info(struct impl *this, bool full);
 
 static void handle_acp_poll(struct spa_source *source)
 {
@@ -107,6 +112,7 @@ static void handle_acp_poll(struct spa_source *source)
 	acp_card_handle_events(this->card);
 	for (i = 0; i < this->n_pfds; i++)
 		this->sources[i].rmask = 0;
+	emit_info(this, false);
 }
 
 static void remove_sources(struct impl *this)
@@ -142,12 +148,12 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	struct spa_dict_item *items;
 	const struct acp_dict_item *it;
 	uint32_t n_items, i;
-	char device_name[128], path[180], channels[16], ch[12];
-	char card_id[16], *p;
+	char device_name[128], path[180], channels[16], ch[12], routes[16];
+	char card_index[16], *p;
 	char positions[SPA_AUDIO_MAX_CHANNELS * 12];
 	struct spa_device_object_info info;
 	struct acp_card *card = this->card;
-	const char *stream, *devstr;;
+	const char *stream, *devstr;
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 	info.type = SPA_TYPE_INTERFACE_Node;
@@ -162,10 +168,10 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 
 	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
 
-	n_items = dev->props.n_items + 6;
-	items = alloca(n_items * sizeof(*items));
+	items = alloca((dev->props.n_items + 8) * sizeof(*items));
+	n_items = 0;
 
-	snprintf(card_id, sizeof(card), "%d", card->index);
+	snprintf(card_index, sizeof(card_index), "%d", card->index);
 
 	devstr = dev->device_strings[0];
 	p = strstr(devstr, "%f");
@@ -176,23 +182,27 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	} else {
 		snprintf(device_name, sizeof(device_name), "%s", devstr);
 	}
-	snprintf(path, sizeof(path), "alsa:pcm:%s:%s:%s", card_id, device_name, stream);
-	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH,	       path);
-	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PATH,           device_name);
-	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_CARD,       card_id);
-	items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_STREAM,     stream);
+	snprintf(path, sizeof(path), "alsa:pcm:%s:%s:%s", card_index, device_name, stream);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH, path);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PATH, device_name);
+	if (dev->flags & ACP_DEVICE_UCM_DEVICE)
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_OPEN_UCM, "true");
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_CARD, card_index);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PCM_STREAM, stream);
 
-	snprintf(channels, sizeof(channels)-1, "%d", dev->format.channels);
-	items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_CHANNELS, channels);
+	snprintf(channels, sizeof(channels), "%d", dev->format.channels);
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_CHANNELS, channels);
 
 	p = positions;
 	for (i = 0; i < dev->format.channels; i++) {
 		p += snprintf(p, 12, "%s%s", i == 0 ? "" : ",",
 				acp_channel_str(ch, sizeof(ch), dev->format.map[i]));
 	}
+	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_POSITION, positions);
 
-	items[5] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_POSITION, positions);
-	n_items = 6;
+	snprintf(routes, sizeof(routes), "%d", dev->n_ports);
+	items[n_items++] = SPA_DICT_ITEM_INIT("device.routes", routes);
+
 	acp_dict_for_each(it, &dev->props)
 		items[n_items++] = SPA_DICT_ITEM_INIT(it->key, it->value);
 
@@ -207,10 +217,11 @@ static int emit_info(struct impl *this, bool full)
 {
 	int err = 0;
 	struct spa_dict_item *items;
-	uint32_t n_items;
+	uint32_t i, n_items;
 	const struct acp_dict_item *it;
 	struct acp_card *card = this->card;
 	char path[128];
+	uint64_t old = full ? this->info.change_mask : 0;
 
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -229,8 +240,17 @@ static int emit_info(struct impl *this, bool full)
 			ADD_ITEM(it->key, it->value);
 		this->info.props = &SPA_DICT_INIT(items, n_items);
 #undef ADD_ITEM
+
+		if (this->info.change_mask & SPA_DEVICE_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < SPA_N_ELEMENTS(this->params); i++) {
+				if (this->params[i].user > 0) {
+					this->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					this->params[i].user = 0;
+				}
+			}
+		}
 		spa_device_emit_info(&this->hooks, &this->info);
-		this->info.change_mask = 0;
+		this->info.change_mask = old;
 	}
 	return err;
 }
@@ -283,25 +303,29 @@ static int impl_sync(void *object, int seq)
 }
 
 static struct spa_pod *build_profile(struct spa_pod_builder *b, uint32_t id,
-	struct acp_card_profile *pr)
+	struct acp_card_profile *pr, bool current)
 {
 	struct spa_pod_frame f[2];
 	uint32_t i, n_classes, n_capture = 0, n_playback = 0;
+	uint32_t *capture, *playback;
+
+	capture = alloca(sizeof(uint32_t) * pr->n_devices);
+	playback = alloca(sizeof(uint32_t) * pr->n_devices);
 
 	for (i = 0; i < pr->n_devices; i++) {
-		switch (pr->devices[i]->direction) {
+		struct acp_device *dev = pr->devices[i];
+		switch (dev->direction) {
 		case ACP_DIRECTION_PLAYBACK:
-			n_playback++;
+			playback[n_playback++] = dev->index;
 			break;
 		case ACP_DIRECTION_CAPTURE:
-			n_capture++;
+			capture[n_capture++] = dev->index;
 			break;
 		}
 	}
 	n_classes = n_capture > 0 ? 1 : 0;
 	n_classes += n_playback > 0 ? 1 : 0;
 
-	spa_pod_builder_int(b, n_classes);
 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_ParamProfile, id);
 	spa_pod_builder_add(b,
 		SPA_PARAM_PROFILE_index, SPA_POD_Int(pr->index),
@@ -316,14 +340,25 @@ static struct spa_pod *build_profile(struct spa_pod_builder *b, uint32_t id,
 	if (n_capture > 0) {
 		spa_pod_builder_add_struct(b,
 			SPA_POD_String("Audio/Source"),
-			SPA_POD_Int(n_capture));
+			SPA_POD_Int(n_capture),
+			SPA_POD_String("card.profile.devices"),
+			SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Int,
+				n_capture, capture));
 	}
 	if (n_playback > 0) {
 		spa_pod_builder_add_struct(b,
 			SPA_POD_String("Audio/Sink"),
-			SPA_POD_Int(n_playback));
+			SPA_POD_Int(n_playback),
+			SPA_POD_String("card.profile.devices"),
+			SPA_POD_Array(sizeof(uint32_t), SPA_TYPE_Int,
+				n_playback, playback));
 	}
 	spa_pod_builder_pop(b, &f[1]);
+	if (current) {
+		spa_pod_builder_prop(b, SPA_PARAM_PROFILE_save, 0);
+		spa_pod_builder_bool(b, SPA_FLAG_IS_SET(pr->flags, ACP_PROFILE_SAVE));
+	}
+
 	return spa_pod_builder_pop(b, &f[0]);
 }
 
@@ -358,12 +393,24 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 		0);
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_info, SPA_POD_PROP_FLAG_HINT_DICT);
 	spa_pod_builder_push_struct(b, &f[1]);
-	spa_pod_builder_int(b, p->props.n_items);
+	spa_pod_builder_int(b, p->props.n_items + (dev ? 2 : 0));
 	acp_dict_for_each(item, &p->props) {
 		spa_pod_builder_add(b,
 				SPA_POD_String(item->key),
 				SPA_POD_String(item->value),
 				NULL);
+	}
+	if (dev != NULL) {
+		const char *str;
+		str = SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_HW_MUTE) ? "true" : "false";
+		spa_pod_builder_add(b,
+				SPA_POD_String("route.hw-mute"),
+				SPA_POD_String(str), NULL);
+
+		str = SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_HW_VOLUME) ? "true" : "false";
+		spa_pod_builder_add(b,
+				SPA_POD_String("route.hw-volume"),
+				SPA_POD_String(str), NULL);
 	}
 	spa_pod_builder_pop(b, &f[1]);
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
@@ -374,11 +421,14 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 	if (dev != NULL) {
 		uint32_t channels = dev->format.channels;
 		float volumes[channels];
+		float soft_volumes[channels];
 		bool mute;
 
 		acp_device_get_mute(dev, &mute);
 		spa_zero(volumes);
+		spa_zero(soft_volumes);
 		acp_device_get_volume(dev, volumes, channels);
+		acp_device_get_soft_volume(dev, soft_volumes, channels);
 
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_device, 0);
 		spa_pod_builder_int(b, dev->index);
@@ -406,6 +456,10 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 		spa_pod_builder_array(b, sizeof(uint32_t), SPA_TYPE_Id,
 				channels, dev->format.map);
 
+		spa_pod_builder_prop(b, SPA_PROP_softVolumes, 0);
+		spa_pod_builder_array(b, sizeof(float), SPA_TYPE_Float,
+				channels, soft_volumes);
+
 		spa_pod_builder_pop(b, &f[1]);
 	}
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
@@ -417,6 +471,8 @@ static struct spa_pod *build_route(struct spa_pod_builder *b, uint32_t id,
 	if (profile != SPA_ID_INVALID) {
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profile, 0);
 		spa_pod_builder_int(b, profile);
+		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_save, 0);
+		spa_pod_builder_bool(b, SPA_FLAG_IS_SET(p->flags, ACP_PORT_SAVE));
 	}
 	return spa_pod_builder_pop(b, &f[0]);
 }
@@ -465,7 +521,7 @@ static int impl_enum_params(void *object, int seq,
 			return 0;
 
 		pr = card->profiles[result.index];
-		param = build_profile(&b, id, pr);
+		param = build_profile(&b, id, pr, false);
 		break;
 
 	case SPA_PARAM_Profile:
@@ -473,7 +529,7 @@ static int impl_enum_params(void *object, int seq,
 			return 0;
 
 		pr = card->profiles[card->active_profile_index];
-		param = build_profile(&b, id, pr);
+		param = build_profile(&b, id, pr, true);
 		break;
 
 	case SPA_PARAM_EnumRoute:
@@ -527,7 +583,7 @@ static int apply_device_props(struct impl *this, struct acp_device *dev, struct 
 	int changed = 0;
 	float volumes[ACP_MAX_CHANNELS];
 	uint32_t channels[ACP_MAX_CHANNELS];
-	uint32_t n_volumes = 0, n_channels = 0;
+	uint32_t n_volumes = 0;
 
 	if (!spa_pod_is_object_type(props, SPA_TYPE_OBJECT_Props))
 		return -EINVAL;
@@ -553,8 +609,8 @@ static int apply_device_props(struct impl *this, struct acp_device *dev, struct 
 			}
 			break;
 		case SPA_PROP_channelMap:
-			if ((n_channels = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
-					channels, ACP_MAX_CHANNELS)) > 0) {
+			if (spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					channels, ACP_MAX_CHANNELS) > 0) {
 				changed++;
 			}
 			break;
@@ -578,30 +634,41 @@ static int impl_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
-		uint32_t id;
+		uint32_t idx;
+		bool save = false;
 
-		if ((res = spa_pod_parse_object(param,
+		if (param == NULL) {
+			idx = acp_card_find_best_profile_index(this->card, NULL);
+			save = true;
+		} else if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&id))) < 0) {
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx),
+				SPA_PARAM_PROFILE_save, SPA_POD_OPT_Bool(&save))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_pod(0, NULL, param);
 			return res;
 		}
 
-		res = acp_card_set_profile(this->card, id);
+		acp_card_set_profile(this->card, idx, save ? ACP_PROFILE_SAVE : 0);
+		emit_info(this, false);
 		break;
 	}
 	case SPA_PARAM_Route:
 	{
-		uint32_t id, device;
+		uint32_t idx, device;
 		struct spa_pod *props = NULL;
 		struct acp_device *dev;
+		bool save = false;
+
+		if (param == NULL)
+			return -EINVAL;
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
-				SPA_PARAM_ROUTE_index, SPA_POD_Int(&id),
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(&idx),
 				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
-				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props))) < 0) {
+				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props),
+				SPA_PARAM_ROUTE_save, SPA_POD_OPT_Bool(&save))) < 0) {
 			spa_log_warn(this->log, "can't parse route");
 			spa_debug_pod(0, NULL, param);
 			return res;
@@ -610,9 +677,10 @@ static int impl_set_param(void *object,
 			return -EINVAL;
 
 		dev = this->card->devices[device];
-		res = acp_device_set_port(dev, id);
+		acp_device_set_port(dev, idx, save ? ACP_PORT_SAVE : 0);
 		if (props)
 			apply_device_props(this, dev, props);
+		emit_info(this, false);
 		break;
 	}
 	default:
@@ -668,9 +736,9 @@ static void card_profile_changed(void *data, uint32_t old_index, uint32_t new_in
 	setup_sources(this);
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Profile].flags ^= SPA_PARAM_INFO_SERIAL;
-	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
+	this->params[IDX_Profile].user++;
+	this->params[IDX_Route].user++;
+	this->params[IDX_EnumRoute].user++;
 }
 
 static void card_profile_available(void *data, uint32_t index,
@@ -684,13 +752,12 @@ static void card_profile_available(void *data, uint32_t index,
 			acp_available_str(old), acp_available_str(available));
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_EnumProfile].flags ^= SPA_PARAM_INFO_SERIAL;
-	this->params[IDX_Profile].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
+	this->params[IDX_EnumProfile].user++;
+	this->params[IDX_Profile].user++;
 
 	if (this->props.auto_profile) {
 		uint32_t best = acp_card_find_best_profile_index(card, NULL);
-		acp_card_set_profile(card, best);
+		acp_card_set_profile(card, best, 0);
 	}
 }
 
@@ -705,8 +772,7 @@ static void card_port_changed(void *data, uint32_t old_index, uint32_t new_index
 			op->name, np->name);
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
+	this->params[IDX_Route].user++;
 }
 
 static void card_port_available(void *data, uint32_t index,
@@ -720,9 +786,8 @@ static void card_port_available(void *data, uint32_t index,
 			acp_available_str(old), acp_available_str(available));
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_EnumRoute].flags ^= SPA_PARAM_INFO_SERIAL;
-	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
+	this->params[IDX_EnumRoute].user++;
+	this->params[IDX_Route].user++;
 
 	if (this->props.auto_port) {
 		uint32_t i;
@@ -735,7 +800,7 @@ static void card_port_available(void *data, uint32_t index,
 				continue;
 
 			best = acp_device_find_best_port_index(d, NULL);
-			acp_device_set_port(d, best);
+			acp_device_set_port(d, best, 0);
 		}
 	}
 }
@@ -743,31 +808,22 @@ static void card_port_available(void *data, uint32_t index,
 static void on_volume_changed(void *data, struct acp_device *dev)
 {
 	struct impl *this = data;
-	spa_log_info(this->log, "device %s volume changed", dev->name);
-	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
-}
-
-static void on_mute_changed(void *data, struct acp_device *dev)
-{
-	struct impl *this = data;
-	spa_log_info(this->log, "device %s mute changed", dev->name);
-	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	this->params[IDX_Route].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_info(this, false);
-}
-
-static void on_set_soft_volume(void *data, struct acp_device *dev,
-		const float *volume, uint32_t n_volume)
-{
-	struct impl *this = data;
 	struct spa_event *event;
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = { 0 };
 	struct spa_pod_frame f[1];
+	uint32_t n_volume = dev->format.channels;
+	float volume[n_volume];
+	float soft_volume[n_volume];
 
-	spa_log_info(this->log, "device %s soft volume %f", dev->name, volume[0]);
+	spa_log_info(this->log, "device %s volume changed", dev->name);
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Route].user++;
+
+	spa_zero(volume);
+	spa_zero(soft_volume);
+	acp_device_get_volume(dev, volume, n_volume);
+	acp_device_get_soft_volume(dev, soft_volume, n_volume);
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0],
@@ -781,22 +837,28 @@ static void on_set_soft_volume(void *data, struct acp_device *dev,
 						SPA_TYPE_Float, n_volume, volume),
 			SPA_PROP_channelMap, SPA_POD_Array(sizeof(uint32_t),
 						SPA_TYPE_Id, dev->format.channels,
-						dev->format.map));
+						dev->format.map),
+			SPA_PROP_softVolumes, SPA_POD_Array(sizeof(float),
+						SPA_TYPE_Float, n_volume, soft_volume));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
 }
 
-static void on_set_soft_mute(void *data, struct acp_device *dev,
-		bool mute)
+static void on_mute_changed(void *data, struct acp_device *dev)
 {
 	struct impl *this = data;
 	struct spa_event *event;
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = { 0 };
 	struct spa_pod_frame f[1];
+	bool mute;
 
-	spa_log_info(this->log, "device %s soft mute %d", dev->name, mute);
+	spa_log_info(this->log, "device %s mute changed", dev->name);
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Route].user++;
+
+	acp_device_get_mute(dev, &mute);
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0],
@@ -807,13 +869,14 @@ static void on_set_soft_mute(void *data, struct acp_device *dev,
 
 	spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Props, SPA_EVENT_DEVICE_Props,
-			SPA_PROP_mute, SPA_POD_Bool(mute));
+			SPA_PROP_mute, SPA_POD_Bool(mute),
+			SPA_PROP_softMute, SPA_POD_Bool(mute));
 	event = spa_pod_builder_pop(&b, &f[0]);
 
 	spa_device_emit_event(&this->hooks, event);
 }
 
-struct acp_card_events card_events = {
+static const struct acp_card_events card_events = {
 	ACP_VERSION_CARD_EVENTS,
 	.props_changed = card_props_changed,
 	.profile_changed = card_profile_changed,
@@ -822,8 +885,6 @@ struct acp_card_events card_events = {
 	.port_available = card_port_available,
 	.volume_changed = on_volume_changed,
 	.mute_changed = on_mute_changed,
-	.set_soft_volume = on_set_soft_volume,
-	.set_soft_mute = on_set_soft_mute,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
@@ -835,7 +896,7 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 	this = (struct impl *) handle;
 
-	if (strcmp(type, SPA_TYPE_INTERFACE_Device) == 0)
+	if (spa_streq(type, SPA_TYPE_INTERFACE_Device))
 		*interface = &this->device;
 	else
 		return -ENOENT;
@@ -892,6 +953,7 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	acp_i18n = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_I18N);
 	if (this->loop == NULL) {
 		spa_log_error(this->log, "a Loop interface is needed");
 		return -EINVAL;
@@ -910,11 +972,11 @@ impl_init(const struct spa_handle_factory *factory,
 
 	if (info) {
 		if ((str = spa_dict_lookup(info, SPA_KEY_API_ALSA_PATH)) != NULL)
-			snprintf(this->props.device, sizeof(this->props.device)-1, "%s", str);
+			snprintf(this->props.device, sizeof(this->props.device), "%s", str);
 		if ((str = spa_dict_lookup(info, "api.acp.auto-port")) != NULL)
-			this->props.auto_port = strcmp(str, "true") == 0 || atoi(str) != 0;
+			this->props.auto_port = spa_atob(str);
 		if ((str = spa_dict_lookup(info, "api.acp.auto-profile")) != NULL)
-			this->props.auto_profile = strcmp(str, "true") == 0 || atoi(str) != 0;
+			this->props.auto_profile = spa_atob(str);
 
 		items = alloca((info->n_items) * sizeof(*items));
 		spa_dict_for_each(it, info)

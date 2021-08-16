@@ -29,7 +29,7 @@
 #include <spa/pod/parser.h>
 
 #include "pipewire/pipewire.h"
-#include "extensions/metadata.h"
+#include "pipewire/extensions/metadata.h"
 
 struct object_data {
 	struct pw_metadata *object;
@@ -72,7 +72,7 @@ struct pw_proxy *pw_core_metadata_export(struct pw_core *core,
 		return NULL;
 
 	data = pw_proxy_get_user_data(proxy);
-	data = SPA_MEMBER(data, user_data_size, struct object_data);
+	data = SPA_PTROFF(data, user_data_size, struct object_data);
 	data->object = object;
 	data->proxy = proxy;
 

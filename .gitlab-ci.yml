@@ -1,24 +1,29 @@
 stages:
   - container
+  - container_coverity
   - build
+  - analysis
   - pages
 
 variables:
   FDO_UPSTREAM_REPO: 'pipewire/pipewire'
 
-# ci-templates as of May 1st 2020
-.templates_sha: &templates_sha 59de540b620c45739871d1a073d76d5521989d11
+# ci-templates as of March 19th 2021
+.templates_sha: &templates_sha 290b79e0e78eab67a83766f4e9691be554fc4afd
 
 include:
   - project: 'freedesktop/ci-templates'
     ref: *templates_sha
     file: '/templates/fedora.yml'
+  - project: 'freedesktop/ci-templates'
+    ref: *templates_sha
+    file: '/templates/ubuntu.yml'
 
 .fedora:
   variables:
     # Update this tag when you want to trigger a rebuild
-    FDO_DISTRIBUTION_TAG: '2020-05-19.1'
-    FDO_DISTRIBUTION_VERSION: '32'
+    FDO_DISTRIBUTION_TAG: '2021-07-06.0'
+    FDO_DISTRIBUTION_VERSION: '33'
     FDO_DISTRIBUTION_PACKAGES: >-
       alsa-lib-devel
       bluez-libs-devel
@@ -32,30 +37,86 @@ include:
       gstreamer1-devel
       gstreamer1-plugins-base-devel
       jack-audio-connection-kit-devel
+      libsndfile-devel
       libv4l-devel
       libva-devel
       libX11-devel
       meson
       pulseaudio-libs-devel
       sbc-devel
+      ShellCheck
       SDL2-devel
       systemd-devel
       vulkan-loader-devel
+      webrtc-audio-processing-devel
       which
+      valgrind
       xmltoman
-      libsndfile-devel
+
+.ubuntu:
+  variables:
+    # Update this tag when you want to trigger a rebuild
+    FDO_DISTRIBUTION_TAG: '2021-06-18.0'
+    FDO_DISTRIBUTION_VERSION: '20.04'
+    FDO_DISTRIBUTION_PACKAGES: >-
+      debhelper-compat
+      findutils
+      git
+      libasound2-dev
+      libavcodec-dev
+      libavfilter-dev
+      libavformat-dev
+      libdbus-1-dev
+      libglib2.0-dev
+      libgstreamer1.0-dev
+      libgstreamer-plugins-base1.0-dev
+      libsbc-dev
+      libsdl2-dev
+      libudev-dev
+      libva-dev
+      libv4l-dev
+      libx11-dev
+      ninja-build
+      pkg-config
+      systemd
+      xmltoman
+      python3-pip
+    FDO_DISTRIBUTION_EXEC: >-
+      pip3 install meson
+
+.coverity:
+  variables:
+    FDO_REPO_SUFFIX: 'coverity'
+    FDO_BASE_IMAGE: registry.freedesktop.org/$FDO_UPSTREAM_REPO/fedora/$FDO_DISTRIBUTION_VERSION:$FDO_DISTRIBUTION_TAG
+    FDO_DISTRIBUTION_PACKAGES: >-
+      curl
+    FDO_DISTRIBUTION_EXEC: >-
+      mkdir -p /opt ;
+      cd /opt ;
+      curl -o /tmp/cov-analysis-linux64.tgz https://scan.coverity.com/download/linux64
+      --form project=$COVERITY_SCAN_PROJECT_NAME --form token=$COVERITY_SCAN_TOKEN ;
+      tar xf /tmp/cov-analysis-linux64.tgz ;
+      mv cov-analysis-linux64-* coverity ;
+      rm /tmp/cov-analysis-linux64.tgz
+  only:
+    variables:
+      - $COVERITY
+
+.not_coverity:
+  except:
+    variables:
+      - $COVERITY
 
 .build:
   before_script:
     # setup the environment
-    - export BUILD_ID="$CI_JOB_NAME"
+    - export BUILD_ID="$CI_JOB_ID"
     - export PREFIX="$PWD/prefix-$BUILD_ID"
     - export BUILD_DIR="$PWD/build-$BUILD_ID"
     - export XDG_RUNTIME_DIR="$(mktemp -p $PWD -d xdg-runtime-XXXXXX)"
   script:
-    - meson "$BUILD_DIR" . --prefix="$PREFIX"
-        -Ddocs=true -Daudiomixer=true -Daudiotestsrc=true
-        -Dtest=true -Dvideotestsrc=true -Dvolume=true
+    - echo "Building with $MESON_OPTIONS"
+    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
     - ninja -C "$BUILD_DIR"
     - ninja -C "$BUILD_DIR" test
     - ninja -C "$BUILD_DIR" install
@@ -65,7 +126,14 @@ include:
     when: always
     paths:
       - build-*/meson-logs
-      - prefix-*
+
+container_ubuntu:
+  extends:
+    - .ubuntu
+    - .fdo.container-build@ubuntu
+  stage: container
+  variables:
+    GIT_STRATEGY: none # no need to pull the whole tree for rebuilding the image
 
 container_fedora:
   extends:
@@ -75,21 +143,140 @@ container_fedora:
   variables:
     GIT_STRATEGY: none # no need to pull the whole tree for rebuilding the image
 
-build_on_fedora:
+container_coverity:
   extends:
     - .fedora
+    - .coverity
+    - .fdo.container-build@fedora
+  stage: container_coverity
+  variables:
+    GIT_STRATEGY: none
+
+build_on_ubuntu:
+  extends:
+    - .ubuntu
+    - .not_coverity
+    - .fdo.distribution-image@ubuntu
+    - .build
+  stage: build
+
+.build_on_fedora:
+  extends:
+    - .fedora
+    - .not_coverity
     - .fdo.distribution-image@fedora
     - .build
   stage: build
 
+build_on_fedora:
+  extends:
+    - .build_on_fedora
+  variables:
+    MESON_OPTIONS: >-
+        -Ddocs=enabled
+        -Dinstalled_tests=enabled
+        -Dsystemd-system-service=enabled
+        -Dbluez5-backend-hsphfpd=enabled
+        -Daudiotestsrc=enabled
+        -Dtest=enabled
+        -Dvideotestsrc=enabled
+        -Dvolume=enabled
+        -Dvulkan=enabled
+        -Dsdl2=enabled
+        -Dsndfile=enabled
+  artifacts:
+    name: pipewire-$CI_COMMIT_SHA
+    when: always
+    paths:
+      - build-*/meson-logs
+      - prefix-*
+
+# build with all options on auto() or their default values
+build_with_no_commandline_options:
+  extends:
+    - .build_on_fedora
+  variables:
+    MESON_OPTIONS: ""
+
+# build with a set of options enabled or disabled
+build_with_custom_options:
+  extends:
+    - .build_on_fedora
+  parallel:
+    matrix:
+      - MESON_OPTION: [docs, installed_tests, systemd-system-service, bluez5-backend-hsphfpd,
+                       audiotestsrc, test, videotestsrc, volume, vulkan, sdl2, sndfile]
+        MESON_OPTION_VALUE: [enabled, disabled]
+  script:
+    - echo "Building with -D$MESON_OPTION=$MESON_OPTION_VALUE"
+    - meson "$BUILD_DIR" . --prefix="$PREFIX" "-D$MESON_OPTION=$MESON_OPTION_VALUE"
+    - ninja -C "$BUILD_DIR"
+    - ninja -C "$BUILD_DIR" test
+
+valgrind:
+  extends:
+    - .build_on_fedora
+  script:
+    - echo "Building with $MESON_OPTIONS"
+    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
+    - meson test -C "$BUILD_DIR" --setup=valgrind
+
+build_with_coverity:
+  extends:
+    - .fedora
+    - .coverity
+    - .fdo.suffixed-image@fedora
+    - .build
+  stage: analysis
+  script:
+    - export PATH=/opt/coverity/bin:$PATH
+    - meson "$BUILD_DIR" . --prefix="$PREFIX"
+        -Ddocs=disabled
+        -Dbluez5-backend-hsphfpd=enabled
+        -Daudiotestsrc=enabled
+        -Dtest=enabled
+        -Dvideotestsrc=enabled
+        -Dvolume=enabled
+        -Dvulkan=enabled
+        -Dsdl2=enabled
+        -Dsndfile=enabled
+    - cov-build --dir cov-int ninja -C "$BUILD_DIR"
+    - tar czf cov-int.tar.gz cov-int
+    - curl https://scan.coverity.com/builds?project=$COVERITY_SCAN_PROJECT_NAME
+        --form token=$COVERITY_SCAN_TOKEN --form email=$GITLAB_USER_EMAIL
+        --form file=@cov-int.tar.gz --form version="`git describe --tags`"
+        --form description="`git describe --tags` / $CI_COMMIT_TITLE / $CI_COMMIT_REF_NAME:$CI_PIPELINE_ID "
+  artifacts:
+    name: pipewire-coverity-$CI_COMMIT_SHA
+    when: always
+    paths:
+      - build-*/meson-logs
+      - cov-int/build-log.txt
+
+shellcheck:
+  extends:
+    - .build_on_fedora
+  stage: analysis
+  script:
+    - shellcheck $(git grep -l "#\!/.*bin/.*sh")
+
+spellcheck:
+  extends:
+    - .build_on_fedora
+  stage: analysis
+  script:
+    - git ls-files | grep -v .gitlab-ci.yml | xargs -d '\n' sed -i 's/Pipewire/PipeWire/g'
+    - git diff --exit-code || (echo "Please fix the above spelling mistakes" && exit 1)
+
 pages:
+  extends:
+    - .not_coverity
   stage: pages
   dependencies:
     - build_on_fedora
   script:
-    - export PREFIX="$PWD/prefix-build_on_fedora"
     - mkdir public
-    - cp -R $PREFIX/share/doc/pipewire/html/* public/
+    - cp -R prefix-*/share/doc/pipewire/html/* public/
   artifacts:
     paths:
       - public

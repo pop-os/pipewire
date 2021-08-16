@@ -35,6 +35,7 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/result.h>
 #include <spa/utils/names.h>
+#include <spa/utils/string.h>
 #include <spa/utils/type-info.h>
 #include <spa/param/format.h>
 #include <spa/param/format-utils.h>
@@ -84,7 +85,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	const struct pw_properties *old;
 	enum pw_direction direction;
 	struct pw_properties *new;
-	const char *str, *path, *node_name, *media_class;
+	const char *str, *path, *desc, *nick, *name, *node_name, *media_class;
 	char position[8], *prefix;
 	bool is_monitor, is_device, is_duplex, is_virtual;
 
@@ -124,11 +125,11 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 			"playback" : is_monitor ? "monitor" : "capture";
 	else
 		prefix = direction == PW_DIRECTION_INPUT ?
-			"input" : "output";
+			"input" : is_monitor ? "monitor" : "output";
 
 	if ((str = pw_properties_get(old, PW_KEY_AUDIO_CHANNEL)) == NULL ||
-	    strcmp(str, "UNK") == 0) {
-		snprintf(position, sizeof(position)-1, "%d", pw_impl_port_get_id(port));
+	    spa_streq(str, "UNK")) {
+		snprintf(position, sizeof(position), "%d", pw_impl_port_get_id(port) + 1);
 		str = position;
 	}
 	if (direction == n->direction) {
@@ -138,15 +139,23 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 		}
 	}
 
-	if ((node_name = pw_properties_get(n->props, PW_KEY_NODE_DESCRIPTION)) == NULL &&
-	    (node_name = pw_properties_get(n->props, PW_KEY_NODE_NICK)) == NULL &&
-	    (node_name = pw_properties_get(n->props, PW_KEY_NODE_NAME)) == NULL) {
+	desc = pw_properties_get(n->props, PW_KEY_NODE_DESCRIPTION);
+	nick = pw_properties_get(n->props, PW_KEY_NODE_NICK);
+	name = pw_properties_get(n->props, PW_KEY_NODE_NAME);
+
+	if ((node_name = desc) == NULL && (node_name = nick) == NULL &&
+	    (node_name = name) == NULL)
 		node_name = "node";
-	}
+
 	pw_properties_setf(new, PW_KEY_OBJECT_PATH, "%s:%s_%d",
 			path ? path : node_name, prefix, pw_impl_port_get_id(port));
 
 	pw_properties_setf(new, PW_KEY_PORT_NAME, "%s_%s", prefix, str);
+
+	if ((node_name = nick) == NULL && (node_name = desc) == NULL &&
+	    (node_name = name) == NULL)
+		node_name = "node";
+
 	pw_properties_setf(new, PW_KEY_PORT_ALIAS, "%s:%s_%s",
 			node_name, prefix, str);
 
@@ -177,8 +186,9 @@ static int find_format(struct pw_impl_node *node, enum pw_direction direction,
 					SPA_DIRECTION_OUTPUT, 0,
 				SPA_PARAM_EnumFormat, &state,
 				NULL, &format, &b)) != 1) {
+		res = res < 0 ? res : -ENOENT;
 		pw_log_warn(NAME " %p: can't get format: %s", node, spa_strerror(res));
-		return res < 0 ? res : -ENOENT;
+		return res;
 	}
 
 	if ((res = spa_format_parse(format, media_type, media_subtype)) < 0)
@@ -283,15 +293,14 @@ struct pw_impl_node *pw_adapter_new(struct pw_context *context,
 	spa_list_init(&n->ports);
 
 	if (user_data_size > 0)
-		n->user_data = SPA_MEMBER(n, sizeof(struct node), void);
+		n->user_data = SPA_PTROFF(n, sizeof(struct node), void);
 
 	pw_impl_node_add_listener(node, &n->node_listener, &node_events, n);
 
 	return node;
 
 error:
-	if (props)
-		pw_properties_free(props);
+	pw_properties_free(props);
 	errno = -res;
 	return NULL;
 }

@@ -29,6 +29,14 @@
 extern "C" {
 #endif
 
+/** \defgroup spa_pod SPA POD
+ */
+
+/**
+ * \addtogroup spa_pod
+ * \{
+ */
+
 #include <stdarg.h>
 
 #include <spa/utils/hook.h>
@@ -60,7 +68,7 @@ struct spa_pod_builder {
 	struct spa_callbacks callbacks;
 };
 
-#define SPA_POD_BUILDER_INIT(buffer,size)  (struct spa_pod_builder){ buffer, size, }
+#define SPA_POD_BUILDER_INIT(buffer,size)  (struct spa_pod_builder){ buffer, size, 0, {}, {} }
 
 static inline void
 spa_pod_builder_get_state(struct spa_pod_builder *builder, struct spa_pod_builder_state *state)
@@ -95,7 +103,7 @@ spa_pod_builder_deref(struct spa_pod_builder *builder, uint32_t offset)
 {
 	uint32_t size = builder->size;
 	if (offset + 8 <= size) {
-		struct spa_pod *pod = SPA_MEMBER(builder->data, offset, struct spa_pod);
+		struct spa_pod *pod = SPA_PTROFF(builder->data, offset, struct spa_pod);
 		if (offset + SPA_POD_SIZE(pod) <= size)
 			return pod;
 	}
@@ -106,7 +114,7 @@ static inline struct spa_pod *
 spa_pod_builder_frame(struct spa_pod_builder *builder, struct spa_pod_frame *frame)
 {
 	if (frame->offset + SPA_POD_SIZE(&frame->pod) <= builder->size)
-		return SPA_MEMBER(builder->data, frame->offset, struct spa_pod);
+		return SPA_PTROFF(builder->data, frame->offset, struct spa_pod);
 	return NULL;
 }
 
@@ -138,7 +146,7 @@ static inline int spa_pod_builder_raw(struct spa_pod_builder *builder, const voi
 				overflow, 0, offset + size);
 	}
 	if (res == 0 && data)
-		memcpy(SPA_MEMBER(builder->data, offset, void), data, size);
+		memcpy(SPA_PTROFF(builder->data, offset, void), data, size);
 
 	builder->state.offset += size;
 
@@ -168,6 +176,10 @@ static inline void *spa_pod_builder_pop(struct spa_pod_builder *builder, struct 
 {
 	struct spa_pod *pod;
 
+	if (SPA_FLAG_IS_SET(builder->state.flags, SPA_POD_BUILDER_FLAG_FIRST)) {
+		const struct spa_pod p = { 0, SPA_TYPE_None };
+		spa_pod_builder_raw(builder, &p, sizeof(p));
+	}
 	if ((pod = (struct spa_pod*)spa_pod_builder_frame(builder, frame)) != NULL)
 		*pod = frame->pod;
 
@@ -209,6 +221,13 @@ static inline int spa_pod_builder_none(struct spa_pod_builder *builder)
 	return spa_pod_builder_primitive(builder, &p);
 }
 
+static inline int spa_pod_builder_child(struct spa_pod_builder *builder, uint32_t size, uint32_t type)
+{
+	const struct spa_pod p = SPA_POD_INIT(size,type);
+	SPA_FLAG_CLEAR(builder->state.flags, SPA_POD_BUILDER_FLAG_FIRST);
+	return spa_pod_builder_raw(builder, &p, sizeof(p));
+}
+
 #define SPA_POD_INIT_Bool(val) (struct spa_pod_bool){ { sizeof(uint32_t), SPA_TYPE_Bool }, val ? 1 : 0, 0 }
 
 static inline int spa_pod_builder_bool(struct spa_pod_builder *builder, bool val)
@@ -241,7 +260,7 @@ static inline int spa_pod_builder_long(struct spa_pod_builder *builder, int64_t 
 	return spa_pod_builder_primitive(builder, &p.pod);
 }
 
-#define SPA_POD_INIT_Float(val) (struct spa_pod_float){ { sizeof(float), SPA_TYPE_Float }, val }
+#define SPA_POD_INIT_Float(val) (struct spa_pod_float){ { sizeof(float), SPA_TYPE_Float }, val, 0 }
 
 static inline int spa_pod_builder_float(struct spa_pod_builder *builder, float val)
 {
@@ -664,6 +683,10 @@ spa_pod_copy(const struct spa_pod *pod)
 		return NULL;
 	return (struct spa_pod *) memcpy(c, pod, size);
 }
+
+/**
+ * \}
+ */
 
 #ifdef __cplusplus
 }  /* extern "C" */
