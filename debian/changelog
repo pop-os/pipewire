@@ -2,6 +2,8 @@ pipewire (0.3.33-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Disable aptX support for now, upstream has switched
+     from libopenaptx to libfreeaptx (not yet in Debian)
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 16 Aug 2021 11:31:07 +0200
 
