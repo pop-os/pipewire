@@ -1,3 +1,10 @@
+pipewire (0.3.33-1) UNRELEASED; urgency=medium
+
+  * Team upload.
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 16 Aug 2021 11:31:07 +0200
+
 pipewire (0.3.32-1) experimental; urgency=medium
 
   * Team upload.
