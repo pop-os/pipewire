@@ -398,31 +398,38 @@ static int port_enum_formats(void *object,
 			    info.info.raw.format == SPA_AUDIO_FORMAT_F32P ||
 			    info.info.raw.format == SPA_AUDIO_FORMAT_F32) {
 				spa_pod_builder_add(builder,
-					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(16,
+					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(22,
 								info.info.raw.format,
 								SPA_AUDIO_FORMAT_F32P,
 								SPA_AUDIO_FORMAT_F32,
+								SPA_AUDIO_FORMAT_F32_OE,
 								SPA_AUDIO_FORMAT_S32P,
 								SPA_AUDIO_FORMAT_S32,
+								SPA_AUDIO_FORMAT_S32_OE,
 								SPA_AUDIO_FORMAT_S24_32P,
 								SPA_AUDIO_FORMAT_S24_32,
+								SPA_AUDIO_FORMAT_S24_32_OE,
 								SPA_AUDIO_FORMAT_S24P,
 								SPA_AUDIO_FORMAT_S24,
 								SPA_AUDIO_FORMAT_S24_OE,
 								SPA_AUDIO_FORMAT_S16P,
 								SPA_AUDIO_FORMAT_S16,
+								SPA_AUDIO_FORMAT_S16_OE,
 								SPA_AUDIO_FORMAT_S8P,
 								SPA_AUDIO_FORMAT_S8,
 								SPA_AUDIO_FORMAT_U8P,
-								SPA_AUDIO_FORMAT_U8),
+								SPA_AUDIO_FORMAT_U8,
+								SPA_AUDIO_FORMAT_ULAW,
+								SPA_AUDIO_FORMAT_ALAW),
 					0);
 			} else {
 				spa_pod_builder_add(builder,
-					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(4,
+					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(5,
 								info.info.raw.format,
 								info.info.raw.format,
 								SPA_AUDIO_FORMAT_F32,
-								SPA_AUDIO_FORMAT_F32P),
+								SPA_AUDIO_FORMAT_F32P,
+								SPA_AUDIO_FORMAT_F32_OE),
 					0);
 			}
 			if (other->have_format) {
@@ -596,6 +603,8 @@ static int calc_width(struct spa_audio_info *info)
 	case SPA_AUDIO_FORMAT_U8:
 	case SPA_AUDIO_FORMAT_S8P:
 	case SPA_AUDIO_FORMAT_S8:
+	case SPA_AUDIO_FORMAT_ALAW:
+	case SPA_AUDIO_FORMAT_ULAW:
 		return 1;
 	case SPA_AUDIO_FORMAT_S16P:
 	case SPA_AUDIO_FORMAT_S16:
@@ -687,6 +696,7 @@ static int port_set_format(void *object,
 		port->params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 		port->params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	}
+	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 	emit_port_info(this, port, false);
 	return 0;
 }
@@ -1020,7 +1030,8 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 	port->id = port_id;
 
 	spa_list_init(&port->queue);
-	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS;
+	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
+		SPA_PORT_CHANGE_MASK_PARAMS;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = SPA_PORT_FLAG_NO_REF |
 		SPA_PORT_FLAG_DYNAMIC_DATA;

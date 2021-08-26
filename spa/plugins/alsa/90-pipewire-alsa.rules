@@ -112,7 +112,7 @@ ATTRS{idVendor}=="045e", ATTRS{idProduct}=="02bb", ENV{ACP_PROFILE_SET}="kinect-
 ATTRS{idVendor}=="041e", ATTRS{idProduct}=="322c", ENV{ACP_PROFILE_SET}="sb-omni-surround-5.1.conf"
 ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="4014", ENV{ACP_PROFILE_SET}="dell-dock-tb16-usb-audio.conf"
 ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="402e", ENV{ACP_PROFILE_SET}="dell-dock-tb16-usb-audio.conf"
-ATTRS{idVendor}=="08bb", ATTRS{idProduct}=="2902", ENV{ACP_PROFILE_SET}="behringer-umc22.conf"
+ATTRS{idVendor}=="1397", ATTRS{idProduct}=="0507", ENV{ACP_PROFILE_SET}="behringer-umc22.conf"
 ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0269", ENV{ACP_PROFILE_SET}="hp-tbt-dock-120w-g2.conf"
 ATTRS{idVendor}=="03f0", ATTRS{idProduct}=="0567", ENV{ACP_PROFILE_SET}="hp-tbt-dock-audio-module.conf"
 
@@ -157,9 +157,11 @@ ATTRS{idVendor}=="2a70", ATTRS{idProduct}=="1881", ENV{ACP_PROFILE_SET}="simple-
 # ID 1395:005e is for Sennheiser GSX 1000
 # ID 1395:00a0 is for Sennheiser GSX 1000
 # ID 1395:005f is for Sennheiser GSX 1200
+# ID 1395:00a1 is for Sennheiser GSX 1200
 ATTRS{idVendor}=="1395", ATTRS{idProduct}=="005e", ENV{ACP_PROFILE_SET}="sennheiser-gsx.conf"
 ATTRS{idVendor}=="1395", ATTRS{idProduct}=="00a0", ENV{ACP_PROFILE_SET}="sennheiser-gsx.conf"
 ATTRS{idVendor}=="1395", ATTRS{idProduct}=="005f", ENV{ACP_PROFILE_SET}="sennheiser-gsx.conf"
+ATTRS{idVendor}=="1395", ATTRS{idProduct}=="00a1", ENV{ACP_PROFILE_SET}="sennheiser-gsx.conf"
 
 GOTO="pipewire_end"
 

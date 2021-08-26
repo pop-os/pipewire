@@ -120,6 +120,8 @@ const a2dp_mpeg_t bluez_a2dp_mpeg = {
 
 extern struct a2dp_codec a2dp_codec_sbc;
 extern struct a2dp_codec a2dp_codec_sbc_xq;
+extern struct a2dp_codec a2dp_codec_faststream;
+extern struct a2dp_codec a2dp_codec_faststream_duplex;
 #if ENABLE_LDAC
 extern struct a2dp_codec a2dp_codec_ldac;
 #endif
@@ -132,6 +134,10 @@ extern struct a2dp_codec a2dp_codec_mpeg;
 #if ENABLE_APTX
 extern struct a2dp_codec a2dp_codec_aptx;
 extern struct a2dp_codec a2dp_codec_aptx_hd;
+extern struct a2dp_codec a2dp_codec_aptx_ll_0;
+extern struct a2dp_codec a2dp_codec_aptx_ll_1;
+extern struct a2dp_codec a2dp_codec_aptx_ll_duplex_0;
+extern struct a2dp_codec a2dp_codec_aptx_ll_duplex_1;
 #endif
 
 static const struct a2dp_codec * const a2dp_codec_list[] = {
@@ -148,8 +154,16 @@ static const struct a2dp_codec * const a2dp_codec_list[] = {
 #if ENABLE_MP3
 	&a2dp_codec_mpeg,
 #endif
-	&a2dp_codec_sbc_xq,
 	&a2dp_codec_sbc,
+	&a2dp_codec_sbc_xq,
+	&a2dp_codec_faststream,
+	&a2dp_codec_faststream_duplex,
+#if ENABLE_APTX
+	&a2dp_codec_aptx_ll_0,
+	&a2dp_codec_aptx_ll_1,
+	&a2dp_codec_aptx_ll_duplex_0,
+	&a2dp_codec_aptx_ll_duplex_1,
+#endif
 	NULL
 };
 

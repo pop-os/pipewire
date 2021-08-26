@@ -46,6 +46,35 @@
 #include "media-session.h"
 
 /** \page page_media_session_module_default_profile Media Session Module: Default Profile
+ *
+ * The default profile module restores a previously saved profile
+ * or otherwise the best available profile.
+ *
+ * The module tracks the \ref SPA_PARAM_Profile parameter on devices
+ * (excluding Bluetooth devices).
+ * When the profile is changed by an external party (e.g. `pavucontrol`), that
+ * profile is written to the state file. In the future, when the active
+ * profile is `"off"`, the previously saved profile (if available) is restored.
+ *
+ * If no saved profile exists, the best profile is restored. The rules for
+ * determining the best profile are:
+ * - the highest-priority available profile, or, if no profiles are available,
+ * - the highest-priority profile with availability unknown, or, if no such
+ *   profile exists,
+ * - the `"off"` profile.
+ *
+ * \note The special profile named `"pro-audio"` is excluded from the above search.
+ *
+ * ## Module-specific properties
+ *
+ * This module stores its state in
+ * `$XDG_CONFIG_HOME/pipewire/media-sesssion.d/default-profile`:
+ *
+ * - `default.profile.$devicename = { "name": "$profilename" }`: stores the default
+ *   profile for `$devicename`
+ *
+ * ## See also
+ * See \ref spa_param_availability for availability values.
  */
 
 #define NAME		"default-profile"
@@ -78,8 +107,7 @@ struct device {
 
 	struct spa_hook listener;
 
-	unsigned int restored:1;
-	uint32_t saved_profile;
+	unsigned int restore_saved_profile:1;
 	uint32_t best_profile;
 	uint32_t active_profile;
 };
@@ -264,10 +292,10 @@ static int handle_active_profile(struct device *dev)
 	if ((res = find_current_profile(dev, &pr)) < 0)
 		return res;
 
-	/* when the active profile is off, always try to restored the saved
+	/* when the active profile is off, always try to restore the saved
 	 * profile again */
 	if (spa_streq(pr.name, "off"))
-		dev->restored = false;
+		dev->restore_saved_profile = true;
 
 	if (dev->active_profile == pr.index) {
 		/* no change, we're done */
@@ -283,7 +311,6 @@ static int handle_active_profile(struct device *dev)
 	if (!pr.save)
 		return 0;
 
-	dev->saved_profile = pr.index;
 	if (pw_properties_setf(impl->properties, dev->key, "{ \"name\": \"%s\" }", pr.name)) {
 		pw_log_info("device '%s': active profile saved as '%s'", dev->name, pr.name);
 		add_idle_timeout(impl);
@@ -309,7 +336,7 @@ static int handle_profile_switch(struct device *dev)
 		pw_log_info("device '%s': found best profile '%s' changed:%d",
 				dev->name, best.name, changed);
 	}
-	if (!dev->restored) {
+	if (dev->restore_saved_profile) {
 		/* try to restore our saved profile */
 		res = find_saved_profile(dev, &saved);
 		if (res >= 0) {
@@ -329,7 +356,7 @@ static int handle_profile_switch(struct device *dev)
 			pw_log_info("device '%s': no saved profile: %s",
 				dev->name, spa_strerror(res));
 		}
-		dev->restored = true;
+		dev->restore_saved_profile = false;
 	}
 
 	if (best.index != SPA_ID_INVALID && changed) {
@@ -404,7 +431,6 @@ static void session_create(void *data, struct sm_object *object)
 	dev->name = strdup(name);
 	dev->key = spa_aprintf(PREFIX"%s", name);
 	dev->active_profile = SPA_ID_INVALID;
-	dev->saved_profile = SPA_ID_INVALID;
 	dev->best_profile = SPA_ID_INVALID;
 
 	dev->obj->obj.mask |= SM_DEVICE_CHANGE_MASK_PARAMS;

@@ -92,6 +92,7 @@ struct node {
 	unsigned int active:1;
 	unsigned int mute:1;
 	unsigned int save:1;
+	unsigned int a2dp_duplex:1;
 	uint32_t n_channels;
 	int64_t latency_offset;
 	uint32_t channels[SPA_AUDIO_MAX_CHANNELS];
@@ -106,6 +107,7 @@ struct dynamic_node
 	struct spa_hook transport_listener;
 	uint32_t id;
 	const char *factory_name;
+	bool a2dp_duplex;
 };
 
 struct impl {
@@ -139,6 +141,7 @@ struct impl {
 	size_t supported_codec_count;
 
 	struct dynamic_node dyn_a2dp_source;
+	struct dynamic_node dyn_a2dp_sink;
 	struct dynamic_node dyn_sco_source;
 	struct dynamic_node dyn_sco_sink;
 
@@ -161,15 +164,20 @@ static void init_node(struct impl *this, struct node *node, uint32_t id)
 	}
 }
 
-static const struct a2dp_codec *get_a2dp_codec(enum spa_bluetooth_audio_codec id)
+static void get_a2dp_codecs(enum spa_bluetooth_audio_codec id, const struct a2dp_codec **codecs, size_t size)
 {
 	const struct a2dp_codec * const *c;
 
-	for (c = a2dp_codecs; *c; ++c)
-		if ((*c)->id == id)
-			return *c;
+	spa_assert(size > 0);
 
-	return NULL;
+	for (c = a2dp_codecs; *c && size > 1; ++c) {
+		if ((*c)->id == id || id == 0) {
+			*codecs++ = *c;
+			--size;
+		}
+	}
+
+	*codecs = NULL;
 }
 
 static const struct a2dp_codec *get_supported_a2dp_codec(struct impl *this, enum spa_bluetooth_audio_codec id)
@@ -227,10 +235,13 @@ static const char *get_hfp_codec_name(unsigned int codec)
 	return "unknown";
 }
 
-static const char *get_codec_name(struct spa_bt_transport *t)
+static const char *get_codec_name(struct spa_bt_transport *t, bool a2dp_duplex)
 {
-	if (t->a2dp_codec != NULL)
+	if (t->a2dp_codec != NULL) {
+		if (a2dp_duplex && t->a2dp_codec->duplex_codec)
+			return t->a2dp_codec->duplex_codec->name;
 		return t->a2dp_codec->name;
+	}
 	return get_hfp_codec_name(t->codec);
 }
 
@@ -279,6 +290,26 @@ static void emit_volume(struct impl *this, struct node *node)
 }
 
 static void emit_info(struct impl *this, bool full);
+
+static float get_soft_volume_boost(struct node *node)
+{
+	/*
+	 * For A2DP duplex, the duplex microphone channel sometimes does not appear
+	 * to have hardware gain, and input volume is very low.
+	 *
+	 * Work around this by boosting the software volume level, i.e. adjust
+	 * the scale on the user-visible volume control to something more sensible.
+	 * If this causes clipping, the user can just reduce the mic volume to
+	 * bring SW gain below 1.
+	 */
+	if (node->a2dp_duplex && node->transport &&
+			node->id == DEVICE_ID_SOURCE &&
+			!node->transport->volumes[SPA_BT_VOLUME_ID_RX].active)
+		return 10.0f;	/* 20 dB boost */
+
+	/* In all other cases, no boost */
+	return 1.0f;
+}
 
 static float node_get_hw_volume(struct node *node)
 {
@@ -340,12 +371,39 @@ static const struct spa_bt_transport_events transport_events = {
 	.volume_changed = volume_changed,
 };
 
+static void get_channels(struct spa_bt_transport *t, bool a2dp_duplex, uint32_t *n_channels, uint32_t *channels)
+{
+	const struct a2dp_codec *codec;
+	struct spa_audio_info info = { 0 };
+
+	if (!a2dp_duplex || !t->a2dp_codec || !t->a2dp_codec->duplex_codec) {
+		*n_channels = t->n_channels;
+		memcpy(channels, t->channels, t->n_channels * sizeof(uint32_t));
+		return;
+	}
+
+	codec = t->a2dp_codec->duplex_codec;
+
+	if (!codec->validate_config ||
+			codec->validate_config(codec, 0,
+					t->configuration, t->configuration_len,
+					&info) < 0) {
+		*n_channels = 1;
+		channels[0] = SPA_AUDIO_CHANNEL_MONO;
+		return;
+	}
+
+	*n_channels = info.info.raw.channels;
+	memcpy(channels, info.info.raw.position,
+			info.info.raw.channels * sizeof(uint32_t));
+}
+
 static void emit_node(struct impl *this, struct spa_bt_transport *t,
-		uint32_t id, const char *factory_name)
+		uint32_t id, const char *factory_name, bool a2dp_duplex)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_device_object_info info;
-	struct spa_dict_item items[6];
+	struct spa_dict_item items[8];
 	uint32_t n_items = 0;
 	char transport[32], str_id[32];
 	bool is_dyn_node = SPA_FLAG_IS_SET(id, DYNAMIC_NODE_ID_FLAG);
@@ -353,13 +411,21 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 	snprintf(transport, sizeof(transport), "pointer:%p", t);
 	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_TRANSPORT, transport);
 	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PROFILE, spa_bt_profile_name(t->profile));
-	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CODEC, get_codec_name(t));
+	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CODEC, get_codec_name(t, a2dp_duplex));
 	items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_ADDRESS, device->address);
 	items[4] = SPA_DICT_ITEM_INIT("device.routes", "1");
 	n_items = 5;
 	if (!is_dyn_node) {
 		snprintf(str_id, sizeof(str_id), "%d", id);
 		items[5] = SPA_DICT_ITEM_INIT("card.profile.device", str_id);
+		n_items++;
+	}
+	if (spa_streq(spa_bt_profile_name(t->profile), "headset-head-unit")) {
+		items[n_items] = SPA_DICT_ITEM_INIT("device.intended-roles", "Communication");
+		n_items++;
+	}
+	if (a2dp_duplex) {
+		items[n_items] = SPA_DICT_ITEM_INIT("api.bluez5.a2dp-duplex", "true");
 		n_items++;
 	}
 
@@ -373,26 +439,34 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 	spa_device_emit_object_info(&this->hooks, id, &info);
 
 	if (!is_dyn_node) {
-		if (this->nodes[id].n_channels > 0) {
-			size_t i;
-
-			/*
-			* Spread mono volume to all channels, if we had switched HFP -> A2DP.
-			* XXX: we should also use different route for hfp and a2dp
-			*/
-			for (i = this->nodes[id].n_channels; i < t->n_channels; ++i)
-				this->nodes[id].volumes[i] = this->nodes[id].volumes[i % this->nodes[id].n_channels];
-		}
+		uint32_t prev_channels = this->nodes[id].n_channels;
+		float boost;
 
 		this->nodes[id].impl = this;
 		this->nodes[id].active = true;
-		this->nodes[id].n_channels = t->n_channels;
-		memcpy(this->nodes[id].channels, t->channels,
-				t->n_channels * sizeof(uint32_t));
+		this->nodes[id].a2dp_duplex = a2dp_duplex;
+		get_channels(t, a2dp_duplex, &this->nodes[id].n_channels, this->nodes[id].channels);
 		if (this->nodes[id].transport)
 			spa_hook_remove(&this->nodes[id].transport_listener);
 		this->nodes[id].transport = t;
 		spa_bt_transport_add_listener(t, &this->nodes[id].transport_listener, &transport_events, &this->nodes[id]);
+
+		if (prev_channels > 0) {
+			size_t i;
+			/*
+			 * Spread mono volume to all channels, if we had switched HFP -> A2DP.
+			 * XXX: we should also use different route for hfp and a2dp
+			 */
+			for (i = prev_channels; i < this->nodes[id].n_channels; ++i)
+				this->nodes[id].volumes[i] = this->nodes[id].volumes[i % prev_channels];
+		}
+
+		boost = get_soft_volume_boost(&this->nodes[id]);
+		if (boost != 1.0f) {
+			size_t i;
+			for (i = 0; i < this->nodes[id].n_channels; ++i)
+				this->nodes[id].soft_volumes[i] = this->nodes[id].volumes[i] * boost;
+		}
 
 		emit_node_props(this, &this->nodes[id], true);
 	}
@@ -402,17 +476,15 @@ static struct spa_bt_transport *find_transport(struct impl *this, int profile, e
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_bt_transport *t;
-	const struct a2dp_codec *a2dp_codec;
-	unsigned int hfp_codec;
-
-	a2dp_codec = get_a2dp_codec(codec);
-	hfp_codec = get_hfp_codec(codec);
 
 	spa_list_for_each(t, &device->transport_list, device_link) {
+		bool codec_ok = codec == 0 ||
+			(t->a2dp_codec != NULL && t->a2dp_codec->id == codec) ||
+			get_hfp_codec_id(t->codec) == codec;
+
 		if ((t->profile & device->connected_profiles) &&
 				(t->profile & profile) == t->profile &&
-				(a2dp_codec == NULL || t->a2dp_codec == a2dp_codec) &&
-				(hfp_codec == 0 || t->codec == hfp_codec))
+				codec_ok)
 			return t;
 	}
 
@@ -439,7 +511,7 @@ static void dynamic_node_transport_state_changed(void *data,
 	if (state >= SPA_BT_TRANSPORT_STATE_PENDING && old < SPA_BT_TRANSPORT_STATE_PENDING) {
 		if (!SPA_FLAG_IS_SET(this->id, DYNAMIC_NODE_ID_FLAG)) {
 			SPA_FLAG_SET(this->id, DYNAMIC_NODE_ID_FLAG);
-			emit_node(impl, t, this->id, this->factory_name);
+			emit_node(impl, t, this->id, this->factory_name, this->a2dp_duplex);
 		}
 	} else if (state < SPA_BT_TRANSPORT_STATE_PENDING && old >= SPA_BT_TRANSPORT_STATE_PENDING) {
 		if (SPA_FLAG_IS_SET(this->id, DYNAMIC_NODE_ID_FLAG)) {
@@ -504,7 +576,7 @@ static const struct spa_bt_transport_events dynamic_node_transport_events = {
 };
 
 static void emit_dynamic_node(struct dynamic_node *this, struct impl *impl,
-	struct spa_bt_transport *t, uint32_t id, const char *factory_name)
+	struct spa_bt_transport *t, uint32_t id, const char *factory_name, bool a2dp_duplex)
 {
 	spa_log_debug(impl->log, NAME": dynamic node, transport: %p->%p id: %08x->%08x",
 		this->transport, t, this->id, id);
@@ -519,6 +591,7 @@ static void emit_dynamic_node(struct dynamic_node *this, struct impl *impl,
 	this->transport = t;
 	this->id = id;
 	this->factory_name = factory_name;
+	this->a2dp_duplex = a2dp_duplex;
 
 	spa_bt_transport_add_listener(this->transport,
 		&this->transport_listener, &dynamic_node_transport_events, this);
@@ -561,9 +634,9 @@ static int emit_nodes(struct impl *this)
 				else
 					this->props.codec = get_hfp_codec_id(t->codec);
 				emit_dynamic_node(&this->dyn_sco_source, this, t,
-						0, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
+						0, SPA_NAME_API_BLUEZ5_SCO_SOURCE, false);
 				emit_dynamic_node(&this->dyn_sco_sink, this, t,
-						1, SPA_NAME_API_BLUEZ5_SCO_SINK);
+						1, SPA_NAME_API_BLUEZ5_SCO_SINK, false);
 			}
 		}
 		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE) {
@@ -571,7 +644,12 @@ static int emit_nodes(struct impl *this)
 			if (t) {
 				this->props.codec = t->a2dp_codec->id;
 				emit_dynamic_node(&this->dyn_a2dp_source, this, t,
-						2, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
+						2, SPA_NAME_API_BLUEZ5_A2DP_SOURCE, false);
+
+				if (t->a2dp_codec->duplex_codec) {
+					emit_dynamic_node(&this->dyn_a2dp_sink, this, t,
+						3, SPA_NAME_API_BLUEZ5_A2DP_SINK, true);
+				}
 			}
 		}
 		break;
@@ -581,7 +659,12 @@ static int emit_nodes(struct impl *this)
 			if (t) {
 				this->props.codec = t->a2dp_codec->id;
 				emit_dynamic_node(&this->dyn_a2dp_source, this, t,
-					DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
+					DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE, false);
+
+				if (t->a2dp_codec->duplex_codec) {
+					emit_node(this, t,
+						DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, true);
+				}
 			}
 		}
 
@@ -589,7 +672,12 @@ static int emit_nodes(struct impl *this)
 			t = find_transport(this, SPA_BT_PROFILE_A2DP_SINK, this->props.codec);
 			if (t) {
 				this->props.codec = t->a2dp_codec->id;
-				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK);
+				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, false);
+
+				if (t->a2dp_codec->duplex_codec) {
+					emit_node(this, t,
+						DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE, true);
+				}
 			}
 		}
 		break;
@@ -603,8 +691,8 @@ static int emit_nodes(struct impl *this)
 					this->props.codec = 0;
 				else
 					this->props.codec = get_hfp_codec_id(t->codec);
-				emit_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_SCO_SOURCE);
-				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_SCO_SINK);
+				emit_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_SCO_SOURCE, false);
+				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_SCO_SINK, false);
 			}
 		}
 		break;
@@ -636,6 +724,7 @@ static void emit_info(struct impl *this, bool full)
 static void emit_remove_nodes(struct impl *this)
 {
 	remove_dynamic_node (&this->dyn_a2dp_source);
+	remove_dynamic_node (&this->dyn_a2dp_sink);
 	remove_dynamic_node (&this->dyn_sco_source);
 	remove_dynamic_node (&this->dyn_sco_sink);
 
@@ -678,24 +767,15 @@ static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_a
 	this->props.codec = codec;
 
 	/*
-	 * A2DP: ensure there's a transport with the selected codec (NULL means any).
+	 * A2DP: ensure there's a transport with the selected codec (0 means any).
 	 * Don't try to switch codecs when the device is in the A2DP source role, since
 	 * devices do not appear to like that.
 	 */
 	if (profile == DEVICE_PROFILE_A2DP && !(this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)) {
 		int ret;
-		const struct a2dp_codec *codec_list[2];
-		const struct a2dp_codec * const *codecs;
-		const struct a2dp_codec *a2dp_codec;
+		const struct a2dp_codec *codecs[64];
 
-		a2dp_codec = get_a2dp_codec(codec);
-		if (a2dp_codec == NULL) {
-			codecs = a2dp_codecs;
-		} else {
-			codec_list[0] = a2dp_codec;
-			codec_list[1] = NULL;
-			codecs = codec_list;
-		}
+		get_a2dp_codecs(codec, codecs, SPA_N_ELEMENTS(codecs));
 
 		this->switching_codec = true;
 
@@ -889,16 +969,21 @@ static int impl_sync(void *object, int seq)
 	return 0;
 }
 
-static uint32_t profile_direction_mask(struct impl *this, uint32_t index)
+static uint32_t profile_direction_mask(struct impl *this, uint32_t index, enum spa_bluetooth_audio_codec codec)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	uint32_t mask;
 	bool have_output = false, have_input = false;
+	const struct a2dp_codec *a2dp_codec;
 
 	switch (index) {
 	case DEVICE_PROFILE_A2DP:
 		if (device->connected_profiles & SPA_BT_PROFILE_A2DP_SINK)
 			have_output = true;
+
+		a2dp_codec = get_supported_a2dp_codec(this, codec);
+		if (a2dp_codec && a2dp_codec->duplex_codec)
+			have_input = true;
 		break;
 	case DEVICE_PROFILE_HSP_HFP:
 		if (device->connected_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)
@@ -1072,7 +1157,7 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 			}
 			name_and_codec = spa_aprintf("%s-%s", name, a2dp_codec->name);
 			name = name_and_codec;
-			if (profile == SPA_BT_PROFILE_A2DP_SINK) {
+			if (profile == SPA_BT_PROFILE_A2DP_SINK && !a2dp_codec->duplex_codec) {
 				desc = _("High Fidelity Playback (A2DP Sink, codec %s)");
 			} else {
 				desc = _("High Fidelity Duplex (A2DP Source/Sink, codec %s)");
@@ -1250,15 +1335,6 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 		return NULL;
 	}
 
-	if (dev != SPA_ID_INVALID && !(profile_direction_mask(this, this->profile) & (1 << direction)))
-		return NULL;
-
-	mask = 0;
-	for (i = 1; i < 4; i++)
-		mask |= profile_direction_mask(this, i);
-	if ((mask & (1 << direction)) == 0)
-		return NULL;
-
 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_ParamRoute, id);
 	spa_pod_builder_add(b,
 		SPA_PARAM_ROUTE_index, SPA_POD_Int(port),
@@ -1278,22 +1354,36 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	spa_pod_builder_pop(b, &f[1]);
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
 	spa_pod_builder_push_array(b, &f[1]);
-	for (i = 1; (j = get_profile_from_index(this, i, &next, &codec)) != SPA_ID_INVALID; i = next) {
 
-		if (!(profile_direction_mask(this, j) & (1 << direction)))
+	mask = 0;
+	for (i = 1; (j = get_profile_from_index(this, i, &next, &codec)) != SPA_ID_INVALID; i = next) {
+		uint32_t profile_mask;
+
+		profile_mask = profile_direction_mask(this, j, codec);
+		if (!(profile_mask & (1 << direction)))
 			continue;
 
 		/* Check the profile actually exists */
 		if (!validate_profile(this, j, codec))
 			continue;
 
+		mask |= profile_mask;
 		spa_pod_builder_int(b, i);
 	}
 	spa_pod_builder_pop(b, &f[1]);
 
+	if (!(mask & (1 << direction))) {
+		/* No profile has route direction */
+		return NULL;
+	}
+
 	if (dev != SPA_ID_INVALID) {
 		struct node *node = &this->nodes[dev];
 		struct spa_bt_transport_volume *t_volume;
+
+		mask = profile_direction_mask(this, this->profile, this->props.codec);
+		if (!(mask & (1 << direction)))
+			return NULL;
 
 		t_volume = node->transport
 			? &node->transport->volumes[node->id]
@@ -1346,15 +1436,34 @@ static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
 	return spa_pod_builder_pop(b, &f[0]);
 }
 
+static bool iterate_supported_a2dp_codecs(struct impl *this, int *j, const struct a2dp_codec **codec)
+{
+	int i;
+
+next:
+	*j = *j + 1;
+	spa_assert(*j >= 0);
+	if ((size_t)*j >= this->supported_codec_count)
+		return false;
+
+	for (i = 0; i < *j; ++i)
+		if (this->supported_codecs[i]->id == this->supported_codecs[*j]->id)
+			goto next;
+
+	*codec = this->supported_codecs[*j];
+	return true;
+}
+
 static struct spa_pod *build_prop_info(struct impl *this, struct spa_pod_builder *b, uint32_t id)
 {
 	struct spa_pod_frame f[2];
 	struct spa_pod_choice *choice;
 	const struct a2dp_codec *codec;
-	size_t n, j;
+	size_t n;
+	int j;
 
 #define FOR_EACH_A2DP_CODEC(j, codec) \
-		for (j = 0; (j < this->supported_codec_count) ? (codec = this->supported_codecs[j]) : NULL; ++j)
+		for (j = -1; iterate_supported_a2dp_codecs(this, &j, &codec);)
 #define FOR_EACH_HFP_CODEC(j) \
 		for (j = HFP_AUDIO_CODEC_MSBC; j >= HFP_AUDIO_CODEC_CVSD; --j) \
 			if (spa_bt_device_supports_hfp_codec(this->bt_dev, j) == 1)
@@ -1575,8 +1684,9 @@ static int node_set_volume(struct impl *this, struct node *node, float volumes[]
 		node_update_soft_volumes(node, hw_volume);
 		spa_bt_transport_set_volume(node->transport, node->id, hw_volume);
 	} else {
+		float boost = get_soft_volume_boost(node);
 		for (uint32_t i = 0; i < node->n_channels; ++i)
-			node->soft_volumes[i] = node->volumes[i];
+			node->soft_volumes[i] = node->volumes[i] * boost;
 	}
 
 	emit_volume(this, node);

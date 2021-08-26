@@ -91,7 +91,6 @@ struct spa_bt_monitor {
 
 	struct spa_bt_quirks *quirks;
 
-	unsigned int enable_sbc_xq:1;
 	unsigned int backend_native_registered:1;
 	unsigned int backend_ofono_registered:1;
 	unsigned int backend_hsphfpd_registered:1;
@@ -401,7 +400,8 @@ static int a2dp_codec_to_endpoint(const struct a2dp_codec *codec,
 				   const char * endpoint,
 				   char** object_path)
 {
-	*object_path = spa_aprintf("%s/%s", endpoint, codec->name);
+	*object_path = spa_aprintf("%s/%s", endpoint,
+		codec->endpoint_name ? codec->endpoint_name : codec->name);
 	if (*object_path == NULL)
 		return -errno;
 	return 0;
@@ -409,19 +409,21 @@ static int a2dp_codec_to_endpoint(const struct a2dp_codec *codec,
 
 static const struct a2dp_codec *a2dp_endpoint_to_codec(const char *endpoint)
 {
-	const char *codec_name;
+	const char *ep_name;
 	int i;
 
 	if (spa_strstartswith(endpoint, A2DP_SINK_ENDPOINT "/"))
-		codec_name = endpoint + strlen(A2DP_SINK_ENDPOINT "/");
+		ep_name = endpoint + strlen(A2DP_SINK_ENDPOINT "/");
 	else if (spa_strstartswith(endpoint, A2DP_SOURCE_ENDPOINT "/"))
-		codec_name = endpoint + strlen(A2DP_SOURCE_ENDPOINT "/");
+		ep_name = endpoint + strlen(A2DP_SOURCE_ENDPOINT "/");
 	else
 		return NULL;
 
 	for (i = 0; a2dp_codecs[i]; i++) {
 		const struct a2dp_codec *codec = a2dp_codecs[i];
-		if (spa_streq(codec->name, codec_name))
+		const char *codec_ep_name =
+			codec->endpoint_name ? codec->endpoint_name : codec->name;
+		if (spa_streq(ep_name, codec_ep_name))
 			return codec;
 	}
 	return NULL;
@@ -440,10 +442,6 @@ static int a2dp_endpoint_to_profile(const char *endpoint)
 
 static bool is_a2dp_codec_enabled(struct spa_bt_monitor *monitor, const struct a2dp_codec *codec)
 {
-	if (!monitor->enable_sbc_xq && codec->feature_flag != NULL &&
-	    spa_streq(codec->feature_flag, "sbc-xq"))
-		return false;
-
 	return spa_dict_lookup(&monitor->enabled_codecs, codec->name) != NULL;
 }
 
@@ -1384,6 +1382,7 @@ static int device_update_props(struct spa_bt_device *device,
 
 bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec)
 {
+	struct spa_bt_monitor *monitor = device->monitor;
 	struct spa_bt_remote_endpoint *ep;
 
 	if (!is_a2dp_codec_enabled(device->monitor, codec))
@@ -1392,6 +1391,14 @@ bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struc
 	if (!device->adapter->application_registered) {
 		/* Codec switching not supported: only plain SBC allowed */
 		return (codec->codec_id == A2DP_CODEC_SBC && spa_streq(codec->name, "sbc"));
+	}
+
+	if (codec->id == SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ) {
+		uint32_t bt_features = (uint32_t)-1;
+		if (monitor->quirks)
+			spa_bt_quirks_get_features(monitor->quirks, device->adapter, device, &bt_features);
+		if (!(bt_features & SPA_BT_FEATURE_SBC_XQ))
+			return false;
 	}
 
 	spa_list_for_each(ep, &device->remote_endpoint_list, device_link) {
@@ -1926,24 +1933,23 @@ int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t)
 	if (t->a2dp_codec == NULL)
 		return 30 * SPA_NSEC_PER_MSEC;
 
-	switch (t->a2dp_codec->codec_id) {
-	case A2DP_CODEC_SBC:
+	switch (t->a2dp_codec->id) {
+	case SPA_BLUETOOTH_AUDIO_CODEC_SBC:
+	case SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ:
 		return 200 * SPA_NSEC_PER_MSEC;
-	case A2DP_CODEC_MPEG24:
+	case SPA_BLUETOOTH_AUDIO_CODEC_MPEG:
+	case SPA_BLUETOOTH_AUDIO_CODEC_AAC:
 		return 200 * SPA_NSEC_PER_MSEC;
-	case A2DP_CODEC_VENDOR:
-	{
-		uint32_t vendor_id = t->a2dp_codec->vendor.vendor_id;
-		uint16_t codec_id = t->a2dp_codec->vendor.codec_id;
-
-		if (vendor_id == APTX_VENDOR_ID && codec_id == APTX_CODEC_ID)
-			return 150 * SPA_NSEC_PER_MSEC;
-		if (vendor_id == APTX_HD_VENDOR_ID && codec_id == APTX_HD_CODEC_ID)
-			return 150 * SPA_NSEC_PER_MSEC;
-		if (vendor_id == LDAC_VENDOR_ID && codec_id == LDAC_CODEC_ID)
-			return 175 * SPA_NSEC_PER_MSEC;
-		break;
-	}
+	case SPA_BLUETOOTH_AUDIO_CODEC_APTX:
+	case SPA_BLUETOOTH_AUDIO_CODEC_APTX_HD:
+		return 150 * SPA_NSEC_PER_MSEC;
+	case SPA_BLUETOOTH_AUDIO_CODEC_LDAC:
+		return 175 * SPA_NSEC_PER_MSEC;
+	case SPA_BLUETOOTH_AUDIO_CODEC_APTX_LL:
+	case SPA_BLUETOOTH_AUDIO_CODEC_APTX_LL_DUPLEX:
+	case SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM:
+	case SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM_DUPLEX:
+		return 40 * SPA_NSEC_PER_MSEC;
 	default:
 		break;
 	};
@@ -3861,7 +3867,6 @@ static int impl_clear(struct spa_handle *handle)
 	monitor->objects_listed = false;
 
 	monitor->connection_info_supported = false;
-	monitor->enable_sbc_xq = false;
 	monitor->backend_native_registered = false;
 	monitor->backend_ofono_registered = false;
 	monitor->backend_hsphfpd_registered = false;
@@ -4069,10 +4074,6 @@ impl_init(const struct spa_handle_factory *factory,
 		if ((str = spa_dict_lookup(info, "bluez5.default.channels")) != NULL &&
 		    ((tmp =  atoi(str)) > 0))
 			this->default_audio_info.channels = tmp;
-
-		if ((str = spa_dict_lookup(info, "bluez5.enable-sbc-xq")) != NULL &&
-		    spa_atob(str))
-			this->enable_sbc_xq = true;
 	}
 
 	register_media_application(this);

@@ -112,6 +112,7 @@ struct stream {
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
 
+	struct spa_io_clock *clock;
 	struct spa_io_position *position;
 	struct spa_io_buffers *io;
 	struct {
@@ -164,6 +165,8 @@ struct stream {
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
 	unsigned int process_rt:1;
+	unsigned int driving:1;
+	unsigned int using_drive:1;
 };
 
 static int get_param_index(uint32_t id)
@@ -433,15 +436,25 @@ static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
 			spa_debug_type_find_name(spa_type_io, id), data, size);
 
 	switch(id) {
+	case SPA_IO_Clock:
+		if (data && size >= sizeof(struct spa_io_clock))
+			impl->clock = data;
+		else
+			impl->clock = NULL;
+		break;
 	case SPA_IO_Position:
 		if (data && size >= sizeof(struct spa_io_position))
 			impl->position = data;
 		else
 			impl->position = NULL;
+
 		pw_loop_invoke(impl->context->data_loop,
 				do_set_position, 1, NULL, 0, true, impl);
 		break;
+	default:
+		break;
 	}
+	impl->driving = impl->clock && impl->position && impl->position->clock.id == impl->clock->id;
 	pw_stream_emit_io_changed(stream, id, data, size);
 
 	return 0;
@@ -533,7 +546,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 			if (impl->direction == SPA_DIRECTION_INPUT)
 				impl->io->status = SPA_STATUS_NEED_DATA;
-			else
+			else if (!impl->process_rt && !impl->driving)
 				call_process(impl);
 
 			stream_set_state(stream, PW_STREAM_STATE_STREAMING, NULL);
@@ -938,8 +951,7 @@ again:
 
 	copy_position(impl, impl->queued.outcount);
 
-	if (!impl->draining &&
-	    !SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_DRIVER)) {
+	if (!impl->draining && !impl->driving) {
 		/* we're not draining, not a driver check if we need to get
 		 * more buffers */
 		if (!impl->process_rt) {
@@ -1745,8 +1757,7 @@ pw_stream_connect(struct pw_stream *stream,
 
 	pw_impl_node_set_implementation(follower, &impl->impl_node);
 
-	if (impl->media_type == SPA_MEDIA_TYPE_audio &&
-	    impl->media_subtype == SPA_MEDIA_SUBTYPE_raw) {
+	if (impl->media_type == SPA_MEDIA_TYPE_audio) {
 		factory = pw_context_find_factory(impl->context, "adapter");
 		if (factory == NULL) {
 			pw_log_error(NAME" %p: no adapter factory found", stream);
@@ -1993,22 +2004,12 @@ int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 }
 
 static int
-do_process(struct spa_loop *loop,
+do_trigger_deprecated(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *impl = user_data;
 	int res = impl->node_methods.process(impl);
 	return spa_node_call_ready(&impl->callbacks, res);
-}
-
-static inline int call_trigger(struct stream *impl)
-{
-	int res = 0;
-	if (SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_DRIVER)) {
-		res = pw_loop_invoke(impl->context->data_loop,
-			do_process, 1, NULL, 0, false, impl);
-	}
-	return res;
 }
 
 SPA_EXPORT
@@ -2052,9 +2053,12 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 	if ((res = push_queue(impl, &impl->queued, b)) < 0)
 		return res;
 
-	if (impl->direction == SPA_DIRECTION_OUTPUT)
-		res = call_trigger(impl);
-
+	if (impl->direction == SPA_DIRECTION_OUTPUT &&
+	    impl->driving && !impl->using_drive) {
+		pw_log_debug("deprecated: use pw_stream_trigger_process() to drive the stream.");
+		res = pw_loop_invoke(impl->context->data_loop,
+			do_trigger_deprecated, 1, NULL, 0, false, impl);
+	}
 	return res;
 }
 
@@ -2099,4 +2103,52 @@ int pw_stream_flush(struct pw_stream *stream, bool drain)
 		spa_node_send_command(impl->node->node,
 				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Flush));
 	return 0;
+}
+
+SPA_EXPORT
+bool pw_stream_is_driving(struct pw_stream *stream)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	return impl->driving;
+}
+
+static int
+do_trigger_process(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct stream *impl = user_data;
+	int res;
+	if (impl->direction == SPA_DIRECTION_OUTPUT) {
+		if (impl->process_rt)
+			spa_callbacks_call(&impl->rt_callbacks, struct pw_stream_events, process, 0);
+		res = impl->node_methods.process(impl);
+	} else {
+		res = SPA_STATUS_NEED_DATA;
+	}
+	return spa_node_call_ready(&impl->callbacks, res);
+}
+
+SPA_EXPORT
+int pw_stream_trigger_process(struct pw_stream *stream)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	int res = 0;
+
+	pw_log_trace(NAME" %p", impl);
+
+	/* flag to check for old or new behaviour */
+	impl->using_drive = true;
+
+	if (!impl->driving)
+		return -EINVAL;
+
+	if (impl->direction == SPA_DIRECTION_OUTPUT &&
+	    !impl->process_rt) {
+		pw_loop_invoke(impl->context->main_loop,
+			do_call_process, 1, NULL, 0, false, impl);
+	}
+	res = pw_loop_invoke(impl->context->data_loop,
+		do_trigger_process, 1, NULL, 0, false, impl);
+
+	return res;
 }

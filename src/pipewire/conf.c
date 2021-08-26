@@ -64,7 +64,7 @@ static int make_path(char *path, int size, const char *paths[])
 	return 0;
 }
 
-static int get_read_path(char *path, size_t size, const char *prefix, const char *name)
+static int get_config_path(char *path, size_t size, const char *prefix, const char *name)
 {
 	const char *dir;
 	char buffer[4096];
@@ -139,6 +139,70 @@ no_config:
 	return 0;
 }
 
+static int get_state_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
+	char buffer[4096];
+
+	if (name[0] == '/') {
+		const char *paths[] = { name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+		return -ENOENT;
+	}
+
+	if (prefix && prefix[0] == '/') {
+		const char *paths[] = { prefix, name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+		return -ENOENT;
+	}
+
+	if (prefix == NULL) {
+		prefix = name;
+		name = NULL;
+	}
+
+	dir = getenv("PIPEWIRE_STATE_DIR");
+	if (dir != NULL) {
+		const char *paths[] = { dir, prefix, name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+	}
+
+	dir = getenv("XDG_STATE_HOME");
+	if (dir != NULL) {
+		const char *paths[] = { dir, "pipewire", prefix, name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+	}
+	dir = getenv("HOME");
+	if (dir == NULL) {
+		struct passwd pwd, *result = NULL;
+		if (getpwuid_r(getuid(), &pwd, buffer, sizeof(buffer), &result) == 0)
+			dir = result ? result->pw_dir : NULL;
+	}
+	if (dir != NULL) {
+		const char *paths[] = { dir, ".local", "state", "pipewire", prefix, name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+	}
+	if (dir != NULL) {
+		/* fallback for old XDG_CONFIG_HOME */
+		const char *paths[] = { dir, ".config", "pipewire", prefix, name, NULL };
+		if (make_path(path, size, paths) == 0 &&
+		    access(path, R_OK) == 0)
+			return 1;
+	}
+
+	return 0;
+}
+
 static int ensure_path(char *path, int size, const char *paths[])
 {
 	int i, len, mode;
@@ -185,7 +249,7 @@ static int open_write_dir(char *path, int size, const char *prefix)
 		if (ensure_path(path, size, paths) == 0)
 			goto found;
 	}
-	dir = getenv("XDG_CONFIG_HOME");
+	dir = getenv("XDG_STATE_HOME");
 	if (dir != NULL) {
 		const char *paths[] = { dir, "pipewire", prefix, NULL };
 		if (ensure_path(path, size, paths) == 0)
@@ -198,7 +262,7 @@ static int open_write_dir(char *path, int size, const char *prefix)
 			dir = result ? result->pw_dir : NULL;
 	}
 	if (dir != NULL) {
-		const char *paths[] = { dir, ".config", "pipewire", prefix, NULL };
+		const char *paths[] = { dir, ".local", "state", "pipewire", prefix, NULL };
 		if (ensure_path(path, size, paths) == 0)
 			goto found;
 	}
@@ -248,21 +312,12 @@ error:
 	return res;
 }
 
-static int conf_load(const char *prefix, const char *name, struct pw_properties *conf)
+static int conf_load(const char *path, struct pw_properties *conf)
 {
-	char path[PATH_MAX], *data;
+	char *data;
 	struct stat sbuf;
 	int fd;
 
-	if (name == NULL) {
-		pw_log_debug(NAME" %p: config name must not be NULL", conf);
-		return -EINVAL;
-	}
-
-	if (get_read_path(path, sizeof(path), prefix, name) == 0) {
-		pw_log_debug(NAME" %p: can't load config '%s': %m", conf, path);
-		return -ENOENT;
-	}
 	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)  {
 		pw_log_warn(NAME" %p: error loading config '%s': %m", conf, path);
 		return -errno;
@@ -288,13 +343,37 @@ error_close:
 SPA_EXPORT
 int pw_conf_load_conf(const char *prefix, const char *name, struct pw_properties *conf)
 {
-	return conf_load(prefix, name, conf);
+	char path[PATH_MAX];
+
+	if (name == NULL) {
+		pw_log_debug(NAME" %p: config name must not be NULL", conf);
+		return -EINVAL;
+	}
+
+	if (get_config_path(path, sizeof(path), prefix, name) == 0) {
+		pw_log_debug(NAME" %p: can't load config '%s': %m", conf, path);
+		return -ENOENT;
+	}
+
+	return conf_load(path, conf);
 }
 
 SPA_EXPORT
 int pw_conf_load_state(const char *prefix, const char *name, struct pw_properties *conf)
 {
-	return conf_load(prefix, name, conf);
+	char path[PATH_MAX];
+
+	if (name == NULL) {
+		pw_log_debug(NAME" %p: config name must not be NULL", conf);
+		return -EINVAL;
+	}
+
+	if (get_state_path(path, sizeof(path), prefix, name) == 0) {
+		pw_log_debug(NAME" %p: can't load config '%s': %m", conf, path);
+		return -ENOENT;
+	}
+
+	return conf_load(path, conf);
 }
 
 /* context.spa-libs = {
@@ -507,7 +586,7 @@ static int do_exec(struct pw_context *context, const char *key, const char *args
 		}
 	}
 	else {
-		int status;
+		int status = 0;
 		res = waitpid(pid, &status, WNOHANG);
 		pw_log_info("exec got pid %d res:%d status:%d", pid, res, status);
 	}

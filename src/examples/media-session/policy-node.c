@@ -127,19 +127,21 @@ struct node {
 	unsigned int configured:1;
 	unsigned int dont_remix:1;
 	unsigned int monitor:1;
-	unsigned int moving:1;
 	unsigned int capture_sink:1;
 	unsigned int virtual:1;
 	unsigned int linking:1;
+	unsigned int have_passthrough:1;
+	unsigned int passthrough_only:1;
 };
-
-static int check_new_target(struct impl *impl, struct node *target);
 
 static bool find_format(struct node *node)
 {
 	struct impl *impl = node->impl;
 	struct sm_param *p;
 	bool have_format = false;
+
+	node->have_passthrough = false;
+	node->passthrough_only = false;
 
 	spa_list_for_each(p, &node->obj->param_list, link) {
 		struct spa_audio_info info = { 0, };
@@ -152,37 +154,50 @@ static bool find_format(struct node *node)
 		if (spa_format_parse(p->param, &info.media_type, &info.media_subtype) < 0)
 			continue;
 
-		if (info.media_type != SPA_MEDIA_TYPE_audio ||
-		    info.media_subtype != SPA_MEDIA_SUBTYPE_raw)
+		if (info.media_type != SPA_MEDIA_TYPE_audio)
 			continue;
 
-		spa_pod_object_fixate((struct spa_pod_object*)p->param);
-		if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
-			spa_debug_pod(2, NULL, p->param);
+		switch (info.media_subtype) {
+		case SPA_MEDIA_SUBTYPE_raw:
+			spa_pod_object_fixate((struct spa_pod_object*)p->param);
+			if (pw_log_level_enabled(SPA_LOG_LEVEL_DEBUG))
+				spa_debug_pod(2, NULL, p->param);
 
-		/* defaults */
-		info.info.raw.format = SPA_AUDIO_FORMAT_F32;
-		info.info.raw.rate = impl->sample_rate;
-		info.info.raw.channels = 2;
-		info.info.raw.position[0] = SPA_AUDIO_CHANNEL_FL;
-		info.info.raw.position[1] = SPA_AUDIO_CHANNEL_FR;
+			/* defaults */
+			info.info.raw.format = SPA_AUDIO_FORMAT_F32;
+			info.info.raw.rate = impl->sample_rate;
+			info.info.raw.channels = 2;
+			info.info.raw.position[0] = SPA_AUDIO_CHANNEL_FL;
+			info.info.raw.position[1] = SPA_AUDIO_CHANNEL_FR;
 
-		spa_pod_parse_object(p->param,
-			SPA_TYPE_OBJECT_Format, NULL,
-			SPA_FORMAT_AUDIO_format,	SPA_POD_Id(&info.info.raw.format),
-			SPA_FORMAT_AUDIO_rate,		SPA_POD_OPT_Int(&info.info.raw.rate),
-			SPA_FORMAT_AUDIO_channels,	SPA_POD_Int(&info.info.raw.channels),
-			SPA_FORMAT_AUDIO_position,	SPA_POD_OPT_Pod(&position));
+			spa_pod_parse_object(p->param,
+				SPA_TYPE_OBJECT_Format, NULL,
+				SPA_FORMAT_AUDIO_format,	SPA_POD_Id(&info.info.raw.format),
+				SPA_FORMAT_AUDIO_rate,		SPA_POD_OPT_Int(&info.info.raw.rate),
+				SPA_FORMAT_AUDIO_channels,	SPA_POD_Int(&info.info.raw.channels),
+				SPA_FORMAT_AUDIO_position,	SPA_POD_OPT_Pod(&position));
 
-		if (position != NULL)
-			n_position = spa_pod_copy_array(position, SPA_TYPE_Id,
-					info.info.raw.position, SPA_AUDIO_MAX_CHANNELS);
-		if (n_position == 0 || n_position != info.info.raw.channels)
-			SPA_FLAG_SET(info.info.raw.flags, SPA_AUDIO_FLAG_UNPOSITIONED);
+			if (position != NULL)
+				n_position = spa_pod_copy_array(position, SPA_TYPE_Id,
+						info.info.raw.position, SPA_AUDIO_MAX_CHANNELS);
+			if (n_position == 0 || n_position != info.info.raw.channels)
+				SPA_FLAG_SET(info.info.raw.flags, SPA_AUDIO_FLAG_UNPOSITIONED);
 
-		if (node->format.info.raw.channels < info.info.raw.channels)
-			node->format = info;
+			if (node->format.info.raw.channels < info.info.raw.channels)
+				node->format = info;
 
+			have_format = true;
+			break;
+
+		case SPA_MEDIA_SUBTYPE_iec958:
+			pw_log_info("passthrough node %d found", node->id);
+			node->have_passthrough = true;
+			break;
+		}
+	}
+	if (!have_format && node->have_passthrough) {
+		pw_log_info("passthrough only node %d found", node->id);
+		node->passthrough_only = true;
 		have_format = true;
 	}
 	return have_format;
@@ -235,8 +250,10 @@ static int configure_node(struct node *node, struct spa_audio_info *info, bool f
 
 	node->configured = true;
 
-	if (node->type == NODE_TYPE_DEVICE)
-		check_new_target(impl, node);
+	if (node->type == NODE_TYPE_DEVICE) {
+		/* Schedule rescan in case we need to move streams */
+		sm_media_session_schedule_rescan(impl->session);
+	}
 
 	return 0;
 }
@@ -717,14 +734,7 @@ static int link_nodes(struct node *node, struct node *peer)
 
 	if (res > 0) {
 		node->peer = peer;
-		node->failed_peer = NULL;
 		node->connect_count++;
-		node->failed_count = 0;
-	} else {
-		if (node->failed_peer != peer)
-			node->failed_count = 0;
-		node->failed_peer = peer;
-		node->failed_count++;
 	}
 	return res;
 }
@@ -757,24 +767,54 @@ static int unlink_nodes(struct node *node, struct node *peer)
 	return 0;
 }
 
+static int relink_node(struct impl *impl, struct node *n, struct node *peer)
+{
+	int res;
+
+	if (peer == n->failed_peer && n->failed_count > MAX_LINK_RETRY) {
+		/* Break rescan -> failed link -> rescan loop. */
+		pw_log_debug(NAME" %p: tried to link '%d' on last rescan, not retrying",
+				impl, peer->id);
+		return -EBUSY;
+	}
+
+	if (n->failed_peer != peer)
+		n->failed_count = 0;
+	n->failed_peer = peer;
+	n->failed_count++;
+
+	if (!can_link(impl, n, peer)) {
+		pw_log_debug("can't link node %d to %d: same link-group", n->id,
+				peer->id);
+		return -EPERM;
+	}
+
+	if (n->peer != NULL)
+		if ((res = unlink_nodes(n, n->peer)) < 0)
+			return res;
+
+	pw_log_debug(NAME" %p: linking node %d to node %d", impl, n->id, peer->id);
+
+	/* NB. if link_nodes returns error, n may have been invalidated */
+	if ((res = link_nodes(n, peer)) > 0) {
+		n->failed_peer = NULL;
+		n->failed_count = 0;
+	}
+	return res;
+}
+
 static int rescan_node(struct impl *impl, struct node *n)
 {
 	struct spa_dict *props;
 	const char *str;
 	bool exclusive, reconnect, autoconnect;
-	struct find_data find;
 	struct pw_node_info *info;
 	struct node *peer;
 	struct sm_object *obj;
 	uint32_t path_id;
-	bool follows_default;
 
 	if (!n->active) {
 		pw_log_debug(NAME " %p: node %d is not active", impl, n->id);
-		return 0;
-	}
-	if (n->moving) {
-		pw_log_debug(NAME " %p: node %d is moving", impl, n->id);
 		return 0;
 	}
 
@@ -793,18 +833,6 @@ static int rescan_node(struct impl *impl, struct node *n)
 
 	str = spa_dict_lookup(props, PW_KEY_NODE_DONT_RECONNECT);
 	reconnect = str ? !pw_properties_parse_bool(str) : true;
-
-	follows_default = (impl->streams_follow_default &&
-	                   n->type == NODE_TYPE_STREAM &&
-	                   reconnect &&
-	                   n->obj->target_node == NULL &&
-	                   ((str = spa_dict_lookup(props, PW_KEY_NODE_TARGET)) == NULL ||
-			    (uint32_t)atoi(str) == SPA_ID_INVALID));
-
-	if (n->peer != NULL && !follows_default) {
-		pw_log_debug(NAME " %p: node %d is already linked", impl, n->id);
-		return 0;
-	}
 
 	if ((str = spa_dict_lookup(props, PW_KEY_STREAM_DONT_REMIX)) != NULL)
 		n->dont_remix = pw_properties_parse_bool(str);
@@ -837,41 +865,48 @@ static int rescan_node(struct impl *impl, struct node *n)
 
 	str = spa_dict_lookup(props, PW_KEY_NODE_EXCLUSIVE);
 	exclusive = str ? pw_properties_parse_bool(str) : false;
-
 	pw_log_debug(NAME " %p: exclusive:%d", impl, exclusive);
 
-	spa_zero(find);
-	find.impl = impl;
-	find.media = n->media;
-	find.capture_sink = n->capture_sink;
-	find.direction = n->direction;
-	find.exclusive = exclusive;
-	find.link_group = n->peer == NULL ? spa_dict_lookup(props, PW_KEY_NODE_LINK_GROUP) : NULL;
-
-	/* we always honour the target node asked for by the client */
+	/* honor target node set by user or asked for by the client */
 	path_id = SPA_ID_INVALID;
-	if ((str = spa_dict_lookup(props, PW_KEY_NODE_TARGET)) != NULL)
-		path_id = find_device_for_name(impl, str);
-	if (path_id == SPA_ID_INVALID && n->obj->target_node != NULL)
+	if (n->obj->target_node != NULL)
 		path_id = find_device_for_name(impl, n->obj->target_node);
-
-	pw_log_info("trying to link node %d exclusive:%d reconnect:%d target:%d follows-default:%d", n->id,
-	            exclusive, reconnect, path_id, follows_default);
+	if (!n->obj->fixed_target &&
+			(str = spa_dict_lookup(props, PW_KEY_NODE_TARGET)) != NULL) {
+		bool has_target = ((uint32_t)atoi(str) != SPA_ID_INVALID);
+		path_id = find_device_for_name(impl, str);
+		if (!reconnect && has_target && path_id == SPA_ID_INVALID) {
+			/* don't use fallbacks for non-reconnecting nodes */
+			peer = NULL;
+			goto do_link;
+		}
+	}
 
 	if (n->peer != NULL) {
-		spa_list_for_each(peer, &impl->node_list, link)
-			find_node(&find, peer);
-
-		if (follows_default && find.node != NULL &&
-		    find.node != n->peer && can_link(impl, n, find.node)) {
-			pw_log_debug(NAME " %p: node %d follows default, changed (%d -> %d)", impl, n->id,
-			             n->peer->id, find.node->id);
-			unlink_nodes(n, n->peer);
-		} else {
-			pw_log_debug(NAME " %p: node %d already linked (not changing)", impl, n->id);
+		/* Do we need to check again where to link to? */
+		bool target_found = (path_id != SPA_ID_INVALID);
+		bool peer_is_target = (target_found && n->peer->obj->obj.id == path_id);
+		bool follows_default = (impl->streams_follow_default &&
+				n->type == NODE_TYPE_STREAM);
+		bool recheck = !peer_is_target && (follows_default || target_found) &&
+			reconnect;
+		if (!recheck) {
+			pw_log_debug(NAME " %p: node %d is already linked, peer-is-target:%d "
+					"follows-default:%d", impl, n->id, peer_is_target,
+					follows_default);
 			return 0;
 		}
 	}
+
+	if (n->passthrough_only) {
+		path_id = SPA_ID_INVALID;
+		peer = NULL;
+		reconnect = false;
+		goto do_link;
+	}
+
+	pw_log_info("trying to link node %d exclusive:%d reconnect:%d target:%d",
+			n->id, exclusive, reconnect, path_id);
 
 	if (path_id != SPA_ID_INVALID) {
 		pw_log_debug(NAME " %p: target:%d", impl, path_id);
@@ -884,8 +919,6 @@ static int rescan_node(struct impl *impl, struct node *n)
 					path_id, obj->type);
 			if (spa_streq(obj->type, PW_TYPE_INTERFACE_Node)) {
 				peer = sm_object_get_data(obj, SESSION_KEY);
-				if (peer == NULL)
-					return -ENOENT;
 				goto do_link;
 			}
 		}
@@ -893,21 +926,38 @@ static int rescan_node(struct impl *impl, struct node *n)
 				path_id, reconnect);
 	}
 	if (path_id == SPA_ID_INVALID && (reconnect || n->connect_count == 0)) {
-		if (find.node == NULL)
-			spa_list_for_each(peer, &impl->node_list, link)
-				find_node(&find, peer);
+		/* find fallback */
+		struct find_data find;
+
+		spa_zero(find);
+		find.impl = impl;
+		find.media = n->media;
+		find.capture_sink = n->capture_sink;
+		find.direction = n->direction;
+		find.exclusive = exclusive;
+		find.link_group = n->peer == NULL ? spa_dict_lookup(props, PW_KEY_NODE_LINK_GROUP) : NULL;
+
+		spa_list_for_each(peer, &impl->node_list, link)
+			find_node(&find, peer);
+
+		peer = find.node;
 	} else {
-		find.node = NULL;
+		peer = NULL;
 	}
 
-	if (find.node == NULL) {
-		struct sm_object *obj;
-
+do_link:
+	if (peer == NULL) {
 		if (!reconnect) {
 			pw_log_info("don-reconnect target node destroyed: destroy %d", n->id);
 			sm_media_session_destroy_object(impl->session, n->id);
+		} else if (reconnect && n->connect_count > 0) {
+			/* Don't error the stream on reconnects */
+			pw_log_info(NAME " %p: no node found for %d, waiting reconnect", impl, n->id);
+			if (n->peer != NULL)
+				unlink_nodes(n, n->peer);
+			return 0;
 		} else {
-			pw_log_warn("no node found for %d", n->id);
+			pw_log_warn(NAME " %p: no node found for %d, stream error", impl, n->id);
 		}
 
 		obj = sm_media_session_find_object(impl->session, n->client_id);
@@ -919,8 +969,11 @@ static int rescan_node(struct impl *impl, struct node *n)
 				n->id, -ENOENT, "no node available");
 		}
 		return -ENOENT;
+	} else if (peer == n->peer) {
+		pw_log_debug(NAME " %p: node %d already linked to %d (not changing)",
+				impl, n->id, peer->id);
+		return 0;
 	}
-	peer = find.node;
 
 	if (exclusive && peer->obj->info->state == PW_NODE_STATE_RUNNING) {
 		pw_log_warn("node %d busy, can't get exclusive access", peer->id);
@@ -928,17 +981,7 @@ static int rescan_node(struct impl *impl, struct node *n)
 	}
 	n->exclusive = exclusive;
 
-	pw_log_debug(NAME" %p: linking to node '%d'", impl, peer->id);
-
-do_link:
-	if (peer == n->failed_peer && n->failed_count > MAX_LINK_RETRY) {
-		/* Break rescan -> failed link -> rescan loop. */
-		pw_log_debug(NAME" %p: tried to link '%d' on last rescan, not retrying",
-				impl, peer->id);
-		return 0;
-	}
-	link_nodes(n, peer);
-	return 1;
+	return relink_node(impl, n, peer);
 }
 
 static void session_info(void *data, const struct pw_core_info *info)
@@ -1031,68 +1074,6 @@ static const struct sm_media_session_events session_events = {
 	.destroy = session_destroy,
 };
 
-static int do_move_node(struct node *n, struct node *src, struct node *dst)
-{
-	n->moving = true;
-	if (src)
-		unlink_nodes(n, src);
-	if (dst)
-		link_nodes(n, dst);
-	n->moving = false;
-	return 0;
-}
-
-static int handle_move(struct impl *impl, struct node *src_node, struct node *dst_node)
-{
-	const char *str;
-	struct pw_node_info *info;
-
-	if (src_node->peer == dst_node)
-		return 0;
-
-	if ((info = src_node->obj->info) == NULL)
-		return -EIO;
-
-	if ((str = spa_dict_lookup(info->props, PW_KEY_NODE_DONT_RECONNECT)) != NULL &&
-		    pw_properties_parse_bool(str)) {
-		pw_log_warn("can't reconnect node %d to %d: dont-reconnect flag set",
-				src_node->id, dst_node->id);
-		return -EPERM;
-	}
-	if (!can_link(impl, src_node, dst_node)) {
-		pw_log_debug("can't link node %d to %d: same link-group", src_node->id,
-				dst_node->id);
-		return -EPERM;
-	}
-
-	pw_log_info("move node %d: from peer %d to %d", src_node->id,
-			src_node->peer ? src_node->peer->id : SPA_ID_INVALID,
-			dst_node->id);
-
-	free(src_node->obj->target_node);
-	str = get_device_name(dst_node);
-	src_node->obj->target_node = str ? strdup(str) : NULL;
-
-	return do_move_node(src_node, src_node->peer, dst_node);
-}
-
-static int check_new_target(struct impl *impl, struct node *target)
-{
-	struct node *node;
-	const char *str = get_device_name(target);
-
-	spa_list_for_each(node, &impl->node_list, link) {
-		pw_log_debug(NAME" %p: node %d target '%s' find:%s", impl,
-				node->id, node->obj->target_node, str);
-
-		if (node->obj->target_node != NULL &&
-		    spa_streq(node->obj->target_node , str)) {
-			handle_move(impl, node, target);
-		}
-	}
-	return 0;
-}
-
 static int metadata_property(void *object, uint32_t subject,
 		const char *key, const char *type, const char *value)
 {
@@ -1131,25 +1112,39 @@ static int metadata_property(void *object, uint32_t subject,
 		}
 		if (changed)
 			sm_media_session_schedule_rescan(impl->session);
-	} else if (key != NULL && spa_streq(key, "target.node")) {
-		if (value != NULL) {
-			struct node *src_node, *dst_node;
+	} else if (key == NULL || spa_streq(key, "target.node")) {
+		struct node *src_node;
+
+		src_node = find_node_by_id_name(impl, subject, NULL);
+		if (!src_node)
+			return 0;
+
+		/* Set target and schedule rescan */
+		if (key == NULL || value == NULL) {
+			free(src_node->obj->target_node);
+			src_node->obj->target_node = NULL;
+			src_node->obj->fixed_target = false;
+		} else {
+			const char *str;
+			struct node *dst_node;
 
 			dst_node = find_node_by_id_name(impl, SPA_ID_INVALID, value);
-			src_node = dst_node ? find_node_by_id_name(impl, subject, NULL) : NULL;
-
-			if (dst_node && src_node)
-				handle_move(impl, src_node, dst_node);
-		} else {
-			/* Unset target node. Schedule rescan to re-link, if needed. */
-			struct node *src_node;
-			src_node = find_node_by_id_name(impl, subject, NULL);
-			if (src_node) {
-				free(src_node->obj->target_node);
-				src_node->obj->target_node = NULL;
-				sm_media_session_schedule_rescan(impl->session);
+			if (dst_node) {
+				str = get_device_name(dst_node);
+				if (!str)
+					return 0;
+			} else if ((uint32_t)atoi(value) == SPA_ID_INVALID) {
+				str = NULL;
+			} else {
+				return 0;
 			}
+
+			free(src_node->obj->target_node);
+			src_node->obj->target_node = str ? strdup(str) : NULL;
+			src_node->obj->fixed_target = true;
 		}
+
+		sm_media_session_schedule_rescan(impl->session);
 	}
 	return 0;
 }
