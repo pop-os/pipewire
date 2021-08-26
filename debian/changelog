@@ -2,6 +2,7 @@ pipewire (0.3.34-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Don't install sink-convolver.conf (filter-chain example configuration)
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 26 Aug 2021 17:55:16 +0200
 

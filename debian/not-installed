@@ -1,5 +1,6 @@
 usr/share/pipewire/media-session.d/with-jack
 usr/share/pipewire/filter-chain/demonic.conf
+usr/share/pipewire/filter-chain/sink-convolver.conf
 usr/share/pipewire/filter-chain/sink-dolby-surround.conf
 usr/share/pipewire/filter-chain/sink-eq6.conf
 usr/share/pipewire/filter-chain/sink-matrix-spatialiser.conf
