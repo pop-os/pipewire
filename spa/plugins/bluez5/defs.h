@@ -60,8 +60,6 @@ extern "C" {
 
 #define PIPEWIRE_BATTERY_PROVIDER "/org/freedesktop/pipewire/battery"
 
-#define SPA_BT_HFP_HF_IPHONEACCEV_KEY_BATTERY	1
-
 #define MIN_LATENCY	512
 #define MAX_LATENCY	1024
 
@@ -175,6 +173,7 @@ extern "C" {
  * of the input (number of PCM samples) and output is known up front. */
 #define MSBC_DECODED_SIZE       240
 #define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
+#define MSBC_PAYLOAD_SIZE       57
 
 enum spa_bt_profile {
 	SPA_BT_PROFILE_NULL =		0,
@@ -254,6 +253,29 @@ enum spa_bt_hfp_hf_feature {
 	SPA_BT_HFP_HF_FEATURE_CODEC_NEGOTIATION =	(1 << 7),
 	SPA_BT_HFP_HF_FEATURE_HF_INDICATORS =		(1 << 8),
 	SPA_BT_HFP_HF_FEATURE_ESCO_S4 =			(1 << 9),
+};
+
+/* https://btprodspecificationrefs.blob.core.windows.net/assigned-numbers/Assigned%20Number%20Types/Hands-Free%20Profile.pdf */
+enum spa_bt_hfp_hf_indicator {
+	SPA_BT_HFP_HF_INDICATOR_ENHANCED_SAFETY =        1,
+	SPA_BT_HFP_HF_INDICATOR_BATTERY_LEVEL =          2,
+};
+
+/* HFP Command AT+IPHONEACCEV
+ *  https://developer.apple.com/accessories/Accessory-Design-Guidelines.pdf */
+enum spa_bt_hfp_hf_iphoneaccev_keys {
+	SPA_BT_HFP_HF_IPHONEACCEV_KEY_BATTERY_LEVEL =    1,
+	SPA_BT_HFP_HF_IPHONEACCEV_KEY_DOCK_STATE =       2,
+};
+
+/* HFP Command AT+XAPL
+ *  https://developer.apple.com/accessories/Accessory-Design-Guidelines.pdf
+ * Bits 0, 5 and above are reserved. */
+enum spa_bt_hfp_hf_xapl_features {
+	SPA_BT_HFP_HF_XAPL_FEATURE_BATTERY_REPORTING =         (1 << 1),
+	SPA_BT_HFP_HF_XAPL_FEATURE_DOCKED_OR_POWERED =         (1 << 2),
+	SPA_BT_HFP_HF_XAPL_FEATURE_SIRI_STATUS_REPORTING =     (1 << 3),
+	SPA_BT_HFP_HF_XAPL_FEATURE_NOISE_REDUCTION_REPORTING = (1 << 4),
 };
 
 enum spa_bt_hfp_sdp_hf_features {

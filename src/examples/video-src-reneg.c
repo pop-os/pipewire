@@ -82,8 +82,8 @@ static void draw_elipse(uint32_t *dst, int width, int height, uint32_t color)
 	}
 }
 
-/* called on timeout and we should push a new buffer in the queue */
-static void on_timeout(void *userdata, uint64_t expirations)
+/* called when we should push a new buffer in the queue */
+static void on_process(void *userdata)
 {
 	struct data *data = userdata;
 	struct pw_buffer *b;
@@ -180,6 +180,14 @@ static void on_timeout(void *userdata, uint64_t expirations)
 	pw_stream_queue_buffer(data->stream, b);
 }
 
+/* called on timeout and we should start the graph */
+static void on_timeout(void *userdata, uint64_t expirations)
+{
+	struct data *data = userdata;
+	pw_log_trace("timeout");
+	pw_stream_trigger_process(data->stream);
+}
+
 /* when the stream is STREAMING, start the timer at 40ms intervals
  * to produce and push a frame. In other states we PAUSE the timer. */
 static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum pw_stream_state state,
@@ -206,8 +214,9 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		interval.tv_sec = 0;
 		interval.tv_nsec = 40 * SPA_NSEC_PER_MSEC;
 
-		pw_loop_update_timer(pw_thread_loop_get_loop(data->loop),
-				data->timer, &timeout, &interval, false);
+		if (pw_stream_is_driving(data->stream))
+			pw_loop_update_timer(pw_thread_loop_get_loop(data->loop),
+					data->timer, &timeout, &interval, false);
 
 		timeout.tv_sec = 1;
 		timeout.tv_nsec = 0;
@@ -358,6 +367,7 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
+	.process = on_process,
 	.state_changed = on_stream_state_changed,
 	.param_changed = on_stream_param_changed,
 	.add_buffer = on_stream_add_buffer,

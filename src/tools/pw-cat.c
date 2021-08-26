@@ -153,6 +153,7 @@ struct data {
 	int sync;
 
 	struct spa_io_position *position;
+	struct spa_io_rate_match *rate_match;
 	bool drained;
 	uint64_t clock_time;
 
@@ -231,6 +232,10 @@ sf_format_to_pw(int format)
 		return SPA_AUDIO_FORMAT_U8;
 	case SF_FORMAT_PCM_S8:
 		return SPA_AUDIO_FORMAT_S8;
+	case SF_FORMAT_ULAW:
+		return SPA_AUDIO_FORMAT_ULAW;
+	case SF_FORMAT_ALAW:
+		return SPA_AUDIO_FORMAT_ALAW;
 	case SF_FORMAT_PCM_16:
 		return endianness == 1 ? SPA_AUDIO_FORMAT_S16_LE :
 		       endianness == 2 ? SPA_AUDIO_FORMAT_S16_BE :
@@ -263,6 +268,8 @@ sf_format_samplesize(int format)
 	switch (sub_type) {
 	case SF_FORMAT_PCM_S8:
 	case SF_FORMAT_PCM_U8:
+	case SF_FORMAT_ULAW:
+	case SF_FORMAT_ALAW:
 		return 1;
 	case SF_FORMAT_PCM_16:
 		return 2;
@@ -281,7 +288,7 @@ static int sf_playback_fill_x8(struct data *d, void *dest, unsigned int n_frames
 {
 	sf_count_t rn;
 
-	rn = sf_read_raw(d->file, dest, n_frames);
+	rn = sf_read_raw(d->file, dest, n_frames * d->stride);
 	return (int)rn;
 }
 
@@ -329,6 +336,8 @@ sf_fmt_playback_fill_fn(int format)
 	switch (fmt) {
 	case SPA_AUDIO_FORMAT_S8:
 	case SPA_AUDIO_FORMAT_U8:
+	case SPA_AUDIO_FORMAT_ULAW:
+	case SPA_AUDIO_FORMAT_ALAW:
 		return sf_playback_fill_x8;
 	case SPA_AUDIO_FORMAT_S16_LE:
 	case SPA_AUDIO_FORMAT_S16_BE:
@@ -363,7 +372,7 @@ static int sf_record_fill_x8(struct data *d, void *src, unsigned int n_frames)
 {
 	sf_count_t rn;
 
-	rn = sf_write_raw(d->file, src, n_frames);
+	rn = sf_write_raw(d->file, src, n_frames * d->stride);
 	return (int)rn;
 }
 
@@ -411,6 +420,8 @@ sf_fmt_record_fill_fn(int format)
 	switch (fmt) {
 	case SPA_AUDIO_FORMAT_S8:
 	case SPA_AUDIO_FORMAT_U8:
+	case SPA_AUDIO_FORMAT_ULAW:
+	case SPA_AUDIO_FORMAT_ALAW:
 		return sf_record_fill_x8;
 	case SPA_AUDIO_FORMAT_S16_LE:
 	case SPA_AUDIO_FORMAT_S16_BE:
@@ -839,6 +850,9 @@ on_io_changed(void *userdata, uint32_t id, void *data, uint32_t size)
 	case SPA_IO_Position:
 		d->position = data;
 		break;
+	case SPA_IO_RateMatch:
+		d->rate_match = data;
+		break;
 	default:
 		break;
 	}
@@ -877,6 +891,8 @@ static void on_process(void *userdata)
 	if (data->mode == mode_playback) {
 
 		n_frames = d->maxsize / data->stride;
+		if (data->rate_match && data->rate_match->size > 0)
+			n_frames = SPA_MIN((uint32_t)n_frames, data->rate_match->size);
 
 		n_fill_frames = data->fill(data, p, n_frames);
 
@@ -1348,8 +1364,11 @@ static int setup_sndfile(struct data *data)
 				sf_fmt_to_str(info.format),
 				data->samplesize,
 				data->stride, nom, (double)nom/data->rate);
+
 	if (nom)
 		pw_properties_setf(data->props, PW_KEY_NODE_LATENCY, "%u/%u", nom, data->rate);
+
+	pw_properties_setf(data->props, PW_KEY_NODE_RATE, "1/%u", data->rate);
 
 	if (data->quality >= 0)
 		pw_properties_setf(data->props, "resample.quality", "%d", data->quality);

@@ -108,7 +108,7 @@ static struct sample *find_sample(struct impl *impl, uint32_t idx, const char *n
 
 	pw_array_for_each(item, &impl->samples.items) {
 		struct sample *s = item->data;
-                if (!pw_map_item_is_free(item) &&
+		if (!pw_map_item_is_free(item) &&
 		    spa_streq(s->name, name))
 			return s;
 	}
@@ -203,7 +203,7 @@ static struct stream *find_stream(struct client *client, uint32_t id)
 	union pw_map_item *item;
 	pw_array_for_each(item, &client->streams.items) {
 		struct stream *s = item->data;
-                if (!pw_map_item_is_free(item) &&
+		if (!pw_map_item_is_free(item) &&
 		    s->id == id)
 			return s;
 	}
@@ -269,8 +269,8 @@ static int64_t get_node_latency_offset(struct pw_manager_object *o)
 		if (p->id != SPA_PARAM_Props)
 			continue;
 		if (spa_pod_parse_object(p->param,
-		                         SPA_TYPE_OBJECT_Props, NULL,
-		                         SPA_PROP_latencyOffsetNsec, SPA_POD_Long(&latency_offset)) == 1)
+					SPA_TYPE_OBJECT_Props, NULL,
+					SPA_PROP_latencyOffsetNsec, SPA_POD_Long(&latency_offset)) == 1)
 			break;
 	}
 	return latency_offset;
@@ -981,7 +981,7 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 	if (id != SPA_PARAM_Format || param == NULL)
 		return;
 
-	if ((res = format_parse_param(param, &stream->ss, &stream->map)) < 0) {
+	if ((res = format_parse_param(param, &stream->ss, &stream->map, NULL, NULL)) < 0) {
 		pw_stream_set_error(stream->stream, res, "format not supported");
 		return;
 	}
@@ -1043,7 +1043,7 @@ struct process_data {
 
 static int
 do_process_done(struct spa_loop *loop,
-                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *stream = user_data;
 	struct client *client = stream->client;
@@ -1145,7 +1145,7 @@ static void stream_process(void *data)
 	void *p;
 	struct pw_buffer *buffer;
 	struct spa_buffer *buf;
-	uint32_t size, minreq, index;
+	uint32_t size, minreq = 0, index;
 	struct process_data pd;
 
 	pw_log_trace_fp(NAME" %p: process", stream);
@@ -1154,8 +1154,8 @@ static void stream_process(void *data)
 	if (buffer == NULL)
 		return;
 
-        buf = buffer->buffer;
-        if ((p = buf->datas[0].data) == NULL)
+	buf = buffer->buffer;
+	if ((p = buf->datas[0].data) == NULL)
 		return;
 
 	spa_zero(pd);
@@ -1165,7 +1165,7 @@ static void stream_process(void *data)
 
 		if (stream->rate_match)
 			minreq = stream->rate_match->size * stream->frame_size;
-		else
+		if (minreq == 0)
 			minreq = stream->attr.minreq;
 
 		if (avail < (int32_t)minreq || stream->corked) {
@@ -1215,10 +1215,10 @@ static void stream_process(void *data)
 			pd.missing = size;
 			pd.underrun = false;
 		}
-	        buf->datas[0].chunk->offset = 0;
-	        buf->datas[0].chunk->stride = stream->frame_size;
-	        buf->datas[0].chunk->size = size;
-	        buffer->size = size / stream->frame_size;
+		buf->datas[0].chunk->offset = 0;
+		buf->datas[0].chunk->stride = stream->frame_size;
+		buf->datas[0].chunk->size = size;
+		buffer->size = size / stream->frame_size;
 	} else  {
 		int32_t filled = spa_ringbuffer_get_write_index(&stream->ring, &index);
 		size = buf->datas[0].chunk->size;
@@ -1291,7 +1291,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	int res;
 	struct sample_spec ss;
 	struct channel_map map;
-	uint32_t sink_index, syncid;
+	uint32_t sink_index, syncid, rate = 0;
 	const char *sink_name;
 	struct buffer_attr attr = { 0 };
 	bool corked = false,
@@ -1411,6 +1411,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			uint8_t i;
 			for (i = 0; i < n_formats; i++) {
 				struct format_info format;
+				uint32_t r;
 
 				if (message_get(m,
 						TAG_FORMAT_INFO, &format,
@@ -1419,9 +1420,11 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 
 				if (n_params < MAX_FORMATS &&
 				    (params[n_params] = format_info_build_param(&b,
-						SPA_PARAM_EnumFormat, &format)) != NULL) {
+						SPA_PARAM_EnumFormat, &format, &r)) != NULL) {
 					n_params++;
 					n_valid_formats++;
+					if (r > rate)
+						rate = r;
 				} else {
 					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
 				}
@@ -1440,6 +1443,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 					impl, format_id2name(ss.format), ss.rate,
 					ss.channels);
 		}
+		rate = ss.rate;
 	}
 
 	if (m->offset != m->length)
@@ -1474,6 +1478,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	stream->is_underrun = true;
 	stream->underrun_for = -1;
 
+	if (rate != 0)
+		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", rate);
 	if (no_remix)
 		pw_properties_set(props, PW_KEY_STREAM_DONT_REMIX, "true");
 	flags = 0;
@@ -1492,7 +1498,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	if (stream->stream == NULL)
 		goto error_errno;
 
-	pw_log_debug(NAME" %p: new stream %p channel:%d", impl, stream, stream->channel);
+	pw_log_debug(NAME" %p: new stream %p channel:%d passthrough:%d",
+			impl, stream, stream->channel, passthrough);
 
 	pw_stream_add_listener(stream->stream,
 			&stream->stream_listener,
@@ -1561,7 +1568,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	struct pw_properties *props = NULL;
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
-	uint32_t n_params = 0, n_valid_formats = 0, flags, id;
+	uint32_t n_params = 0, n_valid_formats = 0, flags, id, rate = 0;
 	const struct spa_pod *params[MAX_FORMATS];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -1639,6 +1646,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 			uint8_t i;
 			for (i = 0; i < n_formats; i++) {
 				struct format_info format;
+				uint32_t r;
 
 				if (message_get(m,
 						TAG_FORMAT_INFO, &format,
@@ -1647,9 +1655,11 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 
 				if (n_params < MAX_FORMATS &&
 				    (params[n_params] = format_info_build_param(&b,
-						SPA_PARAM_EnumFormat, &format)) != NULL) {
+						SPA_PARAM_EnumFormat, &format, &r)) != NULL) {
 					n_params++;
 					n_valid_formats++;
+					if (r > rate)
+						rate = r;
 				} else {
 					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
 				}
@@ -1679,6 +1689,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 					impl, format_id2name(ss.format), ss.rate,
 					ss.channels);
 		}
+		rate = ss.rate;
 	}
 	if (m->offset != m->length)
 		goto error_protocol;
@@ -1713,6 +1724,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	if (client->quirks & QUIRK_REMOVE_CAPTURE_DONT_MOVE)
 		no_move = false;
 
+	if (rate != 0)
+		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", rate);
 	if (peak_detect)
 		pw_properties_set(props, PW_KEY_STREAM_MONITOR, "true");
 	if (no_remix)
@@ -2656,7 +2669,7 @@ static int do_set_volume(struct client *client, uint32_t command, uint32_t tag, 
 		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
-	collect_device_info(o, card, &dev_info, is_monitor);
+	collect_device_info(o, card, &dev_info, is_monitor, &impl->defs);
 
 	if (dev_info.have_volume &&
 	    volume_compare(&dev_info.volume_info.volume, &volume) == 0)
@@ -2722,7 +2735,7 @@ static int do_set_mute(struct client *client, uint32_t command, uint32_t tag, st
 		struct selector sel = { .id = card_id, .type = pw_manager_object_is_card, };
 		card = select_object(manager, &sel);
 	}
-	collect_device_info(o, card, &dev_info, is_monitor);
+	collect_device_info(o, card, &dev_info, is_monitor, &impl->defs);
 
 	if (dev_info.have_volume &&
 	    dev_info.volume_info.mute == mute)
@@ -3393,6 +3406,7 @@ static int fill_card_info(struct client *client, struct message *m,
 static int fill_sink_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
+	struct impl *impl = client->impl;
 	struct pw_node_info *info = o->info;
 	struct pw_manager *manager = client->manager;
 	const char *name, *desc, *str;
@@ -3434,7 +3448,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 	if (card)
 		collect_card_info(card, &card_info);
 
-	collect_device_info(o, card, &dev_info, false);
+	collect_device_info(o, card, &dev_info, false, &impl->defs);
 
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
@@ -3448,11 +3462,11 @@ static int fill_sink_info(struct client *client, struct message *m,
 
 	flags = SINK_LATENCY | SINK_DYNAMIC_LATENCY | SINK_DECIBEL_VOLUME;
 	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_API)) != NULL)
-                flags |= SINK_HARDWARE;
+		flags |= SINK_HARDWARE;
 	if (SPA_FLAG_IS_SET(dev_info.volume_info.flags, VOLUME_HW_VOLUME))
-                flags |= SINK_HW_VOLUME_CTRL;
+		flags |= SINK_HW_VOLUME_CTRL;
 	if (SPA_FLAG_IS_SET(dev_info.volume_info.flags, VOLUME_HW_MUTE))
-                flags |= SINK_HW_MUTE_CTRL;
+		flags |= SINK_HW_MUTE_CTRL;
 
 	if (client->quirks & QUIRK_FORCE_S16_FORMAT)
 		dev_info.ss.format = SPA_AUDIO_FORMAT_S16;
@@ -3529,13 +3543,33 @@ static int fill_sink_info(struct client *client, struct message *m,
 			TAG_INVALID);
 	}
 	if (client->version >= 21) {
-		struct format_info info;
-		spa_zero(info);
-		info.encoding = ENCODING_PCM;
+		struct pw_manager_param *p;
+		struct format_info info[32];
+		uint32_t i, n_info = 0;
+
+		spa_list_for_each(p, &o->param_list, link) {
+			uint32_t index = 0;
+
+			if (p->id != SPA_PARAM_EnumFormat)
+				continue;
+
+			while (n_info < SPA_N_ELEMENTS(info)) {
+				spa_zero(info[n_info]);
+				if (format_info_from_param(&info[n_info], p->param, index++) < 0)
+					break;
+				if (info[n_info].encoding == ENCODING_ANY)
+					continue;
+				n_info++;
+			}
+		}
 		message_put(m,
-			TAG_U8, 1,			/* n_formats */
-			TAG_FORMAT_INFO, &info,
+			TAG_U8, n_info,				/* n_formats */
 			TAG_INVALID);
+		for (i = 0; i < n_info; i++) {
+			message_put(m,
+				TAG_FORMAT_INFO, &info[i],
+				TAG_INVALID);
+		}
 	}
 	return 0;
 }
@@ -3543,6 +3577,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 static int fill_source_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
+	struct impl *impl = client->impl;
 	struct pw_node_info *info = o->info;
 	struct pw_manager *manager = client->manager;
 	bool is_monitor;
@@ -3589,7 +3624,7 @@ static int fill_source_info(struct client *client, struct message *m,
 	if (card)
 		collect_card_info(card, &card_info);
 
-	collect_device_info(o, card, &dev_info, is_monitor);
+	collect_device_info(o, card, &dev_info, is_monitor, &impl->defs);
 
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
@@ -3603,11 +3638,11 @@ static int fill_source_info(struct client *client, struct message *m,
 
 	flags = SOURCE_LATENCY | SOURCE_DYNAMIC_LATENCY | SOURCE_DECIBEL_VOLUME;
 	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_API)) != NULL)
-                flags |= SOURCE_HARDWARE;
+		flags |= SOURCE_HARDWARE;
 	if (SPA_FLAG_IS_SET(dev_info.volume_info.flags, VOLUME_HW_VOLUME))
-                flags |= SOURCE_HW_VOLUME_CTRL;
+		flags |= SOURCE_HW_VOLUME_CTRL;
 	if (SPA_FLAG_IS_SET(dev_info.volume_info.flags, VOLUME_HW_MUTE))
-                flags |= SOURCE_HW_MUTE_CTRL;
+		flags |= SOURCE_HW_MUTE_CTRL;
 
 	if (client->quirks & QUIRK_FORCE_S16_FORMAT)
 		dev_info.ss.format = SPA_AUDIO_FORMAT_S16;
@@ -3707,6 +3742,7 @@ static const char *get_media_name(struct pw_node_info *info)
 static int fill_sink_input_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
+	struct impl *impl = client->impl;
 	struct pw_node_info *info = o->info;
 	struct pw_manager *manager = client->manager;
 	struct pw_manager_object *peer;
@@ -3723,7 +3759,7 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
 
-	collect_device_info(o, NULL, &dev_info, false);
+	collect_device_info(o, NULL, &dev_info, false, &impl->defs);
 
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
@@ -3777,6 +3813,7 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 static int fill_source_output_info(struct client *client, struct message *m,
 		struct pw_manager_object *o)
 {
+	struct impl *impl = client->impl;
 	struct pw_node_info *info = o->info;
 	struct pw_manager *manager = client->manager;
 	struct pw_manager_object *peer;
@@ -3794,7 +3831,7 @@ static int fill_source_output_info(struct client *client, struct message *m,
 	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
 
-	collect_device_info(o, NULL, &dev_info, false);
+	collect_device_info(o, NULL, &dev_info, false, &impl->defs);
 
 	if (!sample_spec_valid(&dev_info.ss) ||
 	    !channel_map_valid(&dev_info.map) ||
@@ -4051,7 +4088,7 @@ static int do_get_sample_info_list(struct client *client, uint32_t command, uint
 	reply = reply_new(client, tag);
 	pw_array_for_each(item, &impl->samples.items) {
 		struct sample *s = item->data;
-                if (pw_map_item_is_free(item))
+		if (pw_map_item_is_free(item))
 			continue;
 		fill_sample_info(client, reply, s);
 	}
@@ -4313,12 +4350,12 @@ static int do_set_profile(struct client *client, uint32_t command, uint32_t tag,
 	if (o->proxy == NULL)
 		return -ENOENT;
 
-        pw_device_set_param((struct pw_device*)o->proxy,
-                        SPA_PARAM_Profile, 0,
-                        spa_pod_builder_add_object(&b,
-                                SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
-                                SPA_PARAM_PROFILE_index, SPA_POD_Int(profile_id),
-                                SPA_PARAM_PROFILE_save, SPA_POD_Bool(true)));
+	pw_device_set_param((struct pw_device*)o->proxy,
+			SPA_PARAM_Profile, 0,
+			spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(profile_id),
+				SPA_PARAM_PROFILE_save, SPA_POD_Bool(true)));
 
 	return operation_new(client, tag);
 }
@@ -4402,6 +4439,7 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 	struct pw_manager *manager = client->manager;
 	struct pw_manager_object *o, *dev, *dev_default;
 	uint32_t id, id_device;
+	int target_id;
 	const char *name_device;
 	struct selector sel;
 	int res;
@@ -4432,29 +4470,23 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 	if ((dev = find_device(client, id_device, name_device, sink, NULL)) == NULL)
 		return -ENOENT;
 
-	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
-			o->id,
-			METADATA_TARGET_NODE,
-			SPA_TYPE_INFO_BASE"Id", "%d", dev->id)) < 0)
-		return res;
-
 	dev_default = find_device(client, SPA_ID_INVALID, NULL, sink, NULL);
 	if (dev == dev_default) {
 		/*
 		 * When moving streams to a node that is equal to the default,
 		 * Pulseaudio understands this to mean '... and unset preferred sink/source',
 		 * forgetting target.node. Follow that behavior here.
-		 *
-		 * XXX: We set target.node key above regardless, to make policy-node
-		 * XXX: to always see the unset event. The metadata is currently not
-		 * XXX: always set when the node has explicit target.
 		 */
-		if ((res = pw_manager_set_metadata(manager, client->metadata_default,
-				o->id,
-				METADATA_TARGET_NODE,
-				NULL, NULL)) < 0)
-			return res;
+		target_id = -1;
+	} else {
+		target_id = dev->id;
 	}
+
+	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
+			o->id,
+			METADATA_TARGET_NODE,
+			SPA_TYPE_INFO_BASE"Id", "%d", target_id)) < 0)
+		return res;
 
 	return reply_simple_ack(client, tag);
 }
@@ -4521,8 +4553,8 @@ static void on_module_loaded(void *data, int result)
 		struct message *reply;
 
 		pw_log_info(NAME" %p: [%s] loaded module id:%u name:%s",
-			    impl, client->name,
-			    module->idx, module->name);
+				impl, client->name,
+				module->idx, module->name);
 
 		module->loaded = true;
 
@@ -4539,9 +4571,9 @@ static void on_module_loaded(void *data, int result)
 	}
 	else {
 		pw_log_warn(NAME" %p: [%s] failed to load module id:%u name:%s result:%d (%s)",
-			    impl, client->name,
-			    module->idx, module->name,
-			    result, spa_strerror(result));
+				impl, client->name,
+				module->idx, module->name,
+				result, spa_strerror(result));
 
 		reply_error(client, COMMAND_LOAD_MODULE, tag, result);
 		module_schedule_unload(module);
@@ -4941,8 +4973,8 @@ static int parse_position(struct pw_properties *props, const char *key, const ch
 		str = def;
 
 	spa_json_init(&it[0], str, strlen(str));
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], str, strlen(str));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+		spa_json_init(&it[1], str, strlen(str));
 
 	res->channels = 0;
 	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
@@ -5043,13 +5075,13 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 
 	if ((res = servers_create_and_start(impl, str, NULL)) < 0) {
 		pw_log_error(NAME" %p: no servers could be started: %s",
-			     impl, spa_strerror(res));
+				impl, spa_strerror(res));
 		goto error_free;
 	}
 
 	if ((res = create_pid_file()) < 0) {
 		pw_log_warn(NAME" %p: can't create pid file: %s",
-			    impl, spa_strerror(res));
+				impl, spa_strerror(res));
 	}
 	pw_context_add_listener(context, &impl->context_listener,
 			&context_events, impl);

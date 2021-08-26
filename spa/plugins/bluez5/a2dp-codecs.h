@@ -4,7 +4,7 @@
  *
  *  Copyright (C) 2006-2010  Nokia Corporation
  *  Copyright (C) 2004-2010  Marcel Holtmann <marcel@holtmann.org>
- *
+ *  Copyright (C) 2018       Pali Rohár <pali.rohar@gmail.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -169,6 +169,19 @@
 #define APTX_HD_SAMPLING_FREQ_44100     0x2
 #define APTX_HD_SAMPLING_FREQ_48000     0x1
 
+#define APTX_LL_VENDOR_ID		0x0000000a
+#define APTX_LL_VENDOR_ID2		0x000000d7
+#define APTX_LL_CODEC_ID		0x0002
+
+/**
+ * Default parameters for aptX LL (Sprint) encoder
+ */
+#define APTX_LL_TARGET_CODEC_LEVEL      180  /* target codec buffer level */
+#define APTX_LL_INITIAL_CODEC_LEVEL     360  /* initial codec buffer level */
+#define APTX_LL_SRA_MAX_RATE            50   /* x/10000 = 0.005 SRA rate */
+#define APTX_LL_SRA_AVG_TIME            1    /* SRA averaging time = 1s */
+#define APTX_LL_GOOD_WORKING_LEVEL      180  /* good working buffer level */
+
 #define LDAC_VENDOR_ID			0x0000012d
 #define LDAC_CODEC_ID			0x00aa
 
@@ -182,6 +195,17 @@
 #define LDAC_SAMPLING_FREQ_96000	0x04
 #define LDAC_SAMPLING_FREQ_176400	0x02
 #define LDAC_SAMPLING_FREQ_192000	0x01
+
+#define FASTSTREAM_VENDOR_ID            0x0000000a
+#define FASTSTREAM_CODEC_ID             0x0001
+
+#define FASTSTREAM_DIRECTION_SINK       0x1
+#define FASTSTREAM_DIRECTION_SOURCE     0x2
+
+#define FASTSTREAM_SINK_SAMPLING_FREQ_44100     0x2
+#define FASTSTREAM_SINK_SAMPLING_FREQ_48000     0x1
+
+#define FASTSTREAM_SOURCE_SAMPLING_FREQ_16000   0x2
 
 typedef struct {
 	uint32_t vendor_id;
@@ -241,6 +265,20 @@ typedef struct {
 	uint32_t rfa;
 } __attribute__ ((packed)) a2dp_aptx_hd_t;
 
+typedef struct {
+        a2dp_aptx_t aptx;
+        uint8_t bidirect_link:1;
+        uint8_t has_new_caps:1;
+        uint8_t reserved:6;
+} __attribute__ ((packed)) a2dp_aptx_ll_t;
+
+typedef struct {
+        a2dp_vendor_codec_t info;
+        uint8_t direction;
+        uint8_t sink_frequency:4;
+        uint8_t source_frequency:4;
+} __attribute__ ((packed)) a2dp_faststream_t;
+
 #elif __BYTE_ORDER == __BIG_ENDIAN
 
 typedef struct {
@@ -288,10 +326,37 @@ typedef struct {
 	uint32_t rfa;
 } __attribute__ ((packed)) a2dp_aptx_hd_t;
 
+typedef struct {
+        a2dp_aptx_t aptx;
+        uint8_t reserved:6;
+        uint8_t has_new_caps:1;
+        uint8_t bidirect_link:1;
+} __attribute__ ((packed)) a2dp_aptx_ll_t;
+
+typedef struct {
+        a2dp_vendor_codec_t info;
+        uint8_t direction;
+        uint8_t source_frequency:4;
+        uint8_t sink_frequency:4;
+} __attribute__ ((packed)) a2dp_faststream_t;
 
 #else
 #error "Unknown byte order"
 #endif
+
+typedef struct {
+        a2dp_aptx_ll_t base;
+        uint8_t reserved;
+        uint8_t target_level2;
+        uint8_t target_level1;
+        uint8_t initial_level2;
+        uint8_t initial_level1;
+        uint8_t sra_max_rate;
+        uint8_t sra_avg_time;
+        uint8_t good_working_level2;
+        uint8_t good_working_level1;
+} __attribute__ ((packed)) a2dp_aptx_ll_ext_t;
+
 
 #define A2DP_CODEC_DEFAULT_RATE		48000
 #define A2DP_CODEC_DEFAULT_CHANNELS	2
@@ -310,11 +375,12 @@ struct a2dp_codec {
 
 	const char *name;
 	const char *description;
+	const char *endpoint_name;	/**< Endpoint name. If NULL, same as name */
 	const struct spa_dict *info;
 
 	const size_t send_buf_size;
 
-	const char *feature_flag;
+	const struct a2dp_codec *duplex_codec;	/**< Codec for non-standard A2DP duplex channel */
 
 	int (*fill_caps) (const struct a2dp_codec *codec, uint32_t flags,
 			uint8_t caps[A2DP_MAX_CAPS_SIZE]);

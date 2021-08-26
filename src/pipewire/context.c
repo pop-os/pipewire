@@ -137,6 +137,15 @@ static bool get_default_bool(struct pw_properties *properties, const char *name,
 	return val;
 }
 
+static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
+{
+	uint32_t i;
+	for (i = 0; i < n_rates; i++)
+		if (rates[i] == rate)
+			return true;
+	return false;
+}
+
 static uint32_t parse_clock_rate(struct pw_properties *properties, const char *name,
 		uint32_t *rates, uint32_t def)
 {
@@ -157,11 +166,13 @@ static uint32_t parse_clock_rate(struct pw_properties *properties, const char *n
 		if (spa_atou32(v, &r, 0))
 	                rates[count++] = r;
         }
-	if (count == 0)
+	if (count == 0 ||!rates_contains(rates, count, def))
 		goto fallback;
+
 	return count;
 fallback:
 	rates[0] = def;
+	pw_properties_setf(properties, name, "[ %u ]", def);
 	return 1;
 }
 
@@ -979,7 +990,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 
 				pw_impl_link_prepare(l);
 
-				if (!l->passive)
+				if (!l->passive && l->prepared)
 					driver->passive = n->passive = false;
 
 				if (l->prepared) {
@@ -997,7 +1008,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 
 				pw_impl_link_prepare(l);
 
-				if (!l->passive)
+				if (!l->passive && l->prepared)
 					driver->passive = n->passive = false;
 
 				if (l->prepared) {
@@ -1048,15 +1059,6 @@ static inline uint32_t *get_rates(struct pw_context *context, uint32_t *def, uin
 		return s->clock_rates;
 	}
 }
-static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
-{
-	uint32_t i;
-	for (i = 0; i < n_rates; i++)
-		if (rates[i] == rate)
-			return true;
-	return false;
-}
-
 static void suspend_driver(struct pw_context *context, struct pw_impl_node *n)
 {
 	struct pw_impl_node *s;
@@ -1170,7 +1172,7 @@ again:
 			pw_log_debug(NAME" %p: unassigned node %p: '%s' active:%d want_driver:%d target:%p",
 					context, n, n->name, n->active, n->want_driver, target);
 
-			t = (n->active && n->want_driver) ? target : NULL;
+			t = n->want_driver ? target : NULL;
 
 			pw_impl_node_set_driver(n, t);
 			if (t == NULL)
