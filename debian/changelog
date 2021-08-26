@@ -1,11 +1,11 @@
-pipewire (0.3.34-1) UNRELEASED; urgency=medium
+pipewire (0.3.34-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
   * Don't install sink-convolver.conf (filter-chain example configuration)
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 26 Aug 2021 17:55:16 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 26 Aug 2021 20:53:42 +0200
 
 pipewire (0.3.33-1) unstable; urgency=medium
 
