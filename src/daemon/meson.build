@@ -13,45 +13,47 @@ conf_config.set('session_manager_path', pipewire_bindir / 'pipewire-media-sessio
 conf_config.set('session_manager_args', '')
 conf_config.set('pipewire_path', pipewire_bindir / 'pipewire')
 conf_config.set('pipewire_pulse_path', pipewire_bindir / 'pipewire-pulse')
-conf_config.set('comment', '#')
+conf_config.set('sm_comment', '#')
+conf_config.set('pulse_comment', '#')
 
 conf_config_uninstalled = conf_config
-conf_config_uninstalled.set('session_manager_path',
-  meson.build_root() / 'src' / 'examples' / 'pipewire-media-session')
 conf_config_uninstalled.set('pipewire_path',
   meson.build_root() / 'src' / 'daemon' / 'pipewire')
 conf_config_uninstalled.set('pipewire_pulse_path',
   meson.build_root() / 'src' / 'daemon' / 'pipewire-pulse')
-conf_config_uninstalled.set('comment', '')
+conf_config_uninstalled.set('pulse_comment', '')
 
 build_ms = get_option('session-managers').contains('media-session')
 build_wp = get_option('session-managers').contains('wireplumber')
-sm_choice = get_option('default-session-manager')
+default_sm = get_option('session-managers').get(0, '')
 
-if sm_choice == 'media-session'
-  if get_option('session-managers') == []
-    summary({'No session manager': 'pw-uninstalled.sh will not work out of the box!'})
-  elif not build_ms
-    error('media-session is the chosen session manager but it won\'t be built')
-  endif
+summary({'Build media-session': build_ms,
+         'Build wireplumber': build_wp,
+         'Default session-manager': default_sm},
+         section: 'Session managers',
+         bool_yn: true)
+
+if build_wp
+  wp_proj = subproject('wireplumber', required : true)
 endif
 
-if not build_wp and (sm_choice == 'wireplumber')
-  error('building of the wireplumber subproject is disabled, ' +
-        'but the requested session-manager is wireplumber')
-elif build_wp
-  wp_proj = subproject('wireplumber', required : true)
-  if sm_choice == 'wireplumber'
-    wp_bindir = wp_proj.get_variable('wireplumber_bin_dir', pipewire_bindir)
+if default_sm == ''
+  summary({'No session manager': 'pw-uninstalled.sh will not work out of the box!'})
+elif default_sm == 'media-session'
+  conf_config_uninstalled.set('session_manager_path',
+    meson.build_root() / 'src' / 'examples' / 'pipewire-media-session')
+  conf_config_uninstalled.set('sm_comment', '')
+elif default_sm == 'wireplumber'
+  wp_bindir = wp_proj.get_variable('wireplumber_bin_dir', pipewire_bindir)
 
-    conf_config.set('session_manager_path', wp_bindir / 'wireplumber')
+  conf_config.set('session_manager_path', wp_bindir / 'wireplumber')
 
-    # wp-uninstalled.sh -b path/to/wp/build/root wireplumber
-    conf_config_uninstalled.set('session_manager_path',
-      meson.source_root() / 'subprojects' / 'wireplumber' / 'wp-uninstalled.sh')
-    conf_config_uninstalled.set('session_manager_args',
-      '-b ' + meson.build_root() / 'subprojects' / 'wireplumber' + ' wireplumber')
-  endif
+  # wp-uninstalled.sh -b path/to/wp/build/root wireplumber
+  conf_config_uninstalled.set('session_manager_path',
+    meson.source_root() / 'subprojects' / 'wireplumber' / 'wp-uninstalled.sh')
+  conf_config_uninstalled.set('session_manager_args',
+    '-b ' + meson.build_root() / 'subprojects' / 'wireplumber' + ' wireplumber')
+  conf_config_uninstalled.set('sm_comment', '')
 endif
 
 conf_files = [

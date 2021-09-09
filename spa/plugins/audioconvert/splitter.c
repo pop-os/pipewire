@@ -217,7 +217,7 @@ static int impl_node_enum_params(void *object, int seq,
 	struct impl *this = object;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[1024];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 
@@ -283,6 +283,9 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	if (param == NULL)
+		return 0;
 
 	switch (id) {
 	case SPA_PARAM_PortConfig:

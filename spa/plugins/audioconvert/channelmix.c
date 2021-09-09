@@ -380,7 +380,7 @@ static int impl_node_enum_params(void *object, int seq,
 	struct impl *this = object;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[1024];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 
@@ -515,6 +515,9 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 	int changed = 0;
 	bool have_channel_volume = false;
 	bool have_soft_volume = false;
+
+	if (param == NULL)
+		return 0;
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {

@@ -288,6 +288,7 @@ struct client {
 	struct pw_core *core;
 	struct spa_hook core_listener;
 	struct pw_mempool *pool;
+	int pending_sync;
 	int last_sync;
 	int last_res;
 	bool error;
@@ -386,6 +387,7 @@ struct client {
 	unsigned int short_name:1;
 	unsigned int filter_name:1;
 	unsigned int freewheeling:1;
+	unsigned int locked_process:1;
 	int self_connect_mode;
 	int rt_max;
 
@@ -444,7 +446,6 @@ static void free_object(struct client *c, struct object *o)
 
 	pthread_mutex_lock(&globals.lock);
 	spa_list_append(&globals.free_objects, &o->link);
-	o->type = INTERFACE_Invalid;
 	o->client = NULL;
 	pthread_mutex_unlock(&globals.lock);
 }
@@ -643,17 +644,17 @@ static struct object *find_port(struct client *c, const char *name)
 	return NULL;
 }
 
-static struct object *find_id(struct client *c, uint32_t id)
+static struct object *find_id(struct client *c, uint32_t id, bool valid)
 {
 	struct object *o = pw_map_lookup(&c->context.globals, id);
-	if (o != NULL && o->type == INTERFACE_Invalid)
-		return NULL;
-	return o;
+	if (o != NULL && (!valid || o->client == c))
+		return o;
+	return NULL;
 }
 
-static struct object *find_type(struct client *c, uint32_t id, uint32_t type)
+static struct object *find_type(struct client *c, uint32_t id, uint32_t type, bool valid)
 {
-	struct object *o = find_id(c, id);
+	struct object *o = find_id(c, id, valid);
 	if (o != NULL && o->type == type)
 		return o;
 	return NULL;
@@ -739,9 +740,11 @@ void jack_get_version(int *major_ptr, int *minor_ptr, int *micro_ptr, int *proto
 ({								\
 	if (c->callback && c->active) {				\
 		pw_thread_loop_unlock(c->context.loop);		\
-		pthread_mutex_lock(&c->rt_lock);		\
+		if (c->locked_process)				\
+			pthread_mutex_lock(&c->rt_lock);	\
 		c->callback(__VA_ARGS__);			\
-		pthread_mutex_unlock(&c->rt_lock);		\
+		if (c->locked_process)				\
+			pthread_mutex_unlock(&c->rt_lock);	\
 		pw_thread_loop_lock(c->context.loop);		\
 	}							\
 })
@@ -773,7 +776,8 @@ static void on_sync_reply(void *data, uint32_t id, int seq)
 	if (id != PW_ID_CORE)
 		return;
 	client->last_sync = seq;
-	pw_thread_loop_signal(client->context.loop, false);
+	if (client->pending_sync == seq)
+		pw_thread_loop_signal(client->context.loop, false);
 }
 
 
@@ -801,14 +805,12 @@ static const struct pw_core_events core_events = {
 
 static int do_sync(struct client *client)
 {
-	int seq;
-
 	if (pw_thread_loop_in_thread(client->context.loop)) {
 		pw_log_warn("sync requested from callback");
 		return 0;
 	}
 
-	seq = pw_proxy_sync((struct pw_proxy*)client->core, client->last_sync);
+	client->pending_sync = pw_proxy_sync((struct pw_proxy*)client->core, client->pending_sync);
 
 	while (true) {
 	        pw_thread_loop_wait(client->context.loop);
@@ -816,7 +818,7 @@ static int do_sync(struct client *client)
 		if (client->error)
 			return client->last_res;
 
-		if (client->last_sync == seq)
+		if (client->pending_sync == client->last_sync)
 			break;
 	}
 	return 0;
@@ -1160,14 +1162,15 @@ do_buffer_frames(struct spa_loop *loop,
 	return 0;
 }
 
-static inline void check_buffer_frames(struct client *c, struct spa_io_position *pos)
+static inline void check_buffer_frames(struct client *c, struct spa_io_position *pos, bool emit)
 {
 	uint32_t buffer_frames = pos->clock.duration;
 	if (SPA_UNLIKELY(buffer_frames != c->buffer_frames)) {
 		pw_log_info(NAME" %p: bufferframes %d", c, buffer_frames);
 		c->buffer_frames = buffer_frames;
-		pw_loop_invoke(c->context.l, do_buffer_frames, 0,
-				&buffer_frames, sizeof(buffer_frames), false, c);
+		if (emit)
+			pw_loop_invoke(c->context.l, do_buffer_frames, 0,
+					&buffer_frames, sizeof(buffer_frames), false, c);
 	}
 }
 
@@ -1229,7 +1232,7 @@ static inline uint32_t cycle_run(struct client *c)
 		return 0;
 	}
 
-	check_buffer_frames(c, pos);
+	check_buffer_frames(c, pos, true);
 	check_sample_rate(c, pos);
 
 	if (SPA_LIKELY(driver)) {
@@ -1741,6 +1744,10 @@ static int param_latency_other(struct client *c, struct port *p,
 static int port_set_format(struct client *c, struct port *p,
 		uint32_t flags, const struct spa_pod *param)
 {
+	struct spa_pod *params[6];
+	uint8_t buffer[4096];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+
 	if (param == NULL) {
 		struct mix *mix;
 
@@ -1748,6 +1755,8 @@ static int port_set_format(struct client *c, struct port *p,
 
 		spa_list_for_each(mix, &p->mix, port_link)
 			clear_buffers(c, mix);
+
+		p->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 	}
 	else {
 		struct spa_audio_info info = { 0 };
@@ -1785,7 +1794,29 @@ static int port_set_format(struct client *c, struct port *p,
 		default:
 			return -EINVAL;
 		}
+		p->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
 	}
+
+	pw_log_info("port %s: update", p->object->port.name);
+
+	p->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+
+	param_enum_format(c, p, &params[0], &b);
+	param_format(c, p, &params[1], &b);
+	param_buffers(c, p, &params[2], &b);
+	param_io(c, p, &params[3], &b);
+	param_latency(c, p, &params[4], &b);
+	param_latency_other(c, p, &params[5], &b);
+
+	pw_client_node_port_update(c->node,
+					 p->direction,
+					 p->id,
+					 PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
+					 PW_CLIENT_NODE_PORT_UPDATE_INFO,
+					 SPA_N_ELEMENTS(params),
+					 (const struct spa_pod **) params,
+					 &p->info);
+	p->info.change_mask = 0;
 	return 0;
 }
 
@@ -1817,7 +1848,7 @@ static void port_update_latency(struct port *p)
 					 SPA_N_ELEMENTS(params),
 					 (const struct spa_pod **) params,
 					 &p->info);
-	c->info.change_mask = 0;
+	p->info.change_mask = 0;
 }
 
 /* called from thread-loop */
@@ -1917,9 +1948,6 @@ static int client_node_port_set_param(void *object,
 {
 	struct client *c = (struct client *) object;
 	struct port *p = GET_PORT(c, direction, port_id);
-	struct spa_pod *params[6];
-	uint8_t buffer[4096];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 
 	if (p == NULL || !p->valid)
 		return -EINVAL;
@@ -1930,28 +1958,14 @@ static int client_node_port_set_param(void *object,
 
 	switch (id) {
 	case SPA_PARAM_Format:
-		port_set_format(c, p, flags, param);
+		return port_set_format(c, p, flags, param);
 		break;
 	case SPA_PARAM_Latency:
 		return port_set_latency(c, p, flags, param);
 	default:
 		break;
 	}
-
-	param_enum_format(c, p, &params[0], &b);
-	param_format(c, p, &params[1], &b);
-	param_buffers(c, p, &params[2], &b);
-	param_io(c, p, &params[3], &b);
-	param_latency(c, p, &params[4], &b);
-	param_latency_other(c, p, &params[5], &b);
-
-	return pw_client_node_port_update(c->node,
-					 direction,
-					 port_id,
-					 PW_CLIENT_NODE_PORT_UPDATE_PARAMS,
-					 SPA_N_ELEMENTS(params),
-					 (const struct spa_pod **) params,
-					 NULL);
+	return 0;
 }
 
 static inline void *init_buffer(struct port *p)
@@ -2404,7 +2418,7 @@ static int metadata_property(void *object, uint32_t id,
 				c->metadata->default_audio_source[0] = '\0';
 		}
 	} else {
-		if ((o = find_id(c, id)) == NULL)
+		if ((o = find_id(c, id, true)) == NULL)
 			return -EINVAL;
 
 		switch (o->type) {
@@ -2624,7 +2638,7 @@ static void registry_event_global(void *data, uint32_t id,
 			spa_list_append(&c->context.ports, &o->link);
 			pthread_mutex_unlock(&c->context.lock);
 
-			if ((ot = find_type(c, node_id, INTERFACE_Node)) == NULL)
+			if ((ot = find_type(c, node_id, INTERFACE_Node, true)) == NULL)
 				goto exit_free;
 
 			if (is_monitor && !c->merge_monitor)
@@ -2696,14 +2710,14 @@ static void registry_event_global(void *data, uint32_t id,
 			goto exit_free;
 		o->port_link.src = pw_properties_parse_int(str);
 
-		if (find_type(c, o->port_link.src, INTERFACE_Port) == NULL)
+		if (find_type(c, o->port_link.src, INTERFACE_Port, true) == NULL)
 			goto exit_free;
 
 		if ((str = spa_dict_lookup(props, PW_KEY_LINK_INPUT_PORT)) == NULL)
 			goto exit_free;
 		o->port_link.dst = pw_properties_parse_int(str);
 
-		if (find_type(c, o->port_link.dst, INTERFACE_Port) == NULL)
+		if (find_type(c, o->port_link.dst, INTERFACE_Port, true) == NULL)
 			goto exit_free;
 
 		pw_log_debug(NAME" %p: add link %d %d->%d", c, id,
@@ -2787,7 +2801,7 @@ static void registry_event_global_remove(void *object, uint32_t id)
 
 	pw_log_debug(NAME" %p: removed: %u", c, id);
 
-	if ((o = find_id(c, id)) == NULL)
+	if ((o = find_id(c, id, true)) == NULL)
 		return;
 
 	if (o->proxy) {
@@ -2818,8 +2832,8 @@ static void registry_event_global_remove(void *object, uint32_t id)
 		graph_changed = true;
 		break;
 	case INTERFACE_Link:
-		if (find_type(c, o->port_link.src, INTERFACE_Port) != NULL &&
-		    find_type(c, o->port_link.dst, INTERFACE_Port) != NULL) {
+		if (find_type(c, o->port_link.src, INTERFACE_Port, true) != NULL &&
+		    find_type(c, o->port_link.dst, INTERFACE_Port, true) != NULL) {
 			pw_log_info(NAME" %p: link %u %d -> %d removed", c, o->id,
 					o->port_link.src, o->port_link.dst);
 			do_callback(c, connect_callback,
@@ -2961,6 +2975,9 @@ jack_client_t * jack_client_open (const char *client_name,
 	if ((str = pw_properties_get(client->props, "jack.filter-name")) != NULL)
 		client->filter_name = pw_properties_parse_bool(str);
 
+	str = pw_properties_get(client->props, "jack.locked-process");
+	client->locked_process = str ? pw_properties_parse_bool(str) : true;
+
 	client->self_connect_mode = SELF_CONNECT_ALLOW;
 	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
 		if (spa_streq(str, "fail-external"))
@@ -3076,6 +3093,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	pw_client_node_update(client->node,
 			PW_CLIENT_NODE_UPDATE_INFO,
 			0, NULL, &client->info);
+	client->info.change_mask = 0;
 
 	if (status)
 		*status = 0;
@@ -3203,20 +3221,24 @@ char *jack_get_uuid_for_client_name (jack_client_t *client,
 	struct client *c = (struct client *) client;
 	struct object *o;
 	char *uuid = NULL;
+	bool monitor;
 
 	spa_return_val_if_fail(c != NULL, NULL);
 	spa_return_val_if_fail(client_name != NULL, NULL);
 
+	monitor = spa_strendswith(client_name, MONITOR_EXT);
+
 	pthread_mutex_lock(&c->context.lock);
 
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if (spa_streq(o->node.name, client_name)) {
+		if (spa_streq(o->node.name, client_name) ||
+		    (monitor && spa_strneq(o->node.name, client_name,
+			    strlen(client_name) - strlen(MONITOR_EXT)))) {
 			uuid = spa_aprintf( "%" PRIu64, client_make_uuid(o->id));
-			pw_log_debug(NAME" %p: name %s -> %s",
-					client, client_name, uuid);
 			break;
 		}
 	}
+	pw_log_debug(NAME" %p: name %s -> %s", client, client_name, uuid);
 	pthread_mutex_unlock(&c->context.lock);
 	return uuid;
 }
@@ -3297,7 +3319,7 @@ int jack_activate (jack_client_t *client)
 	c->active = true;
 
 	if (c->position)
-		check_buffer_frames(c, c->position);
+		check_buffer_frames(c, c->position, false);
 
 	do_callback(c, graph_callback, c->graph_arg);
 
@@ -4262,9 +4284,9 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(l, &c->context.links, link) {
 		if (l->port_link.src == o->id)
-			p = find_type(c, l->port_link.dst, INTERFACE_Port);
+			p = find_type(c, l->port_link.dst, INTERFACE_Port, true);
 		else if (l->port_link.dst == o->id)
-			p = find_type(c, l->port_link.src, INTERFACE_Port);
+			p = find_type(c, l->port_link.src, INTERFACE_Port, true);
 		else
 			continue;
 
@@ -5084,7 +5106,7 @@ jack_port_t * jack_port_by_id (jack_client_t *client,
 
 	pthread_mutex_lock(&c->context.lock);
 
-	res = find_type(c, port_id, INTERFACE_Port);
+	res = find_type(c, port_id, INTERFACE_Port, false);
 	pw_log_debug(NAME" %p: port %d -> %p", c, port_id, res);
 
 	pthread_mutex_unlock(&c->context.lock);

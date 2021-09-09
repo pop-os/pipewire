@@ -389,7 +389,7 @@ struct encoding_info {
 
 static const struct encoding_info encoding_names[] = {
 	[ENCODING_ANY] = { "ANY", 0 },
-	[ENCODING_PCM] = { "PCM", 0 },
+	[ENCODING_PCM] = { "PCM", SPA_AUDIO_IEC958_CODEC_PCM },
 	[ENCODING_AC3_IEC61937] = { "AC3-IEC61937", SPA_AUDIO_IEC958_CODEC_AC3 },
 	[ENCODING_EAC3_IEC61937] = { "EAC3-IEC61937", SPA_AUDIO_IEC958_CODEC_EAC3 },
 	[ENCODING_MPEG_IEC61937] = { "MPEG-IEC61937", SPA_AUDIO_IEC958_CODEC_MPEG },
@@ -406,7 +406,7 @@ const char *format_encoding2name(enum encoding enc)
 		return encoding_names[enc].name;
 	return "INVALID";
 }
-static uint32_t format_encoding2id(enum encoding enc)
+uint32_t format_encoding2id(enum encoding enc)
 {
 	if (enc >= 0 && enc < (int)SPA_N_ELEMENTS(encoding_names) &&
 	    encoding_names[enc].name != NULL)
@@ -632,6 +632,7 @@ static int format_info_iec958_from_param(struct format_info *info, struct spa_po
 	default:
 		return -ENOTSUP;
 	}
+
 	if ((info->props = pw_properties_new(NULL, NULL)) == NULL)
 		return -errno;
 

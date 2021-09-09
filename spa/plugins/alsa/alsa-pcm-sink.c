@@ -63,7 +63,7 @@ static void emit_node_info(struct state *this, bool full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
 		struct spa_dict_item items[4];
-		uint32_t n_items = 0;
+		uint32_t i, n_items = 0;
 		char latency[64];
 
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "alsa");
@@ -75,6 +75,14 @@ static void emit_node_info(struct state *this, bool full)
 		}
 		this->info.props = &SPA_DICT_INIT(items, n_items);
 
+		if (this->info.change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < this->info.n_params; i++) {
+				if (this->params[i].user > 0) {
+					this->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					this->params[i].user = 0;
+				}
+			}
+		}
 		spa_node_emit_info(&this->hooks, &this->info);
 
 		this->info.change_mask = old;
@@ -84,9 +92,20 @@ static void emit_node_info(struct state *this, bool full)
 static void emit_port_info(struct state *this, bool full)
 {
 	uint64_t old = full ? this->port_info.change_mask : 0;
+
 	if (full)
 		this->port_info.change_mask = this->port_info_all;
 	if (this->port_info.change_mask) {
+		uint32_t i;
+
+		if (this->port_info.change_mask & SPA_PORT_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < this->port_info.n_params; i++) {
+				if (this->port_params[i].user > 0) {
+					this->port_params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					this->port_params[i].user = 0;
+				}
+			}
+		}
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_INPUT, 0, &this->port_info);
 		this->port_info.change_mask = old;
@@ -100,7 +119,7 @@ static int impl_node_enum_params(void *object, int seq,
 	struct state *this = object;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[2048];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 
@@ -167,7 +186,7 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_latencyOffsetNsec),
 				SPA_PROP_INFO_name, SPA_POD_String("Latency offset (ns)"),
-				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Long(0, 0, INT64_MAX));
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Long(0LL, 0LL, INT64_MAX));
 			break;
 		case 7:
 			if (this->is_iec958 || this->is_hdmi) {
@@ -205,8 +224,8 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_PROP_latencyOffsetNsec,   SPA_POD_Long(this->process_latency.ns),
 				0);
 
-			n_codecs = spa_alsa_get_iec958_codecs(this, codecs, SPA_N_ELEMENTS(codecs));
-			if (n_codecs > 0) {
+			if (this->is_iec958 || this->is_hdmi) {
+				n_codecs = spa_alsa_get_iec958_codecs(this, codecs, SPA_N_ELEMENTS(codecs));
 				spa_pod_builder_prop(&b, SPA_PROP_iec958Codecs, 0);
 				spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id,
 						n_codecs, codecs);
@@ -297,13 +316,11 @@ static void handle_process_latency(struct state *this,
 
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
 	if (ns_changed)
-		this->params[NODE_Props].flags ^= SPA_PARAM_INFO_SERIAL;
-	this->params[NODE_ProcessLatency].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_node_info(this, false);
+		this->params[NODE_Props].user++;
+	this->params[NODE_ProcessLatency].user++;
 
 	this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
-	this->port_params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
-	emit_port_info(this, false);
+	this->port_params[PORT_Latency].user++;
 }
 
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
@@ -337,15 +354,24 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			SPA_PROP_START_CUSTOM, SPA_POD_OPT_Bool(&p->use_chmap),
 			SPA_PROP_iec958Codecs, SPA_POD_OPT_Pod(&iec958_codecs));
 
-		if (iec958_codecs != NULL) {
+		if ((this->is_iec958 || this->is_hdmi) && iec958_codecs != NULL) {
 			uint32_t i, codecs[16], n_codecs;
 			n_codecs = spa_pod_copy_array(iec958_codecs, SPA_TYPE_Id,
 					codecs, SPA_N_ELEMENTS(codecs));
-			this->iec958_codecs = 0;
+			this->iec958_codecs = 1ULL << SPA_AUDIO_IEC958_CODEC_PCM;
 			for (i = 0; i < n_codecs; i++)
 				this->iec958_codecs |= 1ULL << codecs[i];
+
+			this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			this->params[NODE_Props].user++;
+
+			this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+			this->port_params[PORT_EnumFormat].user++;
 		}
 		handle_process_latency(this, &info);
+
+		emit_node_info(this, false);
+		emit_port_info(this, false);
 		break;
 	}
 	case SPA_PARAM_ProcessLatency:
@@ -355,6 +381,9 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			return res;
 
 		handle_process_latency(this, &info);
+
+		emit_node_info(this, false);
+		emit_port_info(this, false);
 		break;
 	}
 	default:
@@ -655,7 +684,7 @@ static int port_set_format(void *object,
 	if (this->have_format) {
 		this->port_params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
 		this->port_params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
-		this->port_params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
+		this->port_params[PORT_Latency].user++;
 	} else {
 		this->port_params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 		this->port_params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
@@ -692,7 +721,7 @@ impl_node_port_set_param(void *object,
 
 		this->latency[info.direction] = info;
 		this->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
-		this->port_params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
+		this->port_params[PORT_Latency].user++;
 		emit_port_info(this, false);
 		break;
 	}

@@ -16,61 +16,111 @@
 
 #include "alsa-pcm.h"
 
-int spa_alsa_init(struct state *state)
+static struct spa_list cards = SPA_LIST_INIT(&cards);
+
+struct card {
+	struct spa_list link;
+	int ref;
+	uint32_t index;
+	snd_use_case_mgr_t *ucm;
+	char *ucm_prefix;
+};
+
+static struct card *find_card(uint32_t index)
 {
+	struct card *c;
+	spa_list_for_each(c, &cards, link) {
+		if (c->index == index) {
+			c->ref++;
+			return c;
+		}
+	}
+	return NULL;
+}
+
+static struct card *ensure_card(uint32_t index)
+{
+	struct card *c;
+	char card_name[64];
+	const char *alibpref = NULL;
 	int err;
 
+	if ((c = find_card(index)) != NULL)
+		return c;
+
+	c = calloc(1, sizeof(*c));
+	c->ref = 1;
+	c->index = index;
+
+	snprintf(card_name, sizeof(card_name), "hw:%i", index);
+	err = snd_use_case_mgr_open(&c->ucm, card_name);
+	if (err < 0) {
+		char *name;
+		err = snd_card_get_name(index, &name);
+		if (err < 0) {
+			errno = -err;
+			return NULL;
+		}
+		snprintf(card_name, sizeof(card_name), "%s", name);
+		free(name);
+
+		err = snd_use_case_mgr_open(&c->ucm, card_name);
+		if (err < 0) {
+			errno = -err;
+			return NULL;
+		}
+	}
+	if ((snd_use_case_get(c->ucm, "_alibpref", &alibpref) != 0))
+		alibpref = NULL;
+	c->ucm_prefix = (char*)alibpref;
+
+	spa_list_append(&cards, &c->link);
+
+	return c;
+}
+
+static void release_card(uint32_t index)
+{
+	struct card *c;
+	if ((c = find_card(index)) == NULL)
+		return;
+
+	if (--c->ref > 0)
+		return;
+
+	spa_list_remove(&c->link);
+	free(c->ucm_prefix);
+	snd_use_case_mgr_close(c->ucm);
+	free(c);
+}
+
+int spa_alsa_init(struct state *state)
+{
 	snd_config_update_free_global();
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK) {
 		state->is_iec958 = spa_strstartswith(state->props.device, "iec958");
 		state->is_hdmi = spa_strstartswith(state->props.device, "hdmi");
+		state->iec958_codecs |= 1ULL << SPA_AUDIO_IEC958_CODEC_PCM;
 	}
 
 	if (state->open_ucm) {
-		char card_name[64];
-		const char *alibpref = NULL;
+		struct card *c;
 
-		snprintf(card_name, sizeof(card_name), "hw:%i", state->card_index);
-		err = snd_use_case_mgr_open(&state->ucm, card_name);
-		if (err < 0) {
-			char *name;
-			err = snd_card_get_name(state->card_index, &name);
-			if (err < 0) {
-				spa_log_error(state->log,
-						"can't get card name from index %d",
-						state->card_index);
-				return err;
-			}
-			snprintf(card_name, sizeof(card_name), "%s", name);
-			free(name);
-
-			err = snd_use_case_mgr_open(&state->ucm, card_name);
-			if (err < 0) {
-				spa_log_error(state->log, "UCM not available for card %s", card_name);
-				return err;
-			}
+		c = ensure_card(state->card_index);
+		if (c == NULL) {
+			spa_log_error(state->log, "UCM not available for card %d", state->card_index);
+			return -errno;
 		}
-
-		if ((snd_use_case_get(state->ucm, "_alibpref", &alibpref) != 0))
-			alibpref = NULL;
-		if (alibpref != NULL) {
-			char name[sizeof(state->props.device)];
-			spa_scnprintf(name, sizeof(name), "%s%s", alibpref,
-					state->props.device);
-			strcpy(state->props.device, name);
-			free((void*)alibpref);
-		}
+		state->ucm_prefix = c->ucm_prefix;
 	}
-
 	return 0;
 }
 
 int spa_alsa_clear(struct state *state)
 {
-	if (state->ucm)
-		snd_use_case_mgr_close(state->ucm);
-	state->ucm = NULL;
+	state->ucm_prefix = NULL;
+	release_card(state->card_index);
 	return 0;
 }
 
@@ -81,21 +131,26 @@ int spa_alsa_open(struct state *state)
 	int err;
 	struct props *props = &state->props;
 	snd_pcm_info_t *pcminfo;
+	char device_name[128];
 
 	if (state->opened)
 		return 0;
 
 	CHECK(snd_output_stdio_attach(&state->output, stderr, 0), "attach failed");
 
-	spa_log_info(state->log, NAME" %p: ALSA device open '%s' %s", state, props->device,
+	spa_scnprintf(device_name, sizeof(device_name), "%s%s",
+			state->ucm_prefix ? state->ucm_prefix : "",
+			props->device);
+
+	spa_log_info(state->log, NAME" %p: ALSA device open '%s' %s", state, device_name,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback");
 	CHECK(snd_pcm_open(&state->hndl,
-			   props->device,
+			   device_name,
 			   state->stream,
 			   SND_PCM_NONBLOCK |
 			   SND_PCM_NO_AUTO_RESAMPLE |
 			   SND_PCM_NO_AUTO_CHANNELS | SND_PCM_NO_AUTO_FORMAT), "'%s': %s open failed",
-			props->device,
+			device_name,
 			state->stream == SND_PCM_STREAM_CAPTURE ? "capture" : "playback");
 
 	if ((err = spa_system_timerfd_create(state->data_system,
@@ -692,7 +747,7 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 	return res;
 }
 
-static int set_pcm_format(struct state *state, struct spa_audio_info_raw *info, uint32_t flags)
+static int set_pcm_format(struct state *state, struct spa_audio_info_raw *info, uint32_t flags, bool spdif)
 {
 	unsigned int rrate, rchannels;
 	snd_pcm_uframes_t period_size;
@@ -845,6 +900,10 @@ static int set_iec958_format(struct state *state, struct spa_audio_info_iec958 *
 {
 	struct spa_audio_info_raw fmt;
 
+	spa_log_info(state->log, "using IEC958 Codec:%s rate:%d",
+			spa_debug_type_find_short_name(spa_type_audio_iec958_codec, info->codec),
+			info->rate);
+
 	fmt.format = SPA_AUDIO_FORMAT_S16_LE;
 	fmt.channels = 2;
 	fmt.rate = info->rate;
@@ -866,7 +925,7 @@ static int set_iec958_format(struct state *state, struct spa_audio_info_iec958 *
 	default:
 		return -ENOTSUP;
 	}
-	return set_pcm_format(state, &fmt, flags);
+	return set_pcm_format(state, &fmt, flags, true);
 }
 
 int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_t flags)
@@ -875,7 +934,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	switch (fmt->media_subtype) {
 	case SPA_MEDIA_SUBTYPE_raw:
-		res = set_pcm_format(state, &fmt->info.raw, flags);
+		res = set_pcm_format(state, &fmt->info.raw, flags, false);
 		break;
 	case SPA_MEDIA_SUBTYPE_iec958:
 		res = set_iec958_format(state, &fmt->info.iec958, flags);
@@ -1568,7 +1627,9 @@ static int handle_play(struct state *state, uint64_t nsec,
 	int res;
 
 	if (SPA_UNLIKELY(delay > target + state->max_error)) {
-		spa_log_trace(state->log, NAME" %p: early wakeup %ld %ld", state, delay, target);
+		spa_log_trace(state->log, NAME" %p: early wakeup %lu %lu", state, delay, target);
+		if (delay > target * 3)
+			delay = target * 3;
 		state->next_time = nsec + (delay - target) * SPA_NSEC_PER_SEC / state->rate;
 		return -EAGAIN;
 	}
