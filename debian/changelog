@@ -3,6 +3,7 @@ pipewire (0.3.35-1) UNRELEASED; urgency=medium
   * Team upload.
   * New upstream release
   * Replace xmltoman by python3-docutils in BD to generate manpages
+  * Don't install new filter-chain example conf files
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Sep 2021 21:09:20 +0200
 
