@@ -1,4 +1,4 @@
-pipewire (0.3.35-1) UNRELEASED; urgency=medium
+pipewire (0.3.35-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -6,7 +6,7 @@ pipewire (0.3.35-1) UNRELEASED; urgency=medium
   * Don't install new filter-chain example conf files
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Sep 2021 21:09:20 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Sep 2021 21:49:29 +0200
 
 pipewire (0.3.34-1) unstable; urgency=medium
 
