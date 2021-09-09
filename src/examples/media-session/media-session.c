@@ -90,6 +90,7 @@ int sm_default_profile_start(struct sm_media_session *sess);
 int sm_default_routes_start(struct sm_media_session *sess);
 int sm_restore_stream_start(struct sm_media_session *sess);
 int sm_streams_follow_default_start(struct sm_media_session *sess);
+int sm_alsa_no_dsp_start(struct sm_media_session *sess);
 int sm_alsa_midi_start(struct sm_media_session *sess);
 int sm_v4l2_monitor_start(struct sm_media_session *sess);
 int sm_libcamera_monitor_start(struct sm_media_session *sess);
@@ -455,7 +456,7 @@ static void client_event_info(void *object, const struct pw_client_info *info)
 	struct impl *impl = SPA_CONTAINER_OF(client->obj.session, struct impl, this);
 
 	pw_log_debug(NAME" %p: client %d info", impl, client->obj.id);
-	client->info = pw_client_info_update(client->info, info);
+	client->info = pw_client_info_merge(client->info, info, client->obj.changed == 0);
 
 	client->obj.avail |= SM_CLIENT_CHANGE_MASK_INFO;
 	client->obj.changed |= SM_CLIENT_CHANGE_MASK_INFO;
@@ -493,7 +494,7 @@ static void device_event_info(void *object, const struct pw_device_info *info)
 	uint32_t i;
 
 	pw_log_debug(NAME" %p: device %d info", impl, device->obj.id);
-	info = device->info = pw_device_info_update(device->info, info);
+	info = device->info = pw_device_info_merge(device->info, info, device->obj.changed == 0);
 
 	device->obj.avail |= SM_DEVICE_CHANGE_MASK_INFO;
 	device->obj.changed |= SM_DEVICE_CHANGE_MASK_INFO;
@@ -601,7 +602,7 @@ static void node_event_info(void *object, const struct pw_node_info *info)
 	uint32_t i;
 
 	pw_log_debug(NAME" %p: node %d info", impl, node->obj.id);
-	info = node->info = pw_node_info_update(node->info, info);
+	info = node->info = pw_node_info_merge(node->info, info, node->obj.changed == 0);
 
 	node->obj.avail |= SM_NODE_CHANGE_MASK_INFO;
 	node->obj.changed |= SM_NODE_CHANGE_MASK_INFO;
@@ -724,7 +725,7 @@ static void port_event_info(void *object, const struct pw_port_info *info)
 	struct impl *impl = SPA_CONTAINER_OF(port->obj.session, struct impl, this);
 
 	pw_log_debug(NAME" %p: port %d info", impl, port->obj.id);
-	port->info = pw_port_info_update(port->info, info);
+	port->info = pw_port_info_merge(port->info, info, port->obj.changed == 0);
 
 	port->obj.avail |= SM_PORT_CHANGE_MASK_INFO;
 	port->obj.changed |= SM_PORT_CHANGE_MASK_INFO;
@@ -1741,7 +1742,7 @@ static void check_endpoint_link(struct endpoint_link *link)
 static void proxy_link_error(void *data, int seq, int res, const char *message)
 {
 	struct link *l = data;
-	pw_log_warn("can't link %d:%d -> %d:%d: %s",
+	pw_log_info("can't link %d:%d -> %d:%d: %s",
 			l->output_node, l->output_port,
 			l->input_node, l->input_port, message);
 	pw_proxy_destroy(l->proxy);
@@ -2132,7 +2133,7 @@ static void core_info(void *data, const struct pw_core_info *info)
 {
 	struct impl *impl = data;
 	pw_log_debug(NAME" %p: info", impl);
-	impl->this.info = pw_core_info_update(impl->this.info, info);
+	impl->this.info = pw_core_info_merge(impl->this.info, info, true);
 
 	if (impl->this.info->change_mask != 0)
 		sm_media_session_emit_info(impl, impl->this.info);
@@ -2181,7 +2182,7 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 {
 	struct impl *impl = data;
 
-	pw_log(res == -ENOENT ? SPA_LOG_LEVEL_INFO : SPA_LOG_LEVEL_WARN,
+	pw_log(res == -ENOENT || res == -EINVAL ? SPA_LOG_LEVEL_INFO : SPA_LOG_LEVEL_WARN,
 			"error id:%u seq:%d res:%d (%s): %s",
 			id, seq, res, spa_strerror(res), message);
 
@@ -2390,6 +2391,7 @@ static const struct {
 	{ "default-routes", "restore default route", sm_default_routes_start, NULL },
 	{ "restore-stream", "restore stream settings", sm_restore_stream_start, NULL },
 	{ "streams-follow-default", "move streams when default changes", sm_streams_follow_default_start, NULL },
+	{ "alsa-no-dsp", "do not configure audio nodes in DSP mode", sm_alsa_no_dsp_start, NULL },
 	{ "alsa-seq", "alsa seq midi support", sm_alsa_midi_start, NULL },
 	{ "alsa-monitor", "alsa card udev detection", sm_alsa_monitor_start, NULL },
 	{ "v4l2", "video for linux udev detection", sm_v4l2_monitor_start, NULL },

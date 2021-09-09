@@ -112,7 +112,7 @@ static int impl_node_enum_params(void *object, int seq,
 {
 	struct impl *this = object;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[1024];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 	int res;
@@ -916,6 +916,9 @@ static void follower_port_info(void *data,
 			uint32_t idx;
 
 			switch (info->params[i].id) {
+			case SPA_PARAM_EnumFormat:
+				idx = IDX_EnumFormat;
+				break;
 			case SPA_PARAM_Format:
 				idx = IDX_Format;
 				break;

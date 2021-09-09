@@ -398,7 +398,7 @@ static int port_enum_formats(void *object,
 			    info.info.raw.format == SPA_AUDIO_FORMAT_F32P ||
 			    info.info.raw.format == SPA_AUDIO_FORMAT_F32) {
 				spa_pod_builder_add(builder,
-					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(22,
+					SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(26,
 								info.info.raw.format,
 								SPA_AUDIO_FORMAT_F32P,
 								SPA_AUDIO_FORMAT_F32,
@@ -406,15 +406,19 @@ static int port_enum_formats(void *object,
 								SPA_AUDIO_FORMAT_S32P,
 								SPA_AUDIO_FORMAT_S32,
 								SPA_AUDIO_FORMAT_S32_OE,
+								SPA_AUDIO_FORMAT_U32,
 								SPA_AUDIO_FORMAT_S24_32P,
 								SPA_AUDIO_FORMAT_S24_32,
 								SPA_AUDIO_FORMAT_S24_32_OE,
+								SPA_AUDIO_FORMAT_U24_32,
 								SPA_AUDIO_FORMAT_S24P,
 								SPA_AUDIO_FORMAT_S24,
 								SPA_AUDIO_FORMAT_S24_OE,
+								SPA_AUDIO_FORMAT_U24,
 								SPA_AUDIO_FORMAT_S16P,
 								SPA_AUDIO_FORMAT_S16,
 								SPA_AUDIO_FORMAT_S16_OE,
+								SPA_AUDIO_FORMAT_U16,
 								SPA_AUDIO_FORMAT_S8P,
 								SPA_AUDIO_FORMAT_S8,
 								SPA_AUDIO_FORMAT_U8P,
@@ -613,6 +617,7 @@ static int calc_width(struct spa_audio_info *info)
 	case SPA_AUDIO_FORMAT_S24P:
 	case SPA_AUDIO_FORMAT_S24:
 	case SPA_AUDIO_FORMAT_S24_OE:
+	case SPA_AUDIO_FORMAT_U24:
 		return 3;
 	default:
 		return 4;
@@ -723,6 +728,8 @@ impl_node_port_set_param(void *object,
 	case SPA_PARAM_Latency:
 	{
 		struct spa_latency_info info;
+		if (param == NULL)
+			return 0;
 		if ((res = spa_latency_parse(param, &info)) < 0)
 			return res;
 		if (direction == info.direction)

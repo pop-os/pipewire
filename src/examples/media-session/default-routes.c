@@ -136,6 +136,26 @@ static const char *channel_to_name(uint32_t channel)
 	return "UNK";
 }
 
+static uint32_t iec958Codec_from_name(const char *name)
+{
+	int i;
+	for (i = 0; spa_type_audio_iec958_codec[i].name; i++) {
+		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_iec958_codec[i].name)))
+			return spa_type_audio_iec958_codec[i].type;
+	}
+	return SPA_AUDIO_IEC958_CODEC_UNKNOWN;
+}
+
+static const char *iec958Codec_to_name(uint32_t codec)
+{
+	int i;
+	for (i = 0; spa_type_audio_iec958_codec[i].name; i++) {
+		if (spa_type_audio_iec958_codec[i].type == codec)
+			return spa_debug_type_short_name(spa_type_audio_iec958_codec[i].name);
+	}
+	return "UNKNOWN";
+}
+
 struct route_info {
 	uint32_t index;
 	uint32_t generation;
@@ -166,7 +186,7 @@ struct route {
 			.available = SPA_PARAM_AVAILABILITY_unknown,	\
 		}
 
-static struct route_info *find_route_info(struct device *dev, struct route *r)
+static struct route_info *find_route_info(struct device *dev, const struct route *r)
 {
 	struct route_info *i;
 
@@ -205,7 +225,7 @@ static int parse_route(struct sm_param *p, struct route *r)
 			SPA_PARAM_ROUTE_save, SPA_POD_OPT_Bool(&r->save));
 }
 
-static bool array_contains(struct spa_pod *pod, uint32_t val)
+static bool array_contains(const struct spa_pod *pod, uint32_t val)
 {
 	uint32_t *vals, n_vals;
 	uint32_t n;
@@ -245,7 +265,7 @@ static int parse_enum_route(struct sm_param *p, uint32_t device_id, struct route
 	return 0;
 }
 
-static char *serialize_props(struct device *dev, const struct spa_pod *param)
+static char *serialize_props(const struct device *dev, const struct spa_pod *param)
 {
 	struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
@@ -315,6 +335,21 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 			fprintf(f, "%s \"latencyOffsetNsec\": %"PRIi64, (comma ? "," : ""), delay);
 			break;
 		}
+		case SPA_PROP_iec958Codecs:
+		{
+			uint32_t i, codecs[64], n_codecs;
+
+			n_codecs = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
+					codecs, sizeof(codecs));
+			if (n_codecs == 0)
+				continue;
+
+			fprintf(f, "%s \"iec958Codecs\": [", (comma ? "," : ""));
+			for (i = 0; i < n_codecs; i++)
+				fprintf(f, "%s \"%s\"", (i == 0 ? "" : ","), iec958Codec_to_name(codecs[i]));
+			fprintf(f, " ]");
+			break;
+		}
 		default:
 			continue;
 		}
@@ -325,7 +360,7 @@ static char *serialize_props(struct device *dev, const struct spa_pod *param)
 	return ptr;
 }
 
-static int restore_route_params(struct device *dev, const char *val, struct route *r)
+static int restore_route_params(struct device *dev, const char *val, const struct route *r)
 {
 	struct spa_json it[3];
 	char buf[1024], key[128];
@@ -408,6 +443,26 @@ static int restore_route_params(struct device *dev, const char *val, struct rout
                                 continue;
 			spa_pod_builder_prop(&b, SPA_PROP_latencyOffsetNsec, 0);
 			spa_pod_builder_long(&b, (int64_t)SPA_CLAMP(delay, INT64_MIN, INT64_MAX));
+		}
+		else if (spa_streq(key, "iec958Codecs")) {
+			uint32_t n_codecs;
+			uint32_t codecs[64];
+
+			if (spa_json_enter_array(&it[1], &it[2]) <= 0)
+				continue;
+
+			for (n_codecs = 0; n_codecs < 64; n_codecs++) {
+				char name[16];
+                                if (spa_json_get_string(&it[2], name, sizeof(name)) <= 0)
+                                        break;
+				codecs[n_codecs] = iec958Codec_from_name(name);
+                        }
+			if (n_codecs == 0)
+				continue;
+
+			spa_pod_builder_prop(&b, SPA_PROP_iec958Codecs, 0);
+			spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id,
+					n_codecs, codecs);
 		} else {
 			if (spa_json_next(&it[1], &value) <= 0)
                                 break;
@@ -432,12 +487,10 @@ static int restore_route_params(struct device *dev, const char *val, struct rout
 struct profile {
 	uint32_t index;
 	const char *name;
-	uint32_t prio;
-	uint32_t available;
 	struct spa_pod *classes;
 };
 
-static int parse_profile(struct sm_param *p, struct profile *pr)
+static int parse_profile(const struct sm_param *p, struct profile *pr)
 {
 	int res;
 	spa_zero(*pr);
@@ -445,14 +498,12 @@ static int parse_profile(struct sm_param *p, struct profile *pr)
 			SPA_TYPE_OBJECT_ParamProfile, NULL,
 			SPA_PARAM_PROFILE_index,   SPA_POD_Int(&pr->index),
 			SPA_PARAM_PROFILE_name,    SPA_POD_String(&pr->name),
-			SPA_PARAM_PROFILE_priority,  SPA_POD_OPT_Int(&pr->prio),
-			SPA_PARAM_PROFILE_available,  SPA_POD_OPT_Id(&pr->available),
 			SPA_PARAM_PROFILE_classes, SPA_POD_OPT_Pod(&pr->classes))) < 0)
 		return res;
 	return 0;
 }
 
-static int find_current_profile(struct device *dev, struct profile *pr)
+static int find_current_profile(const struct device *dev, struct profile *pr)
 {
 	struct sm_param *p;
 	spa_list_for_each(p, &dev->obj->param_list, link) {
@@ -463,7 +514,7 @@ static int find_current_profile(struct device *dev, struct profile *pr)
 	return -ENOENT;
 }
 
-static int restore_route(struct device *dev, struct route *r)
+static int restore_route(struct device *dev, const struct route *r)
 {
 	struct impl *impl = dev->impl;
 	char key[1024];
@@ -491,7 +542,7 @@ static int restore_route(struct device *dev, struct route *r)
 	return 0;
 }
 
-static int save_route(struct device *dev, struct route *r)
+static int save_route(const struct device *dev, const struct route *r)
 {
 	struct impl *impl = dev->impl;
 	char key[1024], *val;
@@ -511,12 +562,12 @@ static int save_route(struct device *dev, struct route *r)
 	return 0;
 }
 
-static char *serialize_routes(struct device *dev)
+static char *serialize_routes(const struct device *dev)
 {
 	char *ptr;
 	size_t size;
 	FILE *f;
-	struct route_info *ri;
+	const struct route_info *ri;
 	int count = 0;
 
 	f = open_memstream(&ptr, &size);
@@ -532,7 +583,7 @@ static char *serialize_routes(struct device *dev)
 	return ptr;
 }
 
-static int save_profile(struct device *dev, struct profile *pr)
+static int save_profile(struct device *dev, const char *profile_name)
 {
 	struct impl *impl = dev->impl;
 	char key[1024], *val;
@@ -540,16 +591,16 @@ static int save_profile(struct device *dev, struct profile *pr)
 	if (pw_array_get_len(&dev->route_info, struct route_info) == 0)
 		return 0;
 
-	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, pr->name);
+	snprintf(key, sizeof(key), PREFIX"%s:profile:%s", dev->name, profile_name);
 
 	val = serialize_routes(dev);
 	if (pw_properties_set(impl->to_restore, key, val)) {
 		pw_log_info("device %d: profile %s routes changed %s %s",
-				dev->id, pr->name, key, val);
+				dev->id, profile_name, key, val);
 		add_idle_timeout(impl);
 	} else {
 		pw_log_info("device %d: profile %s unchanged (%s)",
-				dev->id, pr->name, val);
+				dev->id, profile_name, val);
 	}
 	free(val);
 	return 0;
@@ -604,7 +655,7 @@ static int find_best_route(struct device *dev, uint32_t device_id, struct route 
 	return 0;
 }
 
-static int find_route(struct device *dev, uint32_t device_id, const char *name, struct route *r)
+static int find_route(const struct device *dev, uint32_t device_id, const char *name, struct route *r)
 {
 	struct sm_param *p;
 
@@ -741,7 +792,7 @@ static void prune_route_info(struct device *dev)
 	}
 }
 
-static int handle_route(struct device *dev, struct route *r)
+static int handle_route(struct device *dev, const struct route *r)
 {
 	struct route_info *ri;
 
@@ -816,7 +867,7 @@ static int handle_device(struct device *dev)
 		if (restore || route_changed)
 			reconfigure_profile(dev, &pr, restore);
 
-		save_profile(dev, &pr);
+		save_profile(dev, pr.name);
 	}
 	return 0;
 }

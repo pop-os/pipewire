@@ -33,6 +33,8 @@
 
 #include <spa/support/cpu.h>
 #include <spa/support/dbus.h>
+#include <spa/support/plugin.h>
+#include <spa/support/plugin-loader.h>
 #include <spa/node/utils.h>
 #include <spa/utils/names.h>
 #include <spa/utils/string.h>
@@ -66,6 +68,7 @@
 struct impl {
 	struct pw_context this;
 	struct spa_handle *dbus_handle;
+	struct spa_plugin_loader plugin_loader;
 	unsigned int recalc:1;
 	unsigned int recalc_pending:1;
 };
@@ -249,6 +252,39 @@ static int context_set_freewheel(struct pw_context *context, bool freewheel)
 	return res;
 }
 
+static struct spa_handle *impl_plugin_loader_load(void *object, const char *factory_name, const struct spa_dict *info)
+{
+	struct impl *impl = object;
+
+	if (impl == NULL || factory_name == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	return pw_context_load_spa_handle(&impl->this, factory_name, info);
+}
+
+static int impl_plugin_loader_unload(void *object, struct spa_handle *handle)
+{
+	spa_return_val_if_fail(object != NULL, -EINVAL);
+	return pw_unload_spa_handle(handle);
+}
+
+static const struct spa_plugin_loader_methods impl_plugin_loader = {
+        SPA_VERSION_PLUGIN_LOADER_METHODS,
+        .load = impl_plugin_loader_load,
+	.unload = impl_plugin_loader_unload,
+};
+
+static void init_plugin_loader(struct impl *impl)
+{
+	impl->plugin_loader.iface = SPA_INTERFACE_INIT(
+		SPA_TYPE_INTERFACE_PluginLoader,
+		SPA_VERSION_PLUGIN_LOADER,
+		&impl_plugin_loader,
+		impl);
+}
+
 
 /** Create a new context object
  *
@@ -398,11 +434,14 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	this->data_system = this->data_loop->system;
 	this->main_loop = main_loop;
 
+	init_plugin_loader(impl);
+
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_System, this->main_loop->system);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Loop, this->main_loop->loop);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_LoopUtils, this->main_loop->utils);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DataSystem, this->data_system);
 	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DataLoop, this->data_loop->loop);
+	this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_PluginLoader, &impl->plugin_loader);
 
 	if ((str = pw_properties_get(properties, "support.dbus")) == NULL ||
 	    pw_properties_parse_bool(str)) {
@@ -423,6 +462,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 		}
 	}
 	this->n_support = n_support;
+	spa_assert(n_support <= SPA_N_ELEMENTS(this->support));
 
 	this->core = pw_context_create_core(this, pw_properties_copy(properties), 0);
 	if (this->core == NULL) {
@@ -985,15 +1025,18 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 			spa_list_for_each(l, &p->links, input_link) {
 				t = l->output->node;
 
-				if (t->visited || !t->active)
+				if (!t->active)
 					continue;
 
 				pw_impl_link_prepare(l);
 
-				if (!l->passive && l->prepared)
+				if (!l->prepared)
+					continue;
+
+				if (!l->passive)
 					driver->passive = n->passive = false;
 
-				if (l->prepared) {
+				if (!t->visited) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
 				}
@@ -1003,15 +1046,18 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 			spa_list_for_each(l, &p->links, output_link) {
 				t = l->input->node;
 
-				if (t->visited || !t->active)
+				if (!t->active)
 					continue;
 
 				pw_impl_link_prepare(l);
 
-				if (!l->passive && l->prepared)
+				if (!l->prepared)
+					continue;
+
+				if (!l->passive)
 					driver->passive = n->passive = false;
 
-				if (l->prepared) {
+				if (!t->visited) {
 					t->visited = true;
 					spa_list_append(&queue, &t->sort_link);
 				}
@@ -1086,9 +1132,12 @@ static uint32_t flp2(uint32_t x)
 	return x - (x >> 1);
 }
 
-static int64_t fraction_compare(const struct spa_fraction *a, const struct spa_fraction *b)
+/* cmp fractions, avoiding overflows */
+static int fraction_compare(const struct spa_fraction *a, const struct spa_fraction *b)
 {
-	return (int64_t)(a->num * b->denom) - (int64_t)(b->num * a->denom);
+	uint64_t fa = (uint64_t)a->num * (uint64_t)b->denom;
+	uint64_t fb = (uint64_t)b->num * (uint64_t)a->denom;
+	return fa < fb ? -1 : (fa > fb ? 1 : 0);
 }
 
 int pw_context_recalc_graph(struct pw_context *context, const char *reason)
@@ -1197,8 +1246,10 @@ again:
 		/* collect quantum and rate */
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 
-			lock_quantum |= s->lock_quantum;
-			lock_rate |= s->lock_rate;
+			if (s->info.state > PW_NODE_STATE_SUSPENDED) {
+				lock_quantum |= s->lock_quantum;
+				lock_rate |= s->lock_rate;
+			}
 
 			/* smallest latencies */
 			if (latency.denom == 0 ||
@@ -1272,7 +1323,7 @@ again:
 		if (context->settings.clock_power_of_two_quantum)
 			quantum = flp2(quantum);
 
-		if (quantum != n->rt.position->clock.duration && !lock_quantum) {
+		if (running && quantum != n->rt.position->clock.duration && !lock_quantum) {
 			pw_log_info("(%s-%u) new quantum:%"PRIu64"->%u",
 					n->name, n->info.id,
 					n->rt.position->clock.duration,

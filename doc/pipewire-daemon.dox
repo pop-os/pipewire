@@ -10,7 +10,7 @@ PipeWire socket (default: `$XDG_RUNTIME_DIR/pipewire-0`). This approach
 provides provides address-space separation between the privileged daemon and
 non-privileged clients.
 
-@dot
+\dot
 digraph pw {
   compound=true;
   node [shape="box"];
@@ -46,7 +46,7 @@ digraph pw {
   sm -> socket;
   alsa -> kernel;
 }
-@enddot
+\enddot
 
 As shown above, the protocol is handled by the \ref
 page_module_protocol_native. From PipeWire's point-of-view this module is just
@@ -129,7 +129,7 @@ Allowed configuration file sections are:
 The `PIPEWIRE_DEBUG` environment variable can be used to enable
 more debugging. The format is:
 
-`<level>[<category>;...]`
+`<level>[<category>,<category>,...]`
 
 - `<level>` specifies the log level:
   + `0`: no logging is enabled

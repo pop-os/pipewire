@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.34',
+  version : '0.3.35',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
@@ -193,7 +193,7 @@ cdata.set('PACKAGE', '"pipewire"')
 cdata.set('PACKAGE_NAME', '"PipeWire"')
 cdata.set('PACKAGE_STRING', '"PipeWire @0@"'.format(pipewire_version))
 cdata.set('PACKAGE_TARNAME', '"pipewire"')
-cdata.set('PACKAGE_URL', '"http://pipewire.org"')
+cdata.set('PACKAGE_URL', '"https://pipewire.org"')
 cdata.set_quoted('PACKAGE_VERSION', pipewire_version)
 cdata.set_quoted('MODULEDIR', modules_install_dir)
 cdata.set_quoted('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
@@ -442,10 +442,15 @@ if doxygen.found()
   subdir('doc')
 endif
 
-xmltoman = find_program('xmltoman', required : get_option('man'))
-summary({'Manpage generation': xmltoman.found()}, bool_yn: true)
-if xmltoman.found()
-  subdir('man')
+if not get_option('man').disabled()
+  rst2man = find_program('rst2man', required: false)
+  if not rst2man.found()
+    rst2man = find_program('rst2man.py', required: get_option('man'))
+  endif
+  summary({'Manpage generation': rst2man.found()}, bool_yn: true)
+  if rst2man.found()
+    subdir('man')
+  endif
 endif
 
 setenv = find_program('pw-uninstalled.sh')

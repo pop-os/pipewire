@@ -70,6 +70,11 @@
  * The above properties must be set by the portal initiating the client
  * connection.
  *
+ * See e.g. the [xdg-desktop-portal](github.com/flatpak/xdg-desktop-portal)
+ * for an implementation that sets the above properties. It creates multiple
+ * connections to pipewire, one with `is_portal` set to true for the portal
+ * itself and one connection per application request to open the camera. The
+ * latter have `app_id` and `media_roles` set accordingly.
  */
 #define NAME		"access-portal"
 #define SESSION_KEY	"access-portal"
@@ -485,8 +490,7 @@ static void client_info_changed(struct client *client, const struct pw_client_in
 	}
 
 	is_portal = spa_dict_lookup(props, "pipewire.access.portal.is_portal");
-	if (is_portal != NULL &&
-	    (spa_streq(is_portal, "yes") || pw_properties_parse_bool(is_portal))) {
+	if (spa_streq(is_portal, "yes") || pw_properties_parse_bool(is_portal)) {
 		pw_log_info(NAME " %p: client %d is the portal itself",
 			     impl, client->id);
 		client->is_portal = true;
