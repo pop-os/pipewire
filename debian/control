@@ -28,8 +28,8 @@ Build-Depends: debhelper-compat (= 13),
                libwebrtc-audio-processing-dev,
                meson (>= 0.50.0),
                pkg-config (>= 0.22),
-               systemd [linux-any],
-               xmltoman
+               python3-docutils,
+               systemd [linux-any]
 Build-Conflicts: libfdk-aac-dev
 Standards-Version: 4.5.1
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
