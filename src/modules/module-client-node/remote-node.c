@@ -144,8 +144,12 @@ static void clean_transport(struct node_data *data)
 	spa_list_consume(l, &data->links, link)
 		clear_link(data, l);
 
-	while ((mm = pw_mempool_find_tag(data->pool, tag, sizeof(uint32_t))) != NULL)
+	while ((mm = pw_mempool_find_tag(data->pool, tag, sizeof(uint32_t))) != NULL) {
+		if (mm->tag[1] == SPA_ID_INVALID)
+			spa_node_set_io(data->node->node, mm->tag[2], NULL, 0);
+
 		pw_memmap_free(mm);
+	}
 
 	pw_memmap_free(data->activation);
 	data->node->rt.activation = data->node->activation->map->ptr;
@@ -433,7 +437,7 @@ client_node_set_io(void *object,
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct pw_memmap *old, *mm;
 	void *ptr;
-	uint32_t tag[5] = { data->remote_id, id, };
+	uint32_t tag[5] = { data->remote_id, SPA_ID_INVALID, id, };
 	int res;
 
 	old = pw_mempool_find_tag(data->pool, tag, sizeof(tag));
