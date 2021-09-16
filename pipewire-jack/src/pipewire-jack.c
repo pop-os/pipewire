@@ -381,7 +381,6 @@ struct client {
 	unsigned int has_transport:1;
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
-	unsigned int timeowner_pending:1;
 	unsigned int timeowner_conditional:1;
 	unsigned int merge_monitor:1;
 	unsigned int short_name:1;
@@ -736,18 +735,27 @@ void jack_get_version(int *major_ptr, int *minor_ptr, int *micro_ptr, int *proto
 		*proto_ptr = 0;
 }
 
-#define do_callback(c,callback,...)				\
+#define do_callback_expr(c,expr,callback,...)			\
 ({								\
 	if (c->callback && c->active) {				\
 		pw_thread_loop_unlock(c->context.loop);		\
 		if (c->locked_process)				\
 			pthread_mutex_lock(&c->rt_lock);	\
+		(expr);						\
+		pw_log_debug("emit " #callback);		\
 		c->callback(__VA_ARGS__);			\
 		if (c->locked_process)				\
 			pthread_mutex_unlock(&c->rt_lock);	\
 		pw_thread_loop_lock(c->context.loop);		\
+	} else {						\
+		(expr);						\
+		pw_log_debug("skip " #callback 			\
+			" cb:%p active:%d", c->callback,	\
+			c->active);				\
 	}							\
 })
+
+#define do_callback(c,callback,...) do_callback_expr(c,{},callback,__VA_ARGS__)
 
 #define do_rt_callback_res(c,callback,...)			\
 ({								\
@@ -1158,20 +1166,24 @@ do_buffer_frames(struct spa_loop *loop,
 {
 	uint32_t buffer_frames = *((uint32_t*)data);
 	struct client *c = user_data;
-	do_callback(c, bufsize_callback, buffer_frames, c->bufsize_arg);
+	do_callback_expr(c, c->buffer_frames = buffer_frames, bufsize_callback, buffer_frames, c->bufsize_arg);
 	return 0;
 }
 
-static inline void check_buffer_frames(struct client *c, struct spa_io_position *pos, bool emit)
+static inline int check_buffer_frames(struct client *c, struct spa_io_position *pos)
 {
 	uint32_t buffer_frames = pos->clock.duration;
 	if (SPA_UNLIKELY(buffer_frames != c->buffer_frames)) {
-		pw_log_info(NAME" %p: bufferframes %d", c, buffer_frames);
-		c->buffer_frames = buffer_frames;
-		if (emit)
+		pw_log_info(NAME" %p: bufferframes old:%d new:%d cb:%p", c,
+				c->buffer_frames, buffer_frames, c->bufsize_callback);
+		if (c->bufsize_callback != NULL) {
 			pw_loop_invoke(c->context.l, do_buffer_frames, 0,
 					&buffer_frames, sizeof(buffer_frames), false, c);
+		} else {
+			c->buffer_frames =  buffer_frames;
+		}
 	}
+	return c->buffer_frames == buffer_frames;
 }
 
 static int
@@ -1180,19 +1192,24 @@ do_sample_rate(struct spa_loop *loop,
 {
 	struct client *c = user_data;
 	uint32_t sample_rate = *((uint32_t*)data);
-	do_callback(c, srate_callback, sample_rate, c->srate_arg);
+	do_callback_expr(c, c->sample_rate = sample_rate, srate_callback, sample_rate, c->srate_arg);
 	return 0;
 }
 
-static inline void check_sample_rate(struct client *c, struct spa_io_position *pos)
+static inline int check_sample_rate(struct client *c, struct spa_io_position *pos)
 {
 	uint32_t sample_rate = pos->clock.rate.denom;
 	if (SPA_UNLIKELY(sample_rate != c->sample_rate)) {
-		pw_log_info(NAME" %p: sample_rate %d", c, sample_rate);
-		c->sample_rate = sample_rate;
-		pw_loop_invoke(c->context.l, do_sample_rate, 0,
-				&sample_rate, sizeof(sample_rate), false, c);
+		pw_log_info(NAME" %p: sample_rate old:%d new:%d cb:%p", c,
+				c->sample_rate, sample_rate, c->srate_callback);
+		if (c->srate_callback != NULL) {
+			pw_loop_invoke(c->context.l, do_sample_rate, 0,
+					&sample_rate, sizeof(sample_rate), false, c);
+		} else {
+			c->sample_rate = sample_rate;
+		}
 	}
+	return c->sample_rate == sample_rate;
 }
 
 static inline uint32_t cycle_run(struct client *c)
@@ -1232,8 +1249,10 @@ static inline uint32_t cycle_run(struct client *c)
 		return 0;
 	}
 
-	check_buffer_frames(c, pos, true);
-	check_sample_rate(c, pos);
+	if (check_buffer_frames(c, pos) == 0)
+		return 0;
+	if (check_sample_rate(c, pos) == 0)
+		return 0;
 
 	if (SPA_LIKELY(driver)) {
 		c->jack_state = position_to_jack(driver, &c->jack_position);
@@ -1357,7 +1376,8 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 
 		buffer_frames = cycle_run(c);
 
-		status = do_rt_callback_res(c, process_callback, buffer_frames, c->process_arg);
+		if (buffer_frames > 0)
+			status = do_rt_callback_res(c, process_callback, buffer_frames, c->process_arg);
 
 		cycle_signal(c, status);
 	}
@@ -1443,7 +1463,7 @@ static int install_timeowner(struct client *c)
 	struct pw_node_activation *a;
 	uint32_t owner;
 
-	if (!c->timeowner_pending)
+	if (!c->timebase_callback)
 		return 0;
 
 	if ((a = c->driver_activation) == NULL)
@@ -1467,7 +1487,6 @@ static int install_timeowner(struct client *c)
 	}
 
 	pw_log_debug(NAME" %p: timebase installed for id:%u", c, c->node_id);
-	c->timeowner_pending = false;
 
 	return 0;
 }
@@ -1479,6 +1498,10 @@ do_update_driver_activation(struct spa_loop *loop,
 	struct client *c = user_data;
 	c->rt.position = c->position;
 	c->rt.driver_activation = c->driver_activation;
+	if (c->position) {
+		check_sample_rate(c, c->position);
+		check_buffer_frames(c, c->position);
+	}
 	return 0;
 }
 
@@ -1548,8 +1571,6 @@ static int client_node_set_io(void *object,
 		c->position = ptr;
 		c->driver_id = ptr ? c->position->clock.id : SPA_ID_INVALID;
 		update_driver_activation(c);
-		if (ptr)
-			check_sample_rate(c, c->position);
 		break;
 	default:
 		break;
@@ -3067,6 +3088,7 @@ jack_client_t * jack_client_open (const char *client_name,
 		pw_properties_set(client->props, PW_KEY_MEDIA_ROLE, "DSP");
 	if (pw_properties_get(client->props, PW_KEY_NODE_ALWAYS_PROCESS) == NULL)
 		pw_properties_set(client->props, PW_KEY_NODE_ALWAYS_PROCESS, "true");
+	pw_properties_set(client->props, "node.transport.sync", "true");
 
 	client->node = pw_core_create_object(client->core,
 				"client-node",
@@ -3116,7 +3138,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	}
 	pw_thread_loop_unlock(client->context.loop);
 
-	pw_log_debug(NAME" %p: new", client);
+	pw_log_info(NAME" %p: opened", client);
 	return (jack_client_t *)client;
 
 no_props:
@@ -3289,12 +3311,8 @@ void jack_internal_client_close (const char *client_name)
 static int do_activate(struct client *c)
 {
 	int res;
-
-	pw_log_info(NAME" %p: activate", c);
 	pw_client_node_set_active(c->node, true);
-
 	res = do_sync(c);
-
 	return res;
 }
 
@@ -3306,6 +3324,8 @@ int jack_activate (jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 
+	pw_log_info(NAME" %p: active:%d", c, c->active);
+
 	if (c->active)
 		return 0;
 
@@ -3316,10 +3336,9 @@ int jack_activate (jack_client_t *client)
 
 	c->activation->pending_new_pos = true;
 	c->activation->pending_sync = true;
-	c->active = true;
 
-	if (c->position)
-		check_buffer_frames(c, c->position, false);
+
+	c->active = true;
 
 	do_callback(c, graph_callback, c->graph_arg);
 
@@ -3337,11 +3356,12 @@ int jack_deactivate (jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 
+	pw_log_info(NAME" %p: active:%d", c, c->active);
+
 	if (!c->active)
 		return 0;
 
 	pw_thread_loop_lock(c->context.loop);
-	pw_log_info(NAME" %p: deactivate", c);
 	pw_data_loop_stop(c->loop);
 
 	pw_client_node_set_active(c->node, false);
@@ -5286,7 +5306,6 @@ int jack_release_timebase (jack_client_t *client)
 	c->timebase_callback = NULL;
 	c->timebase_arg = NULL;
 	c->activation->pending_new_pos = false;
-	c->timeowner_pending = false;
 
 	return 0;
 }
@@ -5349,7 +5368,6 @@ int  jack_set_timebase_callback (jack_client_t *client,
 
 	c->timebase_callback = timebase_callback;
 	c->timebase_arg = arg;
-	c->timeowner_pending = true;
 	c->timeowner_conditional = conditional;
 	install_timeowner(c);
 
