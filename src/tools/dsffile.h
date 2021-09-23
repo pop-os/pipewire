@@ -1,6 +1,6 @@
-/* Simple Plugin API
+/* PipeWire
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2021 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,40 +22,31 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef SPA_PARAM_AUDIO_FORMAT_H
-#define SPA_PARAM_AUDIO_FORMAT_H
+#include <stdio.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <spa/utils/defs.h>
 
-/**
- * \addtogroup spa_param
- * \{
- */
+struct dsf_file;
 
-#include <spa/param/format.h>
-#include <spa/param/audio/raw.h>
-#include <spa/param/audio/iec958.h>
-#include <spa/param/audio/dsd.h>
-
-struct spa_audio_info {
-	uint32_t media_type;
-	uint32_t media_subtype;
-	union {
-		struct spa_audio_info_raw raw;
-		struct spa_audio_info_dsp dsp;
-		struct spa_audio_info_iec958 iec958;
-		struct spa_audio_info_dsd dsd;
-	} info;
+struct dsf_file_info {
+	uint32_t channel_type;
+	uint32_t channels;
+	uint32_t rate;
+	bool lsb;
+	uint64_t samples;
+	uint64_t length;
+	uint32_t blocksize;
 };
 
-/**
- * \}
- */
+struct dsf_layout {
+	int32_t interleave;
+	uint32_t channels;
+	bool lsb;
+};
 
-#ifdef __cplusplus
-}  /* extern "C" */
-#endif
+struct dsf_file * dsf_file_open(const char *filename, const char *mode, struct dsf_file_info *info);
 
-#endif /* SPA_PARAM_AUDIO_FORMAT_H */
+ssize_t dsf_file_read(struct dsf_file *f, void *data, size_t samples, const struct dsf_layout *layout);
+
+int dsf_file_close(struct dsf_file *f);
+

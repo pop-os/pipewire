@@ -470,9 +470,6 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 	if ((res = spa_libcamera_open(dev)) < 0)
 		return res;
 
-	/* stop the camera first. It might have opened with different configuration*/
-	libcamera_stop_capture(dev->camera);
-
 	spa_log_info(dev->log, "libcamera: set %s %dx%d %d/%d\n", (char *)&info->fourcc,
 		     fmt.width, fmt.height,
 		     fmt.denominator, fmt.numerator);
@@ -481,8 +478,9 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 	libcamera_set_streamcfg_width(dev->camera, size->width);
 	libcamera_set_streamcfg_height(dev->camera, size->height);
 
-	/* start the camera now with the configured params */
-	libcamera_start_capture(dev->camera);
+	if(!libcamera_set_config(dev->camera)) {
+		return -EINVAL;
+	}
 
 	dev->have_format = true;
 	size->width = libcamera_get_streamcfg_width(dev->camera);
@@ -867,6 +865,8 @@ static int spa_libcamera_stream_on(struct impl *this)
 
 	libcamera_connect(dev->camera);
 
+	libcamera_start_capture(dev->camera);
+
 	port->source.func = libcamera_on_fd_events;
 	port->source.data = this;
 	port->source.fd = spa_system_eventfd_create(this->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
@@ -911,6 +911,10 @@ static int spa_libcamera_stream_off(struct impl *this)
 	spa_log_info(this->log, "stopping camera");
 
 	libcamera_stop_capture(dev->camera);
+
+	spa_log_info(this->log, "disconnecting camera");
+
+	libcamera_disconnect(dev->camera);
 
 	spa_loop_invoke(this->data_loop, do_remove_source, 0, NULL, 0, true, port);
 

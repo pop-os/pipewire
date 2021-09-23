@@ -486,11 +486,6 @@ extern "C" {
 	}
 
 	int LibCamera::start() {
-		if(!this->set_config()) {
-			return -1;
-		}
-
-		this->streamName_.clear();
 		for (unsigned int index = 0; index < this->config_->size(); ++index) {
 			StreamConfiguration &cfg = this->config_->at(index);
 			this->streamName_[cfg.stream()] = "stream" + std::to_string(index);
@@ -522,8 +517,6 @@ extern "C" {
 	}
 
 	void LibCamera::stop() {
-		this->disconnect();
-
 		StreamConfiguration &cfg = this->config_->at(0);
 		Stream *stream = cfg.stream();
 		uint32_t nbuffers = this->allocator_->buffers(stream).size();
@@ -536,15 +529,17 @@ extern "C" {
     	spa_log_info(this->log_, "Stopping camera ...");
     	this->cam_->stop();
     	if(this->allocator_) {
+		this->allocator_->free(stream);
 	    	delete this->allocator_;
 	    	this->allocator_ = nullptr;
     	}
 
 	    this->item_free_fn();
+	    this->requests_.clear();
+	    this->streamName_.clear();
 	}
 
 	void LibCamera::close() {
-    	this->stop();
 		this->cam_->release();
 	}
 
@@ -580,6 +575,10 @@ extern "C" {
 
 	void libcamera_set_streamcfgpixel_format(LibCamera *camera, uint32_t fmt) {
 		camera->set_streamcfgpixel_format(fmt);
+	}
+
+	bool libcamera_set_config(LibCamera *camera) {
+		return camera->set_config();
 	}
 
 	void libcamera_ringbuffer_read_update(LibCamera *camera) {
