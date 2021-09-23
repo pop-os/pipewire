@@ -1,5 +1,6 @@
-pipewire (0.3.37-1) UNRELEASED; urgency=medium
+pipewire (0.3.37-1) unstable; urgency=medium
 
+  * Team upload.
   * New upstream release
   * Install pw-dsdplay in pipewire-bin
   * Update symbols file
@@ -9,7 +10,7 @@ pipewire (0.3.37-1) UNRELEASED; urgency=medium
      This database is now installed into /usr/share/spa-0.2/bluez5/
      instead of /usr/share/pipewire/media-session.d/
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 23 Sep 2021 16:14:41 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 23 Sep 2021 17:56:09 +0200
 
 pipewire (0.3.36-1) unstable; urgency=medium
 
