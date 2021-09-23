@@ -3,6 +3,11 @@ pipewire (0.3.37-1) UNRELEASED; urgency=medium
   * New upstream release
   * Install pw-dsdplay in pipewire-bin
   * Update symbols file
+  * Move bluez-hardware.conf from pipewire-media-session to libspa-0.2-bluetooth
+     because this hardware quirk database is now loaded by the plugin instead
+     of the session manager.
+     This database is now installed into /usr/share/spa-0.2/bluez5/
+     instead of /usr/share/pipewire/media-session.d/
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 23 Sep 2021 16:14:41 +0200
 
