@@ -33,6 +33,7 @@ if not get_option('pw-cat').disabled() and sndfile_dep.found()
   pwcat_sources = [
     'pw-cat.c',
     'midifile.c',
+    'dsffile.c',
   ]
 
   pwcat_aliases = [
@@ -40,6 +41,7 @@ if not get_option('pw-cat').disabled() and sndfile_dep.found()
     'pw-record',
     'pw-midiplay',
     'pw-midirecord',
+    'pw-dsdplay',
   ]
 
   executable('pw-cat',
@@ -57,3 +59,9 @@ elif not sndfile_dep.found() and get_option('pw-cat').enabled()
 	error('pw-cat is enabled but required dependency `sndfile` was not found.')
 endif
 summary({'Build pw-cat tool': build_pw_cat}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump tool')
+
+executable('pw-reserve',
+	'pw-reserve.c',
+	install: true,
+	dependencies : [dbus_dep, pipewire_dep],
+)

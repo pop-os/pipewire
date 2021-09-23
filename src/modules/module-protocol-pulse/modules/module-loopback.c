@@ -63,15 +63,23 @@ static int module_loopback_load(struct client *client, struct module *module)
 	struct module_loopback_data *data = module->user_data;
 	FILE *f;
 	char *args;
-	size_t size;
+	size_t size, i;
 
 	pw_properties_setf(data->capture_props, PW_KEY_NODE_GROUP, "loopback-%u", module->idx);
 	pw_properties_setf(data->playback_props, PW_KEY_NODE_GROUP, "loopback-%u", module->idx);
 
 	f = open_memstream(&args, &size);
 	fprintf(f, "{");
-	if (data->info.channels != 0)
+	if (data->info.channels != 0) {
 		fprintf(f, " audio.channels = %u", data->info.channels);
+		if (!(data->info.flags & SPA_AUDIO_FLAG_UNPOSITIONED)) {
+			fprintf(f, " audio.position = [ ");
+			for (i = 0; i < data->info.channels; i++)
+				fprintf(f, "%s%s", i == 0 ? "" : ",",
+					channel_id2name(data->info.position[i]));
+			fprintf(f, " ]");
+		}
+	}
 	fprintf(f, " capture.props = {");
 	pw_properties_serialize_dict(f, &data->capture_props->dict, 0);
 	fprintf(f, " } playback.props = {");
@@ -189,7 +197,7 @@ struct module *create_module_loopback(struct impl *impl, const char *argument)
 	if ((str = pw_properties_get(props, "remix")) != NULL) {
 		/* Note that the boolean is inverted */
 		pw_properties_set(playback_props, PW_KEY_STREAM_DONT_REMIX,
-				pw_properties_parse_bool(str) ? "false" : "true");
+				module_args_parse_bool(str) ? "false" : "true");
 		pw_properties_set(props, "remix", NULL);
 	}
 

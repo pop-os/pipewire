@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.35',
+  version : '0.3.37',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
@@ -54,6 +54,7 @@ else
 endif
 
 spa_plugindir = pipewire_libdir / spa_name
+spa_datadir = pipewire_datadir / spa_name
 
 alsadatadir = pipewire_datadir / 'alsa-card-profile' / 'mixer'
 
@@ -198,6 +199,7 @@ cdata.set_quoted('PACKAGE_VERSION', pipewire_version)
 cdata.set_quoted('MODULEDIR', modules_install_dir)
 cdata.set_quoted('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
 cdata.set_quoted('PLUGINDIR', spa_plugindir)
+cdata.set_quoted('SPADATADIR', spa_datadir)
 # FIXME: --with-memory-alignment],[8,N,malloc,pagesize (default is 32)]) option
 cdata.set('MEMORY_ALIGNMENT_MALLOC', 1)
 cdata.set_quoted('PA_ALSA_PATHS_DIR', alsadatadir / 'paths')
@@ -404,7 +406,8 @@ libinotify_dep = (build_machine.system() == 'freebsd'
 # On FreeBSD, libintl library is required for gettext
 libintl_dep = cc.find_library('intl', required: false)
 
-alsa_dep = dependency('alsa', version : '>=1.1.7', required: get_option('pipewire-alsa'))
+need_alsa = get_option('pipewire-alsa').enabled() or get_option('session-managers').contains('media-session')
+alsa_dep = dependency('alsa', version : '>=1.1.7', required: need_alsa)
 summary({'pipewire-alsa': alsa_dep.found()}, bool_yn: true)
 
 installed_tests_metadir = pipewire_datadir / 'installed-tests' / pipewire_name
@@ -467,6 +470,7 @@ if meson.version().version_compare('>=0.58.0')
   devenv.set('PIPEWIRE_MODULE_DIR', builddir / 'src' / 'modules')
 
   devenv.set('SPA_PLUGIN_DIR', builddir / 'spa' / 'plugins')
+  devenv.set('SPA_DATA_DIR', srcdir / 'spa' / 'plugins')
 
   devenv.set('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
 
