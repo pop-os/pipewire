@@ -1,6 +1,7 @@
 pipewire (0.3.37-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Install pw-dsdplay in pipewire-bin
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 23 Sep 2021 16:14:41 +0200
 
