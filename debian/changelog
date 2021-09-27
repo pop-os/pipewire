@@ -1,9 +1,9 @@
-pipewire (0.3.37-2) UNRELEASED; urgency=medium
+pipewire (0.3.37-2) unstable; urgency=medium
 
   * Team upload.
   * Add an upstream patch to support msbc with kernel 5.14.x.
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Sep 2021 10:47:07 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Sep 2021 10:57:25 +0200
 
 pipewire (0.3.37-1) unstable; urgency=medium
 
