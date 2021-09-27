@@ -1,0 +1,25 @@
+From 65f881c2220249de2396189000e0d415a1cffbf2 Mon Sep 17 00:00:00 2001
+From: Pauli Virtanen <pav@iki.fi>
+Date: Sat, 25 Sep 2021 17:49:57 +0300
+Subject: [PATCH] bluez5: fix kernel version regexps
+
+5.14.x kernels do support msbc-alt1, and should not be rejected.
+---
+ spa/plugins/bluez5/bluez-hardware.conf | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/spa/plugins/bluez5/bluez-hardware.conf b/spa/plugins/bluez5/bluez-hardware.conf
+index 836068992..e63211243 100644
+--- a/spa/plugins/bluez5/bluez-hardware.conf
++++ b/spa/plugins/bluez5/bluez-hardware.conf
+@@ -89,7 +89,6 @@ bluez5.features.kernel = [
+     { sysname = "Linux", release = "~^5\\.10\\.(1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|51|52|53|54|55|56|57|58|59|60|61)($|[^0-9])", no-features = [ msbc-alt1 ] },
+     { sysname = "Linux", release = "~^5\\.12\\.(18|19)($|[^0-9])", no-features = [ msbc-alt1 ] },
+     { sysname = "Linux", release = "~^5\\.13\\.(3|4|5|6|7|8|9|10|11|12|13)($|[^0-9])", no-features = [ msbc-alt1 ] },
+-    { sysname = "Linux", release = "~^5\\.14($|[^0-9])", no-features = [ msbc-alt1 ] },
+ 
+     { no-features = [] },
+ ]
+-- 
+GitLab
+
