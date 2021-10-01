@@ -1,3 +1,10 @@
+pipewire (0.3.38-2) UNRELEASED; urgency=medium
+
+  * Team upload.
+  * Add an upstream patch to fix compilation on ARM
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 11:39:23 +0200
+
 pipewire (0.3.38-1) unstable; urgency=medium
 
   * Team upload.
