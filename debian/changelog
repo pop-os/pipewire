@@ -1,4 +1,4 @@
-pipewire (0.3.38-1) UNRELEASED; urgency=medium
+pipewire (0.3.38-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -6,7 +6,7 @@ pipewire (0.3.38-1) UNRELEASED; urgency=medium
   * Add libreadline-dev to Build-Depends
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 09:40:50 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 10:07:52 +0200
 
 pipewire (0.3.37-2) unstable; urgency=medium
 
