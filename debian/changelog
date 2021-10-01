@@ -1,4 +1,4 @@
-pipewire (0.3.38-2) focal; urgency=medium
+pipewire (0.3.38-2) unstable; urgency=medium
 
   * Team upload.
   * Add an upstream patch to fix compilation on ARM
