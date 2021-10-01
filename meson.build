@@ -1,11 +1,11 @@
 project('pipewire', ['c' ],
-  version : '0.3.37',
+  version : '0.3.38',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'b_pie=true',
-		      #'b_sanitize=address,undefined',
+                      #'b_sanitize=address,undefined',
                       'buildtype=debugoptimized' ])
 
 pipewire_version = meson.project_version()
@@ -122,9 +122,9 @@ if host_machine.cpu_family() == 'aarch64'
     int main () {
       float *s;
       asm volatile(
-	"      ld1 { v0.4s }, [%[s]], #16\n"
+        "      ld1 { v0.4s }, [%[s]], #16\n"
         "      fcvtzs v0.4s, v0.4s, #31\n"
-	: [s] "+r" (s) : :);
+        : [s] "+r" (s) : :);
     }
     ''',
     name : 'aarch64 Neon Support')
@@ -140,7 +140,7 @@ elif cc.has_argument('-mfpu=neon')
       asm volatile(
         "      vld1.32 { q0 }, [%[s]]!\n"
         "      vcvt.s32.f32 q0, q0, #31\n"
-	: [s] "+r" (s) : :);
+        : [s] "+r" (s) : :);
     }
     ''',
     args: '-mfpu=neon',
@@ -325,6 +325,8 @@ pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1')
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 summary({'SDL 2': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+readline_dep = dependency('readline', required : false)
+summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump/filter-chain')

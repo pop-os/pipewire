@@ -32,6 +32,8 @@
 #include <alloca.h>
 #endif
 #include <getopt.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define spa_debug(...) fprintf(stdout,__VA_ARGS__);fputc('\n', stdout)
 
@@ -48,6 +50,7 @@
 #include <pipewire/extensions/session-manager.h>
 
 static const char WHITESPACE[] = " \t";
+static char prompt[64];
 
 struct remote_data;
 
@@ -199,6 +202,7 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 static bool do_permissions(struct data *data, const char *cmd, char *args, char **error);
 static bool do_get_permissions(struct data *data, const char *cmd, char *args, char **error);
 static bool do_dump(struct data *data, const char *cmd, char *args, char **error);
+static bool do_quit(struct data *data, const char *cmd, char *args, char **error);
 
 #define DUMP_NAMES "Core|Module|Device|Node|Port|Factory|Client|Link|Session|Endpoint|EndpointStream"
 
@@ -223,7 +227,15 @@ static const struct command command_list[] = {
 	{ "get-permissions", "gp", "Get permissions of a client <client-id>", do_get_permissions },
 	{ "dump", "D", "Dump objects in ways that are cleaner for humans to understand "
 		 "[short|deep|resolve|notype] [-sdrt] [all|"DUMP_NAMES"|<id>]", do_dump },
+	{ "quit", "q", "Quit", do_quit },
 };
+
+static bool do_quit(struct data *data, const char *cmd, char *args, char **error)
+{
+	pw_main_loop_quit(data->loop);
+	data->quit = true;
+	return true;
+}
 
 static bool do_help(struct data *data, const char *cmd, char *args, char **error)
 {
@@ -270,11 +282,10 @@ static void on_core_info(void *_data, const struct pw_core_info *info)
 		fprintf(stdout, "remote %d is named '%s'\n", rd->id, rd->name);
 }
 
-static void show_prompt(struct remote_data *rd)
+static void set_prompt(struct remote_data *rd)
 {
-	rd->data->monitoring = true;
-	fprintf(stdout, "%s>>", rd->name);
-	fflush(stdout);
+	snprintf(prompt, sizeof(prompt), "%s>> ", rd->name);
+	rl_set_prompt(prompt);
 }
 
 static void on_core_done(void *_data, uint32_t id, int seq)
@@ -283,10 +294,12 @@ static void on_core_done(void *_data, uint32_t id, int seq)
 	struct data *d = rd->data;
 
 	if (seq == rd->prompt_pending) {
-		if (d->interactive)
-			show_prompt(rd);
-		else
+		if (d->interactive) {
+			set_prompt(rd);
+			rd->data->monitoring = true;
+		} else {
 			pw_main_loop_quit(d->loop);
+		}
 	}
 }
 
@@ -2871,7 +2884,7 @@ usage:
 	return false;
 }
 
-static bool parse(struct data *data, char *buf, size_t size, char **error)
+static bool parse(struct data *data, char *buf, char **error)
 {
 	char *a[2];
 	int n;
@@ -2903,35 +2916,35 @@ static bool parse(struct data *data, char *buf, size_t size, char **error)
 	return false;
 }
 
-static void do_input(void *data, int fd, uint32_t mask)
+/* We need a global variable, readline doesn't have a closure arg */
+static struct data *readline_dataptr;
+
+static void readline_process_line(char *line)
 {
-	struct data *d = data;
-	char buf[4096], *error;
-	ssize_t r;
+	struct data *d = readline_dataptr;
+	char *error;
 
-	if (mask & SPA_IO_IN) {
-		while (true) {
-			r = read(fd, buf, sizeof(buf)-1);
-			if (r < 0) {
-				if (errno == EAGAIN)
-					continue;
-				perror("read");
-				r = 0;
-				break;
-			}
-			break;
-		}
-		if (r == 0) {
-			fprintf(stdout, "\n");
-			pw_main_loop_quit(d->loop);
-			return;
-		}
-		buf[r] = '\0';
+	if (!line)
+		line = strdup("quit");
 
-		if (!parse(d, buf, r, &error)) {
+	if (line[0] != '\0') {
+		add_history(line);
+		if (!parse(d, line, &error)) {
 			fprintf(stdout, "Error: \"%s\"\n", error);
 			free(error);
 		}
+	}
+	free(line);
+}
+
+static void do_input(void *data, int fd, uint32_t mask)
+{
+	struct data *d = data;
+
+	if (mask & SPA_IO_IN) {
+		readline_dataptr = d;
+		rl_callback_read_char();
+
 		if (d->current == NULL)
 			pw_main_loop_quit(d->loop);
 		else  {
@@ -2942,7 +2955,56 @@ static void do_input(void *data, int fd, uint32_t mask)
 	}
 }
 
-static void do_quit(void *data, int signal_number)
+static char *
+readline_match_command(const char *text, int state)
+{
+	static size_t idx;
+	static int len;
+
+	if (!state) {
+		idx = 0;
+		len = strlen(text);
+	}
+
+	while (idx < SPA_N_ELEMENTS(command_list))  {
+		const char *name = command_list[idx].name;
+		const char *alias = command_list[idx].alias;
+
+		idx++;
+		if (spa_strneq(name, text, len) || spa_strneq(alias, text, len))
+			return strdup(name);
+	}
+
+	return NULL;
+}
+
+static char **
+readline_command_completion(const char *text, int start, int end)
+{
+	char **matches = NULL;
+
+	/* Only try to complete the first word in a line */
+	if (start == 0)
+		matches = rl_completion_matches(text, readline_match_command);
+
+	/* Don't fall back to filename completion */
+	rl_attempted_completion_over = true;
+
+	return matches;
+}
+
+static void readline_init()
+{
+	rl_attempted_completion_function = readline_command_completion;
+	rl_callback_handler_install(">> ", readline_process_line);
+}
+
+static void readline_cleanup()
+{
+	rl_callback_handler_remove();
+}
+
+static void do_quit_on_signal(void *data, int signal_number)
 {
 	struct data *d = data;
 	d->quit = true;
@@ -3011,8 +3073,8 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 	l = pw_main_loop_get_loop(data.loop);
-	pw_loop_add_signal(l, SIGINT, do_quit, &data);
-	pw_loop_add_signal(l, SIGTERM, do_quit, &data);
+	pw_loop_add_signal(l, SIGINT, do_quit_on_signal, &data);
+	pw_loop_add_signal(l, SIGTERM, do_quit_on_signal, &data);
 
 	spa_list_init(&data.remotes);
 	pw_map_init(&data.vars, 64, 16);
@@ -3037,12 +3099,16 @@ int main(int argc, char *argv[])
 	if (optind == argc) {
 		data.interactive = true;
 
-		pw_loop_add_io(l, STDIN_FILENO, SPA_IO_IN|SPA_IO_HUP, false, do_input, &data);
-
 		fprintf(stdout, "Welcome to PipeWire version %s. Type 'help' for usage.\n",
 				pw_get_library_version());
 
+		readline_init();
+
+		pw_loop_add_io(l, STDIN_FILENO, SPA_IO_IN|SPA_IO_HUP, false, do_input, &data);
+
 		pw_main_loop_run(data.loop);
+
+		readline_cleanup();
 	} else {
 		char buf[4096], *p, *error;
 
@@ -3054,7 +3120,7 @@ int main(int argc, char *argv[])
 
 		pw_main_loop_run(data.loop);
 
-		if (!parse(&data, buf, p - buf, &error)) {
+		if (!parse(&data, buf, &error)) {
 			fprintf(stdout, "Error: \"%s\"\n", error);
 			free(error);
 		}

@@ -22,11 +22,15 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <limits.h>
+#include <fnmatch.h>
+
 #include <spa/support/log-impl.h>
 
 #include <spa/pod/pod.h>
 #include <spa/debug/types.h>
 #include <spa/pod/iter.h>
+#include <spa/utils/list.h>
 
 #include <pipewire/log.h>
 #include <pipewire/private.h>
@@ -39,6 +43,27 @@ SPA_EXPORT
 enum spa_log_level pw_log_level = DEFAULT_LOG_LEVEL;
 
 static struct spa_log *global_log = &default_log.log;
+
+SPA_EXPORT
+struct spa_log_topic *PW_LOG_TOPIC_DEFAULT;
+
+PW_LOG_TOPIC_STATIC(log_topic, "pw.log"); /* log topic for this file here */
+PW_LOG_TOPIC(log_conf, "pw.conf");
+PW_LOG_TOPIC(log_context, "pw.context");
+PW_LOG_TOPIC(log_metadata, "pw.metadata");
+PW_LOG_TOPIC(log_node, "pw.node");
+PW_LOG_TOPIC(log_port, "pw.port");
+PW_LOG_TOPIC(log_core, "pw.core");
+PW_LOG_TOPIC(log_proxy, "pw.proxy");
+PW_LOG_TOPIC(log_global, "pw.global");
+PW_LOG_TOPIC(log_protocol, "pw.protocol");
+PW_LOG_TOPIC(log_client, "pw.client");
+PW_LOG_TOPIC(log_factory, "pw.factory");
+PW_LOG_TOPIC(log_module, "pw.module");
+PW_LOG_TOPIC(log_device, "pw.device");
+PW_LOG_TOPIC(log_resource, "pw.resource");
+
+PW_LOG_TOPIC(PW_LOG_TOPIC_DEFAULT, "default");
 
 /** Set the global log interface
  * \param log the global log to set
@@ -74,8 +99,9 @@ void pw_log_set_level(enum spa_log_level level)
 	global_log->level = level;
 }
 
-/** Log a message
+/** Log a message for the given topic
  * \param level the log level
+ * \param topic the topic
  * \param file the file this message originated from
  * \param line the line number
  * \param func the function
@@ -85,23 +111,46 @@ void pw_log_set_level(enum spa_log_level level)
  */
 SPA_EXPORT
 void
-pw_log_log(enum spa_log_level level,
-	   const char *file,
-	   int line,
-	   const char *func,
-	   const char *fmt, ...)
+pw_log_logt(enum spa_log_level level,
+	    const struct spa_log_topic *topic,
+	    const char *file,
+	    int line,
+	    const char *func,
+	    const char *fmt, ...)
 {
-	if (SPA_UNLIKELY(pw_log_level_enabled(level))) {
+	if (SPA_UNLIKELY(pw_log_topic_enabled(level, topic))) {
 		va_list args;
 		va_start(args, fmt);
-		spa_interface_call(&global_log->iface,
-			struct spa_log_methods, logv, 0, level, file, line,
-			func, fmt, args);
+		spa_log_logtv(global_log, level, topic, file, line, func, fmt, args);
 		va_end(args);
 	}
 }
 
-/** Log a message with va_list
+/** Log a message for the given topic with va_list
+ * \param level the log level
+ * \param topic the topic
+ * \param file the file this message originated from
+ * \param line the line number
+ * \param func the function
+ * \param fmt the printf style format
+ * \param args a va_list of arguments
+ *
+ */
+SPA_EXPORT
+void
+pw_log_logtv(enum spa_log_level level,
+	     const struct spa_log_topic *topic,
+	     const char *file,
+	     int line,
+	     const char *func,
+	     const char *fmt,
+	     va_list args)
+{
+	spa_log_logtv(global_log, level, topic, file, line, func, fmt, args);
+}
+
+
+/** Log a message for the default topic with va_list
  * \param level the log level
  * \param file the file this message originated from
  * \param line the line number
@@ -119,11 +168,30 @@ pw_log_logv(enum spa_log_level level,
 	    const char *fmt,
 	    va_list args)
 {
-	if (SPA_UNLIKELY(pw_log_level_enabled(level))) {
-		spa_interface_call(&global_log->iface,
-			struct spa_log_methods, logv, 0, level, file, line,
-			func, fmt, args);
-	}
+	pw_log_logtv(level, PW_LOG_TOPIC_DEFAULT, file, line, func, fmt, args);
+}
+
+/** Log a message for the default topic
+ * \param level the log level
+ * \param file the file this message originated from
+ * \param line the line number
+ * \param func the function
+ * \param fmt the printf style format
+ * \param ... printf style arguments to log
+ *
+ */
+SPA_EXPORT
+void
+pw_log_log(enum spa_log_level level,
+	   const char *file,
+	   int line,
+	   const char *func,
+	   const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	pw_log_logtv(level, PW_LOG_TOPIC_DEFAULT, file, line, func, fmt, args);
+	va_end(args);
 }
 
 /** \fn void pw_log_error (const char *format, ...)
@@ -336,4 +404,31 @@ void pw_log_log_object(enum spa_log_level level,
 				SPA_POD_BODY_SIZE(pod));
 		}
 	}
+}
+
+SPA_EXPORT
+void
+_pw_log_topic_new(struct spa_log_topic *topic)
+{
+	spa_log_topic_init(global_log, topic);
+}
+
+void
+pw_log_init(void)
+{
+	PW_LOG_TOPIC_INIT(PW_LOG_TOPIC_DEFAULT);
+	PW_LOG_TOPIC_INIT(log_topic);
+	PW_LOG_TOPIC_INIT(log_context);
+	PW_LOG_TOPIC_INIT(log_metadata);
+	PW_LOG_TOPIC_INIT(log_node);
+	PW_LOG_TOPIC_INIT(log_port);
+	PW_LOG_TOPIC_INIT(log_core);
+	PW_LOG_TOPIC_INIT(log_proxy);
+	PW_LOG_TOPIC_INIT(log_global);
+	PW_LOG_TOPIC_INIT(log_protocol);
+	PW_LOG_TOPIC_INIT(log_client);
+	PW_LOG_TOPIC_INIT(log_factory);
+	PW_LOG_TOPIC_INIT(log_module);
+	PW_LOG_TOPIC_INIT(log_device);
+	PW_LOG_TOPIC_INIT(log_resource);
 }
