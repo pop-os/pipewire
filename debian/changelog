@@ -4,6 +4,7 @@ pipewire (0.3.38-1) UNRELEASED; urgency=medium
   * New upstream release
   * Drop d/p/fix-msbc-with-linux-5.14.patch, included in upstream release
   * Add libreadline-dev to Build-Depends
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 09:40:50 +0200
 
