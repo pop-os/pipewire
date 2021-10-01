@@ -34,11 +34,18 @@
 #include "../module.h"
 #include "registry.h"
 
+#define NAME "tunnel-source"
+
+PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+#define PW_LOG_TOPIC_DEFAULT mod_topic
+
 struct module_tunnel_source_data {
 	struct module *module;
 
 	struct pw_impl_module *mod;
 	struct spa_hook mod_listener;
+
+	uint32_t latency_msec;
 
 	struct pw_properties *stream_props;
 };
@@ -71,6 +78,8 @@ static int module_tunnel_source_load(struct client *client, struct module *modul
 	pw_properties_serialize_dict(f, &module->props->dict, 0);
 	fprintf(f, " pulse.server.address = \"%s\" ", server);
 	fprintf(f, " tunnel.mode = capture ");
+	if (data->latency_msec > 0)
+		fprintf(f, " pulse.latency = %u ", data->latency_msec);
 	fprintf(f, " stream.props = {");
 	pw_properties_serialize_dict(f, &data->stream_props->dict, 0);
 	fprintf(f, " } }");
@@ -124,6 +133,7 @@ static const struct spa_dict_item module_tunnel_source_info[] = {
 		"channels=<number of channels> "
 		"rate=<sample rate> "
 		"channel_map=<channel map> "
+		"latency_msec=<fixed latency in ms> "
 		"cookie=<cookie file path>" },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
@@ -149,6 +159,8 @@ struct module *create_module_tunnel_source(struct impl *impl, const char *argume
 	const char *str, *server, *remote_source_name;
 	struct spa_audio_info_raw info = { 0 };
 	int res;
+
+	PW_LOG_TOPIC_INIT(mod_topic);
 
 	props = pw_properties_new_dict(&SPA_DICT_INIT_ARRAY(module_tunnel_source_info));
 	stream_props = pw_properties_new(NULL, NULL);
@@ -202,6 +214,9 @@ struct module *create_module_tunnel_source(struct impl *impl, const char *argume
 	d = module->user_data;
 	d->module = module;
 	d->stream_props = stream_props;
+
+	if ((str = pw_properties_get(props, "latency_msec")) != NULL)
+		spa_atou32(str, &d->latency_msec, 0);
 
 	return module;
 out:

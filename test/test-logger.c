@@ -24,6 +24,7 @@
 
 #include "pwtest.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <spa/utils/ansi.h>
@@ -131,28 +132,18 @@ PWTEST(logger_no_ansi)
 static void
 test_log_levels(enum spa_log_level level)
 {
-	struct pwtest_spa_plugin *plugin;
-	void *iface;
 	char fname[PATH_MAX];
-	struct spa_dict_item items[2];
-	struct spa_dict info;
 	char buffer[1024];
 	FILE *fp;
 	bool above_level_found = false;
 	bool below_level_found = false;
 	bool current_level_found = false;
+	char *oldenv = getenv("PIPEWIRE_LOG");
+
+	pwtest_mkstemp(fname);
+	setenv("PIPEWIRE_LOG", fname, 1);
 
 	pw_init(0, NULL);
-	pwtest_mkstemp(fname);
-	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_FILE, fname);
-	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
-	info = SPA_DICT_INIT(items, 2);
-	plugin = pwtest_spa_plugin_new();
-	iface = pwtest_spa_plugin_load_interface(plugin, "support/libspa-support",
-						 SPA_NAME_SUPPORT_LOG, SPA_TYPE_INTERFACE_Log,
-						 &info);
-	pwtest_ptr_notnull(iface);
-	pw_log_set(iface);
 
 	/* current level is whatever the iteration is. Log one line
 	 * with our level, one with a level above (should never show up)
@@ -189,8 +180,12 @@ test_log_levels(enum spa_log_level level)
 		pwtest_bool_true(current_level_found);
 		pwtest_bool_true(below_level_found);
 	}
-	pwtest_spa_plugin_destroy(plugin);
 	pw_deinit();
+
+	if (oldenv)
+		setenv("PIPEWIRE_LOG", oldenv, 1);
+	else
+		unsetenv("PIPEWIRE_LOG");
 }
 
 PWTEST(logger_levels)
@@ -293,6 +288,160 @@ PWTEST(logger_debug_env_alpha)
 	return PWTEST_PASS;
 }
 
+PWTEST(logger_debug_env_topic_all)
+{
+	enum spa_log_level level = pwtest_get_iteration(current_test);
+	enum spa_log_level default_level = pw_log_level;
+	struct spa_log *default_logger = pw_log_get();
+	char *oldenv = getenv("PIPEWIRE_DEBUG");
+	char lvlstr[32];
+	char *lvl = SPA_LOG_LEVEL_NONE;
+
+	if (oldenv)
+		oldenv = strdup(oldenv);
+
+	switch(level) {
+		case SPA_LOG_LEVEL_NONE:  lvl = "X"; break;
+		case SPA_LOG_LEVEL_ERROR: lvl = "E"; break;
+		case SPA_LOG_LEVEL_WARN:  lvl = "W"; break;
+		case SPA_LOG_LEVEL_INFO:  lvl = "I"; break;
+		case SPA_LOG_LEVEL_DEBUG: lvl = "D"; break;
+		case SPA_LOG_LEVEL_TRACE: lvl = "T"; break;
+		default:
+			pwtest_fail_if_reached();
+			break;
+	}
+
+	/* Check that the * glob works to enable all topics */
+	spa_scnprintf(lvlstr, sizeof(lvlstr), "*:%s", lvl);
+	setenv("PIPEWIRE_DEBUG", lvlstr, 1);
+
+	/* Disable logging, let PIPEWIRE_DEBUG set the level */
+	pw_log_set_level(SPA_LOG_LEVEL_NONE);
+
+	test_log_levels(level);
+
+	if (oldenv) {
+		setenv("PIPEWIRE_DEBUG", oldenv, 1);
+		free(oldenv);
+	} else {
+		unsetenv("PIPEWIRE_DEBUG");
+	}
+
+	pw_log_set(default_logger);
+	pw_log_set_level(default_level);
+
+	return PWTEST_PASS;
+}
+
+PWTEST(logger_debug_env_invalid)
+{
+	enum spa_log_level default_level = pw_log_level;
+	struct spa_log *default_logger = pw_log_get();
+	char *oldenv = getenv("PIPEWIRE_DEBUG");
+	char fname[PATH_MAX];
+	char buf[1024] = {0};
+	int fd;
+	int rc;
+	bool error_message_found = false;
+	long unsigned int which = pwtest_get_iteration(current_test);
+	const char *envvars[] = {
+		"invalid value",
+		"*:5,some invalid value",
+		"*:W,foo.bar:3,invalid:",
+		"*:W,1,foo.bar:D",
+		"*:W,D,foo.bar:3",
+	};
+
+	pwtest_int_lt(which, SPA_N_ELEMENTS(envvars));
+
+	if (oldenv)
+		oldenv = strdup(oldenv);
+
+	/* The error message during pw_init() will go to stderr because no
+	 * logger has been set up yet. Intercept that in our temp file */
+	pwtest_mkstemp(fname);
+	fd = open(fname, O_RDWR);
+	pwtest_errno_ok(fd);
+	rc = dup2(fd, STDERR_FILENO);
+	setlinebuf(stderr);
+	pwtest_errno_ok(rc);
+
+	setenv("PIPEWIRE_DEBUG", envvars[which], 1);
+	pw_init(0, NULL);
+
+	fsync(STDERR_FILENO);
+	lseek(fd, SEEK_SET, 0);
+	while ((rc = read(fd, buf, sizeof(buf) - 1) > 0)) {
+		if (strstr(buf, "Ignoring invalid format in PIPEWIRE_DEBUG")) {
+		    error_message_found = true;
+		    break;
+		}
+	}
+	pwtest_errno_ok(rc);
+	close(fd);
+	pwtest_bool_true(error_message_found);
+
+	if (oldenv) {
+		setenv("PIPEWIRE_DEBUG", oldenv, 1);
+		free(oldenv);
+	} else {
+		unsetenv("PIPEWIRE_DEBUG");
+	}
+
+	pw_log_set(default_logger);
+	pw_log_set_level(default_level);
+	pw_deinit();
+
+	return PWTEST_PASS;
+}
+
+PWTEST(logger_topics)
+{
+	struct pwtest_spa_plugin *plugin;
+	void *iface;
+	char fname[PATH_MAX];
+	struct spa_dict_item items[2];
+	struct spa_dict info;
+	char buffer[1024];
+	FILE *fp;
+	bool mark_line_found = false;
+	struct spa_log_topic topic = {
+		.version = 0,
+		.topic = "my topic",
+		.level = SPA_LOG_LEVEL_DEBUG,
+	};
+
+	pw_init(0, NULL);
+
+	pwtest_mkstemp(fname);
+	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_FILE, fname);
+	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_COLORS, "true");
+	info = SPA_DICT_INIT(items, 2);
+	plugin = pwtest_spa_plugin_new();
+	iface = pwtest_spa_plugin_load_interface(plugin, "support/libspa-support",
+						 SPA_NAME_SUPPORT_LOG, SPA_TYPE_INTERFACE_Log,
+						 &info);
+	pwtest_ptr_notnull(iface);
+
+	spa_logt_info(iface, &topic, "MARK\n");
+
+	fp = fopen(fname, "r");
+	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+		if (strstr(buffer, "MARK")) {
+			mark_line_found = true;
+			pwtest_str_contains(buffer, "my topic");
+		}
+	}
+
+	pwtest_bool_true(mark_line_found);
+	pwtest_spa_plugin_destroy(plugin);
+
+	fclose(fp);
+
+	return PWTEST_PASS;
+}
+
 PWTEST(logger_journal)
 {
 	enum pwtest_result result = PWTEST_SKIP;
@@ -302,6 +451,11 @@ PWTEST(logger_journal)
 	struct spa_dict_item items[2];
 	struct spa_dict info;
 	bool mark_line_found = false;
+	struct spa_log_topic topic = {
+		.version = 0,
+		.topic = "pwtest journal",
+		.level = SPA_LOG_LEVEL_DEBUG,
+	};
 	sd_journal *journal;
 	int rc;
 
@@ -325,7 +479,7 @@ PWTEST(logger_journal)
 
 	sd_journal_seek_tail(journal);
 
-	spa_log_info(iface, "MARK\n");
+	spa_logt_info(iface, &topic, "MARK\n");
 	while ((rc = sd_journal_next(journal)) > 0) {
 		char buffer[1024] = {0};
 		const char *d;
@@ -333,8 +487,10 @@ PWTEST(logger_journal)
 		int r = sd_journal_get_data(journal, "MESSAGE", (const void **)&d, &l);
 		pwtest_neg_errno_ok(r);
 		spa_scnprintf(buffer, sizeof(buffer), "%.*s", (int) l, d);
-		if (strstr(buffer, "MARK"))
+		if (strstr(buffer, "MARK")) {
 			mark_line_found = true;
+			pwtest_str_contains(buffer, "pwtest journal");
+		}
 	}
 	pwtest_neg_errno_ok(rc);
 	pwtest_bool_true(mark_line_found);
@@ -362,6 +518,11 @@ PWTEST(logger_journal_chain)
 	struct spa_dict_item items[2];
 	struct spa_dict info;
 	bool mark_line_found = false;
+	struct spa_log_topic topic = {
+		.version = 0,
+		.topic = "pwtest journal",
+		.level = SPA_LOG_LEVEL_DEBUG,
+	};
 	sd_journal *journal;
 	int rc;
 
@@ -395,7 +556,7 @@ PWTEST(logger_journal_chain)
 
 	sd_journal_seek_tail(journal);
 
-	spa_log_info(iface, "MARK\n");
+	spa_logt_info(iface, &topic, "MARK\n");
 	while ((rc = sd_journal_next(journal)) > 0) {
 		char buffer[1024] = {0};
 		const char *d;
@@ -403,8 +564,10 @@ PWTEST(logger_journal_chain)
 		int r = sd_journal_get_data(journal, "MESSAGE", (const void **)&d, &l);
 		pwtest_neg_errno_ok(r);
 		spa_scnprintf(buffer, sizeof(buffer), "%.*s", (int) l, d);
-		if (strstr(buffer, "MARK"))
+		if (strstr(buffer, "MARK")) {
 			mark_line_found = true;
+			pwtest_str_contains(buffer, "pwtest journal");
+		}
 	}
 	pwtest_neg_errno_ok(rc);
 	pwtest_bool_true(mark_line_found);
@@ -413,8 +576,13 @@ PWTEST(logger_journal_chain)
 	mark_line_found = false;
 	fp = fopen(fname, "r");
 	while (fgets(buffer, sizeof(buffer), fp) != NULL) {
-		if (strstr(buffer, "MARK"))
+		if (strstr(buffer, "MARK")) {
 			mark_line_found = true;
+			pwtest_ptr_null(strstr(buffer, SPA_ANSI_RESET));
+			pwtest_ptr_null(strstr(buffer, SPA_ANSI_RED));
+			pwtest_ptr_null(strstr(buffer, SPA_ANSI_BRIGHT_RED));
+			pwtest_ptr_null(strstr(buffer, SPA_ANSI_BOLD_RED));
+		}
 	}
 
 	fclose(fp);
@@ -444,6 +612,13 @@ PWTEST_SUITE(logger)
 	pwtest_add(logger_debug_env_alpha,
 		   PWTEST_ARG_RANGE, SPA_LOG_LEVEL_NONE, SPA_LOG_LEVEL_TRACE + 1,
 		   PWTEST_NOARG);
+	pwtest_add(logger_debug_env_topic_all,
+		   PWTEST_ARG_RANGE, SPA_LOG_LEVEL_NONE, SPA_LOG_LEVEL_TRACE + 1,
+		   PWTEST_NOARG);
+	pwtest_add(logger_debug_env_invalid,
+		   PWTEST_ARG_RANGE, 0, 5, /* see the test */
+		   PWTEST_NOARG);
+	pwtest_add(logger_topics, PWTEST_NOARG);
 	pwtest_add(logger_journal, PWTEST_NOARG);
 	pwtest_add(logger_journal_chain, PWTEST_NOARG);
 

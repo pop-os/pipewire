@@ -1,6 +1,5 @@
 tools_sources = [
   [ 'pw-mon', [ 'pw-mon.c' ] ],
-  [ 'pw-cli', [ 'pw-cli.c' ] ],
   [ 'pw-dot', [ 'pw-dot.c' ] ],
   [ 'pw-dump', [ 'pw-dump.c' ] ],
   [ 'pw-profiler', [ 'pw-profiler.c' ] ],
@@ -12,17 +11,25 @@ tools_sources = [
 
 foreach t : tools_sources
   executable(t.get(0),
-	t.get(1),
-	install: true,
-	dependencies : [pipewire_dep, mathlib],
+    t.get(1),
+    install: true,
+    dependencies : [pipewire_dep, mathlib],
   )
 endforeach
 
+if readline_dep.found()
+  executable('pw-cli',
+    'pw-cli.c',
+    install: true,
+    dependencies: [pipewire_dep, readline_dep]
+  )
+endif
+
 if ncurses_dep.found()
   executable('pw-top',
-	'pw-top.c',
-	install: true,
-	dependencies : [pipewire_dep, ncurses_dep],
+    'pw-top.c',
+    install: true,
+    dependencies : [pipewire_dep, ncurses_dep],
   )
 endif
 
@@ -56,12 +63,12 @@ if not get_option('pw-cat').disabled() and sndfile_dep.found()
     meson.add_install_script('sh', '-c', cmd)
   endforeach
 elif not sndfile_dep.found() and get_option('pw-cat').enabled()
-	error('pw-cat is enabled but required dependency `sndfile` was not found.')
+  error('pw-cat is enabled but required dependency `sndfile` was not found.')
 endif
 summary({'Build pw-cat tool': build_pw_cat}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump tool')
 
 executable('pw-reserve',
-	'pw-reserve.c',
-	install: true,
-	dependencies : [dbus_dep, pipewire_dep],
+  'pw-reserve.c',
+  install: true,
+  dependencies : [dbus_dep, pipewire_dep],
 )

@@ -132,8 +132,11 @@ struct spa_callbacks {
 	void *data;
 };
 
+/** Check if a callback \a c is of at least version \a v */
+#define SPA_CALLBACK_VERSION_MIN(c,v) ((c) && ((v) == 0 || (c)->version > (v)-1))
+
 /** Check if a callback \a c has method \a m of version \a v */
-#define SPA_CALLBACK_CHECK(c,m,v) ((c) && ((v) == 0 || (c)->version > (v)-1) && (c)->m)
+#define SPA_CALLBACK_CHECK(c,m,v) (SPA_CALLBACK_VERSION_MIN(c,v) && (c)->m)
 
 /**
  * Initialize the set of functions \a funcs as a \ref spa_callbacks, together
@@ -177,6 +180,15 @@ struct spa_interface {
 })
 
 /**
+ * True if the \a callbacks are of version \a vers, false otherwise
+ */
+#define spa_callback_version_min(callbacks,type,vers)				\
+({										\
+	const type *_f = (const type *) (callbacks)->funcs;			\
+	SPA_CALLBACK_VERSION_MIN(_f,vers);					\
+})
+
+/**
  * Invoke method named \a method in the \a callbacks.
  * The \a method_type defines the type of the method struct.
  *
@@ -189,6 +201,12 @@ struct spa_interface {
 		res = _f->method((callbacks)->data, ## __VA_ARGS__);		\
 	res;									\
 })
+
+/**
+ * True if the \a iface's \a callbacks are of version \a vers, false otherwise
+ */
+#define spa_interface_callback_version_min(iface,method_type,vers)				\
+   spa_callback_version_min(&(iface)->cb, method_type, vers)
 
 /**
  * Invoke method named \a method in the callbacks on the given interface object.

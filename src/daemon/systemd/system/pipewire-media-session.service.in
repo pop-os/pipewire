@@ -1,5 +1,5 @@
 [Unit]
-Description=Multimedia Service Session Manager
+Description=PipeWire Media Session Manager
 After=pipewire.service
 BindsTo=pipewire.service
 
@@ -18,3 +18,4 @@ Environment=PIPEWIRE_RUNTIME_DIR=%t/pipewire
 
 [Install]
 WantedBy=pipewire.service
+Alias=pipewire-session-manager.service

@@ -1,6 +1,6 @@
-/* PipeWire
+/* Spa ALSA Source
  *
- * Copyright © 2020 Wim Taymans
+ * Copyright © 2021 Red Hat, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,26 +22,18 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <spa/utils/list.h>
-#include <spa/utils/hook.h>
-#include <pipewire/work-queue.h>
+#ifndef SPA_ALSA_H
+#define SPA_ALSA_H
 
-#include "client.h"
-#include "internal.h"
-#include "log.h"
-#include "pending-sample.h"
-#include "sample-play.h"
+#include <spa/support/log.h>
 
-void pending_sample_free(struct pending_sample *ps)
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT alsa_log_topic
+extern struct spa_log_topic *alsa_log_topic;
+
+static inline void alsa_log_topic_init(struct spa_log *log)
 {
-	struct client * const client = ps->client;
-	struct impl * const impl = client->impl;
-
-	spa_list_remove(&ps->link);
-	spa_hook_remove(&ps->listener);
-	pw_work_queue_cancel(impl->work_queue, ps, SPA_ID_INVALID);
-
-	client->ref--;
-
-	sample_play_destroy(ps->play);
+	spa_log_topic_init(log, alsa_log_topic);
 }
+
+#endif /* SPA_ALSA_H */
