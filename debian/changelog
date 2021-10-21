@@ -2,6 +2,9 @@ pipewire (0.3.39-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Don't build the pipewire-media-session binary package anymore,
+      media-session has moved to a separate module to accelerate its
+      deprecation in favour of WirePlumber.
   * Drop d/p/fix-compilation-on-ARM.patch, included in upstream release
   * Add an upstream patch to fix compilation on some architectures
   * Update symbols file
