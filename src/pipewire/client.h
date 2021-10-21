@@ -35,8 +35,8 @@ extern "C" {
 #include <pipewire/proxy.h>
 #include <pipewire/permission.h>
 
-/** \defgroup pw_client PipeWire Client
- *
+/** \defgroup pw_client Client
+ * Client interface
  */
 
 /**

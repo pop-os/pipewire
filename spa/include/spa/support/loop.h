@@ -33,8 +33,12 @@ extern "C" {
 #include <spa/utils/hook.h>
 #include <spa/support/system.h>
 
+/** \defgroup spa_loop Loop
+ * Event loop interface
+ */
+
 /**
- * \addtogroup spa_support
+ * \addtogroup spa_loop
  * \{
  */
 

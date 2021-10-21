@@ -391,6 +391,20 @@ static void capture_process(void *data)
 	pw_stream_queue_buffer(impl->capture, buf);
 }
 
+static void input_state_changed(void *data, enum pw_stream_state old,
+		enum pw_stream_state state, const char *error)
+{
+	struct impl *impl = data;
+	switch (state) {
+	case PW_STREAM_STATE_PAUSED:
+		pw_stream_flush(impl->source, false);
+		pw_stream_flush(impl->capture, false);
+		break;
+	default:
+		break;
+	}
+}
+
 static void input_param_latency_changed(struct impl *impl, const struct spa_pod *param)
 {
 	struct spa_latency_info latency;
@@ -423,6 +437,7 @@ static void input_param_changed(void *data, uint32_t id, const struct spa_pod *p
 static const struct pw_stream_events capture_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = capture_destroy,
+	.state_changed = input_state_changed,
 	.io_changed = capture_io_changed,
 	.process = capture_process,
 	.param_changed = input_param_changed
@@ -438,8 +453,23 @@ static void source_destroy(void *d)
 static const struct pw_stream_events source_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = source_destroy,
+	.state_changed = input_state_changed,
 	.param_changed = input_param_changed
 };
+
+static void output_state_changed(void *data, enum pw_stream_state old,
+		enum pw_stream_state state, const char *error)
+{
+	struct impl *impl = data;
+	switch (state) {
+	case PW_STREAM_STATE_PAUSED:
+		pw_stream_flush(impl->sink, false);
+		pw_stream_flush(impl->playback, false);
+		break;
+	default:
+		break;
+	}
+}
 
 static void output_param_latency_changed(struct impl *impl, const struct spa_pod *param)
 {
@@ -553,6 +583,7 @@ static void playback_destroy(void *d)
 static const struct pw_stream_events playback_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = playback_destroy,
+	.state_changed = output_state_changed,
 	.param_changed = output_param_changed
 };
 static const struct pw_stream_events sink_events = {
@@ -560,6 +591,7 @@ static const struct pw_stream_events sink_events = {
 	.destroy = sink_destroy,
 	.io_changed = sink_io_changed,
 	.process = sink_process,
+	.state_changed = output_state_changed,
 	.param_changed = output_param_changed
 };
 
@@ -582,7 +614,9 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_GROUP, str);
 	if ((str = pw_properties_get(impl->source_props, PW_KEY_NODE_LINK_GROUP)) != NULL)
 		pw_properties_set(props, PW_KEY_NODE_LINK_GROUP, str);
-	if (impl->aec_info->latency)
+	if ((str = pw_properties_get(impl->source_props, PW_KEY_NODE_LATENCY)) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	else if (impl->aec_info->latency)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
 
 	impl->capture = pw_stream_new(impl->core,
@@ -613,7 +647,9 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_GROUP, str);
 	if ((str = pw_properties_get(impl->sink_props, PW_KEY_NODE_LINK_GROUP)) != NULL)
 		pw_properties_set(props, PW_KEY_NODE_LINK_GROUP, str);
-	if (impl->aec_info->latency)
+	if ((str = pw_properties_get(impl->sink_props, PW_KEY_NODE_LATENCY)) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	else if (impl->aec_info->latency)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
 
 	impl->playback = pw_stream_new(impl->core,
@@ -795,10 +831,8 @@ static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_
 
 	*info = SPA_AUDIO_INFO_RAW_INIT(
 			.format = SPA_AUDIO_FORMAT_F32P);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_RATE)) != NULL)
-		info->rate = atoi(str);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_CHANNELS)) != NULL)
-		info->channels = atoi(str);
+	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
+	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
 	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
 		parse_position(info, str, strlen(str));
 }
@@ -916,13 +950,31 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_properties_free(aec_props);
 
 	if (impl->aec_info->latency) {
-		unsigned int num, denom;
-
-		pw_log_info("Setting node latency to %s", impl->aec_info->latency);
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+		unsigned int num, denom, req_num, req_denom;
+		unsigned int factor = 0;
+		unsigned int new_num = 0;
 
 		sscanf(impl->aec_info->latency, "%u/%u", &num, &denom);
-		impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom;
+
+		if ((str = pw_properties_get(props, PW_KEY_NODE_LATENCY)) != NULL) {
+			sscanf(str, "%u/%u", &req_num, &req_denom);
+			factor = (req_num * denom) / (req_denom * num);
+			new_num = req_num / factor * factor;
+		}
+
+		if (factor == 0 || new_num == 0) {
+			pw_log_info("Setting node latency to %s", impl->aec_info->latency);
+			pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+			impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom;
+		} else {
+			char* new_latency_str = (char*)calloc(strlen(str), sizeof(char));
+
+			sprintf(new_latency_str, "%u/%u", new_num, req_denom);
+			pw_log_info("Setting node latency to %s", new_latency_str);
+			pw_properties_set(props, PW_KEY_NODE_LATENCY, new_latency_str);
+			impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom * factor;
+			free(new_latency_str);
+		}
 	} else {
 		/* Implementation doesn't care about the block size */
 		impl->aec_blocksize = 0;

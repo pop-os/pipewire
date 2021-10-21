@@ -48,7 +48,7 @@ PW_LOG_TOPIC_EXTERN(log_node);
 struct impl {
 	struct pw_impl_node this;
 
-	enum pw_node_state pending;
+	enum pw_node_state pending_state;
 	uint32_t pending_id;
 
 	struct pw_work_queue *work;
@@ -84,22 +84,6 @@ struct resource_data {
 };
 
 /** \endcond */
-
-static void node_deactivate(struct pw_impl_node *this)
-{
-	struct pw_impl_port *port;
-	struct pw_impl_link *link;
-
-	pw_log_debug("%p: deactivate", this);
-	spa_list_for_each(port, &this->input_ports, link) {
-		spa_list_for_each(link, &port->links, input_link)
-			pw_impl_link_deactivate(link);
-	}
-	spa_list_for_each(port, &this->output_ports, link) {
-		spa_list_for_each(link, &port->links, output_link)
-			pw_impl_link_deactivate(link);
-	}
-}
 
 static void add_node(struct pw_impl_node *this, struct pw_impl_node *driver)
 {
@@ -184,6 +168,23 @@ do_node_remove(struct spa_loop *loop,
 	return 0;
 }
 
+static void node_deactivate(struct pw_impl_node *this)
+{
+	struct pw_impl_port *port;
+	struct pw_impl_link *link;
+
+	pw_log_debug("%p: deactivate", this);
+	spa_list_for_each(port, &this->input_ports, link) {
+		spa_list_for_each(link, &port->links, input_link)
+			pw_impl_link_deactivate(link);
+	}
+	spa_list_for_each(port, &this->output_ports, link) {
+		spa_list_for_each(link, &port->links, output_link)
+			pw_impl_link_deactivate(link);
+	}
+	pw_loop_invoke(this->data_loop, do_node_remove, 1, NULL, 0, true, this);
+}
+
 static int pause_node(struct pw_impl_node *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
@@ -191,15 +192,13 @@ static int pause_node(struct pw_impl_node *this)
 
 	pw_log_debug("%p: pause node state:%s pending:%s pause-on-idle:%d", this,
 			pw_node_state_as_string(this->info.state),
-			pw_node_state_as_string(impl->pending),
+			pw_node_state_as_string(impl->pending_state),
 			impl->pause_on_idle);
 
-	if (impl->pending <= PW_NODE_STATE_IDLE)
+	if (impl->pending_state <= PW_NODE_STATE_IDLE)
 		return 0;
 
 	node_deactivate(this);
-
-	pw_loop_invoke(this->data_loop, do_node_remove, 1, NULL, 0, true, this);
 
 	res = spa_node_send_command(this->node,
 				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
@@ -209,12 +208,31 @@ static int pause_node(struct pw_impl_node *this)
 	return res;
 }
 
+static void node_activate(struct pw_impl_node *this)
+{
+	struct pw_impl_port *port;
+
+	pw_log_debug("%p: activate", this);
+	spa_list_for_each(port, &this->input_ports, link) {
+		struct pw_impl_link *link;
+		spa_list_for_each(link, &port->links, input_link)
+			pw_impl_link_activate(link);
+	}
+	spa_list_for_each(port, &this->output_ports, link) {
+		struct pw_impl_link *link;
+		spa_list_for_each(link, &port->links, output_link)
+			pw_impl_link_activate(link);
+	}
+}
+
 static int start_node(struct pw_impl_node *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 	int res = 0;
 
-	if (impl->pending >= PW_NODE_STATE_RUNNING)
+	node_activate(this);
+
+	if (impl->pending_state >= PW_NODE_STATE_RUNNING)
 		return 0;
 
 	pw_log_debug("%p: start node", this);
@@ -344,7 +362,7 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 	free((char*)node->info.error);
 	node->info.error = error;
 	node->info.state = state;
-	impl->pending = state;
+	impl->pending_state = state;
 
 	pw_log_debug("%p: (%s) %s -> %s (%s)", node, node->name,
 		     pw_node_state_as_string(old), pw_node_state_as_string(state), error);
@@ -382,7 +400,7 @@ static int suspend_node(struct pw_impl_node *this)
 	if (this->info.state > 0 && this->info.state <= PW_NODE_STATE_SUSPENDED)
 		return 0;
 
-	pause_node(this);
+	node_deactivate(this);
 
 	spa_list_for_each(p, &this->input_ports, link) {
 		if ((res = pw_impl_port_set_param(p, SPA_PARAM_Format, 0, NULL)) < 0)
@@ -838,17 +856,10 @@ static void check_properties(struct pw_impl_node *node)
 		pw_log_debug("%p: name '%s'", node, node->name);
 	}
 
-	str = pw_properties_get(node->properties, PW_KEY_NODE_PAUSE_ON_IDLE);
-	impl->pause_on_idle = str ? pw_properties_parse_bool(str) : true;
-
-	str = pw_properties_get(node->properties, PW_KEY_NODE_CACHE_PARAMS);
-	impl->cache_params = str ? pw_properties_parse_bool(str) : true;
-
-	str = pw_properties_get(node->properties, "node.transport.sync");
-	node->transport_sync = str ? pw_properties_parse_bool(str) : false;
-
-	str = pw_properties_get(node->properties, PW_KEY_NODE_DRIVER);
-	driver = str ? pw_properties_parse_bool(str) : false;
+	impl->pause_on_idle = pw_properties_get_bool(node->properties, PW_KEY_NODE_PAUSE_ON_IDLE, true);
+	impl->cache_params =  pw_properties_get_bool(node->properties, PW_KEY_NODE_CACHE_PARAMS, true);
+	node->transport_sync = pw_properties_get_bool(node->properties, "node.transport.sync", false);
+	driver = pw_properties_get_bool(node->properties, PW_KEY_NODE_DRIVER, false);
 
 	if (node->driver != driver) {
 		pw_log_debug("%p: driver %d -> %d", node, node->driver, driver);
@@ -873,11 +884,9 @@ static void check_properties(struct pw_impl_node *node)
 		recalc_reason = "group changed";
 	}
 
-	str = pw_properties_get(node->properties, PW_KEY_NODE_WANT_DRIVER);
-	node->want_driver = str ? pw_properties_parse_bool(str) : false;
 
-	str = pw_properties_get(node->properties, PW_KEY_NODE_ALWAYS_PROCESS);
-	node->always_process = str ? pw_properties_parse_bool(str) : false;
+	node->want_driver = pw_properties_get_bool(node->properties, PW_KEY_NODE_WANT_DRIVER, false);
+	node->always_process = pw_properties_get_bool(node->properties, PW_KEY_NODE_ALWAYS_PROCESS, false);
 
 	if (node->always_process)
 		node->want_driver = true;
@@ -904,8 +913,7 @@ static void check_properties(struct pw_impl_node *node)
 			}
 		}
 	}
-	str = pw_properties_get(node->properties, PW_KEY_NODE_LOCK_QUANTUM);
-	node->lock_quantum = str ? pw_properties_parse_bool(str) : false;
+	node->lock_quantum = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_QUANTUM, false);
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_RATE))) {
                 if (sscanf(str, "%u/%u", &frac.num, &frac.denom) == 2 && frac.denom != 0) {
@@ -918,8 +926,7 @@ static void check_properties(struct pw_impl_node *node)
 			}
 		}
 	}
-	str = pw_properties_get(node->properties, PW_KEY_NODE_LOCK_RATE);
-	node->lock_rate = str ? pw_properties_parse_bool(str) : false;
+	node->lock_rate = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_RATE, false);
 
 	pw_log_debug("%p: driver:%d recalc:%s active:%d", node, node->driver,
 			recalc_reason, node->active);
@@ -1186,7 +1193,7 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
                 goto error_clean;
 	}
 
-	impl->work = pw_work_queue_new(this->context->main_loop);
+	impl->work = pw_context_get_work_queue(this->context);
 	if (impl->work == NULL) {
 		res = -errno;
 		goto error_clean;
@@ -1736,6 +1743,8 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 	pw_log_debug("%p: destroy", impl);
 	pw_log_info("(%s-%u) destroy", node->name, node->info.id);
 
+	node_deactivate(node);
+
 	suspend_node(node);
 
 	pw_impl_node_emit_destroy(node);
@@ -1785,13 +1794,13 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 
 	pw_memblock_unref(node->activation);
 
-	pw_work_queue_destroy(impl->work);
-
 	pw_param_clear(&impl->param_list, SPA_ID_INVALID);
 	pw_param_clear(&impl->pending_list, SPA_ID_INVALID);
 
 	pw_map_clear(&node->input_port_map);
 	pw_map_clear(&node->output_port_map);
+
+	pw_work_queue_cancel(impl->work, node, SPA_ID_INVALID);
 
 	pw_properties_free(node->properties);
 
@@ -2051,23 +2060,6 @@ static void on_state_complete(void *obj, void *data, int res, uint32_t seq)
 	node_update_state(node, state, res, error);
 }
 
-static void node_activate(struct pw_impl_node *this)
-{
-	struct pw_impl_port *port;
-
-	pw_log_debug("%p: activate", this);
-	spa_list_for_each(port, &this->input_ports, link) {
-		struct pw_impl_link *link;
-		spa_list_for_each(link, &port->links, input_link)
-			pw_impl_link_activate(link);
-	}
-	spa_list_for_each(port, &this->output_ports, link) {
-		struct pw_impl_link *link;
-		spa_list_for_each(link, &port->links, output_link)
-			pw_impl_link_activate(link);
-	}
-}
-
 /** Set the node state
  * \param node a \ref pw_impl_node
  * \param state a \ref pw_node_state
@@ -2080,7 +2072,7 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 {
 	int res = 0;
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
-	enum pw_node_state old = impl->pending;
+	enum pw_node_state old = impl->pending_state;
 
 	pw_log_debug("%p: set state (%s) %s -> %s, active %d pause_on_idle:%d", node,
 			pw_node_state_as_string(node->info.state),
@@ -2106,10 +2098,8 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 		break;
 
 	case PW_NODE_STATE_RUNNING:
-		if (node->active) {
-			node_activate(node);
+		if (node->active)
 			res = start_node(node);
-		}
 		break;
 
 	case PW_NODE_STATE_ERROR:
@@ -2126,10 +2116,10 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 		if (impl->pending_id != SPA_ID_INVALID) {
 			pw_log_debug("cancel state from %s to %s to %s",
 				pw_node_state_as_string(node->info.state),
-				pw_node_state_as_string(impl->pending),
+				pw_node_state_as_string(impl->pending_state),
 				pw_node_state_as_string(state));
 
-			if (impl->pending == PW_NODE_STATE_RUNNING &&
+			if (impl->pending_state == PW_NODE_STATE_RUNNING &&
 			    state < PW_NODE_STATE_RUNNING &&
 			    impl->pending_play) {
 				impl->pending_play = false;
@@ -2137,9 +2127,9 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 					&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
 			}
 			pw_work_queue_cancel(impl->work, node, impl->pending_id);
-			node->info.state = impl->pending;
+			node->info.state = impl->pending_state;
 		}
-		impl->pending = state;
+		impl->pending_state = state;
 		impl->pending_id = pw_work_queue_add(impl->work,
 				node, res, on_state_complete, SPA_INT_TO_PTR(state));
 	}
@@ -2168,4 +2158,10 @@ SPA_EXPORT
 bool pw_impl_node_is_active(struct pw_impl_node *node)
 {
 	return node->active;
+}
+
+SPA_EXPORT
+int pw_impl_node_send_command(struct pw_impl_node *node, const struct spa_command *command)
+{
+	return spa_node_send_command(node->node, command);
 }

@@ -29,8 +29,8 @@
 extern "C" {
 #endif
 
-/** \defgroup spa_debug SPA Debug
- *
+/** \defgroup spa_debug Debug
+ * Debugging utilities
  */
 
 /**

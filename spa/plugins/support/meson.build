@@ -9,9 +9,16 @@ spa_support_sources = [
   'system.c'
 ]
 
+simd_cargs = []
+
+if have_sse
+  simd_cargs += [sse_args, '-DHAVE_SSE']
+endif
+
 spa_support_lib = shared_library('spa-support',
   spa_support_sources,
   include_directories : [ spa_inc ],
+  c_args : [ simd_cargs ],
   dependencies : [ pthread_lib, epoll_shim_dep ],
   install : true,
   install_dir : spa_plugindir / 'support')
@@ -34,14 +41,19 @@ if not get_option('evl').disabled()
     install_dir : spa_plugindir / 'support')
 endif
 
-spa_dbus_sources = ['dbus.c']
+if dbus_dep.found()
+  spa_dbus_sources = ['dbus.c']
 
-spa_dbus_lib = shared_library('spa-dbus',
-  spa_dbus_sources,
-  include_directories : [ spa_inc],
-  dependencies : [dbus_dep, ],
-  install : true,
-  install_dir : spa_plugindir / 'support')
+  spa_dbus_lib = shared_library('spa-dbus',
+    spa_dbus_sources,
+    include_directories : [ spa_inc],
+    dependencies : [dbus_dep, ],
+    install : true,
+    install_dir : spa_plugindir / 'support')
+  spa_dbus_dep = declare_dependency(link_with: spa_dbus_lib)
+else
+  spa_dbus_dep = declare_dependency()
+endif
 
 
 if systemd_dep.found()

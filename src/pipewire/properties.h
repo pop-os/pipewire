@@ -34,7 +34,7 @@ extern "C" {
 #include <spa/utils/dict.h>
 #include <spa/utils/string.h>
 
-/** \defgroup pw_properties Key-Value pairs
+/** \defgroup pw_properties Properties
  *
  * Properties are used to pass around arbitrary key/value pairs.
  * Both keys and values are strings which keeps things simple.
@@ -96,6 +96,62 @@ pw_properties_setva(struct pw_properties *properties,
 		   const char *key, const char *format, va_list args) SPA_PRINTF_FUNC(3,0);
 const char *
 pw_properties_get(const struct pw_properties *properties, const char *key);
+
+int
+pw_properties_fetch_uint32(const struct pw_properties *properties, const char *key, uint32_t *value);
+
+int
+pw_properties_fetch_int32(const struct pw_properties *properties, const char *key, int32_t *value);
+
+int
+pw_properties_fetch_uint64(const struct pw_properties *properties, const char *key, uint64_t *value);
+
+int
+pw_properties_fetch_int64(const struct pw_properties *properties, const char *key, int64_t *value);
+
+int
+pw_properties_fetch_bool(const struct pw_properties *properties, const char *key, bool *value);
+
+static inline uint32_t
+pw_properties_get_uint32(const struct pw_properties *properties, const char *key, uint32_t deflt)
+{
+	uint32_t val = deflt;
+	pw_properties_fetch_uint32(properties, key, &val);
+	return val;
+}
+
+static inline int32_t
+pw_properties_get_int32(const struct pw_properties *properties, const char *key, int32_t deflt)
+{
+	int32_t val = deflt;
+	pw_properties_fetch_int32(properties, key, &val);
+	return val;
+}
+
+static inline uint64_t
+pw_properties_get_uint64(const struct pw_properties *properties, const char *key, uint64_t deflt)
+{
+	uint64_t val = deflt;
+	pw_properties_fetch_uint64(properties, key, &val);
+	return val;
+}
+
+static inline int64_t
+pw_properties_get_int64(const struct pw_properties *properties, const char *key, int64_t deflt)
+{
+	int64_t val = deflt;
+	pw_properties_fetch_int64(properties, key, &val);
+	return val;
+}
+
+
+static inline bool
+pw_properties_get_bool(const struct pw_properties *properties, const char *key, bool deflt)
+{
+	bool val = deflt;
+	pw_properties_fetch_bool(properties, key, &val);
+	return val;
+}
 
 const char *
 pw_properties_iterate(const struct pw_properties *properties, void **state);

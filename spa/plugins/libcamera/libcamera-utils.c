@@ -116,7 +116,7 @@ static int spa_libcamera_clear_buffers(struct impl *this)
 		d = b->outbuf->datas;
 
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUTSTANDING)) {
-			spa_log_debug(this->log, "libcamera: queueing outstanding buffer %p", b);
+			spa_log_debug(this->log, "queueing outstanding buffer %p", b);
 			spa_libcamera_buffer_recycle(this, i);
 		}
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
@@ -386,7 +386,7 @@ next_fmtdesc:
 		spa_pod_builder_id(&b, info->format);
 	}
 
-	spa_log_info(this->log, "%s:: In have_size: Got width = %u height = %u\n", __FUNCTION__, width, height);
+	spa_log_info(this->log, "%s:: In have_size: Got width = %u height = %u", __FUNCTION__, width, height);
 
 	spa_pod_builder_prop(&b, SPA_FORMAT_VIDEO_size, 0);
 	spa_pod_builder_rectangle(&b, port->fmt.width, port->fmt.height);
@@ -454,7 +454,7 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 	info = find_format_info_by_media_type(format->media_type,
 					      format->media_subtype, video_format, 0);
 	if (info == NULL || size == NULL || framerate == NULL) {
-		spa_log_error(this->log, "libcamera: unknown media type %d %d %d", format->media_type,
+		spa_log_error(this->log, "unknown media type %d %d %d", format->media_type,
 			      format->media_subtype, video_format);
 		return -EINVAL;
 	}
@@ -470,7 +470,7 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 	if ((res = spa_libcamera_open(dev)) < 0)
 		return res;
 
-	spa_log_info(dev->log, "libcamera: set %s %dx%d %d/%d\n", (char *)&info->fourcc,
+	spa_log_info(dev->log, "set %s %dx%d %d/%d", (char *)&info->fourcc,
 		     fmt.width, fmt.height,
 		     fmt.denominator, fmt.numerator);
 
@@ -496,7 +496,7 @@ static int spa_libcamera_set_format(struct impl *this, struct spa_video_info *fo
 		SPA_PORT_FLAG_TERMINAL;
 	port->info.rate = SPA_FRACTION(port->rate.num, port->rate.denom);
 
-	spa_log_info(dev->log, " got format. width = %d height = %d and fmt = %s. bytesperline = %u sizeimage = %u\n", 
+	spa_log_info(dev->log, " got format. width = %d height = %d and fmt = %s. bytesperline = %u sizeimage = %u",
 		fmt.width, fmt.height,
 		(char *)&info->fourcc, fmt.bytesperline, fmt.sizeimage);
 
@@ -530,7 +530,7 @@ static int mmap_read(struct impl *this)
 	if(dev->camera) {
 		pOut = (struct OutBuf *)libcamera_get_ring_buffer_data(dev->camera);
 		if(!pOut) {
-			spa_log_debug(this->log, "Exiting %s as pOut is NULL\n", __FUNCTION__);
+			spa_log_debug(this->log, "Exiting %s as pOut is NULL", __FUNCTION__);
 			return -1;
 		}
 		/* update the read index of the ring buffer */
@@ -538,7 +538,7 @@ static int mmap_read(struct impl *this)
 
 		pDatas = pOut->datas;
 		if(NULL == pDatas) {
-			spa_log_debug(this->log, "Exiting %s on NULL pointer\n", __FUNCTION__);
+			spa_log_debug(this->log, "Exiting %s on NULL pointer", __FUNCTION__);
 			goto end;
 		}
 
@@ -546,14 +546,14 @@ static int mmap_read(struct impl *this)
 		b->outbuf->n_datas = pOut->n_datas;
 
 		if(NULL == b->outbuf->datas) {
-			spa_log_debug(this->log, "Exiting %s as b->outbuf->datas is NULL\n", __FUNCTION__);
+			spa_log_debug(this->log, "Exiting %s as b->outbuf->datas is NULL", __FUNCTION__);
 			goto end;
 		}
 
 		for(unsigned int i = 0;  i < pOut->n_datas; ++i) {
 			struct CamData *pData = &pDatas[i];
 			if(NULL == pData) {
-				spa_log_debug(this->log, "Exiting %s on NULL pointer\n", __FUNCTION__);
+				spa_log_debug(this->log, "Exiting %s on NULL pointer", __FUNCTION__);
 				goto end;
 			}
 			b->outbuf->datas[i].flags = SPA_DATA_FLAG_READABLE;
@@ -570,9 +570,9 @@ static int mmap_read(struct impl *this)
 			//b->outbuf->datas[i].chunk->stride = pData->sstride; /* FIXME:: This needs to be appropriately filled */
 			b->outbuf->datas[i].maxsize = pData->maxsize;
 
-			spa_log_trace(this->log,"Spa libcamera Source::%s:: got bufIdx = %d and ndatas = %d\t",
+			spa_log_trace(this->log,"Spa libcamera Source::%s:: got bufIdx = %d and ndatas = %d",
 				__FUNCTION__, pOut->bufIdx, pOut->n_datas);
-			spa_log_trace(this->log," data[%d] --> fd = %ld bytesused = %d sequence = %d\n",
+			spa_log_trace(this->log," data[%d] --> fd = %ld bytesused = %d sequence = %d",
 				i, b->outbuf->datas[i].fd, bytesused, sequence);
 		}
 	}
@@ -602,7 +602,7 @@ static int mmap_read(struct impl *this)
 	d[0].chunk->size = bytesused;
 	d[0].chunk->flags = 0;
 	d[0].data = b->ptr;
-	spa_log_trace(this->log,"%s:: b->ptr = %p d[0].data = %p\n",
+	spa_log_trace(this->log,"%s:: b->ptr = %p d[0].data = %p",
 				__FUNCTION__, b->ptr, d[0].data);
 	spa_list_append(&port->queue, &b->link);
 end:
@@ -638,12 +638,12 @@ static void libcamera_on_fd_events(struct spa_source *source)
 	}
 
 	if (mmap_read(this) < 0) {
-		spa_log_debug(this->log, "%s:: mmap_read failure\n", __FUNCTION__);
+		spa_log_debug(this->log, "%s:: mmap_read failure", __FUNCTION__);
 		return;
 	}
 
 	if (spa_list_is_empty(&port->queue)) {
-		spa_log_debug(this->log, "Exiting %s as spa list is empty\n", __FUNCTION__);
+		spa_log_debug(this->log, "Exiting %s as spa list is empty", __FUNCTION__);
 		return;
 	}
 
@@ -673,7 +673,8 @@ static int spa_libcamera_use_buffers(struct impl *this, struct spa_buffer **buff
 	if (n_buffers > 0) {
 		d = buffers[0]->datas;
 
-		if (d[0].type == SPA_DATA_MemPtr && d[0].data != NULL) {
+		if (d[0].type == SPA_DATA_MemFd ||
+		    (d[0].type == SPA_DATA_MemPtr && d[0].data != NULL)) {
 			port->memtype = SPA_DATA_MemPtr;
 		} else if (d[0].type == SPA_DATA_DmaBuf) {
 			port->memtype = SPA_DATA_DmaBuf;
@@ -692,10 +693,10 @@ static int spa_libcamera_use_buffers(struct impl *this, struct spa_buffer **buff
 		b->flags = BUFFER_FLAG_OUTSTANDING;
 		b->h = spa_buffer_find_meta_data(buffers[i], SPA_META_Header, sizeof(*b->h));
 
-		spa_log_debug(this->log, "libcamera: import buffer %p", buffers[i]);
+		spa_log_debug(this->log, "import buffer %p", buffers[i]);
 
 		if (buffers[i]->n_datas < 1) {
-			spa_log_error(this->log, "libcamera: invalid memory on buffer %p", buffers[i]);
+			spa_log_error(this->log, "invalid memory on buffer %p", buffers[i]);
 			return -EINVAL;
 		}
 
@@ -717,23 +718,23 @@ static int spa_libcamera_use_buffers(struct impl *this, struct spa_buffer **buff
 					}
 
 					b->ptr = d[j].data;
-					spa_log_debug(this->log, "libcamera: In spa_libcamera_use_buffers(). mmap ptr:%p for fd = %ld buffer: #%d",
+					spa_log_debug(this->log, "In spa_libcamera_use_buffers(). mmap ptr:%p for fd = %ld buffer: #%d",
 						d[j].data, d[j].fd, i);
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
 				} else {
 					b->ptr = d[j].data;
-					spa_log_debug(this->log, "libcamera: In spa_libcamera_use_buffers(). b->ptr = %p d[j].maxsize = %d for buffer: #%d",
+					spa_log_debug(this->log, "In spa_libcamera_use_buffers(). b->ptr = %p d[j].maxsize = %d for buffer: #%d",
 						d[j].data, d[j].maxsize, i);
 				}
-				spa_log_debug(this->log, "libcamera: In spa_libcamera_use_buffers(). setting b->ptr = %p for buffer: #%d on libcamera",
+				spa_log_debug(this->log, "In spa_libcamera_use_buffers(). setting b->ptr = %p for buffer: #%d on libcamera",
 						b->ptr, i);
 			}
 			else if (port->memtype == SPA_DATA_DmaBuf) {
 				d[j].fd = libcamera_get_fd(port->dev.camera, i, j);
-				spa_log_debug(this->log, "libcamera: Got fd = %ld for buffer: #%d", d[j].fd, i);
+				spa_log_debug(this->log, "Got fd = %ld for buffer: #%d", d[j].fd, i);
 			}
 			else {
-				spa_log_error(this->log, "libcamera: Exiting spa_libcamera_use_buffers() with -EIO");
+				spa_log_error(this->log, "Exiting spa_libcamera_use_buffers() with -EIO");
 				return -EIO;
 			}
 		}
@@ -753,7 +754,7 @@ mmap_init(struct impl *this,
 	unsigned int i, j;
 	struct spa_data *d;
 
-	spa_log_info(this->log, "libcamera: In mmap_init()");
+	spa_log_info(this->log, "In mmap_init()");
 
 	if (n_buffers > 0) {
 		d = buffers[0]->datas;
@@ -761,6 +762,9 @@ mmap_init(struct impl *this,
 		if (d[0].type != SPA_ID_INVALID &&
 		    d[0].type & (1u << SPA_DATA_DmaBuf)) {
 			port->memtype = SPA_DATA_DmaBuf;
+		} else if (d[0].type != SPA_ID_INVALID &&
+		    d[0].type & (1u << SPA_DATA_MemFd)) {
+			port->memtype = SPA_DATA_MemFd;
 		} else if (d[0].type & (1u << SPA_DATA_MemPtr)) {
 			port->memtype = SPA_DATA_MemPtr;
 		} else {
@@ -776,7 +780,7 @@ mmap_init(struct impl *this,
 		struct buffer *b;
 
 		if (buffers[i]->n_datas < 1) {
-			spa_log_error(this->log, "libcamera: invalid buffer data");
+			spa_log_error(this->log, "invalid buffer data");
 			return -EINVAL;
 		}
 
@@ -797,9 +801,10 @@ mmap_init(struct impl *this,
 			d[j].chunk->stride = port->fmt.bytesperline; /* FIXME:: This needs to be appropriately filled */
 			d[j].chunk->flags = 0;
 
-			if(port->memtype == SPA_DATA_DmaBuf) {
+			if (port->memtype == SPA_DATA_DmaBuf ||
+			    port->memtype == SPA_DATA_MemFd) {
 				d[j].fd = libcamera_get_fd(port->dev.camera, i, j);
-				spa_log_info(this->log, "libcamera: Got fd = %ld for buffer: #%d\n", d[j].fd, i);
+				spa_log_info(this->log, "Got fd = %ld for buffer: #%d", d[j].fd, i);
 				d[j].data = NULL;
 				SPA_FLAG_SET(b->flags, BUFFER_FLAG_ALLOCATED);
 			}
@@ -816,9 +821,9 @@ mmap_init(struct impl *this,
 				}
 				b->ptr = d[j].data;
 				SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
-				spa_log_info(this->log, "libcamera: mmap ptr:%p", d[j].data);
+				spa_log_info(this->log, "mmap ptr:%p", d[j].data);
 			} else {
-				spa_log_error(this->log, "libcamera: invalid buffer type");
+				spa_log_error(this->log, "invalid buffer type");
 				return -EIO;
 			}
 		}
@@ -853,7 +858,7 @@ static int spa_libcamera_stream_on(struct impl *this)
 	struct spa_libcamera_device *dev = &port->dev;
 
 	if (!dev->have_format) {
-		spa_log_error(this->log, "Exting %s with -EIO\n", __FUNCTION__);
+		spa_log_error(this->log, "Exting %s with -EIO", __FUNCTION__);
 		return -EIO;
 	}
 
@@ -873,7 +878,7 @@ static int spa_libcamera_stream_on(struct impl *this)
 	port->source.mask = SPA_IO_IN | SPA_IO_ERR;
 	port->source.rmask = 0;
 	if (port->source.fd < 0) {
-		spa_log_error(this->log, "Failed to create eventfd. Exting %s with -EIO\n", __FUNCTION__);
+		spa_log_error(this->log, "Failed to create eventfd. Exting %s with -EIO", __FUNCTION__);
 	} else {
 		spa_loop_add_source(this->data_loop, &port->source);
 		this->have_source = true;

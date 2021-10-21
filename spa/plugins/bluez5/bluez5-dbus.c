@@ -51,9 +51,12 @@
 #include <spa/utils/json.h>
 
 #include "codec-loader.h"
+#include "player.h"
 #include "defs.h"
 
-#define NAME "bluez5-monitor"
+static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5");
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
 
 enum backend_selection {
 	BACKEND_NONE = -2,
@@ -101,6 +104,7 @@ struct spa_bt_monitor {
 	struct spa_dict enabled_codecs;
 
 	unsigned int connection_info_supported:1;
+	unsigned int dummy_avrcp_player:1;
 
 	struct spa_bt_quirks *quirks;
 
@@ -206,7 +210,7 @@ static void battery_remove(struct spa_bt_device *device) {
 	if (!device->adapter->has_battery_provider || !device->has_battery)
 		return;
 
-	spa_log_debug(device->monitor->log, NAME": Removing virtual battery: %s", device->battery_path);
+	spa_log_debug(device->monitor->log, "Removing virtual battery: %s", device->battery_path);
 
 	m = dbus_message_new_signal(PIPEWIRE_BATTERY_PROVIDER,
 				      DBUS_INTERFACE_OBJECT_MANAGER,
@@ -224,7 +228,7 @@ static void battery_remove(struct spa_bt_device *device) {
 	dbus_message_iter_close_container(&i, &entry);
 
 	if (!dbus_connection_send(device->monitor->conn, m, NULL)) {
-		spa_log_error(device->monitor->log, NAME": sending " DBUS_SIGNAL_INTERFACES_REMOVED " failed");
+		spa_log_error(device->monitor->log, "sending " DBUS_SIGNAL_INTERFACES_REMOVED " failed");
 	}
 
 	dbus_message_unref(m);
@@ -265,7 +269,7 @@ static void battery_write_properties(DBusMessageIter *iter, struct spa_bt_device
 // Send current percentage to BlueZ
 static void battery_update(struct spa_bt_device *device)
 {
-	spa_log_debug(device->monitor->log, NAME": updating battery: %s", device->battery_path);
+	spa_log_debug(device->monitor->log, "updating battery: %s", device->battery_path);
 
 	DBusMessage *msg;
 	DBusMessageIter iter;
@@ -282,7 +286,7 @@ static void battery_update(struct spa_bt_device *device)
 	battery_write_properties(&iter, device);
 
 	if (!dbus_connection_send(device->monitor->conn, msg, NULL))
-		spa_log_error(device->monitor->log, NAME": Error updating battery");
+		spa_log_error(device->monitor->log, "Error updating battery");
 
 	dbus_message_unref(msg);
 }
@@ -310,13 +314,13 @@ static void battery_create(struct spa_bt_device *device) {
 	dbus_message_iter_close_container(&iter, &dict);
 
 	if (!dbus_connection_send(device->monitor->conn, msg, NULL)) {
-		spa_log_error(device->monitor->log, NAME": Failed to create virtual battery for %s", device->address);
+		spa_log_error(device->monitor->log, "Failed to create virtual battery for %s", device->address);
 		return;
 	}
 
 	dbus_message_unref(msg);
 
-	spa_log_debug(device->monitor->log, NAME": Created virtual battery for %s", device->address);
+	spa_log_debug(device->monitor->log, "Created virtual battery for %s", device->address);
 	device->has_battery = true;
 }
 
@@ -332,14 +336,14 @@ static void on_battery_provider_registered(DBusPendingCall *pending_call,
 	device->battery_pending_call = NULL;
 
 	if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
-		spa_log_error(device->monitor->log, NAME": Failed to register battery provider. Error: %s", dbus_message_get_error_name(reply));
-		spa_log_error(device->monitor->log, NAME": BlueZ Battery Provider is not available, won't retry to register it. Make sure you are running BlueZ 5.56+ with experimental features to use Battery Provider.");
+		spa_log_error(device->monitor->log, "Failed to register battery provider. Error: %s", dbus_message_get_error_name(reply));
+		spa_log_error(device->monitor->log, "BlueZ Battery Provider is not available, won't retry to register it. Make sure you are running BlueZ 5.56+ with experimental features to use Battery Provider.");
 		device->adapter->battery_provider_unavailable = true;
 		dbus_message_unref(reply);
 		return;
 	}
 
-	spa_log_debug(device->monitor->log, NAME": Registered Battery Provider");
+	spa_log_debug(device->monitor->log, "Registered Battery Provider");
 
 	device->adapter->has_battery_provider = true;
 
@@ -356,7 +360,7 @@ static void register_battery_provider(struct spa_bt_device *device)
 	DBusMessageIter message_iter;
 
 	if (device->battery_pending_call) {
-		spa_log_debug(device->monitor->log, NAME": Already registering battery provider");
+		spa_log_debug(device->monitor->log, "Already registering battery provider");
 		return;
 	}
 
@@ -366,7 +370,7 @@ static void register_battery_provider(struct spa_bt_device *device)
 		"RegisterBatteryProvider");
 
 	if (!method_call) {
-		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		spa_log_error(device->monitor->log, "Failed to register battery provider");
 		return;
 	}
 
@@ -378,14 +382,14 @@ static void register_battery_provider(struct spa_bt_device *device)
 	if (!dbus_connection_send_with_reply(device->monitor->conn, method_call, &device->battery_pending_call,
 					     DBUS_TIMEOUT_USE_DEFAULT)) {
 		dbus_message_unref(method_call);
-		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		spa_log_error(device->monitor->log, "Failed to register battery provider");
 		return;
 	}
 
 	dbus_message_unref(method_call);
 
 	if (!device->battery_pending_call) {
-		spa_log_error(device->monitor->log, NAME": Failed to register battery provider");
+		spa_log_error(device->monitor->log, "Failed to register battery provider");
 		return;
 	}
 
@@ -668,6 +672,15 @@ static int adapter_update_props(struct spa_bt_adapter *adapter,
 	return 0;
 }
 
+static void adapter_register_player(struct spa_bt_adapter *adapter)
+{
+	if (adapter->player_registered || !adapter->monitor->dummy_avrcp_player)
+		return;
+
+	if (spa_bt_player_register(adapter->dummy_player, adapter->path) == 0)
+		adapter->player_registered = true;
+}
+
 static int adapter_init_bus_type(struct spa_bt_monitor *monitor, struct spa_bt_adapter *d)
 {
 	char path[1024], buf[1024];
@@ -733,6 +746,12 @@ static struct spa_bt_adapter *adapter_create(struct spa_bt_monitor *monitor, con
 	if (d == NULL)
 		return NULL;
 
+	d->dummy_player = spa_bt_player_new(monitor->conn, monitor->log);
+	if (d->dummy_player == NULL) {
+		free(d);
+		return NULL;
+	}
+
 	d->monitor = monitor;
 	d->path = strdup(path);
 
@@ -748,6 +767,8 @@ static void adapter_free(struct spa_bt_adapter *adapter)
 {
 	struct spa_bt_monitor *monitor = adapter->monitor;
 	spa_log_debug(monitor->log, "%p", adapter);
+
+	spa_bt_player_destroy(adapter->dummy_player);
 
 	spa_list_remove(&adapter->link);
 	free(adapter->alias);
@@ -1251,7 +1272,7 @@ static void device_update_hw_volume_profiles(struct spa_bt_device *device)
 	if (!(bt_features & SPA_BT_FEATURE_HW_VOLUME))
 		device->hw_volume_profiles = 0;
 
-	spa_log_debug(monitor->log, NAME ": hw-volume-profiles:%08x", (int)device->hw_volume_profiles);
+	spa_log_debug(monitor->log, "hw-volume-profiles:%08x", (int)device->hw_volume_profiles);
 }
 
 static int device_update_props(struct spa_bt_device *device,
@@ -1407,6 +1428,12 @@ bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struc
 {
 	struct spa_bt_monitor *monitor = device->monitor;
 	struct spa_bt_remote_endpoint *ep;
+	const struct { enum spa_bluetooth_audio_codec codec; uint32_t mask; } quirks[] = {
+		{ SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ, SPA_BT_FEATURE_SBC_XQ },
+		{ SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM, SPA_BT_FEATURE_FASTSTREAM },
+		{ SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM_DUPLEX, SPA_BT_FEATURE_FASTSTREAM },
+	};
+	size_t i;
 
 	if (!is_a2dp_codec_enabled(device->monitor, codec))
 		return false;
@@ -1416,11 +1443,17 @@ bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struc
 		return (codec->codec_id == A2DP_CODEC_SBC && spa_streq(codec->name, "sbc"));
 	}
 
-	if (codec->id == SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ) {
-		uint32_t bt_features = (uint32_t)-1;
-		if (monitor->quirks)
-			spa_bt_quirks_get_features(monitor->quirks, device->adapter, device, &bt_features);
-		if (!(bt_features & SPA_BT_FEATURE_SBC_XQ))
+	/* Check codec quirks */
+	for (i = 0; i < SPA_N_ELEMENTS(quirks); ++i) {
+		uint32_t bt_features;
+
+		if (codec->id != quirks[i].codec)
+			continue;
+		if (monitor->quirks == NULL)
+			break;
+		if (spa_bt_quirks_get_features(monitor->quirks, device->adapter, device, &bt_features) < 0)
+			break;
+		if (!(bt_features & quirks[i].mask))
 			return false;
 	}
 
@@ -1721,6 +1754,8 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 	spa_bt_transport_destroy(transport);
 
 	if (transport->fd >= 0) {
+		spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
+
 		shutdown(transport->fd, SHUT_RDWR);
 		close(transport->fd);
 		transport->fd = -1;
@@ -2138,7 +2173,7 @@ static int transport_set_property_volume(struct spa_bt_transport *transport, uin
 	dbus_message_unref(m);
 
 	if (r == NULL) {
-		spa_log_error(monitor->log, NAME": set volume %u failed for transport %s (%s)",
+		spa_log_error(monitor->log, "set volume %u failed for transport %s (%s)",
 				value, transport->path, err.message);
 		dbus_error_free(&err);
 		return -EIO;
@@ -2233,6 +2268,8 @@ static int transport_acquire(void *data, bool optional)
 	spa_log_debug(monitor->log, "transport %p: %s %s, fd %d MTU %d:%d", transport, method,
 			transport->path, transport->fd, transport->read_mtu, transport->write_mtu);
 
+	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_PLAYING);
+
 	transport_sync_volume(transport);
 
 finish:
@@ -2248,8 +2285,10 @@ static int transport_release(void *data)
 	DBusError err;
 	bool is_idle = (transport->state == SPA_BT_TRANSPORT_STATE_IDLE);
 
-	spa_log_debug(monitor->log, NAME": transport %p: Release %s",
+	spa_log_debug(monitor->log, "transport %p: Release %s",
 			transport, transport->path);
+
+	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
 
 	close(transport->fd);
 	transport->fd = -1;
@@ -2356,25 +2395,25 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 
 	codec = *sw->codec_iter;
 
-	spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: consider codec %s for remote endpoint %s",
+	spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: consider codec %s for remote endpoint %s",
 	              sw, (*sw->codec_iter)->name, *sw->path_iter);
 
 	ep = device_remote_endpoint_find(sw->device, *sw->path_iter);
 
 	if (ep == NULL || ep->capabilities == NULL || ep->uuid == NULL) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: endpoint %s not valid, try next",
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: endpoint %s not valid, try next",
 		              sw, *sw->path_iter);
 		goto next;
 	}
 
 	/* Setup and check compatible configuration */
 	if (ep->codec != codec->codec_id) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: different codec, try next", sw);
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: different codec, try next", sw);
 		goto next;
 	}
 
 	if (!(sw->profile & spa_bt_profile_from_uuid(ep->uuid))) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: wrong uuid (%s) for profile, try next",
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: wrong uuid (%s) for profile, try next",
 		              sw, ep->uuid);
 		goto next;
 	}
@@ -2384,13 +2423,13 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 	} else if (sw->profile & SPA_BT_PROFILE_A2DP_SOURCE) {
 		local_endpoint_base = A2DP_SINK_ENDPOINT;
 	} else {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: bad profile (%d), try next",
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: bad profile (%d), try next",
 		              sw, sw->profile);
 		goto next;
 	}
 
 	if (a2dp_codec_to_endpoint(codec, local_endpoint_base, &local_endpoint) < 0) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: no endpoint for codec %s, try next",
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: no endpoint for codec %s, try next",
 		              sw, codec->name);
 		goto next;
 	}
@@ -2399,24 +2438,24 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 				   &sw->device->monitor->default_audio_info,
 				   sw->device->settings, config);
 	if (res < 0) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: incompatible capabilities (%d), try next",
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: incompatible capabilities (%d), try next",
 		              sw, res);
 		goto next;
 	}
 	config_size = res;
 
-	spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: configuration %d", sw, config_size);
+	spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: configuration %d", sw, config_size);
 	for (i = 0; i < config_size; i++)
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p:     %d: %02x", sw, i, config[i]);
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p:     %d: %02x", sw, i, config[i]);
 
 	/* org.bluez.MediaEndpoint1.SetConfiguration on remote endpoint */
 	m = dbus_message_new_method_call(BLUEZ_SERVICE, ep->path, BLUEZ_MEDIA_ENDPOINT_INTERFACE, "SetConfiguration");
 	if (m == NULL) {
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: dbus allocation failure, try next", sw);
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: dbus allocation failure, try next", sw);
 		goto next;
 	}
 
-	spa_log_info(sw->device->monitor->log, NAME": a2dp codec switch %p: trying codec %s for endpoint %s, local endpoint %s",
+	spa_log_info(sw->device->monitor->log, "a2dp codec switch %p: trying codec %s for endpoint %s, local endpoint %s",
 	             sw, codec->name, ep->path, local_endpoint);
 
 	dbus_message_iter_init_append(m, &iter);
@@ -2430,7 +2469,7 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 	dbus_ret = dbus_connection_send_with_reply(sw->device->monitor->conn, m, &sw->pending, -1);
 
 	if (!dbus_ret || sw->pending == NULL) {
-		spa_log_error(sw->device->monitor->log, NAME": a2dp codec switch %p: dbus call failure, try next", sw);
+		spa_log_error(sw->device->monitor->log, "a2dp codec switch %p: dbus call failure, try next", sw);
 		dbus_message_unref(m);
 		goto next;
 	}
@@ -2439,7 +2478,7 @@ static bool a2dp_codec_switch_process_current(struct spa_bt_a2dp_codec_switch *s
 	dbus_message_unref(m);
 
 	if (!dbus_ret) {
-		spa_log_error(sw->device->monitor->log, NAME": a2dp codec switch %p: dbus set notify failure", sw);
+		spa_log_error(sw->device->monitor->log, "a2dp codec switch %p: dbus set notify failure", sw);
 		goto next;
 	}
 
@@ -2469,7 +2508,7 @@ static void a2dp_codec_switch_process(struct spa_bt_a2dp_codec_switch *sw)
 	};
 
 	/* Didn't find any suitable endpoint. Report failure. */
-	spa_log_info(sw->device->monitor->log, NAME": a2dp codec switch %p: failed to get an endpoint", sw);
+	spa_log_info(sw->device->monitor->log, "a2dp codec switch %p: failed to get an endpoint", sw);
 	spa_bt_device_emit_codec_switched(sw->device, -ENODEV);
 	spa_bt_device_check_profiles(sw->device, false);
 	a2dp_codec_switch_free(sw);
@@ -2494,7 +2533,7 @@ static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 		struct spa_bt_a2dp_codec_switch *t;
 
 		/* This codec switch has been canceled. Switch to the newest one. */
-		spa_log_debug(sw->device->monitor->log, NAME": a2dp codec switch %p: canceled, go to new switch", sw);
+		spa_log_debug(sw->device->monitor->log, "a2dp codec switch %p: canceled, go to new switch", sw);
 
 		if (r != NULL)
 			dbus_message_unref(r);
@@ -2510,14 +2549,14 @@ static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 
 	if (r == NULL) {
 		spa_log_error(sw->device->monitor->log,
-		              NAME": a2dp codec switch %p: empty reply from dbus, trying next",
+		              "a2dp codec switch %p: empty reply from dbus, trying next",
 		              sw);
 		goto next;
 	}
 
 	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
 		spa_log_debug(sw->device->monitor->log,
-		              NAME": a2dp codec switch %p: failed (%s), trying next",
+		              "a2dp codec switch %p: failed (%s), trying next",
 		              sw, dbus_message_get_error_name(r));
 		dbus_message_unref(r);
 		goto next;
@@ -2526,7 +2565,7 @@ static void a2dp_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 	dbus_message_unref(r);
 
 	/* Success */
-	spa_log_info(sw->device->monitor->log, NAME": a2dp codec switch %p: success", sw);
+	spa_log_info(sw->device->monitor->log, "a2dp codec switch %p: success", sw);
 	spa_bt_device_emit_codec_switched(sw->device, 0);
 	spa_bt_device_check_profiles(sw->device, false);
 	a2dp_codec_switch_free(sw);
@@ -2659,7 +2698,7 @@ int spa_bt_device_ensure_a2dp_codec(struct spa_bt_device *device, const struct a
 		 * request.
 		 */
 		spa_log_debug(sw->device->monitor->log,
-		             NAME": a2dp codec switch: already in progress, canceling previous");
+		             "a2dp codec switch: already in progress, canceling previous");
 
 		spa_list_prepend(&device->codec_switch_list, &sw->device_link);
 	} else {
@@ -3346,12 +3385,12 @@ static int switch_backend(struct spa_bt_monitor *monitor, struct spa_bt_backend 
 	return 0;
 }
 
-static void reselect_backend(struct spa_bt_monitor *monitor)
+static void reselect_backend(struct spa_bt_monitor *monitor, bool silent)
 {
 	struct spa_bt_backend *backend;
 	size_t i;
 
-	spa_log_debug(monitor->log, NAME": re-selecting HFP/HSP backend");
+	spa_log_debug(monitor->log, "re-selecting HFP/HSP backend");
 
 	if (monitor->backend_selection == BACKEND_NONE) {
 		spa_bt_backend_unregister_profiles(monitor->backend);
@@ -3369,8 +3408,12 @@ static void reselect_backend(struct spa_bt_monitor *monitor)
 			return;
 	}
 
-	spa_log_error(monitor->log, "Failed to start HFP/HSP backend %s",
-			backend ? backend->name : "none");
+	spa_bt_backend_unregister_profiles(monitor->backend);
+	monitor->backend = NULL;
+
+	if (!silent)
+		spa_log_error(monitor->log, "Failed to start HFP/HSP backend %s",
+				backend ? backend->name : "none");
 }
 
 static void interface_added(struct spa_bt_monitor *monitor,
@@ -3394,11 +3437,12 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		}
 		adapter_update_props(a, props_iter, NULL);
 		adapter_register_application(a);
+		adapter_register_player(a);
 	}
 	else if (spa_streq(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE)) {
 		if (monitor->backends[BACKEND_NATIVE])
 			monitor->backends[BACKEND_NATIVE]->available = true;
-		reselect_backend(monitor);
+		reselect_backend(monitor, false);
 	}
 	else if (spa_streq(interface_name, BLUEZ_DEVICE_INTERFACE)) {
 		struct spa_bt_device *d;
@@ -3546,7 +3590,7 @@ static void get_managed_objects_reply(DBusPendingCall *pending, void *user_data)
 		dbus_message_iter_next(&it[1]);
 	}
 
-	reselect_backend(monitor);
+	reselect_backend(monitor, false);
 
 	monitor->objects_listed = true;
 
@@ -3588,7 +3632,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 					   DBUS_TYPE_STRING, &old_owner,
 					   DBUS_TYPE_STRING, &new_owner,
 					   DBUS_TYPE_INVALID)) {
-			spa_log_error(monitor->log, NAME": Failed to parse org.freedesktop.DBus.NameOwnerChanged: %s", err.message);
+			spa_log_error(monitor->log, "Failed to parse org.freedesktop.DBus.NameOwnerChanged: %s", err.message);
 			goto fail;
 		}
 
@@ -3598,6 +3642,11 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 
 			if (has_old_owner) {
 				spa_log_debug(monitor->log, "Bluetooth daemon disappeared");
+
+				if (monitor->backends[BACKEND_NATIVE])
+					monitor->backends[BACKEND_NATIVE]->available = false;
+
+				reselect_backend(monitor, true);
 			}
 
 			if (has_old_owner || has_new_owner) {
@@ -3616,10 +3665,6 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 					device_free(d);
 				spa_list_consume(a, &monitor->adapter_list, link)
 					adapter_free(a);
-
-				if (monitor->backends[BACKEND_NATIVE])
-					monitor->backends[BACKEND_NATIVE]->available = false;
-				reselect_backend(monitor);
 			}
 
 			if (has_new_owner) {
@@ -3629,11 +3674,11 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 		} else if (spa_streq(name, OFONO_SERVICE)) {
 			if (monitor->backends[BACKEND_OFONO])
 				monitor->backends[BACKEND_OFONO]->available = (new_owner && *new_owner);
-			reselect_backend(monitor);
+			reselect_backend(monitor, false);
 		} else if (spa_streq(name, HSPHFPD_SERVICE)) {
 			if (monitor->backends[BACKEND_HSPHFPD])
 				monitor->backends[BACKEND_HSPHFPD]->available = (new_owner && *new_owner);
-			reselect_backend(monitor);
+			reselect_backend(monitor, false);
 		}
 	} else if (dbus_message_is_signal(m, "org.freedesktop.DBus.ObjectManager", "InterfacesAdded")) {
 		DBusMessageIter it;
@@ -3644,7 +3689,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			goto finish;
 
 		if (!dbus_message_iter_init(m, &it) || !spa_streq(dbus_message_get_signature(m), "oa{sa{sv}}")) {
-			spa_log_error(monitor->log, NAME": Invalid signature found in InterfacesAdded");
+			spa_log_error(monitor->log, "Invalid signature found in InterfacesAdded");
 			goto finish;
 		}
 
@@ -3658,7 +3703,7 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			goto finish;
 
 		if (!dbus_message_iter_init(m, &it) || !spa_streq(dbus_message_get_signature(m), "oas")) {
-			spa_log_error(monitor->log, NAME": Invalid signature found in InterfacesRemoved");
+			spa_log_error(monitor->log, "Invalid signature found in InterfacesRemoved");
 			goto finish;
 		}
 
@@ -3974,7 +4019,7 @@ static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict 
 	spa_json_init(&it, str, strlen(str));
 
 	if (spa_json_enter_array(&it, &it_array) <= 0) {
-		spa_log_error(this->log, NAME": property bluez5.codecs '%s' is not an array", str);
+		spa_log_error(this->log, "property bluez5.codecs '%s' is not an array", str);
 		goto fallback;
 	}
 
@@ -3992,7 +4037,7 @@ static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict 
 			if (spa_dict_lookup_item(&this->enabled_codecs, codec->name) != NULL)
 				continue;
 
-			spa_log_debug(this->log, NAME": enabling codec %s", codec->name);
+			spa_log_debug(this->log, "enabling codec %s", codec->name);
 
 			spa_assert(this->enabled_codecs.n_items < num_codecs);
 
@@ -4009,14 +4054,14 @@ static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict 
 	for (i = 0; a2dp_codecs[i]; ++i) {
 		const struct a2dp_codec *codec = a2dp_codecs[i];
 		if (!is_a2dp_codec_enabled(this, codec))
-			spa_log_debug(this->log, NAME": disabling codec %s", codec->name);
+			spa_log_debug(this->log, "disabling codec %s", codec->name);
 	}
 	return 0;
 
 fallback:
 	for (i = 0; a2dp_codecs[i]; ++i) {
 		const struct a2dp_codec *codec = a2dp_codecs[i];
-		spa_log_debug(this->log, NAME": enabling codec %s", codec->name);
+		spa_log_debug(this->log, "enabling codec %s", codec->name);
 		codecs[i].key = codec->name;
 		codecs[i].value = "true";
 	}
@@ -4049,6 +4094,8 @@ impl_init(const struct spa_handle_factory *factory,
 	this->main_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
 	this->plugin_loader = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_PluginLoader);
 
+	spa_log_topic_init(this->log, &log_topic);
+
 	if (this->dbus == NULL) {
 		spa_log_error(this->log, "a dbus is needed");
 		return -EINVAL;
@@ -4066,14 +4113,14 @@ impl_init(const struct spa_handle_factory *factory,
 
 	this->a2dp_codecs = load_a2dp_codecs(this->plugin_loader, this->log);
 	if (this->a2dp_codecs == NULL) {
-		spa_log_error(this->log, NAME ": failed to load required A2DP codec plugins");
+		spa_log_error(this->log, "failed to load required A2DP codec plugins");
 		res = -EIO;
 		goto fail;
 	}
 
 	this->quirks = spa_bt_quirks_create(info, this->log);
 	if (this->quirks == NULL) {
-		spa_log_error(this->log, NAME ": failed to parse quirk table");
+		spa_log_error(this->log, "failed to parse quirk table");
 		res = -EINVAL;
 		goto fail;
 	}
@@ -4144,6 +4191,11 @@ impl_init(const struct spa_handle_factory *factory,
 			else if (spa_streq(str, "native"))
 				this->backend_selection = BACKEND_NATIVE;
 		}
+
+		if ((str = spa_dict_lookup(info, "bluez5.dummy-avrcp-player")) != NULL)
+			this->dummy_avrcp_player = spa_atob(str);
+		else
+			this->dummy_avrcp_player = true;
 	}
 
 	register_media_application(this);

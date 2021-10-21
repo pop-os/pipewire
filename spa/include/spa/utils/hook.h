@@ -32,7 +32,7 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 
-/** \defgroup spa_interfaces SPA Interfaces
+/** \defgroup spa_interfaces Interfaces
  *
  * \brief Generic implementation of implementation-independent interfaces
  *
@@ -171,12 +171,15 @@ struct spa_interface {
 /**
  * Invoke method named \a method in the \a callbacks.
  * The \a method_type defines the type of the method struct.
+ * Returns true if the method could be called, false otherwise.
  */
 #define spa_callbacks_call(callbacks,type,method,vers,...)			\
 ({										\
 	const type *_f = (const type *) (callbacks)->funcs;			\
-	if (SPA_LIKELY(SPA_CALLBACK_CHECK(_f,method,vers)))			\
+	bool _res = SPA_CALLBACK_CHECK(_f,method,vers);				\
+	if (SPA_LIKELY(_res))							\
 		_f->method((callbacks)->data, ## __VA_ARGS__);			\
+	_res;									\
 })
 
 /**
@@ -186,6 +189,16 @@ struct spa_interface {
 ({										\
 	const type *_f = (const type *) (callbacks)->funcs;			\
 	SPA_CALLBACK_VERSION_MIN(_f,vers);					\
+})
+
+/**
+ * True if the \a callbacks contains \a method of version
+ * \a vers, false otherwise
+ */
+#define spa_callback_check(callbacks,type,method,vers)				\
+({										\
+	const type *_f = (const type *) (callbacks)->funcs;			\
+	SPA_CALLBACK_CHECK(_f,method,vers);					\
 })
 
 /**
@@ -203,17 +216,24 @@ struct spa_interface {
 })
 
 /**
- * True if the \a iface's \a callbacks are of version \a vers, false otherwise
+ * True if the \a iface's callbacks are of version \a vers, false otherwise
  */
-#define spa_interface_callback_version_min(iface,method_type,vers)				\
+#define spa_interface_callback_version_min(iface,method_type,vers)		\
    spa_callback_version_min(&(iface)->cb, method_type, vers)
+
+/**
+ * True if the \a iface's callback \a method is of version \a vers
+ * and exists, false otherwise
+ */
+#define spa_interface_callback_check(iface,method_type,method,vers)		\
+   spa_callback_check(&(iface)->cb, method_type, method, vers)
 
 /**
  * Invoke method named \a method in the callbacks on the given interface object.
  * The \a method_type defines the type of the method struct, not the interface
  * itself.
  */
-#define spa_interface_call(iface,method_type,method,vers,...)				\
+#define spa_interface_call(iface,method_type,method,vers,...)			\
 	spa_callbacks_call(&(iface)->cb,method_type,method,vers,##__VA_ARGS__)
 
 /**
@@ -230,7 +250,7 @@ struct spa_interface {
  * \}
  */
 
-/** \defgroup spa_hooks SPA Hooks
+/** \defgroup spa_hooks Hooks
  *
  * A SPA Hook is a data structure to keep track of callbacks. It is similar to
  * the \ref spa_interfaces and typically used where an implementation allows
@@ -400,22 +420,20 @@ spa_hook_list_join(struct spa_hook_list *list,
  * called */
 #define spa_hook_list_do_call(l,start,type,method,vers,once,...)		\
 ({										\
-	struct spa_hook_list *list = l;						\
-	struct spa_list *s = start ? (struct spa_list *)start : &list->list;	\
-	struct spa_hook cursor = { 0 }, *ci;					\
-	int count = 0;								\
-	spa_list_cursor_start(cursor, s, link);					\
-	spa_list_for_each_cursor(ci, cursor, &list->list, link) {		\
-		const type *_f = (const type *)ci->cb.funcs;			\
-		if (SPA_LIKELY(SPA_CALLBACK_CHECK(_f,method,vers))) {		\
-			_f->method(ci->cb.data, ## __VA_ARGS__);		\
-			count++;						\
+	struct spa_hook_list *_list = l;					\
+	struct spa_list *_s = start ? (struct spa_list *)start : &_list->list;	\
+	struct spa_hook _cursor = { 0 }, *_ci;					\
+	int _count = 0;								\
+	spa_list_cursor_start(_cursor, _s, link);				\
+	spa_list_for_each_cursor(_ci, _cursor, &_list->list, link) {		\
+		if (spa_callbacks_call(&_ci->cb,type,method,vers, ## __VA_ARGS__)) {		\
+			_count++;						\
 			if (once)						\
 				break;						\
 		}								\
 	}									\
-	spa_list_cursor_end(cursor, link);					\
-	count;									\
+	spa_list_cursor_end(_cursor, link);					\
+	_count;									\
 })
 
 /**

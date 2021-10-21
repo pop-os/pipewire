@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-/** \defgroup pw_impl_node Node
+/** \defgroup pw_impl_node Node Impl
  *
  * The node object processes data. The node has a list of
  * input and output ports (\ref pw_impl_port) on which it
@@ -173,6 +173,8 @@ int pw_impl_node_set_active(struct pw_impl_node *node, bool active);
 /** Check if a node is active */
 bool pw_impl_node_is_active(struct pw_impl_node *node);
 
+/** Check if a node is active, Since 0.3.39 */
+int pw_impl_node_send_command(struct pw_impl_node *node, const struct spa_command *command);
 /**
  * \}
  */

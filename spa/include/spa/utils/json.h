@@ -37,7 +37,8 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 
-/** \defgroup spa_json SPA JSON Parser
+/** \defgroup spa_json JSON
+ * Relaxed JSON variant parsing
  */
 
 /**

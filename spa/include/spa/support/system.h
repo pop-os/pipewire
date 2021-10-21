@@ -37,8 +37,12 @@ struct itimerspec;
 #include <spa/utils/defs.h>
 #include <spa/utils/hook.h>
 
+/** \defgroup spa_system System
+ * I/O, clock, polling, timer, and signal interfaces
+ */
+
 /**
- * \addtogroup spa_support
+ * \addtogroup spa_system
  * \{
  */
 

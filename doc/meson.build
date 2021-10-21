@@ -12,47 +12,10 @@ else
   doxyfile_conf.set('HAVE_DOT', 'NO')
 endif
 
-inputs = []
-foreach h : pipewire_headers
-  inputs += meson.source_root() / 'src' / 'pipewire' / h
-endforeach
-foreach h : pipewire_sources
-  inputs += meson.source_root() / 'src' / 'pipewire' / h
-endforeach
-foreach h : module_sources
-  inputs += meson.source_root() / 'src' / 'modules' / h
-endforeach
-foreach h : media_session_sources
-  inputs += meson.source_root() / 'src' / 'media-session' / h
-endforeach
-inputs += meson.source_root() / 'test' / 'pwtest.h'
-
-# SPA headers use static inline functions. Doxygen doesn't extract those
-# unless we have EXTRACT_STATIC set - but we don't want it to extract
-# everything in the rest of the tree.
-# The shell script here basically does a:
-#   cp spa/* builddir/spa/ && sed -i 's/^static//' buildir/spa/**.h
-# The copied files are passed to doxygen as input and they are parsed as
-# normal functions.
-# Because this uses globbing, this target won't rebuild if the headers
-# change but meh.
-sed = find_program('sed', required: false)
-summary({'sed (for SPA docs)': sed.found()}, bool_yn: true, section: 'Optional programs')
-if sed.found()
-  spa_srcdir = meson.source_root() / 'spa' / 'include' / 'spa'
-  spa_dstdir = meson.current_build_dir() / 'spa'
-  spa_strip_static = custom_target(
-    'spa-strip-static',
-    command: [ find_program('strip-static.sh'), spa_srcdir, spa_dstdir ],
-    build_by_default: true,
-    output: 'spa',
-  )
-else
-  spa_strip_static = []
-endif
-
 # Note: order here is how doxygen will expose the pages in the sidebar
+# api-tree.dox should be first to determine ordering of Modules.
 extra_docs = [
+  'api-tree.dox',
   'index.dox',
   'overview.dox',
   'pipewire.dox',
@@ -67,8 +30,6 @@ extra_docs = [
   'pipewire-session-manager.dox',
   'pipewire-objects-design.dox',
   'pipewire-audio.dox',
-  'media-session.dox',
-  'api.dox',
   'tutorial.dox',
   'tutorial1.dox',
   'tutorial2.dox',
@@ -76,6 +37,7 @@ extra_docs = [
   'tutorial4.dox',
   'tutorial5.dox',
   'tutorial6.dox',
+  'api.dox',
   'spa-index.dox',
   'spa-plugins.dox',
   'spa-design.dox',
@@ -85,17 +47,93 @@ extra_docs = [
   'dma-buf.dox',
 ]
 
+inputs = []
 foreach extra : extra_docs
   inputs += meson.source_root() / 'doc' / extra
 endforeach
+foreach h : pipewire_headers
+  inputs += meson.source_root() / 'src' / 'pipewire' / h
+endforeach
+foreach h : pipewire_ext_headers
+  inputs += meson.source_root() / 'src' / 'pipewire' / 'extensions' / h
+endforeach
+foreach h : pipewire_ext_sm_headers
+  inputs += meson.source_root() / 'src' / 'pipewire' / 'extensions' / h
+endforeach
+foreach h : pipewire_sources
+  inputs += meson.source_root() / 'src' / 'pipewire' / h
+endforeach
+foreach h : module_sources
+  inputs += meson.source_root() / 'src' / 'modules' / h
+endforeach
+inputs += meson.source_root() / 'test' / 'pwtest.h'
+input_dirs = [ meson.source_root() / 'spa' / 'include' / 'spa' ]
+
+path_prefixes = [
+  meson.source_root() / 'src',
+  meson.source_root() / 'spa' / 'include',
+  meson.source_root(),
+]
 
 cssfiles = [
   meson.source_root() / 'doc' / 'doxygen-awesome.css',
   meson.source_root() / 'doc' / 'custom.css'
 ]
 
-doxyfile_conf.set('inputs', ' '.join(inputs + [spa_dstdir]))
+# Example files (in order from simple to esoteric)
+example_files = [
+  'tutorial1.c',
+  'tutorial2.c',
+  'tutorial3.c',
+  'tutorial4.c',
+  'tutorial5.c',
+  'tutorial6.c',
+  'audio-src.c',
+  'audio-dsp-src.c',
+  'audio-dsp-filter.c',
+  'video-play.c',
+  'video-src.c',
+  'video-dsp-play.c',
+  'video-play-pull.c',
+  'video-play-reneg.c',
+  'video-src-alloc.c',
+  'video-src-reneg.c',
+  'export-sink.c',
+  'export-source.c',
+  'export-spa.c',
+  'export-spa-device.c',
+  'bluez-session.c',
+  'local-v4l2.c',
+  'spa/examples/adapter-control.c',
+  'spa/examples/example-control.c',
+  'spa/examples/local-libcamera.c',
+  'spa/examples/local-v4l2.c',
+]
+
+example_doxygen = []
+example_ref = []
+foreach h : example_files
+  example_doxygen += ['\\example ' + h,
+                      '\\snippet{doc} ' + h + ' title',
+                      '<br>',
+                      '\\snippet{doc} ' + h + ' doc']
+  example_ref += ['- \\ref ' + h + ' "": \snippet{doc} ' + h + ' title']
+endforeach
+
+examples_dox_conf = configuration_data()
+examples_dox_conf.set('example_doxygen', '\n'.join(example_doxygen))
+examples_dox_conf.set('example_ref', '\n'.join(example_ref))
+examples_dox = configure_file(input: 'examples.dox.in',
+                              output: 'examples.dox',
+                              configuration: examples_dox_conf)
+
+input_dirs += [ 'doc/examples.dox' ]
+
+doxyfile_conf.set('inputs', ' '.join(inputs + input_dirs))
 doxyfile_conf.set('cssfiles', ' '.join(cssfiles))
+doxyfile_conf.set('path_prefixes', ' '.join(path_prefixes))
+doxyfile_conf.set('c_input_filter', meson.source_root() / 'doc' / 'input-filter.sh')
+doxyfile_conf.set('h_input_filter', meson.source_root() / 'doc' / 'input-filter-h.sh')
 
 doxyfile = configure_file(input: 'Doxyfile.in',
                           output: 'Doxyfile',
@@ -107,9 +145,8 @@ if docdir == ''
 endif
 
 html_target = custom_target('pipewire-docs',
-                            input: [ doxyfile ] + inputs + cssfiles,
+                            input: [ doxyfile, examples_dox ] + inputs + cssfiles,
                             output: [ 'html' ],
                             command: [ doxygen, doxyfile ],
-                            depends: spa_strip_static,
                             install: true,
                             install_dir: docdir)

@@ -22,6 +22,12 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+/*
+ [title]
+ Using the \ref spa_device "SPA Device API", among other things.
+ [title]
+ */
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -42,7 +48,7 @@
 
 #include "pipewire/pipewire.h"
 
-#define NAME "media-session"
+#define NAME "bluez-session"
 
 struct impl;
 struct object;

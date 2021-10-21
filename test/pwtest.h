@@ -41,7 +41,7 @@ extern "C" {
 #include "spa/support/plugin.h"
 
 /**
- * \defgroup pwtest The pwtest PipeWire Test Suite
+ * \defgroup pwtest Test Suite
  * \brief `pwtest` is a test runner framework for PipeWire.
  *
  * It's modelled after other
@@ -60,7 +60,7 @@ extern "C" {
  * - \ref PWTEST_FAIL for a test case failure. Usually you should not return this
  *   value but rely on the `pwtest` macros to handle this case.
  * - \ref PWTEST_SKIP to skip the current test
- * - \ref PWTEST_SYSTEM_ERROR in case of an error that would cause the test to not run propertly. This is not a test case failure but some required precondition not being met.
+ * - \ref PWTEST_SYSTEM_ERROR in case of an error that would cause the test to not run properly. This is not a test case failure but some required precondition not being met.
  *
  * ```c
  * #include "pwtest.h"
@@ -85,7 +85,7 @@ extern "C" {
  * ...
  * ```
  *
- * `pwtest` provides comparision macros for most basic data types with the `lt`,
+ * `pwtest` provides comparison macros for most basic data types with the `lt`,
  * `le`, `eq`, `gt`, `ge` suffixes (`<, <=, ==, >, >=`). Tests usually should not
  * return `PWTEST_FAIL` directly, use the `pwtest_fail()` macros if .
  *
@@ -141,6 +141,9 @@ extern "C" {
  * Disabling forking makes it easy to debug but should always be used with
  * `--filter-test`. Any test that modifies its environment will affect
  * subsequent tests and may invalidate the test results.
+ *
+ * Where a test has multiple iterations, use `--filter-iteration` to only run
+ * one single iteration.
  */
 
 /**
@@ -167,7 +170,7 @@ enum pwtest_result {
 					     Use the pwtest_ macros instead */
 	PWTEST_SKIP = 77,		/**< test was skipped */
 	PWTEST_TIMEOUT = 78,		/**< test aborted after timeout */
-	PWTEST_SYSTEM_ERROR = 79,	/**< unrelated error occured */
+	PWTEST_SYSTEM_ERROR = 79,	/**< unrelated error occurred */
 };
 
 /**

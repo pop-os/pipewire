@@ -38,13 +38,13 @@ static const struct quality blackman_qualities[] = {
 	{ 16, 0.70, },
 	{ 24, 0.76, },
 	{ 32, 0.8, },
-	{ 48, 0.865, },                  /* default */
+	{ 48, 0.85, },                  /* default */
 	{ 64, 0.90, },
 	{ 80, 0.92, },
 	{ 96, 0.933, },
 	{ 128, 0.950, },
 	{ 144, 0.955, },
-	{ 160, 0.960, },
+	{ 160, 0.958, },
 	{ 192, 0.965, },
 	{ 256, 0.975, },
 	{ 896, 0.997, },
@@ -60,10 +60,12 @@ static inline double sinc(double x)
 
 static inline double blackman(double x, double n_taps)
 {
-	double w = 2.0 * x * M_PI / n_taps + M_PI;
-	return 0.3635819 - 0.4891775 * cos(w) +
-		0.1365995 * cos(2 * w) - 0.0106411 * cos(3 * w);
+	double alpha = 0.232;
+	x =  2.0 * M_PI * x / n_taps;
+	return (1.0 - alpha) / 2.0 + (1.0 / 2.0) * cos(x) +
+		(alpha / 2.0) * cos(2 * x);
 }
+
 
 static int build_filter(float *taps, uint32_t stride, uint32_t n_taps, uint32_t n_phases, double cutoff)
 {
@@ -85,10 +87,15 @@ static void inner_product_c(float *d, const float * SPA_RESTRICT s,
 		const float * SPA_RESTRICT taps, uint32_t n_taps)
 {
 	float sum = 0.0f;
+#if 1
+	uint32_t i, j, nt2 = n_taps/2;
+	for (i = 0, j = n_taps-1; i < nt2; i++, j--)
+		sum += s[i] * taps[i] + s[j] * taps[j];
+#else
 	uint32_t i;
-
 	for (i = 0; i < n_taps; i++)
 		sum += s[i] * taps[i];
+#endif
 	*d = sum;
 }
 
@@ -98,11 +105,18 @@ static void inner_product_ip_c(float *d, const float * SPA_RESTRICT s,
 {
 	float sum[2] = { 0.0f, 0.0f };
 	uint32_t i;
-
+#if 1
+	uint32_t j, nt2 = n_taps/2;
+	for (i = 0, j = n_taps-1; i < nt2; i++, j--) {
+		sum[0] += s[i] * t0[i] + s[j] * t0[j];
+		sum[1] += s[i] * t1[i] + s[j] * t1[j];
+	}
+#else
 	for (i = 0; i < n_taps; i++) {
 		sum[0] += s[i] * t0[i];
 		sum[1] += s[i] * t1[i];
 	}
+#endif
 	*d = (sum[1] - sum[0]) * x + sum[0];
 }
 

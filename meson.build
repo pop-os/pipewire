@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.38',
+  version : '0.3.39',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
@@ -190,11 +190,11 @@ cdata.set_quoted('PIPEWIRE_CONFDATADIR', pipewire_confdatadir)
 cdata.set_quoted('LOCALEDIR', pipewire_localedir)
 cdata.set_quoted('LIBDIR', pipewire_libdir)
 cdata.set_quoted('GETTEXT_PACKAGE', meson.project_name())
-cdata.set('PACKAGE', '"pipewire"')
-cdata.set('PACKAGE_NAME', '"PipeWire"')
-cdata.set('PACKAGE_STRING', '"PipeWire @0@"'.format(pipewire_version))
-cdata.set('PACKAGE_TARNAME', '"pipewire"')
-cdata.set('PACKAGE_URL', '"https://pipewire.org"')
+cdata.set_quoted('PACKAGE', 'pipewire')
+cdata.set_quoted('PACKAGE_NAME', 'PipeWire')
+cdata.set_quoted('PACKAGE_STRING', 'PipeWire @0@'.format(pipewire_version))
+cdata.set_quoted('PACKAGE_TARNAME', 'pipewire')
+cdata.set_quoted('PACKAGE_URL', 'https://pipewire.org')
 cdata.set_quoted('PACKAGE_VERSION', pipewire_version)
 cdata.set_quoted('MODULEDIR', modules_install_dir)
 cdata.set_quoted('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
@@ -322,10 +322,19 @@ mathlib = cc.find_library('m', required : false)
 rt_lib = cc.find_library('rt', required : false) # clock_gettime
 dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
-dbus_dep = dependency('dbus-1')
+dbus_dep = dependency('dbus-1', required : get_option('dbus'))
+summary({'dbus (Bluetooth, rtkit, portal, pw-reserve)': dbus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+if dbus_dep.found()
+  cdata.set('HAVE_DBUS', 1)
+endif
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 summary({'SDL 2': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 readline_dep = dependency('readline', required : false)
+
+if not readline_dep.found()
+  readline_dep = cc.find_library('readline', required: false)
+endif
+
 summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
@@ -406,7 +415,12 @@ libinotify_dep = (build_machine.system() == 'freebsd'
     : dependency('', required: false))
 
 # On FreeBSD, libintl library is required for gettext
-libintl_dep = cc.find_library('intl', required: false)
+libintl_dep = dependency('intl', required: false)
+
+if not libintl_dep.found()
+    libintl_dep = cc.find_library('intl', required: false)
+endif
+summary({'intl support': libintl_dep.found()}, bool_yn: true)
 
 need_alsa = get_option('pipewire-alsa').enabled() or get_option('session-managers').contains('media-session')
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: need_alsa)
@@ -436,6 +450,9 @@ configure_file(output : 'config.h',
 if not get_option('pipewire-jack').disabled()
   subdir('pipewire-jack')
 endif
+if not get_option('pipewire-v4l2').disabled()
+  subdir('pipewire-v4l2')
+endif
 
 if alsa_dep.found()
   subdir('pipewire-alsa/alsa-plugins')
@@ -459,8 +476,11 @@ if not get_option('man').disabled()
 endif
 
 setenv = find_program('pw-uninstalled.sh')
-run_target('pw-uninstalled', command : [setenv,
-    '-b@0@'.format(meson.build_root()), '-v@0@'.format(pipewire_version)])
+run_target('pw-uninstalled',
+  command : [setenv,
+             '-b@0@'.format(meson.build_root()),
+             '-v@0@'.format(pipewire_version)]
+)
 
 if meson.version().version_compare('>=0.58.0')
   devenv = environment()

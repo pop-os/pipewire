@@ -204,6 +204,15 @@ struct module *create_module_tunnel_sink(struct impl *impl, const char *argument
 	}
 
 	audio_info_to_props(&info, stream_props);
+	if ((str = pw_properties_get(props, "format")) != NULL) {
+		uint32_t id = format_paname2id(str, strlen(str));
+		if (id == SPA_AUDIO_FORMAT_UNKNOWN) {
+			res = -EINVAL;
+			goto out;
+		}
+
+		pw_properties_set(stream_props, PW_KEY_AUDIO_FORMAT, format_id2name(id));
+	}
 
 	module = module_new(impl, &module_tunnel_sink_methods, sizeof(*d));
 	if (module == NULL) {
@@ -216,8 +225,7 @@ struct module *create_module_tunnel_sink(struct impl *impl, const char *argument
 	d->module = module;
 	d->stream_props = stream_props;
 
-	if ((str = pw_properties_get(props, "latency_msec")) != NULL)
-		spa_atou32(str, &d->latency_msec, 0);
+	pw_properties_fetch_uint32(props, "latency_msec", &d->latency_msec);
 
 	return module;
 out:

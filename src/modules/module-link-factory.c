@@ -266,13 +266,14 @@ static struct pw_impl_port *find_port(struct pw_context *context,
 		struct pw_impl_node *node, enum spa_direction direction, const char *name)
 {
 	struct find_port find = {
-		.id = atoi(name),
+		.id = SPA_ID_INVALID,
 		.name = name,
 		.direction = direction,
 		.node = node
 	};
+	spa_atou32(name, &find.id, 0);
 
-	if (find.id != 0) {
+	if (find.id != SPA_ID_INVALID) {
 		struct pw_global *global = pw_context_find_global(context, find.id);
 		/* find port by global id */
 		if (global != NULL && pw_global_is_type(global, PW_TYPE_INTERFACE_Port))
@@ -280,7 +281,7 @@ static struct pw_impl_port *find_port(struct pw_context *context,
 	}
 	if (node != NULL) {
 		/* find port by local id */
-		if (find.id != 0) {
+		if (find.id != SPA_ID_INVALID) {
 			find.port = pw_impl_node_find_port(node, find.direction, find.id);
 			if (find.port != NULL)
 				return find.port;
@@ -337,11 +338,12 @@ found:
 static struct pw_impl_node *find_node(struct pw_context *context, const char *name)
 {
 	struct find_node find = {
-		.id = atoi(name),
+		.id = SPA_ID_INVALID,
 		.name = name,
 	};
+	spa_atou32(name, &find.id, 0);
 
-	if (find.id != 0) {
+	if (find.id != SPA_ID_INVALID) {
 		struct pw_global *global = pw_context_find_global(context, find.id);
 		if (global != NULL && pw_global_is_type(global, PW_TYPE_INTERFACE_Node))
 			return pw_global_get_object(global);
@@ -367,7 +369,6 @@ static void *create_object(void *_data,
 	const char *output_node_str, *input_node_str;
 	const char *output_port_str, *input_port_str;
 	struct link_data *ld;
-	const char *str;
 	int res;
 	bool linger;
 
@@ -401,8 +402,7 @@ static void *create_object(void *_data,
 	if (inport == NULL)
 		goto error_input_port;
 
-	str = pw_properties_get(properties, PW_KEY_OBJECT_LINGER);
-	linger = str ? pw_properties_parse_bool(str) : false;
+	linger = pw_properties_get_bool(properties, PW_KEY_OBJECT_LINGER, false);
 
 	pw_properties_setf(properties, PW_KEY_FACTORY_ID, "%d",
 			pw_impl_factory_get_info(d->this)->id);

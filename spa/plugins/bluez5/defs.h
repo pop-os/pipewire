@@ -314,10 +314,12 @@ static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
 
 struct spa_bt_monitor;
 struct spa_bt_backend;
+struct spa_bt_player;
 
 struct spa_bt_adapter {
 	struct spa_list link;
 	struct spa_bt_monitor *monitor;
+	struct spa_bt_player *dummy_player;
 	char *path;
 	char *alias;
 	char *address;
@@ -332,6 +334,7 @@ struct spa_bt_adapter {
 	int powered;
 	unsigned int endpoints_registered:1;
 	unsigned int application_registered:1;
+	unsigned int player_registered:1;
 	unsigned int has_battery_provider;
 	unsigned int battery_provider_unavailable;
 };
@@ -678,6 +681,7 @@ enum spa_bt_feature {
 	SPA_BT_FEATURE_HW_VOLUME	= (1 << 3),
 	SPA_BT_FEATURE_HW_VOLUME_MIC	= (1 << 4),
 	SPA_BT_FEATURE_SBC_XQ		= (1 << 5),
+	SPA_BT_FEATURE_FASTSTREAM	= (1 << 6),
 };
 
 struct spa_bt_quirks;

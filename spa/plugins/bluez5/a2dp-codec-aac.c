@@ -239,6 +239,56 @@ static int codec_enum_config(const struct a2dp_codec *codec,
 	return *param == NULL ? -EIO : 1;
 }
 
+static int codec_validate_config(const struct a2dp_codec *codec, uint32_t flags,
+			const void *caps, size_t caps_size,
+			struct spa_audio_info *info)
+{
+	a2dp_aac_t conf;
+	size_t j;
+
+	if (caps == NULL || caps_size < sizeof(conf))
+		return -EINVAL;
+
+	memcpy(&conf, caps, sizeof(conf));
+
+	spa_zero(*info);
+	info->media_type = SPA_MEDIA_TYPE_audio;
+	info->media_subtype = SPA_MEDIA_SUBTYPE_raw;
+	info->info.raw.format = SPA_AUDIO_FORMAT_S16;
+
+	/*
+	 * A2DP v1.3.2, 4.5.2: only one bit shall be set in bitfields.
+	 * However, there is a report (#1342) of device setting multiple
+	 * bits for AAC object type. It's not clear if this was due to
+	 * a BlueZ bug, but we can be lax here and below in codec_init.
+	 */
+	if (!(conf.object_type & (AAC_OBJECT_TYPE_MPEG2_AAC_LC |
+					AAC_OBJECT_TYPE_MPEG4_AAC_LC)))
+		return -EINVAL;
+
+	for (j = 0; j < SPA_N_ELEMENTS(aac_frequencies); ++j) {
+		if (AAC_GET_FREQUENCY(conf) & aac_frequencies[j].config) {
+			info->info.raw.rate = aac_frequencies[j].value;
+			break;
+		}
+	}
+	if (j == SPA_N_ELEMENTS(aac_frequencies))
+		return -EINVAL;
+
+	if (conf.channels & AAC_CHANNELS_2) {
+		info->info.raw.channels = 2;
+		info->info.raw.position[0] = SPA_AUDIO_CHANNEL_FL;
+		info->info.raw.position[1] = SPA_AUDIO_CHANNEL_FR;
+	} else if (conf.channels & AAC_CHANNELS_1) {
+		info->info.raw.channels = 1;
+		info->info.raw.position[0] = SPA_AUDIO_CHANNEL_MONO;
+	} else {
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static void *codec_init_props(const struct a2dp_codec *codec, const struct spa_dict *settings)
 {
 	struct props *p = calloc(1, sizeof(struct props));
@@ -292,11 +342,12 @@ static void *codec_init(const struct a2dp_codec *codec, uint32_t flags,
 	if (res != AACENC_OK)
 		goto error;
 
-	if (conf->object_type != AAC_OBJECT_TYPE_MPEG2_AAC_LC &&
-	    conf->object_type != AAC_OBJECT_TYPE_MPEG4_AAC_LC) {
+	if (!(conf->object_type & (AAC_OBJECT_TYPE_MPEG2_AAC_LC |
+					AAC_OBJECT_TYPE_MPEG4_AAC_LC))) {
 		res = -EINVAL;
 		goto error;
 	}
+
 	res = aacEncoder_SetParam(this->aacenc, AACENC_AOT, AOT_AAC_LC);
 	if (res != AACENC_OK)
 		goto error;
@@ -495,6 +546,7 @@ const struct a2dp_codec a2dp_codec_aac = {
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
+	.validate_config = codec_validate_config,
 	.init_props = codec_init_props,
 	.clear_props = codec_clear_props,
 	.init = codec_init,
