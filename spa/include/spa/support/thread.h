@@ -36,8 +36,12 @@ extern "C" {
 #include <spa/utils/hook.h>
 #include <spa/utils/dict.h>
 
+/** \defgroup spa_thread Thread
+ * Threading utility interfaces
+ */
+
 /**
- * \addtogroup spa_support
+ * \addtogroup spa_thread
  * \{
  */
 
@@ -70,6 +74,8 @@ struct spa_thread_utils_methods {
 	int (*drop_rt) (void *data, struct spa_thread *thread);
 };
 
+/** \copydoc spa_thread_utils_methods.create
+ * \sa spa_thread_utils_methods.create */
 static inline struct spa_thread *spa_thread_utils_create(struct spa_thread_utils *o,
 		const struct spa_dict *props, void *(*start_routine)(void*), void *arg)
 {
@@ -80,6 +86,8 @@ static inline struct spa_thread *spa_thread_utils_create(struct spa_thread_utils
 	return res;
 }
 
+/** \copydoc spa_thread_utils_methods.join
+ * \sa spa_thread_utils_methods.join */
 static inline int spa_thread_utils_join(struct spa_thread_utils *o,
 		struct spa_thread *thread, void **retval)
 {
@@ -90,6 +98,8 @@ static inline int spa_thread_utils_join(struct spa_thread_utils *o,
 	return res;
 }
 
+/** \copydoc spa_thread_utils_methods.get_rt_range
+ * \sa spa_thread_utils_methods.get_rt_range */
 static inline int spa_thread_utils_get_rt_range(struct spa_thread_utils *o,
 		const struct spa_dict *props, int *min, int *max)
 {
@@ -100,6 +110,8 @@ static inline int spa_thread_utils_get_rt_range(struct spa_thread_utils *o,
 	return res;
 }
 
+/** \copydoc spa_thread_utils_methods.acquire_rt
+ * \sa spa_thread_utils_methods.acquire_rt */
 static inline int spa_thread_utils_acquire_rt(struct spa_thread_utils *o,
 		struct spa_thread *thread, int priority)
 {
@@ -110,6 +122,8 @@ static inline int spa_thread_utils_acquire_rt(struct spa_thread_utils *o,
 	return res;
 }
 
+/** \copydoc spa_thread_utils_methods.drop_rt
+ * \sa spa_thread_utils_methods.drop_rt */
 static inline int spa_thread_utils_drop_rt(struct spa_thread_utils *o,
 		struct spa_thread *thread)
 {

@@ -29,11 +29,13 @@
 extern "C" {
 #endif
 
-/** \defgroup spa_utils SPA Utils
+/**
+ * \defgroup spa_ansi ANSI codes
+ * ANSI color code macros
  */
 
 /**
- * \addtogroup spa_utils
+ * \addtogroup spa_ansi
  * \{
  */
 

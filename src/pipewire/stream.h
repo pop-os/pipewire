@@ -29,13 +29,13 @@
 extern "C" {
 #endif
 
-/** \page page_streams Media Streams
+/** \page page_streams Streams
  *
  * \section sec_overview Overview
  *
- * Media streams are used to exchange data with the PipeWire server. A
- * stream is a wrapper around a proxy for a pw_client_node with
- * an adapter. This means the stream will automatically do conversion
+ * \ref pw_stream "Streams" are used to exchange data with the
+ * PipeWire server. A stream is a wrapper around a proxy for a pw_client_node
+ * with an adapter. This means the stream will automatically do conversion
  * to the type required by the server.
  *
  * Streams can be used to:
@@ -144,14 +144,14 @@ extern "C" {
  *
  * Use \ref pw_stream_disconnect() to disconnect a stream after use.
  */
-/** \defgroup pw_stream Stream Object
+/** \defgroup pw_stream Stream
  *
  * \brief PipeWire stream objects
  *
  * The stream object provides a convenient way to send and
  * receive data streams from/to PipeWire.
  *
- * See also \ref page_streams and \ref page_core_api
+ * See also \ref page_streams and \ref api_pw_core
  */
 
 /**
@@ -162,6 +162,7 @@ struct pw_stream;
 
 #include <spa/buffer/buffer.h>
 #include <spa/param/param.h>
+#include <spa/pod/command.h>
 
 /** \enum pw_stream_state The state of a stream */
 enum pw_stream_state {
@@ -209,7 +210,7 @@ struct pw_time {
 /** Events for a stream. These events are always called from the mainloop
  * unless explicitly documented otherwise. */
 struct pw_stream_events {
-#define PW_VERSION_STREAM_EVENTS	0
+#define PW_VERSION_STREAM_EVENTS	1
 	uint32_t version;
 
 	void (*destroy) (void *data);
@@ -238,6 +239,9 @@ struct pw_stream_events {
 
 	/** The stream is drained */
         void (*drained) (void *data);
+
+	/** A command notify, Since 0.3.39:1 */
+	void (*command) (void *data, const struct spa_command *command);
 };
 
 /** Convert a stream state to a readable string */

@@ -33,7 +33,7 @@ extern "C" {
 
 #include <spa/utils/defs.h>
 
-/** \defgroup pw_array Array Objects
+/** \defgroup pw_array Array
  *
  * \brief An array object
  *
@@ -98,6 +98,7 @@ static inline void pw_array_init(struct pw_array *arr, size_t extend)
 static inline void pw_array_clear(struct pw_array *arr)
 {
 	free(arr->data);
+	pw_array_init(arr, arr->extend);
 }
 
 /** Reset the array */

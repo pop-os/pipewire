@@ -130,6 +130,8 @@ struct pwtest_context {
 	bool no_fork;
 
 	const char *test_filter;
+	bool has_iteration_filter;
+	int iteration_filter;
 	char *xdg_dir;
 };
 
@@ -526,6 +528,7 @@ static int remove_file(const char *fpath, const struct stat *sb, int typeflag, s
 	int r;
 
 	/* Safety check: bail out if somehow we left TMPDIR */
+	spa_assert_se(tmpdir != NULL);
 	spa_assert_se(spa_strneq(fpath, tmpdir, strlen(tmpdir)));
 
 	r = remove(fpath);
@@ -546,6 +549,7 @@ static void remove_xdg_runtime_dir(const char *xdg_dir)
 
 	/* Safety checks, we really don't want to recursively remove a
 	 * random directory due to a bug */
+	spa_assert_se(tmpdir != NULL);
 	spa_assert_se(spa_strneq(xdg_dir, tmpdir, strlen(tmpdir)));
 	r = spa_scnprintf(path, sizeof(path), "%s/pwtest.dir", xdg_dir);
 	spa_assert_se((size_t)r == strlen(xdg_dir) + 11);
@@ -911,6 +915,9 @@ static void run_test(struct pwtest_context *ctx, struct pwtest_suite *c, struct 
 	pid_t pw_daemon = 0;
 	int read_fds[_FD_LAST], write_fds[_FD_LAST];
 	int r;
+	const char *tmpdir = getenv("TMPDIR");
+
+	spa_assert_se(tmpdir != NULL);
 
 	if (t->result == PWTEST_SKIP) {
 		char *buf = pw_array_add(&t->logs[FD_LOG], 64);
@@ -927,7 +934,7 @@ static void run_test(struct pwtest_context *ctx, struct pwtest_suite *c, struct 
 	}
 
 	set_test_env(ctx, t);
-	r = chdir(getenv("TMPDIR"));
+	r = chdir(tmpdir);
 	if (r < 0) {
 		t->sig_or_errno = -errno;
 		return;
@@ -1109,6 +1116,10 @@ static int run_tests(struct pwtest_context *ctx)
 			bool have_range = min != 0 || max != 1;
 
 			for (int iteration = min; iteration < max; iteration++) {
+				if (ctx->has_iteration_filter &&
+				    ctx->iteration_filter != iteration)
+					continue;
+
 				fprintf(stderr, "  - name: \"%s\"\n", t->name);
 				if (have_range)
 					fprintf(stderr, "    iteration: %d  # %d - %d\n",
@@ -1192,6 +1203,7 @@ static void usage(FILE *fp, const char *progname)
 		"  --timeout=N		Set the test timeout to N seconds (default: 30)\n"
 		"  --filter-test=glob	Run only tests matching the given glob\n"
 		"  --filter-suites=glob	Run only suites matching the given glob\n"
+		"  --filter-iteration=N	Run only iteration N\n"
 		"  --no-fork		Do not fork for the test (see note below)\n"
 		"\n"
 		"Using --no-fork allows for easy debugging of tests but should only be used.\n"
@@ -1209,6 +1221,7 @@ int main(int argc, char **argv)
 		OPT_VERBOSE,
 		OPT_FILTER_TEST,
 		OPT_FILTER_SUITE,
+		OPT_FILTER_ITERATION,
 		OPT_NOFORK,
 	};
 	static const struct option opts[] = {
@@ -1217,6 +1230,7 @@ int main(int argc, char **argv)
 		{ "list",		no_argument,		0, OPT_LIST },
 		{ "filter-test",	required_argument,	0, OPT_FILTER_TEST },
 		{ "filter-suite",	required_argument,	0, OPT_FILTER_SUITE },
+		{ "filter-iteration",	required_argument,	0, OPT_FILTER_ITERATION },
 		{ "list",		no_argument,		0, OPT_LIST },
 		{ "verbose",		no_argument,		0, OPT_VERBOSE },
 		{ "no-fork",		no_argument,		0, OPT_NOFORK },
@@ -1225,6 +1239,7 @@ int main(int argc, char **argv)
 	struct pwtest_context test_ctx = {
 		.suites = SPA_LIST_INIT(&test_ctx.suites),
 		.timeout = 30,
+		.has_iteration_filter = false,
 	};
 	enum {
 		MODE_TEST,
@@ -1259,6 +1274,9 @@ int main(int argc, char **argv)
 			break;
 		case OPT_FILTER_SUITE:
 			suite_filter= optarg;
+			break;
+		case OPT_FILTER_ITERATION:
+			ctx->has_iteration_filter = spa_atoi32(optarg, &ctx->iteration_filter, 10);
 			break;
 		case OPT_NOFORK:
 			ctx->no_fork = true;

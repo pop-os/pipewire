@@ -1003,6 +1003,7 @@ struct pw_core {
 #define pw_stream_emit_process(s)		pw_stream_emit(s, process, 0)
 #define pw_stream_emit_drained(s)		pw_stream_emit(s, drained,0)
 #define pw_stream_emit_control_info(s,i,c)	pw_stream_emit(s, control_info, 0, i, c)
+#define pw_stream_emit_command(s,c)		pw_stream_emit(s, command,1,c)
 
 
 struct pw_stream {
@@ -1038,6 +1039,7 @@ struct pw_stream {
 #define pw_filter_emit_remove_buffer(s,p,b)	pw_filter_emit(s, remove_buffer, 0, p, b)
 #define pw_filter_emit_process(s,p)		pw_filter_emit(s, process, 0, p)
 #define pw_filter_emit_drained(s)		pw_filter_emit(s, drained, 0)
+#define pw_filter_emit_command(s,c)		pw_filter_emit(s, command, 1, c)
 
 
 struct pw_filter {
@@ -1238,9 +1240,6 @@ int pw_control_add_link(struct pw_control *control, uint32_t cmix,
 int pw_control_remove_link(struct pw_control_link *link);
 
 void pw_control_destroy(struct pw_control *control);
-
-void pw_proxy_unref(struct pw_proxy *proxy);
-void pw_proxy_ref(struct pw_proxy *proxy);
 
 #define PW_LOG_OBJECT_POD	(1<<0)
 void pw_log_log_object(enum spa_log_level level, const char *file, int line,

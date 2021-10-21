@@ -46,8 +46,6 @@
 
 #include "libcamera.h"
 
-#define NAME "libcamera-device"
-
 static const char default_device[] = "/dev/media0";
 
 struct props {
@@ -81,7 +79,7 @@ static int emit_info(struct impl *this, bool full)
 	uint32_t n_items = 0;
 	struct spa_device_info info;
 	struct spa_param_info params[2];
-    char path[128], version[16];
+	char path[128], version[16];
 
 	if ((res = spa_libcamera_open(&this->dev)) < 0)
 		return res;
@@ -95,7 +93,7 @@ static int emit_info(struct impl *this, bool full)
 	} while (err == -1 && errno == EINTR);
 
 	if(err < 0) {
-		spa_log_error(this->log, "%s:: Failed to query MEDIA_IOC_DEVICE_INFO on fd %d\n", __FUNCTION__, this->dev.fd);
+		spa_log_error(this->log, "%s:: Failed to query MEDIA_IOC_DEVICE_INFO on fd %d", __FUNCTION__, this->dev.fd);
 	}
 
 #define ADD_ITEM(key, value) items[n_items++] = SPA_DICT_ITEM_INIT(key, value)
@@ -241,6 +239,7 @@ impl_init(const struct spa_handle_factory *factory,
 	handle->clear = impl_clear, this = (struct impl *) handle;
 
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	libcamera_log_topic_init(this->log);
 
 	spa_hook_list_init(&this->hooks);
 

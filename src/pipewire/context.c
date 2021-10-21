@@ -395,16 +395,20 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 			pw_properties_update_string(properties, str, strlen(str));
 		pw_properties_set(properties, "vm.overrides", NULL);
 	}
-	if (pw_properties_get(properties, PW_KEY_CPU_MAX_ALIGN) == NULL && cpu != NULL)
-		pw_properties_setf(properties, PW_KEY_CPU_MAX_ALIGN,
+	if (cpu != NULL) {
+		if (pw_properties_get(properties, PW_KEY_CPU_MAX_ALIGN) == NULL)
+			pw_properties_setf(properties, PW_KEY_CPU_MAX_ALIGN,
 				"%u", spa_cpu_get_max_align(cpu));
+		if ((str = pw_properties_get(properties, SPA_KEY_CPU_ZERO_DENORMALS)) == NULL)
+			str = "true";
+		spa_cpu_zero_denormals(cpu, spa_atob(str));
+	}
 
 	if (getenv("PIPEWIRE_DEBUG") == NULL &&
 	    (str = pw_properties_get(properties, "log.level")) != NULL)
 		pw_log_set_level(atoi(str));
 
-	if ((str = pw_properties_get(properties, "mem.mlock-all")) != NULL &&
-	    pw_properties_parse_bool(str)) {
+	if (pw_properties_get_bool(properties, "mem.mlock-all", false)) {
 		if (mlockall(MCL_CURRENT | MCL_FUTURE) < 0)
 			pw_log_warn("%p: could not mlockall; %m", impl);
 		else
@@ -454,10 +458,11 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 				SPA_NAME_SUPPORT_DBUS, NULL,
 				n_support, this->support);
 
-		if (impl->dbus_handle == NULL ||
-		    (res = spa_handle_get_interface(impl->dbus_handle,
-							SPA_TYPE_INTERFACE_DBus, &dbus_iface)) < 0) {
-				pw_log_warn("%p: can't load dbus interface: %s", this, spa_strerror(res));
+		if (impl->dbus_handle == NULL) {
+			pw_log_warn("%p: can't load dbus library: %s", this, lib);
+		} else if ((res = spa_handle_get_interface(impl->dbus_handle,
+							   SPA_TYPE_INTERFACE_DBus, &dbus_iface)) < 0) {
+			pw_log_warn("%p: can't load dbus interface: %s", this, spa_strerror(res));
 		} else {
 			this->support[n_support++] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_DBus, dbus_iface);
 		}
@@ -1313,7 +1318,6 @@ again:
 		if (rate_quantum != 0 && current_rate != rate_quantum) {
 			def_quantum = def_quantum * current_rate / rate_quantum;
 			min_quantum = min_quantum * current_rate / rate_quantum;
-			max_quantum = max_quantum * current_rate / rate_quantum;
 		}
 
 		/* calculate desired quantum */

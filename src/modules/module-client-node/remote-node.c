@@ -1088,6 +1088,16 @@ static void node_active_changed(void *data, bool active)
 	pw_client_node_set_active(d->client_node, active);
 }
 
+static void node_event(void *data, const struct spa_event *event)
+{
+	struct node_data *d = data;
+	pw_log_debug("%p", d);
+
+	if (d->client_node == NULL)
+		return;
+	pw_client_node_event(d->client_node, event);
+}
+
 static const struct pw_impl_node_events node_events = {
 	PW_VERSION_IMPL_NODE_EVENTS,
 	.destroy = node_destroy,
@@ -1096,6 +1106,7 @@ static const struct pw_impl_node_events node_events = {
 	.port_info_changed = node_port_info_changed,
 	.port_removed = node_port_removed,
 	.active_changed = node_active_changed,
+	.event = node_event,
 };
 
 static void client_node_removed(void *_data)
@@ -1203,7 +1214,6 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 	struct pw_impl_node *node = object;
 	struct pw_proxy *client_node;
 	struct node_data *data;
-	const char *str;
 	int i;
 
 	user_data_size = SPA_ROUND_UP_N(user_data_size, __alignof__(struct node_data));
@@ -1226,13 +1236,12 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 	data->client_node = (struct pw_client_node *)client_node;
 	data->remote_id = SPA_ID_INVALID;
 
-	data->allow_mlock = data->context->settings.mem_allow_mlock;
-	if ((str = pw_properties_get(node->properties, "mem.allow-mlock")) != NULL)
-		data->allow_mlock = pw_properties_parse_bool(str);
 
-	data->warn_mlock = data->context->settings.mem_warn_mlock;
-	if ((str = pw_properties_get(node->properties, "mem.warn-mlock")) != NULL)
-		data->warn_mlock = pw_properties_parse_bool(str);
+	data->allow_mlock = pw_properties_get_bool(node->properties, "mem.allow-mlock",
+						   data->context->settings.mem_allow_mlock);
+
+	data->warn_mlock = pw_properties_get_bool(node->properties, "mem.warn-mlock",
+						  data->context->settings.mem_warn_mlock);
 
 	node->exported = true;
 

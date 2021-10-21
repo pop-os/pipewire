@@ -32,10 +32,9 @@
 #include <spa/support/dbus.h>
 
 #include "pipewire/pipewire.h"
+#include "pipewire/log.h"
 
-#include "../media-session/reserve.c"
-
-#define NAME "reserve"
+#include "reserve.h"
 
 struct impl {
 	struct pw_main_loop *mainloop;

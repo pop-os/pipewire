@@ -32,8 +32,8 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/pod/pod.h>
 
-/** \defgroup spa_control SPA Controls
- *
+/** \defgroup spa_control Control
+ * Control type declarations
  */
 
 /**

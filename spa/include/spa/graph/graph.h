@@ -29,7 +29,8 @@
 extern "C" {
 #endif
 
-/** \defgroup spa_graph SPA Graph
+/** \defgroup spa_graph Graph
+ * Node graph
  */
 
 /**

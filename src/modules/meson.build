@@ -201,16 +201,14 @@ pipewire_module_protocol_native = shared_library('pipewire-module-protocol-nativ
 
 pipewire_module_protocol_pulse_deps = pipewire_module_protocol_deps
 
-if dbus_dep.found()
-  pipewire_module_protocol_pulse_deps += dbus_dep
-endif
-
 pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse.c',
   'module-protocol-pulse/client.c',
   'module-protocol-pulse/collect.c',
-  'module-protocol-pulse/dbus-name.c',
   'module-protocol-pulse/extension.c',
+  'module-protocol-pulse/extensions/ext-device-manager.c',
+  'module-protocol-pulse/extensions/ext-device-restore.c',
+  'module-protocol-pulse/extensions/ext-stream-restore.c',
   'module-protocol-pulse/format.c',
   'module-protocol-pulse/manager.c',
   'module-protocol-pulse/media-roles.c',
@@ -246,6 +244,14 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-zeroconf-discover.c',
 ]
 
+if dbus_dep.found()
+  pipewire_module_protocol_pulse_sources += [
+    'module-protocol-pulse/dbus-name.c',
+  ]
+  pipewire_module_protocol_pulse_deps += dbus_dep
+  cdata.set('HAVE_DBUS', 1)
+endif
+
 if avahi_dep.found()
   pipewire_module_protocol_pulse_sources += [
     'module-protocol-pulse/modules/module-zeroconf-publish.c',
@@ -278,7 +284,8 @@ pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse'
 build_module_pulse_tunnel = pulseaudio_dep.found()
 if build_module_pulse_tunnel
   pipewire_module_pulse_tunnel = shared_library('pipewire-module-pulse-tunnel',
-  [ 'module-pulse-tunnel.c' ],
+  [ 'module-pulse-tunnel.c',
+    'module-protocol-pulse/format.c' ],
   include_directories : [configinc, spa_inc],
   install : true,
   install_dir : modules_install_dir,
@@ -410,6 +417,7 @@ build_module_zeroconf_discover = avahi_dep.found()
 if build_module_zeroconf_discover
 pipewire_module_zeroconf_discover = shared_library('pipewire-module-zeroconf-discover',
   [ 'module-zeroconf-discover.c',
+    'module-protocol-pulse/format.c',
     'module-zeroconf-discover/avahi-poll.c' ],
   include_directories : [configinc, spa_inc],
   install : true,

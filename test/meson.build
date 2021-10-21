@@ -33,7 +33,7 @@ pwtest_lib = static_library(
   include_directories: pwtest_inc,
 )
 
-test('test pwtest',
+test('test-pwtest',
     executable('test-pwtest',
                'test-pwtest.c',
                include_directories: pwtest_inc,
@@ -47,34 +47,37 @@ executable('test-example',
   include_directories: pwtest_inc,
   link_with: pwtest_lib)
 
-test('test pipewire utils',
+test('test-pw-utils',
     executable('test-pw-utils',
                'test-properties.c',
                'test-array.c',
+               'test-map.c',
                'test-utils.c',
                include_directories: pwtest_inc,
                link_with: pwtest_lib)
 )
-test('test lib',
+
+test('test-lib',
     executable('test-lib',
                'test-lib.c',
                include_directories: pwtest_inc,
                link_with: pwtest_lib)
 )
-test('test client',
+
+test('test-client',
     executable('test-client',
                'test-client.c',
                include_directories: pwtest_inc,
                link_with: pwtest_lib)
 )
-test('test context',
+
+test('test-context',
     executable('test-context',
                'test-context.c',
                'test-config.c',
                include_directories: pwtest_inc,
+               dependencies: [spa_support_dep, spa_dbus_dep],
                link_with: [pwtest_lib,
-                            spa_support_lib,
-                            spa_dbus_lib,
                             pipewire_module_protocol_native,
                             pipewire_module_client_node,
                             pipewire_module_client_device,
@@ -83,7 +86,7 @@ test('test context',
                             pipewire_module_session_manager])
 )
 
-test('test support',
+test('test-support',
     executable('test-support',
                'test-support.c',
                'test-logger.c',
@@ -91,7 +94,7 @@ test('test support',
                dependencies: [systemd_dep, spa_support_dep, spa_journal_dep],
                link_with: [pwtest_lib])
 )
-test('test spa',
+test('test-spa',
     executable('test-spa',
                'test-spa-buffer.c',
                'test-spa-json.c',
@@ -106,7 +109,7 @@ test('test spa',
 valgrind = find_program('valgrind', required: false)
 summary({'valgrind (test setup)': valgrind.found()}, bool_yn: true, section: 'Optional programs')
 if valgrind.found()
-  valgrind_env = environment()
+  valgrind_env = environment({'PIPEWIRE_DEBUG': 'D'})
   add_test_setup('valgrind',
                  exe_wrapper : [ valgrind,
                    '--leak-check=full',

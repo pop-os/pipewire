@@ -34,7 +34,8 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/extensions/metadata.h>
 
-#define NAME "alsa-plugin"
+PW_LOG_TOPIC_STATIC(alsa_log_topic, "alsa.ctl");
+#define PW_LOG_TOPIC_DEFAULT alsa_log_topic
 
 #define VOLUME_MAX 65536
 
@@ -502,7 +503,7 @@ static struct spa_pod *build_volume_mute(struct spa_pod_builder *b, struct volum
 
 static int set_volume_mute(snd_ctl_pipewire_t *ctl, const char *name, struct volume *volume, int *mute)
 {
-	struct global *g, *dg;
+	struct global *g, *dg = NULL;
 	uint32_t id = SPA_ID_INVALID, device_id = SPA_ID_INVALID;
 	char buf[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
@@ -522,7 +523,7 @@ static int set_volume_mute(snd_ctl_pipewire_t *ctl, const char *name, struct vol
 		device_id = g->node.profile_device_id;
 	}
 	pw_log_debug("id %d device_id %d flags:%08x", id, device_id, g->node.flags);
-	if (id != SPA_ID_INVALID && device_id != SPA_ID_INVALID) {
+	if (id != SPA_ID_INVALID && device_id != SPA_ID_INVALID && dg != NULL) {
 		if (!SPA_FLAG_IS_SET(dg->permissions, PW_PERM_W | PW_PERM_X))
 			return -EPERM;
 
@@ -748,7 +749,7 @@ static void snd_ctl_pipewire_free(snd_ctl_pipewire_t *ctl)
 	if (ctl == NULL)
 		return;
 
-	pw_log_debug(NAME" %p:", ctl);
+	pw_log_debug("%p:", ctl);
 	if (ctl->mainloop)
 		pw_thread_loop_stop(ctl->mainloop);
 	if (ctl->registry)
@@ -1185,7 +1186,7 @@ static void on_core_error(void *data, uint32_t id, int seq, int res, const char 
 {
 	snd_ctl_pipewire_t *ctl = data;
 
-	pw_log_warn(NAME" %p: error id:%u seq:%d res:%d (%s): %s", ctl,
+	pw_log_warn("%p: error id:%u seq:%d res:%d (%s): %s", ctl,
 			id, seq, res, spa_strerror(res), message);
 
 	if (id == PW_ID_CORE) {
@@ -1210,7 +1211,7 @@ static void on_core_done(void *data, uint32_t id, int seq)
 	if (id != PW_ID_CORE)
 		return;
 
-	ctl->last_seq = ctl->pending_seq;
+	ctl->last_seq = seq;
 	if (seq == ctl->pending_seq) {
 		pipewire_update_volume(ctl);
 		pw_thread_loop_signal(ctl->mainloop, false);
@@ -1240,6 +1241,8 @@ SND_CTL_PLUGIN_DEFINE_FUNC(pipewire)
 	struct pw_loop *loop;
 
         pw_init(NULL, NULL);
+
+	PW_LOG_TOPIC_INIT(alsa_log_topic);
 
 	snd_config_for_each(i, next, conf) {
 		snd_config_t *n = snd_config_iterator_entry(i);

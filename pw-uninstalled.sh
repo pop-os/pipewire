@@ -56,6 +56,9 @@ export PKG_CONFIG_PATH="${BUILDDIR}/meson-uninstalled/:${PKG_CONFIG_PATH}"
 if [ -d "${BUILDDIR}/subprojects/wireplumber" ]; then
 	# FIXME: find a nice, shell-neutral way to specify a prompt
 	"${SCRIPT_DIR}"/subprojects/wireplumber/wp-uninstalled.sh -b"${BUILDDIR}"/subprojects/wireplumber "${SHELL}"
+elif [ -d "${BUILDDIR}/subprojects/media-session" ]; then
+	# FIXME: find a nice, shell-neutral way to specify a prompt
+	"${SCRIPT_DIR}"/subprojects/media-session/media-session-uninstalled.sh -b"${BUILDDIR}"/subprojects/media-session "${SHELL}"
 else
 	# FIXME: find a nice, shell-neutral way to specify a prompt
 	${SHELL}

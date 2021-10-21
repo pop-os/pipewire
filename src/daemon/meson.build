@@ -36,12 +36,20 @@ summary({'Build media-session': build_ms,
 if build_wp
   wp_proj = subproject('wireplumber', required : true)
 endif
+if build_ms
+  ms_proj = subproject('media-session', required : true)
+endif
 
 if default_sm == ''
   summary({'No session manager': 'pw-uninstalled.sh will not work out of the box!'})
 elif default_sm == 'media-session'
+  ms_bindir = ms_proj.get_variable('media_session_bin_dir', pipewire_bindir)
+  conf_config.set('session_manager_path', ms_bindir / 'pipewire-media-session')
+
   conf_config_uninstalled.set('session_manager_path',
-    meson.build_root() / 'src' / 'media-session' / 'pipewire-media-session')
+    meson.source_root() / 'subprojects' / 'pipewire-media-session' / 'media-session-uninstalled.sh')
+  conf_config_uninstalled.set('session_manager_args',
+    '-b ' + meson.build_root() / 'subprojects' / 'pipewire-media-session' + ' pipewire-media-session')
   conf_config_uninstalled.set('sm_comment', '')
 elif default_sm == 'wireplumber'
   wp_bindir = wp_proj.get_variable('wireplumber_bin_dir', pipewire_bindir)
@@ -118,9 +126,6 @@ custom_target('pipewire-uninstalled',
 #endif
 
 subdir('filter-chain')
-if build_ms
-  subdir('media-session.d')
-endif
 if systemd.found()
   subdir('systemd')
 endif

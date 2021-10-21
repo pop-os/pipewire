@@ -29,7 +29,8 @@
 extern "C" {
 #endif
 
-/** \defgroup pw_work_queue PipeWire Work Queue Object
+/** \defgroup pw_work_queue Work Queue
+ * Queued processing of work items.
  */
 
 /**
