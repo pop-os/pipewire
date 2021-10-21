@@ -4,6 +4,7 @@ pipewire (0.3.39-1) UNRELEASED; urgency=medium
   * New upstream release
   * Drop d/p/fix-compilation-on-ARM.patch, included in upstream release
   * Add an upstream patch to fix compilation on some architectures
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 21 Oct 2021 11:21:59 +0200
 
