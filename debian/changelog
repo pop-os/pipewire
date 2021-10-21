@@ -5,6 +5,8 @@ pipewire (0.3.39-1) UNRELEASED; urgency=medium
   * Don't build the pipewire-media-session binary package anymore,
       media-session has moved to a separate module to accelerate its
       deprecation in favour of WirePlumber.
+  * Change priority order between pipewire-media-session and wireplumber,
+      WirePlumber is now the recommended session manager.
   * Drop d/p/fix-compilation-on-ARM.patch, included in upstream release
   * Add an upstream patch to fix compilation on some architectures
   * Update symbols file
