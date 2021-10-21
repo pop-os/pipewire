@@ -1,4 +1,4 @@
-pipewire (0.3.39-1) UNRELEASED; urgency=medium
+pipewire (0.3.39-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -13,7 +13,7 @@ pipewire (0.3.39-1) UNRELEASED; urgency=medium
   * Add an upstream patch to fix compilation on some architectures
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 21 Oct 2021 11:21:59 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 21 Oct 2021 17:14:22 +0200
 
 pipewire (0.3.38-2) unstable; urgency=medium
 
