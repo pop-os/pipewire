@@ -7,6 +7,8 @@ pipewire (0.3.39-1) UNRELEASED; urgency=medium
       deprecation in favour of WirePlumber.
   * Change priority order between pipewire-media-session and wireplumber,
       WirePlumber is now the recommended session manager.
+  * Install pw-v4l2 and libpw-v4l2.so in pipewire-bin and
+      libpipewire-0.3-modules, respectively.
   * Drop d/p/fix-compilation-on-ARM.patch, included in upstream release
   * Add an upstream patch to fix compilation on some architectures
   * Update symbols file
