@@ -1,3 +1,12 @@
+pipewire (0.3.39-2) UNRELEASED; urgency=medium
+
+  * Team upload.
+  * Add upstream patches:
+      - fix a type for big-endian architectures
+      - fix compilation on armel
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 25 Oct 2021 16:33:26 +0200
+
 pipewire (0.3.39-1) unstable; urgency=medium
 
   * Team upload.

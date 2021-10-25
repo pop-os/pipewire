@@ -1,2 +1,4 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 fix_compilation_on_some_architectures.patch
+fix_type_for_big_endian.patch
+fix_compilation_on_armel.patch
