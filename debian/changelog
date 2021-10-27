@@ -1,10 +1,10 @@
-pipewire (0.3.39-3) UNRELEASED; urgency=medium
+pipewire (0.3.39-3) unstable; urgency=medium
 
   * Team upload.
   * Remove pipewire-media-session from Recommends.
       (Closes: #995116, #996994, #997859)
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 27 Oct 2021 20:58:53 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 27 Oct 2021 21:09:13 +0200
 
 pipewire (0.3.39-2) unstable; urgency=medium
 
