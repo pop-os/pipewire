@@ -7,6 +7,8 @@ pipewire (0.3.39-4) UNRELEASED; urgency=medium
       (Closes: #998129, #998130)
   * Build zeroconf modules (Closes: #998218)
     - Add libavahi-client-dev in Build-Deps
+  * Add patch to don't build same binary twice (Closes: #998126)
+      Thanks to Michael Biebl
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 05 Nov 2021 15:10:19 +0100
 
