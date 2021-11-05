@@ -3,3 +3,4 @@ fix_compilation_on_some_architectures.patch
 make_insert_at()_fail_on_a_removed_item.patch
 fix_type_for_big_endian.patch
 fix_compilation_on_armel.patch
+only_run_SSE_when_supported.patch

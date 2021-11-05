@@ -1,0 +1,46 @@
+From 84ecebbd4ebcb6b9b04974cf035bcae6a85174c7 Mon Sep 17 00:00:00 2001
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Tue, 2 Nov 2021 20:11:07 +0100
+Subject: [PATCH] cpu: only run SSE code when supported
+
+Check if we can run SSE instructions before executing the denormals
+SSE code.
+
+Fixes #1775
+---
+ spa/plugins/support/cpu-x86.c | 19 ++++++++++++-------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/spa/plugins/support/cpu-x86.c b/spa/plugins/support/cpu-x86.c
+index 78422ecef..ded9bfaa7 100644
+--- a/spa/plugins/support/cpu-x86.c
++++ b/spa/plugins/support/cpu-x86.c
+@@ -184,13 +184,18 @@ x86_init(struct impl *impl)
+ static int x86_zero_denormals(void *object, bool enable)
+ {
+ #if defined(HAVE_SSE)
+-	unsigned int mxcsr;
+-	mxcsr = _mm_getcsr();
+-	if (enable)
+-		mxcsr |= 0x8040;
+-	else
+-		mxcsr &= ~0x8040;
+-	_mm_setcsr(mxcsr);
++	struct impl *impl = object;
++	if (impl->flags & SPA_CPU_FLAG_SSE) {
++		unsigned int mxcsr;
++		mxcsr = _mm_getcsr();
++		if (enable)
++			mxcsr |= 0x8040;
++		else
++			mxcsr &= ~0x8040;
++		_mm_setcsr(mxcsr);
++		spa_log_debug(impl->log, "%p: zero-denormals:%s",
++				impl, enable ? "on" : "off");
++	}
+ 	return 0;
+ #else
+ 	return -ENOTSUP;
+-- 
+GitLab
+
