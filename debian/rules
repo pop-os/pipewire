@@ -22,7 +22,7 @@ override_dh_auto_configure:
 	dh_auto_configure -- \
 		-Daudiotestsrc=enabled \
 		-Dauto_features=enabled \
-		-Davahi=disabled \
+		-Davahi=enabled \
 		-Dbluez5-codec-aac=disabled \
 		-Dbluez5-codec-aptx=disabled \
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
