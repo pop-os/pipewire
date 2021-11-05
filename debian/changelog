@@ -9,6 +9,7 @@ pipewire (0.3.39-4) UNRELEASED; urgency=medium
     - Add libavahi-client-dev in Build-Deps
   * Add patch to don't build same binary twice (Closes: #998126)
       Thanks to Michael Biebl
+  * Add dbus-user-session in Recommends (Closes: #982853, #998167)
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 05 Nov 2021 15:10:19 +0100
 
