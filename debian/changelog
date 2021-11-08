@@ -1,4 +1,4 @@
-pipewire (0.3.39-4) UNRELEASED; urgency=medium
+pipewire (0.3.39-4) unstable; urgency=medium
 
   * Team upload.
   * Update d/watch to point to gitlab.freedesktop.org/pipewire
@@ -13,7 +13,7 @@ pipewire (0.3.39-4) UNRELEASED; urgency=medium
   * Re-add pipewire-media-session as an alternative to Wireplumber,
       it is now back in the archive as a separate source package.
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 05 Nov 2021 15:10:19 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 08 Nov 2021 13:29:23 +0100
 
 pipewire (0.3.39-3) unstable; urgency=medium
 
