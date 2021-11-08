@@ -193,7 +193,7 @@ Depends: libpipewire-0.3-modules (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
 Recommends: dbus-user-session,
-            wireplumber,
+            wireplumber | pipewire-media-session,
             rtkit
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)

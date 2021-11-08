@@ -10,6 +10,8 @@ pipewire (0.3.39-4) UNRELEASED; urgency=medium
   * Add patch to don't build same binary twice (Closes: #998126)
       Thanks to Michael Biebl
   * Add dbus-user-session in Recommends (Closes: #982853, #998167)
+  * Re-add pipewire-media-session as an alternative to Wireplumber,
+      it is now back in the archive as a separate source package.
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 05 Nov 2021 15:10:19 +0100
 
