@@ -1,4 +1,4 @@
-pipewire (0.3.40-1) UNRELEASED; urgency=medium
+pipewire (0.3.40-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -11,7 +11,7 @@ pipewire (0.3.40-1) UNRELEASED; urgency=medium
   * Install a new manpage for pipewire-pulse
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Nov 2021 17:53:50 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Nov 2021 22:08:23 +0100
 
 pipewire (0.3.39-4) unstable; urgency=medium
 
