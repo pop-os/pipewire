@@ -258,14 +258,13 @@ static struct param *add_param(struct stream *impl,
 
 	if ((idx = get_param_index(id)) != -1) {
 		impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
-		impl->params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
 		impl->params[idx].flags |= SPA_PARAM_INFO_READ;
+		impl->params[idx].user++;
 	} else if ((idx = get_port_param_index(id)) != -1) {
 		impl->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
-		impl->port_params[idx].flags ^= SPA_PARAM_INFO_SERIAL;
 		impl->port_params[idx].flags |= SPA_PARAM_INFO_READ;
+		impl->port_params[idx].user++;
 	}
-
 	return p;
 }
 
@@ -420,6 +419,23 @@ static void call_drained(struct stream *impl)
 }
 
 static int
+do_call_trigger_done(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct stream *impl = user_data;
+	struct pw_stream *stream = &impl->this;
+	pw_log_trace("%p: trigger_done", stream);
+	pw_stream_emit_trigger_done(stream);
+	return 0;
+}
+
+static void call_trigger_done(struct stream *impl)
+{
+	pw_loop_invoke(impl->context->main_loop,
+		do_call_trigger_done, 1, NULL, 0, false, impl);
+}
+
+static int
 do_set_position(struct spa_loop *loop,
 		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
@@ -566,21 +582,41 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 static void emit_node_info(struct stream *d, bool full)
 {
+	uint32_t i;
 	uint64_t old = full ? d->info.change_mask : 0;
 	if (full)
 		d->info.change_mask = d->change_mask_all;
-	if (d->info.change_mask != 0)
+	if (d->info.change_mask != 0) {
+		if (d->info.change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < d->info.n_params; i++) {
+				if (d->params[i].user > 0) {
+					d->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					d->params[i].user = 0;
+				}
+			}
+		}
 		spa_node_emit_info(&d->hooks, &d->info);
+	}
 	d->info.change_mask = old;
 }
 
 static void emit_port_info(struct stream *d, bool full)
 {
+	uint32_t i;
 	uint64_t old = full ? d->port_info.change_mask : 0;
 	if (full)
 		d->port_info.change_mask = d->port_change_mask_all;
-	if (d->port_info.change_mask != 0)
+	if (d->port_info.change_mask != 0) {
+		if (d->port_info.change_mask & SPA_PORT_CHANGE_MASK_PARAMS) {
+			for (i = 0; i < d->port_info.n_params; i++) {
+				if (d->port_params[i].user > 0) {
+					d->port_params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+					d->port_params[i].user = 0;
+				}
+			}
+		}
 		spa_node_emit_port_info(&d->hooks, d->direction, 0, &d->port_info);
+	}
 	d->port_info.change_mask = old;
 }
 
@@ -921,6 +957,9 @@ static int impl_node_process_input(void *object)
 		io->buffer_id = b ? b->id : SPA_ID_INVALID;
 		io->status = SPA_STATUS_NEED_DATA;
 	}
+	if (impl->driving && impl->using_trigger)
+		call_trigger_done(impl);
+
 	return SPA_STATUS_NEED_DATA | SPA_STATUS_HAVE_DATA;
 }
 
@@ -984,6 +1023,9 @@ again:
 	}
 
 	pw_log_trace("%p: res %d", stream, res);
+
+	if (impl->driving && impl->using_trigger && res != SPA_STATUS_HAVE_DATA)
+		call_trigger_done(impl);
 
 	return res;
 }
@@ -1989,7 +2031,7 @@ int pw_stream_set_active(struct pw_stream *stream, bool active)
 	if (impl->node)
 		pw_impl_node_set_active(impl->node, active);
 
-	if (!active)
+	if (!active || impl->drained)
 		impl->drained = impl->draining = false;
 	return 0;
 }
@@ -2150,6 +2192,18 @@ do_trigger_process(struct spa_loop *loop,
 	return spa_node_call_ready(&impl->callbacks, res);
 }
 
+static int trigger_request_process(struct stream *impl)
+{
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = { 0 };
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_node_emit_event(&impl->hooks,
+			spa_pod_builder_add_object(&b,
+				SPA_TYPE_EVENT_Node, SPA_NODE_EVENT_RequestProcess));
+	return 0;
+}
+
 SPA_EXPORT
 int pw_stream_trigger_process(struct pw_stream *stream)
 {
@@ -2161,16 +2215,16 @@ int pw_stream_trigger_process(struct pw_stream *stream)
 	/* flag to check for old or new behaviour */
 	impl->using_trigger = true;
 
-	if (!impl->driving)
-		return -EINVAL;
-
-	if (impl->direction == SPA_DIRECTION_OUTPUT &&
-	    !impl->process_rt) {
-		pw_loop_invoke(impl->context->main_loop,
-			do_call_process, 1, NULL, 0, false, impl);
+	if (!impl->driving) {
+		res = trigger_request_process(impl);
+	} else {
+		if (impl->direction == SPA_DIRECTION_OUTPUT &&
+		    !impl->process_rt) {
+			pw_loop_invoke(impl->context->main_loop,
+				do_call_process, 1, NULL, 0, false, impl);
+		}
+		res = pw_loop_invoke(impl->context->data_loop,
+			do_trigger_process, 1, NULL, 0, false, impl);
 	}
-	res = pw_loop_invoke(impl->context->data_loop,
-		do_trigger_process, 1, NULL, 0, false, impl);
-
 	return res;
 }

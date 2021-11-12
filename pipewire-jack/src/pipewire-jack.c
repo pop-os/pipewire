@@ -144,6 +144,7 @@ struct object {
 			char alias1[REAL_JACK_PORT_NAME_SIZE+1];
 			char alias2[REAL_JACK_PORT_NAME_SIZE+1];
 			char system[REAL_JACK_PORT_NAME_SIZE+1];
+			uint32_t system_id;
 			uint32_t type_id;
 			uint32_t node_id;
 			uint32_t port_id;
@@ -386,6 +387,7 @@ struct client {
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
 	unsigned int timeowner_conditional:1;
+	unsigned int show_monitor:1;
 	unsigned int merge_monitor:1;
 	unsigned int short_name:1;
 	unsigned int filter_name:1;
@@ -676,7 +678,7 @@ static struct object *find_link(struct client *c, uint32_t src, uint32_t dst)
 	return NULL;
 }
 
-static struct buffer *dequeue_buffer(struct mix *mix)
+static struct buffer *dequeue_buffer(struct client *c, struct mix *mix)
 {
 	struct buffer *b;
 
@@ -686,6 +688,7 @@ static struct buffer *dequeue_buffer(struct mix *mix)
 	b = spa_list_first(&mix->queue, struct buffer, link);
 	spa_list_remove(&b->link);
 	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
+	pw_log_trace_fp("%p: port %p: dequeue buffer %d", c, mix->port, b->id);
 
 	return b;
 }
@@ -760,7 +763,7 @@ void jack_get_version(int *major_ptr, int *minor_ptr, int *micro_ptr, int *proto
 	}							\
 })
 
-#define do_callback(c,callback,...) do_callback_expr(c,{},callback,__VA_ARGS__)
+#define do_callback(c,callback,...) do_callback_expr(c,(void)0,callback,__VA_ARGS__)
 
 #define do_rt_callback_res(c,callback,...)			\
 ({								\
@@ -971,31 +974,32 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 	struct mix *mix;
 	struct client *c = p->client;
 	void *ptr = NULL;
-
-	p->io.status = -EPIPE;
-	p->io.buffer_id = SPA_ID_INVALID;
+	struct buffer *b;
 
 	if (frames == 0)
 		return NULL;
 
-	if (SPA_LIKELY((mix = p->global_mix) != NULL)) {
-		struct buffer *b;
+	if (SPA_UNLIKELY((mix = p->global_mix) == NULL))
+		return NULL;
 
-		if (SPA_UNLIKELY(mix->n_buffers == 0))
-			goto done;
+	pw_log_trace_fp("%p: port %p %d get buffer %d n_buffers:%d",
+			c, p, p->id, frames, mix->n_buffers);
 
-		pw_log_trace_fp("%p: port %p %d get buffer %d n_buffers:%d",
-				c, p, p->id, frames, mix->n_buffers);
+	if (SPA_UNLIKELY(mix->n_buffers == 0))
+		return NULL;
 
-		if (SPA_UNLIKELY((b = dequeue_buffer(mix)) == NULL)) {
-			pw_log_warn("port %p: out of buffers", p);
-			goto done;
+	if (p->io.status == SPA_STATUS_HAVE_DATA &&
+	    p->io.buffer_id < mix->n_buffers) {
+		b = &mix->buffers[p->io.buffer_id];
+	} else {
+		if (p->io.buffer_id < mix->n_buffers) {
+			reuse_buffer(c, mix, p->io.buffer_id);
+			p->io.buffer_id = SPA_ID_INVALID;
 		}
-		reuse_buffer(c, mix, b->id);
-		ptr = b->datas[0].data;
-		if (buf)
-			*buf = b;
-
+		if (SPA_UNLIKELY((b = dequeue_buffer(c, mix)) == NULL)) {
+			pw_log_warn("port %p: out of buffers", p);
+			return NULL;
+		}
 		b->datas[0].chunk->offset = 0;
 		b->datas[0].chunk->size = frames * sizeof(float);
 		b->datas[0].chunk->stride = stride;
@@ -1003,48 +1007,58 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 		p->io.status = SPA_STATUS_HAVE_DATA;
 		p->io.buffer_id = b->id;
 	}
-done:
-	spa_list_for_each(mix, &p->mix, port_link) {
-		struct spa_io_buffers *mio = mix->io;
-		if (SPA_UNLIKELY(mio == NULL))
-			continue;
-		pw_log_trace_fp("%p: port %p tee %d.%d get buffer %d io:%p",
-				c, p, p->id, mix->id, frames, mio);
-		*mio = p->io;
-	}
+	ptr = b->datas[0].data;
+	if (buf)
+		*buf = b;
 	return ptr;
 }
 
-static void process_tee(struct client *c, uint32_t frames)
+static inline void process_empty(struct port *p, uint32_t frames)
+{
+	void *ptr;
+
+	switch (p->object->port.type_id) {
+	case TYPE_ID_AUDIO:
+		ptr = get_buffer_output(p, frames, sizeof(float), NULL);
+		if (SPA_LIKELY(ptr != NULL))
+			memcpy(ptr, p->emptyptr, frames * sizeof(float));
+		break;
+	case TYPE_ID_MIDI:
+	{
+		struct buffer *b;
+		ptr = get_buffer_output(p, MAX_BUFFER_FRAMES, 1, &b);
+		if (SPA_LIKELY(ptr != NULL)) {
+			b->datas[0].chunk->size = convert_from_midi(p->emptyptr,
+					ptr, MAX_BUFFER_FRAMES * sizeof(float));
+		}
+		break;
+	}
+	default:
+		pw_log_warn("port %p: unhandled format %d", p, p->object->port.type_id);
+		break;
+	}
+}
+
+static void complete_process(struct client *c, uint32_t frames)
 {
 	struct port *p;
+	struct mix *mix;
 
+	spa_list_for_each(p, &c->ports[SPA_DIRECTION_INPUT], link) {
+		spa_list_for_each(mix, &p->mix, port_link) {
+			if (SPA_LIKELY(mix->io != NULL))
+				mix->io->status = SPA_STATUS_NEED_DATA;
+		}
+	}
 	spa_list_for_each(p, &c->ports[SPA_DIRECTION_OUTPUT], link) {
-		void *ptr;
+		if (SPA_UNLIKELY(p->empty_out))
+			process_empty(p, frames);
 
-		if (SPA_LIKELY(!p->empty_out))
-			continue;
-
-		switch (p->object->port.type_id) {
-		case TYPE_ID_AUDIO:
-			ptr = get_buffer_output(p, frames, sizeof(float), NULL);
-			if (SPA_LIKELY(ptr != NULL))
-				memcpy(ptr, p->emptyptr, frames * sizeof(float));
-			break;
-		case TYPE_ID_MIDI:
-		{
-			struct buffer *b;
-			ptr = get_buffer_output(p, MAX_BUFFER_FRAMES, 1, &b);
-			if (SPA_LIKELY(ptr != NULL)) {
-				b->datas[0].chunk->size = convert_from_midi(p->emptyptr,
-						ptr, MAX_BUFFER_FRAMES * sizeof(float));
-			}
-			break;
+		spa_list_for_each(mix, &p->mix, port_link) {
+			if (SPA_LIKELY(mix->io != NULL))
+				*mix->io = p->io;
 		}
-		default:
-			pw_log_warn("port %p: unhandled format %d", p, p->object->port.type_id);
-			break;
-		}
+		p->io.status = SPA_STATUS_NEED_DATA;
 	}
 }
 
@@ -1311,7 +1325,7 @@ static inline void signal_sync(struct client *c)
 	struct link *l;
 	struct pw_node_activation *activation = c->activation;
 
-	process_tee(c, c->buffer_frames);
+	complete_process(c, c->buffer_frames);
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	nsec = SPA_TIMESPEC_TO_NSEC(&ts);
@@ -2672,6 +2686,8 @@ static void registry_event_global(void *data, uint32_t id,
 				is_monitor = pw_properties_parse_bool(item->value);
 			}
 		}
+		if (is_monitor && !c->show_monitor)
+			goto exit;
 
 		o = NULL;
 		if (node_id == c->node_id) {
@@ -2702,6 +2718,7 @@ static void registry_event_global(void *data, uint32_t id,
 			if (c->filter_name)
 				filter_name(tmp, FILTER_PORT);
 
+			o->port.system_id = 0;
 			o->port.port_id = SPA_ID_INVALID;
 			o->port.priority = ot->node.priority;
 			o->port.node = ot;
@@ -2729,11 +2746,13 @@ static void registry_event_global(void *data, uint32_t id,
 		if ((str = spa_dict_lookup(props, PW_KEY_PORT_ALIAS)) != NULL)
 			snprintf(o->port.alias2, sizeof(o->port.alias2), "%s", str);
 
-		if ((str = spa_dict_lookup(props, PW_KEY_PORT_ID)) != NULL)
+		if ((str = spa_dict_lookup(props, PW_KEY_PORT_ID)) != NULL) {
+			o->port.system_id = atoi(str);
 			snprintf(o->port.system, sizeof(o->port.system), "system:%s_%d",
 					flags & JackPortIsInput ? "playback" :
 					is_monitor ? "monitor" : "capture",
-					atoi(str)+1);
+					o->port.system_id+1);
+		}
 
 		o->port.flags = flags;
 		o->port.type_id = type_id;
@@ -3032,6 +3051,7 @@ jack_client_t * jack_client_open (const char *client_name,
 				execute_match, client);
 	}
 
+	client->show_monitor = pw_properties_get_bool(client->props, "jack.show-monitor", true);
 	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", false);
 	client->short_name = pw_properties_get_bool(client->props, "jack.short-name", false);
 	client->filter_name = pw_properties_get_bool(client->props, "jack.filter-name", false);
@@ -4085,7 +4105,6 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 		if ((b = get_mix_buffer(mix)) == NULL)
 			continue;
 
-		mix->io->status = SPA_STATUS_NEED_DATA;
 		if (layer++ == 0)
 			ptr = b->datas[0].data;
 		else  {
@@ -4102,7 +4121,6 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
-	struct spa_io_buffers *io;
 	void *ptr = p->emptyptr;
 	struct spa_pod_sequence *seq[CONNECTION_NUM_FOR_PORT];
 	uint32_t n_seq = 0;
@@ -4111,19 +4129,16 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 
 	spa_list_for_each(mix, &p->mix, port_link) {
 		struct spa_data *d;
+		struct buffer *b;
 		void *pod;
 
 		pw_log_trace_fp("%p: port %p mix %d.%d get buffer %d",
 				p->client, p, p->id, mix->id, frames);
 
-		io = mix->io;
-		if (io == NULL ||
-		    io->status != SPA_STATUS_HAVE_DATA ||
-		    io->buffer_id >= mix->n_buffers)
+		if ((b = get_mix_buffer(mix)) == NULL)
 			continue;
 
-		io->status = SPA_STATUS_NEED_DATA;
-		d = &mix->buffers[io->buffer_id].datas[0];
+		d = &b->datas[0];
 
 		if ((pod = spa_pod_from_data(d->data, d->maxsize, d->chunk->offset, d->chunk->size)) == NULL)
 			continue;
@@ -5059,10 +5074,17 @@ static int port_compare_func(const void *v1, const void *v2)
 		res = is_def2 - is_def1;
 	else if ((*o1)->port.priority != (*o2)->port.priority)
 		res = (*o2)->port.priority - (*o1)->port.priority;
-	else if ((res = strcmp((*o1)->port.alias1, (*o2)->port.alias1) == 0))
-		res = (*o1)->id - (*o2)->id;
+	else if ((res = strcmp((*o1)->port.alias1, (*o2)->port.alias1) == 0)) {
+		res = (*o1)->port.node_id - (*o2)->port.node_id;
+		if (res == 0)
+			res = (*o1)->port.system_id - (*o2)->port.system_id;
+		if (res == 0)
+			res = (*o1)->id - (*o2)->id;
+	}
 
-	pw_log_debug("port type:%d<->%d def:%d<->%d prio:%d<->%d id:%d<->%d res:%d",
+
+	pw_log_debug("port %s<->%s type:%d<->%d def:%d<->%d prio:%d<->%d id:%d<->%d res:%d",
+			(*o1)->port.name, (*o2)->port.name,
 			(*o1)->port.type_id, (*o2)->port.type_id,
 			is_def1, is_def2,
 			(*o1)->port.priority, (*o2)->port.priority,

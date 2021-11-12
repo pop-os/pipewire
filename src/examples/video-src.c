@@ -214,9 +214,8 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		interval.tv_sec = 0;
 		interval.tv_nsec = 40 * SPA_NSEC_PER_MSEC;
 
-		if (pw_stream_is_driving(data->stream))
-			pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
-					data->timer, &timeout, &interval, false);
+		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+				data->timer, &timeout, &interval, false);
 		break;
 	}
 	default:
@@ -275,11 +274,18 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	pw_stream_update_params(stream, params, 5);
 }
 
+static void
+on_trigger_done(void *_data)
+{
+	pw_log_trace("trigger done");
+}
+
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.process = on_process,
 	.state_changed = on_stream_state_changed,
 	.param_changed = on_stream_param_changed,
+	.trigger_done = on_trigger_done,
 };
 
 static void do_quit(void *userdata, int signal_number)

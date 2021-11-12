@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.39',
+  version : '0.3.40',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.54.0',
   default_options : [ 'warning_level=3',
@@ -329,6 +329,7 @@ if dbus_dep.found()
 endif
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 summary({'SDL 2': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+drm_dep = dependency('libdrm', required : false)
 readline_dep = dependency('readline', required : false)
 
 if not readline_dep.found()
@@ -422,7 +423,7 @@ if not libintl_dep.found()
 endif
 summary({'intl support': libintl_dep.found()}, bool_yn: true)
 
-need_alsa = get_option('pipewire-alsa').enabled() or get_option('session-managers').contains('media-session')
+need_alsa = get_option('pipewire-alsa').enabled() or 'media-session' in get_option('session-managers')
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: need_alsa)
 summary({'pipewire-alsa': alsa_dep.found()}, bool_yn: true)
 

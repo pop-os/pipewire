@@ -633,8 +633,25 @@ static void registry_event_global(void *data, uint32_t id,
 	}
 }
 
-static void registry_event_global_remove(void *object, uint32_t id)
+static struct global *find_global(struct file *file, uint32_t id)
 {
+	struct global *g;
+	spa_list_for_each(g, &file->globals, link) {
+		if (g->id == id)
+			return g;
+	}
+	return NULL;
+}
+
+static void registry_event_global_remove(void *data, uint32_t id)
+{
+	struct file *file = data;
+	struct global *g;
+
+	if ((g = find_global(file, id)) == NULL)
+		return;
+
+	pw_proxy_destroy(g->proxy);
 }
 
 static const struct pw_registry_events registry_events = {
@@ -1572,7 +1589,9 @@ static int vidioc_reqbufs(struct file *file, struct v4l2_requestbuffers *arg)
 
 		arg->count = file->n_buffers;
 	}
+#ifdef V4L2_BUF_CAP_SUPPORTS_MMAP
 	arg->capabilities = V4L2_BUF_CAP_SUPPORTS_MMAP;
+#endif
 	memset(arg->reserved, 0, sizeof(arg->reserved));
 
 	pw_log_info("result count: %u", arg->count);
@@ -1741,7 +1760,11 @@ static int v4l2_ioctl(int fd, unsigned long int request, void *arg)
 	if ((file = find_file(fd)) == NULL)
 		return globals.old_fops.ioctl(fd, request, arg);
 
+#ifdef __FreeBSD__
+	if (arg == NULL && (request & IOC_DIRMASK != IOC_VOID)) {
+#else
 	if (arg == NULL && (_IOC_DIR(request) & (_IOC_WRITE | _IOC_READ))) {
+#endif
 		res = -EFAULT;
 		goto done;
 	}
