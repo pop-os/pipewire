@@ -2,6 +2,12 @@ pipewire (0.3.40-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Drop patches included in upstream release:
+     - fix_compilation_on_armel.patch
+     - fix_compilation_on_some_architectures.patch
+     - make_insert_at()_fail_on_a_removed_item.patch
+     - fix_type_for_big_endian.patch
+     - only_run_SSE_when_supported.patch
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Nov 2021 17:53:50 +0100
 
