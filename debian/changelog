@@ -9,6 +9,7 @@ pipewire (0.3.40-1) UNRELEASED; urgency=medium
      - fix_type_for_big_endian.patch
      - only_run_SSE_when_supported.patch
   * Install a new manpage for pipewire-pulse
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Nov 2021 17:53:50 +0100
 

@@ -117,6 +117,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_get_prgname@Base 0.3.1
  pw_get_support@Base 0.3.1
  pw_get_user_name@Base 0.3.1
+ pw_getrandom@Base 0.3.40
  pw_gettext@Base 0.3.26
  pw_global_add_listener@Base 0.3.1
  pw_global_add_resource@Base 0.3.1
