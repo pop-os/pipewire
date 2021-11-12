@@ -68,6 +68,7 @@ typedef struct {
 	unsigned int drained:1;
 	unsigned int draining:1;
 	unsigned int xrun_detected:1;
+	unsigned int hw_params_changed:1;
 
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t boundary;
@@ -234,7 +235,7 @@ static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delay
 	return 0;
 }
 
-static int
+static snd_pcm_uframes_t
 snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 		snd_pcm_uframes_t *hw_avail,snd_pcm_uframes_t want)
 {
@@ -319,6 +320,7 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 
 			snd_pcm_areas_silence(pwareas, xfer, io->channels,
 							  frames, io->format);
+			xfer += frames;
 		}
 		if (io->state == SND_PCM_STATE_RUNNING ||
 			io->state == SND_PCM_STATE_DRAINING) {
@@ -326,7 +328,7 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 			pw->xrun_detected = true;
 		}
 	}
-	return 0;
+	return xfer;
 }
 
 static void on_stream_param_changed(void *data, uint32_t id, const struct spa_pod *param)
@@ -387,9 +389,15 @@ static void on_stream_process(void *data)
 	snd_pcm_pipewire_t *pw = data;
 	snd_pcm_ioplug_t *io = &pw->io;
 	struct pw_buffer *b;
-	snd_pcm_uframes_t hw_avail, want;
+	snd_pcm_uframes_t hw_avail, want, xfer;
 
 	pw_stream_get_time(pw->stream, &pw->time);
+
+	if (pw->time.rate.num != 0) {
+		pw->time.delay = pw->time.delay * io->rate * pw->time.rate.num / pw->time.rate.denom;
+		pw->time.rate.denom = io->rate;
+		pw->time.rate.num = 1;
+	}
 
 	hw_avail = snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
 
@@ -405,7 +413,12 @@ static void on_stream_process(void *data)
 	want = pw->rate_match ? pw->rate_match->size : hw_avail;
 	pw_log_trace("%p: avail:%lu want:%lu", pw, hw_avail, want);
 
-	snd_pcm_pipewire_process(pw, b, &hw_avail, want);
+	xfer = snd_pcm_pipewire_process(pw, b, &hw_avail, want);
+
+	if (io->stream == SND_PCM_STREAM_PLAYBACK)
+		pw->time.delay += xfer;
+	else
+		pw->time.delay -= SPA_MIN(pw->time.delay, (int64_t)xfer);
 
 	pw_stream_queue_buffer(pw->stream, b);
 
@@ -483,8 +496,9 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 
 	pw_log_debug("%p: prepare %d %p %lu %ld", pw,
 			pw->error, pw->stream, io->period_size, pw->min_avail);
-	if (pw->error >= 0 && pw->stream != NULL)
+	if (pw->error >= 0 && pw->stream != NULL && !pw->hw_params_changed)
 		goto done;
+	pw->hw_params_changed = false;
 
 	if (pw->stream != NULL) {
 		pw_stream_destroy(pw->stream);
@@ -543,6 +557,8 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 done:
 	pw->hw_ptr = 0;
 	pw->xrun_detected = false;
+	pw->drained = false;
+	pw->draining = false;
 
 	pw_thread_loop_unlock(pw->main_loop);
 
@@ -703,6 +719,7 @@ static int snd_pcm_pipewire_hw_params(snd_pcm_ioplug_t * io,
 		pw->blocks = 1;
 		pw->stride = (io->channels * pw->sample_bits) / 8;
 	}
+	pw->hw_params_changed = true;
 	pw_log_info("%p: format:%s channels:%d rate:%d stride:%d blocks:%d", pw,
 			spa_debug_type_find_name(spa_type_audio_format, pw->format.format),
 			io->channels, io->rate, pw->stride, pw->blocks);
@@ -766,7 +783,7 @@ static enum snd_pcm_chmap_position channel_to_chmap(enum spa_audio_channel chann
 
 static enum spa_audio_channel chmap_to_channel(enum snd_pcm_chmap_position pos)
 {
-	if (pos < 0 || pos >= SPA_N_ELEMENTS(chmap_info))
+	if (pos >= SPA_N_ELEMENTS(chmap_info))
 		return SPA_AUDIO_CHANNEL_UNKNOWN;
 	return chmap_info[pos].channel;
 }

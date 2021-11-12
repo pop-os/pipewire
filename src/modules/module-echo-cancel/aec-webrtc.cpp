@@ -23,6 +23,9 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <memory>
+#include <utility>
+
 #include "echo-cancel.h"
 
 #include <pipewire/pipewire.h>
@@ -32,85 +35,84 @@
 #include <webrtc/system_wrappers/include/trace.h>
 
 struct impl {
-	webrtc::AudioProcessing *apm = NULL;
+	std::unique_ptr<webrtc::AudioProcessing> apm;
 	spa_audio_info_raw info;
-	float** play_buffer;
-	float** rec_buffer;
-	float** out_buffer;
+	std::unique_ptr<float *[]> play_buffer, rec_buffer, out_buffer;
+
+	impl(std::unique_ptr<webrtc::AudioProcessing> apm, const spa_audio_info_raw& info)
+		: apm(std::move(apm)),
+		  info(info),
+		  play_buffer(std::make_unique<float *[]>(info.channels)),
+		  rec_buffer(std::make_unique<float *[]>(info.channels)),
+		  out_buffer(std::make_unique<float *[]>(info.channels))
+	{ }
 };
 
 static void *webrtc_create(const struct pw_properties *args, const spa_audio_info_raw *info)
 {
-	struct impl *impl;
-	webrtc::AudioProcessing *apm;
-	webrtc::ProcessingConfig pconfig;
+	bool extended_filter = pw_properties_get_bool(args, "webrtc.extended_filter", true);
+	bool delay_agnostic = pw_properties_get_bool(args, "webrtc.delay_agnostic", true);
+	bool high_pass_filter = pw_properties_get_bool(args, "webrtc.high_pass_filter", true);
+	bool noise_suppression = pw_properties_get_bool(args, "webrtc.noise_suppression", true);
+
+	// Note: AGC seems to mess up with Agnostic Delay Detection, especially with speech,
+	// result in very poor performance, disable by default
+	bool gain_control = pw_properties_get_bool(args, "webrtc.gain_control", false);
+
+	// Disable experimental flags by default
+	bool experimental_agc = pw_properties_get_bool(args, "webrtc.experimental_agc", false);
+	bool experimental_ns = pw_properties_get_bool(args, "webrtc.experimental_ns", false);
+
+	// Intelligibility Enhancer will enforce an upmix on non-mono outputs
+	// Disable by default
+	bool intelligibility = pw_properties_get_bool(args, "webrtc.intelligibility", false);
+
 	webrtc::Config config;
+	config.Set<webrtc::ExtendedFilter>(new webrtc::ExtendedFilter(extended_filter));
+	config.Set<webrtc::DelayAgnostic>(new webrtc::DelayAgnostic(delay_agnostic));
+	config.Set<webrtc::ExperimentalAgc>(new webrtc::ExperimentalAgc(experimental_agc));
+	config.Set<webrtc::ExperimentalNs>(new webrtc::ExperimentalNs(experimental_ns));
+	config.Set<webrtc::Intelligibility>(new webrtc::Intelligibility(intelligibility));
 
-	// TODO: wire up args to control these
-	config.Set<webrtc::ExtendedFilter>(new webrtc::ExtendedFilter(true));
-	// Enable Agnostic Delay Detection, would greatly improve performance for larger latencies
-	config.Set<webrtc::DelayAgnostic>(new webrtc::DelayAgnostic(true));
-
-	apm = webrtc::AudioProcessing::Create(config);
-
-	pconfig = {{
+	webrtc::ProcessingConfig pconfig = {{
 		webrtc::StreamConfig(info->rate, info->channels, false), /* input stream */
 		webrtc::StreamConfig(info->rate, info->channels, false), /* output stream */
 		webrtc::StreamConfig(info->rate, info->channels, false), /* reverse input stream */
 		webrtc::StreamConfig(info->rate, info->channels, false), /* reverse output stream */
 	}};
 
+	auto apm = std::unique_ptr<webrtc::AudioProcessing>(webrtc::AudioProcessing::Create(config));
 	if (apm->Initialize(pconfig) != webrtc::AudioProcessing::kNoError) {
 		pw_log_error("Error initialising webrtc audio processing module");
-		goto error;
+		return nullptr;
 	}
 
-	// TODO: wire up args to control these
-	apm->high_pass_filter()->Enable(true);
+	apm->high_pass_filter()->Enable(high_pass_filter);
+	// Always disable drift compensation since it requires drift sampling
 	apm->echo_cancellation()->enable_drift_compensation(false);
 	apm->echo_cancellation()->Enable(true);
+	// TODO: wire up supression levels to args
 	apm->echo_cancellation()->set_suppression_level(webrtc::EchoCancellation::kHighSuppression);
-        apm->noise_suppression()->set_level(webrtc::NoiseSuppression::kHigh);
-	apm->noise_suppression()->Enable(true);
-	// FIXME: wire up args to AGC
-	// Note: AGC seems to mess up with Agnostic Delay Detection, especially with speech,
-	// result in very poor performance, disable by default
-	// apm->gain_control()->set_analog_level_limits(0, 255);
-	// apm->gain_control()->set_mode(webrtc::GainControl::kAdaptiveDigital);
-	// apm->gain_control()->Enable(true);
+	apm->noise_suppression()->set_level(webrtc::NoiseSuppression::kHigh);
+	apm->noise_suppression()->Enable(noise_suppression);
+	// TODO: wire up AGC parameters to args
+	apm->gain_control()->set_analog_level_limits(0, 255);
+	apm->gain_control()->set_mode(webrtc::GainControl::kAdaptiveDigital);
+	apm->gain_control()->Enable(gain_control);
 
-	impl = (struct impl *)calloc(1, sizeof(struct impl));
-	impl->info = *info;
-
-	impl->play_buffer = (float **)calloc(info->channels, sizeof(float*));
-	impl->rec_buffer = (float **)calloc(info->channels, sizeof(float*));
-	impl->out_buffer = (float **)calloc(info->channels, sizeof(float*));
-
-	impl->apm = apm;
-
-	return impl;
-
-error:
-	if (apm)
-		delete apm;
-
-	return NULL;
+	return new impl(std::move(apm), *info);
 }
 
 static void webrtc_destroy(void *ec)
 {
-	struct impl *impl = (struct impl*)ec;
+	auto impl = static_cast<struct impl *>(ec);
 
-	delete impl->apm;
-	free(impl->play_buffer);
-	free(impl->rec_buffer);
-	free(impl->out_buffer);
-	free(impl);
+	delete impl;
 }
 
 static int webrtc_run(void *ec, const float *rec[], const float *play[], float *out[], uint32_t n_samples)
 {
-	struct impl *impl = (struct impl*)ec;
+	auto impl = static_cast<struct impl *>(ec);
 	webrtc::StreamConfig config =
 		webrtc::StreamConfig(impl->info.rate, impl->info.channels, false);
 	unsigned int num_blocks = n_samples * 1000 / impl->info.rate / 10;
@@ -122,14 +124,14 @@ static int webrtc_run(void *ec, const float *rec[], const float *play[], float *
 
 	for (size_t i = 0; i < num_blocks; i ++) {
 		for (size_t j = 0; j < impl->info.channels; j++) {
-			impl->play_buffer[j] = (float*)play[j] + config.num_frames() * i;
-			impl->rec_buffer[j] = (float*)rec[j] + config.num_frames() * i;
+			impl->play_buffer[j] = const_cast<float *>(play[j]) + config.num_frames() * i;
+			impl->rec_buffer[j] = const_cast<float *>(rec[j]) + config.num_frames() * i;
 			impl->out_buffer[j] = out[j] + config.num_frames() * i;
 		}
 		/* FIXME: ProcessReverseStream may change the playback buffer, in which
 		* case we should use that, if we ever expose the intelligibility
 		* enhancer */
-		if (impl->apm->ProcessReverseStream(impl->play_buffer, config, config, impl->play_buffer) !=
+		if (impl->apm->ProcessReverseStream(impl->play_buffer.get(), config, config, impl->play_buffer.get()) !=
 				webrtc::AudioProcessing::kNoError) {
 			pw_log_error("Processing reverse stream failed");
 		}
@@ -137,7 +139,7 @@ static int webrtc_run(void *ec, const float *rec[], const float *play[], float *
 		// Extra delay introduced by multiple frames
 		impl->apm->set_stream_delay_ms((num_blocks - 1) * 10);
 
-		if (impl->apm->ProcessStream(impl->rec_buffer, config, config, impl->out_buffer) !=
+		if (impl->apm->ProcessStream(impl->rec_buffer.get(), config, config, impl->out_buffer.get()) !=
 				webrtc::AudioProcessing::kNoError) {
 			pw_log_error("Processing stream failed");
 		}

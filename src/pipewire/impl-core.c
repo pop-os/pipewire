@@ -25,17 +25,12 @@
 #include "config.h"
 
 #include <unistd.h>
-#include <errno.h>
-#include <fcntl.h>
 #ifndef ENODATA
 #define ENODATA 9919
 #endif
-#if HAVE_SYS_RANDOM_H
-#include <sys/random.h>
-#endif
 
-#include <spa/utils/string.h>
 #include <spa/debug/types.h>
+#include <spa/utils/string.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -54,7 +49,8 @@ struct resource_data {
 static void * registry_bind(void *object, uint32_t id,
 		const char *type, uint32_t version, size_t user_data_size)
 {
-	struct pw_resource *resource = object;
+	struct resource_data *data = object;
+	struct pw_resource *resource = data->resource;
 	struct pw_impl_client *client = resource->client;
 	struct pw_context *context = resource->context;
 	struct pw_global *global;
@@ -98,7 +94,8 @@ error_exit_clean:
 
 static int registry_destroy(void *object, uint32_t id)
 {
-	struct pw_resource *resource = object;
+	struct resource_data *data = object;
+	struct pw_resource *resource = data->resource;
 	struct pw_impl_client *client = resource->client;
 	struct pw_context *context = resource->context;
 	struct pw_global *global;
@@ -261,7 +258,7 @@ static struct pw_registry *core_get_registry(void *object, uint32_t version, siz
 	pw_resource_add_object_listener(registry_resource,
 				&data->object_listener,
 				&registry_methods,
-				resource);
+				data);
 
 	spa_list_append(&context->registry_resource_list, &registry_resource->link);
 
@@ -416,7 +413,7 @@ struct pw_impl_core *pw_context_create_core(struct pw_context *context,
 	this->info.host_name = pw_get_host_name();
 	this->info.version = pw_get_library_version();
 	do {
-		res = getrandom(&this->info.cookie,
+		res = pw_getrandom(&this->info.cookie,
 				sizeof(this->info.cookie), 0);
 	} while ((res == -1) && (errno == EINTR));
 	if (res == -1) {

@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2018 Wim Taymans
+ * Copyright © 2020 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -24,13 +24,15 @@
 
 /*
  [title]
- Video input stream using \ref pw_stream_trigger_process, for pull mode.
+ Video input stream using \ref pw_stream "pw_stream", with format fixation.
  [title]
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <signal.h>
+#include <libdrm/drm_fourcc.h>
 
 #include <spa/utils/result.h>
 #include <spa/param/video/format-utils.h>
@@ -50,6 +52,18 @@ struct pixel {
 	float r, g, b, a;
 };
 
+struct pw_version {
+  int major;
+  int minor;
+  int micro;
+};
+
+struct modifier_info {
+        uint32_t spa_format;
+        uint32_t n_modifiers;
+        uint64_t *modifiers;
+};
+
 struct data {
 	const char *path;
 
@@ -59,23 +73,72 @@ struct data {
 	SDL_Texture *cursor;
 
 	struct pw_main_loop *loop;
-	struct spa_source *timer;
+	struct spa_source *reneg;
 
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
-
-	struct spa_io_position *position;
 
 	struct spa_video_info format;
 	int32_t stride;
 	struct spa_rectangle size;
 
+	uint32_t n_mod_info;
+	struct modifier_info mod_info[1];
+
 	int counter;
-	SDL_Rect rect;
-	SDL_Rect cursor_rect;
-	bool is_yuv;
-	bool have_request_process;
 };
+
+static struct pw_version parse_pw_version(const char* version) {
+	struct pw_version pw_version;
+	sscanf(version, "%d.%d.%d", &pw_version.major, &pw_version.minor,
+		&pw_version.micro);
+	return pw_version;
+}
+
+static bool has_pw_version(int major, int minor, int micro) {
+	struct pw_version pw_version = parse_pw_version(pw_get_library_version());
+	printf("PW Version: %d.%d.%d\n", pw_version.major, pw_version.minor,
+		pw_version.micro);
+	return major <= pw_version.major && minor <= pw_version.minor && micro <= pw_version.micro;
+}
+
+static void init_modifiers(struct data *data)
+{
+	data->n_mod_info = 1;
+	data->mod_info[0].spa_format = SPA_VIDEO_FORMAT_RGB;
+	data->mod_info[0].n_modifiers = 2;
+	data->mod_info[0].modifiers = (uint64_t*)malloc(2*sizeof(uint32_t));
+	data->mod_info[0].modifiers[0] = DRM_FORMAT_MOD_LINEAR;
+	data->mod_info[0].modifiers[0] = DRM_FORMAT_MOD_INVALID;
+}
+
+static void destroy_modifiers(struct data *data)
+{
+	free(data->mod_info[0].modifiers);
+	data->mod_info[0].n_modifiers = 0;
+}
+
+static void strip_modifier(struct data *data, uint32_t spa_format, uint64_t modifier)
+{
+	if (data->mod_info[0].spa_format != spa_format)
+		return;
+	struct modifier_info *mod_info = &data->mod_info[0];
+	uint32_t counter = 0;
+	// Dropping of single modifiers is only supported on PipeWire 0.3.40 and newer.
+	// On older PipeWire just dropping all modifiers might work on Versions newer then 0.3.33/35
+	if (has_pw_version(0,3,40)) {
+		printf("Dropping a single modifier\n");
+		for (uint32_t i = 0; i < mod_info->n_modifiers; i++) {
+			if (mod_info->modifiers[i] == modifier)
+				continue;
+			mod_info->modifiers[counter++] = mod_info->modifiers[i];
+		}
+	} else {
+		printf("Dropping all modifiers\n");
+		counter = 0;
+	}
+	mod_info->n_modifiers = counter;
+}
 
 static void handle_events(struct data *data)
 {
@@ -87,6 +150,50 @@ static void handle_events(struct data *data)
 			break;
 		}
 	}
+}
+
+static struct spa_pod *build_format(struct spa_pod_builder *b, SDL_RendererInfo *info, enum spa_video_format format,
+        uint64_t *modifiers, int modifier_count)
+{
+	struct spa_pod_frame f[2];
+	int i, c;
+
+	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+	spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
+	spa_pod_builder_add(b, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
+	/* format */
+	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
+	/* modifiers */
+	if (modifier_count == 1 && modifiers[0] == DRM_FORMAT_MOD_INVALID) {
+		// we only support implicit modifiers, use shortpath to skip fixation phase
+		spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+		spa_pod_builder_long(b, modifiers[0]);
+	} else if (modifier_count > 0) {
+		// build an enumeration of modifiers
+		spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+		spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Enum, 0);
+		// modifiers from the array
+		for (i = 0, c = 0; i < modifier_count; i++) {
+			spa_pod_builder_long(b, modifiers[i]);
+			if (c++ == 0)
+				spa_pod_builder_long(b, modifiers[i]);
+		}
+		spa_pod_builder_pop(b, &f[1]);
+	}
+	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_size,
+		SPA_POD_CHOICE_RANGE_Rectangle(
+			&SPA_RECTANGLE(WIDTH, HEIGHT),
+			&SPA_RECTANGLE(1,1),
+			&SPA_RECTANGLE(info->max_texture_width,
+				       info->max_texture_height)),
+		0);
+	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_framerate,
+		SPA_POD_CHOICE_RANGE_Fraction(
+			&SPA_FRACTION(25,1),
+			&SPA_FRACTION(0,1),
+			&SPA_FRACTION(30,1)),
+		0);
+	return spa_pod_builder_pop(b, &f[0]);
 }
 
 /* our data processing function is in general:
@@ -107,13 +214,12 @@ on_process(void *_data)
 	struct spa_buffer *buf;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
-	struct spa_meta_region *mc;
-	struct spa_meta_cursor *mcs;
-	uint32_t i, j;
+	uint32_t i;
 	uint8_t *src, *dst;
-	bool render_cursor = false;
 
 	b = NULL;
+	/* dequeue and queue old buffers, use the last available
+	 * buffer */
 	while (true) {
 		struct pw_buffer *t;
 		if ((t = pw_stream_dequeue_buffer(stream)) == NULL)
@@ -129,140 +235,49 @@ on_process(void *_data)
 
 	buf = b->buffer;
 
-	pw_log_trace("new buffer %p", buf);
+	pw_log_info("new buffer %p", buf);
 
 	handle_events(data);
+
+	if (buf->datas[0].type == SPA_DATA_DmaBuf) {
+		// Simulate a failed import of a DmaBuf
+		// We should try another modifier
+		printf("Failed to import dmabuf, stripping modifier %"PRIu64"\n", data->format.info.raw.modifier);
+		strip_modifier(data, data->format.info.raw.format, data->format.info.raw.modifier);
+		pw_loop_signal_event(pw_main_loop_get_loop(data->loop), data->reneg);
+		goto done;
+	}
 
 	if ((sdata = buf->datas[0].data) == NULL)
 		goto done;
 
-	/* get the videocrop metadata if any */
-	if ((mc = spa_buffer_find_meta_data(buf, SPA_META_VideoCrop, sizeof(*mc))) &&
-	    spa_meta_region_is_valid(mc)) {
-		data->rect.x = mc->region.position.x;
-		data->rect.y = mc->region.position.y;
-		data->rect.w = mc->region.size.width;
-		data->rect.h = mc->region.size.height;
-	}
-	/* get cursor metadata */
-	if ((mcs = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof(*mcs))) &&
-	    spa_meta_cursor_is_valid(mcs)) {
-		struct spa_meta_bitmap *mb;
-		void *cdata;
-		int cstride;
-
-		data->cursor_rect.x = mcs->position.x;
-		data->cursor_rect.y = mcs->position.y;
-
-		mb = SPA_PTROFF(mcs, mcs->bitmap_offset, struct spa_meta_bitmap);
-		data->cursor_rect.w = mb->size.width;
-		data->cursor_rect.h = mb->size.height;
-
-		if (data->cursor == NULL) {
-			data->cursor = SDL_CreateTexture(data->renderer,
-						 id_to_sdl_format(mb->format),
-						 SDL_TEXTUREACCESS_STREAMING,
-						 mb->size.width, mb->size.height);
-			SDL_SetTextureBlendMode(data->cursor, SDL_BLENDMODE_BLEND);
-		}
-
-
-		if (SDL_LockTexture(data->cursor, NULL, &cdata, &cstride) < 0) {
-			fprintf(stderr, "Couldn't lock cursor texture: %s\n", SDL_GetError());
-			goto done;
-		}
-
-		/* copy the cursor bitmap into the texture */
-		src = SPA_PTROFF(mb, mb->offset, uint8_t);
-		dst = cdata;
-		ostride = SPA_MIN(cstride, mb->stride);
-
-		for (i = 0; i < mb->size.height; i++) {
-			memcpy(dst, src, ostride);
-			dst += cstride;
-			src += mb->stride;
-		}
-		SDL_UnlockTexture(data->cursor);
-
-		render_cursor = true;
+	if (SDL_LockTexture(data->texture, NULL, &ddata, &dstride) < 0) {
+		fprintf(stderr, "Couldn't lock texture: %s\n", SDL_GetError());
+		goto done;
 	}
 
 	/* copy video image in texture */
-	if (data->is_yuv) {
-		sstride = data->stride;
-		SDL_UpdateYUVTexture(data->texture,
-				NULL,
-				sdata,
-				sstride,
-				SPA_PTROFF(sdata, sstride * data->size.height, void),
-				sstride / 2,
-				SPA_PTROFF(sdata, 5 * (sstride * data->size.height) / 4, void),
-				sstride / 2);
+	sstride = buf->datas[0].chunk->stride;
+	ostride = SPA_MIN(sstride, dstride);
+
+	src = sdata;
+	dst = ddata;
+
+	for (i = 0; i < data->size.height; i++) {
+		memcpy(dst, src, ostride);
+		src += sstride;
+		dst += dstride;
 	}
-	else {
-		if (SDL_LockTexture(data->texture, NULL, &ddata, &dstride) < 0) {
-			fprintf(stderr, "Couldn't lock texture: %s\n", SDL_GetError());
-			goto done;
-		}
-
-		sstride = buf->datas[0].chunk->stride;
-		ostride = SPA_MIN(sstride, dstride);
-
-		src = sdata;
-		dst = ddata;
-
-		if (data->format.media_subtype == SPA_MEDIA_SUBTYPE_dsp) {
-			for (i = 0; i < data->size.height; i++) {
-				struct pixel *p = (struct pixel *) src;
-				for (j = 0; j < data->size.width; j++) {
-					dst[j * 4 + 0] = SPA_CLAMP(p[j].r * 255.0f, 0, 255);
-					dst[j * 4 + 1] = SPA_CLAMP(p[j].g * 255.0f, 0, 255);
-					dst[j * 4 + 2] = SPA_CLAMP(p[j].b * 255.0f, 0, 255);
-					dst[j * 4 + 3] = SPA_CLAMP(p[j].a * 255.0f, 0, 255);
-				}
-				src += sstride;
-				dst += dstride;
-			}
-		} else {
-			for (i = 0; i < data->size.height; i++) {
-				memcpy(dst, src, ostride);
-				src += sstride;
-				dst += dstride;
-			}
-		}
-		SDL_UnlockTexture(data->texture);
-	}
+	SDL_UnlockTexture(data->texture);
 
 	SDL_RenderClear(data->renderer);
-	/* now render the video and then the cursor if any */
-	SDL_RenderCopy(data->renderer, data->texture, &data->rect, NULL);
-	if (render_cursor) {
-		SDL_RenderCopy(data->renderer, data->cursor, NULL, &data->cursor_rect);
-	}
+	/* now render the video */
+	SDL_RenderCopy(data->renderer, data->texture, NULL, NULL);
 	SDL_RenderPresent(data->renderer);
 
       done:
 	pw_stream_queue_buffer(stream, b);
 }
-
-static void enable_timeouts(struct data *data, bool enabled)
-{
-	struct timespec timeout, interval, *to, *iv;
-
-	if (!enabled || data->have_request_process) {
-		to = iv = NULL;
-	} else {
-		timeout.tv_sec = 0;
-		timeout.tv_nsec = 1;
-		interval.tv_sec = 0;
-		interval.tv_nsec = 80 * SPA_NSEC_PER_MSEC;
-		to = &timeout;
-		iv = &interval;
-	}
-	pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
-				data->timer, to, iv, false);
-}
-
 
 static void on_stream_state_changed(void *_data, enum pw_stream_state old,
 				    enum pw_stream_state state, const char *error)
@@ -274,52 +289,8 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old,
 		pw_main_loop_quit(data->loop);
 		break;
 	case PW_STREAM_STATE_PAUSED:
-		enable_timeouts(data, false);
 		break;
 	case PW_STREAM_STATE_STREAMING:
-		enable_timeouts(data, true);
-		break;
-	default:
-		break;
-	}
-}
-
-static void
-on_stream_io_changed(void *_data, uint32_t id, void *area, uint32_t size)
-{
-	struct data *data = _data;
-
-	switch (id) {
-	case SPA_IO_Position:
-		data->position = area;
-		break;
-	}
-}
-
-static void
-on_trigger_done(void *_data)
-{
-	struct data *data = _data;
-	pw_log_trace("%p trigger done", data);
-}
-
-static void on_timeout(void *userdata, uint64_t expirations)
-{
-	struct data *data = userdata;
-	if (!data->have_request_process)
-		pw_stream_trigger_process(data->stream);
-}
-
-static void
-on_command(void *_data, const struct spa_command *command)
-{
-	struct data *data = _data;
-	switch (SPA_NODE_COMMAND_ID(command)) {
-	case SPA_NODE_COMMAND_RequestProcess:
-		data->have_request_process = true;
-		enable_timeouts(data, false);
-		pw_stream_trigger_process(data->stream);
-		break;
 	default:
 		break;
 	}
@@ -343,10 +314,9 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	struct pw_stream *stream = data->stream;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	const struct spa_pod *params[5];
+	const struct spa_pod *params[1];
 	Uint32 sdl_format;
 	void *d;
-	int32_t mult, size;
 
 	/* NULL means to clear the format */
 	if (param == NULL || id != SPA_PARAM_Format)
@@ -358,31 +328,14 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	if (spa_format_parse(param, &data->format.media_type, &data->format.media_subtype) < 0)
 		return;
 
-	if (data->format.media_type != SPA_MEDIA_TYPE_video)
+	if (data->format.media_type != SPA_MEDIA_TYPE_video ||
+	    data->format.media_subtype != SPA_MEDIA_SUBTYPE_raw)
 		return;
 
-	switch (data->format.media_subtype) {
-	case SPA_MEDIA_SUBTYPE_raw:
-		/* call a helper function to parse the format for us. */
-		spa_format_video_raw_parse(param, &data->format.info.raw);
-		sdl_format = id_to_sdl_format(data->format.info.raw.format);
-		data->size = SPA_RECTANGLE(data->format.info.raw.size.width,
-				data->format.info.raw.size.height);
-		mult = 1;
-		break;
-	case SPA_MEDIA_SUBTYPE_dsp:
-		spa_format_video_dsp_parse(param, &data->format.info.dsp);
-		if (data->format.info.dsp.format != SPA_VIDEO_FORMAT_DSP_F32)
-			return;
-		sdl_format = SDL_PIXELFORMAT_RGBA32;
-		data->size = SPA_RECTANGLE(data->position->video.size.width,
-				data->position->video.size.height);
-		mult = 4;
-		break;
-	default:
-		sdl_format = SDL_PIXELFORMAT_UNKNOWN;
-		break;
-	}
+	/* call a helper function to parse the format for us. */
+	spa_format_video_raw_parse(param, &data->format.info.raw);
+	sdl_format = id_to_sdl_format(data->format.info.raw.format);
+	data->size = data->format.info.raw.size;
 
 	if (sdl_format == SDL_PIXELFORMAT_UNKNOWN) {
 		pw_stream_set_error(stream, -EINVAL, "unknown pixel format");
@@ -397,89 +350,63 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	SDL_LockTexture(data->texture, NULL, &d, &data->stride);
 	SDL_UnlockTexture(data->texture);
 
-	switch(sdl_format) {
-	case SDL_PIXELFORMAT_YV12:
-	case SDL_PIXELFORMAT_IYUV:
-		size = (data->stride * data->size.height) * 3 / 2;
-		data->is_yuv = true;
-		break;
-	default:
-		size = data->stride * data->size.height;
-		break;
-	}
-
-	data->rect.x = 0;
-	data->rect.y = 0;
-	data->rect.w = data->size.width;
-	data->rect.h = data->size.height;
-
 	/* a SPA_TYPE_OBJECT_ParamBuffers object defines the acceptable size,
 	 * number, stride etc of the buffers */
 	params[0] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
 		SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(8, 2, MAX_BUFFERS),
 		SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
-		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(size * mult),
-		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(data->stride * mult),
+		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(data->stride * data->size.height),
+		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(data->stride),
 		SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16),
-		SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1<<SPA_DATA_MemPtr)));
-
-	/* a header metadata with timing information */
-	params[1] = spa_pod_builder_add_object(&b,
-		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
-		SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
-	/* video cropping information */
-	params[2] = spa_pod_builder_add_object(&b,
-		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
-		SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_region)));
-#define CURSOR_META_SIZE(w,h)	(sizeof(struct spa_meta_cursor) + \
-				 sizeof(struct spa_meta_bitmap) + w * h * 4)
-	/* cursor information */
-	params[3] = spa_pod_builder_add_object(&b,
-		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Cursor),
-		SPA_PARAM_META_size, SPA_POD_CHOICE_RANGE_Int(
-				CURSOR_META_SIZE(64,64),
-				CURSOR_META_SIZE(1,1),
-				CURSOR_META_SIZE(256,256)));
+		SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1<<SPA_DATA_MemPtr) | (1<<SPA_DATA_DmaBuf)));
 
 	/* we are done */
-	pw_stream_update_params(stream, params, 4);
+	pw_stream_update_params(stream, params, 1);
 }
 
 /* these are the stream events we listen for */
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.state_changed = on_stream_state_changed,
-	.io_changed = on_stream_io_changed,
 	.param_changed = on_stream_param_changed,
 	.process = on_process,
-	.trigger_done = on_trigger_done,
-	.command = on_command,
 };
 
-static int build_format(struct data *data, struct spa_pod_builder *b, const struct spa_pod **params)
+static int build_formats(struct data *data, struct spa_pod_builder *b, const struct spa_pod **params)
 {
 	SDL_RendererInfo info;
+	int n_params = 0;
 
 	SDL_GetRendererInfo(data->renderer, &info);
-	params[0] = sdl_build_formats(&info, b);
 
-	fprintf(stderr, "supported SDL formats:\n");
-	spa_debug_format(2, NULL, params[0]);
+	if (data->mod_info[0].n_modifiers > 0) {
+		params[n_params++] = build_format(b, &info, SPA_VIDEO_FORMAT_RGB, data->mod_info[0].modifiers, data->mod_info[0].n_modifiers);
+	}
+	params[n_params++] = build_format(b, &info, SPA_VIDEO_FORMAT_RGB, NULL, 0);
 
-	params[1] = spa_pod_builder_add_object(b,
-			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-			SPA_FORMAT_mediaType,		SPA_POD_Id(SPA_MEDIA_TYPE_video),
-			SPA_FORMAT_mediaSubtype,	SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
-			SPA_FORMAT_VIDEO_format,	SPA_POD_Id(SPA_VIDEO_FORMAT_DSP_F32));
+	for (int i=0; i < n_params; i++) {
+		spa_debug_format(2, NULL, params[i]);
+	}
 
-	fprintf(stderr, "supported DSP formats:\n");
-	spa_debug_format(2, NULL, params[1]);
+	return n_params;
+}
 
-	return 2;
+static void reneg_format(void *_data, uint64_t expiration)
+{
+	struct data *data = (struct data*) _data;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	const struct spa_pod *params[2];
+	uint32_t n_params;
+
+	if (data->format.info.raw.format == 0)
+		return;
+
+	fprintf(stderr, "renegotiate formats:\n");
+	n_params = build_formats(data, &b, params);
+
+	pw_stream_update_params(data->stream, params, n_params);
 }
 
 static void do_quit(void *userdata, int signal_number)
@@ -504,9 +431,6 @@ int main(int argc, char *argv[])
 	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGINT, do_quit, &data);
 	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGTERM, do_quit, &data);
 
-	/* the timer to pull in data */
-	data.timer = pw_loop_add_timer(pw_main_loop_get_loop(data.loop), on_timeout, &data);
-
 	/* create a simple stream, the simple stream manages to core and remote
 	 * objects for you if you don't need to deal with them
 	 *
@@ -520,12 +444,11 @@ int main(int argc, char *argv[])
 	 */
 	data.stream = pw_stream_new_simple(
 			pw_main_loop_get_loop(data.loop),
-			"video-play",
+			"video-play-reneg",
 			pw_properties_new(
 				PW_KEY_MEDIA_TYPE, "Video",
 				PW_KEY_MEDIA_CATEGORY, "Capture",
 				PW_KEY_MEDIA_ROLE, "Camera",
-				PW_KEY_PRIORITY_DRIVER, "10000",
 				NULL),
 			&stream_events,
 			&data);
@@ -537,6 +460,8 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	init_modifiers(&data);
+
 	if (SDL_CreateWindowAndRenderer
 	    (WIDTH, HEIGHT, SDL_WINDOW_RESIZABLE, &data.window, &data.renderer)) {
 		fprintf(stderr, "can't create window: %s\n", SDL_GetError());
@@ -546,7 +471,8 @@ int main(int argc, char *argv[])
 	/* build the extra parameters to connect with. To connect, we can provide
 	 * a list of supported formats.  We use a builder that writes the param
 	 * object to the stack. */
-	n_params = build_format(&data, &b, params);
+	printf("supported formats:\n");
+	n_params = build_formats(&data, &b, params);
 
 	/* now connect the stream, we need a direction (input/output),
 	 * an optional target node to connect to, some flags and parameters
@@ -554,7 +480,6 @@ int main(int argc, char *argv[])
 	if ((res = pw_stream_connect(data.stream,
 			  PW_DIRECTION_INPUT,
 			  data.path ? (uint32_t)atoi(data.path) : PW_ID_ANY,
-			  PW_STREAM_FLAG_DRIVER |	/* we're driver, we pull */
 			  PW_STREAM_FLAG_AUTOCONNECT |	/* try to automatically connect this stream */
 			  PW_STREAM_FLAG_MAP_BUFFERS,	/* mmap the buffer data for us */
 			  params, n_params))		/* extra parameters, see above */ < 0) {
@@ -562,11 +487,15 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	data.reneg = pw_loop_add_event(pw_main_loop_get_loop(data.loop), reneg_format, &data);
+
 	/* do things until we quit the mainloop */
 	pw_main_loop_run(data.loop);
 
 	pw_stream_destroy(data.stream);
 	pw_main_loop_destroy(data.loop);
+
+	destroy_modifiers(&data);
 
 	SDL_DestroyTexture(data.texture);
 	if (data.cursor)

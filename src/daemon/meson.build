@@ -23,8 +23,8 @@ conf_config_uninstalled.set('pipewire_pulse_path',
   meson.build_root() / 'src' / 'daemon' / 'pipewire-pulse')
 conf_config_uninstalled.set('pulse_comment', '')
 
-build_ms = get_option('session-managers').contains('media-session')
-build_wp = get_option('session-managers').contains('wireplumber')
+build_ms = 'media-session' in get_option('session-managers')
+build_wp = 'wireplumber' in get_option('session-managers')
 default_sm = get_option('session-managers').get(0, '')
 
 summary({'Build media-session': build_ms,
@@ -46,21 +46,20 @@ elif default_sm == 'media-session'
   ms_bindir = ms_proj.get_variable('media_session_bin_dir', pipewire_bindir)
   conf_config.set('session_manager_path', ms_bindir / 'pipewire-media-session')
 
-  conf_config_uninstalled.set('session_manager_path',
-    meson.source_root() / 'subprojects' / 'pipewire-media-session' / 'media-session-uninstalled.sh')
-  conf_config_uninstalled.set('session_manager_args',
-    '-b ' + meson.build_root() / 'subprojects' / 'pipewire-media-session' + ' pipewire-media-session')
+  ms_uninstalled = ms_proj.get_variable('media_session_uninstalled')
+  conf_config_uninstalled.set('session_manager_path', ms_uninstalled.full_path())
+  conf_config_uninstalled.set('session_manager_args', 'pipewire-media-session')
   conf_config_uninstalled.set('sm_comment', '')
 elif default_sm == 'wireplumber'
   wp_bindir = wp_proj.get_variable('wireplumber_bin_dir', pipewire_bindir)
-
   conf_config.set('session_manager_path', wp_bindir / 'wireplumber')
 
-  # wp-uninstalled.sh -b path/to/wp/build/root wireplumber
-  conf_config_uninstalled.set('session_manager_path',
-    meson.source_root() / 'subprojects' / 'wireplumber' / 'wp-uninstalled.sh')
-  conf_config_uninstalled.set('session_manager_args',
-    '-b ' + meson.build_root() / 'subprojects' / 'wireplumber' + ' wireplumber')
+  wp_uninstalled = wp_proj.get_variable('wireplumber_uninstalled')
+  conf_config_uninstalled.set('session_manager_path', wp_uninstalled.full_path())
+  conf_config_uninstalled.set('session_manager_args', 'wireplumber')
+  conf_config_uninstalled.set('sm_comment', '')
+else
+  conf_config_uninstalled.set('session_manager_path', default_sm)
   conf_config_uninstalled.set('sm_comment', '')
 endif
 

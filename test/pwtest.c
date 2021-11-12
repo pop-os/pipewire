@@ -915,9 +915,7 @@ static void run_test(struct pwtest_context *ctx, struct pwtest_suite *c, struct 
 	pid_t pw_daemon = 0;
 	int read_fds[_FD_LAST], write_fds[_FD_LAST];
 	int r;
-	const char *tmpdir = getenv("TMPDIR");
-
-	spa_assert_se(tmpdir != NULL);
+	const char *tmpdir;
 
 	if (t->result == PWTEST_SKIP) {
 		char *buf = pw_array_add(&t->logs[FD_LOG], 64);
@@ -934,10 +932,14 @@ static void run_test(struct pwtest_context *ctx, struct pwtest_suite *c, struct 
 	}
 
 	set_test_env(ctx, t);
+	tmpdir = getenv("TMPDIR");
+	spa_assert_se(tmpdir != NULL);
 	r = chdir(tmpdir);
 	if (r < 0) {
+		char *buf = pw_array_add(&t->logs[FD_LOG], 256);
+		spa_scnprintf(buf, 256, "pwtest: failed to chdir to '%s'\n", tmpdir);
 		t->sig_or_errno = -errno;
-		return;
+		goto error;
 	}
 
 	if (t->args.pw_daemon) {

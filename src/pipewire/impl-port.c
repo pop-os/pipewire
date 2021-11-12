@@ -1067,10 +1067,10 @@ static void pw_impl_port_remove(struct pw_impl_port *port)
 	}
 
 	if (port->direction == PW_DIRECTION_INPUT) {
-		pw_map_remove(&node->input_port_map, port->port_id);
+		pw_map_insert_at(&node->input_port_map, port->port_id, NULL);
 		node->info.n_input_ports--;
 	} else {
-		pw_map_remove(&node->output_port_map, port->port_id);
+		pw_map_insert_at(&node->output_port_map, port->port_id, NULL);
 		node->info.n_output_ports--;
 	}
 
@@ -1418,6 +1418,10 @@ int pw_impl_port_set_param(struct pw_impl_port *port, uint32_t id, uint32_t flag
 
 		if (param == NULL || res < 0) {
 			pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_CONFIGURE, 0, NULL);
+		}
+		else if (spa_pod_is_fixated(param) <= 0) {
+			pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_CONFIGURE, 0, NULL);
+			pw_impl_port_emit_param_changed(port, id);
 		}
 		else if (!SPA_RESULT_IS_ASYNC(res)) {
 			pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_READY, 0, NULL);

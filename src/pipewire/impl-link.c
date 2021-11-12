@@ -358,10 +358,11 @@ static int do_negotiate(struct pw_impl_link *this)
 		}
 	}
 
-	pw_log_debug("%p: doing set format %p", this, format);
 	pw_log_pod(SPA_LOG_LEVEL_DEBUG, format);
 
 	SPA_POD_OBJECT_ID(format) = SPA_PARAM_Format;
+	pw_log_debug("%p: doing set format %p fixated:%d", this,
+			format, spa_pod_is_fixated(format));
 
 	if (out_state == PW_IMPL_PORT_STATE_CONFIGURE) {
 		pw_log_debug("%p: doing set format on output", this);
@@ -484,6 +485,9 @@ static int do_allocation(struct pw_impl_link *this)
 	input = this->input;
 
 	pw_log_debug("%p: out-state:%d in-state:%d", this, output->state, input->state);
+
+	if (input->state < PW_IMPL_PORT_STATE_READY || output->state < PW_IMPL_PORT_STATE_READY)
+		return 0;
 
 	link_update_state(this, PW_LINK_STATE_ALLOCATING, 0, NULL);
 
@@ -912,8 +916,6 @@ static void port_param_changed(struct pw_impl_link *this, uint32_t id,
 	case SPA_PARAM_EnumFormat:
 		target = PW_IMPL_PORT_STATE_CONFIGURE;
 		break;
-	case SPA_PARAM_Latency:
-		return;
 	default:
 		return;
 	}
@@ -922,6 +924,8 @@ static void port_param_changed(struct pw_impl_link *this, uint32_t id,
 	if (inport)
 		pw_impl_port_update_state(inport, target, 0, NULL);
 
+	this->preparing = this->prepared = false;
+	link_update_state(this, PW_LINK_STATE_INIT, 0, NULL);
 	pw_impl_link_prepare(this);
 }
 
