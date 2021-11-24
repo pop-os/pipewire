@@ -1,4 +1,4 @@
-pipewire (0.3.40-2) UNRELEASED; urgency=medium
+pipewire (0.3.40-2) unstable; urgency=medium
 
   * Team upload.
   * Change back priority order between pipewire-media-session and wireplumber.
@@ -11,7 +11,7 @@ pipewire (0.3.40-2) UNRELEASED; urgency=medium
       to use pipewire as sound server. The priority order will be changed again
       once we will decide to use pipewire as default sound server.
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 24 Nov 2021 12:19:11 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 24 Nov 2021 15:07:07 +0100
 
 pipewire (0.3.40-1) unstable; urgency=medium
 
