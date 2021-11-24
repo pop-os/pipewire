@@ -1,3 +1,18 @@
+pipewire (0.3.40-2) UNRELEASED; urgency=medium
+
+  * Team upload.
+  * Change back priority order between pipewire-media-session and wireplumber.
+      Pipewire-media-session is enough for the current default usage of
+      pipewire in Debian (i.e. screen recording). Having Wireplumber with a
+      higher priority leads to install by default pipewire-pulse and consequently
+      to replace pulseaudio by pipewire as sound server. See #999363.
+      .
+      WirePlumber is still the recommended session manager for users who want
+      to use pipewire as sound server. The priority order will be changed again
+      once we will decide to use pipewire as default sound server.
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 24 Nov 2021 12:19:11 +0100
+
 pipewire (0.3.40-1) unstable; urgency=medium
 
   * Team upload.
