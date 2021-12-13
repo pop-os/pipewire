@@ -39,6 +39,7 @@ Standards-Version: 4.5.1
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
+Rules-Requires-Root: no
 
 Package: libpipewire-0.3-0
 Architecture: linux-any
