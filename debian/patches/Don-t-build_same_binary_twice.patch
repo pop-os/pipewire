@@ -18,11 +18,9 @@ Signed-off-by: Dylan Aïssi <dylan.aissi@collabora.com>
  src/daemon/meson.build | 12 +++++-------
  1 file changed, 5 insertions(+), 7 deletions(-)
 
-diff --git a/src/daemon/meson.build b/src/daemon/meson.build
-index 104a6dbf3..2ebd48a8e 100644
 --- a/src/daemon/meson.build
 +++ b/src/daemon/meson.build
-@@ -90,13 +90,11 @@ pipewire_exec = executable('pipewire',
+@@ -90,13 +90,11 @@
    dependencies : [pipewire_dep, ],
  )
  
@@ -41,6 +39,3 @@ index 104a6dbf3..2ebd48a8e 100644
  
  ln = find_program('ln')
  
--- 
-GitLab
-
