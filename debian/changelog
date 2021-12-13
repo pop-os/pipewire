@@ -1,4 +1,4 @@
-pipewire (0.3.41-1) UNRELEASED; urgency=medium
+pipewire (0.3.41-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -6,7 +6,7 @@ pipewire (0.3.41-1) UNRELEASED; urgency=medium
   * Update symbols file
   * Set Rules-Requires-Root: no
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 13 Dec 2021 11:05:29 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 13 Dec 2021 12:09:33 +0100
 
 pipewire (0.3.40-2) unstable; urgency=medium
 
