@@ -490,6 +490,9 @@ static int reply_create_playback_stream(struct stream *stream, struct pw_manager
 	items[4] = SPA_DICT_ITEM_INIT("pulse.attr.minreq", attr_minreq);
 	pw_stream_update_properties(stream->stream, &SPA_DICT_INIT(items, 5));
 
+	if (stream->attr.prebuf > 0)
+		stream->in_prebuf = true;
+
 	missing = stream_pop_missing(stream);
 
 	pw_log_info("[%s] reply CREATE_PLAYBACK_STREAM tag:%u missing:%u latency:%s",
@@ -1096,6 +1099,7 @@ struct process_data {
 	uint32_t underrun_for;
 	uint32_t playing_for;
 	uint32_t missing;
+	uint32_t maxmissing;
 	unsigned int underrun:1;
 };
 
@@ -1134,7 +1138,7 @@ do_process_done(struct spa_loop *loop,
 				stream_send_started(stream);
 		}
 		stream->missing += pd->missing;
-		stream->missing = SPA_MIN(stream->missing, stream->attr.tlength);
+		stream->missing = SPA_MIN(stream->missing, pd->maxmissing);
 		stream->playing_for += pd->playing_for;
 		if (stream->underrun_for != (uint64_t)-1)
 			stream->underrun_for += pd->underrun_for;
@@ -1228,6 +1232,8 @@ static void stream_process(void *data)
 		if (minreq == 0)
 			minreq = stream->attr.minreq;
 
+		pd.maxmissing = SPA_MAX(minreq, stream->attr.tlength);
+
 		if (avail < (int32_t)minreq || stream->corked) {
 			/* underrun, produce a silence buffer */
 			size = SPA_MIN(buf->datas[0].maxsize, minreq);
@@ -1240,13 +1246,19 @@ static void stream_process(void *data)
 				pd.underrun_for = size;
 				pd.underrun = true;
 			}
-			if (stream->attr.prebuf == 0 && !stream->corked) {
+			if (!stream->corked) {
 				pd.missing = size;
-				pd.playing_for = size;
-				index += size;
-				pd.read_inc = size;
-				spa_ringbuffer_read_update(&stream->ring, index);
+				if (stream->attr.prebuf == 0) {
+					pd.playing_for = size;
+					if (avail > 0) {
+						index += avail;
+						pd.read_inc = avail;
+					}
+					spa_ringbuffer_read_update(&stream->ring, index);
+				}
 			}
+			pw_log_debug("%p: [%s] underrun read:%u avail:%d max:%u",
+					stream, client->name, index, avail, minreq);
 		} else {
 			if (avail > (int32_t)stream->attr.maxlength) {
 				uint32_t skip = avail - stream->attr.maxlength;
@@ -1817,6 +1829,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 			pw_properties_setf(props,
 					PW_KEY_NODE_TARGET,
 					"%.*s", (int)strlen(source_name)-8, source_name);
+			pw_properties_set(props,
+					PW_KEY_STREAM_CAPTURE_SINK, "true");
 		} else {
 			pw_properties_set(props,
 					PW_KEY_NODE_TARGET, source_name);

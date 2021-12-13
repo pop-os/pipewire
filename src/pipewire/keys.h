@@ -64,6 +64,10 @@ extern "C" {
 /** object properties */
 #define PW_KEY_OBJECT_PATH		"object.path"		/**< unique path to construct the object */
 #define PW_KEY_OBJECT_ID		"object.id"		/**< a global object id */
+#define PW_KEY_OBJECT_SERIAL		"object.serial"		/**< a 64 bit object serial number. This is a number
+								  *  incremented for each object that is created.
+								  *  The lower 32 bits are guaranteed to never be
+								  *  SPA_ID_INVALID. */
 #define PW_KEY_OBJECT_LINGER		"object.linger"		/**< the object lives on even after the client
 								  *  that created it has been destroyed */
 #define PW_KEY_OBJECT_REGISTER		"object.register"	/**< If the object should be registered. */
@@ -179,6 +183,9 @@ extern "C" {
 #define PW_KEY_NODE_LINK_GROUP		"node.link-group"	/**< the node is internally linked to
 								  *  nodes with the same link-group */
 #define PW_KEY_NODE_NETWORK		"node.network"		/**< the node is on a network */
+#define PW_KEY_NODE_TRIGGER		"node.trigger"		/**< the node is not scheduled automatically
+								  *   based on the dependencies in the graph
+								  *   but it will be triggered explicitly. */
 
 /** Port keys */
 #define PW_KEY_PORT_ID			"port.id"		/**< port id */

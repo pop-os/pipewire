@@ -108,6 +108,31 @@ struct impl {
 
 /** \endcond */
 
+static int follower_enum_params(struct impl *this,
+				 uint32_t id,
+				 uint32_t idx,
+				 struct spa_result_node_params *result,
+				 const struct spa_pod *filter,
+				 struct spa_pod_builder *builder)
+{
+	int res;
+	if (result->next < 0x10000) {
+		if ((res = spa_node_enum_params_sync(this->convert,
+				id, &result->next, filter, &result->param, builder)) == 1)
+			return res;
+		result->next = 0x10000;
+	}
+	if (result->next >= 0x10000 && this->follower_params_flags[idx] & SPA_PARAM_INFO_READ) {
+		result->next &= 0xffff;
+		if ((res = spa_node_enum_params_sync(this->follower,
+				id, &result->next, filter, &result->param, builder)) == 1) {
+			result->next |= 0x10000;
+			return res;
+		}
+	}
+	return 0;
+}
+
 static int impl_node_enum_params(void *object, int seq,
 				 uint32_t id, uint32_t start, uint32_t num,
 				 const struct spa_pod *filter)
@@ -137,33 +162,28 @@ next:
 		res = spa_node_enum_params(this->convert, seq, id, start, num, filter);
 		return res;
 	case SPA_PARAM_PropInfo:
+		if ((res = follower_enum_params(this,
+				id, IDX_PropInfo, &result, filter, &b)) != 1)
+			return res;
+		break;
 	case SPA_PARAM_Props:
+		if ((res = follower_enum_params(this,
+				id, IDX_Props, &result, filter, &b)) != 1)
+			return res;
+		break;
 	case SPA_PARAM_ProcessLatency:
-	{
-		if (result.next < 0x10000) {
-			if ((res = spa_node_enum_params_sync(this->convert,
-					id, &result.next, filter, &result.param, &b)) == 1)
-				break;
-			result.next = 0x10000;
-		}
-		if (result.next >= 0x10000) {
-			result.next &= 0xffff;
-			if ((res = spa_node_enum_params_sync(this->follower,
-					id, &result.next, filter, &result.param, &b)) == 1) {
-				result.next |= 0x10000;
-				break;
-			}
-		}
-		return res;
-	}
+		if ((res = follower_enum_params(this,
+				id, IDX_ProcessLatency, &result, filter, &b)) != 1)
+			return res;
+		break;
 	case SPA_PARAM_EnumFormat:
 	case SPA_PARAM_Format:
 	case SPA_PARAM_Latency:
 		if ((res = spa_node_port_enum_params_sync(this->follower,
 				this->direction, 0,
-				id, &result.next, filter, &result.param, &b)) == 1)
-			break;
-		return res;
+				id, &result.next, filter, &result.param, &b)) != 1)
+			return res;
+		break;
 	default:
 		return -ENOENT;
 	}
@@ -837,6 +857,9 @@ static void follower_info(void *data, const struct spa_node_info *info)
 			uint32_t idx;
 
 			switch (info->params[i].id) {
+			case SPA_PARAM_PropInfo:
+				idx = IDX_PropInfo;
+				break;
 			case SPA_PARAM_Props:
 				idx = IDX_Props;
 				break;

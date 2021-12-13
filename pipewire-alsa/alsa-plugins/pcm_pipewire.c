@@ -214,7 +214,7 @@ static snd_pcm_sframes_t snd_pcm_pipewire_pointer(snd_pcm_ioplug_t *io)
 static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp)
 {
 	snd_pcm_pipewire_t *pw = io->private_data;
-	int64_t elapsed = 0, filled;
+	int64_t elapsed = 0, filled, avail;
 
 	if (pw->time.rate.num != 0) {
 		struct timespec ts;
@@ -222,15 +222,21 @@ static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delay
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		diff = SPA_TIMESPEC_TO_NSEC(&ts) - pw->time.now;
 	        elapsed = (pw->time.rate.denom * diff) / (pw->time.rate.num * SPA_NSEC_PER_SEC);
-		if (elapsed > pw->time.delay)
-			elapsed = pw->time.delay;
 	}
-	filled = pw->time.delay + snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
+	if (io->stream == SND_PCM_STREAM_PLAYBACK)
+		avail = snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
+	else
+		avail = snd_pcm_ioplug_avail(io, pw->hw_ptr, io->appl_ptr);
+
+	filled = pw->time.delay + avail;
 
 	if (io->stream == SND_PCM_STREAM_PLAYBACK)
 		*delayp = filled - SPA_MIN(elapsed, filled);
 	else
 		*delayp = filled + elapsed;
+
+	pw_log_trace("avail:%"PRIi64" filled %"PRIi64" elapsed:%"PRIi64" delay:%ld %lu %lu",
+			avail, filled, elapsed, *delayp, pw->hw_ptr, io->appl_ptr);
 
 	return 0;
 }
@@ -246,26 +252,30 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 	unsigned int channel;
 	struct spa_data *d;
 	void *ptr;
+	uint32_t bl, offset, size;
 
 	d = b->buffer->datas;
 	pwareas = alloca(io->channels * sizeof(snd_pcm_channel_area_t));
 
-	if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-		nframes = d[0].maxsize - SPA_MIN(d[0].maxsize, d[0].chunk->offset);
-		nframes /= pw->stride;
-		nframes = SPA_MIN(nframes, pw->min_avail);
-	} else {
-		nframes = d[0].chunk->size / pw->stride;
+	for (bl = 0; bl < pw->blocks; bl++) {
+		if (io->stream == SND_PCM_STREAM_PLAYBACK) {
+			size = SPA_MIN(d[bl].maxsize, pw->min_avail * pw->stride);
+		} else {
+			offset = SPA_MIN(d[bl].chunk->offset, d[bl].maxsize);
+			size = SPA_MIN(d[bl].chunk->size, d[bl].maxsize - offset);
+		}
+		want = SPA_MIN(want, size / pw->stride);
 	}
-	want = SPA_MIN(nframes, want);
 	nframes = SPA_MIN(want, *hw_avail);
 
 	if (pw->blocks == 1) {
 		if (io->stream == SND_PCM_STREAM_PLAYBACK) {
 			d[0].chunk->size = want * pw->stride;
-			d[0].chunk->offset = 0;
+			d[0].chunk->offset = offset = 0;
+		} else {
+			offset = SPA_MIN(d[0].chunk->offset, d[0].maxsize);
 		}
-		ptr = SPA_PTROFF(d[0].data, d[0].chunk->offset, void);
+		ptr = SPA_PTROFF(d[0].data, offset, void);
 		for (channel = 0; channel < io->channels; channel++) {
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = channel * pw->sample_bits;
@@ -275,9 +285,11 @@ snd_pcm_pipewire_process(snd_pcm_pipewire_t *pw, struct pw_buffer *b,
 		for (channel = 0; channel < io->channels; channel++) {
 			if (io->stream == SND_PCM_STREAM_PLAYBACK) {
 				d[channel].chunk->size = want * pw->stride;
-				d[channel].chunk->offset = 0;
+				d[channel].chunk->offset = offset = 0;
+			} else {
+				offset = SPA_MIN(d[channel].chunk->offset, d[channel].maxsize);
 			}
-			ptr = SPA_PTROFF(d[channel].data, d[channel].chunk->offset, void);
+			ptr = SPA_PTROFF(d[channel].data, offset, void);
 			pwareas[channel].addr = ptr;
 			pwareas[channel].first = 0;
 			pwareas[channel].step = pw->sample_bits;
@@ -368,7 +380,8 @@ static void on_stream_io_changed(void *data, uint32_t id, void *area, uint32_t s
 	snd_pcm_pipewire_t *pw = data;
 	switch (id) {
 	case SPA_IO_RateMatch:
-		pw->rate_match = area;
+		if (pw->io.stream == SND_PCM_STREAM_PLAYBACK)
+			pw->rate_match = area;
 		break;
 	default:
 		break;
@@ -389,7 +402,7 @@ static void on_stream_process(void *data)
 	snd_pcm_pipewire_t *pw = data;
 	snd_pcm_ioplug_t *io = &pw->io;
 	struct pw_buffer *b;
-	snd_pcm_uframes_t hw_avail, want, xfer;
+	snd_pcm_uframes_t hw_avail, before, want, xfer;
 
 	pw_stream_get_time(pw->stream, &pw->time);
 
@@ -399,7 +412,7 @@ static void on_stream_process(void *data)
 		pw->time.rate.num = 1;
 	}
 
-	hw_avail = snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
+	before = hw_avail = snd_pcm_ioplug_hw_avail(io, pw->hw_ptr, io->appl_ptr);
 
 	if (pw->drained) {
 		pcm_poll_unblock_check(io); /* unblock socket for polling if needed */
@@ -411,9 +424,11 @@ static void on_stream_process(void *data)
 		return;
 
 	want = pw->rate_match ? pw->rate_match->size : hw_avail;
-	pw_log_trace("%p: avail:%lu want:%lu", pw, hw_avail, want);
 
 	xfer = snd_pcm_pipewire_process(pw, b, &hw_avail, want);
+
+	pw_log_trace("%p: avail-before:%lu avail:%lu want:%lu xfer:%lu",
+			pw, before, hw_avail, want, xfer);
 
 	if (io->stream == SND_PCM_STREAM_PLAYBACK)
 		pw->time.delay += xfer;

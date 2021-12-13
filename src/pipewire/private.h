@@ -330,6 +330,7 @@ struct pw_global {
 
 	pw_global_bind_func_t func;	/**< bind function */
 	void *object;			/**< object associated with the interface */
+	uint64_t serial;		/**< increasing serial number */
 
 	struct spa_list resource_list;	/**< The list of resources of this global */
 
@@ -727,6 +728,8 @@ struct pw_impl_node {
 
 		struct ratelimit rate_limit;
 	} rt;
+	struct spa_fraction current_rate;
+	uint64_t current_quantum;
 
         void *user_data;                /**< extra user data */
 };
@@ -1260,7 +1263,8 @@ bool pw_log_is_default(void);
 void pw_log_init(void);
 void pw_log_deinit(void);
 
-int pw_settings_init(struct pw_context *context);
+void pw_settings_init(struct pw_context *context);
+int pw_settings_expose(struct pw_context *context);
 void pw_settings_clean(struct pw_context *context);
 
 /** \endcond */

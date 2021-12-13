@@ -126,7 +126,8 @@ static int handle_memblock(struct client *client, struct message *msg)
 
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_RECORD) {
-		res = -EINVAL;
+		pw_log_info("client %p [%s]: received memblock for unknown channel %d",
+			    client, client->name, channel);
 		goto finish;
 	}
 
@@ -194,7 +195,7 @@ static int do_read(struct client *client)
 	} else {
 		uint32_t idx = client->in_index - sizeof(client->desc);
 
-		if (client->message == NULL) {
+		if (client->message == NULL || client->message->length < idx) {
 			res = -EPROTO;
 			goto exit;
 		}
