@@ -22,6 +22,7 @@ module_sources = [
   'module-pulse-tunnel.c',
   'module-rt.c',
   'module-rtkit.c',
+  'module-raop-discover.c',
   'module-session-manager.c',
   'module-zeroconf-discover.c',
   'module-roc-source.c',
@@ -77,19 +78,33 @@ pffft_c = static_library('pffft_c',
 )
 simd_dependencies += pffft_c
 
+filter_chain_sources = [
+  'module-filter-chain.c',
+  'module-filter-chain/biquad.c',
+  'module-filter-chain/ladspa_plugin.c',
+  'module-filter-chain/builtin_plugin.c',
+  'module-filter-chain/convolver.c'
+]
+filter_chain_dependencies = [
+  mathlib, dl_lib, pipewire_dep, sndfile_dep
+]
+
+if lilv_lib.found()
+  filter_chain_sources += [
+    'module-filter-chain/lv2_plugin.c'
+  ]
+  filter_chain_dependencies += [ lilv_lib ]
+endif
+
 
 pipewire_module_filter_chain = shared_library('pipewire-module-filter-chain',
-  [ 'module-filter-chain.c',
-    'module-filter-chain/biquad.c',
-    'module-filter-chain/ladspa_plugin.c',
-    'module-filter-chain/builtin_plugin.c',
-    'module-filter-chain/convolver.c' ],
+  filter_chain_sources,
   include_directories : [configinc, spa_inc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
   link_with : simd_dependencies,
-  dependencies : [mathlib, dl_lib, pipewire_dep, sndfile_dep],
+  dependencies : filter_chain_dependencies,
 )
 
 pipewire_module_echo_cancel_sources = [
@@ -235,6 +250,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-null-sink.c',
   'module-protocol-pulse/modules/module-pipe-source.c',
   'module-protocol-pulse/modules/module-pipe-sink.c',
+  'module-protocol-pulse/modules/module-raop-discover.c',
   'module-protocol-pulse/modules/module-remap-sink.c',
   'module-protocol-pulse/modules/module-remap-source.c',
   'module-protocol-pulse/modules/module-simple-protocol-tcp.c',
@@ -427,6 +443,34 @@ pipewire_module_zeroconf_discover = shared_library('pipewire-module-zeroconf-dis
 )
 endif
 summary({'zeroconf-discover': build_module_zeroconf_discover}, bool_yn: true, section: 'Optional Modules')
+
+build_module_raop_discover = avahi_dep.found()
+if build_module_raop_discover
+pipewire_module_raop_discover = shared_library('pipewire-module-raop-discover',
+  [ 'module-raop-discover.c',
+    'module-zeroconf-discover/avahi-poll.c' ],
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, avahi_dep],
+)
+endif
+summary({'raop-discover (needs Avahi)': build_module_raop_discover}, bool_yn: true, section: 'Optional Modules')
+
+build_module_raop = openssl_lib.found()
+if build_module_raop
+pipewire_module_raop_sink = shared_library('pipewire-module-raop-sink',
+  [ 'module-raop-sink.c',
+    'module-raop/rtsp-client.c' ],
+  include_directories : [configinc, spa_inc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, openssl_lib],
+)
+endif
+summary({'raop-sink (requires OpenSSL)': build_module_raop}, bool_yn: true, section: 'Optional Modules')
 
 build_module_roc = roc_lib.found()
 if build_module_roc

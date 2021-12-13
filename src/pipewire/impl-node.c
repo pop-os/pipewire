@@ -675,6 +675,7 @@ int pw_impl_node_register(struct pw_impl_node *this,
 		     struct pw_properties *properties)
 {
 	static const char * const keys[] = {
+		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_ID,
@@ -720,6 +721,8 @@ int pw_impl_node_register(struct pw_impl_node *this,
 
 	this->info.id = this->global->id;
 	pw_properties_setf(this->properties, PW_KEY_OBJECT_ID, "%d", this->info.id);
+	pw_properties_setf(this->properties, PW_KEY_OBJECT_SERIAL, "%"PRIu64,
+			pw_global_get_serial(this->global));
 	this->info.props = &this->properties->dict;
 
 	pw_global_update_keys(this->global, &this->properties->dict, keys);
@@ -872,6 +875,10 @@ static void check_properties(struct pw_impl_node *node)
 		}
 		recalc_reason = "driver changed";
 	}
+
+	/* not scheduled automatically so we add an additional required trigger */
+	if (pw_properties_get_bool(node->properties, PW_KEY_NODE_TRIGGER, false))
+		node->rt.activation->state[0].required++;
 
 	/* group defines what nodes are scheduled together */
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)) == NULL)
@@ -1121,8 +1128,11 @@ static void reset_position(struct pw_impl_node *this, struct spa_io_position *po
 	uint32_t quantum = s->clock_force_quantum == 0 ? s->clock_quantum : s->clock_force_quantum;
 	uint32_t rate = s->clock_force_rate == 0 ? s->clock_rate : s->clock_force_rate;
 
-	pos->clock.rate = SPA_FRACTION(1, rate);
-	pos->clock.duration = quantum;
+	this->current_rate = SPA_FRACTION(1, rate);
+	this->current_quantum = quantum;
+
+	pos->clock.rate = this->current_rate;
+	pos->clock.duration = this->current_quantum;
 	pos->video.flags = SPA_IO_VIDEO_SIZE_VALID;
 	pos->video.size = s->video_size;
 	pos->video.stride = pos->video.size.width * 16;
@@ -1575,6 +1585,9 @@ static int node_ready(void *data, int status)
 			}
 			node->rt.target.signal(node->rt.target.data);
 		}
+
+		node->rt.position->clock.duration = node->current_quantum;
+		node->rt.position->clock.rate = node->current_rate;
 
 		sync_type = check_updates(node, &reposition_owner);
 		owner[0] = ATOMIC_LOAD(a->segment_owner[0]);

@@ -48,7 +48,7 @@ static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.resample");
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 
-#define MAX_SAMPLES	8192
+#define MAX_SAMPLES	8192u
 #define MAX_ALIGN	16
 #define MAX_BUFFERS	32
 
@@ -271,6 +271,15 @@ static void update_rate_match(struct impl *this, bool passthrough, uint32_t out_
 	}
 }
 
+static void recalc_rate_match(struct impl *this)
+{
+	bool passthrough = this->resample.i_rate == this->resample.o_rate &&
+		(this->io_rate_match == NULL ||
+		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
+	uint32_t out_size = this->io_position ? this->io_position->clock.duration : 1024;
+	update_rate_match(this, passthrough, out_size, 0);
+}
+
 static void reset_node(struct impl *this)
 {
 	struct port *outport, *inport;
@@ -292,15 +301,9 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Start:
-	{
-		bool passthrough = this->resample.i_rate == this->resample.o_rate &&
-			(this->io_rate_match == NULL ||
-			 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
-		uint32_t out_size = this->io_position ? this->io_position->clock.duration : 1024;
+		recalc_rate_match(this);
 		this->started = true;
-		update_rate_match(this, passthrough, out_size, 0);
 		break;
-	}
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Flush:
 		reset_node(this);
@@ -477,20 +480,26 @@ impl_node_port_enum_params(void *object, int seq,
 	case SPA_PARAM_Buffers:
 	{
 		uint32_t buffers, size;
+		uint32_t rate;
 
-		if (!port->have_format)
+		if (!port->have_format || !other->have_format)
 			return -EIO;
 		if (result.index > 0)
 			return 0;
 
+		if (direction == SPA_DIRECTION_OUTPUT) {
+			rate = (this->resample.o_rate + this->resample.i_rate - 1) / this->resample.i_rate;
+		} else {
+			rate = (this->resample.i_rate + this->resample.o_rate - 1) / this->resample.o_rate;
+		}
 		if (other->n_buffers > 0) {
 			buffers = other->n_buffers;
-			size = other->size / other->stride * 2;
-		}
-		else {
+			size = (other->size / other->stride) * rate;
+		} else {
 			buffers = 1;
-			size = MAX_SAMPLES*2 * other->stride;
+			size = MAX_SAMPLES * rate;
 		}
+		size = SPA_MAX(size, MAX_SAMPLES) * 2;
 
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, id,
@@ -808,9 +817,10 @@ static int impl_node_process(void *object)
 		outio->buffer_id = SPA_ID_INVALID;
 	}
 	if (SPA_UNLIKELY(inio->status != SPA_STATUS_HAVE_DATA)) {
-		if (inio->status != SPA_STATUS_DRAINED || this->drained)
+		if (inio->status != SPA_STATUS_DRAINED || this->drained) {
+			recalc_rate_match(this);
 			return outio->status = inio->status;
-
+		}
 		inio->buffer_id = 0;
 		inport->buffers[0].outbuf->datas[0].chunk->size = 0;
 	}

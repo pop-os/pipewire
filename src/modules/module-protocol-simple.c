@@ -241,6 +241,9 @@ static void capture_process(void *data)
 	size = d->chunk->size;
 	offset = d->chunk->offset;
 
+	if (size + offset > d->maxsize)
+		size = d->maxsize - SPA_MIN(offset, d->maxsize);
+
 	while (size > 0) {
 		res = send(client->source->fd,
 				SPA_PTROFF(d->data, offset, void),
@@ -388,6 +391,8 @@ static int create_streams(struct impl *impl, struct client *client)
 			PW_KEY_NODE_GROUP, "pipewire.dummy",
 			PW_KEY_NODE_LATENCY, DEFAULT_LATENCY,
 			PW_KEY_NODE_TARGET, pw_properties_get(impl->props, "capture.node"),
+			PW_KEY_STREAM_CAPTURE_SINK, pw_properties_get(impl->props,
+				PW_KEY_STREAM_CAPTURE_SINK),
 			PW_KEY_NODE_NETWORK, "true",
 			NULL);
 		if (props == NULL)

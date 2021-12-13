@@ -88,6 +88,18 @@ struct channel_map {
 	uint32_t channels;
 	uint32_t pos[SPA_AUDIO_MAX_CHANNELS];
 };
+
+
+struct card {
+	struct spa_list link;
+	int ref;
+	uint32_t index;
+	snd_use_case_mgr_t *ucm;
+	char *ucm_prefix;
+	int format_ref;
+	uint32_t rate;
+};
+
 struct state {
 	struct spa_handle handle;
 	struct spa_node node;
@@ -97,6 +109,7 @@ struct state {
 	struct spa_loop *data_loop;
 
 	int card_index;
+	struct card *card;
 	snd_pcm_stream_t stream;
 	snd_output_t *output;
 
@@ -115,7 +128,6 @@ struct state {
 
 	bool opened;
 	snd_pcm_t *hndl;
-	int card;
 
 	bool have_format;
 	struct spa_audio_info current_format;
@@ -129,6 +141,7 @@ struct state {
 	struct channel_map default_pos;
 	unsigned int disable_mmap;
 	unsigned int disable_batch;
+	char clock_name[64];
 
 	snd_pcm_uframes_t buffer_frames;
 	snd_pcm_uframes_t period_frames;
@@ -188,6 +201,7 @@ struct state {
 	unsigned int open_ucm:1;
 	unsigned int is_iec958:1;
 	unsigned int is_hdmi:1;
+	unsigned int multi_rate:1;
 
 	uint64_t iec958_codecs;
 
@@ -205,18 +219,20 @@ struct state {
 
 	struct spa_latency_info latency[2];
 	struct spa_process_latency_info process_latency;
-
-	const char *ucm_prefix;
 };
 
-int
-spa_alsa_enum_format(struct state *state, int seq,
+struct spa_pod *spa_alsa_enum_propinfo(struct state *state,
+		uint32_t idx, struct spa_pod_builder *b);
+int spa_alsa_add_prop_params(struct state *state, struct spa_pod_builder *b);
+int spa_alsa_parse_prop_params(struct state *state, struct spa_pod *params);
+
+int spa_alsa_enum_format(struct state *state, int seq,
 		     uint32_t start, uint32_t num,
 		     const struct spa_pod *filter);
 
 int spa_alsa_set_format(struct state *state, struct spa_audio_info *info, uint32_t flags);
 
-int spa_alsa_init(struct state *state);
+int spa_alsa_init(struct state *state, const struct spa_dict *info);
 int spa_alsa_clear(struct state *state);
 
 int spa_alsa_open(struct state *state, const char *params);

@@ -110,7 +110,7 @@ static int registry_destroy(void *object, uint32_t id)
 	if (!PW_PERM_IS_R(permissions))
 		goto error_no_id;
 
-	if (id == PW_ID_CORE || !PW_PERM_IS_X(permissions))
+	if (id == PW_ID_CORE || !PW_PERM_CHECK(permissions, PW_PERM_X|PW_PERM_W))
 		goto error_not_allowed;
 
 	pw_log_debug("global %p: destroy global id %d", global, id);
@@ -183,7 +183,7 @@ static int core_hello(void *object, uint32_t version)
 
 	if (version >= 3) {
 		if ((res = pw_global_bind(client->global, client,
-				PW_PERM_ALL, PW_VERSION_CLIENT, 1)) < 0)
+				PW_PERM_ALL, PW_VERSION_CLIENT, PW_ID_CLIENT)) < 0)
 			return res;
 	}
 	return 0;
@@ -314,8 +314,10 @@ core_create_object(void *object,
 	if (!spa_streq(factory->info.type, type))
 		goto error_type;
 
-	if (factory->info.version < version)
-		goto error_version;
+	if (factory->info.version < version) {
+		pw_log_info("%p: version %d < %d", context,
+				factory->info.version, version);
+	}
 
 	if (props) {
 		properties = pw_properties_new_dict(props);
@@ -325,7 +327,8 @@ core_create_object(void *object,
 		properties = NULL;
 
 	/* error will be posted */
-	obj = pw_impl_factory_create_object(factory, resource, type, version, properties, new_id);
+	obj = pw_impl_factory_create_object(factory, resource, type,
+			version, properties, new_id);
 	if (obj == NULL)
 		goto error_create_failed;
 
@@ -336,7 +339,6 @@ error_no_factory:
 	pw_log_debug("%p: can't find factory '%s'", context, factory_name);
 	pw_resource_errorf_id(resource, new_id, res, "unknown factory name %s", factory_name);
 	goto error_exit;
-error_version:
 error_type:
 	res = -EPROTO;
 	pw_log_debug("%p: invalid resource type/version", context);
@@ -581,6 +583,7 @@ int pw_impl_core_register(struct pw_impl_core *core,
 			 struct pw_properties *properties)
 {
 	static const char * const keys[] = {
+		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_USER_NAME,
 		PW_KEY_HOST_NAME,
 		PW_KEY_CORE_NAME,
@@ -608,6 +611,8 @@ int pw_impl_core_register(struct pw_impl_core *core,
 
 	core->info.id = core->global->id;
 	pw_properties_setf(core->properties, PW_KEY_OBJECT_ID, "%d", core->info.id);
+	pw_properties_setf(core->properties, PW_KEY_OBJECT_SERIAL, "%"PRIu64,
+			pw_global_get_serial(core->global));
 	core->info.props = &core->properties->dict;
 
 	pw_global_update_keys(core->global, core->info.props, keys);
