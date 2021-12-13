@@ -2,6 +2,7 @@ pipewire (0.3.41-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Add libssl-dev to Build-Depends
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 13 Dec 2021 11:05:29 +0100
 
