@@ -3,6 +3,7 @@ pipewire (0.3.41-1) UNRELEASED; urgency=medium
   * Team upload.
   * New upstream release
   * Add libssl-dev and liblilv-dev to Build-Depends
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 13 Dec 2021 11:05:29 +0100
 
