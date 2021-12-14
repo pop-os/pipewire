@@ -1,3 +1,11 @@
+pipewire (0.3.41-2) UNRELEASED; urgency=medium
+
+  * debian/rules:
+    - disable the new lv2 option on Ubuntu, lilv and its depends
+      (serd, sord, sratom) are currently in universe (Closes: #1001691)
+
+ -- Sebastien Bacher <seb128@ubuntu.com>  Tue, 14 Dec 2021 13:01:38 +0100
+
 pipewire (0.3.41-1) unstable; urgency=medium
 
   * Team upload.

@@ -18,6 +18,13 @@ else
 BLUEZ5_CODEC_LDAC=enabled
 endif
 
+# lilv and some of its dependencies are in universe
+ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
+LV2=disabled
+else
+LV2=enabled
+endif
+
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-Daudiotestsrc=enabled \
@@ -30,6 +37,7 @@ override_dh_auto_configure:
 		-Ddocs=$(DOCS) \
 		-Dffmpeg=disabled \
 		-Dinstalled_tests=enabled \
+		-Dlv2=$(LV2) \
 		-Dman=enabled \
 		-Droc=disabled \
 		-Dsession-managers= \
