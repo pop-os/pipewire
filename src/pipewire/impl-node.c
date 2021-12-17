@@ -658,6 +658,9 @@ static void update_io(struct pw_impl_node *node)
 			    sizeof(struct spa_io_position)) >= 0) {
 		pw_log_debug("%p: set position %p", node, &node->rt.activation->position);
 		node->rt.position = &node->rt.activation->position;
+
+		node->current_rate = node->rt.position->clock.rate;
+		node->current_quantum = node->rt.position->clock.duration;
 	} else if (node->driver) {
 		pw_log_warn("%p: can't set position on driver", node);
 	}
@@ -780,6 +783,9 @@ do_move_nodes(struct spa_loop *loop,
 	pw_log_trace("%p: set position %p", node, &driver->rt.activation->position);
 	node->rt.position = &driver->rt.activation->position;
 
+	node->current_rate = node->rt.position->clock.rate;
+	node->current_quantum = node->rt.position->clock.duration;
+
 	if (node->source.loop != NULL) {
 		remove_node(node);
 		add_node(node, driver);
@@ -812,11 +818,12 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 	remove_segment_owner(old, node->info.id);
 
 	if (old != node && old->driving && driver->info.state < PW_NODE_STATE_RUNNING) {
-		driver->rt.activation->position.clock.rate = old->rt.position->clock.rate;
-		driver->rt.activation->position.clock.duration = old->rt.position->clock.duration;
+		driver->current_rate = old->current_rate;
+		driver->current_quantum = old->current_quantum;
+		driver->current_pending = true;
 		pw_log_info("move quantum:%"PRIu64" rate:%d (%s-%d -> %s-%d)",
-				driver->rt.activation->position.clock.duration,
-				driver->rt.activation->position.clock.rate.denom,
+				driver->current_quantum,
+				driver->current_rate.denom,
 				old->name, old->info.id,
 				driver->name, driver->info.id);
 	}
@@ -1586,8 +1593,11 @@ static int node_ready(void *data, int status)
 			node->rt.target.signal(node->rt.target.data);
 		}
 
-		node->rt.position->clock.duration = node->current_quantum;
-		node->rt.position->clock.rate = node->current_rate;
+		if (node->current_pending) {
+			node->rt.position->clock.duration = node->current_quantum;
+			node->rt.position->clock.rate = node->current_rate;
+			node->current_pending = false;
+		}
 
 		sync_type = check_updates(node, &reposition_owner);
 		owner[0] = ATOMIC_LOAD(a->segment_owner[0]);
