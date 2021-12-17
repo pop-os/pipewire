@@ -1,4 +1,4 @@
-pipewire (0.3.42-1) UNRELEASED; urgency=medium
+pipewire (0.3.42-1) unstable; urgency=medium
 
   * Team upload.
 
@@ -10,7 +10,7 @@ pipewire (0.3.42-1) UNRELEASED; urgency=medium
   [ Dylan Aïssi ]
   * New upstream release
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Dec 2021 09:51:03 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Dec 2021 10:19:36 +0100
 
 pipewire (0.3.41-1) unstable; urgency=medium
 
