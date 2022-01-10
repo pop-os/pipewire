@@ -1,11 +1,11 @@
-pipewire (0.3.43-1) UNRELEASED; urgency=medium
+pipewire (0.3.43-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
   * Refresh d/p/Don-t-build_same_binary_twice.patch
   * Bump minimum meson to 0.56
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 10 Jan 2022 10:20:12 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 10 Jan 2022 10:54:04 +0100
 
 pipewire (0.3.42-1) unstable; urgency=medium
 
