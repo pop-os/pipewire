@@ -44,6 +44,51 @@
 #include "reply.h"
 #include "stream.h"
 
+struct stream *stream_new(struct client *client, enum stream_type type, uint32_t create_tag,
+			  const struct sample_spec *ss, const struct channel_map *map,
+			  const struct buffer_attr *attr)
+{
+	int res;
+
+	struct stream *stream = calloc(1, sizeof(*stream));
+	if (stream == NULL)
+		return NULL;
+
+	stream->channel = pw_map_insert_new(&client->streams, stream);
+	if (stream->channel == SPA_ID_INVALID)
+		goto error_errno;
+
+	stream->impl = client->impl;
+	stream->client = client;
+	stream->type = type;
+	stream->create_tag = create_tag;
+	stream->ss = *ss;
+	stream->map = *map;
+	stream->attr = *attr;
+	spa_ringbuffer_init(&stream->ring);
+
+	switch (type) {
+	case STREAM_TYPE_RECORD:
+		stream->direction = PW_DIRECTION_INPUT;
+		break;
+	case STREAM_TYPE_PLAYBACK:
+	case STREAM_TYPE_UPLOAD:
+		stream->direction = PW_DIRECTION_OUTPUT;
+		break;
+	default:
+		spa_assert_not_reached();
+	}
+
+	return stream;
+
+error_errno:
+	res = errno;
+	free(stream);
+	errno = res;
+
+	return NULL;
+}
+
 void stream_free(struct stream *stream)
 {
 	struct client *client = stream->client;
@@ -51,7 +96,8 @@ void stream_free(struct stream *stream)
 
 	pw_log_debug("client %p: stream %p channel:%d", client, stream, stream->channel);
 
-	spa_list_remove(&stream->link);
+	if (stream->pending)
+		spa_list_remove(&stream->link);
 
 	if (stream->drain_tag)
 		reply_error(client, -1, stream->drain_tag, -ENOENT);
@@ -265,14 +311,10 @@ int stream_update_minreq(struct stream *stream, uint32_t minreq)
 	uint32_t new_tlength = minreq + 2 * stream->attr.minreq;
 	uint64_t lat_usec;
 
-	if (new_tlength == old_tlength)
+	if (new_tlength <= old_tlength)
 		return 0;
 
-	if (old_tlength > new_tlength)
-		stream->missing -= old_tlength - new_tlength;
-	else
-		stream->missing += new_tlength - old_tlength;
-
+	stream->missing += new_tlength - old_tlength;
 	stream->attr.tlength = new_tlength;
 
 	if (client->version >= 15) {

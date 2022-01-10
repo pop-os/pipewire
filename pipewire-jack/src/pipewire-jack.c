@@ -1774,8 +1774,7 @@ static int param_buffers(struct client *c, struct port *p,
 								MAX_BUFFER_FRAMES * sizeof(float),
 								sizeof(float)),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(p->object->port.type_id == TYPE_ID_AUDIO ?
-									sizeof(float) : 1),
-			SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
+									sizeof(float) : 1));
 		break;
 	case TYPE_ID_VIDEO:
 		*param = spa_pod_builder_add_object(b,
@@ -1786,8 +1785,7 @@ static int param_buffers(struct client *c, struct port *p,
 								320 * 240 * 4 * 4,
 								0,
 								INT32_MAX),
-			SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(4, 4, INT32_MAX),
-			SPA_PARAM_BUFFERS_align,   SPA_POD_Int(16));
+			SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(4, 4, INT32_MAX));
 		break;
 	default:
 		return -EINVAL;
@@ -2471,10 +2469,12 @@ static const char* type_to_string(jack_port_type_id_t type_id)
 	}
 }
 
-static jack_uuid_t client_make_uuid(uint32_t id)
+static jack_uuid_t client_make_uuid(uint32_t id, bool monitor)
 {
 	jack_uuid_t uuid = 0x2; /* JackUUIDClient */
 	uuid = (uuid << 32) | (id + 1);
+	if (monitor)
+		uuid |= (1 << 30);
 	pw_log_debug("uuid %d -> %"PRIu64, id, uuid);
 	return uuid;
 }
@@ -2489,7 +2489,7 @@ static int json_object_find(const char *obj, const char *key, char *value, size_
 	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
 		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], k, sizeof(k)-1) > 0) {
+	while (spa_json_get_string(&it[1], k, sizeof(k)) > 0) {
 		if (spa_streq(k, key)) {
 			if (spa_json_get_string(&it[1], value, len) <= 0)
 				continue;
@@ -2538,7 +2538,7 @@ static int metadata_property(void *object, uint32_t id,
 
 		switch (o->type) {
 		case INTERFACE_Node:
-			uuid = client_make_uuid(id);
+			uuid = client_make_uuid(id, false);
 			break;
 		case INTERFACE_Port:
 			uuid = jack_port_uuid_generate(id);
@@ -3416,7 +3416,7 @@ char *jack_get_uuid_for_client_name (jack_client_t *client,
 		if (spa_streq(o->node.name, client_name) ||
 		    (monitor && spa_strneq(o->node.name, client_name,
 			    strlen(client_name) - strlen(MONITOR_EXT)))) {
-			uuid = spa_aprintf( "%" PRIu64, client_make_uuid(o->id));
+			uuid = spa_aprintf( "%" PRIu64, client_make_uuid(o->id, monitor));
 			break;
 		}
 	}
@@ -3433,6 +3433,7 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 	struct object *o;
 	jack_uuid_t uuid;
 	char *name = NULL;
+	bool monitor;
 
 	spa_return_val_if_fail(c != NULL, NULL);
 	spa_return_val_if_fail(client_uuid != NULL, NULL);
@@ -3440,12 +3441,14 @@ char *jack_get_client_name_by_uuid (jack_client_t *client,
 	if (jack_uuid_parse(client_uuid, &uuid) < 0)
 		return NULL;
 
+	monitor = uuid & (1 << 30);
+
 	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(o, &c->context.nodes, link) {
-		if (client_make_uuid(o->id) == uuid) {
+		if (client_make_uuid(o->id, monitor) == uuid) {
 			pw_log_debug("%p: uuid %s (%"PRIu64")-> %s",
 					client, client_uuid, uuid, o->node.name);
-			name = strdup(o->node.name);
+			name = spa_aprintf("%s%s", o->node.name, monitor ? MONITOR_EXT : "");
 			break;
 		}
 	}
@@ -3511,6 +3514,7 @@ done:
 SPA_EXPORT
 int jack_deactivate (jack_client_t *client)
 {
+	struct object *l;
 	struct client *c = (struct client *) client;
 	int res;
 
@@ -3528,6 +3532,12 @@ int jack_deactivate (jack_client_t *client)
 
 	c->activation->pending_new_pos = false;
 	c->activation->pending_sync = false;
+
+	spa_list_for_each(l, &c->context.links, link) {
+		if (l->port_link.src_ours || l->port_link.dst_ours) {
+			pw_registry_destroy(c->registry, l->id);
+		}
+	}
 
 	res = do_sync(c);
 
@@ -5683,6 +5693,7 @@ int  jack_transport_reposition (jack_client_t *client,
 		return -EINVAL;
 
 	pw_log_debug("frame:%u", pos->frame);
+	spa_zero(na->reposition);
 	na->reposition.flags = 0;
 	na->reposition.start = 0;
 	na->reposition.duration = 0;
@@ -5779,7 +5790,7 @@ char *jack_client_get_uuid (jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, NULL);
 
-	return spa_aprintf("%"PRIu64, client_make_uuid(c->node_id));
+	return spa_aprintf("%"PRIu64, client_make_uuid(c->node_id, false));
 }
 
 SPA_EXPORT

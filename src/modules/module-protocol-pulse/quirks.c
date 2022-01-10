@@ -75,7 +75,7 @@ static int match(const char *rules, struct spa_dict *dict, uint64_t *quirks)
 		int match = true;
 		uint64_t quirks_cur = 0;
 
-		while (spa_json_get_string(&it[0], key, sizeof(key)-1) > 0) {
+		while (spa_json_get_string(&it[0], key, sizeof(key)) > 0) {
 			char val[4096];
 			const char *str, *value;
 			int len;
@@ -83,7 +83,7 @@ static int match(const char *rules, struct spa_dict *dict, uint64_t *quirks)
 
 			if (spa_streq(key, "quirks")) {
 				if (spa_json_enter_array(&it[0], &it[1]) > 0) {
-					while (spa_json_get_string(&it[1], val, sizeof(val)-1) > 0)
+					while (spa_json_get_string(&it[1], val, sizeof(val)) > 0)
 						quirks_cur |= parse_quirks(val);
 				}
 				continue;
@@ -94,7 +94,8 @@ static int match(const char *rules, struct spa_dict *dict, uint64_t *quirks)
 			if (spa_json_is_null(value, len)) {
 				value = NULL;
 			} else {
-				spa_json_parse_string(value, SPA_MIN(len, (int)sizeof(val)-1), val);
+				if (spa_json_parse_stringn(value, len, val, sizeof(val)) < 0)
+					continue;
 				value = val;
 			}
 			str = spa_dict_lookup(dict, key);

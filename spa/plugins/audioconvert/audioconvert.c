@@ -47,6 +47,8 @@
 #define SPA_LOG_TOPIC_DEFAULT log_topic
 static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.audioconvert");
 
+#define DEFAULT_ALIGN	16
+
 #define MAX_PORTS	SPA_AUDIO_MAX_CHANNELS
 
 struct buffer {
@@ -361,12 +363,14 @@ static int negotiate_link_buffers(struct impl *this, struct link *link)
 			in_alloc = false;
 	}
 
+	align = DEFAULT_ALIGN;
+
 	if (spa_pod_parse_object(param,
 		SPA_TYPE_OBJECT_ParamBuffers, NULL,
 		SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(&buffers),
 		SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(&blocks),
 		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(&size),
-		SPA_PARAM_BUFFERS_align,   SPA_POD_Int(&align)) < 0)
+		SPA_PARAM_BUFFERS_align,   SPA_POD_OPT_Int(&align)) < 0)
 		return -EINVAL;
 
 	spa_log_debug(this->log, "%p: buffers %d, blocks %d, size %d, align %d %d:%d",
@@ -485,7 +489,7 @@ static int impl_node_enum_params(void *object, int seq,
 	struct impl *this = object;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[1024];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 	int res;
@@ -1003,7 +1007,7 @@ impl_node_port_enum_params(void *object, int seq,
 	struct impl *this = object;
 	struct spa_pod *param;
 	struct spa_pod_builder b = { 0 };
-	uint8_t buffer[1024];
+	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 

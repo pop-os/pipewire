@@ -45,6 +45,7 @@ struct module_events {
 	uint32_t version;
 
 	void (*loaded) (void *data, int result);
+	void (*destroy) (void *data);
 };
 
 struct module_methods {
@@ -65,9 +66,11 @@ struct module {
 	struct spa_hook_list listener_list;
 	void *user_data;
 	unsigned int loaded:1;
+	unsigned int unloading:1;
 };
 
 #define module_emit_loaded(m,r) spa_hook_list_call(&m->listener_list, struct module_events, loaded, 0, r)
+#define module_emit_destroy(m) spa_hook_list_call(&(m)->listener_list, struct module_events, destroy, 0)
 
 struct module *module_create(struct client *client, const char *name, const char *args);
 void module_free(struct module *module);
