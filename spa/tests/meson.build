@@ -5,7 +5,7 @@ find = find_program('find', required: false)
 summary({'find (for header testing)': find.found()}, bool_yn: true, section: 'Optional programs')
 if find.found()
   spa_headers = run_command(find,
-                            meson.source_root() / 'spa' / 'include',
+                            meson.project_source_root() / 'spa' / 'include',
                             '-name', '*.h',
                             '-not', '-name', 'type-info.h',
                             '-type', 'f',
@@ -20,7 +20,7 @@ if find.found()
                           configuration: c)
       executable('spa-include-test-@0@'.format(spa_header.underscorify()),
                  src,
-                 include_directories: [spa_inc],
+                 dependencies: [ spa_dep ],
                  install: false)
     endif
   endforeach
@@ -35,13 +35,12 @@ benchmark_apps = [
 foreach a : benchmark_apps
   benchmark('spa-' + a,
     executable('spa-' + a, a + '.c',
-      dependencies : [dl_lib, pthread_lib, mathlib ],
-      include_directories : [spa_inc ],
+      dependencies : [ spa_dep, dl_lib, pthread_lib, mathlib ],
       install : installed_tests_enabled,
       install_dir : installed_tests_execdir,
     ),
     env : [
-      'SPA_PLUGIN_DIR=@0@/spa/plugins/'.format(meson.build_root()),
+      'SPA_PLUGIN_DIR=@0@'.format(spa_dep.get_variable(internal: 'plugindir')),
     ]
   )
 

@@ -1,9 +1,10 @@
 project('pipewire', ['c' ],
-  version : '0.3.42',
+  version : '0.3.43',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
-  meson_version : '>= 0.54.0',
+  meson_version : '>= 0.56.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
+                      'cpp_std=c++17',
                       'b_pie=true',
                       #'b_sanitize=address,undefined',
                       'buildtype=debugoptimized' ])
@@ -60,7 +61,6 @@ alsadatadir = pipewire_datadir / 'alsa-card-profile' / 'mixer'
 
 pipewire_headers_dir = pipewire_name / 'pipewire'
 
-gnome = import('gnome')
 pkgconfig = import('pkgconfig')
 
 cc = meson.get_compiler('c')
@@ -304,9 +304,9 @@ includes_inc = include_directories('include')
 pipewire_inc = include_directories('src')
 
 makedata = configuration_data()
-  makedata.set('BUILD_ROOT', meson.build_root())
-  makedata.set('SOURCE_ROOT', meson.source_root())
-  makedata.set('VERSION', pipewire_version)
+makedata.set('BUILD_ROOT', meson.project_build_root())
+makedata.set('SOURCE_ROOT', meson.project_source_root())
+makedata.set('VERSION', pipewire_version)
 if version_arr.length() == 4
   makedata.set('TAG', 'HEAD')
 else
@@ -427,7 +427,16 @@ need_alsa = get_option('pipewire-alsa').enabled() or 'media-session' in get_opti
 alsa_dep = dependency('alsa', version : '>=1.1.7', required: need_alsa)
 summary({'pipewire-alsa': alsa_dep.found()}, bool_yn: true)
 
-openssl_lib = dependency('openssl', required: get_option('raop'))
+if build_machine.system() == 'freebsd'
+# On FreeBSD the OpenSSL library may come from base or a package.
+# Check for a package first and fallback to the base library if we can't find it via pkgconfig
+    openssl_lib = dependency('openssl', required: false)
+    if not openssl_lib.found()
+        openssl_lib = declare_dependency(link_args : [ '-lssl', '-lcrypto'])
+    endif
+else
+    openssl_lib = dependency('openssl', required: get_option('raop'))
+endif
 summary({'OpenSSL (for raop-sink)': openssl_lib.found()}, bool_yn: true)
 
 lilv_lib = dependency('lilv-0', required: get_option('lv2'))
@@ -467,6 +476,7 @@ endif
 if alsa_dep.found()
   subdir('pipewire-alsa/alsa-plugins')
   subdir('pipewire-alsa/conf')
+  subdir('pipewire-alsa/tests')
 endif
 
 doxygen = find_program('doxygen', required : get_option('docs'))
@@ -488,21 +498,21 @@ endif
 setenv = find_program('pw-uninstalled.sh')
 run_target('pw-uninstalled',
   command : [setenv,
-             '-b@0@'.format(meson.build_root()),
+             '-b@0@'.format(meson.project_build_root()),
              '-v@0@'.format(pipewire_version)]
 )
 
 if meson.version().version_compare('>=0.58.0')
   devenv = environment()
 
-  builddir = meson.current_build_dir()
-  srcdir = meson.current_source_dir()
+  builddir = meson.project_build_root()
+  srcdir = meson.project_source_root()
 
-  devenv.set('PIPEWIRE_CONFIG_DIR', builddir / 'src' / 'daemon')
-  devenv.set('PIPEWIRE_MODULE_DIR', builddir / 'src' / 'modules')
+  devenv.set('PIPEWIRE_CONFIG_DIR', pipewire_dep.get_variable(internal: 'confdatadir'))
+  devenv.set('PIPEWIRE_MODULE_DIR', pipewire_dep.get_variable(internal: 'moduledir'))
 
-  devenv.set('SPA_PLUGIN_DIR', builddir / 'spa' / 'plugins')
-  devenv.set('SPA_DATA_DIR', srcdir / 'spa' / 'plugins')
+  devenv.set('SPA_PLUGIN_DIR', spa_dep.get_variable(internal: 'plugindir'))
+  devenv.set('SPA_DATA_DIR', spa_dep.get_variable(internal: 'datadir'))
 
   devenv.set('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
 

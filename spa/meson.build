@@ -5,7 +5,28 @@
 #pthread_lib = dependencies('threads')
 #mathlib = cc.find_library('m', required : false)
 
-spa_inc = include_directories('include')
+spa_dep = declare_dependency(
+  include_directories : [
+    include_directories('include'),
+  ],
+  version : spaversion,
+  variables : {
+    'plugindir' : meson.current_build_dir() / 'plugins',
+    'datadir' : meson.current_source_dir() / 'plugins',
+  },
+)
+
+meson.override_dependency('lib@0@'.format(spa_name), spa_dep)
+
+pkgconfig.generate(filebase : 'lib@0@'.format(spa_name),
+  name : 'libspa',
+  subdirs : spa_name,
+  description : 'Simple Plugin API',
+  version : spaversion,
+  extra_cflags : '-D_REENTRANT',
+  variables : ['plugindir=${libdir}/@0@'.format(spa_name)],
+  uninstalled_variables : ['plugindir=${prefix}/spa/plugins'],
+)
 
 subdir('include')
 
@@ -40,14 +61,7 @@ if not get_option('spa-plugins').disabled()
   vulkan_headers = cc.has_header('vulkan/vulkan.h', dependencies : vulkan_dep)
   #summary({'Vulkan': vulkan_headers}, bool_yn: true, section: 'Misc dependencies')
 
-  if not get_option('libcamera').disabled()
-    libcamera_dep = dependency('libcamera', required: false)
-    if not libcamera_dep.found()
-      libcamera_dep = dependency('camera', required: get_option('libcamera'))
-    endif
-  else
-    libcamera_dep = dependency('', required: false)
-  endif
+  libcamera_dep = dependency('libcamera', required: get_option('libcamera'))
   summary({'libcamera': libcamera_dep.found()}, bool_yn: true, section: 'Backend')
 
   # common dependencies
@@ -62,21 +76,3 @@ subdir('tests')
 if not get_option('examples').disabled()
   subdir('examples')
 endif
-
-spa_dep = declare_dependency(
-  include_directories : [spa_inc],
-  version : spaversion,
-  variables : { 'plugindir' : meson.current_build_dir() / 'plugins' }
-)
-
-pkgconfig.generate(filebase : 'lib@0@'.format(spa_name),
-  name : 'libspa',
-  subdirs : spa_name,
-  description : 'Simple Plugin API',
-  version : spaversion,
-  extra_cflags : '-D_REENTRANT',
-  variables : ['plugindir=${libdir}/@0@'.format(spa_name)],
-  uninstalled_variables : ['plugindir=${prefix}/spa/plugins'],
-)
-
-meson.override_dependency('lib@0@'.format(spa_name), spa_dep)

@@ -91,12 +91,23 @@ static int handle_packet(struct client *client, struct message *msg)
 		message_dump(SPA_LOG_LEVEL_INFO, msg);
 	}
 
-	if (commands[command].run == NULL) {
+	const struct command *cmd = &commands[command];
+	if (cmd->run == NULL) {
 		res = -ENOTSUP;
 		goto finish;
 	}
 
-	res = commands[command].run(client, command, tag, msg);
+	if (!client->authenticated && !SPA_FLAG_IS_SET(cmd->access, COMMAND_ACCESS_WITHOUT_AUTH)) {
+		res = -EACCES;
+		goto finish;
+	}
+
+	if (client->manager == NULL && !SPA_FLAG_IS_SET(cmd->access, COMMAND_ACCESS_WITHOUT_MANAGER)) {
+		res = -EACCES;
+		goto finish;
+	}
+
+	res = cmd->run(client, command, tag, msg);
 
 finish:
 	message_free(impl, msg, false, false);
@@ -275,7 +286,6 @@ static void
 on_client_data(void *data, int fd, uint32_t mask)
 {
 	struct client * const client = data;
-	struct impl * const impl = client->impl;
 	int res;
 
 	client->ref++;
@@ -302,15 +312,9 @@ on_client_data(void *data, int fd, uint32_t mask)
 		}
 	}
 
-	if (mask & SPA_IO_OUT || client->need_flush) {
-		pw_log_trace("client %p: can write", client);
-		client->need_flush = false;
+	if (mask & SPA_IO_OUT || client->new_msg_since_last_flush) {
 		res = client_flush_messages(client);
-		if (res >= 0) {
-			int m = client->source->mask;
-			SPA_FLAG_CLEAR(m, SPA_IO_OUT);
-			pw_loop_update_io(impl->loop, client->source, m);
-		} else if (res != -EAGAIN && res != -EWOULDBLOCK)
+		if (res < 0)
 			goto error;
 	}
 
@@ -357,6 +361,7 @@ on_connect(void *data, int fd, uint32_t mask)
 	socklen_t length;
 	int client_fd, val;
 	struct client *client = NULL;
+	const char *client_access = NULL;
 	pid_t pid;
 
 	length = sizeof(name);
@@ -379,21 +384,9 @@ on_connect(void *data, int fd, uint32_t mask)
 		goto error;
 	}
 
-	client = calloc(1, sizeof(*client));
+	client = client_new(server);
 	if (client == NULL)
 		goto error;
-
-	client->impl = impl;
-	client->ref = 1;
-	client->connect_tag = SPA_ID_INVALID;
-	client->server = server;
-	spa_list_append(&server->clients, &client->link);
-	server->n_clients++;
-	pw_map_init(&client->streams, 16, 16);
-	spa_list_init(&client->out_messages);
-	spa_list_init(&client->operations);
-	spa_list_init(&client->pending_samples);
-	spa_list_init(&client->pending_streams);
 
 	pw_log_debug("server %p: new client %p fd:%d", server, client, client_fd);
 
@@ -418,6 +411,9 @@ on_connect(void *data, int fd, uint32_t mask)
 	if (client->routes == NULL)
 		goto error;
 
+	if (server->client_access[0] != '\0')
+		client_access = server->client_access;
+
 	if (server->addr.ss_family == AF_UNIX) {
 #ifdef SO_PRIORITY
 		val = 6;
@@ -426,9 +422,10 @@ on_connect(void *data, int fd, uint32_t mask)
 #endif
 		pid = get_client_pid(client, client_fd);
 		if (pid != 0 && check_flatpak(client, pid) == 1)
-			pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "flatpak");
+			client_access = "flatpak";
 	}
 	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
+
 		val = 1;
 		if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
 			pw_log_warn("setsockopt(TCP_NODELAY) failed: %m");
@@ -438,9 +435,10 @@ on_connect(void *data, int fd, uint32_t mask)
 			if (setsockopt(client_fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
 				pw_log_warn("setsockopt(IP_TOS) failed: %m");
 		}
-
-		pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, "restricted");
+		if (client_access == NULL)
+			client_access = "restricted";
 	}
+	pw_properties_set(client->props, PW_KEY_CLIENT_ACCESS, client_access);
 
 	return;
 
@@ -450,9 +448,9 @@ error:
 		client_free(client);
 }
 
-static int parse_unix_address(const char *address, struct pw_array *addrs)
+static int parse_unix_address(const char *address, struct sockaddr_storage *addrs, int len)
 {
-	struct sockaddr_un addr = {0}, *s;
+	struct sockaddr_un addr = {0};
 	int res;
 
 	if (address[0] != '/') {
@@ -477,15 +475,13 @@ static int parse_unix_address(const char *address, struct pw_array *addrs)
 		return -ENAMETOOLONG;
 	}
 
-	s = pw_array_add(addrs, sizeof(struct sockaddr_storage));
-	if (s == NULL)
-		return -ENOMEM;
+	if (len < 1)
+		return -ENOSPC;
 
 	addr.sun_family = AF_UNIX;
 
-	*s = addr;
-
-	return 0;
+	memcpy(&addrs[0], &addr, sizeof(addr));
+	return 1;
 }
 
 #ifndef SUN_LEN
@@ -589,7 +585,7 @@ static int start_unix_server(struct server *server, const struct sockaddr_storag
 		goto error_close;
 	}
 
-	if (listen(fd, LISTEN_BACKLOG) < 0) {
+	if (listen(fd, server->listen_backlog) < 0) {
 		res = -errno;
 		pw_log_warn("server %p: listen() on '%s' failed: %m",
 			    server, addr_un->sun_path);
@@ -753,49 +749,43 @@ static int get_ip_address_length(const struct sockaddr_storage *addr)
 	}
 }
 
-static int parse_ip_address(const char *address, struct pw_array *addrs)
+static int parse_ip_address(const char *address, struct sockaddr_storage *addrs, int len)
 {
 	char ip[FORMATTED_IP_ADDR_STRLEN];
-	struct sockaddr_storage addr, *s;
+	struct sockaddr_storage addr;
 	int res;
 
 	res = parse_ipv6_address(address, (struct sockaddr_in6 *) &addr);
 	if (res == 0) {
-		s = pw_array_add(addrs, sizeof(*s));
-		if (s == NULL)
-			return -ENOMEM;
-
-		*s = addr;
-		return 0;
+		if (len < 1)
+			return -ENOSPC;
+		addrs[0] = addr;
+		return 1;
 	}
 
 	res = parse_ipv4_address(address, (struct sockaddr_in *) &addr);
 	if (res == 0) {
-		s = pw_array_add(addrs, sizeof(*s));
-		if (s == NULL)
-			return -ENOMEM;
-
-		*s = addr;
-		return 0;
+		if (len < 1)
+			return -ENOSPC;
+		addrs[0] = addr;
+		return 1;
 	}
 
 	res = parse_port(address);
 	if (res < 0)
 		return res;
 
-	s = pw_array_add(addrs, sizeof(*s) * 2);
-	if (s == NULL)
-		return -ENOMEM;
+	if (len < 2)
+		return -ENOSPC;
 
 	snprintf(ip, sizeof(ip), "[::]:%d", res);
 	spa_assert_se(parse_ipv6_address(ip, (struct sockaddr_in6 *) &addr) == 0);
-	*s++ = addr;
+	addrs[0] = addr;
 
 	snprintf(ip, sizeof(ip), "0.0.0.0:%d", res);
 	spa_assert_se(parse_ipv4_address(ip, (struct sockaddr_in *) &addr) == 0);
-	*s++ = addr;
-
-	return 0;
+	addrs[1] = addr;
+	return 2;
 }
 
 static int start_ip_server(struct server *server, const struct sockaddr_storage *addr)
@@ -830,7 +820,7 @@ static int start_ip_server(struct server *server, const struct sockaddr_storage 
 		goto error_close;
 	}
 
-	if (listen(fd, LISTEN_BACKLOG) < 0) {
+	if (listen(fd, server->listen_backlog) < 0) {
 		res = -errno;
 		pw_log_warn("server %p: listen() failed: %m", server);
 		goto error_close;
@@ -896,13 +886,13 @@ static int server_start(struct server *server, const struct sockaddr_storage *ad
 	return res;
 }
 
-static int parse_address(const char *address, struct pw_array *addrs)
+static int parse_address(const char *address, struct sockaddr_storage *addrs, int len)
 {
-	if (strncmp(address, "tcp:", strlen("tcp:")) == 0)
-		return parse_ip_address(address + strlen("tcp:"), addrs);
+	if (spa_strstartswith(address, "tcp:"))
+		return parse_ip_address(address + strlen("tcp:"), addrs, len);
 
-	if (strncmp(address, "unix:", strlen("unix:")) == 0)
-		return parse_unix_address(address + strlen("unix:"), addrs);
+	if (spa_strstartswith(address, "unix:"))
+		return parse_unix_address(address + strlen("unix:"), addrs, len);
 
 	return -EAFNOSUPPORT;
 }
@@ -935,11 +925,9 @@ static int format_socket_address(const struct sockaddr_storage *addr, char *buff
 
 int servers_create_and_start(struct impl *impl, const char *addresses, struct pw_array *servers)
 {
-	struct pw_array addrs = PW_ARRAY_INIT(sizeof(struct sockaddr_storage));
-	const struct sockaddr_storage *addr;
-	char addr_str[FORMATTED_SOCKET_ADDR_STRLEN];
-	int res, count = 0, err = 0; /* store the first error to return when no servers could be created */
-	struct spa_json it[2];
+	int len, res, count = 0, err = 0; /* store the first error to return when no servers could be created */
+	const char *v;
+	struct spa_json it[3];
 
 	/* update `err` if it hasn't been set to an errno */
 #define UPDATE_ERR(e) do { if (err == 0) err = (e); } while (false)
@@ -947,52 +935,77 @@ int servers_create_and_start(struct impl *impl, const char *addresses, struct pw
 	/* collect addresses into an array of `struct sockaddr_storage` */
 	spa_json_init(&it[0], addresses, strlen(addresses));
 
+	/* [ <server-spec> ... ] */
 	if (spa_json_enter_array(&it[0], &it[1]) < 0)
 		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], addr_str, sizeof(addr_str) - 1) > 0) {
-		res = parse_address(addr_str, &addrs);
-		if (res < 0) {
+	/* a server-spec is either an address or an object */
+	while ((len = spa_json_next(&it[1], &v)) > 0) {
+		char addr_str[FORMATTED_SOCKET_ADDR_STRLEN] = { 0 };
+		char key[128], client_access[64] = { 0 };
+		struct sockaddr_storage addr[2];
+		int i, max_clients = MAX_CLIENTS, listen_backlog = LISTEN_BACKLOG, n_addr;
+
+		if (spa_json_is_object(v, len)) {
+			spa_json_enter(&it[1], &it[2]);
+			while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
+				if ((len = spa_json_next(&it[2], &v)) <= 0)
+					break;
+
+				if (spa_streq(key, "address")) {
+					spa_json_parse_stringn(v, len, addr_str, sizeof(addr_str));
+				} else if (spa_streq(key, "max-clients")) {
+					spa_json_parse_int(v, len, &max_clients);
+				} else if (spa_streq(key, "listen-backlog")) {
+					spa_json_parse_int(v, len, &listen_backlog);
+				} else if (spa_streq(key, "client.access")) {
+					spa_json_parse_stringn(v, len, client_access, sizeof(client_access));
+				}
+			}
+		} else {
+			spa_json_parse_stringn(v, len, addr_str, sizeof(addr_str));
+		}
+
+		n_addr = parse_address(addr_str, addr, 2);
+		if (n_addr < 0) {
 			pw_log_warn("pulse-server %p: failed to parse address '%s': %s",
-				    impl, addr_str, spa_strerror(res));
-
-			UPDATE_ERR(res);
-		}
-	}
-
-	/* try to create sockets for each address in the list */
-	pw_array_for_each (addr, &addrs) {
-		struct server * const server = server_new(impl);
-		if (server == NULL) {
-			UPDATE_ERR(-errno);
+				    impl, addr_str, spa_strerror(n_addr));
+			UPDATE_ERR(n_addr);
 			continue;
 		}
 
-		res = server_start(server, addr);
-		if (res < 0) {
-			spa_assert_se(format_socket_address(addr, addr_str, sizeof(addr_str)) >= 0);
-			pw_log_warn("pulse-server %p: failed to start server on '%s': %s",
-				    impl, addr_str, spa_strerror(res));
+		/* try to create sockets for each address in the list */
+		for (i = 0; i < n_addr; i++) {
+			struct server * const server = server_new(impl);
+			if (server == NULL) {
+				UPDATE_ERR(-errno);
+				continue;
+			}
 
-			UPDATE_ERR(res);
-			server_free(server);
+			server->max_clients = max_clients;
+			server->listen_backlog = listen_backlog;
+			memcpy(server->client_access, client_access, sizeof(client_access));
 
-			continue;
+			res = server_start(server, addr);
+			if (res < 0) {
+				spa_assert_se(format_socket_address(addr, addr_str, sizeof(addr_str)) >= 0);
+				pw_log_warn("pulse-server %p: failed to start server on '%s': %s",
+					    impl, addr_str, spa_strerror(res));
+				UPDATE_ERR(res);
+				server_free(server);
+				continue;
+			}
+
+			if (servers != NULL)
+				pw_array_add_ptr(servers, server);
+
+			count += 1;
 		}
-
-		if (servers != NULL)
-			pw_array_add_ptr(servers, server);
-
-		count += 1;
 	}
-
-	pw_array_clear(&addrs);
-
 	if (count == 0) {
 		UPDATE_ERR(-EINVAL);
 		return err;
 	}
-
 	return count;
 
 #undef UPDATE_ERR

@@ -50,8 +50,11 @@ static void on_module_unload(void *obj, void *data, int res, uint32_t id)
 
 void module_schedule_unload(struct module *module)
 {
-	struct impl *impl = module->impl;
-	pw_work_queue_add(impl->work_queue, module, 0, on_module_unload, impl);
+	if (module->unloading)
+		return;
+
+	pw_work_queue_add(module->impl->work_queue, module, 0, on_module_unload, NULL);
+	module->unloading = true;
 }
 
 struct module *module_new(struct impl *impl, const struct module_methods *methods, size_t user_data)
@@ -91,6 +94,8 @@ int module_load(struct client *client, struct module *module)
 void module_free(struct module *module)
 {
 	struct impl *impl = module->impl;
+
+	module_emit_destroy(module);
 
 	if (module->idx != SPA_ID_INVALID)
 		pw_map_remove(&impl->modules, module->idx & INDEX_MASK);
@@ -263,20 +268,19 @@ static const struct module_info module_list[] = {
 #ifdef HAVE_AVAHI
 	{ "module-zeroconf-publish", create_module_zeroconf_publish, },
 #endif
-#ifdef HAVE_ROC
 	{ "module-roc-sink", create_module_roc_sink, },
 	{ "module-roc-source", create_module_roc_source, },
-#endif
-	{ NULL, }
 };
 
 static const struct module_info *find_module_info(const char *name)
 {
-	int i;
-	for (i = 0; module_list[i].name != NULL; i++) {
-		if (spa_streq(module_list[i].name, name))
-			return &module_list[i];
+	const struct module_info *info;
+
+	SPA_FOR_EACH_ELEMENT(module_list, info) {
+		if (spa_streq(info->name, name))
+			return info;
 	}
+
 	return NULL;
 }
 

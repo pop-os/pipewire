@@ -393,8 +393,8 @@ static int parse_spa_libs(struct pw_context *context, char *str)
 		return -EINVAL;
 	}
 
-	while (spa_json_get_string(&it[1], key, sizeof(key)-1) > 0) {
-		if (spa_json_get_string(&it[1], value, sizeof(value)-1) > 0) {
+	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
+		if (spa_json_get_string(&it[1], value, sizeof(value)) > 0) {
 			pw_context_add_spa_lib(context, key, value);
 			count++;
 		}
@@ -445,7 +445,7 @@ static int parse_modules(struct pw_context *context, char *str)
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
 		char *name = NULL, *args = NULL, *flags = NULL;
 
-		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
 			const char *val;
 			int len;
 
@@ -454,18 +454,18 @@ static int parse_modules(struct pw_context *context, char *str)
 
 			if (spa_streq(key, "name")) {
 				name = (char*)val;
-				spa_json_parse_string(val, len, name);
+				spa_json_parse_stringn(val, len, name, len+1);
 			} else if (spa_streq(key, "args")) {
 				if (spa_json_is_container(val, len))
 					len = spa_json_container_len(&it[2], val, len);
 
 				args = (char*)val;
-				spa_json_parse_string(val, len, args);
+				spa_json_parse_stringn(val, len, args, len+1);
 			} else if (spa_streq(key, "flags")) {
 				if (spa_json_is_container(val, len))
 					len = spa_json_container_len(&it[2], val, len);
 				flags = (char*)val;
-				spa_json_parse_string(val, len, flags);
+				spa_json_parse_stringn(val, len, flags, len+1);
 			}
 		}
 		if (name != NULL)
@@ -529,7 +529,7 @@ static int parse_objects(struct pw_context *context, char *str)
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
 		char *factory = NULL, *args = NULL, *flags = NULL;
 
-		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
 			const char *val;
 			int len;
 
@@ -538,19 +538,19 @@ static int parse_objects(struct pw_context *context, char *str)
 
 			if (spa_streq(key, "factory")) {
 				factory = (char*)val;
-				spa_json_parse_string(val, len, factory);
+				spa_json_parse_stringn(val, len, factory, len+1);
 			} else if (spa_streq(key, "args")) {
 				if (spa_json_is_container(val, len))
 					len = spa_json_container_len(&it[2], val, len);
 
 				args = (char*)val;
-				spa_json_parse_string(val, len, args);
+				spa_json_parse_stringn(val, len, args, len+1);
 			} else if (spa_streq(key, "flags")) {
 				if (spa_json_is_container(val, len))
 					len = spa_json_container_len(&it[2], val, len);
 
 				flags = (char*)val;
-				spa_json_parse_string(val, len, flags);
+				spa_json_parse_stringn(val, len, flags, len+1);
 			}
 		}
 		if (factory != NULL)
@@ -616,7 +616,7 @@ static int parse_exec(struct pw_context *context, char *str)
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
 		char *path = NULL, *args = NULL;
 
-		while (spa_json_get_string(&it[2], key, sizeof(key)-1) > 0) {
+		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
 			const char *val;
 			int len;
 
@@ -625,10 +625,10 @@ static int parse_exec(struct pw_context *context, char *str)
 
 			if (spa_streq(key, "path")) {
 				path = (char*)val;
-				spa_json_parse_string(val, len, path);
+				spa_json_parse_stringn(val, len, path, len+1);
 			} else if (spa_streq(key, "args")) {
 				args = (char*)val;
-				spa_json_parse_string(val, len, args);
+				spa_json_parse_stringn(val, len, args, len+1);
 			}
 		}
 		if (path != NULL)

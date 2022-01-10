@@ -1180,21 +1180,22 @@ again:
 				running = !n->passive;
 		}
 
-		/* calculate desired rate */
-		target_rate = def_rate;
-		if (rate.denom != 0 && rate.num == 1) {
-			if (rates_contains(rates, n_rates, rate.denom))
-				target_rate = rate.denom;
-		}
 		if (force_rate)
 			lock_rate = false;
 
 		current_rate = n->current_rate.denom;
-		if (target_rate != current_rate && lock_rate)
+		if (lock_rate ||
+		    (!force_rate &&
+		    (n->info.state > PW_NODE_STATE_IDLE)))
 			target_rate = current_rate;
-		else if (target_rate != current_rate && !force_rate &&
-		    (n->info.state > PW_NODE_STATE_IDLE))
-			target_rate = current_rate;
+		else {
+			/* calculate desired rate */
+			target_rate = def_rate;
+			if (rate.denom != 0 && rate.num == 1) {
+				if (rates_contains(rates, n_rates, rate.denom))
+					target_rate = rate.denom;
+			}
+		}
 
 		if (target_rate != current_rate) {
 			pw_log_info("(%s-%u) state:%s new rate:%u->%u",
@@ -1244,6 +1245,12 @@ again:
 					quantum);
 			n->current_quantum = quantum;
 			n->current_pending = true;
+		}
+
+		if (n->info.state < PW_NODE_STATE_RUNNING && n->current_pending) {
+			n->rt.position->clock.duration = n->current_quantum;
+			n->rt.position->clock.rate = n->current_rate;
+			n->current_pending = false;
 		}
 
 		pw_log_debug("%p: driving %p running:%d passive:%d quantum:%u '%s'",
