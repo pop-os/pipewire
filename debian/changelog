@@ -1,9 +1,10 @@
-pipewire (0.3.43-2) UNRELEASED; urgency=medium
+pipewire (0.3.43-2) unstable; urgency=medium
 
+  * Team upload.
   * Skip the new test pw-test-pipewire-alsa-stress,
       this test runs an infinite loop.
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 11 Jan 2022 11:53:57 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 11 Jan 2022 12:10:22 +0100
 
 pipewire (0.3.43-1) unstable; urgency=medium
 
