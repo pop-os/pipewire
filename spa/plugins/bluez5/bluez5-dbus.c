@@ -229,7 +229,7 @@ static void battery_remove(struct spa_bt_device *device) {
 		device->battery_pending_call = NULL;
 	}
 
-	if (!device->adapter->has_battery_provider || !device->has_battery)
+	if (!device->adapter || !device->adapter->has_battery_provider || !device->has_battery)
 		return;
 
 	spa_log_debug(device->monitor->log, "Removing virtual battery: %s", device->battery_path);
@@ -694,6 +694,22 @@ static int adapter_update_props(struct spa_bt_adapter *adapter,
 	return 0;
 }
 
+static void adapter_update_devices(struct spa_bt_adapter *adapter)
+{
+	struct spa_bt_monitor *monitor = adapter->monitor;
+	struct spa_bt_device *device;
+
+	/*
+	 * Update devices when new adapter appears.
+	 * Devices may appear on DBus before or after the adapter does.
+	 */
+
+	spa_list_for_each(device, &monitor->device_list, link) {
+		if (device->adapter == NULL && spa_streq(device->adapter_path, adapter->path))
+			device->adapter = adapter;
+	}
+}
+
 static void adapter_register_player(struct spa_bt_adapter *adapter)
 {
 	if (adapter->player_registered || !adapter->monitor->dummy_avrcp_player)
@@ -785,10 +801,19 @@ static struct spa_bt_adapter *adapter_create(struct spa_bt_monitor *monitor, con
 	return d;
 }
 
+static void device_free(struct spa_bt_device *device);
+
 static void adapter_free(struct spa_bt_adapter *adapter)
 {
 	struct spa_bt_monitor *monitor = adapter->monitor;
+	struct spa_bt_device *d, *td;
+
 	spa_log_debug(monitor->log, "%p", adapter);
+
+	/* Devices should be destroyed before their assigned adapter */
+	spa_list_for_each_safe(d, td, &monitor->device_list, link)
+		if (d->adapter == adapter)
+			device_free(d);
 
 	spa_bt_player_destroy(adapter->dummy_player);
 
@@ -1159,7 +1184,7 @@ static int reconnect_device_profiles(struct spa_bt_device *device)
 }
 
 #define DEVICE_RECONNECT_TIMEOUT_SEC 2
-#define DEVICE_PROFILE_TIMEOUT_SEC 3
+#define DEVICE_PROFILE_TIMEOUT_SEC 6
 
 static void device_timer_event(struct spa_source *source)
 {
@@ -1238,11 +1263,26 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 {
 	struct spa_bt_monitor *monitor = device->monitor;
 	uint32_t connected_profiles = device->connected_profiles;
+	uint32_t direction_masks[2] = {
+		SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_HEADSET_AUDIO,
+		SPA_BT_PROFILE_A2DP_SOURCE | SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY,
+	};
+	bool direction_connected = false;
+	bool all_connected;
+	size_t i;
 
 	if (connected_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT)
 		connected_profiles |= SPA_BT_PROFILE_HEADSET_HEAD_UNIT;
 	if (connected_profiles & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY)
 		connected_profiles |= SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY;
+
+	for (i = 0; i < SPA_N_ELEMENTS(direction_masks); ++i) {
+		uint32_t mask = direction_masks[i] & device->profiles;
+		if (mask && (connected_profiles & mask) == mask)
+			direction_connected = true;
+	}
+
+	all_connected = (device->profiles & connected_profiles) == device->profiles;
 
 	spa_log_debug(monitor->log, "device %p: profiles %08x %08x %d",
 			device, device->profiles, connected_profiles, device->added);
@@ -1250,7 +1290,7 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 	if (connected_profiles == 0 && spa_list_is_empty(&device->codec_switch_list)) {
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_DISCONNECTED);
-	} else if (force || (device->profiles & connected_profiles) == device->profiles) {
+	} else if (force || direction_connected || all_connected) {
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_CONNECTED);
 	} else {
@@ -1349,7 +1389,7 @@ static int device_update_props(struct spa_bt_device *device,
 
 				device->adapter = adapter_find(monitor, value);
 				if (device->adapter == NULL) {
-					spa_log_warn(monitor->log, "unknown adapter %s", value);
+					spa_log_info(monitor->log, "unknown adapter %s", value);
 				}
 			}
 			else if (spa_streq(key, "Icon")) {
@@ -1453,6 +1493,15 @@ static int device_update_props(struct spa_bt_device *device,
 		dbus_message_iter_next(props_iter);
 	}
 	return 0;
+}
+
+static bool device_props_ready(struct spa_bt_device *device)
+{
+	/*
+	 * In some cases, BlueZ device props may be missing part of
+	 * the information required when the interface first appears.
+	 */
+	return device->adapter && device->address;
 }
 
 bool spa_bt_device_supports_a2dp_codec(struct spa_bt_device *device, const struct a2dp_codec *codec)
@@ -2091,9 +2140,16 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				spa_bt_transport_set_state(transport, spa_bt_transport_state_from_string(value));
 			}
 			else if (spa_streq(key, "Device")) {
-				transport->device = spa_bt_device_find(monitor, value);
-				if (transport->device == NULL)
-					spa_log_warn(monitor->log, "could not find device %s", value);
+				struct spa_bt_device *device = spa_bt_device_find(monitor, value);
+				if (transport->device != device) {
+					if (transport->device != NULL)
+						spa_list_remove(&transport->device_link);
+					transport->device = device;
+					if (device != NULL)
+						spa_list_append(&device->transport_list, &transport->device_link);
+					else
+						spa_log_warn(monitor->log, "could not find device %s", value);
+				}
 			}
 		}
 		else if (spa_streq(key, "Codec")) {
@@ -2874,7 +2930,6 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	DBusMessageIter it[2];
 	DBusMessage *r;
 	struct spa_bt_transport *transport;
-	bool is_new = false;
 	const struct a2dp_codec *codec;
 	int profile;
 
@@ -2897,9 +2952,8 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	dbus_message_iter_recurse(&it[0], &it[1]);
 
 	transport = spa_bt_transport_find(monitor, transport_path);
-	is_new = transport == NULL;
 
-	if (is_new) {
+	if (transport == NULL) {
 		char *tpath = strdup(transport_path);
 
 		transport = spa_bt_transport_create(monitor, tpath, 0);
@@ -2928,14 +2982,10 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	transport->a2dp_codec = codec;
 	transport_update_props(transport, &it[1], NULL);
 
-	if (transport->device == NULL) {
+	if (transport->device == NULL || transport->device->adapter == NULL) {
 		spa_log_warn(monitor->log, "no device found for transport");
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
-	spa_bt_device_add_profile(transport->device, transport->profile);
-
-	if (is_new)
-		spa_list_append(&transport->device->transport_list, &transport->device_link);
 
 	device_update_last_bluez_action_time(transport->device);
 
@@ -2965,6 +3015,8 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	}
 	spa_log_info(monitor->log, "%p: %s validate conf channels:%d",
 			monitor, path, transport->n_channels);
+
+	spa_bt_device_add_profile(transport->device, transport->profile);
 
 	spa_bt_device_connect_profile(transport->device, transport->profile);
 
@@ -3585,6 +3637,7 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		adapter_update_props(a, props_iter, NULL);
 		adapter_register_application(a);
 		adapter_register_player(a);
+		adapter_update_devices(a);
 	}
 	else if (spa_streq(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE)) {
 		if (monitor->backends[BACKEND_NATIVE])
@@ -3606,6 +3659,9 @@ static void interface_added(struct spa_bt_monitor *monitor,
 
 		device_update_props(d, props_iter, NULL);
 		d->reconnect_state = BT_DEVICE_RECONNECT_INIT;
+
+		if (!device_props_ready(d))
+			return;
 
 		device_update_hw_volume_profiles(d);
 
@@ -3963,6 +4019,12 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			spa_log_debug(monitor->log, "Properties changed in device %s", path);
 
 			device_update_props(d, &it[1], NULL);
+
+			if (!device_props_ready(d))
+				goto finish;
+
+			device_update_hw_volume_profiles(d);
+
 			spa_bt_device_add_profile(d, SPA_BT_PROFILE_NULL);
 		}
 		else if (spa_streq(iface, BLUEZ_MEDIA_ENDPOINT_INTERFACE)) {

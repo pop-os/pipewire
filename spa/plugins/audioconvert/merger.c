@@ -55,7 +55,6 @@ static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.merger");
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 
-#define MAX_SAMPLES	8192
 #define MAX_ALIGN	16
 #define MAX_BUFFERS	32
 #define MAX_DATAS	SPA_AUDIO_MAX_CHANNELS
@@ -146,6 +145,9 @@ struct impl {
 	struct spa_log *log;
 	struct spa_cpu *cpu;
 
+	uint32_t cpu_flags;
+	uint32_t quantum_limit;
+
 	struct spa_io_position *io_position;
 
 	uint64_t info_all;
@@ -167,7 +169,6 @@ struct impl {
 	unsigned int have_profile:1;
 
 	struct convert conv;
-	uint32_t cpu_flags;
 	unsigned int is_passthrough:1;
 	unsigned int started:1;
 	unsigned int monitor:1;
@@ -181,7 +182,8 @@ struct impl {
 
 	struct spa_latency_info latency[2];
 
-	float empty[MAX_SAMPLES + MAX_ALIGN];
+	uint32_t empty_size;
+	float *empty;
 };
 
 #define CHECK_IN_PORT(this,d,p)		((d) == SPA_DIRECTION_INPUT && (p) < this->port_count)
@@ -622,7 +624,9 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 
 		info.info.raw.rate = 0;
 
-		if (this->have_profile && memcmp(&this->format, &info, sizeof(info)) == 0)
+		if (this->have_profile &&
+		    memcmp(&this->format, &info, sizeof(info)) == 0 &&
+		    this->monitor == monitor)
 			return 0;
 
 		spa_log_debug(this->log, "%p: port config %d/%d %d", this,
@@ -775,11 +779,14 @@ static int port_enum_formats(void *object,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(22,
+				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(25,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32P,
 							SPA_AUDIO_FORMAT_F32,
 							SPA_AUDIO_FORMAT_F32_OE,
+							SPA_AUDIO_FORMAT_F64P,
+							SPA_AUDIO_FORMAT_F64,
+							SPA_AUDIO_FORMAT_F64_OE,
 							SPA_AUDIO_FORMAT_S32P,
 							SPA_AUDIO_FORMAT_S32,
 							SPA_AUDIO_FORMAT_S32_OE,
@@ -869,7 +876,7 @@ impl_node_port_enum_params(void *object, int seq,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(port->blocks),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(
-								MAX_SAMPLES * port->stride,
+								this->quantum_limit * port->stride,
 								16 * port->stride,
 								INT32_MAX),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(port->stride));
@@ -1008,6 +1015,10 @@ static int calc_width(struct spa_audio_info *info)
 	case SPA_AUDIO_FORMAT_S24:
 	case SPA_AUDIO_FORMAT_S24_OE:
 		return 3;
+	case SPA_AUDIO_FORMAT_F64P:
+	case SPA_AUDIO_FORMAT_F64:
+	case SPA_AUDIO_FORMAT_F64_OE:
+		return 8;
 	default:
 		return 4;
 	}
@@ -1024,7 +1035,11 @@ static int port_set_latency(void *object,
 	enum spa_direction other = SPA_DIRECTION_REVERSE(direction);
 	uint32_t i;
 
-	spa_log_debug(this->log, "%p: set latency direction:%d", this, direction);
+	spa_log_debug(this->log, "%p: set latency direction:%d id:%d",
+			this, direction, port_id);
+
+	if (direction == SPA_DIRECTION_OUTPUT && port_id != 0)
+		return 0;
 
 	if (latency == NULL) {
 		this->latency[other] = SPA_LATENCY_INFO(other);
@@ -1212,7 +1227,7 @@ impl_node_port_use_buffers(void *object,
 {
 	struct impl *this = object;
 	struct port *port;
-	uint32_t i, j;
+	uint32_t i, j, maxsize;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -1227,6 +1242,7 @@ impl_node_port_use_buffers(void *object,
 
 	clear_buffers(this, port);
 
+	maxsize = 0;
 	for (i = 0; i < n_buffers; i++) {
 		struct buffer *b;
 		uint32_t n_datas = buffers[i]->n_datas;
@@ -1257,10 +1273,18 @@ impl_node_port_use_buffers(void *object,
 			if (direction == SPA_DIRECTION_OUTPUT &&
 			    !SPA_FLAG_IS_SET(d[j].flags, SPA_DATA_FLAG_DYNAMIC))
 				this->is_passthrough = false;
-		}
 
+			maxsize = SPA_MAX(maxsize, d[j].maxsize);
+		}
 		if (direction == SPA_DIRECTION_OUTPUT)
 			queue_buffer(this, port, i);
+	}
+	if (maxsize > this->empty_size) {
+		this->empty = realloc(this->empty, maxsize + MAX_ALIGN);
+		if (this->empty == NULL)
+			return -errno;
+		memset(this->empty, 0, maxsize + MAX_ALIGN);
+		this->empty_size = maxsize;
 	}
 	port->n_buffers = n_buffers;
 
@@ -1519,6 +1543,7 @@ static int impl_clear(struct spa_handle *handle)
 		free(this->in_ports[i]);
 	for (i = 0; i < MAX_PORTS+1; i++)
 		free(this->out_ports[i]);
+	free(this->empty);
 	return 0;
 }
 
@@ -1557,7 +1582,10 @@ impl_init(const struct spa_handle_factory *factory,
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
-		merger_set_param(this, k, s);
+		if (spa_streq(k, "clock.quantum-limit"))
+			spa_atou32(s, &this->quantum_limit, 0);
+		else
+			merger_set_param(this, k, s);
 	}
 
 	this->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);

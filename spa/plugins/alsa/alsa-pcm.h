@@ -52,9 +52,6 @@ extern "C" {
 
 #include "dll.h"
 
-#define MIN_LATENCY	16
-#define MAX_LATENCY	8192
-
 #define MAX_RATES	16
 
 #define DEFAULT_PERIOD		1024u
@@ -66,8 +63,6 @@ struct props {
 	char device[64];
 	char device_name[128];
 	char card_name[128];
-	uint32_t min_latency;
-	uint32_t max_latency;
 	bool use_chmap;
 };
 
@@ -148,6 +143,7 @@ struct state {
 	unsigned int disable_mmap;
 	unsigned int disable_batch;
 	char clock_name[64];
+	uint32_t quantum_limit;
 
 	snd_pcm_uframes_t buffer_frames;
 	snd_pcm_uframes_t period_frames;

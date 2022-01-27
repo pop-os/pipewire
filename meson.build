@@ -1,7 +1,7 @@
 project('pipewire', ['c' ],
-  version : '0.3.43',
+  version : '0.3.44',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
-  meson_version : '>= 0.56.0',
+  meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
                       'c_std=gnu99',
                       'cpp_std=c++17',
@@ -323,12 +323,12 @@ rt_lib = cc.find_library('rt', required : false) # clock_gettime
 dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1', required : get_option('dbus'))
-summary({'dbus (Bluetooth, rtkit, portal, pw-reserve)': dbus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+summary({'dbus (Bluetooth, rt, portal, pw-reserve)': dbus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 if dbus_dep.found()
   cdata.set('HAVE_DBUS', 1)
 endif
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
-summary({'SDL 2': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+summary({'SDL2 (video examples)': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 drm_dep = dependency('libdrm', required : false)
 readline_dep = dependency('readline', required : false)
 
@@ -348,6 +348,14 @@ summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
 summary({'Avahi DNS-SD (Zeroconf)': avahi_dep.found()}, bool_yn: true,
   section: 'Streaming between daemons')
+
+x11_dep = dependency('x11-xcb', required : get_option('x11'))
+summary({'X11 (x11-bell)': x11_dep.found()}, bool_yn: true,
+  section: 'Misc dependencies')
+
+canberra_dep = dependency('libcanberra', required : get_option('libcanberra'))
+summary({'libcanberra (x11-bell)': canberra_dep.found()}, bool_yn: true,
+  section: 'Misc dependencies')
 
 libusb_dep = dependency('libusb-1.0', required : get_option('libusb'))
 summary({'libusb (Bluetooth quirks)': libusb_dep.found()}, bool_yn: true, section: 'Backend')
@@ -479,20 +487,23 @@ if alsa_dep.found()
   subdir('pipewire-alsa/tests')
 endif
 
-doxygen = find_program('doxygen', required : get_option('docs'))
-if doxygen.found()
-  subdir('doc')
-endif
-
+generate_manpages = false
 if not get_option('man').disabled()
   rst2man = find_program('rst2man', required: false)
   if not rst2man.found()
     rst2man = find_program('rst2man.py', required: get_option('man'))
   endif
-  summary({'Manpage generation': rst2man.found()}, bool_yn: true)
   if rst2man.found()
-    subdir('man')
+    generate_manpages = true
   endif
+endif
+
+summary({'Manpage generation': generate_manpages}, bool_yn: true)
+subdir('man')
+
+doxygen = find_program('doxygen', required : get_option('docs'))
+if doxygen.found()
+  subdir('doc')
 endif
 
 setenv = find_program('pw-uninstalled.sh')
@@ -502,27 +513,25 @@ run_target('pw-uninstalled',
              '-v@0@'.format(pipewire_version)]
 )
 
-if meson.version().version_compare('>=0.58.0')
-  devenv = environment()
+devenv = environment()
 
-  builddir = meson.project_build_root()
-  srcdir = meson.project_source_root()
+builddir = meson.project_build_root()
+srcdir = meson.project_source_root()
 
-  devenv.set('PIPEWIRE_CONFIG_DIR', pipewire_dep.get_variable(internal: 'confdatadir'))
-  devenv.set('PIPEWIRE_MODULE_DIR', pipewire_dep.get_variable(internal: 'moduledir'))
+devenv.set('PIPEWIRE_CONFIG_DIR', pipewire_dep.get_variable('confdatadir'))
+devenv.set('PIPEWIRE_MODULE_DIR', pipewire_dep.get_variable('moduledir'))
 
-  devenv.set('SPA_PLUGIN_DIR', spa_dep.get_variable(internal: 'plugindir'))
-  devenv.set('SPA_DATA_DIR', spa_dep.get_variable(internal: 'datadir'))
+devenv.set('SPA_PLUGIN_DIR', spa_dep.get_variable('plugindir'))
+devenv.set('SPA_DATA_DIR', spa_dep.get_variable('datadir'))
 
-  devenv.set('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
+devenv.set('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
 
-  devenv.set('ALSA_PLUGIN_DIR', builddir / 'pipewire-alsa' / 'alsa-plugins')
-  devenv.set('ACP_PATHS_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'paths')
-  devenv.set('ACP_PROFILES_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'profile-sets')
+devenv.set('ALSA_PLUGIN_DIR', builddir / 'pipewire-alsa' / 'alsa-plugins')
+devenv.set('ACP_PATHS_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'paths')
+devenv.set('ACP_PROFILES_DIR', srcdir / 'spa' / 'plugins' / 'alsa' / 'mixer' / 'profile-sets')
 
-  devenv.set('LD_LIBRARY_PATH', builddir / 'pipewire-jack' / 'src')
+devenv.set('LD_LIBRARY_PATH', builddir / 'pipewire-jack' / 'src')
 
-  devenv.set('PW_UNINSTALLED', '1')
+devenv.set('PW_UNINSTALLED', '1')
 
-  meson.add_devenv(devenv)
-endif
+meson.add_devenv(devenv)

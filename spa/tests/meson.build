@@ -9,15 +9,16 @@ if find.found()
                             '-name', '*.h',
                             '-not', '-name', 'type-info.h',
                             '-type', 'f',
-                            '-printf', '%P\n')
+                            '-printf', '%P\n',
+                            check: false)
   foreach spa_header : spa_headers.stdout().split('\n')
     if spa_header.endswith('.h')  # skip empty lines
       ext = have_cpp ? 'cpp' : 'c'
-      c = configuration_data()
-      c.set('INCLUDE', spa_header)
       src = configure_file(input: 'spa-include-test-template.c',
-                          output: 'spa-include-test-@0@.@1@'.format(spa_header.underscorify(), ext),
-                          configuration: c)
+                           output: 'spa-include-test-@0@.@1@'.format(spa_header.underscorify(), ext),
+                           configuration: {
+                             'INCLUDE': spa_header,
+                           })
       executable('spa-include-test-@0@'.format(spa_header.underscorify()),
                  src,
                  dependencies: [ spa_dep ],
@@ -40,7 +41,7 @@ foreach a : benchmark_apps
       install_dir : installed_tests_execdir,
     ),
     env : [
-      'SPA_PLUGIN_DIR=@0@'.format(spa_dep.get_variable(internal: 'plugindir')),
+      'SPA_PLUGIN_DIR=@0@'.format(spa_dep.get_variable('plugindir')),
     ]
   )
 

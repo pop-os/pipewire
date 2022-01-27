@@ -58,6 +58,7 @@ struct stream {
 	uint32_t create_tag;
 	uint32_t channel;	/* index in map */
 	uint32_t id;		/* id of global */
+	uint32_t index;		/* index */
 
 	struct impl *impl;
 	struct client *client;
@@ -83,8 +84,14 @@ struct stream {
 	int64_t delay;
 
 	uint32_t last_quantum;
-	int64_t missing;
 	int64_t requested;
+
+	struct spa_fraction min_req;
+	struct spa_fraction default_req;
+	struct spa_fraction min_frag;
+	struct spa_fraction default_frag;
+	struct spa_fraction default_tlength;
+	struct spa_fraction min_quantum;
 
 	struct sample_spec ss;
 	struct channel_map map;
@@ -116,7 +123,7 @@ void stream_free(struct stream *stream);
 void stream_flush(struct stream *stream);
 uint32_t stream_pop_missing(struct stream *stream);
 
-int stream_send_underflow(struct stream *stream, int64_t offset, uint32_t underrun_for);
+int stream_send_underflow(struct stream *stream, int64_t offset);
 int stream_send_overflow(struct stream *stream);
 int stream_send_killed(struct stream *stream);
 int stream_send_started(struct stream *stream);

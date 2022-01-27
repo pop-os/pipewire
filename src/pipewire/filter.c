@@ -52,7 +52,6 @@ PW_LOG_TOPIC_EXTERN(log_filter);
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 #define MAX_PORTS	1024
 
-static float empty[MAX_SAMPLES];
 static bool mlock_warned = false;
 
 static uint32_t mappable_dataTypes = (1<<SPA_DATA_MemFd);
@@ -1223,6 +1222,17 @@ filter_new(struct pw_context *context, const char *name,
 	}
 	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_RATE, str);
+	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
+		struct spa_fraction q;
+		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
+			pw_properties_setf(props, PW_KEY_NODE_RATE,
+					"1/%u", q.denom);
+			pw_properties_setf(props, PW_KEY_NODE_LATENCY,
+					"%u/%u", q.num, q.denom);
+		}
+	}
 
 	spa_hook_list_init(&impl->hooks);
 	this->properties = props;
@@ -1860,7 +1870,7 @@ void *pw_filter_get_dsp_buffer(void *port_data, uint32_t n_samples)
 	struct spa_data *d;
 
 	if ((buf = pw_filter_dequeue_buffer(port_data)) == NULL)
-		return empty;
+		return NULL;
 
 	d = &buf->buffer->datas[0];
 

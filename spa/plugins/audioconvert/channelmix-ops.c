@@ -149,17 +149,16 @@ static int make_matrix(struct channelmix *mix)
 	float matrix[SPA_AUDIO_MAX_CHANNELS][SPA_AUDIO_MAX_CHANNELS] = {{ 0.0f }};
 	uint64_t src_mask = mix->src_mask;
 	uint64_t dst_mask = mix->dst_mask;
-	uint64_t unassigned;
+	uint64_t unassigned, keep;
 	uint32_t i, j, ic, jc, matrix_encoding = MATRIX_NORMAL;
 	float clev = SQRT1_2;
 	float slev = SQRT1_2;
 	float llev = 0.5f;
 	float maxsum = 0.0f;
-	bool do_upmix = SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_UPMIX);
 #define _MATRIX(s,d)	matrix[_CH(s)][_CH(d)]
 
-	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64,
-			src_mask, dst_mask);
+	spa_log_debug(mix->log, "src-mask:%08"PRIx64" dst-mask:%08"PRIx64
+			" options:%08x", src_mask, dst_mask, mix->options);
 
 	/* move the MONO mask to FRONT so that the lower bits can be shifted
 	 * away. */
@@ -207,6 +206,14 @@ static int make_matrix(struct channelmix *mix)
 	}
 
 	unassigned = src_mask & ~dst_mask;
+	keep = dst_mask & ~src_mask;
+
+	if (!SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_UPMIX))
+		keep = 0;
+
+	keep |= FRONT;
+	if (mix->lfe_cutoff > 0.0f)
+		keep |= _MASK(LFE);
 
 	spa_log_debug(mix->log, "unassigned downmix %08" PRIx64, unassigned);
 
@@ -232,6 +239,7 @@ static int make_matrix(struct channelmix *mix)
 			_MATRIX(FC,FR) += SQRT1_2;
 			if (src_mask & FRONT)
 				_MATRIX(FC,FC) = clev * SQRT2;
+			keep &= ~FRONT;
 		} else {
 			spa_log_warn(mix->log, "can't assign STEREO");
 		}
@@ -374,12 +382,10 @@ static int make_matrix(struct channelmix *mix)
 		}
 	}
 
-	if (!do_upmix)
-		goto done;
+	unassigned = dst_mask & ~src_mask & keep;
 
-	unassigned = dst_mask & ~src_mask;
-
-	spa_log_debug(mix->log, "unassigned upmix %08" PRIx64, unassigned);
+	spa_log_debug(mix->log, "unassigned upmix %08"PRIx64" lfe:%f",
+			unassigned, mix->lfe_cutoff);
 
 	if (unassigned & FRONT) {
 		if ((src_mask & STEREO) == STEREO) {
@@ -390,7 +396,7 @@ static int make_matrix(struct channelmix *mix)
 			spa_log_warn(mix->log, "can't produce FC");
 		}
 	}
-	if (unassigned & _MASK(LFE) && mix->lfe_cutoff > 0.0f) {
+	if (unassigned & _MASK(LFE)) {
 		if ((src_mask & STEREO) == STEREO) {
 			spa_log_debug(mix->log, "produce LFE from STEREO");
 			_MATRIX(LFE,FL) += llev;
@@ -445,7 +451,7 @@ done:
 			sum += fabs(matrix[i][j]);
 		}
 		maxsum = SPA_MAX(maxsum, sum);
-		if (i == _CH(LFE) && do_upmix && mix->lfe_cutoff > 0.0f) {
+		if (i == _CH(LFE) && mix->lfe_cutoff > 0.0f) {
 			spa_log_debug(mix->log, "channel %d is LFE", ic);
 			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->lfe_cutoff / mix->freq);
 			mix->lr4_info[ic] = 1;
@@ -456,6 +462,7 @@ done:
 	}
 	if (SPA_FLAG_IS_SET(mix->options, CHANNELMIX_OPTION_NORMALIZE) &&
 	    maxsum > 1.0f) {
+		spa_log_debug(mix->log, "normalize %f", maxsum);
 		for (i = 0; i < ic; i++)
 			for (j = 0; j < jc; j++)
 		                mix->matrix_orig[i][j] /= maxsum;

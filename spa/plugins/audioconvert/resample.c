@@ -48,7 +48,6 @@ static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.resample");
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 
-#define MAX_SAMPLES	8192u
 #define MAX_ALIGN	16
 #define MAX_BUFFERS	32
 
@@ -57,12 +56,14 @@ struct impl;
 struct props {
 	double rate;
 	int quality;
+	bool disabled;
 };
 
 static void props_reset(struct props *props)
 {
 	props->rate = 1.0;
 	props->quality = RESAMPLE_DEFAULT_QUALITY;
+	props->disabled = false;
 }
 
 struct buffer {
@@ -104,6 +105,8 @@ struct impl {
 	struct spa_log *log;
 	struct spa_cpu *cpu;
 
+	uint32_t quantum_limit;
+
 	struct spa_io_position *io_position;
 	struct spa_io_rate_match *io_rate_match;
 
@@ -127,8 +130,6 @@ struct impl {
 	struct resample resample;
 
 	double rate_scale;
-
-	float empty[MAX_SAMPLES + MAX_ALIGN];
 };
 
 #define CHECK_PORT(this,d,id)		(id == 0)
@@ -183,7 +184,147 @@ static int impl_node_enum_params(void *object, int seq,
 				 uint32_t id, uint32_t start, uint32_t num,
 				 const struct spa_pod *filter)
 {
-	return -ENOTSUP;
+	struct impl *this = object;
+	struct spa_pod *param;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[4096];
+	struct spa_result_node_params result;
+	uint32_t count = 0;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+	spa_return_val_if_fail(num != 0, -EINVAL);
+
+	result.id = id;
+	result.next = start;
+      next:
+	result.index = result.next++;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+
+	switch (id) {
+	case SPA_PARAM_PropInfo:
+	{
+		struct props *p = &this->props;
+
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id, SPA_POD_Id(SPA_PROP_rate),
+				SPA_PROP_INFO_description, SPA_POD_String("Rate scaler"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Double(p->rate, 0.0, 10.0));
+			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_id, SPA_POD_Id(SPA_PROP_quality),
+				SPA_PROP_INFO_name, SPA_POD_String("resample.quality"),
+				SPA_PROP_INFO_description, SPA_POD_String("Resample Quality"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Int(p->quality, 0, 14),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 2:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("resample.disable"),
+				SPA_PROP_INFO_description, SPA_POD_String("Disable Resampling"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->disabled),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+	case SPA_PARAM_Props:
+	{
+		struct props *p = &this->props;
+		struct spa_pod_frame f[2];
+
+		switch (result.index) {
+		case 0:
+			spa_pod_builder_push_object(&b, &f[0], SPA_TYPE_OBJECT_Props, id);
+			spa_pod_builder_add(&b,
+				SPA_PROP_rate,			SPA_POD_Double(p->rate),
+				SPA_PROP_quality,		SPA_POD_Int(p->quality),
+				0);
+			spa_pod_builder_prop(&b, SPA_PROP_params, 0);
+			spa_pod_builder_push_struct(&b, &f[1]);
+			spa_pod_builder_string(&b, "resample.quality");
+			spa_pod_builder_int(&b, p->quality);
+			spa_pod_builder_string(&b, "resample.disable");
+			spa_pod_builder_bool(&b, p->disabled);
+			spa_pod_builder_pop(&b, &f[1]);
+			param = spa_pod_builder_pop(&b, &f[0]);
+			break;
+		default:
+			return 0;
+		}
+		break;
+	}
+	default:
+		return -ENOENT;
+	}
+
+	if (spa_pod_filter(&b, &result.param, param, filter) < 0)
+		goto next;
+
+	spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+	if (++count != num)
+		goto next;
+
+	return 0;
+}
+
+static int resample_set_param(struct impl *this, const char *k, const char *s)
+{
+	if (spa_streq(k, "resample.quality"))
+		this->props.quality = atoi(s);
+	else if (spa_streq(k, "resample.disable"))
+		this->props.disabled = spa_atob(s);
+	return 0;
+}
+
+static int parse_prop_params(struct impl *this, struct spa_pod *params)
+{
+	struct spa_pod_parser prs;
+	struct spa_pod_frame f;
+
+	spa_pod_parser_pod(&prs, params);
+	if (spa_pod_parser_push_struct(&prs, &f) < 0)
+		return 0;
+
+	while (true) {
+		const char *name;
+		struct spa_pod *pod;
+		char value[512];
+
+		if (spa_pod_parser_get_string(&prs, &name) < 0)
+			break;
+
+		if (spa_pod_parser_get_pod(&prs, &pod) < 0)
+			break;
+
+		if (spa_pod_is_string(pod)) {
+			spa_pod_copy_string(pod, sizeof(value), value);
+		} else if (spa_pod_is_float(pod)) {
+			snprintf(value, sizeof(value), "%f",
+					SPA_POD_VALUE(struct spa_pod_float, pod));
+		} else if (spa_pod_is_int(pod)) {
+			snprintf(value, sizeof(value), "%d",
+					SPA_POD_VALUE(struct spa_pod_int, pod));
+		} else if (spa_pod_is_bool(pod)) {
+			snprintf(value, sizeof(value), "%s",
+					SPA_POD_VALUE(struct spa_pod_bool, pod) ?
+					"true" : "false");
+		} else
+			continue;
+
+		spa_log_info(this->log, "key:'%s' val:'%s'", name, value);
+		resample_set_param(this, name, value);
+	}
+	return 0;
 }
 
 static int apply_props(struct impl *this, const struct spa_pod *param)
@@ -191,22 +332,28 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 	struct spa_pod_prop *prop;
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
 	struct props *p = &this->props;
+	int changed = 0;
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
 		switch (prop->key) {
 		case SPA_PROP_rate:
 			if (spa_pod_get_double(&prop->value, &p->rate) == 0) {
 				resample_update_rate(&this->resample, p->rate);
+				changed++;
 			}
 			break;
 		case SPA_PROP_quality:
-			spa_pod_get_int(&prop->value, &p->quality);
+			if (spa_pod_get_int(&prop->value, &p->quality) == 0)
+				changed++;
+			break;
+		case SPA_PROP_params:
+			changed += parse_prop_params(this, &prop->value);
 			break;
 		default:
 			break;
 		}
 	}
-	return 0;
+	return changed;
 }
 
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
@@ -270,12 +417,16 @@ static void update_rate_match(struct impl *this, bool passthrough, uint32_t out_
 		resample_update_rate(&this->resample, this->rate_scale * this->props.rate);
 	}
 }
+static inline bool is_passthrough(struct impl *this)
+{
+	return this->resample.i_rate == this->resample.o_rate && this->rate_scale == 1.0 &&
+		(this->io_rate_match == NULL || this->props.disabled ||
+		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
+}
 
 static void recalc_rate_match(struct impl *this)
 {
-	bool passthrough = this->resample.i_rate == this->resample.o_rate &&
-		(this->io_rate_match == NULL ||
-		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
+	bool passthrough = is_passthrough(this);
 	uint32_t out_size = this->io_position ? this->io_position->clock.duration : 1024;
 	update_rate_match(this, passthrough, out_size, 0);
 }
@@ -391,20 +542,24 @@ static int port_enum_formats(void *object,
 	struct impl *this = object;
 	struct port *other;
 	struct spa_pod_frame f;
+	uint32_t rate, min = 1, max = INT32_MAX;
 
 	other = GET_PORT(this, SPA_DIRECTION_REVERSE(direction), 0);
 
 	switch (index) {
 	case 0:
 		if (other->have_format) {
+			rate = other->format.info.raw.rate;
+			if (this->props.disabled)
+				min = max = rate;
+
 			spa_pod_builder_push_object(builder, &f,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
 			spa_pod_builder_add(builder,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(
-								other->format.info.raw.rate, 1, INT32_MAX),
+				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(rate, min, max),
 				SPA_FORMAT_AUDIO_channels, SPA_POD_Int(other->format.info.raw.channels),
 				0);
 			spa_pod_builder_prop(builder, SPA_FORMAT_AUDIO_position, 0);
@@ -412,15 +567,17 @@ static int port_enum_formats(void *object,
 					other->format.info.raw.channels, other->format.info.raw.position);
 			*param = spa_pod_builder_pop(builder, &f);
 		} else {
-			uint32_t rate = this->io_position ?
+			rate = this->io_position ?
 				this->io_position->clock.rate.denom : DEFAULT_RATE;
+			if (this->props.disabled)
+				min = max = rate;
 
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 				SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32P),
-				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(rate, 1, INT32_MAX),
+				SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(rate, min, max),
 				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(DEFAULT_CHANNELS, 1, INT32_MAX));
 		}
 		break;
@@ -497,9 +654,9 @@ impl_node_port_enum_params(void *object, int seq,
 			size = (other->size / other->stride) * rate;
 		} else {
 			buffers = 1;
-			size = MAX_SAMPLES * rate;
+			size = this->quantum_limit * rate;
 		}
-		size = SPA_MAX(size, MAX_SAMPLES) * 2;
+		size = SPA_MAX(size, this->quantum_limit) * 2;
 
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, id,
@@ -878,10 +1035,16 @@ static int impl_node_process(void *object)
 	src_datas = alloca(sizeof(void*) * this->resample.channels);
 	dst_datas = alloca(sizeof(void*) * this->resample.channels);
 
+	if (inport->offset > size)
+		inport->offset = size;
+	if (outport->offset > maxsize)
+		outport->offset = maxsize;
+
 	if (size == 0) {
-		size = MAX_SAMPLES * sizeof(float);
+		size = sb->datas[0].maxsize;
+		memset(sb->datas[0].data, 0, size);
 		for (i = 0; i < sb->n_datas; i++)
-			src_datas[i] = SPA_PTR_ALIGN(this->empty, MAX_ALIGN, void);
+			src_datas[i] = sb->datas[0].data;
 		inport->offset = 0;
 		flush_in = draining = true;
 	} else {
@@ -899,9 +1062,7 @@ static int impl_node_process(void *object)
 	pin_len = in_len;
 	pout_len = out_len;
 #endif
-	passthrough = this->resample.i_rate == this->resample.o_rate && this->rate_scale == 1.0 &&
-		(this->io_rate_match == NULL ||
-		 !SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE));
+	passthrough = is_passthrough(this);
 
 	if (passthrough) {
 		uint32_t len = SPA_MIN(in_len, out_len);
@@ -1021,7 +1182,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
-	const char *str;
+	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -1040,20 +1201,25 @@ impl_init(const struct spa_handle_factory *factory,
 
 	props_reset(&this->props);
 
-	if (info != NULL) {
-		if ((str = spa_dict_lookup(info, "resample.quality")) != NULL)
-			this->props.quality = atoi(str);
-		if ((str = spa_dict_lookup(info, "resample.peaks")) != NULL)
-			this->peaks = spa_atob(str);
-		if ((str = spa_dict_lookup(info, "factory.mode")) != NULL) {
-			if (spa_streq(str, "split"))
+	for (i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, "clock.quantum-limit"))
+			spa_atou32(s, &this->quantum_limit, 0);
+		else if (spa_streq(k, "resample.peaks"))
+			this->peaks = spa_atob(s);
+		else if (spa_streq(k, "factory.mode")) {
+			if (spa_streq(s, "split"))
 				this->mode = MODE_SPLIT;
-			else if (spa_streq(str, "merge"))
+			else if (spa_streq(s, "merge"))
 				this->mode = MODE_MERGE;
 			else
 				this->mode = MODE_CONVERT;
-		}
+		} else
+			resample_set_param(this, k, s);
+
 	}
+
 	spa_log_debug(this->log, "mode:%d", this->mode);
 
 	this->node.iface = SPA_INTERFACE_INIT(
