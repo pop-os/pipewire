@@ -11,10 +11,9 @@ pipewire_jackserver_sources += [
   'control.c',
 ]
 
-pipewire_dummy_sources = [
-  'dummy.c',
+pipewire_net_sources = [
+  'net.c',
 ]
-
 pipewire_jack_c_args = [
   '-DPIC',
 ]
@@ -57,8 +56,8 @@ pipewire_jackserver = shared_library('jackserver',
     install_dir : libjack_path,
 )
 
-pipewire_jackserver = shared_library('jacknet',
-    pipewire_dummy_sources,
+pipewire_jacknet = shared_library('jacknet',
+    pipewire_net_sources,
     soversion : soversion,
     version : libversion,
     c_args : pipewire_jack_c_args,
@@ -85,7 +84,7 @@ if get_option('jack-devel') == true
   description : 'PipeWire JACK API',
   version : '1.9.17',
   extra_cflags : '-D_REENTRANT',
-  unescaped_variables: ['server_libs=-L${libdir} -ljackserver'])
+  unescaped_variables: ['server_libs=-L${libdir} -ljackserver', 'jack_implementation=pipewire'])
 endif
 
 if sdl_dep.found()

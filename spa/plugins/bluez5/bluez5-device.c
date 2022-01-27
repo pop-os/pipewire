@@ -137,6 +137,7 @@ struct impl {
 
 	uint32_t profile;
 	unsigned int switching_codec:1;
+	unsigned int save_profile:1;
 	uint32_t prev_bt_connected_profiles;
 
 	const struct a2dp_codec **supported_codecs;
@@ -757,7 +758,7 @@ static void emit_remove_nodes(struct impl *this)
 static bool validate_profile(struct impl *this, uint32_t profile,
 		enum spa_bluetooth_audio_codec codec);
 
-static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_audio_codec codec)
+static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_audio_codec codec, bool save)
 {
 	if (!validate_profile(this, profile, codec)) {
 		spa_log_warn(this->log, "trying to set invalid profile %d, codec %d, %08x %08x",
@@ -765,6 +766,8 @@ static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_a
 			    this->bt_dev->profiles, this->bt_dev->connected_profiles);
 		return -EINVAL;
 	}
+
+	this->save_profile = save;
 
 	if (this->profile == profile &&
 	    (this->profile != DEVICE_PROFILE_A2DP || codec == this->props.codec) &&
@@ -1104,6 +1107,8 @@ static void set_initial_profile(struct impl *this)
 	/* If default profile is set to HSP/HFP, first try those and exit if found. */
 	if (this->bt_dev->settings != NULL) {
 		const char *str = spa_dict_lookup(this->bt_dev->settings, "bluez5.profile");
+		if (spa_streq(str, "off"))
+			goto off;
 		if (spa_streq(str, "headset-head-unit") && set_initial_hsp_hfp_profile(this))
 			return;
 	}
@@ -1126,6 +1131,7 @@ static void set_initial_profile(struct impl *this)
 	if (set_initial_hsp_hfp_profile(this))
 		return;
 
+off:
 	spa_log_debug(this->log, "initial profile off");
 
 	this->profile = DEVICE_PROFILE_OFF;
@@ -1133,7 +1139,8 @@ static void set_initial_profile(struct impl *this)
 }
 
 static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *b,
-		uint32_t id, uint32_t index, uint32_t profile_index, enum spa_bluetooth_audio_codec codec)
+		uint32_t id, uint32_t index, uint32_t profile_index, enum spa_bluetooth_audio_codec codec,
+		bool current)
 {
 	struct spa_bt_device *device = this->bt_dev;
 	struct spa_pod_frame f[2];
@@ -1266,6 +1273,10 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		}
 		spa_pod_builder_pop(b, &f[1]);
 	}
+	if (current) {
+                spa_pod_builder_prop(b, SPA_PARAM_PROFILE_save, 0);
+                spa_pod_builder_bool(b, this->save_profile);
+	}
 
 	if (name_and_codec)
 		free(name_and_codec);
@@ -1282,7 +1293,7 @@ static bool validate_profile(struct impl *this, uint32_t profile,
 	uint8_t buffer[1024];
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	return (build_profile(this, &b, 0, 0, profile, codec) != NULL);
+	return (build_profile(this, &b, 0, 0, profile, codec, false) != NULL);
 }
 
 static struct spa_pod *build_route(struct impl *this, struct spa_pod_builder *b,
@@ -1597,7 +1608,7 @@ static int impl_enum_params(void *object, int seq,
 		case DEVICE_PROFILE_AG:
 		case DEVICE_PROFILE_A2DP:
 		case DEVICE_PROFILE_HSP_HFP:
-			param = build_profile(this, &b, id, result.index, profile, codec);
+			param = build_profile(this, &b, id, result.index, profile, codec, false);
 			if (param == NULL)
 				goto next;
 			break;
@@ -1613,7 +1624,7 @@ static int impl_enum_params(void *object, int seq,
 		switch (result.index) {
 		case 0:
 			index = get_index_from_profile(this, this->profile, this->props.codec);
-			param = build_profile(this, &b, id, index, this->profile, this->props.codec);
+			param = build_profile(this, &b, id, index, this->profile, this->props.codec, true);
 			if (param == NULL)
 				return 0;
 			break;
@@ -1858,13 +1869,15 @@ static int impl_set_param(void *object,
 		uint32_t idx, next;
 		uint32_t profile;
 		enum spa_bluetooth_audio_codec codec;
+		bool save = false;
 
 		if (param == NULL)
 			return -EINVAL;
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx))) < 0) {
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx),
+				SPA_PARAM_PROFILE_save, SPA_POD_OPT_Bool(&save))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_pod(0, NULL, param);
 			return res;
@@ -1874,8 +1887,8 @@ static int impl_set_param(void *object,
 		if (profile == SPA_ID_INVALID)
 			return -EINVAL;
 
-		spa_log_debug(this->log, "setting profile %d codec:%d", profile, codec);
-		return set_profile(this, profile, codec);
+		spa_log_debug(this->log, "setting profile %d codec:%d save:%d", profile, codec, (int)save);
+		return set_profile(this, profile, codec, save);
 	}
 	case SPA_PARAM_Route:
 	{
@@ -1927,6 +1940,8 @@ static int impl_set_param(void *object,
 			return res;
 		}
 
+		spa_log_debug(this->log, "setting props codec:%d", codec_id);
+
 		if (codec_id == SPA_ID_INVALID)
 			return 0;
 
@@ -1934,16 +1949,16 @@ static int impl_set_param(void *object,
 			size_t j;
 			for (j = 0; j < this->supported_codec_count; ++j) {
 				if (this->supported_codecs[j]->id == codec_id) {
-					return set_profile(this, this->profile, codec_id);
+					return set_profile(this, this->profile, codec_id, true);
 				}
 			}
 		} else if (this->profile == DEVICE_PROFILE_HSP_HFP) {
 			if (codec_id == SPA_BLUETOOTH_AUDIO_CODEC_CVSD &&
 					spa_bt_device_supports_hfp_codec(this->bt_dev, HFP_AUDIO_CODEC_CVSD) == 1) {
-				return set_profile(this, this->profile, codec_id);
+				return set_profile(this, this->profile, codec_id, true);
 			} else if (codec_id == SPA_BLUETOOTH_AUDIO_CODEC_MSBC &&
 					spa_bt_device_supports_hfp_codec(this->bt_dev, HFP_AUDIO_CODEC_MSBC) == 1) {
-				return set_profile(this, this->profile, codec_id);
+				return set_profile(this, this->profile, codec_id, true);
 			}
 		}
 		return -EINVAL;

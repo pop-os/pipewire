@@ -44,6 +44,7 @@ struct pw_manager_object;
 struct selector {
 	bool (*type) (struct pw_manager_object *o);
 	uint32_t id;
+	uint32_t index;
 	const char *key;
 	const char *value;
 	void (*accumulate) (struct selector *sel, struct pw_manager_object *o);
@@ -52,6 +53,8 @@ struct selector {
 };
 
 struct pw_manager_object *select_object(struct pw_manager *m, struct selector *s);
+uint32_t id_to_index(struct pw_manager *m, uint32_t id);
+uint32_t index_to_id(struct pw_manager *m, uint32_t index);
 void select_best(struct selector *s, struct pw_manager_object *o);
 
 /* ========================================================================== */
@@ -103,7 +106,7 @@ void collect_card_info(struct pw_manager_object *card, struct card_info *info);
 /* ========================================================================== */
 
 struct profile_info {
-	uint32_t id;
+	uint32_t index;
 	const char *name;
 	const char *description;
 	uint32_t priority;
@@ -118,7 +121,7 @@ uint32_t collect_profile_info(struct pw_manager_object *card, struct card_info *
 /* ========================================================================== */
 
 struct port_info {
-	uint32_t id;
+	uint32_t index;
 	uint32_t direction;
 	const char *name;
 	const char *description;
@@ -154,9 +157,9 @@ uint32_t collect_transport_codec_info(struct pw_manager_object *card,
 /* ========================================================================== */
 
 struct spa_dict *collect_props(struct spa_pod *info, struct spa_dict *dict);
-uint32_t find_profile_id(struct pw_manager_object *card, const char *name);
-uint32_t find_port_id(struct pw_manager_object *card, uint32_t direction, const char *port_name);
-struct pw_manager_object *find_linked(struct pw_manager *m, uint32_t obj_id, enum pw_direction direction);
-bool collect_is_linked(struct pw_manager *m, uint32_t obj_id, enum pw_direction direction);
+uint32_t find_profile_index(struct pw_manager_object *card, const char *name);
+uint32_t find_port_index(struct pw_manager_object *card, uint32_t direction, const char *port_name);
+struct pw_manager_object *find_linked(struct pw_manager *m, uint32_t id, enum pw_direction direction);
+bool collect_is_linked(struct pw_manager *m, uint32_t id, enum pw_direction direction);
 
 #endif

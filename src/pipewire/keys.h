@@ -171,7 +171,9 @@ extern "C" {
 #define PW_KEY_NODE_WANT_DRIVER		"node.want-driver"	/**< the node wants to be grouped with a driver
 								  *  node in order to schedule the graph. */
 #define PW_KEY_NODE_PAUSE_ON_IDLE	"node.pause-on-idle"	/**< pause the node when idle */
+#define PW_KEY_NODE_SUSPEND_ON_IDLE	"node.suspend-on-idle"	/**< suspend the node when idle */
 #define PW_KEY_NODE_CACHE_PARAMS	"node.cache-params"	/**< cache the node params */
+#define PW_KEY_NODE_TRANSPORT_SYNC	"node.transport.sync"	/**< the node handles transport sync */
 #define PW_KEY_NODE_DRIVER		"node.driver"		/**< node can drive the graph */
 #define PW_KEY_NODE_STREAM		"node.stream"		/**< node is a stream, the server side should
 								  *  add a converter */
@@ -325,6 +327,8 @@ extern "C" {
 #ifdef PW_ENABLE_DEPRECATED
 #define PW_KEY_PRIORITY_MASTER		"priority.master"	/**< deprecated */
 #endif /* PW_ENABLE_DEPRECATED */
+
+#define PW_KEY_TARGET_OBJECT		"target.object"		/**< a target object to link to */
 
 /** \}
  */

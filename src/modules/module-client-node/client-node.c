@@ -219,6 +219,8 @@ static struct mix *find_mix(struct port *p, uint32_t mix_id)
 	if (mix_id >= len) {
 		size_t need = sizeof(struct mix) * (mix_id + 1 - len);
 		void *ptr = pw_array_add(&p->mix, need);
+		if (ptr == NULL)
+			return NULL;
 		memset(ptr, 0, need);
 	}
 	mix = pw_array_get_unchecked(&p->mix, mix_id, struct mix);
@@ -1388,8 +1390,15 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 		return -ENOMEM;
 
 	mix->id = pw_map_insert_new(&impl->io_map, NULL);
-	if (mix->id == SPA_ID_INVALID)
+	if (mix->id == SPA_ID_INVALID) {
+		m->valid = false;
 		return -errno;
+	}
+	if (mix->id > MAX_AREAS) {
+		pw_map_remove(&impl->io_map, mix->id);
+		m->valid = false;
+		return -ENOMEM;
+	}
 
 	mix->io = SPA_PTROFF(impl->io_areas->map->ptr,
 			mix->id * sizeof(struct spa_io_buffers), void);

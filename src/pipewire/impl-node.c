@@ -59,6 +59,7 @@ struct impl {
 	struct spa_list pending_list;
 
 	unsigned int pause_on_idle:1;
+	unsigned int suspend_on_idle:1;
 	unsigned int cache_params:1;
 	unsigned int pending_play:1;
 };
@@ -387,6 +388,10 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 		spa_list_for_each(resource, &node->global->resource_list, link)
 			pw_resource_error(resource, res, error);
 	}
+	if (old == PW_NODE_STATE_RUNNING &&
+	    state == PW_NODE_STATE_IDLE &&
+	    impl->suspend_on_idle)
+		 pw_impl_node_set_state(node, PW_NODE_STATE_SUSPENDED);
 }
 
 static int suspend_node(struct pw_impl_node *this)
@@ -867,8 +872,9 @@ static void check_properties(struct pw_impl_node *node)
 	}
 
 	impl->pause_on_idle = pw_properties_get_bool(node->properties, PW_KEY_NODE_PAUSE_ON_IDLE, true);
+	impl->suspend_on_idle = pw_properties_get_bool(node->properties, PW_KEY_NODE_SUSPEND_ON_IDLE, false);
 	impl->cache_params =  pw_properties_get_bool(node->properties, PW_KEY_NODE_CACHE_PARAMS, true);
-	node->transport_sync = pw_properties_get_bool(node->properties, "node.transport.sync", false);
+	node->transport_sync = pw_properties_get_bool(node->properties, PW_KEY_NODE_TRANSPORT_SYNC, false);
 	driver = pw_properties_get_bool(node->properties, PW_KEY_NODE_DRIVER, false);
 
 	if (node->driver != driver) {
@@ -1653,6 +1659,16 @@ again:
 	}
 	if (SPA_UNLIKELY(node->driver && !node->driving))
 		return 0;
+
+	if (!node->driver) {
+		struct timespec ts;
+		struct pw_node_activation *a = node->rt.activation;
+		struct spa_system *data_system = node->context->data_system;
+
+		spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
+		a->status = PW_NODE_ACTIVATION_AWAKE;
+		a->signal_time = a->awake_time = SPA_TIMESPEC_TO_NSEC(&ts);
+	}
 
 	if (status & SPA_STATUS_HAVE_DATA) {
 		spa_list_for_each(p, &node->rt.output_mix, rt.node_link)

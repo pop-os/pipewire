@@ -295,23 +295,34 @@ int client_flush_messages(struct client *client)
 	return 0;
 }
 
-/* returns true if an event with the (mask, event, id) triplet should be dropped because it is redundant */
-static bool client_prune_subscribe_events(struct client *client, uint32_t mask, uint32_t event, uint32_t id)
+static bool drop_from_out_queue(struct client *client, struct message *m)
 {
-	struct impl *impl = client->impl;
-	struct message *m, *t, *first;
+	spa_assert(!spa_list_is_empty(&client->out_messages));
+
+	struct message *first = spa_list_first(&client->out_messages, struct message, link);
+	if (m == first && client->out_index > 0)
+		return false;
+
+	message_free(client->impl, m, true, false);
+
+	return true;
+}
+
+/* returns true if an event with the (mask, event, index) triplet should be dropped because it is redundant */
+static bool client_prune_subscribe_events(struct client *client, uint32_t mask, uint32_t event, uint32_t index)
+{
+	struct message *m, *t;
 
 	if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_NEW)
 		return false;
 
-	first = spa_list_first(&client->out_messages, struct message, link);
-
+	/* NOTE: reverse iteration */
 	spa_list_for_each_safe_reverse(m, t, &client->out_messages, link) {
 		if (m->extra[0] != COMMAND_SUBSCRIBE_EVENT)
 			continue;
 		if ((m->extra[1] ^ event) & SUBSCRIPTION_EVENT_FACILITY_MASK)
 			continue;
-		if (m->extra[2] != id)
+		if (m->extra[2] != index)
 			continue;
 
 		if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_REMOVE) {
@@ -319,25 +330,39 @@ static bool client_prune_subscribe_events(struct client *client, uint32_t mask, 
 			 * point in keeping the old events regarding
 			 * entry in the queue. */
 
-			/* if the first message has already been partially sent, do not drop it */
-			if (m != first || client->out_index == 0) {
-				message_free(impl, m, true, false);
-				pw_log_debug("client %p: dropped redundant event due to remove event", client);
+			bool is_new = (m->extra[1] & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_NEW;
+
+			if (drop_from_out_queue(client, m)) {
+				pw_log_debug("client %p: dropped redundant event due to remove event for object %u",
+					     client, index);
+
+				/* if the NEW event for the current object could successfully be dropped,
+				   there is no need to deliver the REMOVE event */
+				if (is_new)
+					goto drop;
 			}
+
+			/* stop if the NEW event for the current object is reached */
+			if (is_new)
+				break;
 		}
 
 		if ((event & SUBSCRIPTION_EVENT_TYPE_MASK) == SUBSCRIPTION_EVENT_CHANGE) {
 			/* This object has changed. If a "new" or "change" event for
 			 * this object is still in the queue we can exit. */
-			pw_log_debug("client %p: dropped redundant event due to change event", client);
-			return true;
+			goto drop;
 		}
 	}
 
 	return false;
+
+drop:
+	pw_log_debug("client %p: dropped redundant event for object %u", client, index);
+
+	return true;
 }
 
-int client_queue_subscribe_event(struct client *client, uint32_t mask, uint32_t event, uint32_t id)
+int client_queue_subscribe_event(struct client *client, uint32_t mask, uint32_t event, uint32_t index)
 {
 	if (client->disconnect)
 		return -ENOTCONN;
@@ -345,21 +370,21 @@ int client_queue_subscribe_event(struct client *client, uint32_t mask, uint32_t 
 	if (!(client->subscribed & mask))
 		return 0;
 
-	pw_log_debug("client %p: SUBSCRIBE event:%08x id:%u", client, event, id);
+	pw_log_debug("client %p: SUBSCRIBE event:%08x index:%u", client, event, index);
 
-	if (client_prune_subscribe_events(client, mask, event, id))
+	if (client_prune_subscribe_events(client, mask, event, index))
 		return 0;
 
 	struct message *reply = message_alloc(client->impl, -1, 0);
 	reply->extra[0] = COMMAND_SUBSCRIBE_EVENT;
 	reply->extra[1] = event;
-	reply->extra[2] = id;
+	reply->extra[2] = index;
 
 	message_put(reply,
 		TAG_U32, COMMAND_SUBSCRIBE_EVENT,
 		TAG_U32, -1,
 		TAG_U32, event,
-		TAG_U32, id,
+		TAG_U32, index,
 		TAG_INVALID);
 
 	return client_queue_message(client, reply);

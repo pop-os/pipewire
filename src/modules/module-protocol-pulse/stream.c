@@ -44,11 +44,25 @@
 #include "reply.h"
 #include "stream.h"
 
+static int parse_frac(struct pw_properties *props, const char *key,
+		const struct spa_fraction *def, struct spa_fraction *res)
+{
+	const char *str;
+	if (props == NULL ||
+	    (str = pw_properties_get(props, key)) == NULL ||
+	    sscanf(str, "%u/%u", &res->num, &res->denom) != 2 ||
+	     res->denom == 0) {
+		*res = *def;
+	}
+	return 0;
+}
+
 struct stream *stream_new(struct client *client, enum stream_type type, uint32_t create_tag,
 			  const struct sample_spec *ss, const struct channel_map *map,
 			  const struct buffer_attr *attr)
 {
 	int res;
+	struct defs *defs = &client->impl->defs;
 
 	struct stream *stream = calloc(1, sizeof(*stream));
 	if (stream == NULL)
@@ -66,6 +80,13 @@ struct stream *stream_new(struct client *client, enum stream_type type, uint32_t
 	stream->map = *map;
 	stream->attr = *attr;
 	spa_ringbuffer_init(&stream->ring);
+
+	parse_frac(client->props, "pulse.min.req", &defs->min_req, &stream->min_req);
+	parse_frac(client->props, "pulse.min.frag", &defs->min_frag, &stream->min_frag);
+	parse_frac(client->props, "pulse.min.quantum", &defs->min_quantum, &stream->min_quantum);
+	parse_frac(client->props, "pulse.default.req", &defs->default_req, &stream->default_req);
+	parse_frac(client->props, "pulse.default.frag", &defs->default_frag, &stream->default_frag);
+	parse_frac(client->props, "pulse.default.tlength", &defs->default_tlength, &stream->default_tlength);
 
 	switch (type) {
 	case STREAM_TYPE_RECORD:
@@ -136,9 +157,6 @@ void stream_flush(struct stream *stream)
 		stream->ring.writeindex = stream->ring.readindex;
 		stream->write_index = stream->read_index;
 
-		stream->missing = stream->attr.tlength -
-			SPA_MIN(stream->requested, stream->attr.tlength);
-
 		if (stream->attr.prebuf > 0)
 			stream->in_prebuf = true;
 
@@ -153,13 +171,8 @@ void stream_flush(struct stream *stream)
 	}
 }
 
-static bool stream_prebuf_active(struct stream *stream)
+static bool stream_prebuf_active(struct stream *stream, int32_t avail)
 {
-	uint32_t index;
-	int32_t avail;
-
-	avail = spa_ringbuffer_get_write_index(&stream->ring, &index);
-
 	if (stream->in_prebuf) {
 		if (avail >= (int32_t) stream->attr.prebuf)
 			stream->in_prebuf = false;
@@ -172,30 +185,34 @@ static bool stream_prebuf_active(struct stream *stream)
 
 uint32_t stream_pop_missing(struct stream *stream)
 {
-	uint32_t missing;
+	int64_t missing, avail;
 
-	if (stream->missing <= 0)
+	avail = stream->write_index - stream->read_index;
+
+	missing = stream->attr.tlength;
+	missing -= stream->requested;
+	missing -= avail;
+
+	if (missing <= 0)
 		return 0;
 
-	if (stream->missing < stream->attr.minreq && !stream_prebuf_active(stream))
+	if (missing < stream->attr.minreq && !stream_prebuf_active(stream, avail))
 		return 0;
 
-	missing = stream->missing;
 	stream->requested += missing;
-	stream->missing = 0;
 
 	return missing;
 }
 
-int stream_send_underflow(struct stream *stream, int64_t offset, uint32_t underrun_for)
+int stream_send_underflow(struct stream *stream, int64_t offset)
 {
 	struct client *client = stream->client;
 	struct impl *impl = client->impl;
 	struct message *reply;
 
 	if (ratelimit_test(&impl->rate_limit, stream->timestamp, SPA_LOG_LEVEL_INFO)) {
-		pw_log_info("[%s]: UNDERFLOW channel:%u offset:%" PRIi64 " underrun:%u",
-			    client->name, stream->channel, offset, underrun_for);
+		pw_log_info("[%s]: UNDERFLOW channel:%u offset:%" PRIi64,
+			    client->name, stream->channel, offset);
 	}
 
 	reply = message_alloc(impl, -1, 0);
@@ -314,7 +331,6 @@ int stream_update_minreq(struct stream *stream, uint32_t minreq)
 	if (new_tlength <= old_tlength)
 		return 0;
 
-	stream->missing += new_tlength - old_tlength;
 	stream->attr.tlength = new_tlength;
 
 	if (client->version >= 15) {

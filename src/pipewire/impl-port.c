@@ -214,16 +214,16 @@ int pw_impl_port_init_mix(struct pw_impl_port *port, struct pw_impl_port_mix *mi
 	if (port_id == SPA_ID_INVALID)
 		return -errno;
 
+	if ((res = spa_node_add_port(port->mix, port->direction, port_id, NULL)) < 0 &&
+	    res != -ENOTSUP)
+		goto error_remove_map;
+
 	mix->port.direction = port->direction;
 	mix->port.port_id = port_id;
-
-	spa_list_append(&port->mix_list, &mix->link);
-	port->n_mix++;
 	mix->p = port;
 
-	spa_node_add_port(port->mix, port->direction, port_id, NULL);
-
-	res = pw_impl_port_call_init_mix(port, mix);
+	if ((res = pw_impl_port_call_init_mix(port, mix)) < 0)
+		goto error_remove_port;
 
 	/* set the same format on the mixer as on the port if any */
 	{
@@ -242,10 +242,19 @@ int pw_impl_port_init_mix(struct pw_impl_port *port, struct pw_impl_port_mix *mi
 		}
 	}
 
+	spa_list_append(&port->mix_list, &mix->link);
+	port->n_mix++;
+
 	pw_log_debug("%p: init mix n_mix:%d %d.%d io:%p: (%s)", port,
 			port->n_mix, port->port_id, mix->port.port_id,
 			mix->io, spa_strerror(res));
 
+	return res;
+
+error_remove_port:
+	spa_node_remove_port(port->mix, port->direction, port_id);
+error_remove_map:
+	pw_map_remove(&port->mix_port_map, port_id);
 	return res;
 }
 
@@ -261,7 +270,9 @@ int pw_impl_port_release_mix(struct pw_impl_port *port, struct pw_impl_port_mix 
 
 	res = pw_impl_port_call_release_mix(port, mix);
 
-	spa_node_remove_port(port->mix, port->direction, port_id);
+	if ((res = spa_node_remove_port(port->mix, port->direction, port_id)) < 0 &&
+	    res != -ENOTSUP)
+		pw_log_warn("can't remove mix port %d: %s", port_id, spa_strerror(res));
 
 	pw_log_debug("%p: release mix %d %d.%d", port,
 			port->n_mix, port->port_id, mix->port.port_id);
@@ -583,8 +594,10 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 	int res;
 	const char *fallback_lib, *factory_name;
 	struct spa_handle *handle;
-	struct spa_dict_item items[1];
+	struct spa_dict_item items[2];
+	char quantum_limit[16];
 	void *iface;
+	struct pw_context *context = port->node->context;
 
 	if ((res = spa_format_parse(param, &media_type, &media_subtype)) < 0)
 		return res;
@@ -634,7 +647,11 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 	}
 
 	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_LIBRARY_NAME, fallback_lib);
-	handle = pw_context_load_spa_handle(port->node->context, factory_name,
+	spa_scnprintf(quantum_limit, sizeof(quantum_limit), "%u",
+			context->settings.clock_quantum_limit);
+	items[1] = SPA_DICT_ITEM_INIT("clock.quantum-limit", quantum_limit);
+
+	handle = pw_context_load_spa_handle(context, factory_name,
 			&SPA_DICT_INIT_ARRAY(items));
 	if (handle == NULL)
 		return -errno;
@@ -1070,10 +1087,12 @@ static void pw_impl_port_remove(struct pw_impl_port *port)
 	}
 
 	if (port->direction == PW_DIRECTION_INPUT) {
-		pw_map_insert_at(&node->input_port_map, port->port_id, NULL);
+		if ((res = pw_map_insert_at(&node->input_port_map, port->port_id, NULL)) < 0)
+			pw_log_warn("%p: can't remove input port: %s", port, spa_strerror(res));
 		node->info.n_input_ports--;
 	} else {
-		pw_map_insert_at(&node->output_port_map, port->port_id, NULL);
+		if ((res = pw_map_insert_at(&node->output_port_map, port->port_id, NULL)) < 0)
+			pw_log_warn("%p: can't remove output port: %s", port, spa_strerror(res));
 		node->info.n_output_ports--;
 	}
 

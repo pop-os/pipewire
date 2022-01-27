@@ -51,7 +51,7 @@ struct ucred {
 
 #define MAX_RATES				16u
 #define CLOCK_MIN_QUANTUM			4u
-#define CLOCK_MAX_QUANTUM			8192u
+#define CLOCK_MAX_QUANTUM			65536u
 
 struct settings {
 	uint32_t log_level;
@@ -61,12 +61,15 @@ struct settings {
 	uint32_t clock_quantum;			/* default quantum */
 	uint32_t clock_min_quantum;		/* min quantum */
 	uint32_t clock_max_quantum;		/* max quantum */
+	uint32_t clock_quantum_limit;		/* quantum limit */
 	struct spa_rectangle video_size;
 	struct spa_fraction video_rate;
 	uint32_t link_max_buffers;
 	unsigned int mem_warn_mlock:1;
 	unsigned int mem_allow_mlock:1;
 	unsigned int clock_power_of_two_quantum:1;
+	unsigned int check_quantum:1;
+	unsigned int check_rate:1;
 #define CLOCK_RATE_UPDATE_MODE_HARD 0
 #define CLOCK_RATE_UPDATE_MODE_SOFT 1
 	int clock_rate_update_mode;

@@ -134,7 +134,8 @@ static int context_set_freewheel(struct pw_context *context, bool freewheel)
 		res = pw_thread_utils_drop_rt(thr);
 	} else {
 		pw_log_info("%p: exit freewheel", context);
-		res = pw_thread_utils_acquire_rt(thr, 88);
+		// Use the priority as configured within the realtime module
+		res = pw_thread_utils_acquire_rt(thr, -1);
 	}
 	if (res < 0)
 		pw_log_info("%p: freewheel error:%s", context, spa_strerror(res));
@@ -893,24 +894,31 @@ static int ensure_state(struct pw_impl_node *node, bool running)
 	return pw_impl_node_set_state(node, state);
 }
 
-static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver)
+static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
 {
 	struct spa_list queue;
-	struct pw_impl_node *n, *t;
+	struct pw_impl_node *n, *t, *driver;
 	struct pw_impl_port *p;
 	struct pw_impl_link *l;
 
-	spa_list_consume(t, &driver->follower_list, follower_link) {
-		spa_list_remove(&t->follower_link);
-		spa_list_init(&t->follower_link);
+	pw_log_debug("node %p: '%s'", node, node->name);
+
+	if (node->driver) {
+		driver = node;
+		spa_list_consume(t, &driver->follower_list, follower_link) {
+			spa_list_remove(&t->follower_link);
+			spa_list_init(&t->follower_link);
+		}
+	} else {
+		driver = node->driver_node;
+		if (driver == NULL)
+			return -EINVAL;
 	}
 
-	pw_log_debug("driver %p: '%s'", driver, driver->name);
-
-	/* start with driver in the queue */
+	/* start with node in the queue */
 	spa_list_init(&queue);
-	spa_list_append(&queue, &driver->sort_link);
-	driver->visited = true;
+	spa_list_append(&queue, &node->sort_link);
+	node->visited = true;
 
 	/* now follow all the links from the nodes in the queue
 	 * and add the peers to the queue. */
@@ -980,26 +988,32 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *driver
 }
 
 static inline void get_quantums(struct pw_context *context, uint32_t *def,
-		uint32_t *min, uint32_t *max, uint32_t *rate)
+		uint32_t *min, uint32_t *max, uint32_t *limit, uint32_t *rate)
 {
 	struct settings *s = &context->settings;
-	*def = s->clock_force_quantum == 0 ? s->clock_quantum : s->clock_force_quantum;
-	*min = s->clock_force_quantum == 0 ? s->clock_min_quantum : s->clock_force_quantum;
-	*max = s->clock_force_quantum == 0 ? s->clock_max_quantum : s->clock_force_quantum;
-	*rate = s->clock_force_quantum == 0 ? s->clock_rate : s->clock_force_rate;
+	if (s->clock_force_quantum != 0) {
+		*def = *min = *max = s->clock_force_quantum;
+		*rate = 0;
+	} else {
+		*def = s->clock_quantum;
+		*min = s->clock_min_quantum;
+		*max = s->clock_max_quantum;
+		*rate = s->clock_rate;
+	}
+	*limit = s->clock_quantum_limit;
 }
 
 static inline uint32_t *get_rates(struct pw_context *context, uint32_t *def, uint32_t *n_rates,
-		bool *force_rate)
+		bool *force)
 {
 	struct settings *s = &context->settings;
 	if (s->clock_force_rate != 0) {
-		*force_rate = true;
+		*force = true;
 		*n_rates = 1;
 		*def = s->clock_force_rate;
 		return &s->clock_force_rate;
 	} else {
-		*force_rate = false;
+		*force = false;
 		*n_rates = s->n_clock_rates;
 		*def = s->clock_rate;
 		return s->clock_rates;
@@ -1053,7 +1067,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 {
 	struct impl *impl = SPA_CONTAINER_OF(context, struct impl, this);
 	struct pw_impl_node *n, *s, *target, *fallback;
-	uint32_t max_quantum, min_quantum, def_quantum, rate_quantum;
+	uint32_t max_quantum, min_quantum, def_quantum, lim_quantum, rate_quantum;
 	uint32_t *rates, n_rates, def_rate;
 	bool freewheel = false, force_rate;
 
@@ -1067,7 +1081,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 again:
 	impl->recalc = true;
 
-	get_quantums(context, &def_quantum, &min_quantum, &max_quantum, &rate_quantum);
+	get_quantums(context, &def_quantum, &min_quantum, &max_quantum, &lim_quantum, &rate_quantum);
 	rates = get_rates(context, &def_rate, &n_rates, &force_rate);
 
 	/* start from all drivers and group all nodes that are linked
@@ -1135,8 +1149,10 @@ again:
 			pw_impl_node_set_driver(n, t);
 			if (t == NULL)
 				ensure_state(n, false);
-			else
+			else {
 				t->passive = false;
+				collect_nodes(context, n);
+			}
 		}
 		n->visited = false;
 	}
@@ -1221,6 +1237,7 @@ again:
 		if (rate_quantum != 0 && current_rate != rate_quantum) {
 			def_quantum = def_quantum * current_rate / rate_quantum;
 			min_quantum = min_quantum * current_rate / rate_quantum;
+			max_quantum = max_quantum * current_rate / rate_quantum;
 		}
 
 		/* calculate desired quantum */
@@ -1234,6 +1251,7 @@ again:
 		if (latency.denom != 0)
 			quantum = (latency.num * current_rate / latency.denom);
 		quantum = SPA_CLAMP(quantum, min_quantum, max_quantum);
+		quantum = SPA_MIN(quantum, lim_quantum);
 
 		if (context->settings.clock_power_of_two_quantum)
 			quantum = flp2(quantum);

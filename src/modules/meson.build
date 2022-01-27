@@ -21,12 +21,12 @@ module_sources = [
   'module-protocol-simple.c',
   'module-pulse-tunnel.c',
   'module-rt.c',
-  'module-rtkit.c',
   'module-raop-discover.c',
   'module-session-manager.c',
   'module-zeroconf-discover.c',
   'module-roc-source.c',
   'module-roc-sink.c',
+  'module-x11-bell.c',
 ]
 
 pipewire_module_access = shared_library('pipewire-module-access', [ 'module-access.c' ],
@@ -137,21 +137,18 @@ pipewire_module_profiler = shared_library('pipewire-module-profiler',
   dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
 
-build_module_rt = build_machine.system() == 'linux'
+build_module_rt = dbus_dep.found()
 if build_module_rt
 pipewire_module_rt = shared_library('pipewire-module-rt', [ 'module-rt.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [dl_lib, pipewire_dep],
+  dependencies : [dbus_dep, mathlib, dl_lib, pipewire_dep],
 )
-endif
-summary({'rt': build_module_rt}, bool_yn: true, section: 'Optional Modules')
-
-build_module_rtkit = dbus_dep.found()
-if build_module_rtkit
-pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rtkit.c' ],
+# TODO: This serves as a temporary alias to prevent breaking existing setups
+#       while `module-rtkit` is being migrated to `module-rt`
+pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rt.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,
@@ -159,7 +156,7 @@ pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rtkit.
   dependencies : [dbus_dep, mathlib, dl_lib, pipewire_dep],
 )
 endif
-summary({'rtkit': build_module_rtkit}, bool_yn: true, section: 'Optional Modules')
+summary({'rt': build_module_rt}, bool_yn: true, section: 'Optional Modules')
 
 build_module_portal = dbus_dep.found()
 if build_module_portal
@@ -259,6 +256,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-switch-on-connect.c',
   'module-protocol-pulse/modules/module-tunnel-sink.c',
   'module-protocol-pulse/modules/module-tunnel-source.c',
+  'module-protocol-pulse/modules/module-x11-bell.c',
   'module-protocol-pulse/modules/module-zeroconf-discover.c',
 ]
 
@@ -370,9 +368,9 @@ test('pw-test-protocol-native',
     install_dir : installed_tests_execdir,
   ),
   env : [
-    'SPA_PLUGIN_DIR=@0@'.format(spa_dep.get_variable(internal: 'plugindir')),
-    'PIPEWIRE_CONFIG_DIR=@0@'.format(pipewire_dep.get_variable(internal: 'confdatadir')),
-    'PIPEWIRE_MODULE_DIR=@0@'.format(pipewire_dep.get_variable(internal: 'moduledir')),
+    'SPA_PLUGIN_DIR=@0@'.format(spa_dep.get_variable('plugindir')),
+    'PIPEWIRE_CONFIG_DIR=@0@'.format(pipewire_dep.get_variable('confdatadir')),
+    'PIPEWIRE_MODULE_DIR=@0@'.format(pipewire_dep.get_variable('moduledir')),
   ]
 )
 
@@ -488,3 +486,16 @@ pipewire_module_roc_source = shared_library('pipewire-module-roc-source',
 endif
 summary({'roc-sink': build_module_roc}, bool_yn: true, section: 'Optional Modules')
 summary({'roc-source': build_module_roc}, bool_yn: true, section: 'Optional Modules')
+
+build_module_x11_bell = x11_dep.found() and canberra_dep.found()
+if build_module_x11_bell
+pipewire_module_x11_bell = shared_library('pipewire-module-x11-bell',
+  [ 'module-x11-bell.c' ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, x11_dep, canberra_dep],
+)
+endif
+summary({'x11-bell': build_module_x11_bell}, bool_yn: true, section: 'Optional Modules')

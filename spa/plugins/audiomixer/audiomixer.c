@@ -45,11 +45,9 @@
 #define SPA_LOG_TOPIC_DEFAULT log_topic
 static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.audiomixer");
 
-#define MAX_SAMPLES     8192
 #define MAX_BUFFERS     64
 #define MAX_PORTS       128
 #define MAX_CHANNELS    64
-#define MAX_BUFFER_SIZE    (MAX_SAMPLES * MAX_CHANNELS * 8)
 
 #define PORT_DEFAULT_VOLUME	1.0
 #define PORT_DEFAULT_MUTE	false
@@ -74,8 +72,6 @@ struct buffer {
 	struct spa_buffer *buffer;
 	struct spa_meta_header *h;
 	struct spa_buffer buf;
-	struct spa_data datas[1];
-	struct spa_chunk chunk[1];
 };
 
 struct port {
@@ -107,6 +103,7 @@ struct impl {
 	struct spa_log *log;
 	struct spa_cpu *cpu;
 	uint32_t cpu_flags;
+	uint32_t quantum_limit;
 
 	struct mix_ops ops;
 
@@ -128,9 +125,6 @@ struct impl {
 	unsigned int started:1;
 	uint32_t stride;
 	uint32_t blocks;
-
-	uint8_t empty[MAX_BUFFER_SIZE];
-
 };
 
 #define PORT_VALID(p)                ((p) != NULL && (p)->valid)
@@ -421,7 +415,7 @@ impl_node_port_enum_params(void *object, int seq,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(this->blocks),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(
-								MAX_SAMPLES * this->stride,
+								this->quantum_limit * this->stride,
 								16 * this->stride,
 								INT32_MAX),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(this->stride));
@@ -520,6 +514,10 @@ static int calc_width(struct spa_audio_info *info)
 	case SPA_AUDIO_FORMAT_S24_OE:
 	case SPA_AUDIO_FORMAT_U24:
 		return 3;
+	case SPA_AUDIO_FORMAT_F64P:
+	case SPA_AUDIO_FORMAT_F64:
+	case SPA_AUDIO_FORMAT_F64_OE:
+		return 8;
 	default:
 		return 4;
 	}
@@ -653,6 +651,7 @@ impl_node_port_use_buffers(void *object,
 		b->flags = 0;
 		b->id = i;
 		b->h = spa_buffer_find_meta_data(buffers[i], SPA_META_Header, sizeof(*b->h));
+		b->buf = *buffers[i];
 
 		if (d[0].data == NULL) {
 			spa_log_error(this->log, "%p: invalid memory on buffer %p", this,
@@ -721,9 +720,9 @@ static int impl_node_process(void *object)
 	struct impl *this = object;
 	struct port *outport;
 	struct spa_io_buffers *outio;
-	uint32_t n_samples, n_buffers, i, maxsize;
+	uint32_t n_buffers, i, maxsize;
 	struct buffer **buffers;
-        struct buffer *outb;
+	struct buffer *outb;
 	const void **datas;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
@@ -748,7 +747,7 @@ static int impl_node_process(void *object)
         datas = alloca(MAX_PORTS * sizeof(void *));
         n_buffers = 0;
 
-	maxsize = MAX_SAMPLES * this->stride;
+	maxsize = UINT32_MAX;
 
 	for (i = 0; i < this->last_port; i++) {
 		struct port *inport = GET_IN_PORT(this, i);
@@ -785,22 +784,22 @@ static int impl_node_process(void *object)
                 return -EPIPE;
         }
 
-	n_samples = maxsize / this->stride;
-
 	if (n_buffers == 1) {
 		*outb->buffer = *buffers[0]->buffer;
 	}
 	else {
-		outb->buffer->n_datas = 1;
-		outb->buffer->datas = outb->datas;
-		outb->datas[0].data = this->empty;
-		outb->datas[0].chunk = outb->chunk;
-		outb->datas[0].chunk->offset = 0;
-		outb->datas[0].chunk->size = n_samples * this->stride;
-		outb->datas[0].chunk->stride = this->stride;
-		outb->datas[0].maxsize = maxsize;
+		struct spa_data *d = outb->buf.datas;
 
-		mix_ops_process(&this->ops, outb->datas[0].data, datas, n_buffers, n_samples);
+		*outb->buffer = outb->buf;
+
+		maxsize = SPA_MIN(maxsize, d[0].maxsize);
+
+		d[0].chunk->offset = 0;
+		d[0].chunk->size = maxsize;
+		d[0].chunk->stride = this->stride;
+
+		mix_ops_process(&this->ops, d[0].data,
+				datas, n_buffers, maxsize / this->stride);
 	}
 
 	outio->buffer_id = outb->id;
@@ -875,6 +874,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
+	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -890,6 +890,13 @@ impl_init(const struct spa_handle_factory *factory,
 	this->cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 	if (this->cpu)
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);
+
+	for (i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, "clock.quantum-limit"))
+			spa_atou32(s, &this->quantum_limit, 0);
+	}
 
 	spa_hook_list_init(&this->hooks);
 

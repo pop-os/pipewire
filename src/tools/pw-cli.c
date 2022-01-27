@@ -32,6 +32,7 @@
 #include <alloca.h>
 #endif
 #include <getopt.h>
+#include <fnmatch.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -41,7 +42,7 @@
 #include <spa/utils/string.h>
 #include <spa/debug/pod.h>
 #include <spa/utils/keys.h>
-#include <spa/utils/json.h>
+#include <spa/utils/json-pod.h>
 #include <spa/pod/builder.h>
 
 #include <pipewire/impl.h>
@@ -53,6 +54,18 @@ static const char WHITESPACE[] = " \t";
 static char prompt[64];
 
 struct remote_data;
+struct proxy_data;
+
+typedef void (*info_func_t) (struct proxy_data *pd);
+
+struct class {
+	const char *type;
+	uint32_t version;
+	const void *events;
+	pw_destroy_t destroy;
+	info_func_t info;
+	const char *name_key;
+};
 
 struct data {
 	struct pw_main_loop *loop;
@@ -73,6 +86,7 @@ struct global {
 	uint32_t permissions;
 	uint32_t version;
 	char *type;
+	const struct class *class;
 	struct pw_proxy *proxy;
 	bool info_pending;
 	struct pw_properties *properties;
@@ -96,19 +110,15 @@ struct remote_data {
 	struct pw_map globals;
 };
 
-struct proxy_data;
-
-typedef void (*info_func_t) (struct proxy_data *pd);
 
 struct proxy_data {
 	struct remote_data *rd;
 	struct global *global;
 	struct pw_proxy *proxy;
-        void *info;
-	info_func_t info_func;
-        pw_destroy_t destroy;
-        struct spa_hook proxy_listener;
-        struct spa_hook object_listener;
+	void *info;
+	const struct class *class;
+	struct spa_hook proxy_listener;
+	struct spa_hook object_listener;
 };
 
 struct command {
@@ -303,6 +313,29 @@ static void on_core_done(void *_data, uint32_t id, int seq)
 	}
 }
 
+static bool global_matches(struct global *g, const char *pattern)
+{
+	const char *str;
+
+	if (g->properties == NULL)
+		return false;
+
+	if (strstr(g->type, pattern) != NULL)
+		return true;
+	if ((str = pw_properties_get(g->properties, PW_KEY_OBJECT_PATH)) != NULL &&
+	    fnmatch(pattern, str, FNM_EXTMATCH) == 0)
+		return true;
+	if ((str = pw_properties_get(g->properties, PW_KEY_OBJECT_SERIAL)) != NULL &&
+	    spa_streq(pattern, str))
+		return true;
+	if (g->class != NULL && g->class->name_key != NULL &&
+	    (str = pw_properties_get(g->properties, g->class->name_key)) != NULL &&
+	    fnmatch(pattern, str, FNM_EXTMATCH) == 0)
+		return true;
+
+	return false;
+}
+
 static int print_global(void *obj, void *data)
 {
 	struct global *global = obj;
@@ -311,7 +344,7 @@ static int print_global(void *obj, void *data)
 	if (global == NULL)
 		return 0;
 
-	if (filter && !strstr(global->type, filter))
+	if (filter && !global_matches(global, filter))
 		return 0;
 
 	fprintf(stdout, "\tid %d, type %s/%d\n", global->id,
@@ -402,6 +435,24 @@ static const struct pw_registry_events registry_events = {
 	.global = registry_event_global,
 	.global_remove = registry_event_global_remove,
 };
+
+static struct global *find_global(struct remote_data *rd, const char *pattern)
+{
+	uint32_t id;
+	union pw_map_item *item;
+
+	if (spa_atou32(pattern, &id, 0))
+		return pw_map_lookup(&rd->globals, id);
+
+	pw_array_for_each(item, &rd->globals.items) {
+		struct global *g = item->data;
+		if (pw_map_item_is_free(item) || g == NULL)
+			continue;
+		if (global_matches(g, pattern))
+			return g;
+        }
+	return NULL;
+}
 
 static void on_core_error(void *_data, uint32_t id, int seq, int res, const char *message)
 {
@@ -1106,14 +1157,14 @@ destroy_proxy (void *data)
 	spa_hook_remove(&pd->proxy_listener);
 	spa_hook_remove(&pd->object_listener);
 
-	if (pd->info == NULL)
-		return;
-
 	if (pd->global)
 		pd->global->proxy = NULL;
 
-	if (pd->destroy)
-		pd->destroy(pd->info);
+	if (pd->info == NULL)
+		return;
+
+	if (pd->class->destroy)
+		pd->class->destroy(pd->info);
 	pd->info = NULL;
 }
 
@@ -1130,88 +1181,150 @@ static bool do_list_objects(struct data *data, const char *cmd, char *args, char
 	return true;
 }
 
+static const struct class core_class = {
+	.type = PW_TYPE_INTERFACE_Core,
+	.version = PW_VERSION_CORE,
+	.events = &core_events,
+	.destroy = (pw_destroy_t) pw_core_info_free,
+	.info = info_core,
+	.name_key = PW_KEY_CORE_NAME,
+};
+static const struct class module_class = {
+	.type = PW_TYPE_INTERFACE_Module,
+	.version = PW_VERSION_MODULE,
+	.events = &module_events,
+	.destroy = (pw_destroy_t) pw_module_info_free,
+	.info = info_module,
+	.name_key = PW_KEY_MODULE_NAME,
+};
+
+static const struct class factory_class = {
+	.type = PW_TYPE_INTERFACE_Factory,
+	.version = PW_VERSION_FACTORY,
+	.events = &factory_events,
+	.destroy = (pw_destroy_t) pw_factory_info_free,
+	.info = info_factory,
+	.name_key = PW_KEY_FACTORY_NAME,
+};
+
+static const struct class client_class = {
+	.type = PW_TYPE_INTERFACE_Client,
+	.version = PW_VERSION_CLIENT,
+	.events = &client_events,
+	.destroy = (pw_destroy_t) pw_client_info_free,
+	.info = info_client,
+	.name_key = PW_KEY_APP_NAME,
+};
+static const struct class device_class = {
+	.type = PW_TYPE_INTERFACE_Device,
+	.version = PW_VERSION_DEVICE,
+	.events = &device_events,
+	.destroy = (pw_destroy_t) pw_device_info_free,
+	.info = info_device,
+	.name_key = PW_KEY_DEVICE_NAME,
+};
+static const struct class node_class = {
+	.type = PW_TYPE_INTERFACE_Node,
+	.version = PW_VERSION_NODE,
+	.events = &node_events,
+	.destroy = (pw_destroy_t) pw_node_info_free,
+	.info = info_node,
+	.name_key = PW_KEY_NODE_NAME,
+};
+static const struct class port_class = {
+	.type = PW_TYPE_INTERFACE_Port,
+	.version = PW_VERSION_PORT,
+	.events = &port_events,
+	.destroy = (pw_destroy_t) pw_port_info_free,
+	.info = info_port,
+	.name_key = PW_KEY_PORT_NAME,
+};
+static const struct class link_class = {
+	.type = PW_TYPE_INTERFACE_Link,
+	.version = PW_VERSION_LINK,
+	.events = &link_events,
+	.destroy = (pw_destroy_t) pw_link_info_free,
+	.info = info_link,
+};
+static const struct class session_class = {
+	.type = PW_TYPE_INTERFACE_Session,
+	.version = PW_VERSION_SESSION,
+	.events = &session_events,
+	.destroy = (pw_destroy_t) session_info_free,
+	.info = info_session,
+};
+static const struct class endpoint_class = {
+	.type = PW_TYPE_INTERFACE_Endpoint,
+	.version = PW_VERSION_ENDPOINT,
+	.events = &endpoint_events,
+	.destroy = (pw_destroy_t) endpoint_info_free,
+	.info = info_endpoint,
+};
+static const struct class endpoint_stream_class = {
+	.type = PW_TYPE_INTERFACE_EndpointStream,
+	.version = PW_VERSION_ENDPOINT_STREAM,
+	.events = &endpoint_stream_events,
+	.destroy = (pw_destroy_t) endpoint_stream_info_free,
+	.info = info_endpoint_stream,
+};
+static const struct class metadata_class = {
+	.type = PW_TYPE_INTERFACE_Metadata,
+	.version = PW_VERSION_METADATA,
+	.name_key = PW_KEY_METADATA_NAME,
+};
+
+static const struct class *classes[] =
+{
+	&core_class,
+	&module_class,
+	&factory_class,
+	&client_class,
+	&device_class,
+	&node_class,
+	&port_class,
+	&link_class,
+	&session_class,
+	&endpoint_class,
+	&endpoint_stream_class,
+	&metadata_class,
+};
+
+static const struct class *find_class(const char *type, uint32_t version)
+{
+	size_t i;
+	for (i = 0; i < SPA_N_ELEMENTS(classes); i++) {
+		if (spa_streq(classes[i]->type, type) &&
+		    classes[i]->version <= version)
+			return classes[i];
+	}
+	return NULL;
+}
+
 static bool bind_global(struct remote_data *rd, struct global *global, char **error)
 {
-        const void *events;
-        uint32_t client_version;
-	info_func_t info_func;
-        pw_destroy_t destroy;
+	const struct class *class;
 	struct proxy_data *pd;
 	struct pw_proxy *proxy;
 
-	if (spa_streq(global->type, PW_TYPE_INTERFACE_Core)) {
-		events = &core_events;
-		client_version = PW_VERSION_CORE;
-		destroy = (pw_destroy_t) pw_core_info_free;
-		info_func = info_core;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Module)) {
-		events = &module_events;
-		client_version = PW_VERSION_MODULE;
-		destroy = (pw_destroy_t) pw_module_info_free;
-		info_func = info_module;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Device)) {
-		events = &device_events;
-		client_version = PW_VERSION_DEVICE;
-		destroy = (pw_destroy_t) pw_device_info_free;
-		info_func = info_device;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Node)) {
-		events = &node_events;
-		client_version = PW_VERSION_NODE;
-		destroy = (pw_destroy_t) pw_node_info_free;
-		info_func = info_node;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Port)) {
-		events = &port_events;
-		client_version = PW_VERSION_PORT;
-		destroy = (pw_destroy_t) pw_port_info_free;
-		info_func = info_port;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Factory)) {
-		events = &factory_events;
-		client_version = PW_VERSION_FACTORY;
-		destroy = (pw_destroy_t) pw_factory_info_free;
-		info_func = info_factory;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {
-		events = &client_events;
-		client_version = PW_VERSION_CLIENT;
-		destroy = (pw_destroy_t) pw_client_info_free;
-		info_func = info_client;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Link)) {
-		events = &link_events;
-		client_version = PW_VERSION_LINK;
-		destroy = (pw_destroy_t) pw_link_info_free;
-		info_func = info_link;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Session)) {
-		events = &session_events;
-		client_version = PW_VERSION_SESSION;
-		destroy = (pw_destroy_t) session_info_free;
-		info_func = info_session;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_Endpoint)) {
-		events = &endpoint_events;
-		client_version = PW_VERSION_ENDPOINT;
-		destroy = (pw_destroy_t) endpoint_info_free;
-		info_func = info_endpoint;
-	} else if (spa_streq(global->type, PW_TYPE_INTERFACE_EndpointStream)) {
-		events = &endpoint_stream_events;
-		client_version = PW_VERSION_ENDPOINT_STREAM;
-		destroy = (pw_destroy_t) endpoint_stream_info_free;
-		info_func = info_endpoint_stream;
-	} else {
+	class = find_class(global->type, global->version);
+	if (class == NULL) {
 		*error = spa_aprintf("unsupported type %s", global->type);
 		return false;
 	}
+	global->class = class;
 
 	proxy = pw_registry_bind(rd->registry,
 				       global->id,
 				       global->type,
-				       client_version,
+				       class->version,
 				       sizeof(struct proxy_data));
 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
 	pd->global = global;
 	pd->proxy = proxy;
-	pd->info_func = info_func;
-	pd->destroy = destroy;
-	pw_proxy_add_object_listener(proxy, &pd->object_listener, events, pd);
+	pd->class = class;
+	pw_proxy_add_object_listener(proxy, &pd->object_listener, class->events, pd);
 	pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
 
 	global->proxy = proxy;
@@ -1232,8 +1345,8 @@ static bool do_global_info(struct global *global, char **error)
 		global->info_pending = true;
 	} else {
 		pd = pw_proxy_get_user_data(global->proxy);
-		if (pd->info_func)
-			pd->info_func(pd);
+		if (pd->class->info)
+			pd->class->info(pd);
 	}
 	return true;
 }
@@ -1257,7 +1370,6 @@ static bool do_info(struct data *data, const char *cmd, char *args, char **error
 	struct remote_data *rd = data->current;
 	char *a[1];
         int n;
-	uint32_t id;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -1269,10 +1381,9 @@ static bool do_info(struct data *data, const char *cmd, char *args, char **error
 		pw_map_for_each(&rd->globals, do_global_info_all, NULL);
 	}
 	else {
-		id = atoi(a[0]);
-		global = pw_map_lookup(&rd->globals, id);
+		global = find_global(rd, a[0]);
 		if (global == NULL) {
-			*error = spa_aprintf("%s: unknown global %d", cmd, id);
+			*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 			return false;
 		}
 		return do_global_info(global, error);
@@ -1309,7 +1420,7 @@ static bool do_create_device(struct data *data, const char *cmd, char *args, cha
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
 	pd->proxy = proxy;
-	pd->destroy = (pw_destroy_t) pw_device_info_free;
+	pd->class = &device_class;
 	pw_proxy_add_object_listener(proxy, &pd->object_listener, &device_events, pd);
 	pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
 
@@ -1348,7 +1459,7 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
 	pd->proxy = proxy;
-        pd->destroy = (pw_destroy_t) pw_node_info_free;
+        pd->class = &node_class;
         pw_proxy_add_object_listener(proxy, &pd->object_listener, &node_events, pd);
         pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
 
@@ -1363,7 +1474,6 @@ static bool do_destroy(struct data *data, const char *cmd, char *args, char **er
 	struct remote_data *rd = data->current;
 	char *a[1];
         int n;
-	uint32_t id;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -1371,13 +1481,12 @@ static bool do_destroy(struct data *data, const char *cmd, char *args, char **er
 		*error = spa_aprintf("%s <object-id>", cmd);
 		return false;
 	}
-	id = atoi(a[0]);
-	global = pw_map_lookup(&rd->globals, id);
+	global = find_global(rd, a[0]);
 	if (global == NULL) {
-		*error = spa_aprintf("%s: unknown global %d", cmd, id);
+		*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 		return false;
 	}
-	pw_registry_destroy(rd->registry, id);
+	pw_registry_destroy(rd->registry, global->id);
 
 	return true;
 }
@@ -1423,7 +1532,7 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
 	pd->proxy = proxy;
-        pd->destroy = (pw_destroy_t) pw_link_info_free;
+        pd->class = &link_class;
         pw_proxy_add_object_listener(proxy, &pd->object_listener, &link_events, pd);
         pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
 
@@ -1477,26 +1586,12 @@ static bool do_export_node(struct data *data, const char *cmd, char *args, char 
 	return false;
 }
 
-static const struct spa_type_info *find_type_info(const struct spa_type_info *info, const char *name)
-{
-	while (info && info->name) {
-                if (spa_streq(info->name, name))
-                        return info;
-                if (spa_streq(spa_debug_type_short_name(info->name), name))
-                        return info;
-                if (info->type != 0 && info->type == (uint32_t)atoi(name))
-                        return info;
-                info++;
-        }
-        return NULL;
-}
-
 static bool do_enum_params(struct data *data, const char *cmd, char *args, char **error)
 {
 	struct remote_data *rd = data->current;
 	char *a[2];
 	int n;
-	uint32_t id, param_id;
+	uint32_t param_id;
 	const struct spa_type_info *ti;
 	struct global *global;
 
@@ -1506,17 +1601,16 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 
-	id = atoi(a[0]);
-	ti = find_type_info(spa_type_param, a[1]);
+	ti = spa_debug_type_find_short(spa_type_param, a[1]);
 	if (ti == NULL) {
 		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
 		return false;
 	}
 	param_id = ti->type;
 
-	global = pw_map_lookup(&rd->globals, id);
+	global = find_global(rd, a[0]);
 	if (global == NULL) {
-		*error = spa_aprintf("%s: unknown global %d", cmd, id);
+		*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 		return false;
 	}
 	if (global->proxy == NULL) {
@@ -1544,126 +1638,15 @@ static bool do_enum_params(struct data *data, const char *cmd, char *args, char 
 	return true;
 }
 
-static int json_to_pod(struct spa_pod_builder *b, uint32_t id,
-		const struct spa_type_info *info, struct spa_json *iter, const char *value, int len)
-{
-	const struct spa_type_info *ti;
-	char key[256];
-	struct spa_pod_frame f[1];
-	struct spa_json it[1];
-	int l, res;
-	const char *v;
-	uint32_t type;
-
-	if (spa_json_is_object(value, len) && info != NULL) {
-		if ((ti = spa_debug_type_find(NULL, info->parent)) == NULL)
-			return -EINVAL;
-
-		spa_pod_builder_push_object(b, &f[0], info->parent, id);
-
-		spa_json_enter(iter, &it[0]);
-		while (spa_json_get_string(&it[0], key, sizeof(key)) > 0) {
-			const struct spa_type_info *pi;
-			if ((l = spa_json_next(&it[0], &v)) <= 0)
-				break;
-			if ((pi = find_type_info(ti->values, key)) != NULL)
-				type = pi->type;
-			else if ((type = atoi(key)) == 0)
-				continue;
-			spa_pod_builder_prop(b, type, 0);
-			if ((res = json_to_pod(b, id, pi, &it[0], v, l)) < 0)
-				return res;
-		}
-		spa_pod_builder_pop(b, &f[0]);
-	}
-	else if (spa_json_is_array(value, len)) {
-		if (info == NULL || info->parent == SPA_TYPE_Struct) {
-			spa_pod_builder_push_struct(b, &f[0]);
-		} else {
-			spa_pod_builder_push_array(b, &f[0]);
-			info = info->values;
-		}
-		spa_json_enter(iter, &it[0]);
-		while ((l = spa_json_next(&it[0], &v)) > 0)
-			if ((res = json_to_pod(b, id, info, &it[0], v, l)) < 0)
-				return res;
-		spa_pod_builder_pop(b, &f[0]);
-	}
-	else if (spa_json_is_float(value, len)) {
-		float val = 0.0f;
-		spa_json_parse_float(value, len, &val);
-		switch (info ? info->parent : SPA_TYPE_Struct) {
-		case SPA_TYPE_Bool:
-			spa_pod_builder_bool(b, val >= 0.5f);
-			break;
-		case SPA_TYPE_Id:
-			spa_pod_builder_id(b, val);
-			break;
-		case SPA_TYPE_Int:
-			spa_pod_builder_int(b, val);
-			break;
-		case SPA_TYPE_Long:
-			spa_pod_builder_long(b, val);
-			break;
-		case SPA_TYPE_Struct:
-			if (spa_json_is_int(value, len))
-				spa_pod_builder_int(b, val);
-			else
-				spa_pod_builder_float(b, val);
-			break;
-		case SPA_TYPE_Float:
-			spa_pod_builder_float(b, val);
-			break;
-		case SPA_TYPE_Double:
-			spa_pod_builder_double(b, val);
-			break;
-		default:
-			spa_pod_builder_none(b);
-			break;
-		}
-	}
-	else if (spa_json_is_bool(value, len)) {
-		bool val = false;
-		spa_json_parse_bool(value, len, &val);
-		spa_pod_builder_bool(b, val);
-	}
-	else if (spa_json_is_null(value, len)) {
-		spa_pod_builder_none(b);
-	}
-	else {
-		char *val = alloca(len+1);
-		spa_json_parse_stringn(value, len, val, len+1);
-		switch (info ? info->parent : SPA_TYPE_Struct) {
-		case SPA_TYPE_Id:
-			if ((ti = find_type_info(info->values, val)) != NULL)
-				type = ti->type;
-			else if ((type = atoi(val)) == 0)
-				return -EINVAL;
-			spa_pod_builder_id(b, type);
-			break;
-		case SPA_TYPE_Struct:
-		case SPA_TYPE_String:
-			spa_pod_builder_string(b, val);
-			break;
-		default:
-			spa_pod_builder_none(b);
-			break;
-		}
-	}
-	return 0;
-}
-
 static bool do_set_param(struct data *data, const char *cmd, char *args, char **error)
 {
 	struct remote_data *rd = data->current;
 	char *a[3];
-	const char *val;
-        int res, n, len;
-	uint32_t id, param_id;
+	int res, n;
+	uint32_t param_id;
 	struct global *global;
-	struct spa_json it[3];
 	uint8_t buffer[1024];
-        struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
 	const struct spa_type_info *ti;
 	struct spa_pod *pod;
 
@@ -1673,11 +1656,9 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 		return false;
 	}
 
-	id = atoi(a[0]);
-
-	global = pw_map_lookup(&rd->globals, id);
+	global = find_global(rd, a[0]);
 	if (global == NULL) {
-		*error = spa_aprintf("%s: unknown global %d", cmd, id);
+		*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 		return false;
 	}
 	if (global->proxy == NULL) {
@@ -1685,19 +1666,12 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 			return false;
 	}
 
-	ti = find_type_info(spa_type_param, a[1]);
+	ti = spa_debug_type_find_short(spa_type_param, a[1]);
 	if (ti == NULL) {
 		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
 		return false;
 	}
-	param_id = ti->type;
-
-	spa_json_init(&it[0], a[2], strlen(a[2]));
-	if ((len = spa_json_next(&it[0], &val)) <= 0) {
-		*error = spa_aprintf("%s: not a JSON object: %s", cmd, a[2]);
-		return false;
-	}
-	if ((res = json_to_pod(&b, param_id, ti, &it[0], val, len)) < 0) {
+	if ((res = spa_json_to_pod(&b, 0, ti, a[2], strlen(a[2]))) < 0) {
 		*error = spa_aprintf("%s: can't make pod: %s", cmd, spa_strerror(res));
 		return false;
 	}
@@ -1706,6 +1680,8 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 		return false;
 	}
 	spa_debug_pod(0, NULL, pod);
+
+	param_id = ti->type;
 
 	if (spa_streq(global->type, PW_TYPE_INTERFACE_Node))
 		pw_node_set_param((struct pw_node*)global->proxy,
@@ -1729,7 +1705,7 @@ static bool do_permissions(struct data *data, const char *cmd, char *args, char 
 	struct remote_data *rd = data->current;
 	char *a[3];
 	int n;
-	uint32_t id, p;
+	uint32_t p;
 	struct global *global;
 	struct pw_permission permissions[1];
 
@@ -1739,10 +1715,9 @@ static bool do_permissions(struct data *data, const char *cmd, char *args, char 
 		return false;
 	}
 
-	id = atoi(a[0]);
-	global = pw_map_lookup(&rd->globals, id);
+	global = find_global(rd, a[0]);
 	if (global == NULL) {
-		*error = spa_aprintf("%s: unknown global %d", cmd, id);
+		*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 		return false;
 	}
 	if (!spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {
@@ -1770,7 +1745,6 @@ static bool do_get_permissions(struct data *data, const char *cmd, char *args, c
 	struct remote_data *rd = data->current;
 	char *a[3];
         int n;
-	uint32_t id;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -1779,10 +1753,9 @@ static bool do_get_permissions(struct data *data, const char *cmd, char *args, c
 		return false;
 	}
 
-	id = atoi(a[0]);
-	global = pw_map_lookup(&rd->globals, id);
+	global = find_global(rd, a[0]);
 	if (global == NULL) {
-		*error = spa_aprintf("%s: unknown global %d", cmd, id);
+		*error = spa_aprintf("%s: unknown global '%s'", cmd, a[0]);
 		return false;
 	}
 	if (!spa_streq(global->type, PW_TYPE_INTERFACE_Client)) {

@@ -64,7 +64,7 @@ struct object_info {
 
 struct object_data {
 	struct spa_list link;
-	const char *id;
+	const char *key;
 	size_t size;
 };
 
@@ -163,7 +163,7 @@ static bool has_param(struct spa_list *param_list, struct pw_manager_param *p)
 }
 
 
-static struct object *find_object(struct manager *m, uint32_t id)
+static struct object *find_object_by_id(struct manager *m, uint32_t id)
 {
 	struct object *o;
 	spa_list_for_each(o, &m->this.object_list, this.link) {
@@ -586,6 +586,7 @@ static void registry_event_global(void *data, uint32_t id,
 	struct manager *m = data;
 	struct object *o;
 	const struct object_info *info;
+	const char *str;
 	struct pw_proxy *proxy;
 
 	info = find_info(type, version);
@@ -603,10 +604,15 @@ static void registry_event_global(void *data, uint32_t id,
 		pw_proxy_destroy(proxy);
 		return;
 	}
+	str = props ? spa_dict_lookup(props, PW_KEY_OBJECT_SERIAL) : NULL;
+	if (!spa_atou64(str, &o->this.serial, 0))
+		o->this.serial = SPA_ID_INVALID;
+
 	o->this.id = id;
 	o->this.permissions = permissions;
 	o->this.type = info->type;
 	o->this.version = version;
+	o->this.index = o->this.serial < (1ULL<<32) ? o->this.serial : SPA_ID_INVALID;
 	o->this.props = props ? pw_properties_new_dict(props) : NULL;
 	o->this.proxy = proxy;
 	o->this.creating = true;
@@ -638,7 +644,7 @@ static void registry_event_global_remove(void *object, uint32_t id)
 	struct manager *m = object;
 	struct object *o;
 
-	if ((o = find_object(m, id)) == NULL)
+	if ((o = find_object_by_id(m, id)) == NULL)
 		return;
 
 	o->this.removing = true;
@@ -757,7 +763,7 @@ int pw_manager_set_metadata(struct pw_manager *manager,
 	char buf[1024];
 	char *value;
 
-	if ((s = find_object(m, subject)) == NULL)
+	if ((s = find_object_by_id(m, subject)) == NULL)
 		return -ENOENT;
 	if (!SPA_FLAG_IS_SET(s->this.permissions, PW_PERM_M))
 		return -EACCES;
@@ -793,7 +799,7 @@ int pw_manager_for_each_object(struct pw_manager *manager,
 	int res;
 
 	spa_list_for_each(o, &m->this.object_list, this.link) {
-		if (o->this.creating)
+		if (o->this.creating || o->this.removing)
 			continue;
 		if ((res = callback(data, &o->this)) != 0)
 			return res;
@@ -820,22 +826,22 @@ void pw_manager_destroy(struct pw_manager *manager)
 	free(m);
 }
 
-static struct object_data *object_find_data(struct object *o, const char *id)
+static struct object_data *object_find_data(struct object *o, const char *key)
 {
 	struct object_data *d;
 	spa_list_for_each(d, &o->data_list, link) {
-		if (spa_streq(d->id, id))
+		if (spa_streq(d->key, key))
 			return d;
 	}
 	return NULL;
 }
 
-void *pw_manager_object_add_data(struct pw_manager_object *obj, const char *id, size_t size)
+void *pw_manager_object_add_data(struct pw_manager_object *obj, const char *key, size_t size)
 {
 	struct object *o = SPA_CONTAINER_OF(obj, struct object, this);
 	struct object_data *d;
 
-	d = object_find_data(o, id);
+	d = object_find_data(o, key);
 	if (d != NULL) {
 		if (d->size == size)
 			goto done;
@@ -844,7 +850,7 @@ void *pw_manager_object_add_data(struct pw_manager_object *obj, const char *id, 
 	}
 
 	d = calloc(1, sizeof(struct object_data) + size);
-	d->id = id;
+	d->key = key;
 	d->size = size;
 
 	spa_list_append(&o->data_list, &d->link);

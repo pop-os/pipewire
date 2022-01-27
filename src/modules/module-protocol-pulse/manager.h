@@ -75,10 +75,12 @@ struct pw_manager_param {
 
 struct pw_manager_object {
 	struct spa_list link;           /**< link in manager object_list */
+	uint64_t serial;
 	uint32_t id;
 	uint32_t permissions;
 	const char *type;
 	uint32_t version;
+	uint32_t index;
 	struct pw_properties *props;
 	struct pw_proxy *proxy;
 	char *message_object_path;
@@ -111,8 +113,8 @@ int pw_manager_for_each_object(struct pw_manager *manager,
 		int (*callback) (void *data, struct pw_manager_object *object),
 		void *data);
 
-void *pw_manager_object_add_data(struct pw_manager_object *o, const char *id, size_t size);
-void *pw_manager_object_get_data(struct pw_manager_object *obj, const char *id);
+void *pw_manager_object_add_data(struct pw_manager_object *o, const char *key, size_t size);
+void *pw_manager_object_get_data(struct pw_manager_object *obj, const char *key);
 
 bool pw_manager_object_is_client(struct pw_manager_object *o);
 bool pw_manager_object_is_module(struct pw_manager_object *o);

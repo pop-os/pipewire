@@ -9,6 +9,8 @@ context.properties = {
     #mem.allow-mlock = true
     #mem.mlock-all   = false
     log.level        = 0
+
+    #default.clock.quantum-limit = 8192
 }
 
 context.spa-libs = {
@@ -35,10 +37,9 @@ context.modules = [
     # Boost the data thread priority.
     { name = libpipewire-module-rt
         args = {
-            #nice.level   = -11
             #rt.prio      = 88
-            #rt.time.soft = 2000000
-            #rt.time.hard = 2000000
+            #rt.time.soft = -1
+            #rt.time.hard = -1
         }
         flags = [ ifexists nofail ]
     }
