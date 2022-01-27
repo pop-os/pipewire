@@ -3,6 +3,7 @@ pipewire (0.3.44-1) UNRELEASED; urgency=medium
   * Team upload.
   * New upstream release
   * Add libcanberra-dev to Build-Depends
+  * Bump minimum meson to 0.59
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 27 Jan 2022 14:44:22 +0100
 

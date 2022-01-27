@@ -31,7 +31,7 @@ Build-Depends: debhelper-compat (= 13),
                libusb-1.0-0-dev,
                libv4l-dev,
                libwebrtc-audio-processing-dev,
-               meson (>= 0.56.0),
+               meson (>= 0.59.0),
                pkg-config (>= 0.22),
                python3-docutils,
                systemd [linux-any]
