@@ -4,6 +4,7 @@ pipewire (0.3.44-1) UNRELEASED; urgency=medium
   * New upstream release
   * Add libcanberra-dev to Build-Depends
   * Bump minimum meson to 0.59
+  * Install new usr/share/pipewire/minimal.conf in pipewire-bin
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 27 Jan 2022 14:44:22 +0100
 
