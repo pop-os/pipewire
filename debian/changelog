@@ -1,4 +1,4 @@
-pipewire (0.3.44-1) UNRELEASED; urgency=medium
+pipewire (0.3.44-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -6,7 +6,7 @@ pipewire (0.3.44-1) UNRELEASED; urgency=medium
   * Bump minimum meson to 0.59
   * Install new usr/share/pipewire/minimal.conf in pipewire-bin
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 27 Jan 2022 14:44:22 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 27 Jan 2022 16:24:40 +0100
 
 pipewire (0.3.43-2) unstable; urgency=medium
 
