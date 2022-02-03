@@ -1,4 +1,4 @@
-pipewire (0.3.45-1) UNRELEASED; urgency=medium
+pipewire (0.3.45-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -7,7 +7,7 @@ pipewire (0.3.45-1) UNRELEASED; urgency=medium
   * Adapt lintian overrides to the new output
   * Standards-Version: 4.6.0 (no changes required)
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Feb 2022 18:15:20 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Feb 2022 21:42:07 +0100
 
 pipewire (0.3.44-1) unstable; urgency=medium
 
