@@ -5,6 +5,7 @@ pipewire (0.3.45-1) UNRELEASED; urgency=medium
   * Don't install new filter-chain example conf file
   * Update symbols file
   * Adapt lintian overrides to the new output
+  * Standards-Version: 4.6.0 (no changes required)
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Feb 2022 18:15:20 +0100
 
