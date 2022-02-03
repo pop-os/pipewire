@@ -360,7 +360,11 @@ pw_core_resource_errorv(struct pw_resource *resource, uint32_t id, int seq,
 	buffer[1023] = '\0';
 	pw_log_debug("resource %p: id:%d seq:%d res:%d (%s) msg:\"%s\"",
 			resource, id, seq, res, spa_strerror(res), buffer);
-	pw_core_resource_error(resource, id, seq, res, buffer);
+	if (resource)
+		pw_core_resource_error(resource, id, seq, res, buffer);
+	else
+		pw_log_error("id:%d seq:%d res:%d (%s) msg:\"%s\"",
+				id, seq, res, spa_strerror(res), buffer);
 }
 
 static inline SPA_PRINTF_FUNC(5,6) void
@@ -424,6 +428,8 @@ struct pw_context {
 
 	struct pw_mempool *pool;		/**< global memory pool */
 
+	uint64_t stamp;
+	uint64_t serial;
 	struct pw_map globals;			/**< map of globals */
 
 	struct spa_list core_impl_list;		/**< list of core_imp */
@@ -472,9 +478,9 @@ struct pw_data_loop {
 	struct pw_loop *loop;
 
 	struct spa_hook_list listener_list;
-	struct spa_source *event;
 
 	pthread_t thread;
+	unsigned int cancel:1;
 	unsigned int created:1;
 	unsigned int running:1;
 };
@@ -486,7 +492,6 @@ struct pw_main_loop {
         struct pw_loop *loop;
 
 	struct spa_hook_list listener_list;
-	struct spa_source *event;
 
 	unsigned int created:1;
 	unsigned int running:1;
@@ -713,6 +718,9 @@ struct pw_impl_node {
 	struct spa_fraction latency;		/**< requested latency */
 	struct spa_fraction max_latency;	/**< maximum latency */
 	struct spa_fraction rate;		/**< requested rate */
+	uint32_t force_quantum;			/**< forced quantum */
+	uint32_t force_rate;			/**< forced rate */
+	uint32_t stamp;				/**< stamp of last update */
 	struct spa_source source;		/**< source to remotely trigger this node */
 	struct pw_memblock *activation;
 	struct {

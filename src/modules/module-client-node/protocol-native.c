@@ -33,6 +33,13 @@
 #include <pipewire/extensions/protocol-native.h>
 #include <pipewire/extensions/client-node.h>
 
+#define MAX_DICT	256
+#define MAX_PARAMS	128
+#define MAX_PARAM_INFO	128
+#define MAX_BUFFERS	64
+#define MAX_METAS	16u
+#define MAX_DATAS	64u
+
 PW_LOG_TOPIC_EXTERN(mod_topic);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
@@ -73,16 +80,70 @@ static inline int parse_item(struct spa_pod_parser *prs, struct spa_dict_item *i
 	return 0;
 }
 
-static inline int parse_dict(struct spa_pod_parser *prs, struct spa_dict *dict)
-{
-	uint32_t i;
-	int res;
-	for (i = 0; i < dict->n_items; i++) {
-		if ((res = parse_item(prs, (struct spa_dict_item *) &dict->items[i])) < 0)
-			return res;
-	}
-	return 0;
-}
+#define parse_dict(prs,d)								\
+do {											\
+	uint32_t i;									\
+	if (spa_pod_parser_get(prs,							\
+			 SPA_POD_Int(&(d)->n_items), NULL) < 0)				\
+		return -EINVAL;								\
+	(d)->items = NULL;								\
+	if ((d)->n_items > 0) {								\
+		if ((d)->n_items > MAX_DICT) 						\
+			return -ENOSPC;							\
+		(d)->items = alloca((d)->n_items * sizeof(struct spa_dict_item));	\
+		for (i = 0; i < (d)->n_items; i++) {					\
+			if (parse_item(prs, (struct spa_dict_item *) &(d)->items[i]) < 0)	\
+				return -EINVAL;						\
+		}									\
+	}										\
+} while(0)
+
+#define parse_dict_struct(prs,f,dict)						\
+do {										\
+	if (spa_pod_parser_push_struct(prs, f) < 0)				\
+		return -EINVAL;							\
+	parse_dict(prs, dict);							\
+	spa_pod_parser_pop(prs, f);						\
+} while(0)
+
+#define parse_params(prs,n_params,params)						\
+do {											\
+	uint32_t i;									\
+	if (spa_pod_parser_get(prs,							\
+			 SPA_POD_Int(&n_params), NULL) < 0)				\
+		return -EINVAL;								\
+	params = NULL;									\
+	if (n_params > 0) {								\
+		if (n_params > MAX_PARAMS)						\
+			return -ENOSPC;							\
+		params = alloca(n_params * sizeof(struct spa_pod *));			\
+		for (i = 0; i < n_params; i++) {					\
+			if (spa_pod_parser_get(prs,					\
+					SPA_POD_PodObject(&params[i]), NULL) < 0)	\
+				return -EINVAL;						\
+		}									\
+	}										\
+} while(0)
+
+#define parse_param_info(prs,n_params,params)						\
+do {											\
+	uint32_t i;									\
+	if (spa_pod_parser_get(prs,							\
+			SPA_POD_Int(&(n_params)), NULL) < 0)				\
+		return -EINVAL;								\
+	params = NULL;									\
+	if (n_params > 0) {								\
+		if (n_params > MAX_PARAM_INFO)						\
+			return -ENOSPC;							\
+		params = alloca(n_params * sizeof(struct spa_param_info));		\
+		for (i = 0; i < n_params; i++) {					\
+			if (spa_pod_parser_get(prs,					\
+					SPA_POD_Id(&(params[i]).id),			\
+					SPA_POD_Int(&(params[i]).flags), NULL) < 0)	\
+				return -EINVAL;						\
+		}									\
+	}										\
+} while(0)
 
 static int client_node_marshal_add_listener(void *object,
 			struct spa_hook *listener,
@@ -407,15 +468,7 @@ static int client_node_demarshal_add_port(void *object, const struct pw_protocol
 			SPA_POD_Int(&port_id), NULL) < 0)
 		return -EINVAL;
 
-	if (spa_pod_parser_push_struct(&prs, &f[1]) < 0)
-		return -EINVAL;
-	if (spa_pod_parser_get(&prs,
-			 SPA_POD_Int(&props.n_items), NULL) < 0)
-		return -EINVAL;
-
-	props.items = alloca(props.n_items * sizeof(struct spa_dict_item));
-	if (parse_dict(&prs, &props) < 0)
-		return -EINVAL;
+	parse_dict_struct(&prs, &f[1], &props);
 
 	pw_proxy_notify(proxy, struct pw_client_node_events, add_port, 0, direction, port_id,
 			props.n_items ? &props : NULL);
@@ -478,6 +531,9 @@ static int client_node_demarshal_port_use_buffers(void *object, const struct pw_
 			SPA_POD_Int(&n_buffers), NULL) < 0)
 		return -EINVAL;
 
+	if (n_buffers > MAX_BUFFERS)
+		return -ENOSPC;
+
 	buffers = alloca(sizeof(struct pw_client_node_buffer) * n_buffers);
 	for (i = 0; i < n_buffers; i++) {
 		struct spa_buffer *buf = buffers[i].buffer = alloca(sizeof(struct spa_buffer));
@@ -488,6 +544,9 @@ static int client_node_demarshal_port_use_buffers(void *object, const struct pw_
 				      SPA_POD_Int(&buffers[i].size),
 				      SPA_POD_Int(&buf->n_metas), NULL) < 0)
 			return -EINVAL;
+
+		if (buf->n_metas > MAX_METAS)
+			return -ENOSPC;
 
 		buf->metas = alloca(sizeof(struct spa_meta) * buf->n_metas);
 		for (j = 0; j < buf->n_metas; j++) {
@@ -501,6 +560,9 @@ static int client_node_demarshal_port_use_buffers(void *object, const struct pw_
 		if (spa_pod_parser_get(&prs,
 					SPA_POD_Int(&buf->n_datas), NULL) < 0)
 			return -EINVAL;
+
+		if (buf->n_datas > MAX_DATAS)
+			return -ENOSPC;
 
 		buf->datas = alloca(sizeof(struct spa_data) * buf->n_datas);
 		for (j = 0; j < buf->n_datas; j++) {
@@ -594,15 +656,7 @@ static int client_node_demarshal_port_set_mix_info(void *object, const struct pw
 			SPA_POD_Int(&peer_id), NULL) < 0)
 		return -EINVAL;
 
-	if (spa_pod_parser_push_struct(&prs, &f[1]) < 0)
-		return -EINVAL;
-	if (spa_pod_parser_get(&prs,
-			 SPA_POD_Int(&props.n_items), NULL) < 0)
-		return -EINVAL;
-
-	props.items = alloca(props.n_items * sizeof(struct spa_dict_item));
-	if (parse_dict(&prs, &props) < 0)
-		return -EINVAL;
+	parse_dict_struct(&prs, &f[1], &props);
 
 	pw_proxy_notify(proxy, struct pw_client_node_events, port_set_mix_info, 1,
 							direction, port_id, mix_id,
@@ -926,24 +980,18 @@ static int client_node_demarshal_update(void *object, const struct pw_protocol_n
 	struct spa_pod_parser prs;
 	struct spa_pod_frame f[2];
 	uint32_t change_mask, n_params;
-	const struct spa_pod **params;
+	const struct spa_pod **params = NULL;
 	struct spa_node_info info = SPA_NODE_INFO_INIT(), *infop = NULL;
 	struct spa_pod *ipod;
 	struct spa_dict props = SPA_DICT_INIT(NULL, 0);
-	uint32_t i;
 
 	spa_pod_parser_init(&prs, msg->data, msg->size);
 	if (spa_pod_parser_push_struct(&prs, &f[0]) < 0 ||
 	    spa_pod_parser_get(&prs,
-			SPA_POD_Int(&change_mask),
-			SPA_POD_Int(&n_params), NULL) < 0)
+			SPA_POD_Int(&change_mask), NULL) < 0)
 		return -EINVAL;
 
-	params = alloca(n_params * sizeof(struct spa_pod *));
-	for (i = 0; i < n_params; i++)
-		if (spa_pod_parser_get(&prs,
-					SPA_POD_PodObject(&params[i]), NULL) < 0)
-			return -EINVAL;
+	parse_params(&prs, n_params, params);
 
 	if (spa_pod_parser_get(&prs,
 				SPA_POD_PodStruct(&ipod), NULL) < 0)
@@ -960,34 +1008,18 @@ static int client_node_demarshal_update(void *object, const struct pw_protocol_n
 				SPA_POD_Int(&info.max_input_ports),
 				SPA_POD_Int(&info.max_output_ports),
 				SPA_POD_Long(&info.change_mask),
-				SPA_POD_Long(&info.flags),
-				SPA_POD_Int(&props.n_items), NULL) < 0)
+				SPA_POD_Long(&info.flags), NULL) < 0)
 			return -EINVAL;
 
 		info.change_mask &= SPA_NODE_CHANGE_MASK_FLAGS |
 				SPA_NODE_CHANGE_MASK_PROPS |
 				SPA_NODE_CHANGE_MASK_PARAMS;
 
-		if (props.n_items > 0) {
+		parse_dict(&p2, &props);
+		if (props.n_items > 0)
 			info.props = &props;
 
-			props.items = alloca(props.n_items * sizeof(struct spa_dict_item));
-			if (parse_dict(&p2, &props) < 0)
-				return -EINVAL;
-		}
-		if (spa_pod_parser_get(&p2,
-				SPA_POD_Int(&info.n_params), NULL) < 0)
-			return -EINVAL;
-
-		if (info.n_params > 0) {
-			info.params = alloca(info.n_params * sizeof(struct spa_param_info));
-			for (i = 0; i < info.n_params; i++) {
-				if (spa_pod_parser_get(&p2,
-						SPA_POD_Id(&info.params[i].id),
-						SPA_POD_Int(&info.params[i].flags), NULL) < 0)
-					return -EINVAL;
-			}
-		}
+		parse_param_info(&p2, info.n_params, info.params);
 	}
 
 	pw_resource_notify(resource, struct pw_client_node_methods, update, 0, change_mask,
@@ -1001,7 +1033,7 @@ static int client_node_demarshal_port_update(void *object, const struct pw_proto
 	struct pw_resource *resource = object;
 	struct spa_pod_parser prs;
 	struct spa_pod_frame f;
-	uint32_t i, direction, port_id, change_mask, n_params;
+	uint32_t direction, port_id, change_mask, n_params;
 	const struct spa_pod **params = NULL;
 	struct spa_port_info info = SPA_PORT_INFO_INIT(), *infop = NULL;
 	struct spa_pod *ipod;
@@ -1012,15 +1044,10 @@ static int client_node_demarshal_port_update(void *object, const struct pw_proto
 	    spa_pod_parser_get(&prs,
 			SPA_POD_Int(&direction),
 			SPA_POD_Int(&port_id),
-			SPA_POD_Int(&change_mask),
-			SPA_POD_Int(&n_params), NULL) < 0)
+			SPA_POD_Int(&change_mask), NULL) < 0)
 		return -EINVAL;
 
-	params = alloca(n_params * sizeof(struct spa_pod *));
-	for (i = 0; i < n_params; i++)
-		if (spa_pod_parser_get(&prs,
-					SPA_POD_PodObject(&params[i]), NULL) < 0)
-			return -EINVAL;
+	parse_params(&prs, n_params, params);
 
 	if (spa_pod_parser_get(&prs,
 				SPA_POD_PodStruct(&ipod), NULL) < 0)
@@ -1037,8 +1064,7 @@ static int client_node_demarshal_port_update(void *object, const struct pw_proto
 				SPA_POD_Long(&info.change_mask),
 				SPA_POD_Long(&info.flags),
 				SPA_POD_Int(&info.rate.num),
-				SPA_POD_Int(&info.rate.denom),
-				SPA_POD_Int(&props.n_items), NULL) < 0)
+				SPA_POD_Int(&info.rate.denom), NULL) < 0)
 			return -EINVAL;
 
 		info.change_mask &= SPA_PORT_CHANGE_MASK_FLAGS |
@@ -1046,26 +1072,11 @@ static int client_node_demarshal_port_update(void *object, const struct pw_proto
 				SPA_PORT_CHANGE_MASK_PROPS |
 				SPA_PORT_CHANGE_MASK_PARAMS;
 
-		if (props.n_items > 0) {
+		parse_dict(&p2, &props);
+		if (props.n_items > 0)
 			info.props = &props;
 
-			props.items = alloca(props.n_items * sizeof(struct spa_dict_item));
-			if (parse_dict(&p2, &props) < 0)
-				return -EINVAL;
-		}
-		if (spa_pod_parser_get(&p2,
-				SPA_POD_Int(&info.n_params), NULL) < 0)
-			return -EINVAL;
-
-		if (info.n_params > 0) {
-			info.params = alloca(info.n_params * sizeof(struct spa_param_info));
-			for (i = 0; i < info.n_params; i++) {
-				if (spa_pod_parser_get(&p2,
-						SPA_POD_Id(&info.params[i].id),
-						SPA_POD_Int(&info.params[i].flags), NULL) < 0)
-					return -EINVAL;
-			}
-		}
+		parse_param_info(&p2, info.n_params, info.params);
 	}
 
 	pw_resource_notify(resource, struct pw_client_node_methods, port_update, 0, direction,
@@ -1124,6 +1135,9 @@ static int client_node_demarshal_port_buffers(void *object, const struct pw_prot
 			SPA_POD_Int(&n_buffers), NULL) < 0)
 		return -EINVAL;
 
+	if (n_buffers > MAX_BUFFERS)
+		return -ENOSPC;
+
 	buffers = alloca(sizeof(struct spa_buffer*) * n_buffers);
 	for (i = 0; i < n_buffers; i++) {
 		struct spa_buffer *buf = buffers[i] = alloca(sizeof(struct spa_buffer));
@@ -1132,6 +1146,9 @@ static int client_node_demarshal_port_buffers(void *object, const struct pw_prot
 		if (spa_pod_parser_get(&prs,
 					SPA_POD_Int(&buf->n_datas), NULL) < 0)
 			return -EINVAL;
+
+		if (buf->n_datas > MAX_DATAS)
+			return -ENOSPC;
 
 		buf->datas = alloca(sizeof(struct spa_data) * buf->n_datas);
 		for (j = 0; j < buf->n_datas; j++) {

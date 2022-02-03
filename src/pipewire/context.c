@@ -273,10 +273,8 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	n_support = pw_get_support(this->support, SPA_N_ELEMENTS(this->support) - 6);
 	cpu = spa_support_find(this->support, n_support, SPA_TYPE_INTERFACE_CPU);
 
-	if ((str = pw_properties_get(conf, "context.properties")) != NULL) {
-		pw_properties_update_string(properties, str, strlen(str));
-		pw_log_info("%p: parsed context.properties section", this);
-	}
+	res = pw_context_conf_update_props(this, "context.properties", properties);
+	pw_log_info("%p: parsed %d context.properties items", this, res);
 
 	if ((str = getenv("PIPEWIRE_CORE"))) {
 		pw_log_info("using core.name from environment: %s", str);
@@ -1066,10 +1064,11 @@ static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
 int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 {
 	struct impl *impl = SPA_CONTAINER_OF(context, struct impl, this);
+	struct settings *settings = &context->settings;
 	struct pw_impl_node *n, *s, *target, *fallback;
 	uint32_t max_quantum, min_quantum, def_quantum, lim_quantum, rate_quantum;
 	uint32_t *rates, n_rates, def_rate;
-	bool freewheel = false, force_rate;
+	bool freewheel = false, global_force_rate, force_rate, global_force_quantum;
 
 	pw_log_info("%p: busy:%d reason:%s", context, impl->recalc, reason);
 
@@ -1082,7 +1081,10 @@ again:
 	impl->recalc = true;
 
 	get_quantums(context, &def_quantum, &min_quantum, &max_quantum, &lim_quantum, &rate_quantum);
-	rates = get_rates(context, &def_rate, &n_rates, &force_rate);
+	rates = get_rates(context, &def_rate, &n_rates, &global_force_rate);
+
+	global_force_quantum = rate_quantum == 0;
+	force_rate = global_force_rate;
 
 	/* start from all drivers and group all nodes that are linked
 	 * to it. Some nodes are not (yet) linked to anything and they
@@ -1164,6 +1166,7 @@ again:
 		struct spa_fraction max_latency = SPA_FRACTION(0, 0);
 		struct spa_fraction rate = SPA_FRACTION(0, 0);
 		uint32_t quantum, target_rate, current_rate;
+		uint64_t quantum_stamp = 0, rate_stamp = 0;
 
 		if (!n->driving || n->exported)
 			continue;
@@ -1174,6 +1177,20 @@ again:
 			if (s->info.state > PW_NODE_STATE_SUSPENDED) {
 				lock_quantum |= s->lock_quantum;
 				lock_rate |= s->lock_rate;
+			}
+			if (!global_force_quantum && s->force_quantum > 0 &&
+			    s->stamp > quantum_stamp) {
+				def_quantum = min_quantum = max_quantum = s->force_quantum;
+				rate_quantum = 0;
+				quantum_stamp = s->stamp;
+			}
+			if (!global_force_rate && s->force_rate > 0 &&
+			    s->stamp > rate_stamp) {
+				def_rate = s->force_rate;
+				force_rate = true;
+				n_rates = 1;
+				rates = &s->force_rate;
+				rate_stamp = s->stamp;
 			}
 
 			/* smallest latencies */
@@ -1221,7 +1238,7 @@ again:
 					target_rate);
 
 			if (force_rate) {
-				if (context->settings.clock_rate_update_mode == CLOCK_RATE_UPDATE_MODE_HARD)
+				if (settings->clock_rate_update_mode == CLOCK_RATE_UPDATE_MODE_HARD)
 					suspend_driver(context, n);
 			} else {
 				if (n->info.state >= PW_NODE_STATE_IDLE)
@@ -1253,7 +1270,7 @@ again:
 		quantum = SPA_CLAMP(quantum, min_quantum, max_quantum);
 		quantum = SPA_MIN(quantum, lim_quantum);
 
-		if (context->settings.clock_power_of_two_quantum)
+		if (settings->clock_power_of_two_quantum)
 			quantum = flp2(quantum);
 
 		if (running && quantum != n->current_quantum && !lock_quantum) {

@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #if HAVE_PWD_H
 #include <pwd.h>
 #endif
@@ -45,6 +46,7 @@
 #include <spa/utils/json.h>
 
 #include <pipewire/impl.h>
+#include <pipewire/private.h>
 
 PW_LOG_TOPIC_EXTERN(log_conf);
 #define PW_LOG_TOPIC_DEFAULT log_conf
@@ -65,34 +67,21 @@ static int make_path(char *path, size_t size, const char *paths[])
 	return 0;
 }
 
-static int get_config_path(char *path, size_t size, const char *prefix, const char *name)
+static int get_abs_path(char *path, size_t size, const char *prefix, const char *name)
 {
-	const char *dir;
-	char buffer[4096];
-
-	if (name[0] == '/') {
-		const char *paths[] = { name, NULL };
-		if (make_path(path, size, paths) == 0 &&
-		    access(path, R_OK) == 0)
-			return 1;
-		return -ENOENT;
-	}
-
-	if (prefix && prefix[0] == '/') {
+	if (prefix[0] == '/') {
 		const char *paths[] = { prefix, name, NULL };
 		if (make_path(path, size, paths) == 0 &&
 		    access(path, R_OK) == 0)
 			return 1;
 		return -ENOENT;
 	}
+	return 0;
+}
 
-	if (prefix == NULL) {
-		prefix = name;
-		name = NULL;
-	}
-
-	if (pw_check_option("no-config", "true"))
-		goto no_config;
+static int get_envconf_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
 
 	dir = getenv("PIPEWIRE_CONFIG_DIR");
 	if (dir != NULL) {
@@ -100,7 +89,15 @@ static int get_config_path(char *path, size_t size, const char *prefix, const ch
 		if (make_path(path, size, paths) == 0 &&
 		    access(path, R_OK) == 0)
 			return 1;
+		return -ENOENT;
 	}
+	return 0;
+}
+
+static int get_homeconf_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	char buffer[4096];
+	const char *dir;
 
 	dir = getenv("XDG_CONFIG_HOME");
 	if (dir != NULL) {
@@ -121,7 +118,12 @@ static int get_config_path(char *path, size_t size, const char *prefix, const ch
 		    access(path, R_OK) == 0)
 			return 1;
 	}
+	return 0;
+}
 
+static int get_configdir_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
 	dir = PIPEWIRE_CONFIG_DIR;
 	if (dir != NULL) {
 		const char *paths[] = { dir, prefix, name, NULL };
@@ -129,7 +131,12 @@ static int get_config_path(char *path, size_t size, const char *prefix, const ch
 		    access(path, R_OK) == 0)
 			return 1;
 	}
-no_config:
+	return 0;
+}
+
+static int get_confdata_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
 	dir = PIPEWIRE_CONFDATADIR;
 	if (dir != NULL) {
 		const char *paths[] = { dir, prefix, name, NULL };
@@ -140,39 +147,93 @@ no_config:
 	return 0;
 }
 
-static int get_state_path(char *path, size_t size, const char *prefix, const char *name)
+static int get_config_path(char *path, size_t size, const char *prefix, const char *name)
 {
-	const char *dir;
-	char buffer[4096];
-
-	if (name[0] == '/') {
-		const char *paths[] = { name, NULL };
-		if (make_path(path, size, paths) == 0 &&
-		    access(path, R_OK) == 0)
-			return 1;
-		return -ENOENT;
-	}
-
-	if (prefix && prefix[0] == '/') {
-		const char *paths[] = { prefix, name, NULL };
-		if (make_path(path, size, paths) == 0 &&
-		    access(path, R_OK) == 0)
-			return 1;
-		return -ENOENT;
-	}
+	int res;
 
 	if (prefix == NULL) {
 		prefix = name;
 		name = NULL;
 	}
+	if ((res = get_abs_path(path, size, prefix, name)) != 0)
+		return res;
 
+	if (pw_check_option("no-config", "true"))
+		goto no_config;
+
+	if ((res = get_envconf_path(path, size, prefix, name)) != 0)
+		return res;
+
+	if ((res = get_homeconf_path(path, size, prefix, name)) != 0)
+		return res;
+
+	if ((res = get_configdir_path(path, size, prefix, name)) != 0)
+		return res;
+no_config:
+	if ((res = get_confdata_path(path, size, prefix, name)) != 0)
+		return res;
+	return 0;
+}
+
+static int get_config_dir(char *path, size_t size, const char *prefix, const char *name, int *level)
+{
+	int res;
+
+	if (prefix == NULL) {
+		prefix = name;
+		name = NULL;
+	}
+	if ((res = get_abs_path(path, size, prefix, name)) != 0) {
+		if ((*level)++ == 0)
+			return res;
+		return -ENOENT;
+	}
+
+	if ((res = get_envconf_path(path, size, prefix, name)) != 0) {
+		if ((*level)++ == 0)
+			return res;
+		return -ENOENT;
+	}
+
+	if (*level == 0) {
+		(*level)++;
+		if ((res = get_confdata_path(path, size, prefix, name)) != 0)
+			return res;
+	}
+	if (pw_check_option("no-config", "true"))
+		return 0;
+
+	if (*level == 1) {
+		(*level)++;
+		if ((res = get_configdir_path(path, size, prefix, name)) != 0)
+			return res;
+	}
+	if (*level == 2) {
+		(*level)++;
+		if ((res = get_homeconf_path(path, size, prefix, name)) != 0)
+			return res;
+	}
+	return 0;
+}
+
+static int get_envstate_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
 	dir = getenv("PIPEWIRE_STATE_DIR");
 	if (dir != NULL) {
 		const char *paths[] = { dir, prefix, name, NULL };
 		if (make_path(path, size, paths) == 0 &&
 		    access(path, R_OK) == 0)
 			return 1;
+		return -ENOENT;
 	}
+	return 0;
+}
+
+static int get_homestate_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	const char *dir;
+	char buffer[4096];
 
 	dir = getenv("XDG_STATE_HOME");
 	if (dir != NULL) {
@@ -200,6 +261,25 @@ static int get_state_path(char *path, size_t size, const char *prefix, const cha
 		    access(path, R_OK) == 0)
 			return 1;
 	}
+	return 0;
+}
+
+static int get_state_path(char *path, size_t size, const char *prefix, const char *name)
+{
+	int res;
+
+	if (prefix == NULL) {
+		prefix = name;
+		name = NULL;
+	}
+	if ((res = get_abs_path(path, size, prefix, name)) != 0)
+		return res;
+
+	if ((res = get_envstate_path(path, size, prefix, name)) != 0)
+		return res;
+
+	if ((res = get_homestate_path(path, size, prefix, name)) != 0)
+		return res;
 
 	return 0;
 }
@@ -317,34 +397,57 @@ static int conf_load(const char *path, struct pw_properties *conf)
 {
 	char *data;
 	struct stat sbuf;
-	int fd;
+	int fd, count;
 
-	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)  {
-		pw_log_warn("%p: error loading config '%s': %m", conf, path);
-		return -errno;
-	}
+	if ((fd = open(path,  O_CLOEXEC | O_RDONLY)) < 0)
+		goto error;
 
-	pw_log_info("%p: loading config '%s'", conf, path);
 	if (fstat(fd, &sbuf) < 0)
 		goto error_close;
 	if ((data = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
 		goto error_close;
 	close(fd);
 
-	pw_properties_update_string(conf, data, sbuf.st_size);
+	count = pw_properties_update_string(conf, data, sbuf.st_size);
 	munmap(data, sbuf.st_size);
+
+	pw_log_info("%p: loaded config '%s' with %d items", conf, path, count);
 
 	return 0;
 
 error_close:
 	close(fd);
+error:
+	pw_log_warn("%p: error loading config '%s': %m", conf, path);
 	return -errno;
+}
+
+static void add_override(struct pw_properties *conf, struct pw_properties *override,
+		const char *path, int level, int index)
+{
+	const struct spa_dict_item *it;
+	char key[1024];
+	snprintf(key, sizeof(key), "override.%d.%d.config.path", level, index);
+	pw_properties_set(conf, key, path);
+	spa_dict_for_each(it, &override->dict) {
+		snprintf(key, sizeof(key), "override.%d.%d.%s", level, index, it->key);
+		pw_properties_set(conf, key, it->value);
+	}
+}
+
+static int conf_filter(const struct dirent *entry)
+{
+	return spa_strendswith(entry->d_name, ".conf");
 }
 
 SPA_EXPORT
 int pw_conf_load_conf(const char *prefix, const char *name, struct pw_properties *conf)
 {
 	char path[PATH_MAX];
+	char fname[PATH_MAX + 256];
+	int i, res, level = 0;
+	struct pw_properties *override = NULL;
+	const char *dname;
 
 	if (name == NULL) {
 		pw_log_debug("%p: config name must not be NULL", conf);
@@ -355,8 +458,45 @@ int pw_conf_load_conf(const char *prefix, const char *name, struct pw_properties
 		pw_log_debug("%p: can't load config '%s': %m", conf, path);
 		return -ENOENT;
 	}
+	pw_properties_set(conf, "config.prefix", prefix);
+	pw_properties_set(conf, "config.name", name);
+	pw_properties_set(conf, "config.path", path);
 
-	return conf_load(path, conf);
+	if ((res = conf_load(path, conf)) < 0)
+		return res;
+
+	pw_properties_setf(conf, "config.name.d", "%s.d", name);
+	dname = pw_properties_get(conf, "config.name.d");
+
+	while (true) {
+		struct dirent **entries = NULL;
+		int n;
+
+		if (get_config_dir(path, sizeof(path), prefix, dname, &level) <= 0)
+			break;
+
+		n = scandir(path, &entries, conf_filter, alphasort);
+		if (n == 0)
+			continue;
+		if (n < 0) {
+			pw_log_warn("scandir %s failed: %m", path);
+			continue;
+		}
+		if (override == NULL &&
+		    (override = pw_properties_new(NULL, NULL)) == NULL)
+			return -errno;
+
+		for (i = 0; i < n; i++) {
+			snprintf(fname, sizeof(fname), "%s/%s", path, entries[i]->d_name);
+			if (conf_load(fname, override) >= 0)
+				add_override(conf, override, fname, level, i);
+			pw_properties_clear(override);
+			free(entries[i]);
+		}
+		free(entries);
+	}
+	pw_properties_free(override);
+	return 0;
 }
 
 SPA_EXPORT
@@ -373,21 +513,28 @@ int pw_conf_load_state(const char *prefix, const char *name, struct pw_propertie
 		pw_log_debug("%p: can't load config '%s': %m", conf, path);
 		return -ENOENT;
 	}
-
 	return conf_load(path, conf);
 }
+
+struct data {
+	struct pw_context *context;
+	struct pw_properties *props;
+	int count;
+};
 
 /* context.spa-libs = {
  *  <factory-name regex> = <library-name>
  * }
  */
-static int parse_spa_libs(struct pw_context *context, char *str)
+static int parse_spa_libs(void *user_data, const char *location,
+		const char *section, const char *str, size_t len)
 {
+	struct data *d = user_data;
+	struct pw_context *context = d->context;
 	struct spa_json it[2];
 	char key[512], value[512];
-	int count = 0;
 
-	spa_json_init(&it[0], str, strlen(str));
+	spa_json_init(&it[0], str, len);
 	if (spa_json_enter_object(&it[0], &it[1]) < 0) {
 		pw_log_error("config file error: context.spa-libs is not an object");
 		return -EINVAL;
@@ -396,10 +543,10 @@ static int parse_spa_libs(struct pw_context *context, char *str)
 	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
 		if (spa_json_get_string(&it[1], value, sizeof(value)) > 0) {
 			pw_context_add_spa_lib(context, key, value);
-			count++;
+			d->count++;
 		}
 	}
-	return count;
+	return 0;
 }
 
 static int load_module(struct pw_context *context, const char *key, const char *args, const char *flags)
@@ -430,16 +577,21 @@ static int load_module(struct pw_context *context, const char *key, const char *
  *   }
  * ]
  */
-static int parse_modules(struct pw_context *context, char *str)
+static int parse_modules(void *user_data, const char *location,
+		const char *section, const char *str, size_t len)
 {
+	struct data *d = user_data;
+	struct pw_context *context = d->context;
 	struct spa_json it[3];
-	char key[512];
-	int res = 0, count = 0;
+	char key[512], *s;
+	int res = 0;
 
-	spa_json_init(&it[0], str, strlen(str));
+	s = strndup(str, len);
+	spa_json_init(&it[0], s, len);
 	if (spa_json_enter_array(&it[0], &it[1]) < 0) {
 		pw_log_error("config file error: context.modules is not an array");
-		return -EINVAL;
+		res = -EINVAL;
+		goto exit;
 	}
 
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
@@ -474,8 +626,10 @@ static int parse_modules(struct pw_context *context, char *str)
 		if (res < 0)
 			break;
 
-		res = ++count;
+		d->count++;
 	}
+exit:
+	free(s);
 	return res;
 }
 
@@ -514,16 +668,21 @@ static int create_object(struct pw_context *context, const char *key, const char
  *   }
  * ]
  */
-static int parse_objects(struct pw_context *context, char *str)
+static int parse_objects(void *user_data, const char *location,
+		const char *section, const char *str, size_t len)
 {
+	struct data *d = user_data;
+	struct pw_context *context = d->context;
 	struct spa_json it[3];
-	char key[512];
-	int res = 0, count = 0;
+	char key[512], *s;
+	int res = 0;
 
-	spa_json_init(&it[0], str, strlen(str));
+	s = strndup(str, len);
+	spa_json_init(&it[0], s, len);
 	if (spa_json_enter_array(&it[0], &it[1]) < 0) {
 		pw_log_error("config file error: context.objects is not an array");
-		return -EINVAL;
+		res = -EINVAL;
+		goto exit;
 	}
 
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
@@ -558,8 +717,10 @@ static int parse_objects(struct pw_context *context, char *str)
 
 		if (res < 0)
 			break;
-		res = ++count;
+		d->count++;
 	}
+exit:
+	free(s);
 	return res;
 }
 
@@ -601,16 +762,21 @@ static int do_exec(struct pw_context *context, const char *key, const char *args
  *   }
  * ]
  */
-static int parse_exec(struct pw_context *context, char *str)
+static int parse_exec(void *user_data, const char *location,
+		const char *section, const char *str, size_t len)
 {
+	struct data *d = user_data;
+	struct pw_context *context = d->context;
 	struct spa_json it[3];
-	char key[512];
-	int res = 0, count = 0;
+	char key[512], *s;
+	int res = 0;
 
-	spa_json_init(&it[0], str, strlen(str));
+	s = strndup(str, len);
+	spa_json_init(&it[0], s, len);
 	if (spa_json_enter_array(&it[0], &it[1]) < 0) {
 		pw_log_error("config file error: context.exec is not an array");
-		return -EINVAL;
+		res = -EINVAL;
+		goto exit;
 	}
 
 	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
@@ -637,7 +803,40 @@ static int parse_exec(struct pw_context *context, char *str)
 		if (res < 0)
 			break;
 
-		res = ++count;
+		d->count++;
+	}
+exit:
+	free(s);
+	return res;
+}
+
+SPA_EXPORT
+int pw_context_conf_section_for_each(struct pw_context *context, const char *section,
+		int (*callback) (void *data, const char *location, const char *section,
+			const char *str, size_t len),
+		void *data)
+{
+	struct pw_properties *conf = context->conf;
+	const char *path = NULL;
+	const struct spa_dict_item *it;
+	int res;
+
+	spa_dict_for_each(it, &conf->dict) {
+		if (spa_strendswith(it->key, "config.path")) {
+			path = it->value;
+			continue;
+
+		} else if (spa_streq(it->key, section)) {
+			pw_log_info("handle config '%s' section '%s'", path, section);
+		} else if (spa_strstartswith(it->key, "override.") &&
+		    spa_strendswith(it->key, section)) {
+			pw_log_info("handle override '%s' section '%s'", path, section);
+		} else
+			continue;
+
+		res = callback(data, path, section, it->value, strlen(it->value));
+		if (res != 0)
+			break;
 	}
 	return res;
 }
@@ -646,27 +845,40 @@ SPA_EXPORT
 int pw_context_parse_conf_section(struct pw_context *context,
 		struct pw_properties *conf, const char *section)
 {
-	const char *str;
-	char *s;
-	int res;
-
-	if ((str = pw_properties_get(conf, section)) == NULL)
-		return 0;
-
-	s = strdup(str);
+	struct data data = { .context = context };
 
 	if (spa_streq(section, "context.spa-libs"))
-		res = parse_spa_libs(context, s);
+		pw_context_conf_section_for_each(context, section,
+				parse_spa_libs, &data);
 	else if (spa_streq(section, "context.modules"))
-		res = parse_modules(context, s);
+		pw_context_conf_section_for_each(context, section,
+				parse_modules, &data);
 	else if (spa_streq(section, "context.objects"))
-		res = parse_objects(context, s);
+		pw_context_conf_section_for_each(context, section,
+				parse_objects, &data);
 	else if (spa_streq(section, "context.exec"))
-		res = parse_exec(context, s);
+		pw_context_conf_section_for_each(context, section,
+				parse_exec, &data);
 	else
-		res = -EINVAL;
+		data.count = -EINVAL;
 
-	free(s);
+	return data.count;
+}
 
-	return res;
+static int update_props(void *user_data, const char *location, const char *key,
+			const char *val, size_t len)
+{
+	struct data *data = user_data;
+	data->count += pw_properties_update_string(data->props, val, len);
+	return 0;
+}
+
+SPA_EXPORT
+int pw_context_conf_update_props(struct pw_context *context,
+		const char *section, struct pw_properties *props)
+{
+	struct data data = { .context = context, .props = props };
+	pw_context_conf_section_for_each(context, section,
+				update_props, &data);
+	return data.count;
 }

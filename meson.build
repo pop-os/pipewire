@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.44',
+  version : '0.3.45',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -77,10 +77,12 @@ common_flags = [
   '-Wmissing-braces',
   '-Wtype-limits',
   '-Wvariadic-macros',
+  '-Wmaybe-uninitialized',
   '-Wno-missing-field-initializers',
   '-Wno-unused-parameter',
   '-Wno-pedantic',
   '-Wold-style-declaration',
+  '-Wdeprecated-declarations',
   '-Wunused-result',
 ]
 
@@ -424,10 +426,9 @@ libinotify_dep = (build_machine.system() == 'freebsd'
     : dependency('', required: false))
 
 # On FreeBSD, libintl library is required for gettext
-libintl_dep = dependency('intl', required: false)
-
+libintl_dep = cc.find_library('intl', required: false)
 if not libintl_dep.found()
-    libintl_dep = cc.find_library('intl', required: false)
+    libintl_dep = dependency('intl', required: false)
 endif
 summary({'intl support': libintl_dep.found()}, bool_yn: true)
 

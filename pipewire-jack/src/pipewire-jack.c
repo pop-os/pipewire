@@ -274,6 +274,7 @@ struct context {
 
 struct metadata {
 	struct pw_metadata *proxy;
+	struct spa_hook proxy_listener;
 	struct spa_hook listener;
 
 	char default_audio_sink[1024];
@@ -862,6 +863,8 @@ static int do_sync(struct client *client)
 		pw_log_warn("sync requested from callback");
 		return 0;
 	}
+	if (client->error)
+		return client->last_res;
 
 	client->pending_sync = pw_proxy_sync((struct pw_proxy*)client->core, client->pending_sync);
 
@@ -2593,6 +2596,26 @@ static const struct pw_metadata_events metadata_events = {
 	.property = metadata_property
 };
 
+static void metadata_proxy_removed(void *data)
+{
+	struct client *c = data;
+	pw_proxy_destroy((struct pw_proxy*)c->metadata->proxy);
+}
+
+static void metadata_proxy_destroy(void *data)
+{
+	struct client *c = data;
+	spa_hook_remove(&c->metadata->proxy_listener);
+	spa_hook_remove(&c->metadata->listener);
+	c->metadata = NULL;
+}
+
+static const struct pw_proxy_events metadata_proxy_events = {
+	PW_VERSION_PROXY_EVENTS,
+	.removed = metadata_proxy_removed,
+	.destroy = metadata_proxy_destroy,
+};
+
 static void proxy_removed(void *data)
 {
 	struct object *o = data;
@@ -2917,6 +2940,9 @@ static void registry_event_global(void *data, uint32_t id,
 		c->metadata->default_audio_sink[0] = '\0';
 		c->metadata->default_audio_source[0] = '\0';
 
+		pw_proxy_add_listener(proxy,
+				&c->metadata->proxy_listener,
+				&metadata_proxy_events, c);
 		pw_metadata_add_listener(proxy,
 				&c->metadata->listener,
 				&metadata_events, c);
@@ -3069,6 +3095,19 @@ static int execute_match(void *data, const char *action, const char *val, int le
 	return 1;
 }
 
+static int apply_jack_rules(void *data, const char *location, const char *section,
+		const char *str, size_t len)
+{
+	struct client *client = data;
+	const struct pw_properties *p =
+		pw_context_get_properties(client->context.context);
+
+	if (p != NULL)
+		pw_jack_match_rules(str, len, &p->dict, execute_match, client);
+
+	return 0;
+}
+
 SPA_EXPORT
 jack_client_t * jack_client_open (const char *client_name,
                                   jack_options_t options,
@@ -3126,22 +3165,15 @@ jack_client_t * jack_client_open (const char *client_name,
 	client->allow_mlock = client->context.context->settings.mem_allow_mlock;
 	client->warn_mlock = client->context.context->settings.mem_warn_mlock;
 
-	if ((str = pw_context_get_conf_section(client->context.context,
-					"jack.properties")) != NULL)
-		pw_properties_update_string(client->props, str, strlen(str));
+	pw_context_conf_update_props(client->context.context,
+			"jack.properties", client->props);
 
         if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
 		pw_properties_update_string(client->props, str, strlen(str));
 
 
-	if ((str = pw_context_get_conf_section(client->context.context,
-					"jack.rules")) != NULL) {
-		const struct pw_properties *p =
-			pw_context_get_properties(client->context.context);
-		if (p != NULL)
-			pw_jack_match_rules(str, strlen(str), &p->dict,
-				execute_match, client);
-	}
+	pw_context_conf_section_for_each(client->context.context, "jack.rules",
+			apply_jack_rules, client);
 
 	client->show_monitor = pw_properties_get_bool(client->props, "jack.show-monitor", true);
 	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", false);
@@ -3973,6 +4005,7 @@ int jack_set_buffer_size (jack_client_t *client, jack_nframes_t nframes)
 
 	pw_thread_loop_lock(c->context.loop);
 	pw_properties_set(c->props, PW_KEY_NODE_LATENCY, latency);
+	pw_properties_setf(c->props, PW_KEY_NODE_FORCE_QUANTUM, "%u", nframes);
 
 	c->info.change_mask |= SPA_NODE_CHANGE_MASK_PROPS;
 	c->info.props = &c->props->dict;

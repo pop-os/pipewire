@@ -124,7 +124,7 @@ static int module_ladspa_source_load(struct client *client, struct module *modul
 	return 0;
 }
 
-static int module_ladspa_source_unload(struct client *client, struct module *module)
+static int module_ladspa_source_unload(struct module *module)
 {
 	struct module_ladspa_source_data *d = module->user_data;
 
@@ -212,6 +212,8 @@ struct module *create_module_ladspa_source(struct impl *impl, const char *argume
 	}
 	if (pw_properties_get(playback_props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(playback_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
+	if (pw_properties_get(playback_props, PW_KEY_DEVICE_CLASS) == NULL)
+		pw_properties_set(playback_props, PW_KEY_DEVICE_CLASS, "filter");
 
 	if ((str = pw_properties_get(props, "master")) != NULL ||
 	    (str = pw_properties_get(props, "source_master")) != NULL) {

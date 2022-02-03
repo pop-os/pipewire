@@ -22,8 +22,6 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include "pipewire/core.h"
-
 #include "config.h"
 
 #include <errno.h>
@@ -444,55 +442,66 @@ static uint32_t fix_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 	return latency / frame_size;
 }
 
-static int reply_create_playback_stream(struct stream *stream, struct pw_manager_object *peer)
+static uint64_t set_playback_buffer_attr(struct stream *s, struct buffer_attr *attr)
 {
-	struct client *client = stream->client;
-	struct pw_manager *manager = client->manager;
-	struct message *reply;
-	uint32_t missing, peer_index;
+	struct spa_fraction lat;
+	uint64_t lat_usec;
 	struct spa_dict_item items[5];
 	char latency[32];
 	char attr_maxlength[32];
 	char attr_tlength[32];
 	char attr_prebuf[32];
 	char attr_minreq[32];
-	const char *peer_name;
-	struct spa_fraction lat;
-	uint64_t lat_usec;
 
-	lat.denom = stream->ss.rate;
-	lat.num = fix_playback_buffer_attr(stream, &stream->attr);
+	lat.denom = s->ss.rate;
+	lat.num = fix_playback_buffer_attr(s, attr);
 
-	stream->buffer = calloc(1, stream->attr.maxlength);
-	if (stream->buffer == NULL)
-		return -errno;
+	s->attr = *attr;
 
-	if (lat.num * stream->min_quantum.denom / lat.denom < stream->min_quantum.num)
-		lat.num = (stream->min_quantum.num * lat.denom +
-				(stream->min_quantum.denom -1)) / stream->min_quantum.denom;
+	if (lat.num * s->min_quantum.denom / lat.denom < s->min_quantum.num)
+		lat.num = (s->min_quantum.num * lat.denom +
+				(s->min_quantum.denom -1)) / s->min_quantum.denom;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
-	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", stream->attr.maxlength);
-	snprintf(attr_tlength, sizeof(attr_tlength), "%u", stream->attr.tlength);
-	snprintf(attr_prebuf, sizeof(attr_prebuf), "%u", stream->attr.prebuf);
-	snprintf(attr_minreq, sizeof(attr_minreq), "%u", stream->attr.minreq);
+	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", s->attr.maxlength);
+	snprintf(attr_tlength, sizeof(attr_tlength), "%u", s->attr.tlength);
+	snprintf(attr_prebuf, sizeof(attr_prebuf), "%u", s->attr.prebuf);
+	snprintf(attr_minreq, sizeof(attr_minreq), "%u", s->attr.minreq);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
 	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
 	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.tlength", attr_tlength);
 	items[3] = SPA_DICT_ITEM_INIT("pulse.attr.prebuf", attr_prebuf);
 	items[4] = SPA_DICT_ITEM_INIT("pulse.attr.minreq", attr_minreq);
-	pw_stream_update_properties(stream->stream, &SPA_DICT_INIT(items, 5));
+	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 5));
 
-	if (stream->attr.prebuf > 0)
-		stream->in_prebuf = true;
+	if (s->attr.prebuf > 0)
+		s->in_prebuf = true;
+
+	return lat_usec;
+}
+
+static int reply_create_playback_stream(struct stream *stream, struct pw_manager_object *peer)
+{
+	struct client *client = stream->client;
+	struct pw_manager *manager = client->manager;
+	struct message *reply;
+	uint32_t missing, peer_index;
+	const char *peer_name;
+	uint64_t lat_usec;
+
+	stream->buffer = calloc(1, MAXLENGTH);
+	if (stream->buffer == NULL)
+		return -errno;
+
+	lat_usec = set_playback_buffer_attr(stream, &stream->attr);
 
 	missing = stream_pop_missing(stream);
 	stream->index = id_to_index(manager, stream->id);
 
-	pw_log_info("[%s] reply CREATE_PLAYBACK_STREAM tag:%u index:%u missing:%u latency:%s",
-			client->name, stream->create_tag, stream->index, missing, latency);
+	pw_log_info("[%s] reply CREATE_PLAYBACK_STREAM tag:%u index:%u missing:%u lat:%"PRIu64,
+			client->name, stream->create_tag, stream->index, missing, lat_usec);
 
 	reply = reply_new(client, stream->create_tag);
 	message_put(reply,
@@ -584,47 +593,56 @@ static uint32_t fix_record_buffer_attr(struct stream *s, struct buffer_attr *att
 	return latency / frame_size;
 }
 
-static int reply_create_record_stream(struct stream *stream, struct pw_manager_object *peer)
+static uint64_t set_record_buffer_attr(struct stream *s, struct buffer_attr *attr)
 {
-	struct client *client = stream->client;
-	struct pw_manager *manager = client->manager;
-	struct message *reply;
 	struct spa_dict_item items[3];
-	char latency[32], *tmp;
+	char latency[32];
 	char attr_maxlength[32];
 	char attr_fragsize[32];
-	const char *peer_name, *name;
-	uint32_t peer_index;
 	struct spa_fraction lat;
 	uint64_t lat_usec;
 
-	lat.denom = stream->ss.rate;
-	lat.num = fix_record_buffer_attr(stream, &stream->attr);
+	lat.denom = s->ss.rate;
+	lat.num = fix_record_buffer_attr(s, &s->attr);
 
-	stream->buffer = calloc(1, stream->attr.maxlength);
-	if (stream->buffer == NULL)
-		return -errno;
-
-	if (lat.num * stream->min_quantum.denom / lat.denom < stream->min_quantum.num)
-		lat.num = (stream->min_quantum.num * lat.denom +
-				(stream->min_quantum.denom -1)) / stream->min_quantum.denom;
+	if (lat.num * s->min_quantum.denom / lat.denom < s->min_quantum.num)
+		lat.num = (s->min_quantum.num * lat.denom +
+				(s->min_quantum.denom -1)) / s->min_quantum.denom;
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
 
-	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", stream->attr.maxlength);
-	snprintf(attr_fragsize, sizeof(attr_fragsize), "%u", stream->attr.fragsize);
+	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", s->attr.maxlength);
+	snprintf(attr_fragsize, sizeof(attr_fragsize), "%u", s->attr.fragsize);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
 	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
 	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.fragsize", attr_fragsize);
-	pw_stream_update_properties(stream->stream,
-			&SPA_DICT_INIT(items, 3));
+	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 3));
+
+	return lat_usec;
+}
+
+static int reply_create_record_stream(struct stream *stream, struct pw_manager_object *peer)
+{
+	struct client *client = stream->client;
+	struct pw_manager *manager = client->manager;
+	char *tmp;
+	struct message *reply;
+	const char *peer_name, *name;
+	uint32_t peer_index;
+	uint64_t lat_usec;
+
+	stream->buffer = calloc(1, MAXLENGTH);
+	if (stream->buffer == NULL)
+		return -errno;
+
+	lat_usec = set_record_buffer_attr(stream, &stream->attr);
 
 	stream->index = id_to_index(manager, stream->id);
 
-	pw_log_info("[%s] reply CREATE_RECORD_STREAM tag:%u index:%u latency:%s",
-			client->name, stream->create_tag, stream->index, latency);
+	pw_log_info("[%s] reply CREATE_RECORD_STREAM tag:%u index:%u latency:%"PRIu64,
+			client->name, stream->create_tag, stream->index, lat_usec);
 
 	reply = reply_new(client, stream->create_tag);
 	message_put(reply,
@@ -837,7 +855,7 @@ static void manager_metadata(void *data, struct pw_manager_object *o,
 
 static void do_free_client(void *obj, void *data, int res, uint32_t id)
 {
-	struct client *client = data;
+	struct client *client = obj;
 	client_free(client);
 }
 
@@ -845,8 +863,8 @@ static void manager_disconnect(void *data)
 {
 	struct client *client = data;
 	pw_log_debug("manager_disconnect()");
-	pw_work_queue_add(client->impl->work_queue, NULL, 0,
-				do_free_client, client);
+	pw_work_queue_add(client->impl->work_queue, client, 0,
+				do_free_client, NULL);
 }
 
 static const struct pw_manager_events manager_events = {
@@ -952,13 +970,11 @@ static void stream_control_info(void *data, uint32_t id,
 	}
 }
 
-static void on_stream_cleanup(void *obj, void *data, int res, uint32_t id)
+static void do_destroy_stream(void *obj, void *data, int res, uint32_t id)
 {
 	struct stream *stream = obj;
-	struct client *client = stream->client;
+
 	stream_free(stream);
-	if (client->ref <= 0)
-		client_free(client);
 }
 
 static void stream_state_changed(void *data, enum pw_stream_state old,
@@ -967,27 +983,29 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 	struct stream *stream = data;
 	struct client *client = stream->client;
 	struct impl *impl = client->impl;
+	bool destroy_stream = false;
 
 	switch (state) {
 	case PW_STREAM_STATE_ERROR:
 		reply_error(client, -1, stream->create_tag, -EIO);
-		stream->done = true;
+		destroy_stream = true;
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
 		if (stream->create_tag != SPA_ID_INVALID)
 			reply_error(client, -1, stream->create_tag, -ENOENT);
-		else if (!client->disconnecting)
+		else
 			stream->killed = true;
-		stream->done = true;
+		destroy_stream = true;
 		break;
 	case PW_STREAM_STATE_CONNECTING:
 	case PW_STREAM_STATE_PAUSED:
 	case PW_STREAM_STATE_STREAMING:
 		break;
 	}
-	if (stream->done) {
+
+	if (destroy_stream) {
 		pw_work_queue_add(impl->work_queue, stream, 0,
-				on_stream_cleanup, client);
+				do_destroy_stream, NULL);
 	}
 }
 
@@ -1186,8 +1204,8 @@ do_process_done(struct spa_loop *loop,
 					return -errno;
 
 				spa_ringbuffer_read_data(&stream->ring,
-						stream->buffer, stream->attr.maxlength,
-						index % stream->attr.maxlength,
+						stream->buffer, MAXLENGTH,
+						index % MAXLENGTH,
 						msg->data, towrite);
 
 				client_queue_message(client, msg);
@@ -1255,8 +1273,8 @@ static void stream_process(void *data)
 			if ((stream->attr.prebuf == 0 || do_flush) && !stream->corked) {
 				if (avail > 0) {
 					spa_ringbuffer_read_data(&stream->ring,
-						stream->buffer, stream->attr.maxlength,
-						index % stream->attr.maxlength,
+						stream->buffer, MAXLENGTH,
+						index % MAXLENGTH,
 						p, avail);
 				}
 				pd.playing_for = size;
@@ -1282,8 +1300,8 @@ static void stream_process(void *data)
 			size = SPA_MIN(size, minreq);
 
 			spa_ringbuffer_read_data(&stream->ring,
-					stream->buffer, stream->attr.maxlength,
-					index % stream->attr.maxlength,
+					stream->buffer, MAXLENGTH,
+					index % MAXLENGTH,
 					p, size);
 
 			index += size;
@@ -1315,10 +1333,10 @@ static void stream_process(void *data)
 		}
 
 		spa_ringbuffer_write_data(&stream->ring,
-				stream->buffer, stream->attr.maxlength,
-				index % stream->attr.maxlength,
+				stream->buffer, MAXLENGTH,
+				index % MAXLENGTH,
 				SPA_PTROFF(p, buf->datas[0].chunk->offset, void),
-				SPA_MIN(size, stream->attr.maxlength));
+				SPA_MIN(size, MAXLENGTH));
 
 		index += size;
 		pd.write_inc = size;
@@ -2080,7 +2098,7 @@ static int do_create_upload_stream(struct client *client, uint32_t command, uint
 
 	stream->props = props;
 
-	stream->buffer = calloc(1, stream->attr.maxlength);
+	stream->buffer = calloc(1, MAXLENGTH);
 	if (stream->buffer == NULL)
 		goto error_errno;
 
@@ -2139,7 +2157,7 @@ static int do_finish_upload_stream(struct client *client, uint32_t command, uint
 			channel, name);
 
 	struct sample *old = find_sample(impl, SPA_ID_INVALID, name);
-	if (old == NULL || (old != NULL && old->ref > 1)) {
+	if (old == NULL || old->ref > 1) {
 		sample = calloc(1, sizeof(*sample));
 		if (sample == NULL)
 			goto error_errno;
@@ -2326,9 +2344,9 @@ static void on_sample_done(void *obj, void *data, int res, uint32_t id)
 {
 	struct pending_sample *ps = obj;
 	struct client *client = ps->client;
+
 	pending_sample_free(ps);
-	if (client->ref <= 0)
-		client_free(client);
+	client_unref(client);
 }
 
 static void sample_play_done(void *data, int res)
@@ -2342,7 +2360,6 @@ static void sample_play_done(void *data, int res)
 	else
 		pw_log_info("[%s] PLAY_SAMPLE done tag:%u", client->name, ps->tag);
 
-	ps->done = true;
 	pw_work_queue_add(impl->work_queue, ps, 0,
 				on_sample_done, client);
 }
@@ -4299,6 +4316,7 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 	struct message *reply;
 	struct buffer_attr attr;
 	bool adjust_latency = false, early_requests = false;
+	uint64_t lat_usec;
 
 	if (message_get(m,
 			TAG_U32, &channel,
@@ -4348,7 +4366,12 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 
 	reply = reply_new(client, tag);
 
+	stream->adjust_latency = adjust_latency;
+	stream->early_requests = early_requests;
+
 	if (command == COMMAND_SET_PLAYBACK_STREAM_BUFFER_ATTR) {
+		lat_usec = set_playback_buffer_attr(stream, &attr);
+
 		message_put(reply,
 			TAG_U32, stream->attr.maxlength,
 			TAG_U32, stream->attr.tlength,
@@ -4357,17 +4380,19 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 			TAG_INVALID);
 		if (client->version >= 13) {
 			message_put(reply,
-				TAG_USEC, 0LL,		/* configured_sink_latency */
+				TAG_USEC, lat_usec,		/* configured_sink_latency */
 				TAG_INVALID);
 		}
 	} else {
+		lat_usec = set_record_buffer_attr(stream, &attr);
+
 		message_put(reply,
 			TAG_U32, stream->attr.maxlength,
 			TAG_U32, stream->attr.fragsize,
 			TAG_INVALID);
 		if (client->version >= 13) {
 			message_put(reply,
-				TAG_USEC, 0LL,		/* configured_source_latency */
+				TAG_USEC, lat_usec,		/* configured_source_latency */
 				TAG_INVALID);
 		}
 	}
@@ -4803,7 +4828,7 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 	if (module == NULL)
 		return -ENOENT;
 
-	module_unload(client, module);
+	module_unload(module);
 
 	return reply_simple_ack(client, tag);
 }
@@ -5045,55 +5070,66 @@ const struct command commands[COMMAND_MAX] =
 static int impl_free_sample(void *item, void *data)
 {
 	struct sample *s = item;
-	sample_free(s);
+
+	spa_assert(s->ref == 1);
+	sample_unref(s);
+
 	return 0;
 }
 
-static int impl_free_module(void *item, void *data)
+static int impl_unload_module(void *item, void *data)
 {
 	struct module *m = item;
-	module_free(m);
+	module_unload(m);
 	return 0;
 }
 
-static void impl_free(struct impl *impl)
+static void impl_clear(struct impl *impl)
 {
+	struct message *msg;
 	struct server *s;
 	struct client *c;
-	struct message *msg;
 
-#if HAVE_DBUS
-	if (impl->dbus_name)
-		dbus_release_name(impl->dbus_name);
-#endif
+	spa_list_consume(s, &impl->servers, link)
+		server_free(s);
+
+	spa_list_consume(c, &impl->cleanup_clients, link)
+		client_free(c);
 
 	spa_list_consume(msg, &impl->free_messages, link)
 		message_free(impl, msg, true, true);
 
-	if (impl->context != NULL)
-		spa_hook_remove(&impl->context_listener);
-	spa_list_consume(c, &impl->cleanup_clients, link)
-		client_free(c);
-	spa_list_consume(s, &impl->servers, link)
-		server_free(s);
-
 	pw_map_for_each(&impl->samples, impl_free_sample, impl);
 	pw_map_clear(&impl->samples);
-	pw_map_for_each(&impl->modules, impl_free_module, impl);
+
+	pw_map_for_each(&impl->modules, impl_unload_module, impl);
 	pw_map_clear(&impl->modules);
 
+#if HAVE_DBUS
+	if (impl->dbus_name) {
+		dbus_release_name(impl->dbus_name);
+		impl->dbus_name = NULL;
+	}
+#endif
+
+	if (impl->context) {
+		spa_hook_remove(&impl->context_listener);
+		impl->context = NULL;
+	}
+
 	pw_properties_free(impl->props);
+	impl->props = NULL;
+}
+
+static void impl_free(struct impl *impl)
+{
+	impl_clear(impl);
 	free(impl);
 }
 
 static void context_destroy(void *data)
 {
-	struct impl *impl = data;
-	struct server *s;
-	spa_list_consume(s, &impl->servers, link)
-		server_free(s);
-	spa_hook_remove(&impl->context_listener);
-	impl->context = NULL;
+	impl_clear(data);
 }
 
 static const struct pw_context_events context_events = {

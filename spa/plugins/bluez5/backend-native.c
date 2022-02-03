@@ -201,18 +201,20 @@ static struct spa_bt_transport *_transport_create(struct rfcomm *rfcomm)
 	td = t->user_data;
 	td->rfcomm = rfcomm;
 
-	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM ; ++i) {
-		rfcomm->volumes[i].hw_volume = SPA_BT_VOLUME_INVALID;
-		t->volumes[i].active = rfcomm->volumes[i].active;
-		t->volumes[i].hw_volume_max = SPA_BT_VOLUME_HS_MAX;
-	}
-
 	if (t->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY) {
 		t->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_AG_VOLUME;
 		t->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_AG_VOLUME;
 	} else {
 		t->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_RX_VOLUME;
 		t->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_TX_VOLUME;
+	}
+
+	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM ; ++i) {
+		t->volumes[i].active = rfcomm->volumes[i].active;
+		t->volumes[i].hw_volume_max = SPA_BT_VOLUME_HS_MAX;
+		if (rfcomm->volumes[i].active && rfcomm->volumes[i].hw_volume != SPA_BT_VOLUME_INVALID)
+			t->volumes[i].volume =
+				spa_bt_volume_hw_to_linear(rfcomm->volumes[i].hw_volume, t->volumes[i].hw_volume_max);
 	}
 
 	spa_bt_transport_add_listener(t, &rfcomm->transport_listener, &transport_events, rfcomm);
@@ -550,11 +552,10 @@ fail:
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
 
-static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapter, bool msbc);
-
 static bool device_supports_required_mSBC_transport_modes(
-		struct impl *backend, struct spa_bt_device *device) {
-	int sock;
+		struct impl *backend, struct spa_bt_device *device)
+{
+	int res;
 	bool msbc_ok, msbc_alt1_ok;
 	uint32_t bt_features;
 
@@ -575,43 +576,20 @@ static bool device_supports_required_mSBC_transport_modes(
 	if (!msbc_ok && !msbc_alt1_ok)
 		return false;
 
-	/*
-	 * Check if adapter supports BT_VOICE_TRANSPARENT. Do this without
-	 * directly probing HCI properties.
-	 */
-	sock = sco_create_socket(backend, device->adapter, true);
-	if (sock < 0) {
+	res = spa_bt_adapter_has_msbc(device->adapter);
+	if (res < 0) {
+		spa_log_warn(backend->log,
+				"adapter %s: failed to determine msbc/esco capability (%d)",
+				device->adapter->path, res);
+	} else if (res == 0) {
+		spa_log_info(backend->log,
+				"adapter %s: no msbc/esco transport",
+				device->adapter->path);
 		return false;
 	} else {
-		struct sockaddr_sco addr;
-		socklen_t len;
-		int res;
-
-		/* Connect to non-existent address */
-		len = sizeof(addr);
-		memset(&addr, 0, len);
-		addr.sco_family = AF_BLUETOOTH;
-		bacpy(&addr.sco_bdaddr, BDADDR_LOCAL);
-
-		spa_log_debug(backend->log, "connect to determine adapter msbc support...");
-
-		/* Linux kernel code checks for features needed for BT_VOICE_TRANSPARENT
-		 * among the first checks it does, and fails with EOPNOTSUPP if not
-		 * supported. The connection generally timeouts, so set it
-		 * nonblocking since we are just checking.
-		 */
-		fcntl(sock, F_SETFL, O_NONBLOCK);
-		res = connect(sock, (struct sockaddr *) &addr, len);
-		if (res < 0)
-			res = errno;
-		else
-			res = 0;
-		close(sock);
-
-		spa_log_debug(backend->log, "determined adapter-msbc:%d res:%d",
-				(res != EOPNOTSUPP), res);
-		if (res == EOPNOTSUPP)
-			return false;
+		spa_log_debug(backend->log,
+				"adapter %s: has msbc/esco transport",
+				device->adapter->path);
 	}
 
 	/* Check if USB ALT6 is really available on the device */
@@ -705,7 +683,6 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
 	unsigned int indicator_value;
 	int xapl_vendor;
 	int xapl_product;
-	int xapl_version;
 	int xapl_features;
 
 	if (sscanf(buf, "AT+BRSF=%u", &features) == 1) {
@@ -889,7 +866,7 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
 		rfcomm_send_reply(rfcomm, "OK");
 	} else if (sscanf(buf, "AT+BIEV=%u,%u", &indicator, &indicator_value) == 2) {
 		process_hfp_hf_indicator(rfcomm, indicator, indicator_value);
-	} else if (sscanf(buf, "AT+XAPL=%04x-%04x-%04x,%u", &xapl_vendor, &xapl_product, &xapl_version, &xapl_features) == 4) {
+	} else if (sscanf(buf, "AT+XAPL=%04x-%04x-%*[^,],%u", &xapl_vendor, &xapl_product, &xapl_features) == 3) {
 		if (xapl_features & SPA_BT_HFP_HF_XAPL_FEATURE_BATTERY_REPORTING) {
 			/* claim, that we support battery status reports */
 			rfcomm_send_reply(rfcomm, "+XAPL=iPhone,%u", SPA_BT_HFP_HF_XAPL_FEATURE_BATTERY_REPORTING);
@@ -1155,6 +1132,7 @@ static int sco_do_connect(struct spa_bt_transport *t)
 {
 	struct impl *backend = SPA_CONTAINER_OF(t->backend, struct impl, this);
 	struct spa_bt_device *d = t->device;
+	struct transport_data *td = t->user_data;
 	struct sockaddr_sco addr;
 	socklen_t len;
 	int err;
@@ -1189,6 +1167,21 @@ again:
 		goto again;
 	} else if (err < 0 && !(errno == EAGAIN || errno == EINPROGRESS)) {
 		spa_log_error(backend->log, "connect(): %s", strerror(errno));
+#ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
+		if (errno == EOPNOTSUPP && t->codec == HFP_AUDIO_CODEC_MSBC &&
+				td->rfcomm->msbc_supported_by_hfp) {
+			/* Adapter doesn't support msbc. Renegotiate. */
+			d->adapter->msbc_probed = true;
+			d->adapter->has_msbc = false;
+			td->rfcomm->msbc_supported_by_hfp = false;
+			if (t->profile == SPA_BT_PROFILE_HFP_HF) {
+				td->rfcomm->hfp_ag_switching_codec = true;
+				rfcomm_send_reply(td->rfcomm, "+BCS: 1");
+			} else if (t->profile == SPA_BT_PROFILE_HFP_AG) {
+				rfcomm_send_cmd(td->rfcomm, "AT+BAC=1");
+			}
+		}
+#endif
 		goto fail_close;
 	}
 
@@ -1209,10 +1202,6 @@ static int sco_acquire_cb(void *data, bool optional)
 
 	spa_log_debug(backend->log, "transport %p: enter sco_acquire_cb", t);
 
-#ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
-	rfcomm_hfp_ag_set_cind(td->rfcomm, true);
-#endif
-
 	if (optional || t->fd > 0)
 		sock = t->fd;
 	else
@@ -1220,6 +1209,10 @@ static int sco_acquire_cb(void *data, bool optional)
 
 	if (sock < 0)
 		goto fail;
+
+#ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
+	rfcomm_hfp_ag_set_cind(td->rfcomm, true);
+#endif
 
 	t->fd = sock;
 
