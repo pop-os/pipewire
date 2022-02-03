@@ -99,6 +99,7 @@ bool client_detach(struct client *client)
 
 	/* remove from the `server->clients` list */
 	spa_list_remove(&client->link);
+	spa_list_append(&impl->cleanup_clients, &client->link);
 
 	server->n_clients--;
 	if (server->wait_clients > 0 && --server->wait_clients == 0) {
@@ -125,15 +126,18 @@ void client_disconnect(struct client *client)
 	spa_assert(client->server == NULL);
 
 	client->disconnect = true;
-	spa_list_append(&impl->cleanup_clients, &client->link);
 
 	pw_map_for_each(&client->streams, client_free_stream, client);
 
-	if (client->source)
+	if (client->source) {
 		pw_loop_destroy_source(impl->loop, client->source);
+		client->source = NULL;
+	}
 
-	if (client->manager)
+	if (client->manager) {
 		pw_manager_destroy(client->manager);
+		client->manager = NULL;
+	}
 }
 
 void client_free(struct client *client)
@@ -163,12 +167,12 @@ void client_free(struct client *client)
 	spa_list_consume(o, &client->operations, link)
 		operation_free(o);
 
-	if (client->core) {
-		client->disconnecting = true;
+	if (client->core)
 		pw_core_disconnect(client->core);
-	}
 
 	pw_map_clear(&client->streams);
+
+	pw_work_queue_cancel(impl->work_queue, client, SPA_ID_INVALID);
 
 	free(client->default_sink);
 	free(client->default_source);
