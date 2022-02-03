@@ -1,4 +1,5 @@
 usr/share/pipewire/filter-chain/demonic.conf
+usr/share/pipewire/filter-chain/duplicate-FL.conf
 usr/share/pipewire/filter-chain/sink-convolver.conf
 usr/share/pipewire/filter-chain/sink-dolby-surround.conf
 usr/share/pipewire/filter-chain/sink-eq6.conf

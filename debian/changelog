@@ -2,6 +2,7 @@ pipewire (0.3.45-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Don't install new filter-chain example conf file
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Feb 2022 18:15:20 +0100
 
