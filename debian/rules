@@ -31,7 +31,6 @@ override_dh_auto_configure:
 		-Dauto_features=enabled \
 		-Davahi=enabled \
 		-Dbluez5-codec-aac=disabled \
-		-Dbluez5-codec-aptx=disabled \
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
 		-Dlibcamera=disabled \
 		-Ddocs=$(DOCS) \
