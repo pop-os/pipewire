@@ -209,14 +209,14 @@ static struct stream *find_stream(struct client *client, uint32_t index)
 }
 
 static int send_object_event(struct client *client, struct pw_manager_object *o,
-		uint32_t facility)
+		uint32_t type)
 {
 	uint32_t event = 0, mask = 0, res_index = o->index;
 
 	if (pw_manager_object_is_sink(o)) {
 		client_queue_subscribe_event(client,
 				SUBSCRIPTION_MASK_SINK,
-				SUBSCRIPTION_EVENT_SINK | facility,
+				SUBSCRIPTION_EVENT_SINK | type,
 				res_index);
 	}
 	if (pw_manager_object_is_source_or_monitor(o)) {
@@ -248,7 +248,7 @@ static int send_object_event(struct client *client, struct pw_manager_object *o,
 	if (event != SPA_ID_INVALID)
 		client_queue_subscribe_event(client,
 				mask,
-				event | facility,
+				event | type,
 				res_index);
 	return 0;
 }
@@ -374,15 +374,14 @@ static uint32_t fix_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 
 	if (attr->maxlength == (uint32_t) -1 || attr->maxlength > MAXLENGTH)
 		attr->maxlength = MAXLENGTH;
-	attr->maxlength -= attr->maxlength % frame_size;
-	attr->maxlength = SPA_MAX(attr->maxlength, frame_size);
+	attr->maxlength = SPA_ROUND_UP(attr->maxlength, frame_size);
+
+	minreq = SPA_MIN(minreq, attr->maxlength);
 
 	if (attr->tlength == (uint32_t) -1)
 		attr->tlength = frac_to_bytes_round_up(s->default_tlength, &s->ss);
-	if (attr->tlength > attr->maxlength)
-		attr->tlength = attr->maxlength;
-	attr->tlength -= attr->tlength % frame_size;
-	attr->tlength = SPA_MAX(attr->tlength, frame_size);
+	attr->tlength = SPA_MIN(attr->tlength, attr->maxlength);
+	attr->tlength = SPA_ROUND_UP(attr->tlength, frame_size);
 	attr->tlength = SPA_MAX(attr->tlength, minreq);
 
 	if (attr->minreq == (uint32_t) -1) {
@@ -390,13 +389,13 @@ static uint32_t fix_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 		/* With low-latency, tlength/4 gives a decent default in all of traditional,
 		 * adjust latency and early request modes. */
 		uint32_t m = attr->tlength / 4;
-		m -= m % frame_size;
+		m = SPA_ROUND_DOWN(m, frame_size);
 		attr->minreq = SPA_MIN(process, m);
 	}
 	attr->minreq = SPA_MAX(attr->minreq, minreq);
 
 	if (attr->tlength < attr->minreq+frame_size)
-		attr->tlength = attr->minreq + frame_size;
+		attr->tlength = SPA_MIN(attr->minreq + frame_size, attr->maxlength);
 
 	if (s->early_requests) {
 		latency = attr->minreq;
@@ -406,7 +405,7 @@ static uint32_t fix_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 		else
 			latency = attr->minreq;
 
-		latency -= latency % frame_size;
+		latency = SPA_ROUND_DOWN(latency, frame_size);
 
 		if (attr->tlength >= latency)
 			attr->tlength -= latency;
@@ -418,20 +417,20 @@ static uint32_t fix_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 	}
 
 	if (attr->tlength < latency + 2 * attr->minreq)
-		attr->tlength = latency + 2 * attr->minreq;
+		attr->tlength = SPA_MIN(latency + 2 * attr->minreq, attr->maxlength);
 
-	attr->minreq -= attr->minreq % frame_size;
+	attr->minreq = SPA_ROUND_DOWN(attr->minreq, frame_size);
 	if (attr->minreq <= 0) {
 		attr->minreq = frame_size;
 		attr->tlength += frame_size*2;
 	}
 	if (attr->tlength <= attr->minreq)
-		attr->tlength = attr->minreq*2 + frame_size;
+		attr->tlength = SPA_MIN(attr->minreq*2 + frame_size, attr->maxlength);
 
 	max_prebuf = attr->tlength + frame_size - attr->minreq;
 	if (attr->prebuf == (uint32_t) -1 || attr->prebuf > max_prebuf)
 		attr->prebuf = max_prebuf;
-	attr->prebuf -= attr->prebuf % frame_size;
+	attr->prebuf = SPA_ROUND_DOWN(attr->prebuf, frame_size);
 
 	attr->fragsize = 0;
 
@@ -946,6 +945,9 @@ static int do_subscribe(struct client *client, uint32_t command, uint32_t tag, s
 
 	pw_log_info("[%s] SUBSCRIBE tag:%u mask:%08x",
 			client->name, tag, mask);
+
+	if (mask & ~SUBSCRIPTION_MASK_ALL)
+		return -EINVAL;
 
 	client->subscribed = mask;
 
@@ -2322,11 +2324,12 @@ static struct pw_manager_object *find_device(struct client *client,
 	return o;
 }
 
-static void sample_play_ready(void *data, uint32_t index)
+static void sample_play_ready(void *data, uint32_t id)
 {
 	struct pending_sample *ps = data;
 	struct client *client = ps->client;
 	struct message *reply;
+	uint32_t index = id_to_index(client->manager, id);
 
 	pw_log_info("[%s] PLAY_SAMPLE tag:%u index:%u",
 			client->name, ps->tag, index);
@@ -3556,6 +3559,9 @@ static int fill_sink_info(struct client *client, struct message *m,
 		snprintf(monitor_name, size, "%s.monitor", name);
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
+		module_id = id_to_index(manager, (uint32_t)atoi(str));
+	if (module_id == SPA_ID_INVALID &&
+	    (str = spa_dict_lookup(info->props, "pulse.module.id")) != NULL)
 		module_id = (uint32_t)atoi(str);
 	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL)
 		card_id = (uint32_t)atoi(str);
@@ -3601,7 +3607,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 		TAG_STRING, desc,
 		TAG_SAMPLE_SPEC, &dev_info.ss,
 		TAG_CHANNEL_MAP, &dev_info.map,
-		TAG_U32, id_to_index(manager, module_id),	/* module index */
+		TAG_U32, module_id,			/* module index */
 		TAG_CVOLUME, &dev_info.volume_info.volume,
 		TAG_BOOLEAN, dev_info.volume_info.mute,
 		TAG_U32, o->index,			/* monitor source index */
@@ -3760,6 +3766,9 @@ static int fill_source_info(struct client *client, struct message *m,
 	snprintf(monitor_desc, size, "Monitor of %s", desc);
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
+		module_id = id_to_index(manager, (uint32_t)atoi(str));
+	if (module_id == SPA_ID_INVALID &&
+	    (str = spa_dict_lookup(info->props, "pulse.module.id")) != NULL)
 		module_id = (uint32_t)atoi(str);
 	if ((str = spa_dict_lookup(info->props, PW_KEY_DEVICE_ID)) != NULL)
 		card_id = (uint32_t)atoi(str);
@@ -3804,7 +3813,7 @@ static int fill_source_info(struct client *client, struct message *m,
 		TAG_STRING, is_monitor ? monitor_desc : desc,
 		TAG_SAMPLE_SPEC, &dev_info.ss,
 		TAG_CHANNEL_MAP, &dev_info.map,
-		TAG_U32, id_to_index(manager, module_id),	/* module index */
+		TAG_U32, module_id,				/* module index */
 		TAG_CVOLUME, &dev_info.volume_info.volume,
 		TAG_BOOLEAN, dev_info.volume_info.mute,
 		TAG_U32, is_monitor ? o->index : SPA_ID_INVALID,/* monitor of sink */
@@ -3908,7 +3917,11 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
+		module_id = id_to_index(manager, (uint32_t)atoi(str));
+	if (module_id == SPA_ID_INVALID &&
+	    (str = spa_dict_lookup(info->props, "pulse.module.id")) != NULL)
 		module_id = (uint32_t)atoi(str);
+
 	if (!pw_manager_object_is_virtual(o) &&
 	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
@@ -3929,7 +3942,7 @@ static int fill_sink_input_info(struct client *client, struct message *m,
 	message_put(m,
 		TAG_U32, o->index,				/* sink_input index */
 		TAG_STRING, get_media_name(info),
-		TAG_U32, id_to_index(manager, module_id),	/* module index */
+		TAG_U32, module_id,				/* module index */
 		TAG_U32, id_to_index(manager, client_id),	/* client index */
 		TAG_U32, peer_index,				/* sink index */
 		TAG_SAMPLE_SPEC, &dev_info.ss,
@@ -3984,7 +3997,11 @@ static int fill_source_output_info(struct client *client, struct message *m,
 		return -ENOENT;
 
 	if ((str = spa_dict_lookup(info->props, PW_KEY_MODULE_ID)) != NULL)
+		module_id = id_to_index(manager, (uint32_t)atoi(str));
+	if (module_id == SPA_ID_INVALID &&
+	    (str = spa_dict_lookup(info->props, "pulse.module.id")) != NULL)
 		module_id = (uint32_t)atoi(str);
+
 	if (!pw_manager_object_is_virtual(o) &&
 	    (str = spa_dict_lookup(info->props, PW_KEY_CLIENT_ID)) != NULL)
 		client_id = (uint32_t)atoi(str);
@@ -4005,7 +4022,7 @@ static int fill_source_output_info(struct client *client, struct message *m,
 	message_put(m,
 		TAG_U32, o->index,				/* source_output index */
 		TAG_STRING, get_media_name(info),
-		TAG_U32, id_to_index(manager, module_id),	/* module index */
+		TAG_U32, module_id,				/* module index */
 		TAG_U32, id_to_index(manager, client_id),	/* client index */
 		TAG_U32, peer_index,				/* source index */
 		TAG_SAMPLE_SPEC, &dev_info.ss,
@@ -4684,8 +4701,8 @@ static void handle_module_loaded(struct module *module, struct client *client, u
 	spa_assert(!SPA_RESULT_IS_ASYNC(result));
 
 	if (SPA_RESULT_IS_OK(result)) {
-		pw_log_info("[%s] loaded module index:%u name:%s",
-				client_name, module->index, module->name);
+		pw_log_info("[%s] loaded module index:%u name:%s tag:%d",
+				client_name, module->index, module->name, tag);
 
 		module->loaded = true;
 
@@ -4704,9 +4721,9 @@ static void handle_module_loaded(struct module *module, struct client *client, u
 		}
 	}
 	else {
-		pw_log_warn("%p: [%s] failed to load module index:%u name:%s result:%d (%s)",
+		pw_log_warn("%p: [%s] failed to load module index:%u name:%s tag:%d result:%d (%s)",
 				impl, client_name,
-				module->index, module->name,
+				module->index, module->name, tag,
 				result, spa_strerror(result));
 
 		module_schedule_unload(module);
@@ -4723,34 +4740,92 @@ struct pending_module {
 	struct module *module;
 	struct spa_hook module_listener;
 
+	struct spa_hook manager_listener;
+
 	uint32_t tag;
+
+	int result;
+	bool wait_sync;
 };
+
+static void finish_pending_module(struct pending_module *pm)
+{
+	spa_hook_remove(&pm->module_listener);
+
+	if (pm->client != NULL) {
+		spa_hook_remove(&pm->client_listener);
+		spa_hook_remove(&pm->manager_listener);
+	}
+
+	handle_module_loaded(pm->module, pm->client, pm->tag, pm->result);
+	free(pm);
+}
+
+static void on_load_module_manager_sync(void *data)
+{
+	struct pending_module *pm = data;
+
+	pw_log_debug("pending module %p: manager sync wait_sync:%d tag:%d",
+			pm, pm->wait_sync, pm->tag);
+
+	if (!pm->wait_sync)
+		return;
+
+	finish_pending_module(pm);
+}
 
 static void on_module_loaded(void *data, int result)
 {
 	struct pending_module *pm = data;
 
-	if (pm->client != NULL)
-		spa_hook_remove(&pm->client_listener);
+	pw_log_debug("pending module %p: loaded, result:%d tag:%d",
+			pm, result, pm->tag);
 
-	spa_hook_remove(&pm->module_listener);
+	pm->result = result;
 
-	handle_module_loaded(pm->module, pm->client, pm->tag, result);
+	/*
+	 * Do manager sync first: the module may have its own core, so
+	 * although things are completed on the server, our client
+	 * might not yet see them.
+	 */
 
-	free(pm);
+	if (pm->client == NULL) {
+		finish_pending_module(pm);
+	} else {
+		pw_log_debug("pending module %p: wait manager sync tag:%d", pm, pm->tag);
+		pm->wait_sync = true;
+		pw_manager_sync(pm->client->manager);
+	}
 }
 
 static void on_module_destroy(void *data)
 {
-	on_module_loaded(data, -ECANCELED);
+	struct pending_module *pm = data;
+
+	pw_log_debug("pending module %p: destroyed, tag:%d",
+			pm, pm->tag);
+
+	pm->result = -ECANCELED;
+	finish_pending_module(pm);
 }
 
 static void on_client_disconnect(void *data)
 {
 	struct pending_module *pm = data;
 
+	pw_log_debug("pending module %p: client disconnect tag:%d", pm, pm->tag);
+
 	spa_hook_remove(&pm->client_listener);
+	spa_hook_remove(&pm->manager_listener);
 	pm->client = NULL;
+
+	if (pm->wait_sync)
+		finish_pending_module(pm);
+}
+
+static void on_load_module_manager_disconnect(void *data)
+{
+	on_client_disconnect(data);
 }
 
 static int do_load_module(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -4764,9 +4839,15 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 		VERSION_CLIENT_EVENTS,
 		.disconnect = on_client_disconnect,
 	};
+	static const struct pw_manager_events manager_events = {
+		PW_VERSION_MANAGER_EVENTS,
+		.disconnect = on_load_module_manager_disconnect,
+		.sync = on_load_module_manager_sync,
+	};
 
 	const char *name, *argument;
 	struct module *module;
+	struct pending_module *pm;
 	int r;
 
 	if (message_get(m,
@@ -4782,21 +4863,24 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 	if (module == NULL)
 		return -errno;
 
+	pm = calloc(1, sizeof(*pm));
+	if (pm == NULL)
+		return -errno;
+
+	pm->tag = tag;
+	pm->client = client;
+	pm->module = module;
+
+	pw_log_debug("pending module %p: start tag:%d", pm, tag);
+
 	r = module_load(client, module);
-	if (SPA_RESULT_IS_ASYNC(r)) {
-		struct pending_module *pm = calloc(1, sizeof(*pm));
-		if (pm == NULL)
-			return -errno;
 
-		pm->tag = tag;
-		pm->client = client;
-		pm->module = module;
+	module_add_listener(module, &pm->module_listener, &module_events, pm);
+	client_add_listener(client, &pm->client_listener, &client_events, pm);
+	pw_manager_add_listener(client->manager, &pm->manager_listener, &manager_events, pm);
 
-		module_add_listener(module, &pm->module_listener, &module_events, pm);
-		client_add_listener(client, &pm->client_listener, &client_events, pm);
-	} else {
-		handle_module_loaded(module, client, tag, r);
-	}
+	if (!SPA_RESULT_IS_ASYNC(r))
+		on_module_loaded(pm, r);
 
 	/*
 	 * return 0 to prevent `handle_packet()` from sending a reply
@@ -4830,7 +4914,7 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 
 	module_unload(module);
 
-	return reply_simple_ack(client, tag);
+	return operation_new(client, tag);
 }
 
 static int do_send_object_message(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5105,7 +5189,7 @@ static void impl_clear(struct impl *impl)
 	pw_map_for_each(&impl->modules, impl_unload_module, impl);
 	pw_map_clear(&impl->modules);
 
-#if HAVE_DBUS
+#ifdef HAVE_DBUS
 	if (impl->dbus_name) {
 		dbus_release_name(impl->dbus_name);
 		impl->dbus_name = NULL;
@@ -5276,7 +5360,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	pw_context_add_listener(context, &impl->context_listener,
 			&context_events, impl);
 
-#if HAVE_DBUS
+#ifdef HAVE_DBUS
 	impl->dbus_name = dbus_request_name(context, "org.pulseaudio.Server");
 #endif
 

@@ -64,15 +64,13 @@
 
 #define JACK_CLIENT_NAME_SIZE		128
 #define JACK_PORT_NAME_SIZE		256
-#define JACK_PORT_MAX			4096
 #define JACK_PORT_TYPE_SIZE             32
-#define CONNECTION_NUM_FOR_PORT		1024
 #define MONITOR_EXT			" Monitor"
 
+#define MAX_MIDI_MIX			1024
 #define MAX_BUFFER_FRAMES		8192
 
 #define MAX_ALIGN			16
-#define MAX_PORTS			1024
 #define MAX_BUFFERS			2
 #define MAX_BUFFER_DATAS		1u
 
@@ -380,6 +378,7 @@ struct client {
 	} rt;
 
 	pthread_mutex_t rt_lock;
+	unsigned int rt_locked:1;
 
 	unsigned int started:1;
 	unsigned int active:1;
@@ -396,6 +395,7 @@ struct client {
 	unsigned int filter_name:1;
 	unsigned int freewheeling:1;
 	unsigned int locked_process:1;
+	unsigned int default_as_system:1;
 	int self_connect_mode;
 	int rt_max;
 
@@ -808,7 +808,9 @@ void jack_get_version(int *major_ptr, int *minor_ptr, int *micro_ptr, int *proto
 	int res = 0;						\
 	if (c->callback) {					\
 		if (pthread_mutex_trylock(&c->rt_lock) == 0) {	\
+			c->rt_locked = true;			\
 			res = c->callback(__VA_ARGS__);		\
+			c->rt_locked = false;			\
 			pthread_mutex_unlock(&c->rt_lock);	\
 		}						\
 	}							\
@@ -859,6 +861,8 @@ static const struct pw_core_events core_events = {
 
 static int do_sync(struct client *client)
 {
+	bool in_data_thread = pw_data_loop_in_thread(client->loop);
+
 	if (pw_thread_loop_in_thread(client->context.loop)) {
 		pw_log_warn("sync requested from callback");
 		return 0;
@@ -869,7 +873,13 @@ static int do_sync(struct client *client)
 	client->pending_sync = pw_proxy_sync((struct pw_proxy*)client->core, client->pending_sync);
 
 	while (true) {
+		if (in_data_thread && client->rt_locked)
+			pthread_mutex_unlock(&client->rt_lock);
+
 	        pw_thread_loop_wait(client->context.loop);
+
+		if (in_data_thread && client->rt_locked)
+			pthread_mutex_lock(&client->rt_lock);
 
 		if (client->error)
 			return client->last_res;
@@ -891,6 +901,7 @@ static void on_node_destroy(void *data)
 	struct client *client = data;
 	client->node = NULL;
 	spa_hook_remove(&client->proxy_listener);
+	spa_hook_remove(&client->node_listener);
 }
 
 static void on_node_bound(void *data, uint32_t global_id)
@@ -3087,25 +3098,13 @@ static void varargs_parse (struct client *c, jack_options_t options, va_list ap)
 }
 
 
-static int execute_match(void *data, const char *action, const char *val, int len)
+static int execute_match(void *data, const char *location, const char *action,
+		const char *val, size_t len)
 {
 	struct client *client = data;
 	if (spa_streq(action, "update-props"))
 		pw_properties_update_string(client->props, val, len);
 	return 1;
-}
-
-static int apply_jack_rules(void *data, const char *location, const char *section,
-		const char *str, size_t len)
-{
-	struct client *client = data;
-	const struct pw_properties *p =
-		pw_context_get_properties(client->context.context);
-
-	if (p != NULL)
-		pw_jack_match_rules(str, len, &p->dict, execute_match, client);
-
-	return 0;
 }
 
 SPA_EXPORT
@@ -3171,15 +3170,15 @@ jack_client_t * jack_client_open (const char *client_name,
         if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
 		pw_properties_update_string(client->props, str, strlen(str));
 
-
-	pw_context_conf_section_for_each(client->context.context, "jack.rules",
-			apply_jack_rules, client);
+	pw_context_conf_section_match_rules(client->context.context, "jack.rules",
+			&client->props->dict, execute_match, client);
 
 	client->show_monitor = pw_properties_get_bool(client->props, "jack.show-monitor", true);
 	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", false);
 	client->short_name = pw_properties_get_bool(client->props, "jack.short-name", false);
 	client->filter_name = pw_properties_get_bool(client->props, "jack.filter-name", false);
 	client->locked_process = pw_properties_get_bool(client->props, "jack.locked-process", true);
+	client->default_as_system = pw_properties_get_bool(client->props, "jack.default-as-system", false);
 
 	client->self_connect_mode = SELF_CONNECT_ALLOW;
 	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
@@ -3221,8 +3220,8 @@ jack_client_t * jack_client_open (const char *client_name,
         spa_list_init(&client->mix);
         spa_list_init(&client->free_mix);
 
-	pw_map_init(&client->ports[SPA_DIRECTION_INPUT], MAX_PORTS, 32);
-	pw_map_init(&client->ports[SPA_DIRECTION_OUTPUT], MAX_PORTS, 32);
+	pw_map_init(&client->ports[SPA_DIRECTION_INPUT], 32, 32);
+	pw_map_init(&client->ports[SPA_DIRECTION_OUTPUT], 32, 32);
 	spa_list_init(&client->free_ports);
 
 	pw_thread_loop_start(client->context.loop);
@@ -3278,6 +3277,8 @@ jack_client_t * jack_client_open (const char *client_name,
 		pw_properties_set(client->props, PW_KEY_MEDIA_ROLE, "DSP");
 	if (pw_properties_get(client->props, PW_KEY_NODE_ALWAYS_PROCESS) == NULL)
 		pw_properties_set(client->props, PW_KEY_NODE_ALWAYS_PROCESS, "true");
+	if (pw_properties_get(client->props, PW_KEY_NODE_LOCK_QUANTUM) == NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_LOCK_QUANTUM, "true");
 	pw_properties_set(client->props, PW_KEY_NODE_TRANSPORT_SYNC, "true");
 
 	client->node = pw_core_create_object(client->core,
@@ -3295,8 +3296,8 @@ jack_client_t * jack_client_open (const char *client_name,
 			&client->proxy_listener, &node_proxy_events, client);
 
 	client->info = SPA_NODE_INFO_INIT();
-	client->info.max_input_ports = MAX_PORTS;
-	client->info.max_output_ports = MAX_PORTS;
+	client->info.max_input_ports = UINT32_MAX;
+	client->info.max_output_ports = UINT32_MAX;
 	client->info.change_mask = SPA_NODE_CHANGE_MASK_FLAGS |
 		SPA_NODE_CHANGE_MASK_PROPS;
 	client->info.flags = SPA_NODE_FLAG_RT;
@@ -3383,11 +3384,14 @@ int jack_client_close (jack_client_t *client)
 
 	pw_thread_loop_stop(c->context.loop);
 
-	if (c->registry)
+	if (c->registry) {
+		spa_hook_remove(&c->registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)c->registry);
+	}
 	if (c->metadata && c->metadata->proxy) {
 		pw_proxy_destroy((struct pw_proxy*)c->metadata->proxy);
 	}
+	spa_hook_remove(&c->core_listener);
 	pw_core_disconnect(c->core);
 	pw_context_destroy(c->context.context);
 
@@ -3996,15 +4000,12 @@ SPA_EXPORT
 int jack_set_buffer_size (jack_client_t *client, jack_nframes_t nframes)
 {
 	struct client *c = (struct client *) client;
-	char latency[128];
 
 	spa_return_val_if_fail(c != NULL, -EINVAL);
 
-	snprintf(latency, sizeof(latency), "%d/%d", nframes, jack_get_sample_rate(client));
-	pw_log_info("%p: buffer-size %s", client, latency);
+	pw_log_info("%p: buffer-size %u", client, nframes);
 
 	pw_thread_loop_lock(c->context.loop);
-	pw_properties_set(c->props, PW_KEY_NODE_LATENCY, latency);
 	pw_properties_setf(c->props, PW_KEY_NODE_FORCE_QUANTUM, "%u", nframes);
 
 	c->info.change_mask |= SPA_NODE_CHANGE_MASK_PROPS;
@@ -4334,7 +4335,7 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
 	void *ptr = p->emptyptr;
-	struct spa_pod_sequence *seq[CONNECTION_NUM_FOR_PORT];
+	struct spa_pod_sequence *seq[MAX_MIDI_MIX];
 	uint32_t n_seq = 0;
 
 	jack_midi_clear_buffer(ptr);
@@ -4358,6 +4359,8 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 			continue;
 
 		seq[n_seq++] = pod;
+		if (n_seq == MAX_MIDI_MIX)
+			break;
 	}
 	convert_to_midi(seq, n_seq, ptr);
 
@@ -4439,12 +4442,23 @@ jack_uuid_t jack_port_uuid (const jack_port_t *port)
 	return jack_port_uuid_generate(o->serial);
 }
 
+static const char *port_name(struct object *o)
+{
+	const char *name;
+	struct client *c = o->client;
+	if (c->default_as_system && is_port_default(c, o))
+		name = o->port.system;
+	else
+		name = o->port.name;
+	return name;
+}
+
 SPA_EXPORT
 const char * jack_port_name (const jack_port_t *port)
 {
 	struct object *o = (struct object *) port;
 	spa_return_val_if_fail(o != NULL, NULL);
-	return o->port.name;
+	return port_name(o);
 }
 
 SPA_EXPORT
@@ -4452,7 +4466,7 @@ const char * jack_port_short_name (const jack_port_t *port)
 {
 	struct object *o = (struct object *) port;
 	spa_return_val_if_fail(o != NULL, NULL);
-	return strchr(o->port.name, ':') + 1;
+	return strchr(port_name(o), ':') + 1;
 }
 
 SPA_EXPORT
@@ -4583,11 +4597,12 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 	struct object *p, *l;
 	const char **res;
 	int count = 0;
+	struct pw_array tmp;
 
 	spa_return_val_if_fail(c != NULL, NULL);
 	spa_return_val_if_fail(o != NULL, NULL);
 
-	res = malloc(sizeof(char*) * (CONNECTION_NUM_FOR_PORT + 1));
+	pw_array_init(&tmp, sizeof(void*) * 32);
 
 	pthread_mutex_lock(&c->context.lock);
 	spa_list_for_each(l, &c->context.objects, link) {
@@ -4603,18 +4618,18 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 		if (p == NULL)
 			continue;
 
-		res[count++] = p->port.name;
-		if (count == CONNECTION_NUM_FOR_PORT)
-			break;
+		pw_array_add_ptr(&tmp, (void*)port_name(p));
+		count++;
 	}
 	pthread_mutex_unlock(&c->context.lock);
 
 	if (count == 0) {
-		free(res);
+		pw_array_clear(&tmp);
 		res = NULL;
-	} else
-		res[count] = NULL;
-
+	} else {
+		pw_array_add_ptr(&tmp, NULL);
+		res = tmp.data;
+	}
 	return res;
 }
 
@@ -5340,7 +5355,7 @@ const char ** jack_get_ports (jack_client_t *client,
 	struct client *c = (struct client *) client;
 	const char **res;
 	struct object *o;
-	struct object *tmp[JACK_PORT_MAX];
+	struct pw_array tmp;
 	const char *str;
 	uint32_t i, count, id;
 	int r;
@@ -5370,14 +5385,14 @@ const char ** jack_get_ports (jack_client_t *client,
 			port_name_pattern, type_name_pattern, flags);
 
 	pthread_mutex_lock(&c->context.lock);
+	pw_array_init(&tmp, sizeof(void*) * 32);
 	count = 0;
+
 	spa_list_for_each(o, &c->context.objects, link) {
 		if (o->type != INTERFACE_Port || o->removed)
 			continue;
 		pw_log_debug("%p: check port type:%d flags:%08lx name:\"%s\"", c,
 				o->port.type_id, o->port.flags, o->port.name);
-		if (count == JACK_PORT_MAX)
-			break;
 		if (o->port.type_id > TYPE_ID_VIDEO)
 			continue;
 		if (!SPA_FLAG_IS_SET(o->port.flags, flags))
@@ -5398,21 +5413,22 @@ const char ** jack_get_ports (jack_client_t *client,
 						0, NULL, 0) == REG_NOMATCH)
 				continue;
 		}
-
 		pw_log_debug("%p: port \"%s\" prio:%d matches (%d)",
 				c, o->port.name, o->port.priority, count);
-		tmp[count++] = o;
+
+		pw_array_add_ptr(&tmp, o);
+		count++;
 	}
 	pthread_mutex_unlock(&c->context.lock);
 
 	if (count > 0) {
-		qsort(tmp, count, sizeof(struct object *), port_compare_func);
-
-		res = malloc(sizeof(char*) * (count + 1));
+		qsort(tmp.data, count, sizeof(struct object *), port_compare_func);
+		pw_array_add_ptr(&tmp, NULL);
+		res = tmp.data;
 		for (i = 0; i < count; i++)
-			res[i] = tmp[i]->port.name;
-		res[count] = NULL;
+			res[i] = port_name((struct object*)res[i]);
 	} else {
+		pw_array_clear(&tmp);
 		res = NULL;
 	}
 

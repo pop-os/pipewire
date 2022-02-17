@@ -43,18 +43,20 @@
 #include <spa/param/audio/raw.h>
 #include <spa/param/profiler.h>
 #include <spa/pod/builder.h>
+#include <spa/support/plugin.h>
 #include <spa/utils/json.h>
+#include <spa/utils/names.h>
 #include <spa/utils/result.h>
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/string.h>
+#include <spa/support/plugin-loader.h>
+#include <spa/interfaces/audio/aec.h>
 
 #include <pipewire/private.h>
 #include <pipewire/impl.h>
 #include <pipewire/pipewire.h>
 
 #include <pipewire/extensions/profiler.h>
-
-#include "module-echo-cancel/echo-cancel.h"
 
 /** \page page_module_echo_cancel PipeWire Module: Echo Cancel
  *
@@ -68,8 +70,8 @@
  *
  * - `source.props = {}`: properties to be passed to the source stream
  * - `sink.props = {}`: properties to be passed to the sink stream
- * - `aec.method = <str>`: the echo cancellation method. Currently supported:
- * `webrtc`. Leave unset to use the default method (`webrtc`).
+ * - `library.name = <str>`: the echo cancellation library  Currently supported:
+ * `aec/libspa-aec-exaudio`. Leave unset to use the default method (`aec/libspa-aec-exaudio`).
  * - `aec.args = <str>`: arguments to pass to the echo cancellation method
  *
  * ## General options
@@ -94,7 +96,7 @@
  * context.modules = [
  *  {   name = libpipewire-module-echo-cancel
  *      args = {
- *          # aec.method = webrtc
+ *          # library.name  = aec/libspa-aec-exaudio
  *          # node.latency = 1024/48000
  *          source.props = {
  *             node.name = "Echo Cancellation Source"
@@ -138,7 +140,7 @@ static const struct spa_dict_item module_props[] = {
 				"[ audio.position=<channel map> ] "
 				"[ buffer.max_size=<max buffer size in ms> ] "
 				"[ buffer.play_delay=<play delay in ms> ] "
-				"[ aec.method=<aec method> ] "
+				"[ library.name =<library name> ] "
 				"[ aec.args=<aec arguments> ] "
 				"[ source.props=<properties> ] "
 				"[ sink.props=<properties> ] " },
@@ -185,8 +187,7 @@ struct impl {
 	uint32_t out_ringsize;
 	struct spa_ringbuffer out_ring;
 
-	const struct echo_cancel_info *aec_info;
-	void *aec;
+	struct spa_audio_aec *aec;
 	uint32_t aec_blocksize;
 
 	unsigned int capture_ready:1;
@@ -197,6 +198,9 @@ struct impl {
 
 	uint32_t max_buffer_size;
 	uint32_t buffer_delay;
+
+	struct spa_handle *spa_handle;
+	struct spa_plugin_loader *loader;
 };
 
 static void do_unload_module(void *obj, void *data, int res, uint32_t id)
@@ -283,7 +287,7 @@ static void process(struct impl *impl)
 	pw_stream_queue_buffer(impl->playback, pout);
 
 	/* Now run the canceller */
-	echo_cancel_run(impl->aec_info, impl->aec, rec,	play_delayed, out, size / sizeof(float));
+	spa_audio_aec_run(impl->aec, rec, play_delayed, out, size / sizeof(float));
 
 	/* Next, copy over the output to the output ringbuffer */
 	avail = spa_ringbuffer_get_write_index(&impl->out_ring, &oindex);
@@ -647,8 +651,8 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_LINK_GROUP, str);
 	if ((str = pw_properties_get(impl->source_props, PW_KEY_NODE_LATENCY)) != NULL)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
-	else if (impl->aec_info->latency)
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+	else if (impl->aec->latency)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
 
 	impl->capture = pw_stream_new(impl->core,
 			"Echo-Cancel Capture", props);
@@ -680,8 +684,8 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_LINK_GROUP, str);
 	if ((str = pw_properties_get(impl->sink_props, PW_KEY_NODE_LATENCY)) != NULL)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
-	else if (impl->aec_info->latency)
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+	else if (impl->aec->latency)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
 
 	impl->playback = pw_stream_new(impl->core,
 			"Echo-Cancel Playback", props);
@@ -803,8 +807,8 @@ static void impl_destroy(struct impl *impl)
 		pw_stream_destroy(impl->sink);
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
-	if (impl->aec)
-		echo_cancel_destroy(impl->aec_info, impl->aec);
+	if (impl->spa_handle)
+		spa_plugin_loader_unload(impl->loader, impl->spa_handle);
 	pw_properties_free(impl->source_props);
 	pw_properties_free(impl->sink_props);
 
@@ -893,7 +897,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct impl *impl;
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
 	const char *str;
-	int res;
+	const char *path;
+	int res = 0;
+	struct spa_handle *handle = NULL;
+	void *iface;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 
@@ -967,31 +974,66 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(impl->sink_props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(impl->sink_props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 
-	if ((str = pw_properties_get(props, "aec.method")) == NULL)
-		str = "webrtc";
+	if ((str = pw_properties_get(props, "aec.method")) != NULL)
+		pw_log_warn("aec.method is not supported anymore use library.name");
 
-#ifdef HAVE_WEBRTC
-	if (spa_streq(str, "webrtc"))
-		impl->aec_info = echo_cancel_webrtc;
-	else
-#endif
-		impl->aec_info = echo_cancel_null;
+	/* Use webrtc as default */
+	if ((path = pw_properties_get(props, "library.name")) == NULL)
+		path = "aec/libspa-aec-webrtc";
+
+	struct spa_dict_item info_items[] = {
+		{ SPA_KEY_LIBRARY_NAME, path },
+	};
+	struct spa_dict info = SPA_DICT_INIT_ARRAY(info_items);
+
+	impl->loader = spa_support_find(context->support, context->n_support, SPA_TYPE_INTERFACE_PluginLoader);
+	if (impl->loader == NULL) {
+		pw_log_error("a plugin loader is needed");
+		return -EINVAL;
+	}
+
+	handle = spa_plugin_loader_load(impl->loader, SPA_NAME_AEC, &info);
+	if (handle == NULL) {
+		pw_log_error("AEC codec plugin %s not available library.name %s", SPA_NAME_AEC, path);
+		return -ENOENT;
+	}
+
+	if ((res = spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_AUDIO_AEC, &iface)) < 0) {
+		pw_log_error("can't get %s interface %d", SPA_TYPE_INTERFACE_AUDIO_AEC, res);
+		return res;
+	}
+	impl->aec = iface;
+	impl->spa_handle = handle;
+	if (impl->aec->iface.version != SPA_VERSION_AUDIO_AEC) {
+		pw_log_error("codec plugin %s has incompatible ABI version (%d != %d)",
+			SPA_NAME_AEC, impl->aec->iface.version, SPA_VERSION_AUDIO_AEC);
+		res = -ENOENT;
+		goto error;
+	}
+
+	(void)SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_AUDIO_AEC, (struct spa_audio_aec *)impl->aec);
+
+	pw_log_info("Using plugin AEC %s", impl->aec->name);
 
 	if ((str = pw_properties_get(props, "aec.args")) != NULL)
 		aec_props = pw_properties_new_string(str);
 	else
 		aec_props = pw_properties_new(NULL, NULL);
 
-	impl->aec = echo_cancel_create(impl->aec_info, aec_props, &impl->info);
+	if (spa_audio_aec_init(impl->aec, &aec_props->dict, &impl->info)) {
+		pw_log_error("codec plugin %s create failed", impl->aec->name);
+		res = -ENOENT;
+		goto error;
+	}
 
 	pw_properties_free(aec_props);
 
-	if (impl->aec_info->latency) {
+	if (impl->aec->latency) {
 		unsigned int num, denom, req_num, req_denom;
 		unsigned int factor = 0;
 		unsigned int new_num = 0;
 
-		spa_assert_se(sscanf(impl->aec_info->latency, "%u/%u", &num, &denom) == 2);
+		spa_assert_se(sscanf(impl->aec->latency, "%u/%u", &num, &denom) == 2);
 
 		if ((str = pw_properties_get(props, PW_KEY_NODE_LATENCY)) != NULL) {
 			sscanf(str, "%u/%u", &req_num, &req_denom);
@@ -1000,8 +1042,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		}
 
 		if (factor == 0 || new_num == 0) {
-			pw_log_info("Setting node latency to %s", impl->aec_info->latency);
-			pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec_info->latency);
+			pw_log_info("Setting node latency to %s", impl->aec->latency);
+			pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
 			impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom;
 		} else {
 			pw_log_info("Setting node latency to %u/%u", new_num, req_denom);

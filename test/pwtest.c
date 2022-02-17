@@ -36,10 +36,10 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
-#if HAVE_PIDFD_OPEN
+#ifdef HAVE_PIDFD_OPEN
 #include <sys/syscall.h>
 #endif
-#if HAVE_LIBCAP
+#ifdef HAVE_LIBCAP
 #include <sys/capability.h>
 #endif
 #include <sys/epoll.h>
@@ -177,7 +177,7 @@ static void restore_env(struct pwtest_test *t)
 
 static void pwtest_backtrace(pid_t p)
 {
-#if HAVE_GSTACK
+#ifdef HAVE_GSTACK
 	char pid[11];
 	pid_t parent, child;
 	int status;
@@ -305,12 +305,14 @@ pwtest_spa_plugin_destroy(struct pwtest_spa_plugin *plugin)
 	struct spa_handle **hnd;
 
 	SPA_FOR_EACH_ELEMENT(plugin->handles, hnd) {
-		if (*hnd)
+		if (*hnd) {
+			spa_handle_clear(*hnd);
 			free(*hnd);
+		}
 	}
 	SPA_FOR_EACH_ELEMENT(plugin->dlls, dll) {
 		if (*dll)
-			dlclose(dll);
+			dlclose(*dll);
 	}
 	free(plugin);
 }
@@ -362,12 +364,13 @@ pwtest_spa_plugin_try_load_interface(struct pwtest_spa_plugin *plugin,
 	r = spa_handle_factory_init(factory, handle, info, plugin->support, plugin->nsupport);
 	pwtest_neg_errno_ok(r);
 	if ((r = spa_handle_get_interface(handle, interface_name, &iface)) != 0) {
-		dlclose(hnd);
+		spa_handle_clear(handle);
 		free(handle);
+		dlclose(hnd);
 		return -ENOSYS;
 	}
 
-	plugin->handles[plugin->ndlls++] = hnd;
+	plugin->dlls[plugin->ndlls++] = hnd;
 	plugin->handles[plugin->nhandles++] = handle;
 	plugin->support[plugin->nsupport++] = SPA_SUPPORT_INIT(interface_name, iface);
 
@@ -820,7 +823,7 @@ static int monitor_test_forked(struct pwtest_test *t, pid_t pid, int read_fds[_F
 	size_t nevents = 0;
 	int r;
 
-#if HAVE_PIDFD_OPEN
+#ifdef HAVE_PIDFD_OPEN
 	pidfd = syscall(SYS_pidfd_open, pid, 0);
 #else
 	errno = ENOSYS;
@@ -1168,7 +1171,7 @@ static void list_tests(struct pwtest_context *ctx)
 static bool is_debugger_attached(void)
 {
 	bool rc = false;
-#if HAVE_LIBCAP
+#ifdef HAVE_LIBCAP
 	int status;
 	int pid = fork();
 

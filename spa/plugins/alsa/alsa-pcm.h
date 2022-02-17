@@ -189,8 +189,6 @@ struct state {
 	uint32_t start_delay;
 
 	uint32_t duration;
-	uint32_t last_duration;
-	uint64_t last_position;
 	unsigned int alsa_started:1;
 	unsigned int alsa_sync:1;
 	unsigned int alsa_recovering:1;
@@ -210,7 +208,6 @@ struct state {
 	int64_t sample_count;
 
 	int64_t sample_time;
-	uint64_t current_time;
 	uint64_t next_time;
 	uint64_t base_time;
 

@@ -246,6 +246,60 @@ static void unescape(const char *src, char *dst)
 	*d = 0;
 }
 
+static int check_device_pcm_class(const char *devname)
+{
+	FILE *f;
+	char path[PATH_MAX];
+	char buf[16];
+	size_t sz;
+
+	/* Check device class */
+	spa_scnprintf(path, sizeof(path), "/sys/class/sound/%s/pcm_class",
+			devname);
+	f = fopen(path, "r");
+	if (f == NULL)
+		return -errno;
+	sz = fread(buf, 1, sizeof(buf) - 1, f);
+	buf[sz] = '\0';
+	fclose(f);
+	return spa_strstartswith(buf, "modem") ? -ENXIO : 0;
+}
+
+static int get_num_pcm_devices(unsigned int card_id)
+{
+	char prefix[32];
+	DIR *snd = NULL;
+	struct dirent *entry;
+	int num_dev = 0;
+	int res;
+
+	/* Check if card has PCM devices, without opening them */
+
+	spa_scnprintf(prefix, sizeof(prefix), "pcmC%uD", card_id);
+
+	if ((snd = opendir("/dev/snd")) == NULL)
+		return -errno;
+
+	while ((errno = 0, entry = readdir(snd)) != NULL) {
+		if (!(entry->d_type == DT_CHR &&
+				spa_strstartswith(entry->d_name, prefix)))
+			continue;
+
+		res = check_device_pcm_class(entry->d_name);
+		if (res != -ENXIO) {
+			/* count device also if sysfs status file not accessible */
+			++num_dev;
+		}
+	}
+	if (errno != 0)
+		res = -errno;
+	else
+		res = num_dev;
+
+	closedir(snd);
+	return res;
+}
+
 static int check_device_available(struct impl *this, struct device *device, int *num_pcm)
 {
 	char path[PATH_MAX];
@@ -256,13 +310,27 @@ static int check_device_available(struct impl *this, struct device *device, int 
 	struct dirent *entry, *entry_pcm;
 	int res;
 
+	res = get_num_pcm_devices(device->id);
+	if (res < 0) {
+		spa_log_error(this->log, "Error finding PCM devices for ALSA card %u: %s",
+			(unsigned int)device->id, spa_strerror(res));
+		return res;
+	}
+	*num_pcm = res;
+
+	spa_log_debug(this->log, "card %u has %d pcm device(s)", (unsigned int)device->id, *num_pcm);
+
 	/*
 	 * Check if some pcm devices of the card are busy.  Check it via /proc, as we
 	 * don't want to actually open any devices using alsa-lib (generates uncontrolled
 	 * number of inotify events), or replicate its subdevice logic.
+	 *
+	 * The /proc/asound directory might not exist if kernel is compiled with
+	 * CONFIG_SND_PROCFS=n, and the pcmXX directories may be missing if compiled
+	 * with CONFIG_SND_VERBOSE_PROCFS=n. In those cases, the busy check always succeeds.
 	 */
 
-	*num_pcm = 0;
+	res = 0;
 
 	spa_scnprintf(path, sizeof(path), "/proc/asound/card%u", (unsigned int)device->id);
 
@@ -274,16 +342,9 @@ static int check_device_available(struct impl *this, struct device *device, int 
 				spa_strstartswith(entry->d_name, "pcm")))
 			continue;
 
-		/* Check device class */
-		spa_scnprintf(path, sizeof(path), "/sys/class/sound/pcmC%uD%s/pcm_class",
+		spa_scnprintf(path, sizeof(path), "pcmC%uD%s",
 				(unsigned int)device->id, entry->d_name+3);
-		f = fopen(path, "r");
-		if (f == NULL)
-			goto done;
-		sz = fread(buf, 1, sizeof(buf) - 1, f);
-		buf[sz] = '\0';
-		fclose(f);
-		if (spa_strstartswith(buf, "modem"))
+		if (check_device_pcm_class(path) < 0)
 			continue;
 
 		/* Check busy status */
@@ -310,7 +371,7 @@ static int check_device_available(struct impl *this, struct device *device, int 
 			if (!spa_strstartswith(buf, "closed")) {
 				spa_log_debug(this->log, "card %u pcm device %s busy",
 						(unsigned int)device->id, entry->d_name);
-				errno = EBUSY;
+				res = -EBUSY;
 				goto done;
 			}
 			spa_log_debug(this->log, "card %u pcm device %s free",
@@ -319,8 +380,6 @@ static int check_device_available(struct impl *this, struct device *device, int 
 		if (errno != 0)
 			goto done;
 
-		++*num_pcm;
-
 		closedir(pcm);
 		pcm = NULL;
 	}
@@ -328,7 +387,10 @@ static int check_device_available(struct impl *this, struct device *device, int 
 		goto done;
 
 done:
-	res = -errno;
+	if (errno != 0) {
+		spa_log_info(this->log, "card %u: failed to find busy status (%s)",
+				(unsigned int)device->id, spa_strerror(-errno));
+	}
 	if (card)
 		closedir(card);
 	if (pcm)
@@ -352,15 +414,16 @@ static int emit_object_info(struct impl *this, struct device *device)
 	 * device->emitted to true. alsalib functions can be used after that.
 	 */
 
+	snprintf(path, sizeof(path), "hw:%u", id);
+
 	if ((res = check_device_available(this, device, &pcm)) < 0)
 		return res;
 	if (pcm == 0) {
 		spa_log_debug(this->log, "no pcm devices for %s", path);
 		device->ignored = true;
-		return 0;
+		return -ENODEV;
 	}
 
-	snprintf(path, sizeof(path), "hw:%u", id);
 	spa_log_debug(this->log, "emitting card %s", path);
 	device->emitted = true;
 

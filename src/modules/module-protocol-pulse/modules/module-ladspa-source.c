@@ -75,6 +75,8 @@ static int module_ladspa_source_load(struct client *client, struct module *modul
 
 	pw_properties_setf(data->capture_props, PW_KEY_NODE_GROUP, "ladspa-source-%u", module->index);
 	pw_properties_setf(data->playback_props, PW_KEY_NODE_GROUP, "ladspa-source-%u", module->index);
+	pw_properties_setf(data->capture_props, "pulse.module.id", "%u", module->index);
+	pw_properties_setf(data->playback_props, "pulse.module.id", "%u", module->index);
 
 	f = open_memstream(&args, &size);
 	fprintf(f, "{");
@@ -203,11 +205,11 @@ struct module *create_module_ladspa_source(struct impl *impl, const char *argume
 		module_args_add_props(props, argument);
 
 	if ((str = pw_properties_get(props, "source_name")) != NULL) {
-		pw_properties_set(capture_props, PW_KEY_NODE_NAME, str);
+		pw_properties_set(playback_props, PW_KEY_NODE_NAME, str);
 		pw_properties_set(props, "source_name", NULL);
 	}
 	if ((str = pw_properties_get(props, "source_properties")) != NULL) {
-		module_args_add_props(capture_props, str);
+		module_args_add_props(playback_props, str);
 		pw_properties_set(props, "source_properties", NULL);
 	}
 	if (pw_properties_get(playback_props, PW_KEY_MEDIA_CLASS) == NULL)
@@ -215,17 +217,25 @@ struct module *create_module_ladspa_source(struct impl *impl, const char *argume
 	if (pw_properties_get(playback_props, PW_KEY_DEVICE_CLASS) == NULL)
 		pw_properties_set(playback_props, PW_KEY_DEVICE_CLASS, "filter");
 
+	if ((str = pw_properties_get(playback_props, PW_KEY_NODE_DESCRIPTION)) == NULL) {
+		str = pw_properties_get(playback_props, PW_KEY_NODE_NAME);
+		pw_properties_setf(props, PW_KEY_NODE_DESCRIPTION,
+					"%s Source", str);
+	} else {
+		pw_properties_set(props, PW_KEY_NODE_DESCRIPTION, str);
+	}
+
 	if ((str = pw_properties_get(props, "master")) != NULL ||
 	    (str = pw_properties_get(props, "source_master")) != NULL) {
-		pw_properties_set(playback_props, PW_KEY_NODE_TARGET, str);
+		pw_properties_set(capture_props, PW_KEY_NODE_TARGET, str);
 		pw_properties_set(props, "master", NULL);
 	}
 
-	if (module_args_to_audioinfo(impl, props, &capture_info) < 0) {
+	if (module_args_to_audioinfo(impl, props, &playback_info) < 0) {
 		res = -EINVAL;
 		goto out;
 	}
-	playback_info = capture_info;
+	capture_info = playback_info;
 
 	position_to_props(&capture_info, capture_props);
 	position_to_props(&playback_info, playback_props);

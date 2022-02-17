@@ -1458,9 +1458,9 @@ static void do_quit(void *data, int signal_number)
 	pw_main_loop_quit(d->loop);
 }
 
-static void show_help(struct data *data, const char *name)
+static void show_help(struct data *data, const char *name, bool error)
 {
-        fprintf(stdout, "%s [options] [<id>]\n"
+	fprintf(error ? stderr : stdout, "%s [options] [<id>]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -r, --remote                          Remote daemon name\n"
@@ -1492,14 +1492,15 @@ int main(int argc, char *argv[])
 	data.out = stdout;
 	if (isatty(fileno(data.out)) && getenv("NO_COLOR") == NULL)
 		colors = true;
+	setlinebuf(data.out);
 
 	while ((c = getopt_long(argc, argv, "hVr:mNC", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h' :
-			show_help(&data, argv[0]);
+			show_help(&data, argv[0], false);
 			return 0;
 		case 'V' :
-			fprintf(stdout, "%s\n"
+			printf("%s\n"
 				"Compiled with libpipewire %s\n"
 				"Linked with libpipewire %s\n",
 				argv[0],
@@ -1524,12 +1525,13 @@ int main(int argc, char *argv[])
 			else if (!strcmp(optarg, "always"))
 				colors = true;
 			else {
-				show_help(&data, argv[0]);
+				fprintf(stderr, "Unknown color: %s\n", optarg);
+				show_help(&data, argv[0], true);
 				return -1;
 			}
 			break;
 		default:
-			show_help(&data, argv[0]);
+			show_help(&data, argv[0], true);
 			return -1;
 		}
 	}
@@ -1581,7 +1583,9 @@ int main(int argc, char *argv[])
 	if (data.info)
 		pw_core_info_free(data.info);
 
+	spa_hook_remove(&data.registry_listener);
 	pw_proxy_destroy((struct pw_proxy*)data.registry);
+	spa_hook_remove(&data.core_listener);
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 	pw_deinit();

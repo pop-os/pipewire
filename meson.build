@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.45',
+  version : '0.3.46',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -202,8 +202,6 @@ cdata.set_quoted('MODULEDIR', modules_install_dir)
 cdata.set_quoted('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
 cdata.set_quoted('PLUGINDIR', spa_plugindir)
 cdata.set_quoted('SPADATADIR', spa_datadir)
-# FIXME: --with-memory-alignment],[8,N,malloc,pagesize (default is 32)]) option
-cdata.set('MEMORY_ALIGNMENT_MALLOC', 1)
 cdata.set_quoted('PA_ALSA_PATHS_DIR', alsadatadir / 'paths')
 cdata.set_quoted('PA_ALSA_PROFILE_SETS_DIR', alsadatadir / 'profile-sets')
 
@@ -211,95 +209,38 @@ if host_machine.endian() == 'big'
   cdata.set('WORDS_BIGENDIAN', 1)
 endif
 
-check_headers = [['dlfcn.h','HAVE_DLFCN_H'],
-  ['inttypes.h', 'HAVE_INTTYPES_H'],
-  ['memory.h', 'HAVE_MEMORY_H'],
-  ['poll.h', 'HAVE_POLL_H'],
-  ['stddef.h', 'HAVE_STDDEF_H'],
-  ['stdint.h', 'HAVE_STDINT_H'],
-  ['stdio_ext.h', 'HAVE_STDIO_EXT_H'],
-  ['strings.h', 'HAVE_STRINGS_H'],
-  ['string.h', 'HAVE_STRING_H'],
+check_headers = [
   ['sys/mount.h', 'HAVE_SYS_MOUNT_H'],
   ['sys/param.h', 'HAVE_SYS_PARAM_H'],
-  ['sys/poll.h', 'HAVE_SYS_POLL_H'],
-  ['sys/prctl.h', 'HAVE_SYS_PRCTL_H'],
   ['sys/random.h', 'HAVE_SYS_RANDOM_H'],
-  ['sys/socket.h', 'HAVE_SYS_SOCKET_H'],
-  ['sys/stat.h', 'HAVE_SYS_STAT_H'],
-  ['sys/times.h', 'HAVE_SYS_TIMES_H'],
-  ['sys/time.h', 'HAVE_SYS_TIME_H'],
-  ['sys/types.h', 'HAVE_SYS_TYPES_H'],
-  ['sys/utsname.h', 'HAVE_SYS_UTSNAME_H'],
   ['sys/vfs.h', 'HAVE_SYS_VFS_H'],
-  ['sys/wait.h', 'HAVE_SYS_WAIT_H'],
   ['pwd.h', 'HAVE_PWD_H'],
-  ['ucontext.h', 'HAVE_UCONTEXT_H'],
-  ['unistd.h', 'HAVE_UNISTD_H'],
 ]
 
 foreach h : check_headers
-  if cc.has_header(h.get(0))
-    cdata.set(h.get(1), 1)
-  endif
+  cdata.set(h.get(1), cc.has_header(h.get(0)))
 endforeach
 
-if cc.has_function('poll', prefix : '#include<poll.h>')
-  cdata.set('HAVE_POLL', 1)
-endif
-if cc.has_function('pselect', prefix : '#include<sys/select.h>')
-  cdata.set('HAVE_PSELECT', 1)
-endif
-cdata.set('HAVE_MMAP', 1)
+check_functions = [
+  ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE']],
+  ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE']],
+  ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE']],
+  ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE']],
+]
 
-if cc.has_function('posix_memalign', prefix : '#include<stdlib.h>')
-  cdata.set('HAVE_POSIX_MEMALIGN', 1)
-endif
-if cc.has_function('getpagesize', prefix : '#include<unistd.h>')
-  cdata.set('HAVE_GETPAGESIZE', 1)
-endif
-if cc.has_function('gettid', prefix : '#include<unistd.h>', args: [ '-D_GNU_SOURCE' ])
-  cdata.set('HAVE_GETTID', 1)
-endif
-if cc.has_function('clock_gettime', prefix : '#include <time.h>')
-  cdata.set('HAVE_CLOCK_GETTIME', 1)
-endif
+foreach f : check_functions
+  cdata.set('HAVE_' + f.get(0).to_upper(),
+            cc.has_function(f.get(0), prefix: f.get(1), args: f.get(2)))
+endforeach
 
-if cc.has_type('ptrdiff_t', prefix : '#include <stddef.h>')
-  cdata.set('HAVE_PTRDIFF_T', 1)
-endif
-
-if cc.has_header_symbol('string.h', 'strndupa', args : [ '-D_GNU_SOURCE' ])
-  cdata.set('HAVE_STRNDUPA', 1)
-endif
-
-if cc.has_function('mkstemp', prefix : '#include <stdlib.h>')
-  cdata.set('HAVE_MKSTEMP', 1)
-endif
-
-if cc.has_function('memfd_create', prefix : '#include <sys/mman.h>', args : [ '-D_GNU_SOURCE' ])
-  cdata.set('HAVE_MEMFD_CREATE', 1)
-endif
-
-if cc.has_function('getrandom', prefix : '#include <stddef.h>\n#include <sys/random.h>', args : [ '-D_GNU_SOURCE' ])
-  cdata.set('HAVE_GETRANDOM', 1)
-endif
-
-if cc.has_function('sigabbrev_np', prefix : '#include <string.h>', args : [ '-D_GNU_SOURCE' ])
-  cdata.set('HAVE_SIGABBREV_NP', 1)
-endif
-
-if cc.get_define('SYS_pidfd_open', prefix : '#include <sys/syscall.h>') != ''
-  cdata.set('HAVE_PIDFD_OPEN', 1)
-endif
+cdata.set('HAVE_PIDFD_OPEN',
+          cc.get_define('SYS_pidfd_open', prefix: '#include <sys/syscall.h>') != '')
 
 systemd = dependency('systemd', required: get_option('systemd'))
 systemd_dep = dependency('libsystemd',required: get_option('systemd'))
 summary({'systemd conf data': systemd.found()}, bool_yn: true)
 summary({'libsystemd': systemd_dep.found()}, bool_yn: true)
-if systemd.found() and systemd_dep.found()
-  cdata.set('HAVE_SYSTEMD', 1)
-endif
+cdata.set('HAVE_SYSTEMD', systemd.found() and systemd_dep.found())
 
 configinc = include_directories('.')
 includes_inc = include_directories('include')
@@ -326,9 +267,7 @@ dl_lib = cc.find_library('dl', required : false)
 pthread_lib = dependency('threads')
 dbus_dep = dependency('dbus-1', required : get_option('dbus'))
 summary({'dbus (Bluetooth, rt, portal, pw-reserve)': dbus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
-if dbus_dep.found()
-  cdata.set('HAVE_DBUS', 1)
-endif
+cdata.set('HAVE_DBUS', dbus_dep.found())
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 summary({'SDL2 (video examples)': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 drm_dep = dependency('libdrm', required : false)
@@ -342,9 +281,7 @@ summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section:
 ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump/filter-chain')
-if sndfile_dep.found()
-  cdata.set('HAVE_SNDFILE', 1)
-endif
+cdata.set('HAVE_SNDFILE', sndfile_dep.found())
 pulseaudio_dep = dependency('libpulse', required : get_option('libpulse'))
 summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
@@ -361,14 +298,10 @@ summary({'libcanberra (x11-bell)': canberra_dep.found()}, bool_yn: true,
 
 libusb_dep = dependency('libusb-1.0', required : get_option('libusb'))
 summary({'libusb (Bluetooth quirks)': libusb_dep.found()}, bool_yn: true, section: 'Backend')
-if libusb_dep.found()
-  cdata.set('HAVE_LIBUSB', 1)
-endif
+cdata.set('HAVE_LIBUSB', libusb_dep.found())
 
 cap_lib = dependency('libcap', required : false)
-if cap_lib.found()
-  cdata.set('HAVE_LIBCAP', 1)
-endif
+cdata.set('HAVE_LIBCAP', cap_lib.found())
 
 gst_option = get_option('gstreamer')
 gst_deps_def = {
@@ -403,18 +336,13 @@ endforeach
 gst_dp_found = gst_dep.length() > 0
 summary({'gstreamer-device-provider': gst_dp_found}, bool_yn: true, section: 'Backend')
 
-if not get_option('gstreamer-device-provider').disabled()
-  cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', 1)
-endif
+cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', get_option('gstreamer-device-provider').allowed())
 
 webrtc_dep = dependency('webrtc-audio-processing',
   version : ['>= 0.2', '< 1.0'],
   required : get_option('echo-cancel-webrtc'))
 summary({'WebRTC Echo Canceling': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
-
-if webrtc_dep.found()
-  cdata.set('HAVE_WEBRTC', 1)
-endif
+cdata.set('HAVE_WEBRTC', webrtc_dep.found())
 
 # On FreeBSD, epoll-shim library is required for eventfd() and timerfd()
 epoll_shim_dep = (build_machine.system() == 'freebsd'
@@ -450,35 +378,33 @@ summary({'OpenSSL (for raop-sink)': openssl_lib.found()}, bool_yn: true)
 
 lilv_lib = dependency('lilv-0', required: get_option('lv2'))
 summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true)
-if lilv_lib.found()
-  cdata.set('HAVE_LILV', 1)
-endif
+cdata.set('HAVE_LILV', lilv_lib.found())
 
 installed_tests_metadir = pipewire_datadir / 'installed-tests' / pipewire_name
 installed_tests_execdir = pipewire_libexecdir / 'installed-tests' / pipewire_name
-installed_tests_enabled = not get_option('installed_tests').disabled()
+installed_tests_enabled = get_option('installed_tests').allowed()
 installed_tests_template = files('template.test.in')
 
-if not get_option('tests').disabled()
+if get_option('tests').allowed()
   gstack = find_program('gstack', required : false)
-  cdata.set10('HAVE_GSTACK', gstack.found())
+  cdata.set('HAVE_GSTACK', gstack.found())
 endif
 
 subdir('po')
 subdir('spa')
 subdir('src')
 
-if not get_option('tests').disabled()
+if get_option('tests').allowed()
   subdir('test')
 endif
 
 configure_file(output : 'config.h',
                configuration : cdata)
 
-if not get_option('pipewire-jack').disabled()
+if get_option('pipewire-jack').allowed()
   subdir('pipewire-jack')
 endif
-if not get_option('pipewire-v4l2').disabled()
+if get_option('pipewire-v4l2').allowed()
   subdir('pipewire-v4l2')
 endif
 
@@ -489,7 +415,7 @@ if alsa_dep.found()
 endif
 
 generate_manpages = false
-if not get_option('man').disabled()
+if get_option('man').allowed()
   rst2man = find_program('rst2man', required: false)
   if not rst2man.found()
     rst2man = find_program('rst2man.py', required: get_option('man'))

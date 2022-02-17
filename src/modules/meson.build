@@ -10,6 +10,7 @@ module_sources = [
   'module-echo-cancel.c',
   'module-example-sink.c',
   'module-example-source.c',
+  'module-fallback-sink.c',
   'module-filter-chain.c',
   'module-link-factory.c',
   'module-loopback.c',
@@ -109,14 +110,7 @@ pipewire_module_filter_chain = shared_library('pipewire-module-filter-chain',
 
 pipewire_module_echo_cancel_sources = [
   'module-echo-cancel.c',
-  'module-echo-cancel/aec-null.c',
 ]
-
-if webrtc_dep.found()
-  pipewire_module_echo_cancel_sources += [
-    'module-echo-cancel/aec-webrtc.cpp'
-  ]
-endif
 
 pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
   pipewire_module_echo_cancel_sources,
@@ -124,7 +118,7 @@ pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, pipewire_dep, webrtc_dep],
+  dependencies : [mathlib, dl_lib, pipewire_dep],
 )
 
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
@@ -223,7 +217,6 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/extensions/ext-stream-restore.c',
   'module-protocol-pulse/format.c',
   'module-protocol-pulse/manager.c',
-  'module-protocol-pulse/media-roles.c',
   'module-protocol-pulse/message.c',
   'module-protocol-pulse/message-handler.c',
   'module-protocol-pulse/module.c',
@@ -231,6 +224,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/pending-sample.c',
   'module-protocol-pulse/pulse-server.c',
   'module-protocol-pulse/quirks.c',
+  'module-protocol-pulse/remap.c',
   'module-protocol-pulse/reply.c',
   'module-protocol-pulse/sample.c',
   'module-protocol-pulse/sample-play.c',
@@ -238,6 +232,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/stream.c',
   'module-protocol-pulse/utils.c',
   'module-protocol-pulse/volume.c',
+  'module-protocol-pulse/modules/module-always-sink.c',
   'module-protocol-pulse/modules/module-combine-sink.c',
   'module-protocol-pulse/modules/module-echo-cancel.c',
   'module-protocol-pulse/modules/module-ladspa-sink.c',
@@ -265,7 +260,6 @@ if dbus_dep.found()
     'module-protocol-pulse/dbus-name.c',
   ]
   pipewire_module_protocol_pulse_deps += dbus_dep
-  cdata.set('HAVE_DBUS', 1)
 endif
 
 if avahi_dep.found()
@@ -274,7 +268,7 @@ if avahi_dep.found()
     'module-zeroconf-discover/avahi-poll.c',
   ]
   pipewire_module_protocol_pulse_deps += avahi_dep
-  cdata.set('HAVE_AVAHI', 1)
+  cdata.set('HAVE_AVAHI', true)
 endif
 
 pipewire_module_protocol_pulse = shared_library('pipewire-module-protocol-pulse',
@@ -499,3 +493,12 @@ pipewire_module_x11_bell = shared_library('pipewire-module-x11-bell',
 )
 endif
 summary({'x11-bell': build_module_x11_bell}, bool_yn: true, section: 'Optional Modules')
+
+pipewire_module_fallback_sink = shared_library('pipewire-module-fallback-sink',
+  [ 'module-fallback-sink.c' ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep],
+)

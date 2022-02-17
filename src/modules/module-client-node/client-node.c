@@ -47,28 +47,14 @@ PW_LOG_TOPIC_EXTERN(mod_topic);
 
 /** \cond */
 
-#define MAX_INPUTS	1024
-#define MAX_OUTPUTS	1024
-
 #define MAX_BUFFERS	64
 #define MAX_METAS	16u
 #define MAX_DATAS	64u
 #define MAX_AREAS	2048
-#define MAX_MIX		128
 
-#define CHECK_IN_PORT_ID(this,d,p)       ((d) == SPA_DIRECTION_INPUT && (p) < MAX_INPUTS)
-#define CHECK_OUT_PORT_ID(this,d,p)      ((d) == SPA_DIRECTION_OUTPUT && (p) < MAX_OUTPUTS)
-#define CHECK_PORT_ID(this,d,p)          (CHECK_IN_PORT_ID(this,d,p) || CHECK_OUT_PORT_ID(this,d,p))
-#define CHECK_FREE_IN_PORT(this,d,p)     (CHECK_IN_PORT_ID(this,d,p) && (this)->in_ports[p] == NULL)
-#define CHECK_FREE_OUT_PORT(this,d,p)    (CHECK_OUT_PORT_ID(this,d,p) && (this)->out_ports[p] == NULL)
-#define CHECK_FREE_PORT(this,d,p)        (CHECK_FREE_IN_PORT (this,d,p) || CHECK_FREE_OUT_PORT (this,d,p))
-#define CHECK_IN_PORT(this,d,p)          (CHECK_IN_PORT_ID(this,d,p) && (this)->in_ports[p])
-#define CHECK_OUT_PORT(this,d,p)         (CHECK_OUT_PORT_ID(this,d,p) && (this)->out_ports[p])
-#define CHECK_PORT(this,d,p)             (CHECK_IN_PORT (this,d,p) || CHECK_OUT_PORT (this,d,p))
-
-#define GET_IN_PORT(this,p)	(this->in_ports[p])
-#define GET_OUT_PORT(this,p)	(this->out_ports[p])
-#define GET_PORT(this,d,p)	(d == SPA_DIRECTION_INPUT ? GET_IN_PORT(this,p) : GET_OUT_PORT(this,p))
+#define CHECK_FREE_PORT(this,d,p)	(p <= pw_map_get_size(&this->ports[d]) && !CHECK_PORT(this,d,p))
+#define CHECK_PORT(this,d,p)		(pw_map_lookup(&this->ports[d], p) != NULL)
+#define GET_PORT(this,d,p)		(pw_map_lookup(&this->ports[d], p))
 
 #define CHECK_PORT_BUFFER(this,b,p)      (b < p->n_buffers)
 
@@ -129,10 +115,7 @@ struct node {
 	struct spa_source data_source;
 	int writefd;
 
-	uint32_t n_inputs;
-	uint32_t n_outputs;
-	struct port *in_ports[MAX_INPUTS];
-	struct port *out_ports[MAX_OUTPUTS];
+	struct pw_map ports[2];
 
 	struct port dummy;
 
@@ -213,8 +196,7 @@ static struct mix *find_mix(struct port *p, uint32_t mix_id)
 		mix_id = 0;
 	else
 		mix_id++;
-	if (mix_id >= MAX_MIX)
-		return NULL;
+
 	len = pw_array_get_len(&p->mix, struct mix);
 	if (mix_id >= len) {
 		size_t need = sizeof(struct mix) * (mix_id + 1 - len);
@@ -432,19 +414,19 @@ static int impl_node_add_listener(void *object,
 {
 	struct node *this = object;
 	struct spa_hook_list save;
-	uint32_t i;
+	union pw_map_item *item;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
 	spa_hook_list_isolate(&this->hooks, &save, listener, events, data);
 
-	for (i = 0; i < MAX_INPUTS; i++) {
-		if (this->in_ports[i])
-			emit_port_info(this, this->in_ports[i]);
+	pw_array_for_each(item, &this->ports[SPA_DIRECTION_INPUT].items) {
+		if (item->data)
+			emit_port_info(this, item->data);
 	}
-	for (i = 0; i < MAX_OUTPUTS; i++) {
-		if (this->out_ports[i])
-			emit_port_info(this, this->out_ports[i]);
+	pw_array_for_each(item, &this->ports[SPA_DIRECTION_OUTPUT].items) {
+		if (item->data)
+			emit_port_info(this, item->data);
 	}
 	spa_hook_list_join(&this->hooks, &save);
 
@@ -537,18 +519,8 @@ clear_port(struct node *this, struct port *port)
 	pw_array_clear(&port->mix);
 	pw_array_init(&port->mix, sizeof(struct mix) * 2);
 
-	if (port->direction == SPA_DIRECTION_INPUT) {
-		if (this->in_ports[port->id] == port) {
-			this->in_ports[port->id] = NULL;
-			this->n_inputs--;
-		}
-	}
-	else {
-		if (this->out_ports[port->id] == port) {
-			this->out_ports[port->id] = NULL;
-			this->n_outputs--;
-		}
-	}
+	pw_map_insert_at(&this->ports[port->direction], port->id, NULL);
+
 	if (!port->removed)
 		spa_node_emit_port_info(&this->hooks, port->direction, port->id, NULL);
 }
@@ -598,9 +570,9 @@ impl_node_port_enum_params(void *object, int seq,
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
 
 	port = GET_PORT(this, direction, port_id);
+	spa_return_val_if_fail(port != NULL, -EINVAL);
 
 	pw_log_debug("%p: seq:%d port %d.%d id:%u start:%u num:%u n_params:%d",
 			this, seq, direction, port_id, id, start, num, port->n_params);
@@ -649,14 +621,14 @@ impl_node_port_set_param(void *object,
 	struct mix *mix;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	if(!CHECK_PORT(this, direction, port_id))
+
+	port = GET_PORT(this, direction, port_id);
+	if(port == NULL)
 		return param == NULL ? 0 : -EINVAL;
 
 	pw_log_debug("%p: port %d.%d set param %s %d", this,
 			direction, port_id,
 			spa_debug_type_find_name(spa_type_param, id), id);
-
-	port = GET_PORT(this, direction, port_id);
 
 	if (id == SPA_PARAM_Format) {
 		pw_array_for_each(mix, &port->mix)
@@ -687,10 +659,9 @@ static int do_port_set_io(struct impl *impl,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, data, size);
 
-	if (!CHECK_PORT(this, direction, port_id))
-		return data == NULL ? 0 : -EINVAL;
-
 	port = GET_PORT(this, direction, port_id);
+	if (port == NULL)
+		return data == NULL ? 0 : -EINVAL;
 
 	if ((mix = find_mix(port, mix_id)) == NULL || !mix->valid)
 		return -EINVAL;
@@ -752,13 +723,13 @@ do_port_use_buffers(struct impl *impl,
 	uint32_t i, j, peer_id;
 	struct pw_client_node_buffer *mb;
 
-	if (!CHECK_PORT(this, direction, port_id))
+	p = GET_PORT(this, direction, port_id);
+	if (p == NULL)
 		return n_buffers == 0 ? 0 : -EINVAL;
 
 	if (n_buffers > MAX_BUFFERS)
 		return -ENOSPC;
 
-	p = GET_PORT(this, direction, port_id);
 
 	spa_log_debug(this->log, "%p: %s port %d.%d use buffers %p %u flags:%08x", this,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
@@ -920,7 +891,7 @@ impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
 	struct node *this = object;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	spa_return_val_if_fail(CHECK_OUT_PORT(this, SPA_DIRECTION_OUTPUT, port_id), -EINVAL);
+	spa_return_val_if_fail(CHECK_PORT(this, SPA_DIRECTION_OUTPUT, port_id), -EINVAL);
 
 	spa_log_trace_fp(this->log, "reuse buffer %d", buffer_id);
 
@@ -1011,8 +982,6 @@ client_node_port_update(void *data,
 
 	spa_log_debug(this->log, "%p: got port update change:%08x params:%d",
 			this, change_mask, n_params);
-	if (!CHECK_PORT_ID(this, direction, port_id))
-		return -EINVAL;
 
 	remove = (change_mask == 0);
 
@@ -1027,6 +996,9 @@ client_node_port_update(void *data,
 		struct port *target;
 
 		if (port == NULL) {
+			if (!CHECK_FREE_PORT(this, direction, port_id))
+				return -EINVAL;
+
 			target = &this->dummy;
 			spa_zero(this->dummy);
 			target->direction = direction;
@@ -1076,9 +1048,8 @@ static int client_node_port_buffers(void *data,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, buffers, n_buffers);
 
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
-
 	p = GET_PORT(this, direction, port_id);
+	spa_return_val_if_fail(p != NULL, -EINVAL);
 
 	if (direction == SPA_DIRECTION_OUTPUT)
 		mix_id = SPA_ID_INVALID;
@@ -1374,6 +1345,8 @@ static void node_free(void *data)
 	if (impl->io_areas)
 		pw_memblock_unref(impl->io_areas);
 
+	pw_map_clear(&impl->node.ports[0]);
+	pw_map_clear(&impl->node.ports[1]);
 	pw_map_clear(&impl->io_map);
 
 	if (impl->fds[0] != -1)
@@ -1565,13 +1538,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 			&impl_port_mix, p);
 	ensure_mix(impl, p, SPA_ID_INVALID);
 
-	if (p->direction == SPA_DIRECTION_INPUT) {
-		this->in_ports[p->id] = p;
-		this->n_inputs++;
-	} else {
-		this->out_ports[p->id] = p;
-		this->n_outputs++;
-	}
+	pw_map_insert_at(&this->ports[p->direction], p->id, p);
 	return;
 }
 
@@ -1741,6 +1708,8 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 	impl->node.client = client;
 	this->flags = do_register ? 0 : 1;
 
+	pw_map_init(&impl->node.ports[0], 64, 64);
+	pw_map_init(&impl->node.ports[1], 64, 64);
 	pw_map_init(&impl->io_map, 64, 64);
 
 	this->resource = resource;
