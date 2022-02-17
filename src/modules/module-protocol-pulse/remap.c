@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
+ * Copyright © 2020 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,43 +22,35 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include "echo-cancel.h"
+#include <stddef.h>
 
-struct impl {
-	uint32_t channels;
+#include <pipewire/keys.h>
+
+#include "remap.h"
+
+const struct str_map media_role_map[] = {
+	{ "Movie", "video", },
+	{ "Music", "music", },
+	{ "Game", "game", },
+	{ "Notification", "event", },
+	{ "Communication", "phone", },
+	{ "Movie", "animation", },
+	{ "Production", "production", },
+	{ "Accessibility", "a11y", },
+	{ "Test", "test", },
+	{ NULL, NULL },
 };
 
-static void *null_create(const struct pw_properties *args, const struct spa_audio_info_raw *info)
-{
-	struct impl *impl;
-	impl = calloc(1, sizeof(struct impl));
-	impl->channels = info->channels;
-	return impl;
-}
-
-static void null_destroy(void *ec)
-{
-	free(ec);
-}
-
-static int null_run(void *ec, const float *rec[], const float *play[], float *out[], uint32_t n_samples)
-{
-	struct impl *impl = ec;
-	uint32_t i;
-	for (i = 0; i < impl->channels; i++)
-		memcpy(out[i], rec[i], n_samples * sizeof(float));
-	return 0;
-}
-
-static const struct echo_cancel_info echo_cancel_null_impl = {
-	.name = "null",
-	.info = SPA_DICT_INIT(NULL, 0),
-	.latency = NULL,
-
-	.create = null_create,
-	.destroy = null_destroy,
-
-	.run = null_run,
+const struct str_map props_key_map[] = {
+	{ PW_KEY_DEVICE_BUS_PATH, "device.bus_path" },
+	{ PW_KEY_DEVICE_FORM_FACTOR, "device.form_factor" },
+	{ PW_KEY_DEVICE_ICON_NAME, "device.icon_name" },
+	{ PW_KEY_DEVICE_INTENDED_ROLES, "device.intended_roles" },
+	{ PW_KEY_NODE_DESCRIPTION, "device.description" },
+	{ PW_KEY_MEDIA_ICON_NAME, "media.icon_name" },
+	{ PW_KEY_APP_ICON_NAME, "application.icon_name" },
+	{ PW_KEY_APP_PROCESS_MACHINE_ID, "application.process.machine_id" },
+	{ PW_KEY_APP_PROCESS_SESSION_ID, "application.process.session_id" },
+	{ PW_KEY_MEDIA_ROLE, "media.role", media_role_map },
+	{ NULL, NULL },
 };
-
-const struct echo_cancel_info *echo_cancel_null = &echo_cancel_null_impl;

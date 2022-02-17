@@ -22,8 +22,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PULSE_SERVER_MEDIA_ROLES_H
-#define PULSE_SERVER_MEDIA_ROLES_H
+#ifndef PULSE_SERVER_REMAP_H
+#define PULSE_SERVER_REMAP_H
 
 #include <stddef.h>
 
@@ -37,6 +37,8 @@ struct str_map {
 
 extern const struct str_map media_role_map[];
 
+extern const struct str_map props_key_map[];
+
 static inline const struct str_map *str_map_find(const struct str_map *map, const char *pw, const char *pa)
 {
 	size_t i;
@@ -47,4 +49,4 @@ static inline const struct str_map *str_map_find(const struct str_map *map, cons
 	return NULL;
 }
 
-#endif /* PULSE_SERVER_MEDIA_ROLES_H */
+#endif /* PULSE_SERVER_REMAP_H */

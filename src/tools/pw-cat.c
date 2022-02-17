@@ -648,7 +648,7 @@ static void on_core_info(void *userdata, const struct pw_core_info *info)
 	struct data *data = userdata;
 
 	if (data->verbose)
-		fprintf(stdout, "remote %"PRIu32" is named \"%s\"\n",
+		printf("remote %"PRIu32" is named \"%s\"\n",
 				info->id, info->name);
 }
 
@@ -808,7 +808,7 @@ static void registry_event_global(void *userdata, uint32_t id,
 					id, type, name, media_class, desc ? : "", prio);
 
 			spa_dict_for_each(item, props) {
-				fprintf(stdout, "\t\t%s = \"%s\"\n", item->key, item->value);
+				printf("\t\t%s = \"%s\"\n", item->key, item->value);
 			}
 		}
 
@@ -1533,7 +1533,7 @@ int main(int argc, char *argv[])
 			return EXIT_SUCCESS;
 
 		case OPT_VERSION:
-			fprintf(stdout, "%s\n"
+			printf("%s\n"
 				"Compiled with libpipewire %s\n"
 				"Linked with libpipewire %s\n",
 				prog,
@@ -1930,14 +1930,21 @@ int main(int argc, char *argv[])
 	}
 
 error_connect_fail:
-	if (data.stream)
+	if (data.stream) {
+		spa_hook_remove(&data.stream_listener);
 		pw_stream_destroy(data.stream);
+	}
 error_no_stream:
-	if (data.metadata)
+	if (data.metadata) {
+		spa_hook_remove(&data.metadata_listener);
 		pw_proxy_destroy((struct pw_proxy*)data.metadata);
-	if (data.registry)
+	}
+	if (data.registry) {
+		spa_hook_remove(&data.registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)data.registry);
+	}
 error_no_registry:
+	spa_hook_remove(&data.core_listener);
 	pw_core_disconnect(data.core);
 error_ctx_connect_failed:
 	pw_context_destroy(data.context);

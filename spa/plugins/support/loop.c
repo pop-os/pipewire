@@ -48,6 +48,7 @@ static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.loop");
 #define MAX_ALIGN	8
 #define ITEM_ALIGN	8
 #define DATAS_SIZE	(4096*8)
+#define MAX_EP		32
 
 /** \cond */
 
@@ -74,11 +75,11 @@ struct impl {
         struct spa_system *system;
 
 	struct spa_list source_list;
-	struct spa_list destroy_list;
 	struct spa_hook_list hooks_list;
 
 	int poll_fd;
 	pthread_t thread;
+	int enter_count;
 
 	struct spa_source *wakeup;
 	int ack_fd;
@@ -113,6 +114,7 @@ static int loop_add_source(void *object, struct spa_source *source)
 {
 	struct impl *impl = object;
 	source->loop = &impl->loop;
+	source->priv = NULL;
 	return spa_system_pollfd_add(impl->system, impl->poll_fd, source->fd, source->mask, source);
 }
 
@@ -125,6 +127,12 @@ static int loop_update_source(void *object, struct spa_source *source)
 static int loop_remove_source(void *object, struct spa_source *source)
 {
 	struct impl *impl = object;
+	struct spa_poll_event *e;
+	if ((e = source->priv)) {
+		/* active in an iteration of the loop, remove it from there */
+		e->data = NULL;
+		source->priv = NULL;
+	}
 	source->loop = NULL;
 	return spa_system_pollfd_del(impl->system, impl->poll_fd, source->fd);
 }
@@ -289,35 +297,43 @@ loop_add_hook(void *object,
 static void loop_enter(void *object)
 {
 	struct impl *impl = object;
-	impl->thread = pthread_self();
+	pthread_t thread_id = pthread_self();
+
+	if (impl->enter_count == 0) {
+		spa_return_if_fail(impl->thread == 0);
+		impl->thread = thread_id;
+		impl->enter_count = 1;
+	} else {
+		spa_return_if_fail(impl->enter_count > 0);
+		spa_return_if_fail(impl->thread == thread_id);
+		impl->enter_count++;
+	}
 	spa_log_trace(impl->log, "%p: enter %lu", impl, impl->thread);
 }
 
 static void loop_leave(void *object)
 {
 	struct impl *impl = object;
-	spa_log_trace(impl->log, "%p: leave %lu", impl, impl->thread);
-	impl->thread = 0;
-}
+	pthread_t thread_id = pthread_self();
 
-static inline void process_destroy(struct impl *impl)
-{
-	struct source_impl *source, *tmp;
-	spa_list_for_each_safe(source, tmp, &impl->destroy_list, link)
-		free(source);
-	spa_list_init(&impl->destroy_list);
+	spa_return_if_fail(impl->enter_count > 0);
+	spa_return_if_fail(impl->thread == thread_id);
+
+	spa_log_trace(impl->log, "%p: leave %lu", impl, impl->thread);
+
+	if (--impl->enter_count == 0)
+		impl->thread = 0;
 }
 
 static int loop_iterate(void *object, int timeout)
 {
 	struct impl *impl = object;
-	struct spa_loop *loop = &impl->loop;
-	struct spa_poll_event ep[32];
+	struct spa_poll_event ep[MAX_EP], *e;
 	int i, nfds;
 
 	spa_loop_control_hook_before(&impl->hooks_list);
 
-	nfds = spa_system_pollfd_wait(impl->system, impl->poll_fd, ep, SPA_N_ELEMENTS(ep), timeout);
+	nfds = spa_system_pollfd_wait(impl->system, impl->poll_fd, ep, MAX_EP, timeout);
 
 	spa_loop_control_hook_after(&impl->hooks_list);
 
@@ -330,15 +346,19 @@ static int loop_iterate(void *object, int timeout)
 	for (i = 0; i < nfds; i++) {
 		struct spa_source *s = ep[i].data;
 		s->rmask = ep[i].events;
+		/* already active in another iteration of the loop,
+		 * remove it from that iteration */
+		if (SPA_UNLIKELY(e = s->priv))
+			e->data = NULL;
+		s->priv = &ep[i];
 	}
 	for (i = 0; i < nfds; i++) {
 		struct spa_source *s = ep[i].data;
-		if (SPA_LIKELY(s->rmask && s->fd != -1 && s->loop == loop))
+		if (SPA_LIKELY(s && s->rmask)) {
+			s->priv = NULL;
 			s->func(s);
+		}
 	}
-	if (SPA_UNLIKELY(!spa_list_is_empty(&impl->destroy_list)))
-		process_destroy(impl);
-
 	return nfds;
 }
 
@@ -692,7 +712,7 @@ static void loop_destroy_source(void *object, struct spa_source *source)
 		spa_system_close(impl->impl->system, source->fd);
 		source->fd = -1;
 	}
-	spa_list_insert(&impl->impl->destroy_list, &impl->link);
+	free(source);
 }
 
 static const struct spa_loop_methods impl_loop = {
@@ -756,10 +776,12 @@ static int impl_clear(struct spa_handle *handle)
 
 	impl = (struct impl *) handle;
 
+	if (impl->enter_count != 0)
+		spa_log_warn(impl->log, "%p: loop is entered %d times",
+				impl, impl->enter_count);
+
 	spa_list_consume(source, &impl->source_list, link)
 		loop_destroy_source(impl, &source->source);
-
-	process_destroy(impl);
 
 	spa_system_close(impl->system, impl->ack_fd);
 	spa_system_close(impl->system, impl->poll_fd);
@@ -822,7 +844,6 @@ impl_init(const struct spa_handle_factory *factory,
 	impl->poll_fd = res;
 
 	spa_list_init(&impl->source_list);
-	spa_list_init(&impl->destroy_list);
 	spa_hook_list_init(&impl->hooks_list);
 
 	impl->buffer_data = SPA_PTR_ALIGN(impl->buffer_mem, MAX_ALIGN, uint8_t);

@@ -5,24 +5,14 @@ foreach dep: bluez5_deps
   endif
 endforeach
 
-if not get_option('bluez5-backend-hsp-native').disabled()
-  cdata.set('HAVE_BLUEZ_5_BACKEND_HSP_NATIVE', 1)
-  cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
-endif
-if not get_option('bluez5-backend-hfp-native').disabled()
-  cdata.set('HAVE_BLUEZ_5_BACKEND_HFP_NATIVE', 1)
-  cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE', 1)
-endif
-if not get_option('bluez5-backend-ofono').disabled()
-  cdata.set('HAVE_BLUEZ_5_BACKEND_OFONO', 1)
-endif
-if not get_option('bluez5-backend-hsphfpd').disabled()
-  cdata.set('HAVE_BLUEZ_5_BACKEND_HSPHFPD', 1)
-endif
-
-if dependency('bluez', version: '< 6', required: false).found()
-  cdata.set('HAVE_BLUEZ_5_HCI', 1)
-endif
+cdata.set('HAVE_BLUEZ_5_BACKEND_NATIVE',
+          get_option('bluez5-backend-hsp-native').allowed() or
+          get_option('bluez5-backend-hfp-native').allowed())
+cdata.set('HAVE_BLUEZ_5_BACKEND_HSP_NATIVE', get_option('bluez5-backend-hsp-native').allowed())
+cdata.set('HAVE_BLUEZ_5_BACKEND_HFP_NATIVE', get_option('bluez5-backend-hfp-native').allowed())
+cdata.set('HAVE_BLUEZ_5_BACKEND_OFONO', get_option('bluez5-backend-ofono').allowed())
+cdata.set('HAVE_BLUEZ_5_BACKEND_HSPHFPD', get_option('bluez5-backend-hsphfpd').allowed())
+cdata.set('HAVE_BLUEZ_5_HCI', dependency('bluez', version: '< 6', required: false).found())
 
 bluez5_sources = [
   'plugin.c',
@@ -44,18 +34,18 @@ bluez5_data = ['bluez-hardware.conf']
 
 install_data(bluez5_data, install_dir : spa_datadir / 'bluez5')
 
-if not get_option('bluez5-backend-hsp-native').disabled() or not get_option('bluez5-backend-hfp-native').disabled()
+if get_option('bluez5-backend-hsp-native').allowed() or get_option('bluez5-backend-hfp-native').allowed()
   if libusb_dep.found()
     bluez5_deps += libusb_dep
   endif
   bluez5_sources += ['backend-native.c']
 endif
 
-if not get_option('bluez5-backend-ofono').disabled()
+if get_option('bluez5-backend-ofono').allowed()
   bluez5_sources += ['backend-ofono.c']
 endif
 
-if not get_option('bluez5-backend-hsphfpd').disabled()
+if get_option('bluez5-backend-hsphfpd').allowed()
   bluez5_sources += ['backend-hsphfpd.c']
 endif
 

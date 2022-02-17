@@ -1,6 +1,6 @@
-/* PipeWire
+/* Simple Plugin API
  *
- * Copyright © 2020 Wim Taymans
+ * Copyright © 2022 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,19 +22,32 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <stddef.h>
+#ifndef SPA_DEBUG_LOG_H
+#define SPA_DEBUG_LOG_H
 
-#include "media-roles.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-const struct str_map media_role_map[] = {
-	{ "Movie", "video", },
-	{ "Music", "music", },
-	{ "Game", "game", },
-	{ "Notification", "event", },
-	{ "Communication", "phone", },
-	{ "Movie", "animation", },
-	{ "Production", "production", },
-	{ "Accessibility", "a11y", },
-	{ "Test", "test", },
-	{ NULL, NULL },
-};
+#include <stdio.h>
+/**
+ * \addtogroup spa_debug
+ * \{
+ */
+
+#ifndef spa_debug
+#define spa_debug(fmt,...)	({ printf(fmt"\n", ## __VA_ARGS__); })
+#endif
+#ifndef spa_debugn
+#define spa_debugn(fmt,...)	({ printf(fmt, ## __VA_ARGS__); })
+#endif
+
+/**
+ * \}
+ */
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
+
+#endif /* SPA_DEBUG_LOGH */
