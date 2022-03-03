@@ -192,8 +192,11 @@ static void manager_sync(void *data)
 		reply_set_client_name(client, client->connect_tag);
 		client->connect_tag = SPA_ID_INVALID;
 	}
+
+	client->ref++;
 	spa_list_consume(o, &client->operations, link)
 		operation_complete(o);
+	client_unref(client);
 }
 
 static struct stream *find_stream(struct client *client, uint32_t index)
@@ -445,8 +448,8 @@ static uint64_t set_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 {
 	struct spa_fraction lat;
 	uint64_t lat_usec;
-	struct spa_dict_item items[5];
-	char latency[32];
+	struct spa_dict_item items[6];
+	char latency[32], rate[32];
 	char attr_maxlength[32];
 	char attr_tlength[32];
 	char attr_prebuf[32];
@@ -463,17 +466,19 @@ static uint64_t set_playback_buffer_attr(struct stream *s, struct buffer_attr *a
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
+	snprintf(rate, sizeof(rate), "1/%u", lat.denom);
 	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", s->attr.maxlength);
 	snprintf(attr_tlength, sizeof(attr_tlength), "%u", s->attr.tlength);
 	snprintf(attr_prebuf, sizeof(attr_prebuf), "%u", s->attr.prebuf);
 	snprintf(attr_minreq, sizeof(attr_minreq), "%u", s->attr.minreq);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
-	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
-	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.tlength", attr_tlength);
-	items[3] = SPA_DICT_ITEM_INIT("pulse.attr.prebuf", attr_prebuf);
-	items[4] = SPA_DICT_ITEM_INIT("pulse.attr.minreq", attr_minreq);
-	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 5));
+	items[1] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_RATE, rate);
+	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
+	items[3] = SPA_DICT_ITEM_INIT("pulse.attr.tlength", attr_tlength);
+	items[4] = SPA_DICT_ITEM_INIT("pulse.attr.prebuf", attr_prebuf);
+	items[5] = SPA_DICT_ITEM_INIT("pulse.attr.minreq", attr_minreq);
+	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 6));
 
 	if (s->attr.prebuf > 0)
 		s->in_prebuf = true;
@@ -594,8 +599,8 @@ static uint32_t fix_record_buffer_attr(struct stream *s, struct buffer_attr *att
 
 static uint64_t set_record_buffer_attr(struct stream *s, struct buffer_attr *attr)
 {
-	struct spa_dict_item items[3];
-	char latency[32];
+	struct spa_dict_item items[4];
+	char latency[32], rate[32];
 	char attr_maxlength[32];
 	char attr_fragsize[32];
 	struct spa_fraction lat;
@@ -610,14 +615,16 @@ static uint64_t set_record_buffer_attr(struct stream *s, struct buffer_attr *att
 	lat_usec = lat.num * SPA_USEC_PER_SEC / lat.denom;
 
 	snprintf(latency, sizeof(latency), "%u/%u", lat.num, lat.denom);
+	snprintf(rate, sizeof(rate), "1/%u", lat.denom);
 
 	snprintf(attr_maxlength, sizeof(attr_maxlength), "%u", s->attr.maxlength);
 	snprintf(attr_fragsize, sizeof(attr_fragsize), "%u", s->attr.fragsize);
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency);
-	items[1] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
-	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.fragsize", attr_fragsize);
-	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 3));
+	items[1] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_RATE, rate);
+	items[2] = SPA_DICT_ITEM_INIT("pulse.attr.maxlength", attr_maxlength);
+	items[3] = SPA_DICT_ITEM_INIT("pulse.attr.fragsize", attr_fragsize);
+	pw_stream_update_properties(s->stream, &SPA_DICT_INIT(items, 4));
 
 	return lat_usec;
 }
@@ -999,8 +1006,10 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 			stream->killed = true;
 		destroy_stream = true;
 		break;
-	case PW_STREAM_STATE_CONNECTING:
 	case PW_STREAM_STATE_PAUSED:
+		stream->id = pw_stream_get_node_id(stream->stream);
+		break;
+	case PW_STREAM_STATE_CONNECTING:
 	case PW_STREAM_STATE_STREAMING:
 		break;
 	}
@@ -1055,7 +1064,7 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 	if (id != SPA_PARAM_Format || param == NULL)
 		return;
 
-	if ((res = format_parse_param(param, &stream->ss, &stream->map, NULL, NULL)) < 0) {
+	if ((res = format_parse_param(param, false, &stream->ss, &stream->map, NULL, NULL)) < 0) {
 		pw_stream_set_error(stream->stream, res, "format not supported");
 		return;
 	}
@@ -1073,7 +1082,6 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 
 	if (stream->create_tag != SPA_ID_INVALID) {
 		struct pw_manager_object *peer;
-		stream->id = pw_stream_get_node_id(stream->stream);
 
 		if (stream->volume_set) {
 			pw_stream_set_control(stream->stream,
@@ -1556,7 +1564,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 				n_valid_formats++;
 			}
 		}
-		if (n_params < MAX_FORMATS &&
+		else if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
 				SPA_PARAM_EnumFormat, &ss,
 				ss.channels > 0 ? &map : NULL)) != NULL) {
@@ -2324,6 +2332,13 @@ static struct pw_manager_object *find_device(struct client *client,
 	return o;
 }
 
+static void sample_play_finish(struct pending_sample *ps)
+{
+	struct client *client = ps->client;
+	pending_sample_free(ps);
+	client_unref(client);
+}
+
 static void sample_play_ready_reply(void *data, struct client *client, uint32_t tag)
 {
 	struct pending_sample *ps = data;
@@ -2333,6 +2348,8 @@ static void sample_play_ready_reply(void *data, struct client *client, uint32_t 
 	pw_log_info("[%s] PLAY_SAMPLE tag:%u index:%u",
 			client->name, ps->tag, index);
 
+	ps->ready = true;
+
 	reply = reply_new(client, ps->tag);
 	if (client->version >= 13)
 		message_put(reply,
@@ -2340,6 +2357,9 @@ static void sample_play_ready_reply(void *data, struct client *client, uint32_t 
 			TAG_INVALID);
 
 	client_queue_message(client, reply);
+
+	if (ps->done)
+		sample_play_finish(ps);
 }
 
 static void sample_play_ready(void *data, uint32_t id)
@@ -2352,10 +2372,9 @@ static void sample_play_ready(void *data, uint32_t id)
 static void on_sample_done(void *obj, void *data, int res, uint32_t id)
 {
 	struct pending_sample *ps = obj;
-	struct client *client = ps->client;
-
-	pending_sample_free(ps);
-	client_unref(client);
+	ps->done = true;
+	if (ps->ready)
+		sample_play_finish(ps);
 }
 
 static void sample_play_done(void *data, int res)
@@ -4609,7 +4628,9 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 	struct pw_manager_object *o, *dev, *dev_default;
 	uint32_t index, index_device;
 	int target_id;
+	int64_t target_serial;
 	const char *name_device;
+	struct pw_node_info *info;
 	struct selector sel;
 	int res;
 	bool sink = command == COMMAND_MOVE_SINK_INPUT;
@@ -4636,6 +4657,12 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 	if (o == NULL)
 		return -ENOENT;
 
+	info = o->info;
+	if (info == NULL || info->props == NULL)
+		return -EINVAL;
+	if (spa_atob(spa_dict_lookup(info->props, PW_KEY_NODE_DONT_RECONNECT)))
+		return -EINVAL;
+
 	if ((dev = find_device(client, index_device, name_device, sink, NULL)) == NULL)
 		return -ENOENT;
 
@@ -4647,14 +4674,22 @@ static int do_move_stream(struct client *client, uint32_t command, uint32_t tag,
 		 * forgetting target.node. Follow that behavior here.
 		 */
 		target_id = -1;
+		target_serial = -1;
 	} else {
 		target_id = dev->id;
+		target_serial = dev->serial;
 	}
 
 	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
 			o->id,
 			METADATA_TARGET_NODE,
 			SPA_TYPE_INFO_BASE"Id", "%d", target_id)) < 0)
+		return res;
+
+	if ((res = pw_manager_set_metadata(manager, client->metadata_default,
+			o->id,
+			METADATA_TARGET_OBJECT,
+			SPA_TYPE_INFO_BASE"Id", "%"PRIi64, target_serial)) < 0)
 		return res;
 
 	return reply_simple_ack(client, tag);
@@ -5330,8 +5365,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	impl->props = props;
 
 	impl->work_queue = pw_context_get_work_queue(context);
-	if (impl->work_queue == NULL)
-		goto error_free;
 
 	spa_list_init(&impl->servers);
 	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;

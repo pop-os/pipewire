@@ -1,6 +1,6 @@
-/* PipeWire
+/* Spa
  *
- * Copyright © 2020 Wim Taymans
+ * Copyright © 2022 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,29 +22,51 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PULSER_SERVER_OPERATION_H
-#define PULSER_SERVER_OPERATION_H
+#ifndef DELAY_H
+#define DELAY_H
 
-#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#include <spa/utils/list.h>
+static inline void delay_run(float *buffer, uint32_t *pos,
+		uint32_t n_buffer, uint32_t delay,
+		float *dst, const float *src, const float vol, uint32_t n_samples)
+{
+	uint32_t i;
+	uint32_t p = *pos;
 
-struct client;
+	for (i = 0; i < n_samples; i++) {
+		buffer[p] = src[i];
+		dst[i] = buffer[(p - delay) & (n_buffer-1)] * vol;
+		p = (p + 1) & (n_buffer-1);
+	}
+	*pos = p;
+}
 
-struct operation {
-	struct spa_list link;
-	struct client *client;
-	uint32_t tag;
-	void (*callback) (void *data, struct client *client, uint32_t tag);
-	void *data;
-};
+static inline void delay_convolve_run(float *buffer, uint32_t *pos,
+		uint32_t n_buffer, uint32_t delay,
+		const float *taps, uint32_t n_taps,
+		float *dst, const float *src, const float vol, uint32_t n_samples)
+{
+	uint32_t i, j;
+	uint32_t p = *pos;
 
-int operation_new(struct client *client, uint32_t tag);
-int operation_new_cb(struct client *client, uint32_t tag,
-		void (*callback) (void *data, struct client *client, uint32_t tag),
-		void *data);
-struct operation *operation_find(struct client *client, uint32_t tag);
-void operation_free(struct operation *o);
-void operation_complete(struct operation *o);
+	for (i = 0; i < n_samples; i++) {
+		float sum = 0.0f;
 
-#endif /* PULSER_SERVER_OPERATION_H */
+		buffer[p] = src[i];
+		for (j = 0; j < n_taps; j++)
+			sum += (taps[j] * buffer[((p - delay) - j) & (n_buffer-1)]);
+		dst[i] = sum * vol;
+
+		p = (p + 1) & (n_buffer-1);
+	}
+	*pos = p;
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* DELAY_H */

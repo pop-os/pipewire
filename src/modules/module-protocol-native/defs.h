@@ -30,3 +30,14 @@ int pw_protocol_native_connect_portal_screencast(struct pw_protocol_client *clie
 					    const struct spa_dict *props,
 					    void (*done_callback) (void *data, int res),
 					    void *data);
+
+static inline void *get_first_pod_from_data(void *data, size_t maxsize, off_t offset)
+{
+	void *pod;
+	if (offset + sizeof(struct spa_pod) > maxsize)
+		return NULL;
+	pod = SPA_PTROFF(data, offset, void);
+	if (offset + SPA_POD_SIZE(pod) > maxsize)
+		return NULL;
+	return pod;
+}

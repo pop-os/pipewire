@@ -36,6 +36,7 @@
 #include <spa/buffer/alloc.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/filter.h>
+#include <spa/pod/dynamic.h>
 #include <spa/param/param.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
@@ -68,6 +69,7 @@ struct impl {
 	struct spa_hook follower_listener;
 	uint32_t follower_flags;
 	struct spa_audio_info follower_current_format;
+	struct spa_audio_info default_format;
 
 	struct spa_handle *hnd_convert;
 	struct spa_node *convert;
@@ -141,8 +143,8 @@ static int impl_node_enum_params(void *object, int seq,
 				 const struct spa_pod *filter)
 {
 	struct impl *this = object;
-	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[4096];
+	struct spa_pod_dynamic_builder b;
 	struct spa_result_node_params result;
 	uint32_t count = 0;
 	int res;
@@ -157,7 +159,7 @@ next:
 
 	spa_log_debug(this->log, "%p: %d id:%u", this, seq, id);
 
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 
 	switch (id) {
 	case SPA_PARAM_EnumPortConfig:
@@ -165,35 +167,38 @@ next:
 		res = spa_node_enum_params(this->convert, seq, id, start, num, filter);
 		return res;
 	case SPA_PARAM_PropInfo:
-		if ((res = follower_enum_params(this,
-				id, IDX_PropInfo, &result, filter, &b)) != 1)
-			return res;
+		res = follower_enum_params(this,
+				id, IDX_PropInfo, &result, filter, &b.b);
 		break;
 	case SPA_PARAM_Props:
-		if ((res = follower_enum_params(this,
-				id, IDX_Props, &result, filter, &b)) != 1)
-			return res;
+		res = follower_enum_params(this,
+				id, IDX_Props, &result, filter, &b.b);
 		break;
 	case SPA_PARAM_ProcessLatency:
-		if ((res = follower_enum_params(this,
-				id, IDX_ProcessLatency, &result, filter, &b)) != 1)
-			return res;
+		res = follower_enum_params(this,
+				id, IDX_ProcessLatency, &result, filter, &b.b);
 		break;
 	case SPA_PARAM_EnumFormat:
 	case SPA_PARAM_Format:
 	case SPA_PARAM_Latency:
-		if ((res = spa_node_port_enum_params_sync(this->follower,
+		res = spa_node_port_enum_params_sync(this->follower,
 				this->direction, 0,
-				id, &result.next, filter, &result.param, &b)) != 1)
-			return res;
+				id, &result.next, filter, &result.param, &b.b);
 		break;
 	default:
 		return -ENOENT;
 	}
 
-	spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+	if (res == 1) {
+		spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+		count++;
+	}
+	spa_pod_dynamic_builder_clean(&b);
 
-	if (++count != num)
+	if (res != 1)
+		return res;
+
+	if (count != num)
 		goto next;
 
 	return 0;
@@ -522,6 +527,31 @@ static int reconfigure_mode(struct impl *this, bool passthrough,
 	return 0;
 }
 
+static int format_audio_raw_parse_opt(const struct spa_pod *format, struct spa_audio_info_raw *info)
+{
+	struct spa_pod *position = NULL;
+	uint32_t media_type, media_subtype;
+	int res;
+	if ((res = spa_format_parse(format, &media_type, &media_subtype)) < 0)
+		return res;
+	if (media_type != SPA_MEDIA_TYPE_audio ||
+	    media_subtype != SPA_MEDIA_SUBTYPE_raw)
+		return -ENOTSUP;
+
+	spa_zero(*info);
+	res = spa_pod_parse_object(format,
+			SPA_TYPE_OBJECT_Format, NULL,
+			SPA_FORMAT_AUDIO_format, SPA_POD_OPT_Id(&info->format),
+			SPA_FORMAT_AUDIO_rate, SPA_POD_OPT_Int(&info->rate),
+			SPA_FORMAT_AUDIO_channels, SPA_POD_OPT_Int(&info->channels),
+			SPA_FORMAT_AUDIO_position, SPA_POD_OPT_Pod(&position));
+	if (position == NULL ||
+	    !spa_pod_copy_array(position, SPA_TYPE_Id, info->position, SPA_AUDIO_MAX_CHANNELS))
+		SPA_FLAG_SET(info->flags, SPA_AUDIO_FLAG_UNPOSITIONED);
+
+	return res;
+}
+
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			       const struct spa_pod *param)
 {
@@ -568,6 +598,12 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 				SPA_PARAM_PORT_CONFIG_monitor,		SPA_POD_OPT_Bool(&monitor),
 				SPA_PARAM_PORT_CONFIG_format,		SPA_POD_OPT_Pod(&format)) < 0)
 			return -EINVAL;
+
+		if (format) {
+			struct spa_audio_info info;
+			if (format_audio_raw_parse_opt(format, &info.info.raw) >= 0)
+				this->default_format = info;
+		}
 
 		switch (mode) {
 		case SPA_PARAM_PORT_CONFIG_MODE_none:
@@ -634,10 +670,44 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	return res;
 }
 
+static struct spa_pod *merge_objects(struct impl *this, struct spa_pod_builder *b, uint32_t id,
+			struct spa_pod_object *o1, struct spa_pod_object *o2)
+{
+	const struct spa_pod_prop *p1, *p2;
+	struct spa_pod_frame f;
+	struct spa_pod_builder_state state;
+	int res = 0;
+
+	if (o2 == NULL || SPA_POD_TYPE(o1) != SPA_POD_TYPE(o2))
+		return (struct spa_pod*)o1;
+
+	spa_pod_builder_push_object(b, &f, o1->body.type, o1->body.id);
+	p2 = NULL;
+	SPA_POD_OBJECT_FOREACH(o1, p1) {
+		p2 = spa_pod_object_find_prop(o2, p2, p1->key);
+		if (p2 != NULL) {
+			spa_pod_builder_get_state(b, &state);
+			res = spa_pod_filter_prop(b, p1, p2);
+			if (res < 0)
+		                spa_pod_builder_reset(b, &state);
+		}
+		if (p2 == NULL || res < 0)
+			spa_pod_builder_raw_padded(b, p1, SPA_POD_PROP_SIZE(p1));
+	}
+	p1 = NULL;
+	SPA_POD_OBJECT_FOREACH(o2, p2) {
+		p1 = spa_pod_object_find_prop(o1, p1, p2->key);
+		if (p1 != NULL)
+			continue;
+		spa_pod_builder_raw_padded(b, p2, SPA_POD_PROP_SIZE(p2));
+	}
+	return spa_pod_builder_pop(b, &f);
+}
+
 static int negotiate_format(struct impl *this)
 {
 	uint32_t state;
-	struct spa_pod *format;
+	struct spa_pod *format, *def;
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = { 0 };
 	int res;
@@ -669,7 +739,6 @@ static int negotiate_format(struct impl *this)
 			goto done;
 		}
 	}
-
 	if (this->convert) {
 		state = 0;
 		if ((res = spa_node_port_enum_params_sync(this->convert,
@@ -687,6 +756,13 @@ static int negotiate_format(struct impl *this)
 		res = -ENOTSUP;
 		goto done;
 	}
+
+	def = spa_format_audio_raw_build(&b,
+			SPA_PARAM_Format, &this->default_format.info.raw);
+
+	format = merge_objects(this, &b, SPA_PARAM_Format,
+			(struct spa_pod_object*)format,
+			(struct spa_pod_object*)def);
 
 	spa_pod_fixate(format);
 

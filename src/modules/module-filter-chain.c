@@ -39,6 +39,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/param/profiler.h>
+#include <spa/pod/dynamic.h>
 #include <spa/debug/pod.h>
 
 #include <pipewire/utils.h>
@@ -107,8 +108,6 @@ static const struct spa_dict_item module_props[] = {
 #include <pipewire/pipewire.h>
 
 #define MAX_HNDL 64
-#define MAX_PORTS 64
-#define MAX_CONTROLS 256
 #define MAX_SAMPLES 8192
 
 static float silence_data[MAX_SAMPLES];
@@ -136,11 +135,11 @@ struct descriptor {
 	uint32_t n_output;
 	uint32_t n_control;
 	uint32_t n_notify;
-	unsigned long input[MAX_PORTS];
-	unsigned long output[MAX_PORTS];
-	unsigned long control[MAX_PORTS];
-	unsigned long notify[MAX_PORTS];
-	float default_control[MAX_PORTS];
+	unsigned long *input;
+	unsigned long *output;
+	unsigned long *control;
+	unsigned long *notify;
+	float *default_control;
 };
 
 struct port {
@@ -167,10 +166,10 @@ struct node {
 	char name[256];
 	char *config;
 
-	struct port input_port[MAX_PORTS];
-	struct port output_port[MAX_PORTS];
-	struct port control_port[MAX_PORTS];
-	struct port notify_port[MAX_PORTS];
+	struct port *input_port;
+	struct port *output_port;
+	struct port *control_port;
+	struct port *notify_port;
 
 	uint32_t n_hndl;
 	void *hndl[MAX_HNDL];
@@ -207,23 +206,22 @@ struct graph {
 	struct spa_list link_list;
 
 	uint32_t n_input;
-	struct graph_port input[MAX_PORTS];
+	struct graph_port *input;
 
 	uint32_t n_output;
-	struct graph_port output[MAX_PORTS];
+	struct graph_port *output;
 
 	uint32_t n_hndl;
-	struct graph_hndl hndl[MAX_HNDL];
+	struct graph_hndl *hndl;
 
 	uint32_t n_control;
-	struct port *control_port[MAX_CONTROLS];
+	struct port **control_port;
 };
 
 struct impl {
 	struct pw_context *context;
 
 	struct pw_impl_module *module;
-	struct pw_work_queue *work;
 
 	struct spa_hook module_listener;
 
@@ -244,25 +242,11 @@ struct impl {
 	struct spa_audio_info_raw playback_info;
 
 	unsigned int do_disconnect:1;
-	unsigned int unloading:1;
 
 	long unsigned rate;
 
 	struct graph graph;
 };
-
-static void do_unload_module(void *obj, void *data, int res, uint32_t id)
-{
-	struct impl *impl = data;
-	pw_impl_module_destroy(impl->module);
-}
-static void unload_module(struct impl *impl)
-{
-	if (!impl->unloading) {
-		impl->unloading = true;
-		pw_work_queue_add(impl->work, impl, 0, do_unload_module, impl);
-	}
-}
 
 static void capture_destroy(void *d)
 {
@@ -628,26 +612,13 @@ static const struct pw_stream_events out_stream_events = {
 	.param_changed = param_changed
 };
 
-static int builder_overflow(void *data, uint32_t size)
-{
-	struct spa_pod_builder *b = data;
-	b->size = SPA_ROUND_UP_N(size, 4096);
-	if ((b->data = realloc(b->data, b->size)) == NULL)
-		return -errno;
-        return 0;
-}
-
-static const struct spa_pod_builder_callbacks builder_callbacks = {
-	SPA_VERSION_POD_BUILDER_CALLBACKS,
-	.overflow = builder_overflow
-};
-
 static int setup_streams(struct impl *impl)
 {
 	int res;
 	uint32_t i, n_params;
-	const struct spa_pod *params[256];
-	struct spa_pod_builder b;
+	uint32_t offsets[512];
+	const struct spa_pod *params[512];
+	struct spa_pod_dynamic_builder b;
 	struct graph *graph = &impl->graph;
 
 	impl->capture = pw_stream_new(impl->core,
@@ -671,16 +642,22 @@ static int setup_streams(struct impl *impl)
 			&out_stream_events, impl);
 
 	n_params = 0;
-	spa_pod_builder_init(&b, NULL, 0);
-	spa_pod_builder_set_callbacks(&b, &builder_callbacks, &b);
+	spa_pod_dynamic_builder_init(&b, NULL, 0, 4096);
 
-	params[n_params++] = spa_format_audio_raw_build(&b,
+	offsets[n_params++] = b.b.state.offset;
+	spa_format_audio_raw_build(&b.b,
 			SPA_PARAM_EnumFormat, &impl->capture_info);
 
-	for (i = 0; i < graph->n_control; i++)
-		params[n_params++] = get_prop_info(graph, &b, i);
+	for (i = 0; i < graph->n_control; i++) {
+		offsets[n_params++] = b.b.state.offset;
+		get_prop_info(graph, &b.b, i);
+	}
 
-	params[n_params++] = get_props_param(graph, &b);
+	offsets[n_params++] = b.b.state.offset;
+	get_props_param(graph, &b.b);
+
+	for (i = 0; i < n_params; i++)
+		params[i] = spa_pod_builder_deref(&b.b, offsets[i]);
 
 	res = pw_stream_connect(impl->capture,
 			PW_DIRECTION_INPUT,
@@ -689,14 +666,14 @@ static int setup_streams(struct impl *impl)
 			PW_STREAM_FLAG_MAP_BUFFERS |
 			PW_STREAM_FLAG_RT_PROCESS,
 			params, n_params);
-	free(b.data);
+
+	spa_pod_dynamic_builder_clean(&b);
 	if (res < 0)
 		return res;
 
 	n_params = 0;
-	spa_pod_builder_init(&b, NULL, 0);
-	spa_pod_builder_set_callbacks(&b, &builder_callbacks, &b);
-	params[n_params++] = spa_format_audio_raw_build(&b,
+	spa_pod_dynamic_builder_init(&b, NULL, 0, 4096);
+	params[n_params++] = spa_format_audio_raw_build(&b.b,
 			SPA_PARAM_EnumFormat, &impl->playback_info);
 
 	res = pw_stream_connect(impl->playback,
@@ -707,7 +684,7 @@ static int setup_streams(struct impl *impl)
 			PW_STREAM_FLAG_RT_PROCESS  |
 			PW_STREAM_FLAG_TRIGGER,
 			params, n_params);
-	free(b.data);
+	spa_pod_dynamic_builder_clean(&b);
 
 	if (res < 0)
 		return res;
@@ -741,7 +718,6 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 {
 	struct fc_plugin *pl = NULL;
 	struct plugin *hndl;
-	int res = 0;
 	const struct spa_support *support;
 	uint32_t n_support;
 
@@ -765,6 +741,11 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 		pl = load_lv2_plugin(support, n_support, path, NULL);
 	}
 #endif
+	else {
+		pl = NULL;
+		errno = EINVAL;
+	}
+
 	if (pl == NULL)
 		goto exit;
 
@@ -784,9 +765,7 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 	spa_list_append(&impl->plugin_list, &hndl->link);
 
 	return hndl;
-
 exit:
-	errno = -res;
 	return NULL;
 }
 
@@ -797,6 +776,11 @@ static void descriptor_unref(struct descriptor *desc)
 
 	spa_list_remove(&desc->link);
 	plugin_unref(desc->plugin);
+	free(desc->input);
+	free(desc->output);
+	free(desc->control);
+	free(desc->default_control);
+	free(desc->notify);
 	free(desc);
 }
 
@@ -806,7 +790,7 @@ static struct descriptor *descriptor_load(struct impl *impl, const char *type,
 	struct plugin *hndl;
 	struct descriptor *desc;
 	const struct fc_descriptor *d;
-	uint32_t i;
+	uint32_t i, n_input, n_output, n_control, n_notify;
 	unsigned long p;
 	int res;
 
@@ -832,6 +816,7 @@ static struct descriptor *descriptor_load(struct impl *impl, const char *type,
 	desc = calloc(1, sizeof(*desc));
 	desc->ref = 1;
 	desc->plugin = hndl;
+	spa_list_init(&desc->link);
 
 	if ((d = hndl->plugin->make_desc(hndl->plugin, label)) == NULL) {
 		pw_log_error("cannot find label %s", label);
@@ -840,6 +825,27 @@ static struct descriptor *descriptor_load(struct impl *impl, const char *type,
 	}
 	desc->desc = d;
 	snprintf(desc->label, sizeof(desc->label), "%s", label);
+
+	n_input = n_output = n_control = n_notify = 0;
+	for (p = 0; p < d->n_ports; p++) {
+		struct fc_port *fp = &d->ports[p];
+		if (FC_IS_PORT_AUDIO(fp->flags)) {
+			if (FC_IS_PORT_INPUT(fp->flags))
+				n_input++;
+			else if (FC_IS_PORT_OUTPUT(fp->flags))
+				n_output++;
+		} else if (FC_IS_PORT_CONTROL(fp->flags)) {
+			if (FC_IS_PORT_INPUT(fp->flags))
+				n_control++;
+			else if (FC_IS_PORT_OUTPUT(fp->flags))
+				n_notify++;
+		}
+	}
+	desc->input = calloc(n_input, sizeof(unsigned long));
+	desc->output = calloc(n_output, sizeof(unsigned long));
+	desc->control = calloc(n_control, sizeof(unsigned long));
+	desc->default_control = calloc(n_control, sizeof(float));
+	desc->notify = calloc(n_notify, sizeof(unsigned long));
 
 	for (p = 0; p < d->n_ports; p++) {
 		struct fc_port *fp = &d->ports[p];
@@ -884,9 +890,7 @@ static struct descriptor *descriptor_load(struct impl *impl, const char *type,
 	return desc;
 
 exit:
-	if (hndl != NULL)
-		plugin_unref(hndl);
-	free(desc);
+	descriptor_unref(desc);
 	errno = -res;
 	return NULL;
 }
@@ -1095,6 +1099,11 @@ static int load_node(struct graph *graph, struct spa_json *json)
 	node->desc = desc;
 	snprintf(node->name, sizeof(node->name), "%s", name);
 
+	node->input_port = calloc(desc->n_input, sizeof(struct port));
+	node->output_port = calloc(desc->n_output, sizeof(struct port));
+	node->control_port = calloc(desc->n_control, sizeof(struct port));
+	node->notify_port = calloc(desc->n_notify, sizeof(struct port));
+
 	for (i = 0; i < desc->n_input; i++) {
 		struct port *port = &node->input_port[i];
 		port->node = node;
@@ -1154,6 +1163,10 @@ static void node_free(struct node *node)
 		d->cleanup(node->hndl[i]);
 	}
 	descriptor_unref(node->desc);
+	free(node->input_port);
+	free(node->output_port);
+	free(node->control_port);
+	free(node->notify_port);
 	free(node);
 }
 
@@ -1221,15 +1234,12 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 	struct port *port;
 	struct graph_port *gp;
 	struct graph_hndl *gh;
-	uint32_t i, j, n_input, n_output, n_hndl = 0;
+	uint32_t i, j, n_nodes, n_input, n_output, n_control, n_hndl = 0;
 	int res;
 	unsigned long p;
 	struct descriptor *desc;
 	const struct fc_descriptor *d;
 	char v[256];
-
-	graph->n_input = 0;
-	graph->n_output = 0;
 
 	first = spa_list_first(&graph->node_list, struct node, link);
 	last = spa_list_last(&graph->node_list, struct node, link);
@@ -1272,11 +1282,16 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		res = -EINVAL;
 		goto error;
 	}
+	if (n_hndl > MAX_HNDL) {
+		pw_log_error("too many channels");
+		res = -EINVAL;
+		goto error;
+	}
 	pw_log_info("using %d instances %d %d", n_hndl, n_input, n_output);
 
-	/* now go over all nodes and create instances. We can also link
-	 * the control and notify ports already */
-	graph->n_control = 0;
+	/* now go over all nodes and create instances. */
+	n_control = 0;
+	n_nodes = 0;
 	spa_list_for_each(node, &graph->node_list, link) {
 		float *sd = silence_data, *dd = discard_data;
 
@@ -1313,11 +1328,8 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 			if (d->activate)
 				d->activate(node->hndl[i]);
 		}
-		/* collect all control ports on the graph */
-		for (j = 0; j < desc->n_control; j++) {
-			graph->control_port[graph->n_control] = &node->control_port[j];
-			graph->n_control++;
-		}
+		n_control += desc->n_control;
+		n_nodes++;
 	}
 	pw_log_info("suggested rate:%lu capture:%d playback:%d", impl->rate,
 			impl->capture_info.rate, impl->playback_info.rate);
@@ -1326,6 +1338,11 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		impl->capture_info.rate = impl->rate;
 	if (impl->playback_info.rate == 0)
 		impl->playback_info.rate = impl->rate;
+
+	graph->n_input = 0;
+	graph->input = calloc(n_input * n_hndl, sizeof(struct graph_port));
+	graph->n_output = 0;
+	graph->output = calloc(n_output * n_hndl, sizeof(struct graph_port));
 
 	/* now collect all input and output ports for all the handles. */
 	for (i = 0; i < n_hndl; i++) {
@@ -1429,6 +1446,9 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 
 	/* order all nodes based on dependencies */
 	graph->n_hndl = 0;
+	graph->hndl = calloc(n_nodes * n_hndl, sizeof(struct graph_hndl));
+	graph->n_control = 0;
+	graph->control_port = calloc(n_control, sizeof(struct port *));
 	while (true) {
 		if ((node = find_next_node(graph)) == NULL)
 			break;
@@ -1447,6 +1467,12 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 
 		for (i = 0; i < desc->n_output; i++)
 			setup_output_port(graph, &node->output_port[i]);
+
+		/* collect all control ports on the graph */
+		for (i = 0; i < desc->n_control; i++) {
+			graph->control_port[graph->n_control] = &node->control_port[i];
+			graph->n_control++;
+		}
 	}
 	return 0;
 
@@ -1539,6 +1565,10 @@ static void graph_free(struct graph *graph)
 		link_free(link);
 	spa_list_consume(node, &graph->node_list, link)
 		node_free(node);
+	free(graph->input);
+	free(graph->output);
+	free(graph->hndl);
+	free(graph->control_port);
 }
 
 static void core_error(void *data, uint32_t id, int seq, int res, const char *message)
@@ -1549,7 +1579,7 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 			id, seq, res, spa_strerror(res), message);
 
 	if (id == PW_ID_CORE && res == -EPIPE)
-		unload_module(impl);
+		pw_impl_module_schedule_destroy(impl->module);
 }
 
 static const struct pw_core_events core_events = {
@@ -1562,7 +1592,7 @@ static void core_destroy(void *d)
 	struct impl *impl = d;
 	spa_hook_remove(&impl->core_listener);
 	impl->core = NULL;
-	unload_module(impl);
+	pw_impl_module_schedule_destroy(impl->module);
 }
 
 static const struct pw_proxy_events core_proxy_events = {
@@ -1579,8 +1609,6 @@ static void impl_destroy(struct impl *impl)
 		pw_core_disconnect(impl->core);
 	pw_properties_free(impl->capture_props);
 	pw_properties_free(impl->playback_props);
-	if (impl->work)
-		pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	graph_free(&impl->graph);
 	free(impl);
 }
@@ -1588,7 +1616,6 @@ static void impl_destroy(struct impl *impl)
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
-	impl->unloading = true;
 	spa_hook_remove(&impl->module_listener);
 	impl_destroy(impl);
 }
@@ -1688,12 +1715,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->module = module;
 	impl->context = context;
-	impl->work = pw_context_get_work_queue(context);
-	if (impl->work == NULL) {
-		res = -errno;
-		pw_log_error( "can't create work queue: %m");
-		goto error;
-	}
+
 	impl->rate = 48000;
 	impl->graph.impl = impl;
 	spa_list_init(&impl->plugin_list);
