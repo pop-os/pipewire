@@ -197,6 +197,7 @@ pipewire_module_protocol_native = shared_library('pipewire-module-protocol-nativ
     'module-protocol-native/portal-screencast.c',
     'module-protocol-native/protocol-native.c',
     'module-protocol-native/v0/protocol-native.c',
+    'module-protocol-native/protocol-footer.c',
     'module-protocol-native/connection.c' ],
   include_directories : [configinc],
   install : true,
@@ -489,7 +490,7 @@ pipewire_module_x11_bell = shared_library('pipewire-module-x11-bell',
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, x11_dep, canberra_dep],
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, x11_dep, xfixes_dep, canberra_dep],
 )
 endif
 summary({'x11-bell': build_module_x11_bell}, bool_yn: true, section: 'Optional Modules')

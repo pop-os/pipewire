@@ -38,10 +38,15 @@
 #include <X11/Xlib-xcb.h>
 #include <X11/XKBlib.h>
 
+#ifdef HAVE_XFIXES_6
+#include <X11/extensions/Xfixes.h>
+#endif
+
 #include <canberra.h>
 
-#include "pipewire/pipewire.h"
-#include "pipewire/impl.h"
+#include <pipewire/pipewire.h>
+#include <pipewire/impl.h>
+#include <pipewire/private.h>
 
 /** \page page_module_x11_bell PipeWire Module: X11 Bell
  *
@@ -81,21 +86,30 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 struct impl {
 	struct pw_context *context;
 	struct pw_thread_loop *thread_loop;
+	struct pw_loop *thread_loop_loop;
 	struct pw_loop *loop;
 	struct spa_source *source;
 
 	struct pw_properties *properties;
 
+	struct pw_impl_module *module;
 	struct spa_hook module_listener;
 
 	Display *display;
-	int xkb_event_base;
 };
 
-static int play_sample(struct impl *impl, const char *sample)
+static int play_sample(struct impl *impl)
 {
-	int res;
+	const char *sample = NULL;
 	ca_context *ca;
+	int res;
+
+	if (impl->properties)
+		sample = pw_properties_get(impl->properties, "sample.name");
+	if (sample == NULL)
+		sample = "bell-window-system";
+
+	pw_log_debug("play sample %s", sample);
 
 	if ((res = ca_context_create(&ca)) < 0) {
 		pw_log_error("canberra context create error: %s", ca_strerror(res));
@@ -113,6 +127,8 @@ static int play_sample(struct impl *impl, const char *sample)
 			CA_PROP_CANBERRA_CACHE_CONTROL, "permanent",
 			NULL)) < 0) {
 		pw_log_warn("can't play sample (%s): %s", sample, ca_strerror(res));
+		res = -EIO;
+		goto exit_destroy;
 	}
 
 exit_destroy:
@@ -120,11 +136,17 @@ exit_destroy:
 exit:
 	return res;
 }
+
+static int do_play_sample(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	play_sample(user_data);
+	return 0;
+}
+
 static void display_io(void *data, int fd, uint32_t mask)
 {
 	struct impl *impl = data;
 	XEvent e;
-	const char *sample = NULL;
 
 	while (XPending(impl->display)) {
 		XNextEvent(impl->display, &e);
@@ -132,60 +154,64 @@ static void display_io(void *data, int fd, uint32_t mask)
 		if (((XkbEvent*) &e)->any.xkb_type != XkbBellNotify)
 			continue;
 
-		if (impl->properties)
-			sample = pw_properties_get(impl->properties, "sample.name");
-		if (sample == NULL)
-			sample = "bell-window-system";
-
-		pw_log_debug("play sample %s", sample);
-		play_sample(impl, sample);
+		pw_loop_invoke(impl->thread_loop_loop, do_play_sample, 0, NULL, 0, false, impl);
 	}
 }
 
-static void x11_close(struct impl *impl)
+#ifdef HAVE_XSETIOERROREXITHANDLER
+static void x11_io_error_exit_handler(Display *display, void *data)
 {
-	if (impl->source) {
-		pw_loop_destroy_source(impl->loop, impl->source);
-		impl->source = NULL;
-	}
-	if (impl->display) {
-		XCloseDisplay(impl->display);
-		impl->display = NULL;
-	}
+	struct impl *impl = data;
+
+	spa_assert(display == impl->display);
+
+	pw_log_warn("X11 display (%s) has encountered a fatal I/O error", DisplayString(display));
+
+	pw_loop_destroy_source(impl->loop, impl->source);
+	impl->source = NULL;
+
+	pw_impl_module_schedule_destroy(impl->module);
 }
+#endif
 
 static int x11_connect(struct impl *impl, const char *name)
 {
-	int res, major, minor;
+	int major, minor;
 	unsigned int auto_ctrls, auto_values;
 
 	if (!(impl->display = XOpenDisplay(name))) {
-		pw_log_warn("XOpenDisplay() failed");
-		res = -EIO;
-		goto error;
+		pw_log_error("XOpenDisplay() failed");
+		return -EIO;
 	}
 
 	impl->source = pw_loop_add_io(impl->loop,
 			ConnectionNumber(impl->display),
 			SPA_IO_IN, false, display_io, impl);
+	if (!impl->source)
+		return -errno;
+
+#ifdef HAVE_XSETIOERROREXITHANDLER
+	XSetIOErrorExitHandler(impl->display, x11_io_error_exit_handler, impl);
+#endif
+
+#ifdef HAVE_XFIXES_6
+	XFixesSetClientDisconnectMode(impl->display, XFixesClientDisconnectFlagTerminate);
+#endif
 
 	major = XkbMajorVersion;
 	minor = XkbMinorVersion;
 
 	if (!XkbLibraryVersion(&major, &minor)) {
-		pw_log_warn("XkbLibraryVersion() failed");
-		res = -EIO;
-		goto error;
+		pw_log_error("XkbLibraryVersion() failed");
+		return -EIO;
 	}
 
 	major = XkbMajorVersion;
 	minor = XkbMinorVersion;
 
-	if (!XkbQueryExtension(impl->display, NULL, &impl->xkb_event_base,
-				NULL, &major, &minor)) {
-		res = -EIO;
-		pw_log_warn("XkbQueryExtension() failed");
-		goto error;
+	if (!XkbQueryExtension(impl->display, NULL, NULL, NULL, &major, &minor)) {
+		pw_log_error("XkbQueryExtension() failed");
+		return -EIO;
 	}
 
 	XkbSelectEvents(impl->display, XkbUseCoreKbd, XkbBellNotifyMask, XkbBellNotifyMask);
@@ -193,28 +219,24 @@ static int x11_connect(struct impl *impl, const char *name)
 	XkbSetAutoResetControls(impl->display, XkbAudibleBellMask, &auto_ctrls, &auto_values);
 	XkbChangeEnabledControls(impl->display, XkbUseCoreKbd, XkbAudibleBellMask, 0);
 
-	res = 0;
-error:
-	if (res < 0)
-		x11_close(impl);
-	return res;
+	return 0;
 }
 
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
 
-	spa_hook_remove(&impl->module_listener);
+	if (impl->module)
+		spa_hook_remove(&impl->module_listener);
+
+	if (impl->source)
+		pw_loop_destroy_source(impl->loop, impl->source);
+
+	if (impl->display)
+		XCloseDisplay(impl->display);
 
 	if (impl->thread_loop)
-		pw_thread_loop_lock(impl->thread_loop);
-
-	x11_close(impl);
-
-	if (impl->thread_loop) {
-		pw_thread_loop_unlock(impl->thread_loop);
 		pw_thread_loop_destroy(impl->thread_loop);
-	}
 
 	pw_properties_free(impl->properties);
 
@@ -252,15 +274,18 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_log_debug("module %p: new", impl);
 
 	impl->context = context;
+	impl->loop = pw_context_get_main_loop(context);
+
 	impl->thread_loop = pw_thread_loop_new("X11 Bell", NULL);
 	if (impl->thread_loop == NULL) {
 		res = -errno;
 		pw_log_error("can't create thread loop: %m");
 		goto error;
 	}
-	impl->loop = pw_thread_loop_get_loop(impl->thread_loop);
+	impl->thread_loop_loop = pw_thread_loop_get_loop(impl->thread_loop);
 	impl->properties = args ? pw_properties_new_string(args) : NULL;
 
+	impl->module = module;
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_x11_bell_info));
 
@@ -279,13 +304,62 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	 * to pipewire eventually and will then block the mainloop. */
 	pw_thread_loop_start(impl->thread_loop);
 
-	pw_thread_loop_lock(impl->thread_loop);
-	x11_connect(impl, name);
-	pw_thread_loop_unlock(impl->thread_loop);
+	res = x11_connect(impl, name);
+	if (res < 0)
+		goto error;
 
 	return 0;
 error:
 	module_destroy(impl);
 	return res;
 
+}
+
+static int x11_error_handler(Display *display, XErrorEvent *error)
+{
+	pw_log_warn("X11 error handler called on display %s with error %d",
+		    DisplayString(display), error->error_code);
+	return 0;
+}
+
+static int x11_io_error_handler(Display *display)
+{
+	pw_log_warn("X11 I/O error handler called on display %s", DisplayString(display));
+	return 0;
+}
+
+__attribute__((constructor))
+static void set_x11_handlers(void)
+{
+	{
+		XErrorHandler prev = XSetErrorHandler(NULL);
+		XErrorHandler def = XSetErrorHandler(x11_error_handler);
+
+		if (prev != def)
+			XSetErrorHandler(prev);
+	}
+
+	{
+		XIOErrorHandler prev = XSetIOErrorHandler(NULL);
+		XIOErrorHandler def = XSetIOErrorHandler(x11_io_error_handler);
+
+		if (prev != def)
+			XSetIOErrorHandler(prev);
+	}
+}
+
+__attribute__((destructor))
+static void restore_x11_handlers(void)
+{
+	{
+		XErrorHandler prev = XSetErrorHandler(NULL);
+		if (prev != x11_error_handler)
+			XSetErrorHandler(prev);
+	}
+
+	{
+		XIOErrorHandler prev = XSetIOErrorHandler(NULL);
+		if (prev != x11_io_error_handler)
+			XSetIOErrorHandler(prev);
+	}
 }

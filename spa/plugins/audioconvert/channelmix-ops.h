@@ -33,6 +33,7 @@
 extern struct spa_log_topic *log_topic;
 
 #include "crossover.h"
+#include "delay.h"
 
 #define VOLUME_MIN 0.0f
 #define VOLUME_NORM 1.0f
@@ -45,6 +46,10 @@ extern struct spa_log_topic *log_topic;
 #define MASK_5_1	_M(FL)|_M(FR)|_M(FC)|_M(LFE)|_M(SL)|_M(SR)|_M(RL)|_M(RR)
 #define MASK_7_1	_M(FL)|_M(FR)|_M(FC)|_M(LFE)|_M(SL)|_M(SR)|_M(RL)|_M(RR)
 
+#define BUFFER_SIZE 4096
+
+#define BUFFER_SIZE 4096
+#define MAX_TAPS 255
 
 struct channelmix {
 	uint32_t src_chan;
@@ -69,11 +74,20 @@ struct channelmix {
 
 	float freq;					/* sample frequency */
 	float lfe_cutoff;				/* in Hz, 0 is disabled */
-	uint32_t lr4_info[SPA_AUDIO_MAX_CHANNELS];
+	float fc_cutoff;				/* in Hz, 0 is disabled */
+	float rear_delay;				/* in ms, 0 is disabled */
+	float widen;					/* stereo widen. 0 is disabled */
+	uint32_t hilbert_taps;				/* to phase shift, 0 disabled */
 	struct lr4 lr4[SPA_AUDIO_MAX_CHANNELS];
 
-	void (*process) (struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRICT dst[n_dst],
-			uint32_t n_src, const void * SPA_RESTRICT src[n_src], uint32_t n_samples);
+	float buffer[2][BUFFER_SIZE];
+	uint32_t pos[2];
+	uint32_t delay;
+	float taps[MAX_TAPS];
+	uint32_t n_taps;
+
+	void (*process) (struct channelmix *mix, void * SPA_RESTRICT dst[],
+			const void * SPA_RESTRICT src[], uint32_t n_samples);
 	void (*set_volume) (struct channelmix *mix, float volume, bool mute,
 			uint32_t n_channel_volumes, float *channel_volumes);
 	void (*free) (struct channelmix *mix);
@@ -87,10 +101,9 @@ int channelmix_init(struct channelmix *mix);
 #define channelmix_set_volume(mix,...)	(mix)->set_volume(mix, __VA_ARGS__)
 #define channelmix_free(mix)		(mix)->free(mix)
 
-#define DEFINE_FUNCTION(name,arch)					\
-void channelmix_##name##_##arch(struct channelmix *mix,			\
-		uint32_t n_dst, void * SPA_RESTRICT dst[n_dst],		\
-		uint32_t n_src, const void * SPA_RESTRICT src[n_src],	\
+#define DEFINE_FUNCTION(name,arch)						\
+void channelmix_##name##_##arch(struct channelmix *mix,				\
+		void * SPA_RESTRICT dst[], const void * SPA_RESTRICT src[],	\
 		uint32_t n_samples);
 
 #define CHANNELMIX_OPS_MAX_ALIGN 16
@@ -104,6 +117,7 @@ DEFINE_FUNCTION(f32_3p1_1, c);
 DEFINE_FUNCTION(f32_2_4, c);
 DEFINE_FUNCTION(f32_2_3p1, c);
 DEFINE_FUNCTION(f32_2_5p1, c);
+DEFINE_FUNCTION(f32_2_7p1, c);
 DEFINE_FUNCTION(f32_5p1_2, c);
 DEFINE_FUNCTION(f32_5p1_3p1, c);
 DEFINE_FUNCTION(f32_5p1_4, c);

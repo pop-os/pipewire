@@ -1,6 +1,6 @@
-/* PipeWire
+/* Hilbert function
  *
- * Copyright © 2020 Wim Taymans
+ * Copyright © 2021 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,29 +22,48 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PULSER_SERVER_OPERATION_H
-#define PULSER_SERVER_OPERATION_H
+#ifndef HILBERT_H
+#define HILBERT_H
 
-#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#include <spa/utils/list.h>
+#include <errno.h>
+#include <stddef.h>
+#include <math.h>
 
-struct client;
+static inline void blackman_window(float *taps, int n_taps)
+{
+	int n;
+	for (n = 0; n < n_taps; n++) {
+		float w = 2 * M_PI * n / (n_taps-1);
+		taps[n] = 0.3635819 - 0.4891775 * cos(w)
+			+ 0.1365995 * cos(2 * w) - 0.0106411 * cos(3 * w);
+	}
+}
 
-struct operation {
-	struct spa_list link;
-	struct client *client;
-	uint32_t tag;
-	void (*callback) (void *data, struct client *client, uint32_t tag);
-	void *data;
-};
+static inline int hilbert_generate(float *taps, int n_taps)
+{
+	int i;
 
-int operation_new(struct client *client, uint32_t tag);
-int operation_new_cb(struct client *client, uint32_t tag,
-		void (*callback) (void *data, struct client *client, uint32_t tag),
-		void *data);
-struct operation *operation_find(struct client *client, uint32_t tag);
-void operation_free(struct operation *o);
-void operation_complete(struct operation *o);
+	if ((n_taps & 1) == 0)
+		return -EINVAL;
 
-#endif /* PULSER_SERVER_OPERATION_H */
+	for (i = 0; i < n_taps; i++) {
+		int k = -(n_taps / 2) + i;
+		if (k & 1) {
+			float pk = M_PI * k;
+			taps[i] *= (1.0f - cosf(pk)) / pk;
+		} else {
+			taps[i] = 0.0f;
+		}
+	}
+	return 0;
+}
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* HILBERT_H */

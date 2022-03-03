@@ -145,6 +145,7 @@ struct impl {
 	struct spa_cpu *cpu;
 	uint32_t quantum_limit;
 
+	enum spa_direction direction;
 	struct spa_io_position *io_position;
 
 	struct spa_hook_list hooks;
@@ -360,7 +361,7 @@ static int setup_convert(struct impl *this,
 	if ((res = channelmix_init(&this->mix)) < 0)
 		return res;
 
-	remap_volumes(this, src_info);
+	remap_volumes(this, this->direction == SPA_DIRECTION_INPUT ? src_info : dst_info);
 	set_volume(this);
 
 	emit_props_changed(this);
@@ -467,13 +468,21 @@ static int impl_node_enum_params(void *object, int seq,
 		case 8:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.disable"),
+				SPA_PROP_INFO_description, SPA_POD_String("Disable Channel mixing"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->disabled),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 9:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_name, SPA_POD_String("channelmix.normalize"),
 				SPA_PROP_INFO_description, SPA_POD_String("Normalize Volumes"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(
 					SPA_FLAG_IS_SET(this->mix.options, CHANNELMIX_OPTION_NORMALIZE)),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
-		case 9:
+		case 10:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_name, SPA_POD_String("channelmix.mix-lfe"),
@@ -482,7 +491,7 @@ static int impl_node_enum_params(void *object, int seq,
 					SPA_FLAG_IS_SET(this->mix.options, CHANNELMIX_OPTION_MIX_LFE)),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
-		case 10:
+		case 11:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_name, SPA_POD_String("channelmix.upmix"),
@@ -491,21 +500,49 @@ static int impl_node_enum_params(void *object, int seq,
 					SPA_FLAG_IS_SET(this->mix.options, CHANNELMIX_OPTION_UPMIX)),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
-		case 11:
+		case 12:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_name, SPA_POD_String("channelmix.lfe-cutoff"),
-				SPA_PROP_INFO_description, SPA_POD_String("LFE cutoff frequency"),
+				SPA_PROP_INFO_description, SPA_POD_String("LFE cutoff frequency (Hz)"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(
 					this->mix.lfe_cutoff, 0.0, 1000.0),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
-		case 12:
+		case 13:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
-				SPA_PROP_INFO_name, SPA_POD_String("channelmix.disable"),
-				SPA_PROP_INFO_description, SPA_POD_String("Disable Channel mixing"),
-				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->disabled),
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.fc-cutoff"),
+				SPA_PROP_INFO_description, SPA_POD_String("FC cutoff frequency (Hz)"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(
+					this->mix.fc_cutoff, 0.0, 48000.0),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 14:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.rear-delay"),
+				SPA_PROP_INFO_description, SPA_POD_String("Rear channels delay (ms)"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(
+					this->mix.rear_delay, 0.0, 1000.0),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 15:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.stereo-widen"),
+				SPA_PROP_INFO_description, SPA_POD_String("Stereo widen"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(
+					this->mix.widen, 0.0, 1.0),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 16:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.hilbert-taps"),
+				SPA_PROP_INFO_description, SPA_POD_String("Taps for phase shift of rear"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Int(
+					this->mix.hilbert_taps, 0, MAX_TAPS),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
 		default:
@@ -546,6 +583,8 @@ static int impl_node_enum_params(void *object, int seq,
 				0);
 			spa_pod_builder_prop(&b, SPA_PROP_params, 0);
 			spa_pod_builder_push_struct(&b, &f[1]);
+			spa_pod_builder_string(&b, "channelmix.disable");
+			spa_pod_builder_bool(&b, this->props.disabled);
 			spa_pod_builder_string(&b, "channelmix.normalize");
 			spa_pod_builder_bool(&b, SPA_FLAG_IS_SET(this->mix.options,
 						CHANNELMIX_OPTION_NORMALIZE));
@@ -557,8 +596,14 @@ static int impl_node_enum_params(void *object, int seq,
 						CHANNELMIX_OPTION_UPMIX));
 			spa_pod_builder_string(&b, "channelmix.lfe-cutoff");
 			spa_pod_builder_float(&b, this->mix.lfe_cutoff);
-			spa_pod_builder_string(&b, "channelmix.disable");
-			spa_pod_builder_bool(&b, this->props.disabled);
+			spa_pod_builder_string(&b, "channelmix.fc-cutoff");
+			spa_pod_builder_float(&b, this->mix.fc_cutoff);
+			spa_pod_builder_string(&b, "channelmix.rear-delay");
+			spa_pod_builder_float(&b, this->mix.rear_delay);
+			spa_pod_builder_string(&b, "channelmix.stereo-widen");
+			spa_pod_builder_float(&b, this->mix.widen);
+			spa_pod_builder_string(&b, "channelmix.hilbert-taps");
+			spa_pod_builder_int(&b, this->mix.hilbert_taps);
 			spa_pod_builder_pop(&b, &f[1]);
 			param = spa_pod_builder_pop(&b, &f[0]);
 			break;
@@ -584,23 +629,34 @@ static int impl_node_enum_params(void *object, int seq,
 
 static int channelmix_set_param(struct impl *this, const char *k, const char *s)
 {
-	if (spa_streq(k, "channelmix.normalize"))
+	if (spa_streq(k, "channelmix.disable"))
+		this->props.disabled = spa_atob(s);
+	else if (spa_streq(k, "channelmix.normalize"))
 		SPA_FLAG_UPDATE(this->mix.options, CHANNELMIX_OPTION_NORMALIZE, spa_atob(s));
 	else if (spa_streq(k, "channelmix.mix-lfe"))
 		SPA_FLAG_UPDATE(this->mix.options, CHANNELMIX_OPTION_MIX_LFE, spa_atob(s));
 	else if (spa_streq(k, "channelmix.upmix"))
 		SPA_FLAG_UPDATE(this->mix.options, CHANNELMIX_OPTION_UPMIX, spa_atob(s));
 	else if (spa_streq(k, "channelmix.lfe-cutoff"))
-		this->mix.lfe_cutoff = atoi(s);
-	else if (spa_streq(k, "channelmix.disable"))
-		this->props.disabled = spa_atob(s);
-	return 0;
+		spa_atof(s, &this->mix.lfe_cutoff);
+	else if (spa_streq(k, "channelmix.fc-cutoff"))
+		spa_atof(s, &this->mix.fc_cutoff);
+	else if (spa_streq(k, "channelmix.rear-delay"))
+		spa_atof(s, &this->mix.rear_delay);
+	else if (spa_streq(k, "channelmix.stereo-widen"))
+		spa_atof(s, &this->mix.widen);
+	else if (spa_streq(k, "channelmix.hilbert-taps"))
+		spa_atou32(s, &this->mix.hilbert_taps, 0);
+	else
+		return 0;
+	return 1;
 }
 
 static int parse_prop_params(struct impl *this, struct spa_pod *params)
 {
 	struct spa_pod_parser prs;
 	struct spa_pod_frame f;
+	int changed = 0;
 
 	spa_pod_parser_pod(&prs, params);
 	if (spa_pod_parser_push_struct(&prs, &f) < 0)
@@ -633,9 +689,11 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 			continue;
 
 		spa_log_info(this->log, "key:'%s' val:'%s'", name, value);
-		channelmix_set_param(this, name, value);
+		changed += channelmix_set_param(this, name, value);
 	}
-	return 0;
+	if (changed)
+		channelmix_init(&this->mix);
+	return changed;
 }
 
 static int apply_props(struct impl *this, const struct spa_pod *param)
@@ -714,7 +772,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 		}
 	}
 	if (changed) {
-		struct port *port = GET_IN_PORT(this, 0);
+		struct port *port = GET_PORT(this, this->direction, 0);
 		if (have_soft_volume)
 			p->have_soft_volume = true;
 		else if (have_channel_volume)
@@ -1292,8 +1350,7 @@ static int impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t 
 }
 
 static int channelmix_process_control(struct impl *this, struct port *ctrlport,
-				      uint32_t n_dst, void * SPA_RESTRICT dst[n_dst],
-				      uint32_t n_src, const void * SPA_RESTRICT src[n_src],
+				      void * SPA_RESTRICT dst[], const void * SPA_RESTRICT src[],
 				      uint32_t n_samples)
 {
 	struct spa_pod_control *c, *prev = NULL;
@@ -1336,10 +1393,10 @@ static int channelmix_process_control(struct impl *this, struct port *ctrlport,
 		spa_log_trace_fp(this->log, "%p: process %d %d", this,
 				c->offset, chunk);
 
-		channelmix_process(&this->mix, n_dst, dst, n_src, src, chunk);
-		for (i = 0; i < n_src; i++)
+		channelmix_process(&this->mix, dst, src, chunk);
+		for (i = 0; i < this->mix.src_chan; i++)
 			s[i] += chunk;
-		for (i = 0; i < n_dst; i++)
+		for (i = 0; i < this->mix.dst_chan; i++)
 			d[i] += chunk;
 
 		avail_samples -= chunk;
@@ -1352,7 +1409,7 @@ static int channelmix_process_control(struct impl *this, struct port *ctrlport,
 	 * remaining samples */
 	spa_log_trace_fp(this->log, "%p: remain %d", this, avail_samples);
 	if (avail_samples > 0)
-		channelmix_process(&this->mix, n_dst, dst, n_src, src, avail_samples);
+		channelmix_process(&this->mix, dst, src, avail_samples);
 
 	return 1;
 }
@@ -1444,14 +1501,14 @@ static int impl_node_process(void *object)
 		if (!is_passthrough) {
 			if (ctrlport->ctrl != NULL) {
 				/* if return value is 1, the sequence has been processed */
-				if (channelmix_process_control(this, ctrlport, n_dst_datas, dst_datas,
-						n_src_datas, src_datas, n_samples) == 1) {
+				if (channelmix_process_control(this, ctrlport, dst_datas,
+						src_datas, n_samples) == 1) {
 					ctrlio->status = SPA_STATUS_OK;
 					ctrlport->ctrl = NULL;
 				}
 			} else {
-				channelmix_process(&this->mix, n_dst_datas, dst_datas,
-						n_src_datas, src_datas, n_samples);
+				channelmix_process(&this->mix, dst_datas,
+						src_datas, n_samples);
 			}
 		}
 	}
@@ -1571,6 +1628,8 @@ impl_init(const struct spa_handle_factory *factory,
 	props_reset(&this->props);
 
 	this->mix.options = CHANNELMIX_OPTION_NORMALIZE;
+	this->mix.log = this->log;
+	this->mix.rear_delay = 12.0f;
 
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
@@ -1579,6 +1638,12 @@ impl_init(const struct spa_handle_factory *factory,
 			this->props.n_channels = parse_position(this->props.channel_map, s, strlen(s));
 		else if (spa_streq(k, "clock.quantum-limit"))
 			spa_atou32(s, &this->quantum_limit, 0);
+		else if (spa_streq(k, "factory.mode")) {
+			if (spa_streq(s, "merge"))
+				this->direction = SPA_DIRECTION_OUTPUT;
+			else
+				this->direction = SPA_DIRECTION_INPUT;
+		}
 		else
 			channelmix_set_param(this, k, s);
 

@@ -35,6 +35,7 @@
 #define VOLUME_NORM 1.0f
 
 #include "channelmix-ops.h"
+#include "hilbert.h"
 
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT log_topic
@@ -51,8 +52,8 @@ struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.channelmix");
 #define ANY	((uint32_t)-1)
 #define EQ	((uint32_t)-2)
 
-typedef void (*channelmix_func_t) (struct channelmix *mix, uint32_t n_dst, void * SPA_RESTRICT dst[n_dst],
-			uint32_t n_src, const void * SPA_RESTRICT src[n_src], uint32_t n_samples);
+typedef void (*channelmix_func_t) (struct channelmix *mix, void * SPA_RESTRICT dst[],
+			const void * SPA_RESTRICT src[], uint32_t n_samples);
 
 static const struct channelmix_info {
 	uint32_t src_chan;
@@ -84,6 +85,7 @@ static const struct channelmix_info {
 	{ 2, MASK_STEREO, 4, MASK_QUAD, channelmix_f32_2_4_c, 0, "f32_2_4_c" },
 	{ 2, MASK_STEREO, 4, MASK_3_1, channelmix_f32_2_3p1_c, 0, "f32_2_3p1_c" },
 	{ 2, MASK_STEREO, 6, MASK_5_1, channelmix_f32_2_5p1_c, 0, "f32_2_5p1_c" },
+	{ 2, MASK_STEREO, 8, MASK_7_1, channelmix_f32_2_7p1_c, 0, "f32_2_7p1_c" },
 #if defined (HAVE_SSE)
 	{ 6, MASK_5_1, 2, MASK_STEREO, channelmix_f32_5p1_2_sse, SPA_CPU_FLAG_SSE, "f32_5p1_2_sse" },
 #endif
@@ -214,8 +216,10 @@ static int make_matrix(struct channelmix *mix)
 	keep |= FRONT;
 	if (mix->lfe_cutoff > 0.0f)
 		keep |= _MASK(LFE);
+	else
+		keep &= ~_MASK(LFE);
 
-	spa_log_debug(mix->log, "unassigned downmix %08" PRIx64, unassigned);
+	spa_log_debug(mix->log, "unassigned downmix %08" PRIx64 " %08" PRIx64, unassigned, keep);
 
 	if (unassigned & FRONT){
 		if ((dst_mask & STEREO) == STEREO){
@@ -452,11 +456,13 @@ done:
 		}
 		maxsum = SPA_MAX(maxsum, sum);
 		if (i == _CH(LFE) && mix->lfe_cutoff > 0.0f) {
-			spa_log_debug(mix->log, "channel %d is LFE", ic);
+			spa_log_debug(mix->log, "channel %d is LFE cutoff:%f", ic, mix->lfe_cutoff);
 			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->lfe_cutoff / mix->freq);
-			mix->lr4_info[ic] = 1;
+		} else if (i == _CH(FC) && mix->fc_cutoff > 0.0f) {
+			spa_log_debug(mix->log, "channel %d is FC cutoff:%f", ic, mix->fc_cutoff);
+			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->fc_cutoff / mix->freq);
 		} else {
-			mix->lr4_info[ic] = 0;
+			mix->lr4[ic].active = false;
 		}
 		ic++;
 	}
@@ -467,6 +473,7 @@ done:
 			for (j = 0; j < jc; j++)
 		                mix->matrix_orig[i][j] /= maxsum;
 	}
+
 	return 0;
 }
 
@@ -542,11 +549,22 @@ int channelmix_init(struct channelmix *mix)
 	if (info == NULL)
 		return -ENOTSUP;
 
-	spa_log_debug(mix->log, "selected %s", info->name);
-
 	mix->free = impl_channelmix_free;
 	mix->process = info->process;
 	mix->set_volume = impl_channelmix_set_volume;
 	mix->cpu_flags = info->cpu_flags;
+	mix->delay = mix->rear_delay * mix->freq / 1000.0f;
+
+	spa_log_debug(mix->log, "selected %s delay:%d options:%08x", info->name, mix->delay,
+			mix->options);
+
+	if (mix->hilbert_taps > 0) {
+		mix->n_taps = SPA_CLAMP(mix->hilbert_taps, 15u, 255u) | 1;
+		blackman_window(mix->taps, mix->n_taps);
+		hilbert_generate(mix->taps, mix->n_taps);
+	} else {
+		mix->n_taps = 1;
+		mix->taps[0] = 1.0f;
+	}
 	return make_matrix(mix);
 }

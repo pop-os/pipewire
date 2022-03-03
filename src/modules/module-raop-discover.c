@@ -71,7 +71,6 @@ struct impl {
 
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
-	struct pw_work_queue *work;
 
 	struct pw_properties *properties;
 
@@ -80,8 +79,6 @@ struct impl {
 	AvahiServiceBrowser *sink_browser;
 
 	struct spa_list tunnel_list;
-
-	unsigned int unloading:1;
 };
 
 struct tunnel_info {
@@ -102,20 +99,6 @@ struct tunnel {
 };
 
 static int start_client(struct impl *impl);
-
-static void do_unload_module(void *obj, void *data, int res, uint32_t id)
-{
-	struct impl *impl = data;
-	pw_impl_module_destroy(impl->module);
-}
-
-static void unload_module(struct impl *impl)
-{
-	if (!impl->unloading) {
-		impl->unloading = true;
-		pw_work_queue_add(impl->work, impl, 0, do_unload_module, impl);
-	}
-}
 
 static struct tunnel *make_tunnel(struct impl *impl, const struct tunnel_info *info)
 {
@@ -168,8 +151,6 @@ static void impl_free(struct impl *impl)
 	if (impl->avahi_poll)
 		pw_avahi_poll_free(impl->avahi_poll);
 	pw_properties_free(impl->properties);
-	if (impl->work)
-		pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	free(impl);
 }
 
@@ -340,7 +321,11 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	}
 
 
-	f = open_memstream(&args, &size);
+	if ((f = open_memstream(&args, &size)) == NULL) {
+		pw_log_error("Can't open memstream: %m");
+		goto done;
+	}
+
 	fprintf(f, "{");
 	pw_properties_serialize_dict(f, &props->dict, 0);
 	fprintf(f, " stream.props = {");
@@ -465,7 +450,7 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
 	}
 	return;
 error:
-	unload_module(impl);
+	pw_impl_module_schedule_destroy(impl->module);
 }
 
 static int start_client(struct impl *impl)
@@ -476,7 +461,7 @@ static int start_client(struct impl *impl)
 					client_callback, impl,
 					&res)) == NULL) {
 		pw_log_error("can't create client: %s", avahi_strerror(res));
-		unload_module(impl);
+		pw_impl_module_schedule_destroy(impl->module);
 		return -EIO;
 	}
 	return 0;
@@ -520,10 +505,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->properties = props;
-
-	impl->work = pw_context_get_work_queue(context);
-	if (impl->work == NULL)
-		goto error_errno;
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 

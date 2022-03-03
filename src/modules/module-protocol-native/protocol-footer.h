@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2020 Wim Taymans
+ * Copyright © 2018 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -22,29 +22,38 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef PULSER_SERVER_OPERATION_H
-#define PULSER_SERVER_OPERATION_H
+/*
+ * Protocol footer.
+ *
+ * For passing around general state data that is not associated with
+ * messages sent to objects.
+ */
 
-#include <stdint.h>
-
-#include <spa/utils/list.h>
-
-struct client;
-
-struct operation {
-	struct spa_list link;
-	struct client *client;
-	uint32_t tag;
-	void (*callback) (void *data, struct client *client, uint32_t tag);
-	void *data;
+enum {
+	FOOTER_CORE_OPCODE_GENERATION = 0,
+	FOOTER_CORE_OPCODE_LAST
 };
 
-int operation_new(struct client *client, uint32_t tag);
-int operation_new_cb(struct client *client, uint32_t tag,
-		void (*callback) (void *data, struct client *client, uint32_t tag),
-		void *data);
-struct operation *operation_find(struct client *client, uint32_t tag);
-void operation_free(struct operation *o);
-void operation_complete(struct operation *o);
+enum {
+	FOOTER_CLIENT_OPCODE_GENERATION = 0,
+	FOOTER_CLIENT_OPCODE_LAST
+};
 
-#endif /* PULSER_SERVER_OPERATION_H */
+struct footer_core_global_state {
+	uint64_t last_recv_generation;
+};
+
+struct footer_client_global_state {
+};
+
+struct footer_demarshal {
+	int (*demarshal)(void *object, struct spa_pod_parser *parser);
+};
+
+extern const struct footer_demarshal footer_core_demarshal[FOOTER_CORE_OPCODE_LAST];
+extern const struct footer_demarshal footer_client_demarshal[FOOTER_CLIENT_OPCODE_LAST];
+
+void marshal_core_footers(struct footer_core_global_state *state, struct pw_core *core,
+		struct spa_pod_builder *builder);
+void marshal_client_footers(struct footer_client_global_state *state, struct pw_impl_client *client,
+		struct spa_pod_builder *builder);

@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.47',
+  version : '0.3.48',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -221,18 +221,6 @@ foreach h : check_headers
   cdata.set(h.get(1), cc.has_header(h.get(0)))
 endforeach
 
-check_functions = [
-  ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE']],
-  ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE']],
-  ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE']],
-  ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE']],
-]
-
-foreach f : check_functions
-  cdata.set('HAVE_' + f.get(0).to_upper(),
-            cc.has_function(f.get(0), prefix: f.get(1), args: f.get(2)))
-endforeach
-
 cdata.set('HAVE_PIDFD_OPEN',
           cc.get_define('SYS_pidfd_open', prefix: '#include <sys/syscall.h>') != '')
 
@@ -291,6 +279,9 @@ summary({'Avahi DNS-SD (Zeroconf)': avahi_dep.found()}, bool_yn: true,
 x11_dep = dependency('x11-xcb', required : get_option('x11'))
 summary({'X11 (x11-bell)': x11_dep.found()}, bool_yn: true,
   section: 'Misc dependencies')
+
+xfixes_dep = dependency('xfixes', required : get_option('x11-xfixes'), version: '>= 6')
+cdata.set('HAVE_XFIXES_6', xfixes_dep.found())
 
 canberra_dep = dependency('libcanberra', required : get_option('libcanberra'))
 summary({'libcanberra (x11-bell)': canberra_dep.found()}, bool_yn: true,
@@ -379,6 +370,22 @@ summary({'OpenSSL (for raop-sink)': openssl_lib.found()}, bool_yn: true)
 lilv_lib = dependency('lilv-0', required: get_option('lv2'))
 summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true)
 cdata.set('HAVE_LILV', lilv_lib.found())
+
+check_functions = [
+  ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
+  ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE'], []],
+  ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE'], []],
+  ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE'], []],
+  ['XSetIOErrorExitHandler', '#include <X11/Xlib.h>', [], [x11_dep]],
+]
+
+foreach f : check_functions
+  cdata.set('HAVE_' + f.get(0).to_upper(),
+            cc.has_function(f.get(0),
+                            prefix: f.get(1),
+                            args: f.get(2),
+                            dependencies: f.get(3)))
+endforeach
 
 installed_tests_metadir = pipewire_datadir / 'installed-tests' / pipewire_name
 installed_tests_execdir = pipewire_libexecdir / 'installed-tests' / pipewire_name

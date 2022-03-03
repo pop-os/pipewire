@@ -58,6 +58,7 @@
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
+#include <pipewire/private.h>
 
 #include "module-raop/rtsp-client.h"
 
@@ -134,7 +135,6 @@ struct impl {
 
 	struct pw_impl_module *module;
 	struct pw_loop *loop;
-	struct pw_work_queue *work;
 
 	struct spa_hook module_listener;
 
@@ -160,7 +160,6 @@ struct impl {
 	char *password;
 
 	unsigned int do_disconnect:1;
-	unsigned int unloading:1;
 
 	uint8_t key[AES_CHUNK_SIZE]; /* Key for aes-cbc */
 	uint8_t iv[AES_CHUNK_SIZE];  /* Initialization vector for cbc */
@@ -195,20 +194,6 @@ struct impl {
 	uint8_t buffer[FRAMES_PER_TCP_PACKET * 4];
 	uint32_t filled;
 };
-
-static void do_unload_module(void *obj, void *data, int res, uint32_t id)
-{
-	struct impl *impl = data;
-	pw_impl_module_destroy(impl->module);
-}
-
-static void unload_module(struct impl *impl)
-{
-	if (!impl->unloading) {
-		impl->unloading = true;
-		pw_work_queue_add(impl->work, impl, 0, do_unload_module, impl);
-	}
-}
 
 static void stream_destroy(void *d)
 {
@@ -599,6 +584,10 @@ on_timing_source_io(void *data, int fd, uint32_t mask)
 
 		received = ntp_now(CLOCK_MONOTONIC);
 		bytes = read(impl->timing_fd, packet, sizeof(packet));
+		if (bytes < 0) {
+			pw_log_debug("error reading timing packet: %m");
+			return;
+		}
 		if (bytes != sizeof(packet)) {
 			pw_log_warn("discarding short (%zd < %zd) timing packet",
 					bytes, sizeof(bytes));
@@ -624,7 +613,11 @@ on_control_source_io(void *data, int fd, uint32_t mask)
 		uint32_t hdr;
 		uint16_t seq, num;
 
-		bytes = read(impl->timing_fd, packet, sizeof(packet));
+		bytes = read(impl->control_fd, packet, sizeof(packet));
+		if (bytes < 0) {
+			pw_log_debug("error reading control packet: %m");
+			return;
+		}
 		if (bytes != sizeof(packet)) {
 			pw_log_warn("discarding short (%zd < %zd) control packet",
 					bytes, sizeof(bytes));
@@ -1260,7 +1253,7 @@ static void stream_state_changed(void *d, enum pw_stream_state old,
 	switch (state) {
 	case PW_STREAM_STATE_ERROR:
 	case PW_STREAM_STATE_UNCONNECTED:
-		unload_module(impl);
+		pw_impl_module_schedule_destroy(impl->module);
 		break;
 	case PW_STREAM_STATE_PAUSED:
 		rtsp_do_flush(impl);
@@ -1394,7 +1387,7 @@ static void core_error(void *data, uint32_t id, int seq, int res, const char *me
 			id, seq, res, spa_strerror(res), message);
 
 	if (id == PW_ID_CORE && res == -EPIPE)
-		unload_module(impl);
+		pw_impl_module_schedule_destroy(impl->module);
 }
 
 static const struct pw_core_events core_events = {
@@ -1407,7 +1400,7 @@ static void core_destroy(void *d)
 	struct impl *impl = d;
 	spa_hook_remove(&impl->core_listener);
 	impl->core = NULL;
-	unload_module(impl);
+	pw_impl_module_schedule_destroy(impl->module);
 }
 
 static const struct pw_proxy_events core_proxy_events = {
@@ -1428,15 +1421,12 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 	free(impl->password);
-	if (impl->work)
-		pw_work_queue_cancel(impl->work, impl, SPA_ID_INVALID);
 	free(impl);
 }
 
 static void module_destroy(void *data)
 {
 	struct impl *impl = data;
-	impl->unloading = true;
 	spa_hook_remove(&impl->module_listener);
 	impl_destroy(impl);
 }
@@ -1587,12 +1577,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
-	impl->work = pw_context_get_work_queue(context);
-	if (impl->work == NULL) {
-		res = -errno;
-		pw_log_error( "can't get work queue: %m");
-		goto error;
-	}
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_GROUP, "pipewire.dummy");
