@@ -33,4 +33,5 @@ usr/share/man/man1/pw-metadata.*
 usr/share/man/man1/pw-mididump.*
 usr/share/man/man1/pw-mon.*
 usr/share/man/man1/pw-profiler.*
+usr/share/man/man1/pw-top.*
 usr/share/man/man5

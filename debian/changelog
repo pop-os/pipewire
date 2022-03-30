@@ -2,6 +2,7 @@ pipewire (0.3.49-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Install a new manpage for pw-top
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 30 Mar 2022 10:47:33 +0200
 
