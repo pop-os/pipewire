@@ -1,6 +1,6 @@
 /* PipeWire
  *
- * Copyright © 2021 Red Hat, Inc.
+ * Copyright © 2019 Wim Taymans
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -27,43 +27,36 @@
 
 #include "pwtest.h"
 
-#include "pipewire/pipewire.h"
-
-PWTEST(library_version)
+PWTEST(openal_info_test)
 {
-	const char *libversion, *headerversion;
-	char version_expected[64];
+	int status;
 
-	pw_init(0, NULL);
-	libversion = pw_get_library_version();
-	headerversion = pw_get_headers_version();
-
-	spa_scnprintf(version_expected, sizeof(version_expected),
-		"%d.%d.%d", PW_MAJOR, PW_MINOR, PW_MICRO);
-
-	pwtest_str_eq(headerversion, version_expected);
-	pwtest_str_eq(libversion, version_expected);
-
-	pw_deinit();
-
+#ifdef OPENAL_INFO_PATH
+	status = pwtest_spawn(OPENAL_INFO_PATH, (char *[]){ "openal-info", NULL });
+	pwtest_int_eq(WEXITSTATUS(status), 0);
 	return PWTEST_PASS;
+#else
+	return PWTEST_SKIP;
+#endif
 }
 
-PWTEST(init_deinit)
+PWTEST(pactl_test)
 {
-	pw_init(0, NULL);
-	pw_deinit();
-	pw_init(0, NULL);
-	pw_init(0, NULL);
-	pw_deinit();
-	pw_deinit();
+	int status;
+
+#ifdef PACTL_PATH
+	status = pwtest_spawn(PACTL_PATH, (char *[]){ "pactl", "info", NULL });
+	pwtest_int_eq(WEXITSTATUS(status), 0);
 	return PWTEST_PASS;
+#else
+	return PWTEST_SKIP;
+#endif
 }
 
-PWTEST_SUITE(properties)
+PWTEST_SUITE(pw_array)
 {
-	pwtest_add(library_version, PWTEST_NOARG);
-	pwtest_add(init_deinit, PWTEST_NOARG);
+	pwtest_add(pactl_test, PWTEST_ARG_DAEMON);
+	pwtest_add(openal_info_test, PWTEST_ARG_DAEMON);
 
 	return PWTEST_PASS;
 }

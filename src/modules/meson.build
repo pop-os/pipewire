@@ -131,8 +131,6 @@ pipewire_module_profiler = shared_library('pipewire-module-profiler',
   dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
 
-build_module_rt = dbus_dep.found()
-if build_module_rt
 pipewire_module_rt = shared_library('pipewire-module-rt', [ 'module-rt.c' ],
   include_directories : [configinc],
   install : true,
@@ -140,6 +138,9 @@ pipewire_module_rt = shared_library('pipewire-module-rt', [ 'module-rt.c' ],
   install_rpath: modules_install_dir,
   dependencies : [dbus_dep, mathlib, dl_lib, pipewire_dep],
 )
+
+build_module_rtkit = dbus_dep.found()
+if build_module_rtkit
 # TODO: This serves as a temporary alias to prevent breaking existing setups
 #       while `module-rtkit` is being migrated to `module-rt`
 pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rt.c' ],
@@ -150,7 +151,7 @@ pipewire_module_rtkit = shared_library('pipewire-module-rtkit', [ 'module-rt.c' 
   dependencies : [dbus_dep, mathlib, dl_lib, pipewire_dep],
 )
 endif
-summary({'rt': build_module_rt}, bool_yn: true, section: 'Optional Modules')
+summary({'rt': '@0@ RTKit'.format(build_module_rtkit ? 'with' : 'without')}, section: 'Optional Modules')
 
 build_module_portal = dbus_dep.found()
 if build_module_portal

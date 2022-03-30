@@ -408,14 +408,36 @@ static struct spa_pod *get_prop_info(struct graph *graph, struct spa_pod_builder
 			SPA_PROP_INFO_name, SPA_POD_String(name),
 			0);
 	spa_pod_builder_prop(b, SPA_PROP_INFO_type, 0);
-	if (min == max) {
-		spa_pod_builder_float(b, def);
+	if (p->hint & FC_HINT_BOOLEAN) {
+		if (min == max) {
+			spa_pod_builder_bool(b, def <= 0.0 ? false : true);
+		} else  {
+			spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Enum, 0);
+			spa_pod_builder_bool(b, def <= 0.0 ? false : true);
+			spa_pod_builder_bool(b, false);
+			spa_pod_builder_bool(b, true);
+			spa_pod_builder_pop(b, &f[1]);
+		}
+	} else if (p->hint & FC_HINT_INTEGER) {
+		if (min == max) {
+			spa_pod_builder_int(b, def);
+		} else {
+			spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Range, 0);
+			spa_pod_builder_int(b, def);
+			spa_pod_builder_int(b, min);
+			spa_pod_builder_int(b, max);
+			spa_pod_builder_pop(b, &f[1]);
+		}
 	} else {
-		spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Range, 0);
-		spa_pod_builder_float(b, def);
-		spa_pod_builder_float(b, min);
-		spa_pod_builder_float(b, max);
-		spa_pod_builder_pop(b, &f[1]);
+		if (min == max) {
+			spa_pod_builder_float(b, def);
+		} else {
+			spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Range, 0);
+			spa_pod_builder_float(b, def);
+			spa_pod_builder_float(b, min);
+			spa_pod_builder_float(b, max);
+			spa_pod_builder_pop(b, &f[1]);
+		}
 	}
 	spa_pod_builder_prop(b, SPA_PROP_INFO_params, 0);
 	spa_pod_builder_bool(b, true);
@@ -446,7 +468,13 @@ static struct spa_pod *get_props_param(struct graph *graph, struct spa_pod_build
 			snprintf(name, sizeof(name), "%s", p->name);
 
 		spa_pod_builder_string(b, name);
-		spa_pod_builder_float(b, port->control_data);
+		if (p->hint & FC_HINT_BOOLEAN) {
+			spa_pod_builder_bool(b, port->control_data <= 0.0 ? false : true);
+		} else if (p->hint & FC_HINT_INTEGER) {
+			spa_pod_builder_int(b, port->control_data);
+		} else {
+			spa_pod_builder_float(b, port->control_data);
+		}
 	}
 	spa_pod_builder_pop(b, &f[1]);
 	return spa_pod_builder_pop(b, &f[0]);
@@ -487,12 +515,23 @@ static int parse_params(struct graph *graph, const struct spa_pod *pod)
 	while (true) {
 		const char *name;
 		float value, *val = NULL;
+		bool bool_val;
+		int32_t int_val;
 
 		if (spa_pod_parser_get_string(&prs, &name) < 0)
 			break;
-		if (spa_pod_parser_get_float(&prs, &value) >= 0)
+		if (spa_pod_parser_get_float(&prs, &value) >= 0) {
 			val = &value;
-
+		} else if (spa_pod_parser_get_int(&prs, &int_val) >= 0) {
+			value = int_val;
+			val = &value;
+		} else if (spa_pod_parser_get_bool(&prs, &bool_val) >= 0) {
+			value = bool_val ? 1.0f : 0.0f;
+			val = &value;
+		} else {
+			struct spa_pod *pod;
+			spa_pod_parser_get_pod(&prs, &pod);
+		}
 		changed += set_control_value(def_node, name, val);
 	}
 	return changed;
@@ -524,13 +563,14 @@ static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 	}
 	if (changed > 0) {
 		uint8_t buffer[1024];
-		struct spa_pod_builder b;
+		struct spa_pod_dynamic_builder b;
 		const struct spa_pod *params[1];
 
-		spa_pod_builder_init(&b, buffer, sizeof(buffer));
-		params[0] = get_props_param(graph, &b);
+		spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
+		params[0] = get_props_param(graph, &b.b);
 
 		pw_stream_update_params(impl->capture, params, 1);
+		spa_pod_dynamic_builder_clean(&b);
 	}
 }
 

@@ -89,7 +89,7 @@ struct support {
 	struct spa_interface i18n_iface;
 	struct spa_support support[MAX_SUPPORT];
 	uint32_t n_support;
-	unsigned int initialized:1;
+	uint32_t init_count;
 	unsigned int in_valgrind:1;
 	unsigned int no_color:1;
 	unsigned int no_config:1;
@@ -413,11 +413,9 @@ static const char *i18n_ntext(void *object, const char *msgid, const char *msgid
 
 static void init_i18n(struct support *support)
 {
-	/* Load locale from the environment. */
-	setlocale(LC_ALL, "");
-	/* Set LC_NUMERIC to C so that floating point strings are consistently
-	 * formatted and parsed across locales. */
-	setlocale(LC_NUMERIC, "C");
+	/* XXX: we should remove this setlocale() call, after wireplumber
+	 * XXX: starts setting the locale */
+	setlocale(LC_MESSAGES, "");
 	bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
 	bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8");
 	pw_set_domain(GETTEXT_PACKAGE);
@@ -594,7 +592,7 @@ void pw_init(int *argc, char **argv[])
 	char level[32];
 
 	pthread_mutex_lock(&init_lock);
-	if (support->initialized)
+	if (support->init_count > 0)
 		goto done;
 
 	pthread_mutex_lock(&support_lock);
@@ -666,9 +664,9 @@ void pw_init(int *argc, char **argv[])
 	add_i18n(support);
 
 	pw_log_info("version %s", pw_get_library_version());
-	support->initialized = true;
 	pthread_mutex_unlock(&support_lock);
 done:
+	support->init_count++;
 	pthread_mutex_unlock(&init_lock);
 }
 
@@ -680,6 +678,11 @@ void pw_deinit(void)
 	struct plugin *p;
 
 	pthread_mutex_lock(&init_lock);
+	if (support->init_count == 0)
+		goto done;
+	if (--support->init_count > 0)
+		goto done;
+
 	pthread_mutex_lock(&support_lock);
 	pw_log_set(NULL);
 	spa_list_consume(p, &registry->plugins, link) {
@@ -693,6 +696,7 @@ void pw_deinit(void)
 	free(support->i18n_domain);
 	spa_zero(global_support);
 	pthread_mutex_unlock(&support_lock);
+done:
 	pthread_mutex_unlock(&init_lock);
 
 }

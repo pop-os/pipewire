@@ -60,9 +60,6 @@ extern "C" {
 
 #define PIPEWIRE_BATTERY_PROVIDER "/org/freedesktop/pipewire/battery"
 
-#define MIN_LATENCY	512
-#define MAX_LATENCY	1024
-
 #define OBJECT_MANAGER_INTROSPECT_XML                                          \
 	DBUS_INTROSPECT_1_0_XML_DOCTYPE_DECL_NODE                                  \
 	"<node>\n"                                                                 \
@@ -499,6 +496,7 @@ int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, unsigned int co
 int spa_bt_device_supports_hfp_codec(struct spa_bt_device *device, unsigned int codec);
 int spa_bt_device_release_transports(struct spa_bt_device *device);
 int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage);
+void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device);
 
 #define spa_bt_device_emit(d,m,v,...)			spa_hook_list_call(&(d)->listener_list, \
 								struct spa_bt_device_events,	\

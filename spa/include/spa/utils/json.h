@@ -34,8 +34,11 @@ extern "C" {
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
+#include <float.h>
 
 #include <spa/utils/defs.h>
+#include <spa/utils/string.h>
 
 /** \defgroup spa_json JSON
  * Relaxed JSON variant parsing
@@ -237,9 +240,10 @@ static inline bool spa_json_is_null(const char *val, int len)
 static inline int spa_json_parse_float(const char *val, int len, float *result)
 {
 	char *end;
-	*result = strtof(val, &end);
-	return end == val + len;
+	*result = spa_strtof(val, &end);
+	return len > 0 && end == val + len;
 }
+
 static inline bool spa_json_is_float(const char *val, int len)
 {
 	float dummy;
@@ -254,12 +258,25 @@ static inline int spa_json_get_float(struct spa_json *iter, float *res)
 	return spa_json_parse_float(value, len, res);
 }
 
+static inline char *spa_json_format_float(char *str, int size, float val)
+{
+	if (SPA_UNLIKELY(!isnormal(val))) {
+		if (val == INFINITY)
+			val = FLT_MAX;
+		else if (val == -INFINITY)
+			val = FLT_MIN;
+		else
+			val = 0.0f;
+	}
+	return spa_dtoa(str, size, val);
+}
+
 /* int */
 static inline int spa_json_parse_int(const char *val, int len, int *result)
 {
 	char *end;
 	*result = strtol(val, &end, 0);
-	return end == val + len;
+	return len > 0 && end == val + len;
 }
 static inline bool spa_json_is_int(const char *val, int len)
 {
