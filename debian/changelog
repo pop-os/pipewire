@@ -1,4 +1,4 @@
-pipewire (0.3.49-1) UNRELEASED; urgency=medium
+pipewire (0.3.49-1) unstable; urgency=medium
 
   * Team upload.
   * New upstream release
@@ -6,7 +6,7 @@ pipewire (0.3.49-1) UNRELEASED; urgency=medium
   * Add libxfixes-dev to Build-Depends
   * pipewire-pulse: add pulseaudio-utils in Suggests (Closes: #1007949)
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 30 Mar 2022 10:47:33 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 30 Mar 2022 12:06:06 +0200
 
 pipewire (0.3.48-1) unstable; urgency=medium
 
