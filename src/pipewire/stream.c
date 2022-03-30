@@ -116,6 +116,8 @@ struct stream {
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
 	struct spa_io_buffers *io;
+	struct spa_io_rate_match *rate_match;
+	uint32_t rate_queued;
 	struct {
 		struct spa_io_position *position;
 	} rt;
@@ -295,7 +297,7 @@ static int update_params(struct stream *impl, uint32_t id,
 		clear_params(impl, id);
 	} else {
 		for (i = 0; i < n_params; i++) {
-			if (!spa_pod_is_object(params[i]))
+			if (params[i] == NULL || !spa_pod_is_object(params[i]))
 				continue;
 			clear_params(impl, SPA_POD_OBJECT_ID(params[i]));
 		}
@@ -390,14 +392,14 @@ do_call_process(struct spa_loop *loop,
 {
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
-	pw_log_trace("%p: do process", stream);
+	pw_log_trace_fp("%p: do process", stream);
 	pw_stream_emit_process(stream);
 	return 0;
 }
 
 static void call_process(struct stream *impl)
 {
-	pw_log_trace("%p: call process rt:%u", impl, impl->process_rt);
+	pw_log_trace_fp("%p: call process rt:%u", impl, impl->process_rt);
 	if (impl->process_rt)
 		spa_callbacks_call(&impl->rt_callbacks, struct pw_stream_events, process, 0);
 	else
@@ -411,7 +413,7 @@ do_call_drained(struct spa_loop *loop,
 {
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
-	pw_log_trace("%p: drained", stream);
+	pw_log_trace_fp("%p: drained", stream);
 	pw_stream_emit_drained(stream);
 	return 0;
 }
@@ -428,7 +430,7 @@ do_call_trigger_done(struct spa_loop *loop,
 {
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
-	pw_log_trace("%p: trigger_done", stream);
+	pw_log_trace_fp("%p: trigger_done", stream);
 	pw_stream_emit_trigger_done(stream);
 	return 0;
 }
@@ -668,6 +670,12 @@ static int impl_port_set_io(void *object, enum spa_direction direction, uint32_t
 			impl->io = data;
 		else
 			impl->io = NULL;
+		break;
+	case SPA_IO_RateMatch:
+		if (data && size >= sizeof(struct spa_io_rate_match))
+			impl->rate_match = data;
+		else
+			impl->rate_match = NULL;
 		break;
 	}
 	pw_stream_emit_io_changed(stream, id, data, size);
@@ -917,8 +925,9 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 static inline void copy_position(struct stream *impl, int64_t queued)
 {
 	struct spa_io_position *p = impl->rt.position;
-	if (SPA_UNLIKELY(p != NULL)) {
-		SEQ_WRITE(impl->seq);
+
+	SEQ_WRITE(impl->seq);
+	if (SPA_LIKELY(p != NULL)) {
 		impl->time.now = p->clock.nsec;
 		impl->time.rate = p->clock.rate;
 		if (SPA_UNLIKELY(impl->clock_id != p->clock.id)) {
@@ -929,8 +938,10 @@ static inline void copy_position(struct stream *impl, int64_t queued)
 		impl->time.delay = 0;
 		impl->time.queued = queued;
 		impl->quantum = p->clock.duration;
-		SEQ_WRITE(impl->seq);
 	}
+	if (SPA_LIKELY(impl->rate_match != NULL))
+		impl->rate_queued = impl->rate_match->delay;
+	SEQ_WRITE(impl->seq);
 }
 
 static int impl_node_process_input(void *object)
@@ -940,7 +951,7 @@ static int impl_node_process_input(void *object)
 	struct spa_io_buffers *io = impl->io;
 	struct buffer *b;
 
-	pw_log_trace("%p: process in status:%d id:%d ticks:%"PRIu64" delay:%"PRIi64,
+	pw_log_trace_fp("%p: process in status:%d id:%d ticks:%"PRIu64" delay:%"PRIi64,
 			stream, io->status, io->buffer_id, impl->time.ticks, impl->time.delay);
 
 	if (io->status == SPA_STATUS_HAVE_DATA &&
@@ -956,7 +967,7 @@ static int impl_node_process_input(void *object)
 	if (io->status != SPA_STATUS_NEED_DATA) {
 		/* pop buffer to recycle */
 		if ((b = pop_queue(impl, &impl->queued))) {
-			pw_log_trace("%p: recycle buffer %d", stream, b->id);
+			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
 		} else if (io->status == -EPIPE)
 			return io->status;
 		io->buffer_id = b ? b->id : SPA_ID_INVALID;
@@ -976,16 +987,19 @@ static int impl_node_process_output(void *object)
 	struct buffer *b;
 	int res;
 	uint32_t index;
+	bool recycled;
 
 again:
-	pw_log_trace("%p: process out status:%d id:%d", stream,
+	pw_log_trace_fp("%p: process out status:%d id:%d", stream,
 			io->status, io->buffer_id);
 
+	recycled = false;
 	if ((res = io->status) != SPA_STATUS_HAVE_DATA) {
 		/* recycle old buffer */
 		if ((b = get_buffer(stream, io->buffer_id)) != NULL) {
-			pw_log_trace("%p: recycle buffer %d", stream, b->id);
+			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
 			push_queue(impl, &impl->dequeued, b);
+			recycled = true;
 		}
 
 		/* pop new buffer */
@@ -993,17 +1007,17 @@ again:
 			impl->drained = false;
 			io->buffer_id = b->id;
 			res = io->status = SPA_STATUS_HAVE_DATA;
-			pw_log_trace("%p: pop %d %p", stream, b->id, io);
+			pw_log_trace_fp("%p: pop %d %p", stream, b->id, io);
 		} else if (impl->draining || impl->drained) {
 			impl->draining = true;
 			impl->drained = true;
 			io->buffer_id = SPA_ID_INVALID;
 			res = io->status = SPA_STATUS_DRAINED;
-			pw_log_trace("%p: draining", stream);
+			pw_log_trace_fp("%p: draining", stream);
 		} else {
 			io->buffer_id = SPA_ID_INVALID;
 			res = io->status = SPA_STATUS_NEED_DATA;
-			pw_log_trace("%p: no more buffers %p", stream, io);
+			pw_log_trace_fp("%p: no more buffers %p", stream, io);
 		}
 	}
 
@@ -1012,12 +1026,12 @@ again:
 	if (!impl->draining && !impl->driving) {
 		/* we're not draining, not a driver check if we need to get
 		 * more buffers */
-		if (!impl->process_rt) {
+		if (!impl->process_rt && (recycled || res == SPA_STATUS_NEED_DATA)) {
 			/* not realtime and we have a free buffer, trigger process so that we have
 			 * data in the next round. */
 			if (spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index) > 0)
 				call_process(impl);
-		} else if (io->status == SPA_STATUS_NEED_DATA) {
+		} else if (res == SPA_STATUS_NEED_DATA) {
 			/* realtime and we don't have a buffer, trigger process and try
 			 * again when there is something in the queue now */
 			call_process(impl);
@@ -1027,7 +1041,7 @@ again:
 		}
 	}
 
-	pw_log_trace("%p: res %d", stream, res);
+	pw_log_trace_fp("%p: res %d", stream, res);
 
 	if (impl->driving && impl->using_trigger && res != SPA_STATUS_HAVE_DATA)
 		call_trigger_done(impl);
@@ -2061,10 +2075,12 @@ int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	uintptr_t seq1, seq2;
+	uint32_t rate_queued;
 
 	do {
 		seq1 = SEQ_READ(impl->seq);
 		*time = impl->time;
+		rate_queued = impl->rate_queued;
 		seq2 = SEQ_READ(impl->seq);
 	} while (!SEQ_READ_SUCCESS(seq1, seq2));
 
@@ -2073,11 +2089,13 @@ int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 	else
 		time->queued = (int64_t)(impl->queued.incount - time->queued);
 
+	time->queued += rate_queued;
+
 	time->delay += ((impl->latency.min_quantum + impl->latency.max_quantum) / 2) * impl->quantum;
 	time->delay += (impl->latency.min_rate + impl->latency.max_rate) / 2;
 	time->delay += ((impl->latency.min_ns + impl->latency.max_ns) / 2) * time->rate.denom / SPA_NSEC_PER_SEC;
 
-	pw_log_trace("%p: %"PRIi64" %"PRIi64" %"PRIu64" %d/%d %"PRIu64" %"
+	pw_log_trace_fp("%p: %"PRIi64" %"PRIi64" %"PRIu64" %d/%d %"PRIu64" %"
 			PRIu64" %"PRIu64" %"PRIu64" %"PRIu64, stream,
 			time->now, time->delay, time->ticks,
 			time->rate.num, time->rate.denom, time->queued,
@@ -2105,17 +2123,17 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream)
 
 	if ((b = pop_queue(impl, &impl->dequeued)) == NULL) {
 		res = -errno;
-		pw_log_trace("%p: no more buffers: %m", stream);
+		pw_log_trace_fp("%p: no more buffers: %m", stream);
 		errno = -res;
 		return NULL;
 	}
-	pw_log_trace("%p: dequeue buffer %d", stream, b->id);
+	pw_log_trace_fp("%p: dequeue buffer %d size:%"PRIu64, stream, b->id, b->this.size);
 
 	if (b->busy && impl->direction == SPA_DIRECTION_OUTPUT) {
 		if (ATOMIC_INC(b->busy->count) > 1) {
 			ATOMIC_DEC(b->busy->count);
 			push_queue(impl, &impl->dequeued, b);
-			pw_log_trace("%p: buffer busy", stream);
+			pw_log_trace_fp("%p: buffer busy", stream);
 			errno = EBUSY;
 			return NULL;
 		}
@@ -2133,7 +2151,7 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 	if (b->busy)
 		ATOMIC_DEC(b->busy->count);
 
-	pw_log_trace("%p: queue buffer %d", stream, b->id);
+	pw_log_trace_fp("%p: queue buffer %d", stream, b->id);
 	if ((res = push_queue(impl, &impl->queued, b)) < 0)
 		return res;
 
@@ -2153,7 +2171,7 @@ do_flush(struct spa_loop *loop,
 	struct stream *impl = user_data;
 	struct buffer *b;
 
-	pw_log_trace("%p: flush", impl);
+	pw_log_trace_fp("%p: flush", impl);
 	do {
 		b = pop_queue(impl, &impl->queued);
 		if (b != NULL)
@@ -2171,7 +2189,7 @@ do_drain(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *impl = user_data;
-	pw_log_trace("%p", impl);
+	pw_log_trace_fp("%p", impl);
 	impl->draining = true;
 	impl->drained = false;
 	return 0;
@@ -2230,7 +2248,7 @@ int pw_stream_trigger_process(struct pw_stream *stream)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int res = 0;
 
-	pw_log_trace("%p", impl);
+	pw_log_trace_fp("%p", impl);
 
 	/* flag to check for old or new behaviour */
 	impl->using_trigger = true;

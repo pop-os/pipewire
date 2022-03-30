@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <assert.h>
 #include <ctype.h>
+#include <locale.h>
 
 #include <sndfile.h>
 
@@ -915,7 +916,7 @@ on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param)
 	data->dsf.layout.channels = info.info.dsd.channels;
 	data->dsf.layout.lsb = info.info.dsd.bitorder == SPA_PARAM_BITORDER_lsb;
 
-	data->stride = data->dsf.info.channels * SPA_ABS(data->dsf.layout.interleave);
+	data->stride = data->dsf.layout.channels * SPA_ABS(data->dsf.layout.interleave);
 
 	if (data->verbose) {
 		printf("DSD out: channels:%d bitorder:%s interleave:%d\n",
@@ -1268,13 +1269,14 @@ static int setup_dsffile(struct data *data)
 	}
 
 	if (data->verbose)
-		printf("opened file \"%s\" channels:%d rate:%d bitorder:%s\n",
+		printf("opened file \"%s\" channels:%d rate:%d samples:%"PRIu64" bitorder:%s\n",
 				data->filename,
 				data->dsf.info.channels, data->dsf.info.rate,
+				data->dsf.info.samples,
 				data->dsf.info.lsb ? "lsb" : "msb");
 
 	data->fill = dsf_play;
-;
+
 	return 0;
 }
 
@@ -1488,6 +1490,7 @@ int main(int argc, char *argv[])
 	int exit_code = EXIT_FAILURE, c, ret;
 	enum pw_stream_flags flags = 0;
 
+	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
 	flags |= PW_STREAM_FLAG_AUTOCONNECT;

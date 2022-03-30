@@ -1822,7 +1822,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				n_valid_formats++;
 			}
 		}
-		if (n_params < MAX_FORMATS &&
+		else if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
 				SPA_PARAM_EnumFormat, &ss,
 				ss.channels > 0 ? &map : NULL)) != NULL) {
@@ -5349,6 +5349,8 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 
 	support = pw_context_get_support(context, &n_support);
 	cpu = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
+
+	pw_context_conf_update_props(context, "pulse.properties", props);
 
 	if ((str = pw_properties_get(props, "vm.overrides")) != NULL) {
 		if (cpu != NULL && spa_cpu_get_vm_type(cpu) != SPA_CPU_VM_NONE)

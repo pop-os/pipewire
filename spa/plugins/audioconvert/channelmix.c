@@ -292,7 +292,8 @@ static void set_volume(struct impl *this)
 {
 	struct volumes *vol;
 
-	if (this->mix.set_volume == NULL)
+	if (this->mix.set_volume == NULL ||
+	    this->props.disabled)
 		return;
 
 	if (this->props.have_soft_volume)
@@ -545,6 +546,31 @@ static int impl_node_enum_params(void *object, int seq,
 					this->mix.hilbert_taps, 0, MAX_TAPS),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
+		case 17:
+		{
+			struct spa_pod_frame f[2];
+			uint32_t i;
+			spa_pod_builder_push_object(&b, &f[0],
+				SPA_TYPE_OBJECT_PropInfo, id);
+			spa_pod_builder_add(&b,
+				SPA_PROP_INFO_name, SPA_POD_String("channelmix.upmix-method"),
+				SPA_PROP_INFO_description, SPA_POD_String("Upmix Method to use"),
+				SPA_PROP_INFO_type, SPA_POD_String(
+					channelmix_upmix_info[this->mix.upmix].label),
+				0);
+			spa_pod_builder_prop(&b, SPA_PROP_INFO_labels, 0);
+			spa_pod_builder_push_struct(&b, &f[1]);
+			for (i = 0; i < SPA_N_ELEMENTS(channelmix_upmix_info); i++) {
+				spa_pod_builder_string(&b, channelmix_upmix_info[i].label);
+				spa_pod_builder_string(&b, channelmix_upmix_info[i].description);
+			}
+			spa_pod_builder_pop(&b, &f[1]);
+			spa_pod_builder_add(&b,
+				SPA_PROP_INFO_params, SPA_POD_Bool(true),
+				0);
+			param = spa_pod_builder_pop(&b, &f[0]);
+			break;
+		}
 		default:
 			return 0;
 		}
@@ -604,6 +630,8 @@ static int impl_node_enum_params(void *object, int seq,
 			spa_pod_builder_float(&b, this->mix.widen);
 			spa_pod_builder_string(&b, "channelmix.hilbert-taps");
 			spa_pod_builder_int(&b, this->mix.hilbert_taps);
+			spa_pod_builder_string(&b, "channelmix.upmix-method");
+			spa_pod_builder_string(&b, channelmix_upmix_info[this->mix.upmix].label);
 			spa_pod_builder_pop(&b, &f[1]);
 			param = spa_pod_builder_pop(&b, &f[0]);
 			break;
@@ -647,6 +675,8 @@ static int channelmix_set_param(struct impl *this, const char *k, const char *s)
 		spa_atof(s, &this->mix.widen);
 	else if (spa_streq(k, "channelmix.hilbert-taps"))
 		spa_atou32(s, &this->mix.hilbert_taps, 0);
+	else if (spa_streq(k, "channelmix.upmix-method"))
+		this->mix.upmix = channelmix_upmix_from_label(s);
 	else
 		return 0;
 	return 1;
@@ -665,7 +695,7 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 	while (true) {
 		const char *name;
 		struct spa_pod *pod;
-		char value[512];
+		char value[512], buf[128];
 
 		if (spa_pod_parser_get_string(&prs, &name) < 0)
 			break;
@@ -676,8 +706,9 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 		if (spa_pod_is_string(pod)) {
 			spa_pod_copy_string(pod, sizeof(value), value);
 		} else if (spa_pod_is_float(pod)) {
-			snprintf(value, sizeof(value), "%f",
-					SPA_POD_VALUE(struct spa_pod_float, pod));
+			snprintf(value, sizeof(value), "%s",
+					spa_json_format_float(buf, sizeof(buf),
+						SPA_POD_VALUE(struct spa_pod_float, pod)));
 		} else if (spa_pod_is_int(pod)) {
 			snprintf(value, sizeof(value), "%d",
 					SPA_POD_VALUE(struct spa_pod_int, pod));
@@ -691,7 +722,7 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 		spa_log_info(this->log, "key:'%s' val:'%s'", name, value);
 		changed += channelmix_set_param(this, name, value);
 	}
-	if (changed)
+	if (changed && !this->props.disabled)
 		channelmix_init(&this->mix);
 	return changed;
 }
@@ -707,9 +738,6 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 	uint32_t n;
 
 	if (param == NULL)
-		return 0;
-
-	if (this->props.disabled)
 		return 0;
 
 	SPA_POD_OBJECT_FOREACH(obj, prop) {
@@ -771,6 +799,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 			break;
 		}
 	}
+
 	if (changed) {
 		struct port *port = GET_PORT(this, this->direction, 0);
 		if (have_soft_volume)
@@ -780,6 +809,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 
 		if (port->have_format)
 			remap_volumes(this, &port->format);
+
 		set_volume(this);
 	}
 	return changed;
@@ -793,9 +823,6 @@ static int apply_midi(struct impl *this, const struct spa_pod *value)
 
 	if (size < 3)
 		return -EINVAL;
-
-	if (this->props.disabled)
-		return 0;
 
 	if ((val[0] & 0xf0) != 0xb0 || val[1] != 7)
 		return 0;
@@ -1627,9 +1654,13 @@ impl_init(const struct spa_handle_factory *factory,
 
 	props_reset(&this->props);
 
-	this->mix.options = CHANNELMIX_OPTION_NORMALIZE;
+	this->mix.options = CHANNELMIX_OPTION_UPMIX;
+	this->mix.upmix = CHANNELMIX_UPMIX_SIMPLE;
 	this->mix.log = this->log;
+	this->mix.lfe_cutoff = 120.0f;
+	this->mix.fc_cutoff = 6000.0f;
 	this->mix.rear_delay = 12.0f;
+	this->mix.widen = 0.1f;
 
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;

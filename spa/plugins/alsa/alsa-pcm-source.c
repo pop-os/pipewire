@@ -160,7 +160,7 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_latencyOffsetNsec),
 				SPA_PROP_INFO_description, SPA_POD_String("Latency offset (ns)"),
-				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Long(0LL, 0LL, INT64_MAX));
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Long(0LL, 0LL, 2 * SPA_NSEC_PER_SEC));
 			break;
 		default:
 			param = spa_alsa_enum_propinfo(this, result.index - 4, &b);
@@ -290,24 +290,27 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 	case SPA_PARAM_Props:
 	{
 		struct props *p = &this->props;
-		struct spa_process_latency_info info;
 		struct spa_pod *params = NULL;
+		int64_t lat_ns = -1;
 
 		if (param == NULL) {
 			reset_props(p);
 			return 0;
 		}
 
-		info = this->process_latency;
-
 		spa_pod_parse_object(param,
 			SPA_TYPE_OBJECT_Props, NULL,
 			SPA_PROP_device,       SPA_POD_OPT_Stringn(p->device, sizeof(p->device)),
-			SPA_PROP_latencyOffsetNsec,   SPA_POD_OPT_Long(&info.ns),
+			SPA_PROP_latencyOffsetNsec,   SPA_POD_OPT_Long(&lat_ns),
 			SPA_PROP_params,       SPA_POD_OPT_Pod(&params));
 
 		spa_alsa_parse_prop_params(this, params);
-		handle_process_latency(this, &info);
+		if (lat_ns != -1) {
+			struct spa_process_latency_info info;
+			info = this->process_latency;
+			info.ns = lat_ns;
+			handle_process_latency(this, &info);
+		}
 
 		emit_node_info(this, false);
 		emit_port_info(this, false);
