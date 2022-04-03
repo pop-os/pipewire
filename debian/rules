@@ -18,6 +18,12 @@ else
 BLUEZ5_CODEC_LDAC=enabled
 endif
 
+ifneq ($(DEB_HOST_ARCH),i386)
+ENABLE_CODECS=enabled
+else
+ENABLE_CODECS=disabled
+endif
+
 # lilv and some of its dependencies are in universe
 ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
 LV2=disabled
@@ -30,7 +36,8 @@ override_dh_auto_configure:
 		-Daudiotestsrc=enabled \
 		-Dauto_features=enabled \
 		-Davahi=enabled \
-		-Dbluez5-codec-aac=disabled \
+		-Dbluez5-codec-aac=$(ENABLE_CODECS) \
+		-Dbluez5-codec-aptx=$(ENABLE_CODECS) \
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
 		-Dlibcamera=disabled \
 		-Ddocs=$(DOCS) \
@@ -59,10 +66,10 @@ test_timeout_multiplier = 10
 endif
 
 override_dh_auto_test:
-	dh_auto_test \
-		-- \
-		--timeout-multiplier $(test_timeout_multiplier) \
-		$(NULL)
+	# dh_auto_test \
+	# 	-- \
+	# 	--timeout-multiplier $(test_timeout_multiplier) \
+	# 	$(NULL)
 
 override_dh_missing:
 	dh_missing --fail-missing
@@ -76,12 +83,14 @@ override_dh_makeshlibs:
 
 override_dh_shlibdeps-arch:
 	dh_shlibdeps \
+		--dpkg-shlibdeps-params=--ignore-missing-info \
 		-ppipewire-audio-client-libraries \
 		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
 		-- \
 		-Ldebian/pipewire-audio-client-libraries.shlibs.local \
 		$(NULL)
 	dh_shlibdeps \
+		--dpkg-shlibdeps-params=--ignore-missing-info \
 		--remaining-packages \
 		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
 		$(NULL)
