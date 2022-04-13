@@ -124,18 +124,20 @@ static int try_load_conf(struct pw_context *this, const char *conf_prefix,
 static int context_set_freewheel(struct pw_context *context, bool freewheel)
 {
 	struct spa_thread *thr;
-	int res;
+	int res = 0;
 
 	if ((thr = pw_data_loop_get_thread(context->data_loop_impl)) == NULL)
 		return -EIO;
 
 	if (freewheel) {
 		pw_log_info("%p: enter freewheel", context);
-		res = pw_thread_utils_drop_rt(thr);
+		if (context->thread_utils)
+			res = spa_thread_utils_drop_rt(context->thread_utils, thr);
 	} else {
 		pw_log_info("%p: exit freewheel", context);
-		// Use the priority as configured within the realtime module
-		res = pw_thread_utils_acquire_rt(thr, -1);
+		/* Use the priority as configured within the realtime module */
+		if (context->thread_utils)
+			res = spa_thread_utils_acquire_rt(context->thread_utils, thr, -1);
 	}
 	if (res < 0)
 		pw_log_info("%p: freewheel error:%s", context, spa_strerror(res));
@@ -411,8 +413,6 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	pw_data_loop_invoke(this->data_loop_impl,
 			do_data_loop_setup, 0, NULL, 0, false, this);
 
-	context_set_freewheel(this, false);
-
 	pw_settings_expose(this);
 
 	pw_log_debug("%p: created", this);
@@ -464,7 +464,7 @@ void pw_context_destroy(struct pw_context *context)
 		pw_resource_destroy(resource);
 
 	if (context->data_loop_impl)
-		pw_data_loop_destroy(context->data_loop_impl);
+		pw_data_loop_stop(context->data_loop_impl);
 
 	spa_list_consume(module, &context->module_list, link)
 		pw_impl_module_destroy(module);
@@ -480,6 +480,9 @@ void pw_context_destroy(struct pw_context *context)
 
 	pw_log_debug("%p: free", context);
 	pw_context_emit_free(context);
+
+	if (context->data_loop_impl)
+		pw_data_loop_destroy(context->data_loop_impl);
 
 	if (context->pool)
 		pw_mempool_destroy(context->pool);
@@ -1172,7 +1175,8 @@ again:
 			if (t == NULL)
 				ensure_state(n, false);
 			else {
-				t->passive = false;
+				if (n->always_process)
+					t->passive = false;
 				collect_nodes(context, n);
 			}
 		}
@@ -1455,6 +1459,12 @@ int pw_context_set_object(struct pw_context *context, const char *type, void *va
 			entry->type = type;
 		}
 		entry->value = value;
+	}
+	if (spa_streq(type, SPA_TYPE_INTERFACE_ThreadUtils)) {
+		context->thread_utils = value;
+		if (context->data_loop_impl)
+			pw_data_loop_set_thread_utils(context->data_loop_impl,
+					context->thread_utils);
 	}
 	return 0;
 }

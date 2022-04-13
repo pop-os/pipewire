@@ -153,8 +153,6 @@ struct impl {
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
 
-	uint32_t id;
-
 	struct pw_core *core;
 	struct spa_hook core_proxy_listener;
 	struct spa_hook core_listener;
@@ -169,7 +167,6 @@ struct impl {
 	void *rec_buffer[SPA_AUDIO_MAX_CHANNELS];
 	uint32_t rec_ringsize;
 	struct spa_ringbuffer rec_ring;
-	struct spa_io_rate_match *rec_rate_match;
 
 	struct pw_stream *playback;
 	struct spa_hook playback_listener;
@@ -180,7 +177,6 @@ struct impl {
 	uint32_t play_ringsize;
 	struct spa_ringbuffer play_ring;
 	struct spa_ringbuffer play_delayed_ring;
-	struct spa_io_rate_match *play_rate_match;
 
 	void *out_buffer[SPA_AUDIO_MAX_CHANNELS];
 	uint32_t out_ringsize;
@@ -338,17 +334,6 @@ static void capture_destroy(void *d)
 	impl->capture = NULL;
 }
 
-static void capture_io_changed(void *data, uint32_t id, void *area, uint32_t size)
-{
-	struct impl *impl = data;
-
-	switch (id) {
-	case SPA_IO_RateMatch:
-		impl->rec_rate_match = area;
-		break;
-	}
-}
-
 static void capture_process(void *data)
 {
 	struct impl *impl = data;
@@ -382,7 +367,7 @@ static void capture_process(void *data)
 	 * if it has a specific requirement, else keep the block size the same
 	 * on input and output or what the resampler needs */
 	if (impl->aec_blocksize == 0) {
-		impl->aec_blocksize = SPA_MAX(size, impl->rec_rate_match->size);
+		impl->aec_blocksize = size;
 		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
 	}
 
@@ -454,7 +439,6 @@ static const struct pw_stream_events capture_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = capture_destroy,
 	.state_changed = input_state_changed,
-	.io_changed = capture_io_changed,
 	.process = capture_process,
 	.param_changed = input_param_changed
 };
@@ -523,17 +507,6 @@ static void sink_destroy(void *d)
 	impl->sink = NULL;
 }
 
-static void sink_io_changed(void *data, uint32_t id, void *area, uint32_t size)
-{
-	struct impl *impl = data;
-
-	switch (id) {
-	case SPA_IO_RateMatch:
-		impl->play_rate_match = area;
-		break;
-	}
-}
-
 static void sink_process(void *data)
 {
 	struct impl *impl = data;
@@ -567,7 +540,7 @@ static void sink_process(void *data)
 	}
 
 	if (impl->aec_blocksize == 0) {
-		impl->aec_blocksize = SPA_MAX(size, impl->rec_rate_match->size);
+		impl->aec_blocksize = size;
 		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
 	}
 
@@ -608,7 +581,6 @@ static const struct pw_stream_events playback_events = {
 static const struct pw_stream_events sink_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = sink_destroy,
-	.io_changed = sink_io_changed,
 	.process = sink_process,
 	.state_changed = output_state_changed,
 	.param_changed = output_param_changed
@@ -638,6 +610,10 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
 	else if (impl->aec->latency)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
+	if ((str = pw_properties_get(impl->source_props, SPA_KEY_AUDIO_CHANNELS)) != NULL)
+		pw_properties_set(props, SPA_KEY_AUDIO_CHANNELS, str);
+	if ((str = pw_properties_get(impl->source_props, SPA_KEY_AUDIO_POSITION)) != NULL)
+		pw_properties_set(props, SPA_KEY_AUDIO_POSITION, str);
 
 	impl->capture = pw_stream_new(impl->core,
 			"Echo-Cancel Capture", props);
@@ -671,6 +647,10 @@ static int setup_streams(struct impl *impl)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
 	else if (impl->aec->latency)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
+	if ((str = pw_properties_get(impl->sink_props, SPA_KEY_AUDIO_CHANNELS)) != NULL)
+		pw_properties_set(props, SPA_KEY_AUDIO_CHANNELS, str);
+	if ((str = pw_properties_get(impl->sink_props, SPA_KEY_AUDIO_POSITION)) != NULL)
+		pw_properties_set(props, SPA_KEY_AUDIO_POSITION, str);
 
 	impl->playback = pw_stream_new(impl->core,
 			"Echo-Cancel Playback", props);
@@ -877,6 +857,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct pw_properties *props, *aec_props;
 	struct impl *impl;
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
+	uint32_t pid = getpid();
 	const char *str;
 	const char *path;
 	int res = 0;
@@ -909,14 +890,13 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 
-	impl->id = id;
 	impl->module = module;
 	impl->context = context;
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_GROUP, "echo-cancel-%u", id);
+		pw_properties_setf(props, PW_KEY_NODE_GROUP, "echo-cancel-%u-%u", pid, id);
 	if (pw_properties_get(props, PW_KEY_NODE_LINK_GROUP) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_LINK_GROUP, "echo-cancel-%u", id);
+		pw_properties_setf(props, PW_KEY_NODE_LINK_GROUP, "echo-cancel-%u-%u", pid, id);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
@@ -1052,6 +1032,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_LINK_GROUP);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_NODE_LATENCY);
+	copy_props(impl, props, SPA_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 
 	impl->max_buffer_size = pw_properties_get_uint32(props,"buffer.max_size", MAX_BUFSIZE_MS);
 
