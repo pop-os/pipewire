@@ -261,6 +261,8 @@ struct context {
 	struct pw_thread_loop *loop;	/* thread_lock protects all below */
 	struct pw_context *context;
 
+	struct spa_thread_utils *old_thread_utils;
+	struct spa_thread_utils thread_utils;
 	pthread_mutex_t lock;		/* protects map and lists below, in addition to thread_lock */
 	struct spa_list objects;
 	uint32_t free_count;
@@ -2486,6 +2488,72 @@ static const struct pw_client_node_events client_node_events = {
 	.port_set_mix_info = client_node_port_set_mix_info,
 };
 
+#define CHECK(expression,label)						\
+do {									\
+	if ((errno = expression) != 0) {				\
+		res = -errno;						\
+		pw_log_error(#expression ": %s", strerror(errno));	\
+		goto label;						\
+	}								\
+} while(false);
+
+static struct spa_thread *impl_create(void *data,
+			const struct spa_dict *props,
+			void *(*start)(void*), void *arg)
+{
+	struct client *c = (struct client *) data;
+	struct spa_thread *thr;
+	int res = 0;
+
+	pw_log_info("create thread");
+	if (globals.creator != NULL) {
+		pthread_t pt;
+		pthread_attr_t attributes;
+
+		pthread_attr_init(&attributes);
+		CHECK(pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_JOINABLE), error);
+		CHECK(pthread_attr_setscope(&attributes, PTHREAD_SCOPE_SYSTEM), error);
+		CHECK(pthread_attr_setinheritsched(&attributes, PTHREAD_EXPLICIT_SCHED), error);
+		CHECK(pthread_attr_setstacksize(&attributes, THREAD_STACK), error);
+
+		res = -globals.creator(&pt, &attributes, start, arg);
+
+		pthread_attr_destroy(&attributes);
+		if (res != 0)
+			goto error;
+		thr = (struct spa_thread*)pt;
+	} else {
+		thr = spa_thread_utils_create(c->context.old_thread_utils, NULL, start, arg);
+	}
+	return thr;
+error:
+	pw_log_warn("create RT thread failed: %s", strerror(res));
+	errno = -res;
+	return NULL;
+
+}
+
+static int impl_join(void *data,
+		struct spa_thread *thread, void **retval)
+{
+	struct client *c = (struct client *) data;
+	pw_log_info("join thread");
+	return spa_thread_utils_join(c->context.old_thread_utils, thread, retval);
+}
+
+static int impl_acquire_rt(void *data, struct spa_thread *thread, int priority)
+{
+	struct client *c = (struct client *) data;
+	return spa_thread_utils_acquire_rt(c->context.old_thread_utils, thread, priority);
+}
+
+static struct spa_thread_utils_methods thread_utils_impl = {
+	SPA_VERSION_THREAD_UTILS_METHODS,
+	.create = impl_create,
+	.join = impl_join,
+	.acquire_rt = impl_acquire_rt,
+};
+
 static jack_port_type_id_t string_to_type(const char *port_type)
 {
 	if (spa_streq(JACK_DEFAULT_AUDIO_TYPE, port_type))
@@ -3205,7 +3273,23 @@ jack_client_t * jack_client_open (const char *client_name,
 			mix2 = mix2_sse;
 #endif
 	}
+	client->context.old_thread_utils =
+		pw_context_get_object(client->context.context,
+				SPA_TYPE_INTERFACE_ThreadUtils);
+	if (client->context.old_thread_utils == NULL)
+		client->context.old_thread_utils = pw_thread_utils_get();
+
+	client->context.thread_utils.iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_ThreadUtils,
+			SPA_VERSION_THREAD_UTILS,
+			&thread_utils_impl, client);
+
 	client->loop = client->context.context->data_loop_impl;
+	pw_data_loop_stop(client->loop);
+
+	pw_context_set_object(client->context.context,
+			SPA_TYPE_INTERFACE_ThreadUtils,
+			&client->context.thread_utils);
 
 	spa_list_init(&client->links);
 	spa_list_init(&client->rt.target_links);
@@ -3568,6 +3652,7 @@ int jack_activate (jack_client_t *client)
 		return 0;
 
 	pw_thread_loop_lock(c->context.loop);
+	pw_data_loop_start(c->loop);
 
 	if ((res = do_activate(c)) < 0)
 		goto done;
@@ -3575,15 +3660,17 @@ int jack_activate (jack_client_t *client)
 	c->activation->pending_new_pos = true;
 	c->activation->pending_sync = true;
 
-
 	c->active = true;
 
 	do_callback(c, graph_callback, c->graph_arg);
 
 done:
+	if (res < 0)
+		pw_data_loop_stop(c->loop);
+
 	pw_thread_loop_unlock(c->context.loop);
 
-	return 0;
+	return res;
 }
 
 SPA_EXPORT
@@ -3617,7 +3704,6 @@ int jack_deactivate (jack_client_t *client)
 
 	res = do_sync(c);
 
-	pw_data_loop_start(c->loop);
 	pw_thread_loop_unlock(c->context.loop);
 
 	if (res < 0)
@@ -5325,15 +5411,14 @@ static int port_compare_func(const void *v1, const void *v2)
 		res = is_def2 - is_def1;
 	else if ((*o1)->port.priority != (*o2)->port.priority)
 		res = (*o2)->port.priority - (*o1)->port.priority;
-	else if ((res = strcmp((*o1)->port.alias1, (*o2)->port.alias1)) == 0) {
-		res = (*o1)->port.node_id - (*o2)->port.node_id;
+	else if ((res = (*o1)->port.node_id - (*o2)->port.node_id) == 0) {
+		if ((*o1)->port.is_monitor != (*o2)->port.is_monitor)
+			res = (*o1)->port.is_monitor - (*o2)->port.is_monitor;
 		if (res == 0)
 			res = (*o1)->port.system_id - (*o2)->port.system_id;
 		if (res == 0)
 			res = (*o1)->serial - (*o2)->serial;
 	}
-
-
 	pw_log_debug("port %s<->%s type:%d<->%d def:%d<->%d prio:%d<->%d id:%d<->%d res:%d",
 			(*o1)->port.name, (*o2)->port.name,
 			(*o1)->port.type_id, (*o2)->port.type_id,
@@ -5964,18 +6049,9 @@ int jack_client_max_real_time_priority (jack_client_t *client)
 
 	spa_return_val_if_fail(c != NULL, -1);
 
-	pw_thread_utils_get_rt_range(NULL, &min, &max);
+	spa_thread_utils_get_rt_range(&c->context.thread_utils, NULL, &min, &max);
 	return SPA_MIN(max, c->rt_max) - 1;
 }
-
-#define CHECK(expression,label)						\
-do {									\
-	if ((errno = expression) != 0) {				\
-		res = -errno;						\
-		pw_log_error(#expression ": %s", strerror(errno));	\
-		goto label;						\
-	}								\
-} while(false);
 
 SPA_EXPORT
 int jack_acquire_real_time_scheduling (jack_native_thread_t thread, int priority)
@@ -6015,55 +6091,45 @@ int jack_client_create_thread (jack_client_t* client,
                                void *(*start_routine)(void*),
                                void *arg)
 {
+	struct client *c = (struct client *) client;
 	int res = 0;
+	struct spa_thread *thr;
 
 	spa_return_val_if_fail(client != NULL, -EINVAL);
+	spa_return_val_if_fail(thread != NULL, -EINVAL);
+	spa_return_val_if_fail(start_routine != NULL, -EINVAL);
 
 	pw_log_info("client %p: create thread rt:%d prio:%d", client, realtime, priority);
-	if (globals.creator != NULL) {
-		pthread_attr_t attributes;
 
-		pthread_attr_init(&attributes);
-		CHECK(pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_JOINABLE), error);
-		CHECK(pthread_attr_setscope(&attributes, PTHREAD_SCOPE_SYSTEM), error);
-		CHECK(pthread_attr_setinheritsched(&attributes, PTHREAD_EXPLICIT_SCHED), error);
-		CHECK(pthread_attr_setstacksize(&attributes, THREAD_STACK), error);
+	thr = spa_thread_utils_create(&c->context.thread_utils, NULL, start_routine, arg);
+	if (thr == NULL)
+		res = -errno;
+	*thread = (pthread_t)thr;
 
-		res = globals.creator(thread, &attributes, start_routine, arg);
-
-		pthread_attr_destroy(&attributes);
-	} else {
-		struct spa_thread *thr;
-
-		thr = pw_thread_utils_create(NULL, start_routine, arg);
-		if (thr == NULL)
-			res = -errno;
-		*thread = (pthread_t)thr;
-	}
-
-	if (res == 0 && realtime) {
+	if (res != 0) {
+		pw_log_warn("client %p: create RT thread failed: %s",
+				client, strerror(res));
+	} else if (realtime) {
 		/* Try to acquire RT scheduling, we don't fail here but the
 		 * function will emit a warning. Real JACK fails here. */
 		jack_acquire_real_time_scheduling(*thread, priority);
 	}
-
-error:
-	if (res != 0)
-		pw_log_warn("client %p: create RT thread failed: %s",
-				client, strerror(res));
 	return res;
 }
 
 SPA_EXPORT
 int jack_client_stop_thread(jack_client_t* client, jack_native_thread_t thread)
 {
+	struct client *c = (struct client *) client;
 	void* status;
 
 	if (thread == (jack_native_thread_t)NULL)
 		return -EINVAL;
 
+	spa_return_val_if_fail(client != NULL, -EINVAL);
+
 	pw_log_debug("join thread %lu", thread);
-	pw_thread_utils_join((struct spa_thread*)thread, &status);
+	spa_thread_utils_join(&c->context.thread_utils, (struct spa_thread*)thread, &status);
 	pw_log_debug("stopped thread %lu", thread);
 	return 0;
 }
@@ -6071,15 +6137,18 @@ int jack_client_stop_thread(jack_client_t* client, jack_native_thread_t thread)
 SPA_EXPORT
 int jack_client_kill_thread(jack_client_t* client, jack_native_thread_t thread)
 {
+	struct client *c = (struct client *) client;
 	void* status;
 
 	if (thread == (jack_native_thread_t)NULL)
 		return -EINVAL;
 
+	spa_return_val_if_fail(client != NULL, -EINVAL);
+
 	pw_log_debug("cancel thread %lu", thread);
 	pthread_cancel(thread);
 	pw_log_debug("join thread %lu", thread);
-	pw_thread_utils_join((struct spa_thread*)thread, &status);
+	spa_thread_utils_join(&c->context.thread_utils, (struct spa_thread*)thread, &status);
 	pw_log_debug("stopped thread %lu", thread);
 	return 0;
 }

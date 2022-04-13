@@ -120,6 +120,8 @@ struct data {
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
 
+	struct spa_source *timer;
+
 	enum mode mode;
 	bool verbose;
 #define TYPE_PCM	0
@@ -162,7 +164,6 @@ struct data {
 	int sync;
 
 	struct spa_io_position *position;
-	struct spa_io_rate_match *rate_match;
 	bool drained;
 	uint64_t clock_time;
 
@@ -657,9 +658,6 @@ static void on_core_done(void *userdata, uint32_t id, int seq)
 {
 	struct data *data = userdata;
 
-	if (data->verbose)
-		printf("core done\n");
-
 	/* if we're listing targets just exist */
 	if (data->sync == seq && data->list_targets) {
 		data->targets_listed = true;
@@ -845,29 +843,41 @@ on_state_changed(void *userdata, enum pw_stream_state old,
 				pw_stream_state_as_string(old),
 				pw_stream_state_as_string(state));
 
-	if (state == PW_STREAM_STATE_STREAMING && !data->volume_is_set) {
+	switch (state) {
+	case PW_STREAM_STATE_STREAMING:
+		if (!data->volume_is_set) {
+			ret = pw_stream_set_control(data->stream,
+					SPA_PROP_volume, 1, &data->volume,
+					0);
+			if (data->verbose)
+				printf("stream set volume to %.3f - %s\n", data->volume,
+						ret == 0 ? "success" : "FAILED");
 
-		ret = pw_stream_set_control(data->stream,
-				SPA_PROP_volume, 1, &data->volume,
-				0);
-		if (data->verbose)
-			printf("set stream volume to %.3f - %s\n", data->volume,
-					ret == 0 ? "success" : "FAILED");
-
-		data->volume_is_set = true;
-
-	}
-
-	if (state == PW_STREAM_STATE_STREAMING) {
-		if (data->verbose)
+			data->volume_is_set = true;
+		}
+		if (data->verbose) {
+			struct timespec timeout = {0, 1}, interval = {1, 0};
+			struct pw_loop *l = pw_main_loop_get_loop(data->loop);
+			pw_loop_update_timer(l, data->timer, &timeout, &interval, false);
 			printf("stream node %"PRIu32"\n",
 				pw_stream_get_node_id(data->stream));
-	}
-	if (state == PW_STREAM_STATE_ERROR) {
+		}
+		break;
+	case PW_STREAM_STATE_PAUSED:
+		if (data->verbose) {
+			struct timespec timeout = {0, 0}, interval = {0, 0};
+			struct pw_loop *l = pw_main_loop_get_loop(data->loop);
+			pw_loop_update_timer(l, data->timer, &timeout, &interval, false);
+		}
+		break;
+	case PW_STREAM_STATE_ERROR:
 		printf("stream node %"PRIu32" error: %s\n",
 				pw_stream_get_node_id(data->stream),
 				error);
 		pw_main_loop_quit(data->loop);
+		break;
+	default:
+		break;
 	}
 }
 
@@ -879,10 +889,6 @@ on_io_changed(void *userdata, uint32_t id, void *data, uint32_t size)
 	switch (id) {
 	case SPA_IO_Position:
 		d->position = data;
-		break;
-	case SPA_IO_RateMatch:
-		if (d->data_type == TYPE_PCM)
-			d->rate_match = data;
 		break;
 	default:
 		break;
@@ -897,7 +903,8 @@ on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param)
 	int err;
 
 	if (data->verbose)
-		printf("stream param change: id=%"PRIu32"\n", id);
+		printf("stream param change: %s\n",
+			spa_debug_type_find_name(spa_type_param, id));
 
 	if (id != SPA_PARAM_Format || param == NULL)
 		return;
@@ -919,7 +926,7 @@ on_param_changed(void *userdata, uint32_t id, const struct spa_pod *param)
 	data->stride = data->dsf.layout.channels * SPA_ABS(data->dsf.layout.interleave);
 
 	if (data->verbose) {
-		printf("DSD out: channels:%d bitorder:%s interleave:%d\n",
+		printf("DSD: channels:%d bitorder:%s interleave:%d\n",
 				data->dsf.layout.channels,
 				data->dsf.layout.lsb ? "lsb" : "msb",
 				data->dsf.layout.interleave);
@@ -951,8 +958,7 @@ static void on_process(void *userdata)
 	if (data->mode == mode_playback) {
 
 		n_frames = d->maxsize / data->stride;
-		if (data->rate_match && data->rate_match->size > 0)
-			n_frames = SPA_MIN((uint32_t)n_frames, data->rate_match->size);
+		n_frames = SPA_MIN(n_frames, (int)b->requested);
 
 		n_fill_frames = data->fill(data, p, n_frames);
 
@@ -961,8 +967,10 @@ static void on_process(void *userdata)
 			d->chunk->stride = data->stride;
 			d->chunk->size = n_fill_frames * data->stride;
 			have_data = true;
-		} else if (n_fill_frames < 0)
+			b->size = n_frames;
+		} else if (n_fill_frames < 0) {
 			fprintf(stderr, "fill error %d\n", n_fill_frames);
+		}
 	} else {
 		offset = SPA_MIN(d->chunk->offset, d->maxsize);
 		size = SPA_MIN(d->chunk->size, d->maxsize - offset);
@@ -1015,11 +1023,14 @@ static void do_print_delay(void *userdata, uint64_t expirations)
 {
 	struct data *data = userdata;
 	struct pw_time time;
-	pw_stream_get_time(data->stream, &time);
-	printf("now=%"PRIi64" rate=%u/%u ticks=%"PRIu64" delay=%"PRIi64" queued=%"PRIu64"\n",
+	pw_stream_get_time_n(data->stream, &time, sizeof(time));
+	printf("stream time: now:%"PRIi64" rate:%u/%u ticks:%"PRIu64
+			" delay:%"PRIi64" queued:%"PRIu64
+			" buffered:%"PRIi64" buffers:%u avail:%u\n",
 		time.now,
 		time.rate.num, time.rate.denom,
-		time.ticks, time.delay, time.queued);
+		time.ticks, time.delay, time.queued, time.buffered,
+		time.queued_buffers, time.avail_buffers);
 }
 
 enum {
@@ -1222,12 +1233,12 @@ static int setup_midifile(struct data *data)
 			data->mode == mode_playback ? "r" : "w",
 			&data->midi.info);
 	if (data->midi.file == NULL) {
-		fprintf(stderr, "error: can't read midi file '%s': %m\n", data->filename);
+		fprintf(stderr, "midifile: can't read midi file '%s': %m\n", data->filename);
 		return -errno;
 	}
 
 	if (data->verbose)
-		printf("opened file \"%s\" format %08x ntracks:%d div:%d\n",
+		printf("midifile: opened file \"%s\" format %08x ntracks:%d div:%d\n",
 				data->filename,
 				data->midi.info.format, data->midi.info.ntracks,
 				data->midi.info.division);
@@ -1264,12 +1275,12 @@ static int setup_dsffile(struct data *data)
 
 	data->dsf.file = dsf_file_open(data->filename, "r", &data->dsf.info);
 	if (data->dsf.file == NULL) {
-		fprintf(stderr, "error: can't read dsf file '%s': %m\n", data->filename);
+		fprintf(stderr, "dsffile: can't read dsf file '%s': %m\n", data->filename);
 		return -errno;
 	}
 
 	if (data->verbose)
-		printf("opened file \"%s\" channels:%d rate:%d samples:%"PRIu64" bitorder:%s\n",
+		printf("dsffile: opened file \"%s\" channels:%d rate:%d samples:%"PRIu64" bitorder:%s\n",
 				data->filename,
 				data->dsf.info.channels, data->dsf.info.rate,
 				data->dsf.info.samples,
@@ -1366,16 +1377,16 @@ static int setup_sndfile(struct data *data)
 			data->mode == mode_playback ? SFM_READ : SFM_WRITE,
 			&info);
 	if (!data->file) {
-		fprintf(stderr, "error: failed to open audio file \"%s\": %s\n",
+		fprintf(stderr, "sndfile: failed to open audio file \"%s\": %s\n",
 				data->filename, sf_strerror(NULL));
 		return -EIO;
 	}
 
 	if (data->verbose)
-		printf("opened file \"%s\" format %08x channels:%d rate:%d\n",
+		printf("sndfile: opened file \"%s\" format %08x channels:%d rate:%d\n",
 				data->filename, info.format, info.channels, info.samplerate);
 	if (data->channels > 0 && info.channels != data->channels) {
-		printf("given channels (%u) don't match file channels (%d)\n",
+		fprintf(stderr, "sndfile: given channels (%u) don't match file channels (%d)\n",
 				data->channels, info.channels);
 		return -EINVAL;
 	}
@@ -1399,7 +1410,7 @@ static int setup_sndfile(struct data *data)
 				def = true;
 			}
 			if (data->verbose) {
-				printf("using %s channel map: ", def ? "default" : "file");
+				printf("sndfile: using %s channel map: ", def ? "default" : "file");
 				channelmap_print(&data->channelmap);
 				printf("\n");
 			}
@@ -1462,7 +1473,7 @@ static int setup_sndfile(struct data *data)
 	}
 
 	if (data->verbose)
-		printf("rate=%u channels=%u fmt=%s samplesize=%u stride=%u latency=%u (%.3fs)\n",
+		printf("PCM: rate=%u channels=%u fmt=%s samplesize=%u stride=%u latency=%u (%.3fs)\n",
 				data->rate, data->channels,
 				sf_fmt_to_str(info.format),
 				data->samplesize,
@@ -1839,11 +1850,8 @@ int main(int argc, char *argv[])
 					data.mode == mode_playback ? "playback" : "record",
 					data.target_id);
 
-		if (data.verbose) {
-			struct timespec timeout = {0, 1}, interval = {1, 0};
-			struct spa_source *timer = pw_loop_add_timer(l, do_print_delay, &data);
-			pw_loop_update_timer(l, timer, &timeout, &interval, false);
-		}
+		if (data.verbose)
+			data.timer = pw_loop_add_timer(l, do_print_delay, &data);
 
 		ret = pw_stream_connect(data.stream,
 				  data.mode == mode_playback ? PW_DIRECTION_OUTPUT : PW_DIRECTION_INPUT,

@@ -410,21 +410,21 @@ static int impl_node_enum_params(void *object, int seq,
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_volume),
-				SPA_PROP_INFO_name, SPA_POD_String("Volume"),
+				SPA_PROP_INFO_description, SPA_POD_String("Volume"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0));
 			break;
 		case 1:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_mute),
-				SPA_PROP_INFO_name, SPA_POD_String("Mute"),
+				SPA_PROP_INFO_description, SPA_POD_String("Mute"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->channel.mute));
 			break;
 		case 2:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelVolumes),
-				SPA_PROP_INFO_name, SPA_POD_String("Channel Volumes"),
+				SPA_PROP_INFO_description, SPA_POD_String("Channel Volumes"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
 				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
@@ -432,7 +432,7 @@ static int impl_node_enum_params(void *object, int seq,
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_channelMap),
-				SPA_PROP_INFO_name, SPA_POD_String("Channel Map"),
+				SPA_PROP_INFO_description, SPA_POD_String("Channel Map"),
 				SPA_PROP_INFO_type, SPA_POD_Id(SPA_AUDIO_CHANNEL_UNKNOWN),
 				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
@@ -440,14 +440,14 @@ static int impl_node_enum_params(void *object, int seq,
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_softMute),
-				SPA_PROP_INFO_name, SPA_POD_String("Soft Mute"),
+				SPA_PROP_INFO_description, SPA_POD_String("Soft Mute"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->soft.mute));
 			break;
 		case 5:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_softVolumes),
-				SPA_PROP_INFO_name, SPA_POD_String("Soft Volumes"),
+				SPA_PROP_INFO_description, SPA_POD_String("Soft Volumes"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
 				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
@@ -455,14 +455,14 @@ static int impl_node_enum_params(void *object, int seq,
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_monitorMute),
-				SPA_PROP_INFO_name, SPA_POD_String("Monitor Mute"),
+				SPA_PROP_INFO_description, SPA_POD_String("Monitor Mute"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->monitor.mute));
 			break;
 		case 7:
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_PropInfo, id,
 				SPA_PROP_INFO_id,   SPA_POD_Id(SPA_PROP_monitorVolumes),
-				SPA_PROP_INFO_name, SPA_POD_String("Monitor Volumes"),
+				SPA_PROP_INFO_description, SPA_POD_String("Monitor Volumes"),
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(p->volume, 0.0, 10.0),
 				SPA_PROP_INFO_container, SPA_POD_Id(SPA_TYPE_Array));
 			break;
@@ -1655,12 +1655,12 @@ impl_init(const struct spa_handle_factory *factory,
 	props_reset(&this->props);
 
 	this->mix.options = CHANNELMIX_OPTION_UPMIX;
-	this->mix.upmix = CHANNELMIX_UPMIX_SIMPLE;
+	this->mix.upmix = CHANNELMIX_UPMIX_PSD;
 	this->mix.log = this->log;
-	this->mix.lfe_cutoff = 120.0f;
-	this->mix.fc_cutoff = 6000.0f;
+	this->mix.lfe_cutoff = 150.0f;
+	this->mix.fc_cutoff = 12000.0f;
 	this->mix.rear_delay = 12.0f;
-	this->mix.widen = 0.1f;
+	this->mix.widen = 0.0f;
 
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;

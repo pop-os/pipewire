@@ -455,6 +455,7 @@ struct pw_context {
 	struct spa_hook_list driver_listener_list;
 	struct spa_hook_list listener_list;
 
+	struct spa_thread_utils *thread_utils;
 	struct pw_loop *main_loop;		/**< main loop for control */
 	struct pw_loop *data_loop;		/**< data loop for data passing */
 	struct pw_data_loop *data_loop_impl;
@@ -482,6 +483,8 @@ struct pw_data_loop {
 	struct pw_loop *loop;
 
 	struct spa_hook_list listener_list;
+
+	struct spa_thread_utils *thread_utils;
 
 	pthread_t thread;
 	unsigned int cancel:1;

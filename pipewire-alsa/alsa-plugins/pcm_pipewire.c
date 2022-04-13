@@ -90,7 +90,6 @@ typedef struct {
 	struct spa_hook stream_listener;
 
 	struct pw_time time;
-	struct spa_io_rate_match *rate_match;
 
 	struct spa_audio_info_raw format;
 } snd_pcm_pipewire_t;
@@ -374,19 +373,6 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 	pw_stream_update_params(pw->stream, params, n_params);
 }
 
-static void on_stream_io_changed(void *data, uint32_t id, void *area, uint32_t size)
-{
-	snd_pcm_pipewire_t *pw = data;
-	switch (id) {
-	case SPA_IO_RateMatch:
-		if (pw->io.stream == SND_PCM_STREAM_PLAYBACK)
-			pw->rate_match = area;
-		break;
-	default:
-		break;
-	}
-}
-
 static void on_stream_drained(void *data)
 {
 	snd_pcm_pipewire_t *pw = data;
@@ -403,7 +389,7 @@ static void on_stream_process(void *data)
 	struct pw_buffer *b;
 	snd_pcm_uframes_t hw_avail, before, want, xfer;
 
-	pw_stream_get_time(pw->stream, &pw->time);
+	pw_stream_get_time_n(pw->stream, &pw->time, sizeof(pw->time));
 
 	if (pw->time.rate.num != 0) {
 		pw->time.delay = pw->time.delay * io->rate * pw->time.rate.num / pw->time.rate.denom;
@@ -422,7 +408,7 @@ static void on_stream_process(void *data)
 	if (b == NULL)
 		return;
 
-	want = pw->rate_match ? pw->rate_match->size : hw_avail;
+	want = b->requested ? b->requested : hw_avail;
 
 	xfer = snd_pcm_pipewire_process(pw, b, &hw_avail, want);
 
@@ -451,7 +437,6 @@ static void on_stream_process(void *data)
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.param_changed = on_stream_param_changed,
-	.io_changed = on_stream_io_changed,
 	.process = on_stream_process,
 	.drained = on_stream_drained,
 };

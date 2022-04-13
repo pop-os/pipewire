@@ -547,6 +547,28 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags, const struc
 	return 0;
 }
 
+static inline uint32_t update_requested(struct stream *impl)
+{
+	uint32_t index, id, res = 0;
+	struct buffer *buffer;
+	struct spa_io_rate_match *r = impl->rate_match;
+
+	if (spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index) < 1)
+		return 0;
+
+	id = impl->dequeued.ids[index & MASK_BUFFERS];
+	buffer = &impl->buffers[id];
+	if (r) {
+		buffer->this.requested = r->size;
+		res = r->size > 0 ? 1 : 0;
+	} else {
+		buffer->this.requested = impl->quantum;
+		res = 1;
+	}
+	pw_log_trace_fp("%p: update buffer:%u size:%u", impl, id, r->size);
+	return res;
+}
+
 static int impl_send_command(void *object, const struct spa_command *command)
 {
 	struct stream *impl = object;
@@ -574,8 +596,10 @@ static int impl_send_command(void *object, const struct spa_command *command)
 
 			if (impl->direction == SPA_DIRECTION_INPUT)
 				impl->io->status = SPA_STATUS_NEED_DATA;
-			else if (!impl->process_rt && !impl->driving)
-				call_process(impl);
+			else if (!impl->process_rt && !impl->driving) {
+				if (update_requested(impl) > 0)
+					call_process(impl);
+			}
 
 			stream_set_state(stream, PW_STREAM_STATE_STREAMING, NULL);
 		}
@@ -1029,12 +1053,13 @@ again:
 		if (!impl->process_rt && (recycled || res == SPA_STATUS_NEED_DATA)) {
 			/* not realtime and we have a free buffer, trigger process so that we have
 			 * data in the next round. */
-			if (spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index) > 0)
+			if (update_requested(impl) > 0)
 				call_process(impl);
 		} else if (res == SPA_STATUS_NEED_DATA) {
 			/* realtime and we don't have a buffer, trigger process and try
 			 * again when there is something in the queue now */
-			call_process(impl);
+			if (update_requested(impl) > 0)
+				call_process(impl);
 			if (impl->draining ||
 			    spa_ringbuffer_get_read_index(&impl->queued.ring, &index) > 0)
 				goto again;
@@ -1127,7 +1152,7 @@ static int node_event_param(void *object, int seq,
 		struct control *c;
 		const struct spa_pod *type, *pod;
 		uint32_t iid, choice, n_vals, container = SPA_ID_INVALID;
-		float *vals, bool_range[3] = { 1.0, 0.0, 1.0 };
+		float *vals, bool_range[3] = { 1.0, 0.0, 1.0 }, dbl[3];
 
 		if (spa_pod_parse_object(param,
 					SPA_TYPE_OBJECT_PropInfo, NULL,
@@ -1147,7 +1172,7 @@ static int node_event_param(void *object, int seq,
 
 		if (spa_pod_parse_object(c->info,
 					SPA_TYPE_OBJECT_PropInfo, NULL,
-					SPA_PROP_INFO_name, SPA_POD_String(&c->control.name),
+					SPA_PROP_INFO_description, SPA_POD_OPT_String(&c->control.name),
 					SPA_PROP_INFO_type, SPA_POD_PodChoice(&type),
 					SPA_PROP_INFO_container, SPA_POD_OPT_Id(&container)) < 0) {
 			free(c);
@@ -1161,6 +1186,15 @@ static int node_event_param(void *object, int seq,
 		c->type = SPA_POD_TYPE(pod);
 		if (spa_pod_is_float(pod))
 			vals = SPA_POD_BODY(pod);
+		else if (spa_pod_is_double(pod)) {
+			double *v = SPA_POD_BODY(pod);
+			dbl[0] = v[0];
+			if (n_vals > 1)
+				dbl[1] = v[1];
+			if (n_vals > 2)
+				dbl[2] = v[2];
+			vals = dbl;
+		}
 		else if (spa_pod_is_bool(pod) && n_vals > 0) {
 			choice = SPA_CHOICE_Range;
 			vals = bool_range;
@@ -1206,6 +1240,7 @@ static int node_event_param(void *object, int seq,
 		struct spa_pod_object *obj = (struct spa_pod_object *) param;
 		union {
 			float f;
+			double d;
 			bool b;
 		} value;
 		float *values;
@@ -1223,6 +1258,13 @@ static int node_event_param(void *object, int seq,
 				if (spa_pod_get_float(&prop->value, &value.f) < 0)
 					continue;
 				n_values = 1;
+				values = &value.f;
+				break;
+			case SPA_TYPE_Double:
+				if (spa_pod_get_double(&prop->value, &value.d) < 0)
+					continue;
+				n_values = 1;
+				value.f = value.d;
 				values = &value.f;
 				break;
 			case SPA_TYPE_Bool:
@@ -2014,6 +2056,9 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 			case SPA_TYPE_Float:
 				spa_pod_builder_float(&b, values[0]);
 				break;
+			case SPA_TYPE_Double:
+				spa_pod_builder_double(&b, values[0]);
+				break;
 			case SPA_TYPE_Bool:
 				spa_pod_builder_bool(&b, values[0] < 0.5 ? false : true);
 				break;
@@ -2070,17 +2115,32 @@ int pw_stream_set_active(struct pw_stream *stream, bool active)
 	return 0;
 }
 
+struct old_time {
+	int64_t now;
+	struct spa_fraction rate;
+	uint64_t ticks;
+	int64_t delay;
+	uint64_t queued;
+};
+
 SPA_EXPORT
 int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 {
+	return pw_stream_get_time_n(stream, time, sizeof(struct old_time));
+}
+
+SPA_EXPORT
+int pw_stream_get_time_n(struct pw_stream *stream, struct pw_time *time, size_t size)
+{
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	uintptr_t seq1, seq2;
-	uint32_t rate_queued;
+	uint32_t buffered, quantum, index;
 
 	do {
 		seq1 = SEQ_READ(impl->seq);
-		*time = impl->time;
-		rate_queued = impl->rate_queued;
+		memcpy(time, &impl->time, SPA_MIN(size, sizeof(struct pw_time)));
+		buffered = impl->rate_queued;
+		quantum = impl->quantum;
 		seq2 = SEQ_READ(impl->seq);
 	} while (!SEQ_READ_SUCCESS(seq1, seq2));
 
@@ -2089,11 +2149,16 @@ int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 	else
 		time->queued = (int64_t)(impl->queued.incount - time->queued);
 
-	time->queued += rate_queued;
-
-	time->delay += ((impl->latency.min_quantum + impl->latency.max_quantum) / 2) * impl->quantum;
+	time->delay += ((impl->latency.min_quantum + impl->latency.max_quantum) / 2) * quantum;
 	time->delay += (impl->latency.min_rate + impl->latency.max_rate) / 2;
 	time->delay += ((impl->latency.min_ns + impl->latency.max_ns) / 2) * time->rate.denom / SPA_NSEC_PER_SEC;
+
+	if (size >= offsetof(struct pw_time, queued_buffers))
+		time->buffered = buffered;
+	if (size >= offsetof(struct pw_time, avail_buffers))
+		time->queued_buffers = spa_ringbuffer_get_read_index(&impl->queued.ring, &index);
+	if (size >= sizeof(struct pw_time))
+		time->avail_buffers = spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index);
 
 	pw_log_trace_fp("%p: %"PRIi64" %"PRIi64" %"PRIu64" %d/%d %"PRIu64" %"
 			PRIu64" %"PRIu64" %"PRIu64" %"PRIu64, stream,
@@ -2101,7 +2166,6 @@ int pw_stream_get_time(struct pw_stream *stream, struct pw_time *time)
 			time->rate.num, time->rate.denom, time->queued,
 			impl->dequeued.outcount, impl->dequeued.incount,
 			impl->queued.outcount, impl->queued.incount);
-
 	return 0;
 }
 

@@ -1145,10 +1145,9 @@ do_process_done(struct spa_loop *loop,
 	int32_t avail;
 
 	stream->timestamp = pd->pwt.now;
+	stream->delay = pd->pwt.buffered * SPA_USEC_PER_SEC / stream->ss.rate;
 	if (pd->pwt.rate.denom > 0)
 		stream->delay = pd->pwt.delay * SPA_USEC_PER_SEC / pd->pwt.rate.denom;
-	else
-		stream->delay = 0;
 
 	if (stream->direction == PW_DIRECTION_OUTPUT) {
 		if (pd->quantum != stream->last_quantum)
@@ -1260,8 +1259,7 @@ static void stream_process(void *data)
 	if (stream->direction == PW_DIRECTION_OUTPUT) {
 		int32_t avail = spa_ringbuffer_get_read_index(&stream->ring, &index);
 
-		if (stream->rate_match)
-			minreq = stream->rate_match->size * stream->frame_size;
+		minreq = buffer->requested * stream->frame_size;
 		if (minreq == 0)
 			minreq = stream->attr.minreq;
 
@@ -1357,7 +1355,7 @@ static void stream_process(void *data)
 	if (do_flush)
 		pw_stream_flush(stream->stream, true);
 
-	pw_stream_get_time(stream->stream, &pd.pwt);
+	pw_stream_get_time_n(stream->stream, &pd.pwt, sizeof(pd.pwt));
 
 	pw_loop_invoke(impl->loop,
 			do_process_done, 1, &pd, sizeof(pd), false, stream);
@@ -3355,7 +3353,7 @@ static int fill_ext_module_info(struct client *client, struct message *m,
 {
 	message_put(m,
 		TAG_U32, module->index,			/* module index */
-		TAG_STRING, module->name,
+		TAG_STRING, module->info->name,
 		TAG_STRING, module->args,
 		TAG_U32, -1,				/* n_used */
 		TAG_INVALID);
@@ -4743,7 +4741,7 @@ static void handle_module_loaded(struct module *module, struct client *client, u
 
 	if (SPA_RESULT_IS_OK(result)) {
 		pw_log_info("[%s] loaded module index:%u name:%s tag:%d",
-				client_name, module->index, module->name, tag);
+				client_name, module->index, module->info->name, tag);
 
 		module->loaded = true;
 
@@ -4764,7 +4762,7 @@ static void handle_module_loaded(struct module *module, struct client *client, u
 	else {
 		pw_log_warn("%p: [%s] failed to load module index:%u name:%s tag:%d result:%d (%s)",
 				impl, client_name,
-				module->index, module->name, tag,
+				module->index, module->info->name, tag,
 				result, spa_strerror(result));
 
 		module_schedule_unload(module);

@@ -95,7 +95,6 @@ struct impl {
 	struct pw_properties *stream_props;
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
-	struct spa_io_rate_match *rate_match;
 	struct spa_audio_info_raw info;
 	uint32_t frame_size;
 
@@ -157,10 +156,7 @@ static void capture_stream_process(void *d)
 	bd = &buf->buffer->datas[0];
 
 	data = bd->data;
-	if (impl->rate_match)
-		size = SPA_MIN(impl->rate_match->size * impl->frame_size, bd->maxsize);
-	else
-		size = bd->maxsize;
+	size = buf->requested ? buf->requested * impl->frame_size : bd->maxsize;
 
 	/* fill buffer contents here */
 	pw_log_info("fill buffer data %p with up to %u bytes", data, size);
@@ -168,25 +164,15 @@ static void capture_stream_process(void *d)
 	bd->chunk->size = size;
 	bd->chunk->stride = impl->frame_size;
 	bd->chunk->offset = 0;
+	buf->size = size / impl->frame_size;
 
 	pw_stream_queue_buffer(impl->stream, buf);
-}
-
-static void stream_io_changed(void *data, uint32_t id, void *area, uint32_t size)
-{
-	struct impl *impl = data;
-	switch (id) {
-	case SPA_IO_RateMatch:
-		impl->rate_match = area;
-		break;
-	}
 }
 
 static const struct pw_stream_events capture_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
-	.io_changed = stream_io_changed,
 	.process = capture_stream_process
 };
 
@@ -385,6 +371,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
+	uint32_t pid = getpid();
 	struct pw_properties *props = NULL;
 	struct impl *impl;
 	const char *str;
@@ -420,8 +407,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->work = pw_context_get_work_queue(context);
 
-	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
-		pw_properties_set(props, PW_KEY_NODE_GROUP, "pipewire.dummy");
+	if (pw_properties_get(props, PW_KEY_NODE_WANT_DRIVER) == NULL)
+		pw_properties_set(props, PW_KEY_NODE_WANT_DRIVER, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
@@ -429,7 +416,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Audio/Source");
 
 	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_NAME, "example-source-%u", id);
+		pw_properties_setf(props, PW_KEY_NODE_NAME, "example-source-%u-%u", pid, id);
 	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_DESCRIPTION,
 				pw_properties_get(props, PW_KEY_NODE_NAME));
@@ -443,6 +430,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);
+	copy_props(impl, props, PW_KEY_NODE_WANT_DRIVER);
 	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
