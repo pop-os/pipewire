@@ -2,6 +2,7 @@ pipewire (0.3.50-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Install a new manpage for pw-link
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Apr 2022 22:54:44 +0200
 
