@@ -1,4 +1,4 @@
-pipewire (0.3.50-1) UNRELEASED; urgency=medium
+pipewire (0.3.50-1) unstable; urgency=medium
 
   * Team upload.
 
@@ -10,7 +10,7 @@ pipewire (0.3.50-1) UNRELEASED; urgency=medium
   [ Debian Janitor ]
   * Remove constraints unnecessary since buster
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Apr 2022 22:54:44 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 14 Apr 2022 10:11:53 +0200
 
 pipewire (0.3.49-1) unstable; urgency=medium
 
