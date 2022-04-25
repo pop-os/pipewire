@@ -6,4 +6,3 @@ usr/lib/*/pipewire-0.3/jack
 usr/share/alsa/alsa.conf.d/50-pipewire.conf
 usr/share/alsa/alsa.conf.d/99-pipewire-default.conf
 usr/share/man/man1/pw-jack.*
-etc/alsa/alsa
