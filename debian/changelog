@@ -1,4 +1,4 @@
-pipewire (0.3.50-2) UNRELEASED; urgency=medium
+pipewire (0.3.50-2) unstable; urgency=medium
 
   [ Markus Teich ]
   * Remove obsolete xdg autostart conffile.
@@ -8,7 +8,7 @@ pipewire (0.3.50-2) UNRELEASED; urgency=medium
     - fix argument type (Closes: #1008907)
     - fix C90 header include (Closes: #1010151)
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 26 Apr 2022 22:00:14 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 26 Apr 2022 22:06:23 +0200
 
 pipewire (0.3.50-1) unstable; urgency=medium
 
