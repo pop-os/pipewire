@@ -1,3 +1,4 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 Don-t-build_same_binary_twice.patch
 fix_argument_type_for_Long.patch
+fix_c90_header_include.patch
