@@ -2,6 +2,9 @@ pipewire (0.3.51-1) UNRELEASED; urgency=medium
 
   * Team upload.
   * New upstream release
+  * Drop patches included in upstream release:
+     - fix_argument_type_for_Long.patch
+     - fix_c90_header_include.patch
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 29 Apr 2022 10:50:19 +0200
 
