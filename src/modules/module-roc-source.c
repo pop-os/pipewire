@@ -58,6 +58,7 @@
  * - `sess.latency.msec = <str>`: target network latency in milliseconds
  * - `resampler.profile = <str>`: Possible values: `disable`, `high`,
  *   `medium`, `low`.
+ * - `fec.code = <str>`: Possible values: `disable`, `rs8m`, `ldpc`
  *
  * ## General options
  *
@@ -74,6 +75,7 @@
  *      args = {
  *          local.ip = 0.0.0.0
  *          resampler.profile = medium
+ *          fec.code = disable
  *          sess.latency.msec = 5000
  *          local.source.port = 10001
  *          local.repair.port = 10002
@@ -113,6 +115,7 @@ struct module_roc_source_data {
 	struct pw_properties *playback_props;
 
 	unsigned int do_disconnect:1;
+	uint32_t stride;
 
 	roc_address local_addr;
 	roc_address local_source_addr;
@@ -120,7 +123,8 @@ struct module_roc_source_data {
 	roc_context *context;
 	roc_receiver *receiver;
 
-	char *resampler_profile;
+	roc_resampler_profile resampler_profile;
+	roc_fec_code fec_code;
 	char *local_ip;
 	int local_source_port;
 	int local_repair_port;
@@ -136,25 +140,34 @@ static void stream_destroy(void *d)
 
 static int roc_parse_resampler_profile(roc_resampler_profile *out, const char *str)
 {
-	if (!str || !*str) {
+	if (!str || !*str)
 		*out = ROC_RESAMPLER_DEFAULT;
-		return 0;
-	} else if (spa_streq(str, "disable") == 0) {
+	else if (spa_streq(str, "disable"))
 		*out = ROC_RESAMPLER_DISABLE;
-		return 0;
-	} else if (spa_streq(str, "high") == 0) {
+	else if (spa_streq(str, "high"))
 		*out = ROC_RESAMPLER_HIGH;
-		return 0;
-	} else if (spa_streq(str, "medium") == 0) {
+	else if (spa_streq(str, "medium"))
 		*out = ROC_RESAMPLER_MEDIUM;
-		return 0;
-	} else if (spa_streq(str, "low") == 0) {
+	else if (spa_streq(str, "low"))
 		*out = ROC_RESAMPLER_LOW;
-		return 0;
-	} else {
-		pw_log_error("Invalid resampler profile: %s", str);
+	else
 		return -EINVAL;
-	}
+	return 0;
+}
+
+static int roc_parse_fec_code(roc_fec_code *out, const char *str)
+{
+	if (!str || !*str)
+		*out = ROC_FEC_DEFAULT;
+	else if (spa_streq(str, "disable"))
+		*out = ROC_FEC_DISABLE;
+	else if (spa_streq(str, "rs8m"))
+		*out = ROC_FEC_RS8M;
+	else if (spa_streq(str, "ldpc"))
+		*out = ROC_FEC_LDPC_STAIRCASE;
+	else
+		return -EINVAL;
+	return 0;
 }
 
 static void playback_process(void *data)
@@ -175,22 +188,22 @@ static void playback_process(void *data)
 		return;
 
 	buf->datas[0].chunk->offset = 0;
-	buf->datas[0].chunk->stride = 8; /* channels = 2, format = F32LE */
+	buf->datas[0].chunk->stride = impl->stride;
 	buf->datas[0].chunk->size = 0;
 
-	memset(&frame, 0, sizeof(frame));
-
+	spa_zero(frame);
 	frame.samples = dst;
-	frame.samples_size = buf->datas[0].maxsize;
+	frame.samples_size = SPA_MIN(b->requested * impl->stride, buf->datas[0].maxsize);
 
 	if (roc_receiver_read(impl->receiver, &frame) != 0) {
 		/* Handle EOF and error */
 		pw_log_error("Failed to read from roc source");
 		pw_impl_module_schedule_destroy(impl->module);
-		return;
+		frame.samples_size = 0;
 	}
 
 	buf->datas[0].chunk->size = frame.samples_size;
+	b->size = frame.samples_size / impl->stride;
 
 	pw_stream_queue_buffer(impl->playback, b);
 }
@@ -264,7 +277,6 @@ static void impl_destroy(struct module_roc_source_data *data)
 		roc_context_close(data->context);
 
 	free(data->local_ip);
-	free(data->resampler_profile);
 	free(data);
 }
 
@@ -290,6 +302,7 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	uint32_t n_params;
 	uint8_t buffer[1024];
 	int res;
+	roc_protocol audio_proto, repair_proto;
 
 	if (roc_address_init(&data->local_addr, ROC_AF_AUTO, data->local_ip, 0)) {
 		pw_log_error("Invalid local IP address");
@@ -308,19 +321,18 @@ static int roc_source_setup(struct module_roc_source_data *data)
 		return -EINVAL;
 	}
 
-	memset(&context_config, 0, sizeof(context_config));
-
+	spa_zero(context_config);
 	data->context = roc_context_open(&context_config);
 	if (!data->context) {
 		pw_log_error("Failed to create roc context");
 		return -EINVAL;
 	}
 
-	memset(&receiver_config, 0, sizeof(receiver_config));
-
+	spa_zero(receiver_config);
 	receiver_config.frame_sample_rate = 44100;
 	receiver_config.frame_channels = ROC_CHANNEL_SET_STEREO;
 	receiver_config.frame_encoding = ROC_FRAME_ENCODING_PCM_FLOAT;
+	receiver_config.resampler_profile = data->resampler_profile;
 
 	/* Fixed to be the same as ROC receiver config above */
 	info.rate = 44100;
@@ -328,12 +340,9 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	info.format = SPA_AUDIO_FORMAT_F32_LE;
 	info.position[0] = SPA_AUDIO_CHANNEL_FL;
 	info.position[1] = SPA_AUDIO_CHANNEL_FR;
+	data->stride = info.channels * sizeof(float);
 
-	if (roc_parse_resampler_profile(&receiver_config.resampler_profile,
-				data->resampler_profile)) {
-		pw_log_error("Invalid resampler profile");
-		return -EINVAL;
-	}
+	pw_properties_setf(data->playback_props, PW_KEY_NODE_RATE, "1/%d", info.rate);
 
 	/*
 	 * Note that target latency is in nano seconds.
@@ -354,16 +363,33 @@ static int roc_source_setup(struct module_roc_source_data *data)
 		return -EINVAL;
 	}
 
-	if (roc_receiver_bind(data->receiver, ROC_PORT_AUDIO_SOURCE, ROC_PROTO_RTP_RS8M_SOURCE,
+	switch (data->fec_code) {
+	case ROC_FEC_DEFAULT:
+	case ROC_FEC_RS8M:
+		audio_proto = ROC_PROTO_RTP_RS8M_SOURCE;
+		repair_proto = ROC_PROTO_RS8M_REPAIR;
+		break;
+	case ROC_FEC_LDPC_STAIRCASE:
+		audio_proto = ROC_PROTO_RTP_LDPC_SOURCE;
+		repair_proto = ROC_PROTO_LDPC_REPAIR;
+		break;
+	default:
+		audio_proto = ROC_PROTO_RTP;
+		repair_proto = 0;
+		break;
+	}
+
+	if (roc_receiver_bind(data->receiver, ROC_PORT_AUDIO_SOURCE, audio_proto,
 				&data->local_source_addr) != 0) {
 		pw_log_error("can't connect roc receiver to local source address");
 		return -EINVAL;
 	}
-
-	if (roc_receiver_bind(data->receiver, ROC_PORT_AUDIO_REPAIR, ROC_PROTO_RS8M_REPAIR,
-				&data->local_repair_addr) != 0) {
-		pw_log_error("can't connect roc receiver to local repair address");
-		return -EINVAL;
+	if (repair_proto != 0) {
+		if (roc_receiver_bind(data->receiver, ROC_PORT_AUDIO_REPAIR, repair_proto,
+					&data->local_repair_addr) != 0) {
+			pw_log_error("can't connect roc receiver to local repair address");
+			return -EINVAL;
+		}
 	}
 
 	data->playback = pw_stream_new(data->core,
@@ -385,6 +411,7 @@ static int roc_source_setup(struct module_roc_source_data *data)
 			PW_DIRECTION_OUTPUT,
 			PW_ID_ANY,
 			PW_STREAM_FLAG_MAP_BUFFERS |
+			PW_STREAM_FLAG_AUTOCONNECT |
 			PW_STREAM_FLAG_RT_PROCESS,
 			params, n_params)) < 0)
 		return res;
@@ -397,6 +424,7 @@ static const struct spa_dict_item module_roc_source_info[] = {
 	{ PW_KEY_MODULE_DESCRIPTION, "roc source" },
 	{ PW_KEY_MODULE_USAGE,	"source.name=<name for the source> "
 				"resampler.profile=<empty>|disable|high|medium|low "
+				"fec.code=<empty>|disable|rs8m|ldpc "
 				"sess.latency.msec=<target network latency in milliseconds> "
 				"local.ip=<local receiver ip> "
 				"local.source.port=<local receiver port for source packets> "
@@ -412,8 +440,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct module_roc_source_data *data;
 	struct pw_properties *props = NULL, *playback_props = NULL;
 	const char *str;
-	char *local_ip = NULL, *resampler_profile = NULL;
-	int res = 0, local_repair_port, local_source_port, sess_latency_msec;
+	int res = 0;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 
@@ -455,46 +482,56 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_properties_set(playback_props, PW_KEY_NODE_NAME, "roc-source");
 	if (pw_properties_get(playback_props, PW_KEY_NODE_DESCRIPTION) == NULL)
 		pw_properties_set(playback_props, PW_KEY_NODE_DESCRIPTION, "ROC Source");
-	if (pw_properties_get(playback_props, PW_KEY_NODE_WANT_DRIVER) == NULL)
-		pw_properties_set(playback_props, PW_KEY_NODE_WANT_DRIVER, "true");
 	if (pw_properties_get(playback_props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(playback_props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(playback_props, PW_KEY_NODE_NETWORK) == NULL)
 		pw_properties_set(playback_props, PW_KEY_NODE_NETWORK, "true");
-	if ((str = pw_properties_get(playback_props, PW_KEY_MEDIA_CLASS)) == NULL)
-		pw_properties_set(playback_props, PW_KEY_MEDIA_CLASS, "Audio/Source");
 
 	if ((str = pw_properties_get(props, "local.ip")) != NULL) {
-		local_ip = strdup(str);
+		data->local_ip = strdup(str);
 		pw_properties_set(props, "local.ip", NULL);
 	} else {
-		local_ip = strdup(ROC_DEFAULT_IP);
+		data->local_ip = strdup(ROC_DEFAULT_IP);
 	}
 
 	if ((str = pw_properties_get(props, "local.source.port")) != NULL) {
-		local_source_port = pw_properties_parse_int(str);
+		data->local_source_port = pw_properties_parse_int(str);
 		pw_properties_set(props, "local.source.port", NULL);
 	} else {
-		local_source_port = ROC_DEFAULT_SOURCE_PORT;
+		data->local_source_port = ROC_DEFAULT_SOURCE_PORT;
 	}
 
 	if ((str = pw_properties_get(props, "local.repair.port")) != NULL) {
-		local_repair_port = pw_properties_parse_int(str);
+		data->local_repair_port = pw_properties_parse_int(str);
 		pw_properties_set(props, "local.repair.port", NULL);
 	} else {
-		local_repair_port = ROC_DEFAULT_REPAIR_PORT;
+		data->local_repair_port = ROC_DEFAULT_REPAIR_PORT;
 	}
 
 	if ((str = pw_properties_get(props, "sess.latency.msec")) != NULL) {
-		sess_latency_msec = pw_properties_parse_int(str);
+		data->sess_latency_msec = pw_properties_parse_int(str);
 		pw_properties_set(props, "sess.latency.msec", NULL);
 	} else {
-		sess_latency_msec = ROC_DEFAULT_SESS_LATENCY;
+		data->sess_latency_msec = ROC_DEFAULT_SESS_LATENCY;
 	}
 
 	if ((str = pw_properties_get(props, "resampler.profile")) != NULL) {
-		resampler_profile = strdup(str);
+		if (roc_parse_resampler_profile(&data->resampler_profile, str)) {
+			pw_log_warn("Invalid resampler profile %s, using default", str);
+			data->resampler_profile = ROC_RESAMPLER_DEFAULT;
+		}
 		pw_properties_set(props, "resampler.profile", NULL);
+	} else {
+		data->resampler_profile = ROC_RESAMPLER_DEFAULT;
+	}
+	if ((str = pw_properties_get(props, "fec.code")) != NULL) {
+		if (roc_parse_fec_code(&data->fec_code, str)) {
+			pw_log_error("Invalid fec code %s, using default", str);
+			data->fec_code = ROC_FEC_DEFAULT;
+		}
+		pw_properties_set(props, "fec.code", NULL);
+	} else {
+		data->fec_code = ROC_FEC_DEFAULT;
 	}
 
 	data->core = pw_context_get_object(data->module_context, PW_TYPE_INTERFACE_Core);
@@ -519,12 +556,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_core_add_listener(data->core,
 			&data->core_listener,
 			&core_events, data);
-
-	data->local_ip = local_ip;
-	data->local_source_port = local_source_port;
-	data->local_repair_port = local_repair_port;
-	data->sess_latency_msec = sess_latency_msec;
-	data->resampler_profile = resampler_profile;
 
 	if ((res = roc_source_setup(data)) < 0)
 		goto out;

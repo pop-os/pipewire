@@ -76,12 +76,46 @@
 
 /** \page page_module_rt PipeWire Module: RT
  *
- * The `rt` module uses the operating system's scheduler to enable realtime
- * scheduling for certain threads to assist with low latency audio processing.
+ * The `rt` modules can give real-time priorities to processing threads.
+ *
+ * It uses the operating system's scheduler to enable realtime scheduling
+ * for certain threads to assist with low latency audio processing.
  * This requires `RLIMIT_RTPRIO` to be set to a value that's equal to this
  * module's `rt.prio` parameter or higher. Most distros will come with some
  * package that configures this for certain groups or users. If this is not set
  * up and DBus is available, then this module will fall back to using RTKit.
+ *
+ * ## Module Options
+ *
+ * - `nice.level`: The nice value set for the application thread. It improves
+ *                 performance of the communication with the pipewire daemon.
+ * - `rt.prio`: The realtime priority of the data thread. Higher values are
+ *              higher priority.
+ * - `rt.time.soft`, `rt.time.hard`: The amount of CPU time an RT thread can
+ *              consume without doing any blocking calls before the kernel kills
+ *              the thread. This is a safety measure to avoid lockups of the complete
+ *              system when some thread consumes 100%.
+
+ * The nice level is by default set to an invalid value so that clients don't
+ * automatically have the nice level raised.
+ *
+ * The PipeWire server processes are explicitly configured with a valid nice level.
+ *
+ * ## Example configuration
+ *
+ *\code{.unparsed}
+ * context.modules = [
+ * {   name = libpipewire-module-rt
+ *     args = {
+ *         #nice.level   = 20
+ *         #rt.prio      = 88
+ *         #rt.time.soft = -1
+ *         #rt.time.hard = -1
+ *     }
+ *     flags = [ ifexists nofail ]
+ * }
+ * ]
+ *\endcode
  */
 
 #define NAME "rt"
@@ -496,24 +530,23 @@ static bool check_realtime_privileges(rlim_t priority)
 	 * scheduling without that rlimit being set such as `CAP_SYS_NICE` or
 	 * running as root. Instead of checking a bunch of preconditions, we
 	 * just try if setting realtime scheduling works or not. */
-	if ((old_policy = sched_getscheduler(0)) < 0 ||
-	    sched_getparam(0, &old_sched_params) != 0) {
+	if (pthread_getschedparam(pthread_self(),&old_policy,&old_sched_params) < 0) {
+		pw_log_warn("Failed to check RLIMIT_RTPRIO %m");
 		return false;
 	}
 
 	/* If the current scheduling policy has `SCHED_RESET_ON_FORK` set, then
-	 * this also needs to be set here or `sched_setscheduler()` will return
+	 * this also needs to be set here or `pthread_setschedparam()` will return
 	 * an error code. Similarly, if it is not set, then we don't want to set
 	 * it here as it would irreversible change the current thread's
 	 * scheduling policy. */
 	spa_zero(new_sched_params);
 	new_sched_params.sched_priority = priority;
-	if ((old_policy & PW_SCHED_RESET_ON_FORK) != 0) {
+	if ((old_policy & PW_SCHED_RESET_ON_FORK) != 0)
 		new_policy |= PW_SCHED_RESET_ON_FORK;
-	}
 
-	if (sched_setscheduler(0, new_policy, &new_sched_params) == 0) {
-		sched_setscheduler(0, old_policy, &old_sched_params);
+	if (pthread_setschedparam(pthread_self(), new_policy, &new_sched_params) == 0) {
+		pthread_setschedparam(pthread_self(), old_policy, &old_sched_params);
 		return true;
 	} else {
 		return false;
@@ -612,7 +645,7 @@ static int impl_acquire_rt_sched(struct spa_thread *thread, int priority)
 	return 0;
 }
 
-static int impl_drop_rt_generic(void *data, struct spa_thread *thread)
+static int impl_drop_rt_generic(void *object, struct spa_thread *thread)
 {
 	struct sched_param sp;
 	pthread_t pt = (pthread_t)thread;
@@ -653,12 +686,12 @@ static void *custom_start(void *data)
 	return this->start(this->arg);
 }
 
-static struct spa_thread *impl_create(void *data, const struct spa_dict *props,
+static struct spa_thread *impl_create(void *object, const struct spa_dict *props,
 		void *(*start_routine)(void*), void *arg)
 {
-	struct impl *impl = data;
+	struct impl *impl = object;
 	struct thread *this;
-	int err;
+	struct spa_thread *thread;
 
 	this = calloc(1, sizeof(*this));
 	this->impl = impl;
@@ -667,27 +700,27 @@ static struct spa_thread *impl_create(void *data, const struct spa_dict *props,
 
 	/* This thread list is only used for the RTKit implementation */
 	pthread_mutex_lock(&impl->lock);
-	err = pthread_create(&this->thread, NULL, custom_start, this);
-	if (err != 0)
+	thread = pw_thread_utils_create(props, custom_start, this);
+	if (thread == NULL)
 		goto exit;
 
+	this->thread = (pthread_t)thread;
 	pthread_cond_wait(&impl->cond, &impl->lock);
 
 	spa_list_append(&impl->threads_list, &this->link);
 exit:
 	pthread_mutex_unlock(&impl->lock);
 
-	if (err != 0) {
-		errno = err;
+	if (thread == NULL) {
 		free(this);
 		return NULL;
 	}
-	return (struct spa_thread*)this->thread;
+	return thread;
 }
 
-static int impl_join(void *data, struct spa_thread *thread, void **retval)
+static int impl_join(void *object, struct spa_thread *thread, void **retval)
 {
-	struct impl *impl = data;
+	struct impl *impl = object;
 	pthread_t pt = (pthread_t)thread;
 	struct thread *thr;
 
@@ -701,10 +734,10 @@ static int impl_join(void *data, struct spa_thread *thread, void **retval)
 	return pthread_join(pt, retval);
 }
 
-static int impl_get_rt_range(void *data, const struct spa_dict *props,
+static int impl_get_rt_range(void *object, const struct spa_dict *props,
 		int *min, int *max)
 {
-	struct impl *impl = data;
+	struct impl *impl = object;
 	if (impl->use_rtkit) {
 		if (min)
 			*min = 1;
@@ -735,9 +768,9 @@ static pid_t impl_gettid(struct impl *impl, pthread_t pt)
 	return pid;
 }
 
-static int impl_acquire_rt(void *data, struct spa_thread *thread, int priority)
+static int impl_acquire_rt(void *object, struct spa_thread *thread, int priority)
 {
-	struct impl *impl = data;
+	struct impl *impl = object;
 	struct sched_param sp;
 	int err, rtprio_limit;
 	pthread_t pt = (pthread_t)thread;
@@ -786,26 +819,18 @@ static const struct spa_thread_utils_methods impl_thread_utils = {
 
 #else /* HAVE_DBUS */
 
-static struct spa_thread *impl_create(void *data, const struct spa_dict *props,
+static struct spa_thread *impl_create(void *object, const struct spa_dict *props,
 		void *(*start_routine)(void*), void *arg)
 {
-	pthread_t pt;
-	int err;
-
-	err = pthread_create(&pt, NULL, start_routine, arg);
-	if (err != 0) {
-		errno = err;
-		return NULL;
-	}
-	return (struct spa_thread*)pt;
+	return pw_thread_utils_create(props, start_routine, arg);
 }
 
-static int impl_join(void *data, struct spa_thread *thread, void **retval)
+static int impl_join(void *object, struct spa_thread *thread, void **retval)
 {
-	return pthread_join((pthread_t)thread, retval);
+	return pw_thread_utils_join(thread, retval);
 }
 
-static int impl_get_rt_range(void *data, const struct spa_dict *props,
+static int impl_get_rt_range(void *object, const struct spa_dict *props,
 		int *min, int *max)
 {
 	if (min)
@@ -815,9 +840,9 @@ static int impl_get_rt_range(void *data, const struct spa_dict *props,
 	return 0;
 }
 
-static int impl_acquire_rt(void *data, struct spa_thread *thread, int priority)
+static int impl_acquire_rt(void *object, struct spa_thread *thread, int priority)
 {
-	struct impl *impl = data;
+	struct impl *impl = object;
 
 	/* See the docstring on `spa_thread_utils_methods::acquire_rt` */
 	if (priority == -1) {

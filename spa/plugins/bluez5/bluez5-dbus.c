@@ -1307,6 +1307,11 @@ static void device_set_connected(struct spa_bt_device *device, int connected)
 	if (connected)
 		spa_bt_device_check_profiles(device, false);
 	else {
+		/* Stop codec switch on disconnect */
+		struct spa_bt_a2dp_codec_switch *sw;
+		spa_list_consume(sw, &device->codec_switch_list, device_link)
+			a2dp_codec_switch_free(sw);
+
 		if (device->reconnect_state != BT_DEVICE_RECONNECT_INIT)
 			device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_DISCONNECTED);
@@ -1574,7 +1579,7 @@ const struct a2dp_codec **spa_bt_device_get_supported_a2dp_codecs(struct spa_bt_
 		if (j >= size) {
 			const struct a2dp_codec **p;
 			size = size * 2;
-			p = realloc(supported_codecs, size * sizeof(const struct a2dp_codec *));
+			p = reallocarray(supported_codecs, size, sizeof(const struct a2dp_codec *));
 			if (p == NULL) {
 				free(supported_codecs);
 				return NULL;

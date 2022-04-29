@@ -42,6 +42,28 @@
 #include <pipewire/extensions/profiler.h>
 
 /** \page page_module_profiler PipeWire Module: Profiler
+ *
+ * The profiler module provides a Profiler interface for applications that
+ * can be used to receive profiling information.
+ *
+ * Use tools like pw-top and pw-profiler to collect profiling information
+ * about the pipewire graph.
+ *
+ * ## Example configuration
+ *
+ * The module has no arguments and is usually added to the config file of
+ * the main pipewire daemon.
+ *
+ *\code{.unparsed}
+ * context.modules = [
+ * { name = libpipewire-module-profiler }
+ * ]
+ *\endcode
+ *
+ * ## See also
+ *
+ * - `pw-top`: a tool to display realtime profiler data
+ * - `pw-profiler`: a tool to collect and render profiler data
  */
 
 #define NAME "profiler"
@@ -312,10 +334,10 @@ do_start(struct spa_loop *loop,
 	return 0;
 }
 static int
-global_bind(void *_data, struct pw_impl_client *client, uint32_t permissions,
+global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
             uint32_t version, uint32_t id)
 {
-	struct impl *impl = _data;
+	struct impl *impl = object;
 	struct pw_global *global = impl->global;
 	struct pw_resource *resource;
 	struct resource_data *data;

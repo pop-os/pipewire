@@ -259,10 +259,10 @@ static struct mix *ensure_mix(struct node_data *data,
 }
 
 
-static int client_node_transport(void *object,
+static int client_node_transport(void *_data,
 			int readfd, int writefd, uint32_t mem_id, uint32_t offset, uint32_t size)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 
 	clean_transport(data);
@@ -317,8 +317,15 @@ static int add_node_update(struct node_data *data, uint32_t change_mask, uint32_
 	                        res = spa_node_enum_params_sync(node->node,
 							id, &idx, NULL, &param, &b.b);
 				if (res == 1) {
-					params = realloc(params, sizeof(struct spa_pod *) * (n_params + 1));
-					params[n_params++] = spa_pod_copy(param);
+					void *p;
+					p = reallocarray(params, n_params + 1, sizeof(struct spa_pod *));
+					if (p == NULL) {
+						res = -errno;
+						pw_log_error("realloc failed: %m");
+					} else {
+						params = p;
+						params[n_params++] = spa_pod_copy(param);
+					}
 				}
 				spa_pod_dynamic_builder_clean(&b);
 				if (res != 1)
@@ -376,8 +383,15 @@ static int add_port_update(struct node_data *data, struct pw_impl_port *port, ui
 							port->direction, port->port_id,
 							id, &idx, NULL, &param, &b.b);
 				if (res == 1) {
-					params = realloc(params, sizeof(struct spa_pod *) * (n_params + 1));
-					params[n_params++] = spa_pod_copy(param);
+					void *p;
+					p = reallocarray(params, n_params + 1, sizeof(struct spa_pod*));
+					if (p == NULL) {
+						res = -errno;
+						pw_log_error("realloc failed: %m");
+					} else {
+						params = p;
+						params[n_params++] = spa_pod_copy(param);
+					}
 				}
 				spa_pod_dynamic_builder_clean(&b);
 
@@ -416,10 +430,10 @@ static int add_port_update(struct node_data *data, struct pw_impl_port *port, ui
 }
 
 static int
-client_node_set_param(void *object, uint32_t id, uint32_t flags,
+client_node_set_param(void *_data, uint32_t id, uint32_t flags,
 		      const struct spa_pod *param)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	int res;
 
@@ -440,13 +454,13 @@ client_node_set_param(void *object, uint32_t id, uint32_t flags,
 }
 
 static int
-client_node_set_io(void *object,
+client_node_set_io(void *_data,
 		   uint32_t id,
 		   uint32_t memid,
 		   uint32_t offset,
 		   uint32_t size)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct pw_memmap *old, *mm;
 	void *ptr;
@@ -483,15 +497,15 @@ exit:
 	return res;
 }
 
-static int client_node_event(void *object, const struct spa_event *event)
+static int client_node_event(void *data, const struct spa_event *event)
 {
 	pw_log_warn("unhandled node event %d", SPA_EVENT_TYPE(event));
 	return -ENOTSUP;
 }
 
-static int client_node_command(void *object, const struct spa_command *command)
+static int client_node_command(void *_data, const struct spa_command *command)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	int res;
 
@@ -533,10 +547,10 @@ static int client_node_command(void *object, const struct spa_command *command)
 }
 
 static int
-client_node_add_port(void *object, enum spa_direction direction, uint32_t port_id,
+client_node_add_port(void *_data, enum spa_direction direction, uint32_t port_id,
 		const struct spa_dict *props)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	pw_log_warn("add port not supported");
 	pw_proxy_error(proxy, -ENOTSUP, "add port not supported");
@@ -544,9 +558,9 @@ client_node_add_port(void *object, enum spa_direction direction, uint32_t port_i
 }
 
 static int
-client_node_remove_port(void *object, enum spa_direction direction, uint32_t port_id)
+client_node_remove_port(void *_data, enum spa_direction direction, uint32_t port_id)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	pw_log_warn("remove port not supported");
 	pw_proxy_error(proxy, -ENOTSUP, "remove port not supported");
@@ -579,12 +593,12 @@ static int clear_buffers(struct node_data *data, struct mix *mix)
 }
 
 static int
-client_node_port_set_param(void *object,
+client_node_port_set_param(void *_data,
 			   enum spa_direction direction, uint32_t port_id,
 			   uint32_t id, uint32_t flags,
 			   const struct spa_pod *param)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct pw_impl_port *port;
 	int res;
@@ -620,12 +634,12 @@ error_exit:
 }
 
 static int
-client_node_port_use_buffers(void *object,
+client_node_port_use_buffers(void *_data,
 			     enum spa_direction direction, uint32_t port_id, uint32_t mix_id,
 			     uint32_t flags,
 			     uint32_t n_buffers, struct pw_client_node_buffer *buffers)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct buffer *bid;
 	uint32_t i, j;
@@ -769,7 +783,7 @@ error_exit:
 }
 
 static int
-client_node_port_set_io(void *object,
+client_node_port_set_io(void *_data,
                         uint32_t direction,
                         uint32_t port_id,
                         uint32_t mix_id,
@@ -778,7 +792,7 @@ client_node_port_set_io(void *object,
                         uint32_t offset,
                         uint32_t size)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct mix *mix;
 	struct pw_memmap *mm, *old;
@@ -869,14 +883,14 @@ do_activate_link(struct spa_loop *loop,
 }
 
 static int
-client_node_set_activation(void *object,
+client_node_set_activation(void *_data,
                         uint32_t node_id,
                         int signalfd,
                         uint32_t memid,
                         uint32_t offset,
                         uint32_t size)
 {
-	struct node_data *data = object;
+	struct node_data *data = _data;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct pw_impl_node *node = data->node;
 	struct pw_memmap *mm;
