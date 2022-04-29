@@ -398,6 +398,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_stream_update_params@Base 0.3.1
  pw_stream_update_properties@Base 0.3.1
  pw_strip@Base 0.3.1
+ pw_thread_fill_attr@Base 0.3.51
  pw_thread_loop_accept@Base 0.3.1
  pw_thread_loop_add_listener@Base 0.3.1
  pw_thread_loop_destroy@Base 0.3.1
