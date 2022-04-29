@@ -109,6 +109,8 @@ static int create_link(struct data *data)
 	struct pw_proxy *proxy;
 	struct spa_hook listener;
 
+	data->link_res = 0;
+
 	proxy = pw_core_create_object(data->core,
 			"link-factory",
 			PW_TYPE_INTERFACE_Link,
@@ -137,6 +139,47 @@ static struct object *find_object(struct data *data, uint32_t type, uint32_t id)
 		if ((type == OBJECT_ANY || o->type == type) && o->id == id)
 			return o;
 	return NULL;
+}
+
+static struct object *find_node_port(struct data *data, struct object *node, enum pw_direction direction, const char *port_id)
+{
+	struct object *o;
+
+	spa_list_for_each(o, &data->objects, link) {
+		const char *o_port_id;
+		if (o->type != OBJECT_PORT)
+			continue;
+		if (o->extra[1] != node->id)
+			continue;
+		if (o->extra[0] != direction)
+			continue;
+		if ((o_port_id = pw_properties_get(o->props, PW_KEY_PORT_ID)) == NULL)
+			continue;
+		if (spa_streq(o_port_id, port_id))
+			return o;
+	}
+
+	return NULL;
+}
+
+static char *node_name(char *buffer, int size, struct object *n)
+{
+	const char *name;
+	buffer[0] = '\0';
+	if ((name = pw_properties_get(n->props, PW_KEY_NODE_NAME)) == NULL)
+		return buffer;
+	snprintf(buffer, size, "%s", name);
+	return buffer;
+}
+
+static char *node_path(char *buffer, int size, struct object *n)
+{
+	const char *name;
+	buffer[0] = '\0';
+	if ((name = pw_properties_get(n->props, PW_KEY_OBJECT_PATH)) == NULL)
+		return buffer;
+	snprintf(buffer, size, "%s", name);
+	return buffer;
 }
 
 static char *port_name(char *buffer, int size, struct object *n, struct object *p)
@@ -241,6 +284,19 @@ static void do_list_port_links(struct data *data, struct object *node, struct ob
 	}
 }
 
+static int node_matches(struct data *data, struct object *n, const char *name)
+{
+	char buffer[1024];
+	uint32_t id = atoi(name);
+	if (n->id == id)
+		return 1;
+	if (spa_streq(node_name(buffer, sizeof(buffer), n), name))
+		return 1;
+	if (spa_streq(node_path(buffer, sizeof(buffer), n), name))
+		return 1;
+	return 0;
+}
+
 static int port_matches(struct data *data, struct object *n, struct object *p, const char *name)
 {
 	char buffer[1024];
@@ -304,10 +360,19 @@ static int do_link_ports(struct data *data)
 {
 	uint32_t in_port = 0, out_port = 0;
 	struct object *n, *p;
+	struct object *in_node = NULL, *out_node = NULL;
 
 	spa_list_for_each(n, &data->objects, link) {
 		if (n->type != OBJECT_NODE)
 			continue;
+
+		if (out_node == NULL && node_matches(data, n, data->opt_output)) {
+			out_node = n;
+			continue;
+		} else if (in_node == NULL && node_matches(data, n, data->opt_input)) {
+			in_node = n;
+			continue;
+		}
 
 		spa_list_for_each(p, &data->objects, link) {
 			if (p->type != OBJECT_PORT)
@@ -323,6 +388,33 @@ static int do_link_ports(struct data *data)
 				in_port = p->id;
 		}
 	}
+
+	if (in_node && out_node) {
+		int i, ret;
+		char port_id[32];
+		bool all_links_exist = true;
+
+		for (i=0;; i++) {
+			snprintf(port_id, sizeof(port_id), "%d", i);
+
+			struct object *port_out = find_node_port(data, out_node, PW_DIRECTION_OUTPUT, port_id);
+			struct object *port_in = find_node_port(data, in_node, PW_DIRECTION_INPUT, port_id);
+
+			if (!port_out || !port_in)
+				break;
+
+			pw_properties_setf(data->props, PW_KEY_LINK_OUTPUT_PORT, "%u", port_out->id);
+			pw_properties_setf(data->props, PW_KEY_LINK_INPUT_PORT, "%u", port_in->id);
+
+			if ((ret = create_link(data)) < 0 && ret != -EEXIST)
+				return ret;
+
+			if (ret >= 0)
+				all_links_exist = false;
+		}
+		return (all_links_exist ? -EEXIST : 0);
+	}
+
 	if (in_port == 0 || out_port == 0)
 		return -ENOENT;
 
@@ -335,7 +427,24 @@ static int do_link_ports(struct data *data)
 static int do_unlink_ports(struct data *data)
 {
 	struct object *l, *n, *p;
-	uint32_t link_id = 0;
+	bool found_any = false;
+	struct object *in_node = NULL, *out_node = NULL;
+
+	if (data->opt_input != NULL) {
+		/* 2 args, check if they are node names */
+		spa_list_for_each(n, &data->objects, link) {
+			if (n->type != OBJECT_NODE)
+				continue;
+
+			if (out_node == NULL && node_matches(data, n, data->opt_output)) {
+				out_node = n;
+				continue;
+			} else if (in_node == NULL && node_matches(data, n, data->opt_input)) {
+				in_node = n;
+				continue;
+			}
+		}
+	}
 
 	spa_list_for_each(l, &data->objects, link) {
 		if (l->type != OBJECT_LINK)
@@ -344,6 +453,21 @@ static int do_unlink_ports(struct data *data)
 		if (data->opt_input == NULL) {
 			/* 1 arg, check link id */
 			if (l->id != (uint32_t)atoi(data->opt_output))
+				continue;
+		} else if (out_node && in_node) {
+			/* 2 args, check nodes */
+			if ((p = find_object(data, OBJECT_PORT, l->extra[0])) == NULL)
+				continue;
+			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+				continue;
+			if (n->id != out_node->id)
+				continue;
+
+			if ((p = find_object(data, OBJECT_PORT, l->extra[1])) == NULL)
+				continue;
+			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+				continue;
+			if (n->id != in_node->id)
 				continue;
 		} else {
 			/* 2 args, check port names */
@@ -361,13 +485,11 @@ static int do_unlink_ports(struct data *data)
 			if (!port_matches(data, n, p, data->opt_input))
 				continue;
 		}
-		link_id = l->id;
-		break;
+		pw_registry_destroy(data->registry, l->id);
+		found_any = true;
 	}
-	if (link_id == 0)
+	if (!found_any)
 		return -ENOENT;
-
-	pw_registry_destroy(data->registry, link_id);
 
 	core_sync(data);
 	pw_main_loop_run(data->loop);
@@ -492,9 +614,9 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 	}
 }
 
-static void registry_event_global_remove(void *object, uint32_t id)
+static void registry_event_global_remove(void *data, uint32_t id)
 {
-	struct data *d = object;
+	struct data *d = data;
 	struct object *obj;
 
 	if ((obj = find_object(d, OBJECT_ANY, id)) == NULL)

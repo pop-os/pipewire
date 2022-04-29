@@ -63,6 +63,16 @@
 #include "module-raop/rtsp-client.h"
 
 /** \page page_module_raop_sink PipeWire Module: AirPlay Sink
+ *
+ * Creates a new Sink to stream to an Airplay device.
+ *
+ * ## Module Options
+ *
+ * ## Example configuration
+ *
+ * ## See also
+ *
+ * \ref page_module_raop_discover
  */
 
 #define NAME "raop-sink"
@@ -1579,8 +1589,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
 
-	if (pw_properties_get(props, PW_KEY_NODE_WANT_DRIVER) == NULL)
-		pw_properties_set(props, PW_KEY_NODE_WANT_DRIVER, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
@@ -1605,7 +1613,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);
-	copy_props(impl, props, PW_KEY_NODE_WANT_DRIVER);
 	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);

@@ -1175,6 +1175,22 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
+struct match {
+	struct pw_filter *filter;
+	int count;
+};
+#define MATCH_INIT(f) (struct match){ .filter = f }
+
+static int execute_match(void *data, const char *location, const char *action,
+		const char *val, size_t len)
+{
+	struct match *match = data;
+	struct pw_filter *this = match->filter;
+	if (spa_streq(action, "update-props"))
+		match->count += pw_properties_update_string(this->properties, val, len);
+	return 1;
+}
+
 static struct filter *
 filter_new(struct pw_context *context, const char *name,
 		struct pw_properties *props, const struct pw_properties *extra)
@@ -1182,6 +1198,7 @@ filter_new(struct pw_context *context, const char *name,
 	struct filter *impl;
 	struct pw_filter *this;
 	const char *str;
+	struct match match;
 	int res;
 
 	impl = calloc(1, sizeof(struct filter));
@@ -1202,20 +1219,17 @@ filter_new(struct pw_context *context, const char *name,
 		res = -errno;
 		goto error_properties;
 	}
+	spa_hook_list_init(&impl->hooks);
+	this->properties = props;
+
 	pw_context_conf_update_props(context, "filter.properties", props);
 
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
-		str = pw_properties_get(extra, PW_KEY_APP_NAME);
-		if (str == NULL)
-			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
-		if (str == NULL)
-			str = name;
-		pw_properties_set(props, PW_KEY_NODE_NAME, str);
-	}
-	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
-	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_RATE, str);
+	match = MATCH_INIT(this);
+	pw_context_conf_section_match_rules(context, "filter.rules",
+		&this->properties->dict, execute_match, &match);
+
+	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		pw_properties_update_string(props, str, strlen(str));
 	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
@@ -1225,9 +1239,19 @@ filter_new(struct pw_context *context, const char *name,
 					"%u/%u", q.num, q.denom);
 		}
 	}
+	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_RATE, str);
 
-	spa_hook_list_init(&impl->hooks);
-	this->properties = props;
+	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
+		str = pw_properties_get(extra, PW_KEY_APP_NAME);
+		if (str == NULL)
+			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
+		if (str == NULL)
+			str = name;
+		pw_properties_set(props, PW_KEY_NODE_NAME, str);
+	}
 
 	this->name = name ? strdup(name) : NULL;
 	this->node_id = SPA_ID_INVALID;
@@ -1454,9 +1478,16 @@ int pw_filter_update_properties(struct pw_filter *filter, void *port_data, const
 			emit_port_info(impl, port, false);
 		}
 	} else {
+		struct match match;
+
 		changed = pw_properties_update(filter->properties, dict);
+
+		match = MATCH_INIT(filter);
+		pw_context_conf_section_match_rules(impl->context, "filter.rules",
+			&filter->properties->dict, execute_match, &match);
+
 		impl->info.props = &filter->properties->dict;
-		if (changed > 0) {
+		if (changed > 0 || match.count > 0) {
 			impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PROPS;
 			emit_node_info(impl, false);
 		}
@@ -1512,6 +1543,11 @@ pw_filter_connect(struct pw_filter *filter,
 
 	impl->disconnecting = false;
 	filter_set_state(filter, PW_FILTER_STATE_CONNECTING, NULL);
+
+	if (flags & PW_FILTER_FLAG_DRIVER)
+		pw_properties_set(filter->properties, PW_KEY_NODE_DRIVER, "true");
+	if ((pw_properties_get(filter->properties, PW_KEY_NODE_WANT_DRIVER) == NULL))
+		pw_properties_set(filter->properties, PW_KEY_NODE_WANT_DRIVER, "true");
 
 	if (filter->core == NULL) {
 		filter->core = pw_context_connect(impl->context,

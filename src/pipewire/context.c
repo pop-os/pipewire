@@ -915,26 +915,14 @@ static int ensure_state(struct pw_impl_node *node, bool running)
 	return pw_impl_node_set_state(node, state);
 }
 
-static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
+static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, struct spa_list *collect)
 {
 	struct spa_list queue;
-	struct pw_impl_node *n, *t, *driver;
+	struct pw_impl_node *n, *t;
 	struct pw_impl_port *p;
 	struct pw_impl_link *l;
 
 	pw_log_debug("node %p: '%s'", node, node->name);
-
-	if (node->driver) {
-		driver = node;
-		spa_list_consume(t, &driver->follower_list, follower_link) {
-			spa_list_remove(&t->follower_link);
-			spa_list_init(&t->follower_link);
-		}
-	} else {
-		driver = node->driver_node;
-		if (driver == NULL)
-			return -EINVAL;
-	}
 
 	/* start with node in the queue */
 	spa_list_init(&queue);
@@ -944,9 +932,14 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
 	/* now follow all the links from the nodes in the queue
 	 * and add the peers to the queue. */
 	spa_list_consume(n, &queue, sort_link) {
+		pw_log_debug(" next node %p: '%s'", n, n->name);
+
 		spa_list_remove(&n->sort_link);
-		pw_impl_node_set_driver(n, driver);
+		spa_list_append(collect, &n->sort_link);
 		n->passive = true;
+
+		if (!n->active)
+			continue;
 
 		spa_list_for_each(p, &n->input_ports, link) {
 			spa_list_for_each(l, &p->links, input_link) {
@@ -961,7 +954,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
 					continue;
 
 				if (!l->passive)
-					driver->passive = n->passive = false;
+					node->passive = n->passive = false;
 
 				if (!t->visited) {
 					t->visited = true;
@@ -982,7 +975,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
 					continue;
 
 				if (!l->passive)
-					driver->passive = n->passive = false;
+					node->passive = n->passive = false;
 
 				if (!t->visited) {
 					t->visited = true;
@@ -1006,6 +999,27 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node)
 		}
 	}
 	return 0;
+}
+
+static void move_to_driver(struct pw_context *context, struct spa_list *nodes,
+		struct pw_impl_node *driver)
+{
+	struct pw_impl_node *n;
+	pw_log_debug("driver: %p %s", driver, driver->name);
+	spa_list_consume(n, nodes, sort_link) {
+		spa_list_remove(&n->sort_link);
+		pw_log_debug(" follower: %p %s", n, n->name);
+		pw_impl_node_set_driver(n, driver);
+	}
+}
+static void remove_from_driver(struct pw_context *context, struct spa_list *nodes)
+{
+	struct pw_impl_node *n;
+	spa_list_consume(n, nodes, sort_link) {
+		spa_list_remove(&n->sort_link);
+		pw_impl_node_set_driver(n, NULL);
+		ensure_state(n, false);
+	}
 }
 
 static inline void get_quantums(struct pw_context *context, uint32_t *def,
@@ -1084,6 +1098,24 @@ static bool rates_contains(uint32_t *rates, uint32_t n_rates, uint32_t rate)
 	return false;
 }
 
+/* here we evaluate the complete state of the graph.
+ *
+ * It roughly operates in 3 stages:
+ *
+ * 1. go over all drivers and collect the nodes that need to be scheduled with the
+ *    driver. This include all nodes that have an active link with the driver or
+ *    with a node already scheduled with the driver.
+ *
+ * 2. go over all nodes that are not assigned to a driver. The ones that require
+ *    a driver are moved to some random active driver found in step 1.
+ *
+ * 3. go over all drivers again, collect the quantum/rate of all followers, select
+ *    the desired final value and activate the followers and then the driver.
+ *
+ * A complete graph evaluation is performed for each change that is made to the
+ * graph, such as making/destroting links, adding/removing nodes, property changes such
+ * as quantum/rate changes or metadata changes.
+ */
 int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 {
 	struct impl *impl = SPA_CONTAINER_OF(context, struct impl, this);
@@ -1092,6 +1124,7 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 	uint32_t max_quantum, min_quantum, def_quantum, lim_quantum, rate_quantum;
 	uint32_t *rates, n_rates, def_rate;
 	bool freewheel = false, global_force_rate, force_rate, force_quantum, global_force_quantum;
+	struct spa_list collect;
 
 	pw_log_info("%p: busy:%d reason:%s", context, impl->recalc, reason);
 
@@ -1119,9 +1152,11 @@ again:
 		if (n->exported)
 			continue;
 
-		if (!n->visited)
-			collect_nodes(context, n);
-
+		if (!n->visited) {
+			spa_list_init(&collect);
+			collect_nodes(context, n, &collect);
+			move_to_driver(context, &collect, n);
+		}
 		/* from now on we are only interested in active driving nodes.
 		 * We're going to see if there are active followers. */
 		if (!n->driving || !n->active)
@@ -1158,30 +1193,41 @@ again:
 
 	/* now go through all available nodes. The ones we didn't visit
 	 * in collect_nodes() are not linked to any driver. We assign them
-	 * to either an active driver of the first driver */
+	 * to either an active driver or the first driver if they are in a
+	 * group that needs a driver. Else we remove them from a driver
+	 * and stop them. */
 	spa_list_for_each(n, &context->node_list, link) {
-		if (n->exported)
+		struct pw_impl_node *t, *driver;
+
+		if (n->exported || n->visited)
 			continue;
 
-		if (!n->visited) {
-			struct pw_impl_node *t;
+		pw_log_debug("%p: unassigned node %p: '%s' active:%d want_driver:%d target:%p",
+				context, n, n->name, n->active, n->want_driver, target);
 
-			pw_log_debug("%p: unassigned node %p: '%s' active:%d want_driver:%d target:%p",
-					context, n, n->name, n->active, n->want_driver, target);
+		/* collect all nodes in this group */
+		spa_list_init(&collect);
+		collect_nodes(context, n, &collect);
 
-			t = n->want_driver ? target : NULL;
-
-			pw_impl_node_set_driver(n, t);
-			if (t == NULL)
-				ensure_state(n, false);
-			else {
-				if (n->always_process)
-					t->passive = false;
-				collect_nodes(context, n);
-			}
+		driver = NULL;
+		spa_list_for_each(t, &collect, sort_link) {
+			/* is any active and want a driver or it want process */
+			if ((t->want_driver && t->active && !n->passive) ||
+			    t->always_process)
+				driver = target;
 		}
-		n->visited = false;
+		if (driver != NULL) {
+			/* driver needed for this group */
+			driver->passive = false;
+			move_to_driver(context, &collect, driver);
+		} else {
+			/* no driver, make sure the nodes stops */
+			remove_from_driver(context, &collect);
+		}
 	}
+	/* clean up the visited flag now */
+	spa_list_for_each(n, &context->node_list, link)
+		n->visited = false;
 
 	/* assign final quantum and set state for followers and drivers */
 	spa_list_for_each(n, &context->driver_list, driver_link) {
@@ -1198,7 +1244,11 @@ again:
 		/* collect quantum and rate */
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 
-			if (s->info.state > PW_NODE_STATE_SUSPENDED) {
+			if (!s->moved) {
+				/* We only try to enforce the lock flags for nodes that
+				 * are not recently moved between drivers. The nodes that
+				 * are moved should try to enforce their quantum on the
+				 * new driver. */
 				lock_quantum |= s->lock_quantum;
 				lock_rate |= s->lock_rate;
 			}
@@ -1236,6 +1286,8 @@ again:
 
 			if (s->active)
 				running = !n->passive;
+
+			s->moved = false;
 		}
 
 		if (force_quantum)
@@ -1247,9 +1299,14 @@ again:
 		if (lock_rate ||
 		    (!force_rate &&
 		    (n->info.state > PW_NODE_STATE_IDLE)))
+			/* when someone wants us to lock the rate of this driver or
+			 * when the driver is busy and we don't need to force a rate,
+			 * keep the current rate */
 			target_rate = current_rate;
 		else {
-			/* calculate desired rate */
+			/* Here we are allowed to change the rate of the driver.
+			 * Start with the default rate. If the desired rate is
+			 * allowed, switch to it */
 			target_rate = def_rate;
 			if (rate.denom != 0 && rate.num == 1) {
 				if (rates_contains(rates, n_rates, rate.denom))
@@ -1258,6 +1315,7 @@ again:
 		}
 
 		if (target_rate != current_rate) {
+			/* we doing a rate switch */
 			pw_log_info("(%s-%u) state:%s new rate:%u->%u",
 					n->name, n->info.id,
 					pw_node_state_as_string(n->info.state),
@@ -1271,6 +1329,8 @@ again:
 				if (n->info.state >= PW_NODE_STATE_IDLE)
 					suspend_driver(context, n);
 			}
+			/* we're setting the pending rate. This will become the new
+			 * current rate in the next iteration of the graph. */
 			n->current_rate = SPA_FRACTION(1, target_rate);
 			n->current_pending = true;
 			current_rate = target_rate;
@@ -1279,6 +1339,7 @@ again:
 		}
 
 		if (rate_quantum != 0 && current_rate != rate_quantum) {
+			/* the quantum values are scaled with the current rate */
 			def_quantum = def_quantum * current_rate / rate_quantum;
 			min_quantum = min_quantum * current_rate / rate_quantum;
 			max_quantum = max_quantum * current_rate / rate_quantum;
@@ -1305,11 +1366,16 @@ again:
 					n->name, n->info.id,
 					n->current_quantum,
 					quantum);
+			/* this is the new pending quantum */
 			n->current_quantum = quantum;
 			n->current_pending = true;
 		}
 
 		if (n->info.state < PW_NODE_STATE_RUNNING && n->current_pending) {
+			/* the driver node is not actually running and we have a
+			 * panding change. Apply the change to the position now so
+			 * that we have the right values when we change the node
+			 * states of the driver and followers to RUNNING below */
 			n->rt.position->clock.duration = n->current_quantum;
 			n->rt.position->clock.rate = n->current_rate;
 			n->current_pending = false;
@@ -1318,6 +1384,7 @@ again:
 		pw_log_debug("%p: driving %p running:%d passive:%d quantum:%u '%s'",
 				context, n, running, n->passive, quantum, n->name);
 
+		/* first change the node states of the followers to the new target */
 		spa_list_for_each(s, &n->follower_list, follower_link) {
 			if (s == n)
 				continue;
@@ -1325,6 +1392,7 @@ again:
 					context, s, s->active, s->name);
 			ensure_state(s, running);
 		}
+		/* now that all the followers are ready, start the driver */
 		ensure_state(n, running);
 	}
 	impl->recalc = false;

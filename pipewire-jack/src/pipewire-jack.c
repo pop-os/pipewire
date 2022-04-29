@@ -380,6 +380,7 @@ struct client {
 
 	pthread_mutex_t rt_lock;
 	unsigned int rt_locked:1;
+	unsigned int data_locked:1;
 
 	unsigned int started:1;
 	unsigned int active:1;
@@ -872,13 +873,18 @@ static int do_sync(struct client *client)
 	client->pending_sync = pw_proxy_sync((struct pw_proxy*)client->core, client->pending_sync);
 
 	while (true) {
-		if (in_data_thread && client->rt_locked)
-			pthread_mutex_unlock(&client->rt_lock);
-
+		if (in_data_thread) {
+			if (client->rt_locked)
+				pthread_mutex_unlock(&client->rt_lock);
+			client->data_locked = true;
+		}
 	        pw_thread_loop_wait(client->context.loop);
 
-		if (in_data_thread && client->rt_locked)
-			pthread_mutex_lock(&client->rt_lock);
+		if (in_data_thread) {
+			client->data_locked = false;
+			if (client->rt_locked)
+				pthread_mutex_lock(&client->rt_lock);
+		}
 
 		if (client->last_res < 0)
 			return client->last_res;
@@ -927,23 +933,21 @@ static struct link *find_activation(struct spa_list *links, uint32_t node_id)
 	return NULL;
 }
 
+static void client_remove_source(struct client *c)
+{
+	if (c->socket_source) {
+		pw_loop_destroy_source(c->loop->loop, c->socket_source);
+		c->socket_source = NULL;
+	}
+}
+
 static int
 do_remove_sources(struct spa_loop *loop,
                   bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct client *c = user_data;
-
-	if (c->socket_source) {
-		pw_loop_destroy_source(c->loop->loop, c->socket_source);
-		c->socket_source = NULL;
-	}
+	client_remove_source(c);
 	return 0;
-}
-
-static void unhandle_socket(struct client *c)
-{
-	pw_data_loop_invoke(c->loop,
-			do_remove_sources, 1, NULL, 0, true, c);
 }
 
 static inline void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
@@ -1278,8 +1282,11 @@ static inline int check_buffer_frames(struct client *c, struct spa_io_position *
 	if (SPA_UNLIKELY(buffer_frames != c->buffer_frames)) {
 		pw_log_info("%p: bufferframes old:%d new:%d cb:%p", c,
 				c->buffer_frames, buffer_frames, c->bufsize_callback);
-		pw_loop_invoke(c->context.l, do_buffer_frames, 0,
-				&buffer_frames, sizeof(buffer_frames), false, c);
+		if (c->buffer_frames != (uint32_t)-1)
+			pw_loop_invoke(c->context.l, do_buffer_frames, 0,
+					&buffer_frames, sizeof(buffer_frames), false, c);
+		else
+			c->buffer_frames = buffer_frames;
 	}
 	return c->buffer_frames == buffer_frames;
 }
@@ -1460,7 +1467,7 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 
 	if (SPA_UNLIKELY(mask & (SPA_IO_ERR | SPA_IO_HUP))) {
 		pw_log_warn("%p: got error", c);
-		unhandle_socket(c);
+		client_remove_source(c);
 		return;
 	}
 	if (SPA_UNLIKELY(c->thread_callback)) {
@@ -1493,7 +1500,7 @@ do_clear_link(struct spa_loop *loop,
 static void clear_link(struct client *c, struct link *link)
 {
 	pw_data_loop_invoke(c->loop,
-			do_clear_link, 1, NULL, 0, true, link);
+			do_clear_link, 1, NULL, 0, !c->data_locked, link);
 	pw_memmap_free(link->mem);
 	close(link->signalfd);
 	spa_list_remove(&link->link);
@@ -1507,7 +1514,8 @@ static void clean_transport(struct client *c)
 	if (!c->has_transport)
 		return;
 
-	unhandle_socket(c);
+	pw_data_loop_invoke(c->loop,
+			do_remove_sources, 1, NULL, 0, !c->data_locked, c);
 
 	spa_list_consume(l, &c->links, link)
 		clear_link(c, l);
@@ -1515,11 +1523,11 @@ static void clean_transport(struct client *c)
 	c->has_transport = false;
 }
 
-static int client_node_transport(void *object,
+static int client_node_transport(void *data,
                            int readfd, int writefd,
 			   uint32_t mem_id, uint32_t offset, uint32_t size)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 
 	clean_transport(c);
 
@@ -1547,11 +1555,11 @@ static int client_node_transport(void *object,
 	return 0;
 }
 
-static int client_node_set_param(void *object,
+static int client_node_set_param(void *data,
 			uint32_t id, uint32_t flags,
 			const struct spa_pod *param)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	pw_proxy_error((struct pw_proxy*)c->node, -ENOTSUP, "not supported");
 	return -ENOTSUP;
 }
@@ -1633,19 +1641,19 @@ static int update_driver_activation(struct client *c)
 	link = find_activation(&c->links, c->driver_id);
 	c->driver_activation = link ? link->activation : NULL;
 	pw_data_loop_invoke(c->loop,
-                       do_update_driver_activation, SPA_ID_INVALID, NULL, 0, true, c);
+                       do_update_driver_activation, SPA_ID_INVALID, NULL, 0, false, c);
 	install_timeowner(c);
 
 	return 0;
 }
 
-static int client_node_set_io(void *object,
+static int client_node_set_io(void *data,
 			uint32_t id,
 			uint32_t mem_id,
 			uint32_t offset,
 			uint32_t size)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct pw_memmap *old, *mm;
 	void *ptr;
 	uint32_t tag[5] = { c->node_id, id, };
@@ -1680,14 +1688,14 @@ static int client_node_set_io(void *object,
 	return 0;
 }
 
-static int client_node_event(void *object, const struct spa_event *event)
+static int client_node_event(void *data, const struct spa_event *event)
 {
 	return -ENOTSUP;
 }
 
-static int client_node_command(void *object, const struct spa_command *command)
+static int client_node_command(void *data, const struct spa_command *command)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 
 	pw_log_debug("%p: got command %d", c, SPA_COMMAND_TYPE(command));
 
@@ -1720,20 +1728,20 @@ static int client_node_command(void *object, const struct spa_command *command)
 	return 0;
 }
 
-static int client_node_add_port(void *object,
+static int client_node_add_port(void *data,
                           enum spa_direction direction,
                           uint32_t port_id, const struct spa_dict *props)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	pw_proxy_error((struct pw_proxy*)c->node, -ENOTSUP, "add port not supported");
 	return -ENOTSUP;
 }
 
-static int client_node_remove_port(void *object,
+static int client_node_remove_port(void *data,
                              enum spa_direction direction,
                              uint32_t port_id)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	pw_proxy_error((struct pw_proxy*)c->node, -ENOTSUP, "remove port not supported");
 	return -ENOTSUP;
 }
@@ -2071,13 +2079,13 @@ static int port_set_latency(struct client *c, struct port *p,
 }
 
 /* called from thread-loop */
-static int client_node_port_set_param(void *object,
+static int client_node_port_set_param(void *data,
                                 enum spa_direction direction,
                                 uint32_t port_id,
                                 uint32_t id, uint32_t flags,
                                 const struct spa_pod *param)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct port *p = GET_PORT(c, direction, port_id);
 
 	if (p == NULL || !p->valid)
@@ -2121,7 +2129,7 @@ static inline void *init_buffer(struct port *p)
 	return data;
 }
 
-static int client_node_port_use_buffers(void *object,
+static int client_node_port_use_buffers(void *data,
                                   enum spa_direction direction,
                                   uint32_t port_id,
                                   uint32_t mix_id,
@@ -2129,7 +2137,7 @@ static int client_node_port_use_buffers(void *object,
                                   uint32_t n_buffers,
                                   struct pw_client_node_buffer *buffers)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct port *p = GET_PORT(c, direction, port_id);
 	struct buffer *b;
 	uint32_t i, j, fl;
@@ -2268,7 +2276,7 @@ static int client_node_port_use_buffers(void *object,
 	return res;
 }
 
-static int client_node_port_set_io(void *object,
+static int client_node_port_set_io(void *data,
                              enum spa_direction direction,
                              uint32_t port_id,
                              uint32_t mix_id,
@@ -2277,7 +2285,7 @@ static int client_node_port_set_io(void *object,
                              uint32_t offset,
                              uint32_t size)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct port *p = GET_PORT(c, direction, port_id);
         struct pw_memmap *mm, *old;
         struct mix *mix;
@@ -2340,14 +2348,14 @@ do_activate_link(struct spa_loop *loop,
 	return 0;
 }
 
-static int client_node_set_activation(void *object,
+static int client_node_set_activation(void *data,
                              uint32_t node_id,
                              int signalfd,
                              uint32_t mem_id,
                              uint32_t offset,
                              uint32_t size)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct pw_memmap *mm;
 	struct link *link;
 	void *ptr;
@@ -2412,14 +2420,14 @@ static int client_node_set_activation(void *object,
 	return res;
 }
 
-static int client_node_port_set_mix_info(void *object,
+static int client_node_port_set_mix_info(void *data,
                                   enum spa_direction direction,
                                   uint32_t port_id,
                                   uint32_t mix_id,
                                   uint32_t peer_id,
                                   const struct spa_dict *props)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct port *p = GET_PORT(c, direction, port_id);
 	struct mix *mix;
 	struct object *l;
@@ -2497,33 +2505,29 @@ do {									\
 	}								\
 } while(false);
 
-static struct spa_thread *impl_create(void *data,
+static struct spa_thread *impl_create(void *object,
 			const struct spa_dict *props,
 			void *(*start)(void*), void *arg)
 {
-	struct client *c = (struct client *) data;
+	struct client *c = (struct client *) object;
 	struct spa_thread *thr;
 	int res = 0;
 
 	pw_log_info("create thread");
 	if (globals.creator != NULL) {
 		pthread_t pt;
-		pthread_attr_t attributes;
+		pthread_attr_t *attr = NULL, attributes;
 
-		pthread_attr_init(&attributes);
-		CHECK(pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_JOINABLE), error);
-		CHECK(pthread_attr_setscope(&attributes, PTHREAD_SCOPE_SYSTEM), error);
-		CHECK(pthread_attr_setinheritsched(&attributes, PTHREAD_EXPLICIT_SCHED), error);
-		CHECK(pthread_attr_setstacksize(&attributes, THREAD_STACK), error);
+		attr = pw_thread_fill_attr(props, &attributes);
 
-		res = -globals.creator(&pt, &attributes, start, arg);
-
-		pthread_attr_destroy(&attributes);
+		res = -globals.creator(&pt, attr, start, arg);
+		if (attr)
+			pthread_attr_destroy(attr);
 		if (res != 0)
 			goto error;
 		thr = (struct spa_thread*)pt;
 	} else {
-		thr = spa_thread_utils_create(c->context.old_thread_utils, NULL, start, arg);
+		thr = spa_thread_utils_create(c->context.old_thread_utils, props, start, arg);
 	}
 	return thr;
 error:
@@ -2533,17 +2537,17 @@ error:
 
 }
 
-static int impl_join(void *data,
+static int impl_join(void *object,
 		struct spa_thread *thread, void **retval)
 {
-	struct client *c = (struct client *) data;
+	struct client *c = (struct client *) object;
 	pw_log_info("join thread");
 	return spa_thread_utils_join(c->context.old_thread_utils, thread, retval);
 }
 
-static int impl_acquire_rt(void *data, struct spa_thread *thread, int priority)
+static int impl_acquire_rt(void *object, struct spa_thread *thread, int priority)
 {
-	struct client *c = (struct client *) data;
+	struct client *c = (struct client *) object;
 	return spa_thread_utils_acquire_rt(c->context.old_thread_utils, thread, priority);
 }
 
@@ -2617,10 +2621,10 @@ static int json_object_find(const char *obj, const char *key, char *value, size_
 	return -ENOENT;
 }
 
-static int metadata_property(void *object, uint32_t id,
+static int metadata_property(void *data, uint32_t id,
 		const char *key, const char *type, const char *value)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct object *o;
 	jack_uuid_t uuid;
 
@@ -2712,11 +2716,11 @@ static const struct pw_proxy_events proxy_events = {
 	.destroy = proxy_destroy,
 };
 
-static void port_param(void *object, int seq,
+static void port_param(void *data, int seq,
 			uint32_t id, uint32_t index, uint32_t next,
 			const struct spa_pod *param)
 {
-	struct object *o = object;
+	struct object *o = data;
 
 	switch (id) {
 	case SPA_PARAM_Latency:
@@ -3073,9 +3077,9 @@ static void registry_event_global(void *data, uint32_t id,
 	return;
 }
 
-static void registry_event_global_remove(void *object, uint32_t id)
+static void registry_event_global_remove(void *data, uint32_t id)
 {
-	struct client *c = (struct client *) object;
+	struct client *c = (struct client *) data;
 	struct object *o;
 	bool graph_changed = false;
 
@@ -3232,9 +3236,6 @@ jack_client_t * jack_client_open (const char *client_name,
 	pw_context_conf_update_props(client->context.context,
 			"jack.properties", client->props);
 
-        if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
-		pw_properties_update_string(client->props, str, strlen(str));
-
 	pw_context_conf_section_match_rules(client->context.context, "jack.rules",
 			&client->props->dict, execute_match, client);
 
@@ -3325,10 +3326,8 @@ jack_client_t * jack_client_open (const char *client_name,
 			&client->registry_listener,
 			&registry_events, client);
 
-	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
-		pw_properties_set(client->props, PW_KEY_NODE_LATENCY, str);
-	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
-		pw_properties_set(client->props, PW_KEY_NODE_RATE, str);
+	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		pw_properties_update_string(client->props, str, strlen(str));
 	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
@@ -3340,6 +3339,11 @@ jack_client_t * jack_client_open (const char *client_name,
 			pw_log_warn("invalid PIPEWIRE_QUANTUM: %s", str);
 		}
 	}
+	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(client->props, PW_KEY_NODE_RATE, str);
+
 	if ((str = pw_properties_get(client->props, PW_KEY_NODE_LATENCY)) != NULL) {
 		uint32_t num, denom;
 		if (sscanf(str, "%u/%u", &num, &denom) == 2 && denom != 0) {

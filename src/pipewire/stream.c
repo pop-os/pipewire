@@ -1306,9 +1306,9 @@ static int node_event_param(void *object, int seq,
 	return 0;
 }
 
-static void node_event_info(void *object, const struct pw_node_info *info)
+static void node_event_info(void *data, const struct pw_node_info *info)
 {
-	struct pw_stream *stream = object;
+	struct pw_stream *stream = data;
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	uint32_t i;
 
@@ -1336,9 +1336,9 @@ static const struct pw_impl_node_events node_events = {
 	.info_changed = node_event_info,
 };
 
-static void on_core_error(void *object, uint32_t id, int seq, int res, const char *message)
+static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
-	struct pw_stream *stream = object;
+	struct pw_stream *stream = data;
 
 	pw_log_debug("%p: error id:%u seq:%d res:%d (%s): %s", stream,
 			id, seq, res, spa_strerror(res), message);
@@ -1370,6 +1370,22 @@ static const struct pw_context_driver_events context_events = {
 	.drained = context_drained,
 };
 
+struct match {
+	struct pw_stream *stream;
+	int count;
+};
+#define MATCH_INIT(s) (struct match){ .stream = s }
+
+static int execute_match(void *data, const char *location, const char *action,
+		const char *val, size_t len)
+{
+	struct match *match = data;
+	struct pw_stream *this = match->stream;
+	if (spa_streq(action, "update-props"))
+		match->count += pw_properties_update_string(this->properties, val, len);
+	return 1;
+}
+
 static struct stream *
 stream_new(struct pw_context *context, const char *name,
 		struct pw_properties *props, const struct pw_properties *extra)
@@ -1377,6 +1393,7 @@ stream_new(struct pw_context *context, const char *name,
 	struct stream *impl;
 	struct pw_stream *this;
 	const char *str;
+	struct match match;
 	int res;
 
 	impl = calloc(1, sizeof(struct stream));
@@ -1402,23 +1419,17 @@ stream_new(struct pw_context *context, const char *name,
 		res = -errno;
 		goto error_properties;
 	}
+	spa_hook_list_init(&impl->hooks);
+	this->properties = props;
+
 	pw_context_conf_update_props(context, "stream.properties", props);
 
-	if (pw_properties_get(props, PW_KEY_STREAM_IS_LIVE) == NULL)
-		pw_properties_set(props, PW_KEY_STREAM_IS_LIVE, "true");
+	match = MATCH_INIT(this);
+	pw_context_conf_section_match_rules(context, "stream.rules",
+			&this->properties->dict, execute_match, &match);
 
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
-		str = pw_properties_get(extra, PW_KEY_APP_NAME);
-		if (str == NULL)
-			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
-		if (str == NULL)
-			str = name;
-		pw_properties_set(props, PW_KEY_NODE_NAME, str);
-	}
-	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
-	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_RATE, str);
+	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		pw_properties_update_string(props, str, strlen(str));
 	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
@@ -1428,9 +1439,21 @@ stream_new(struct pw_context *context, const char *name,
 					"%u/%u", q.num, q.denom);
 		}
 	}
+	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_RATE, str);
 
-	spa_hook_list_init(&impl->hooks);
-	this->properties = props;
+	if (pw_properties_get(props, PW_KEY_STREAM_IS_LIVE) == NULL)
+		pw_properties_set(props, PW_KEY_STREAM_IS_LIVE, "true");
+	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
+		str = pw_properties_get(extra, PW_KEY_APP_NAME);
+		if (str == NULL)
+			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
+		if (str == NULL)
+			str = name;
+		pw_properties_set(props, PW_KEY_NODE_NAME, str);
+	}
 
 	this->name = name ? strdup(name) : NULL;
 	this->node_id = SPA_ID_INVALID;
@@ -1640,14 +1663,21 @@ int pw_stream_update_properties(struct pw_stream *stream, const struct spa_dict 
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int changed, res = 0;
+	struct match match;
 
 	changed = pw_properties_update(stream->properties, dict);
-
 	if (!changed)
 		return 0;
 
+	match = MATCH_INIT(stream);
+	pw_context_conf_section_match_rules(impl->context, "stream.rules",
+			&stream->properties->dict, execute_match, &match);
+
 	if (impl->node)
-		res = pw_impl_node_update_properties(impl->node, dict);
+		res = pw_impl_node_update_properties(impl->node,
+				match.count == 0 ?
+					dict :
+					&stream->properties->dict);
 
 	return res;
 }
@@ -1834,6 +1864,9 @@ pw_stream_connect(struct pw_stream *stream,
 	}
 	if (flags & PW_STREAM_FLAG_DRIVER)
 		pw_properties_set(stream->properties, PW_KEY_NODE_DRIVER, "true");
+	if ((pw_properties_get(stream->properties, PW_KEY_NODE_WANT_DRIVER) == NULL))
+		pw_properties_set(stream->properties, PW_KEY_NODE_WANT_DRIVER, "true");
+
 	if (flags & PW_STREAM_FLAG_EXCLUSIVE)
 		pw_properties_set(stream->properties, PW_KEY_NODE_EXCLUSIVE, "true");
 	if (flags & PW_STREAM_FLAG_DONT_RECONNECT)
@@ -1852,6 +1885,7 @@ pw_stream_connect(struct pw_stream *stream,
 				direction == PW_DIRECTION_INPUT ? "Input" : "Output",
 				media_type ? media_type : get_media_class(impl));
 	}
+
 	if ((str = pw_properties_get(stream->properties, PW_KEY_FORMAT_DSP)) != NULL)
 		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, str);
 	else if (impl->media_type == SPA_MEDIA_TYPE_application &&
