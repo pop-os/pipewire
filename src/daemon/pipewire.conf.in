@@ -27,10 +27,10 @@ context.properties = {
 
     ## Properties for the DSP configuration.
     #default.clock.rate          = 48000
-    #default.clock.allowed-rates = [ 48000 ]
-    #default.clock.quantum       = 1024
-    default.clock.min-quantum   = 16
-    #default.clock.max-quantum   = 2048
+    default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 352800 384000 ]
+    default.clock.min-quantum   = 32
+    default.clock.quantum       = 1024
+    default.clock.max-quantum   = 8192
     #default.clock.quantum-limit = 8192
     #default.video.width         = 640
     #default.video.height        = 480
@@ -43,6 +43,7 @@ context.properties = {
     # These overrides are only applied when running in a vm.
     vm.overrides = {
         default.clock.min-quantum = 1024
+        default.clock.quantum = 2048
     }
 }
 
