@@ -1,0 +1,24 @@
+Index: pipewire/pipewire-alsa/conf/99-pipewire-default.conf
+===================================================================
+--- pipewire.orig/pipewire-alsa/conf/99-pipewire-default.conf
++++ pipewire/pipewire-alsa/conf/99-pipewire-default.conf
+@@ -1,13 +1,12 @@
++# Default to `type pulse` to fix audio lag from `type pipewire`
+ pcm.!default {
+-    type pipewire
+-    playback_node "-1"
+-    capture_node  "-1"
++    type pulse
+     hint {
+         show on
+-        description "Default ALSA Output (currently PipeWire Media Server)"
++        description "Default ALSA Output (currently PulseAudio Sound Server)"
+     }
+ }
+ 
+ ctl.!default {
+-    type pipewire
+-}
++    type pulse
++}
+\ No newline at end of file
