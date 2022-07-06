@@ -3,3 +3,4 @@ Don-t-build_same_binary_twice.patch
 alsa-type-pulse.patch
 discord.patch
 pop-defaults.patch
+bt-input.patch
