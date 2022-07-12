@@ -1,0 +1,907 @@
+pipewire (0.3.61) jammy; urgency=medium
+
+  * New upstream release
+
+ -- Michael Murphy <michael@mmurphy.dev>  Wed, 30 Nov 2022 16:05:02 +0100
+
+pipewire (0.3.60-1) unstable; urgency=medium
+
+  * New upstream release
+      - Improve support of RealTek ALC4080 (Closes: #1021179)
+  * Cherry-pick upstream recommended patch:
+      - b720da77: pulse-server: also advance read pointer in underrun
+  * Add libopus-dev in Build-Deps
+  * Add liblc3-dev in Build-Deps
+  * Be sure the build option for bluez5 aptx codec is enabled
+  * pipewire-pulse: add pulseaudio-utils in Recommends instead
+      of Suggests (LP: #1993358)
+  * pipewire-alsa: install conf files in the right location
+      (Closes: #1023504, LP: #1975823)
+  * pipewire-alsa: conflict with pulseaudio. (Closes: #1013276)
+      As long as the pulseaudio package is installed, ALSA clients will output
+      via PulseAudio instead of PipeWire. This is due to the order of their
+      respective configs files in /etc/alsa/conf.d/.
+  * pipewire: depend on adduser (Closes: #1023758)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 11 Nov 2022 14:55:34 +0100
+
+pipewire (0.3.59-1) unstable; urgency=medium
+
+  * New upstream release
+  * Remove conflict between pipewire-pulse and pulseaudio to allow users
+    to switch from one to the other just by disabling/enabling services.
+      (Closes: #1020330, #1020903)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 30 Sep 2022 15:04:20 +0200
+
+pipewire (0.3.58-2) unstable; urgency=medium
+
+  * Mention to install pipewire-alsa and pipewire-jack
+      in README.Debian (Closes: #1019971)
+  * Add debian/pipewire-alsa.TODO
+  * Patch pipewire-pulse.service to be sure it is started
+      after a session manager (Closes: #1019944)
+    Because of a bug in the way systemd handles aliases, they have been removed
+    in wireplumber and pipewire-media-session services to avoid a conflict.
+    This change needs to be reflected in the pipewire-pulse service to be sure
+    it is started after a session manager, otherwise pipewire-pulse doesn't
+    see any devices.
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 23 Sep 2022 11:01:16 +0200
+
+pipewire (0.3.58-1) unstable; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+      - Fix crackling sound if pavucontrol is open (Closes: #1019888)
+  * Create a pipewire group and define real-time priority limits
+      (Closes: #1011399)
+  * Add suggestion to install wireplumber in pipewire.README.Debian
+  * Clarify relation between pipewire and libspa-0.2-bluetooth in
+      pipewire.README.Debian (Closes: #998220, #1011035)
+  * Remove reference to experimental status of pipewire for audio
+
+  [ Sebastien Bacher ]
+  * Let pipewire-pulse conflicts on pulseaudio
+      (Closes: #1013276, LP: #1975823)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 16 Sep 2022 15:41:31 +0200
+
+pipewire (0.3.57-1) unstable; urgency=medium
+
+  * New upstream release
+  * Drop patches included in upstream release:
+      - aaa015d0: avb: fix compilation on big endian
+      - 1a5ec445: avb: fix compilation on big endian
+      - f857fd46: avb: fix compilation on big endian
+  * Don't install filter-chain.service for now.
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 05 Sep 2022 09:57:50 +0200
+
+pipewire (0.3.56-1) unstable; urgency=medium
+
+  * New upstream release
+  * Drop patches included in upstream release:
+      - 40552a0e: jack: only mix when we have input to mix
+  * Cherry-pick upstream recommended patches:
+      - aaa015d0: avb: fix compilation on big endian
+      - 1a5ec445: avb: fix compilation on big endian
+      - f857fd46: avb: fix compilation on big endian
+  * Install the new avb module in libspa-0.2-modules
+  * Don't install new filter-chain example conf file
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 19 Jul 2022 22:47:35 +0200
+
+pipewire (0.3.55-2) unstable; urgency=medium
+
+  * Source only upload for migration to testing
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 18 Jul 2022 18:10:38 +0200
+
+pipewire (0.3.55-1) unstable; urgency=medium
+
+  * New upstream release
+  * Cherry-pick upstream recommended patch:
+      - 40552a0e: jack: only mix when we have input to mix
+  * Don't install new filter-chain example conf files
+  * Reintroduce pipewire-audio-client-libraries as a transitional package
+      to simplify the transition from Bullseye to Bookworm (Closes: #1014639)
+  * Mark pipewire-{alsa,jack,v4l2} as 'Multi-Arch: same' (Closes: #1014608)
+
+ -- Dylan Aïssi <daissi@debian.org>  Sun, 17 Jul 2022 10:42:21 +0200
+
+pipewire (0.3.54-2) unstable; urgency=medium
+
+  * Source only upload for migration to testing
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 08 Jul 2022 10:07:26 +0200
+
+pipewire (0.3.54-1) unstable; urgency=medium
+
+  [ Sebastien Bacher ]
+  * Split the legacy pipewire-audio-client-libraries in alsa and jack
+
+  [ Dylan Aïssi ]
+  * New upstream release
+     - Fix issue with microphone input on bluetooth headset (Closes: #1014458)
+  * pipewire-jack: remove suggests pulseaudio-utils and libspa-0.2-bluetooth
+  * Switch section from video to sound for pipewire-pulse, pipewire-alsa
+      and pipewire-jack
+  * Improve description of pipewire-alsa and pipewire-jack
+  * Move the V4L2 plugin into its own package
+  * Update copyright file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 07 Jul 2022 17:11:37 +0200
+
+pipewire (0.3.53-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Jul 2022 14:08:59 +0200
+
+pipewire (0.3.52-1) unstable; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+  * libpipewire-0.3-0: Demote pipewire from Recommends to Suggests
+      (Closes: #1011130)
+  * pipewire-pulse: Suggests for libspa-0.2-bluetooth
+  * Bump libxfixes-dev version requirement to 6.0.0
+  * Disable LC3plus codec
+  * Update symbols file
+  * Add myself in Uploaders
+  * Standards-Version: 4.6.1 (no changes needed)
+
+  [ Debian Janitor ]
+  * Avoid explicitly specifying -Wl,--as-needed linker flag.
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Jun 2022 22:17:03 +0200
+
+pipewire (0.3.51-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Drop patches included in upstream release:
+     - fix_argument_type_for_Long.patch
+     - fix_c90_header_include.patch
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 02 May 2022 16:01:05 +0200
+
+pipewire (0.3.50-2) unstable; urgency=medium
+
+  [ Markus Teich ]
+  * Remove obsolete xdg autostart conffile.
+
+  [ Dylan Aïssi ]
+  * Add upstream patches:
+    - fix argument type (Closes: #1008907)
+    - fix C90 header include (Closes: #1010151)
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 26 Apr 2022 22:06:23 +0200
+
+pipewire (0.3.50-1) unstable; urgency=medium
+
+  * Team upload.
+
+  [ Dylan Aïssi ]
+  * New upstream release
+  * Install a new manpage for pw-link
+  * Update symbols file
+
+  [ Debian Janitor ]
+  * Remove constraints unnecessary since buster
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 14 Apr 2022 10:11:53 +0200
+
+pipewire (0.3.49-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Install a new manpage for pw-top
+  * Add libxfixes-dev to Build-Depends
+  * pipewire-pulse: add pulseaudio-utils in Suggests (Closes: #1007949)
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 30 Mar 2022 12:06:06 +0200
+
+pipewire (0.3.48-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Mar 2022 15:43:37 +0100
+
+pipewire (0.3.47-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 18 Feb 2022 14:30:39 +0100
+
+pipewire (0.3.46-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release (Closes: #1005067)
+  * Install the new aec module in libspa-0.2-modules
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 17 Feb 2022 21:58:18 +0100
+
+pipewire (0.3.45-2) unstable; urgency=medium
+
+  * Team upload.
+  * Re-enable aptX support, add libfreeaptx-dev to BD (Closes: #1005801)
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 15 Feb 2022 11:18:05 +0100
+
+pipewire (0.3.45-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Don't install new filter-chain example conf file
+  * Update symbols file
+  * Adapt lintian overrides to the new output
+  * Standards-Version: 4.6.0 (no changes required)
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 03 Feb 2022 21:42:07 +0100
+
+pipewire (0.3.44-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Add libcanberra-dev to Build-Depends
+  * Bump minimum meson to 0.59
+  * Install new usr/share/pipewire/minimal.conf in pipewire-bin
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 27 Jan 2022 16:24:40 +0100
+
+pipewire (0.3.43-2) unstable; urgency=medium
+
+  * Team upload.
+  * Skip the new test pw-test-pipewire-alsa-stress,
+      this test runs an infinite loop.
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 11 Jan 2022 12:10:22 +0100
+
+pipewire (0.3.43-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Refresh d/p/Don-t-build_same_binary_twice.patch
+  * Bump minimum meson to 0.56
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 10 Jan 2022 10:54:04 +0100
+
+pipewire (0.3.42-1) unstable; urgency=medium
+
+  * Team upload.
+
+  [ Sebastien Bacher ]
+  * debian/rules:
+    - disable the new lv2 option on Ubuntu, lilv and its depends
+      (serd, sord, sratom) are currently in universe (Closes: #1001691)
+
+  [ Dylan Aïssi ]
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Dec 2021 10:19:36 +0100
+
+pipewire (0.3.41-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Add libssl-dev and liblilv-dev to Build-Depends
+  * Update symbols file
+  * Set Rules-Requires-Root: no
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 13 Dec 2021 12:09:33 +0100
+
+pipewire (0.3.40-2) unstable; urgency=medium
+
+  * Team upload.
+  * Change back priority order between pipewire-media-session and wireplumber.
+      Pipewire-media-session is enough for the current default usage of
+      pipewire in Debian (i.e. screen recording). Having Wireplumber with a
+      higher priority leads to install by default pipewire-pulse and consequently
+      to replace pulseaudio by pipewire as sound server. See #999363.
+      .
+      WirePlumber is still the recommended session manager for users who want
+      to use pipewire as sound server. The priority order will be changed again
+      once we will decide to use pipewire as default sound server.
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 24 Nov 2021 15:07:07 +0100
+
+pipewire (0.3.40-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Drop patches included in upstream release:
+     - fix_compilation_on_armel.patch
+     - fix_compilation_on_some_architectures.patch
+     - make_insert_at()_fail_on_a_removed_item.patch
+     - fix_type_for_big_endian.patch
+     - only_run_SSE_when_supported.patch
+  * Install a new manpage for pipewire-pulse
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Nov 2021 22:08:23 +0100
+
+pipewire (0.3.39-4) unstable; urgency=medium
+
+  * Team upload.
+  * Update d/watch to point to gitlab.freedesktop.org/pipewire
+      instead of a mirror.
+  * Add an upstream patch to only run SSE when supported
+      (Closes: #998129, #998130)
+  * Build zeroconf modules (Closes: #998218)
+    - Add libavahi-client-dev in Build-Deps
+  * Add patch to don't build same binary twice (Closes: #998126)
+      Thanks to Michael Biebl
+  * Add dbus-user-session in Recommends (Closes: #982853, #998167)
+  * Re-add pipewire-media-session as an alternative to Wireplumber,
+      it is now back in the archive as a separate source package.
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 08 Nov 2021 13:29:23 +0100
+
+pipewire (0.3.39-3) unstable; urgency=medium
+
+  * Team upload.
+  * Remove pipewire-media-session from Recommends.
+      (Closes: #995116, #996994, #997859)
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 27 Oct 2021 21:09:13 +0200
+
+pipewire (0.3.39-2) unstable; urgency=medium
+
+  * Team upload.
+  * Add upstream patches:
+      - fix pw_map_insert_at and pw_map_item
+      - fix compilation on armel
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 25 Oct 2021 17:23:25 +0200
+
+pipewire (0.3.39-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Don't build the pipewire-media-session binary package anymore,
+      media-session has moved to a separate module to accelerate its
+      deprecation in favour of WirePlumber.
+  * Change priority order between pipewire-media-session and wireplumber,
+      WirePlumber is now the recommended session manager.
+  * Install pw-v4l2 and libpw-v4l2.so in pipewire-bin and
+      libpipewire-0.3-modules, respectively.
+  * Drop d/p/fix-compilation-on-ARM.patch, included in upstream release
+  * Add an upstream patch to fix compilation on some architectures
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 21 Oct 2021 17:14:22 +0200
+
+pipewire (0.3.38-2) unstable; urgency=medium
+
+  * Team upload.
+  * Add an upstream patch to fix compilation on ARM
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 11:44:51 +0200
+
+pipewire (0.3.38-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Drop d/p/fix-msbc-with-linux-5.14.patch, included in upstream release
+  * Add libreadline-dev to Build-Depends
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 01 Oct 2021 10:07:52 +0200
+
+pipewire (0.3.37-2) unstable; urgency=medium
+
+  * Team upload.
+  * Add an upstream patch to support msbc with kernel 5.14.x.
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Sep 2021 10:57:25 +0200
+
+pipewire (0.3.37-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Install pw-dsdplay in pipewire-bin
+  * Update symbols file
+  * Move bluez-hardware.conf from pipewire-media-session to libspa-0.2-bluetooth
+     because this hardware quirk database is now loaded by the plugin instead
+     of the session manager.
+     This database is now installed into /usr/share/spa-0.2/bluez5/
+     instead of /usr/share/pipewire/media-session.d/
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 23 Sep 2021 17:56:09 +0200
+
+pipewire (0.3.36-1) unstable; urgency=medium
+
+  * Team upload.
+  [ Arto Jantunen ]
+  * pipewire-bin: Recommend rtkit (Closes: #984429)
+
+  [ Dylan Aïssi ]
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Sep 2021 21:50:44 +0200
+
+pipewire (0.3.35-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Replace xmltoman by python3-docutils in BD to generate manpages
+  * Don't install new filter-chain example conf files
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Sep 2021 21:49:29 +0200
+
+pipewire (0.3.34-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Don't install sink-convolver.conf (filter-chain example configuration)
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 26 Aug 2021 20:53:42 +0200
+
+pipewire (0.3.33-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Disable aptX support for now, upstream has switched
+     from libopenaptx to libfreeaptx (not yet in Debian)
+  * Upload to unstable as Bullseye was released.
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 16 Aug 2021 11:44:56 +0200
+
+pipewire (0.3.32-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 21 Jul 2021 12:14:03 +0200
+
+pipewire (0.3.31-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Add libusb-1.0-0-dev to Build-Depends
+  * Disable roc module at least for now
+  * Install bluez-hardware.conf in pipewire-media-session
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 29 Jun 2021 12:09:29 +0200
+
+pipewire (0.3.30-1) experimental; urgency=medium
+
+  * Team upload.
+  * New upstream release
+  * Remove d/p/Let-pipewire-pulse-services-conflict-with-their-pulseaudi.patch,
+      applied upstream.
+  * Add libwebrtc-audio-processing-dev to Build-Depends
+  * Update symbols file
+  * Remove unused lintian override in pipewire-audio-client-libraries
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 16 Jun 2021 12:07:16 +0200
+
+pipewire (0.3.28-1) experimental; urgency=medium
+
+  [ Frédéric Danis ]
+  * Split pipewire-media-session from pipewire-bin package
+  * Split pipewire-pulse from pipewire-bin package
+
+  [ Sjoerd Simons ]
+  * Install user systemd units by default
+  * Update readme for seperate pipewire-pulse
+  * New upstream release
+  * Disable avahi module at least for now
+  * Don't install the filter-chain example configurations
+  * Update libpipewire-0.3-0 symbol file
+  * Remove configuration files that moved to /usr/share
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 22 May 2021 16:19:10 +0200
+
+pipewire (0.3.27-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Wed, 12 May 2021 20:37:03 +0200
+
+pipewire (0.3.26-1) experimental; urgency=medium
+
+  * New upstream release
+  * Add libpipewire-0.3-common to hold the translation files
+  * Install pw-link in pipewire-bin
+  * Update libpipewire-0.3-0 symbols
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sun, 25 Apr 2021 20:54:29 +0200
+
+pipewire (0.3.25-1) experimental; urgency=medium
+
+  * New upstream release
+  * Install pw-loopback tool in pipewire-bin
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 09 Apr 2021 21:57:09 +0200
+
+pipewire (0.3.24-3) experimental; urgency=medium
+
+  * debian/rules: Disable ldac on arches where it's not available.  This isn't
+    available on these arches. piepwire FTBFS otherwise as it tries to find
+    it.
+
+ -- Iain Lane <laney@debian.org>  Thu, 25 Mar 2021 00:01:00 +0000
+
+pipewire (0.3.24-2) experimental; urgency=medium
+
+  * Move doxygen/graphviz into Build-Depends; Fixes arch only build failures
+  * Re-add support for nodocs builds
+  * run wrap-and-sort
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 19 Mar 2021 16:57:32 +0100
+
+pipewire (0.3.24-1) experimental; urgency=medium
+
+  * New upstream release
+  * Adjust builds options to cope with pipewire switching more options to
+    features, actual options used are unchanged
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Thu, 18 Mar 2021 20:46:29 +0100
+
+pipewire (0.3.23-1) experimental; urgency=medium
+
+  * New upstream release
+  * Update symbols file
+  * debian/pipewire.install
+    - Install new pipewire-media-session.service
+  * d/d/p/bluez5-volumes-need-to-be-distributed-to-all-channels.patch
+    d/p/bluez5-set-the-right-volumes-on-the-node.patch
+    d/p/policy-node-don-t-crash-without-metadata.patch
+    - Dropped; All included in upstream release
+  * Refreshed patches
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Fri, 05 Mar 2021 20:21:46 +0100
+
+pipewire (0.3.22-2) experimental; urgency=medium
+
+  [ Daniel van Vugt ]
+  * Fix "the metadata crash" (LP: #1916716). Using upstream commit
+    3673265ae20d7b59e89cad6c5238c232796731b2 which is scheduled for inclusion
+    in release 0.3.23.
+
+ -- Iain Lane <laney@debian.org>  Thu, 04 Mar 2021 11:09:52 +0000
+
+pipewire (0.3.22-1) experimental; urgency=medium
+
+  * Team upload
+  * New upstream release
+  * d/p/bluez5-volumes-need-to-be-distributed-to-all-channels.patch
+    d/p/bluez5-set-the-right-volumes-on-the-node.patch:
+    - Fix volume control on bluetooth devices
+  * d/libpipewire-0.3-0.symbols:
+    - Add new symbols
+  * debian/pipewire-bin.install
+    - Install new confiration file (bluez, v4l and client config)
+
+ -- Sjoerd Simons <sjoerd@debian.org>  Sat, 20 Feb 2021 21:50:40 +0100
+
+pipewire (0.3.19-4) unstable; urgency=medium
+
+  * Team upload
+  * Disable GStreamer device provider.
+    Apparently it isn't ready, and breaks video recording in cheese.
+    Thanks to Fedora (see also Red Hat bug 1884260). (Closes: #982636)
+
+ -- Simon McVittie <smcv@debian.org>  Sat, 13 Feb 2021 10:49:02 +0000
+
+pipewire (0.3.19-3) unstable; urgency=medium
+
+  * Team upload
+  * Don't enable audio-related plugins by default.
+    Using pipewire for audio is considered experimental for Debian 11,
+    and in particular the with-pulseaudio flag file will result in
+    PulseAudio and Pipewire fighting over Bluetooth devices.
+    - If you're experimenting with pipewire-pulse, please see
+      /usr/share/doc/pipewire-audio-client-libraries/README.Debian
+      for details of how to re-enable these.
+  * Install brief documentation of how to experiment with Pipewire for audio.
+    There should eventually be a pipewire-pulse package that sets up the
+    PulseAudio replacement automatically, and perhaps a pipewire-jack
+    package that does the equivalent for the JACK libraries, but these
+    are rather new and don't seem to be ready for general use in Debian 11.
+
+ -- Simon McVittie <smcv@debian.org>  Fri, 29 Jan 2021 15:55:13 +0000
+
+pipewire (0.3.19-2) unstable; urgency=medium
+
+  * Team upload
+  * Depend on openaptx with #980297 fixed, instead of working around it
+  * Don't depend on libldac on big-endian architectures.
+    It currently only compiles on little-endian architectures (#980372).
+
+ -- Simon McVittie <smcv@debian.org>  Mon, 18 Jan 2021 11:58:41 +0000
+
+pipewire (0.3.19-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release (Closes: #979309)
+    - Fix cleanup of acp card objects (Closes: #979537)
+    - Provide pipewire-pulse, pipewire's replacement for the PulseAudio
+      daemon (Closes: #976654). Note that this is not enabled by default
+      for bullseye. systemd user units to start it can be found in
+      /usr/share/doc/pipewire/examples/systemd/user.
+  * Drop patch, applied upstream
+  * Remove pw-pulse from pipewire-audio-client-libraries, no longer
+    supported upstream
+  * Fix installation path for example 99-pipewire-default.conf
+  * Install example ld.so.conf.d fragments into
+    /usr/share/doc/pipewire/examples/ld.so.conf.d to replace libjack with
+    Pipewire as suggested by upstream. These can be copied into
+    /etc/ld.so.conf.d if desired. This is not done by default and is
+    considered to be experimental
+  * Add Build-Conflicts with non-free libfdk-aac-dev.
+    This makes the build more predictable by not compiling a plugin that
+    would depend on that library.
+  * d/control: Add new dependencies for Bluetooth codecs
+  * Build-depend on libncurses-dev for the new pw-top utility
+  * d/copyright: Update
+  * d/pipewire-bin.install: Install pw-dump and pw-top
+  * Don't automatically start pipewire for root logins (Closes: #979791)
+  * Standards-Version: 4.5.1 (no changes required)
+  * Update symbols file
+  * Remove unnecessary RUNPATH from bluez5 plugin (workaround for #980297)
+  * Silence library-not-linked-against-libc lintian error for JACK
+    libraries.
+    These libraries genuinely don't directly need anything from glibc.
+
+ -- Simon McVittie <smcv@debian.org>  Sun, 17 Jan 2021 13:38:28 +0000
+
+pipewire (0.3.15-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+    - Disable the pulse-bridge module by default.
+      This should only be used if completely replacing PulseAudio
+      with PipeWire, which Debian is definitely not ready to do.
+    - Disable the bluez5 module by default (previously a Debian and
+      Fedora patch). This should also only be used if completely
+      replacing PulseAudio with PipeWire.
+    - Various other bug fixes
+  * Drop patch to disable bluez5 plugin.
+    This should no longer be necessary.
+  * d/p/protocol-native-do-version-check-on-HELLO.patch:
+    Add patch (from upstream, via Fedora) to fix interop with older clients
+
+ -- Simon McVittie <smcv@debian.org>  Thu, 05 Nov 2020 18:10:32 +0000
+
+pipewire (0.3.14-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+    - Avoid colliding with PulseAudio (Closes: #970760)
+  * d/pipewire-bin.install: Install pw-reserve
+
+ -- Simon McVittie <smcv@debian.org>  Wed, 04 Nov 2020 09:48:08 +0000
+
+pipewire (0.3.12-1) unstable; urgency=medium
+
+  * Team upload
+  * New upstream release
+    - Configuration in ~/.pipewire-media-session is no longer used.
+      If you have configuration in that location, please move it into
+      $XDG_CONFIG_HOME/pipewire-media-session, defaulting to
+      $HOME/.config/pipewire-media-session if $XDG_CONFIG_HOME is not
+      set. It will not be migrated automatically.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Drop, applied upstream
+  * Move libspa-0.2-modules dependency from -modules to shared library.
+    The shared library calls into the support module, as seen in the
+    autopkgtest.
+  * Stop pipewire-audio-client-libraries depending on libpulse.
+    If we are using PipeWire's emulation of libpulse-simple.so.0, we'll
+    also be using PipeWire's emulation of libpulse.so.0, so there's no
+    point in depending on the real PulseAudio libpulse.so.0.
+  * d/rules: Sort Meson options alphabetically
+  * d/tests/gstreamer1.0-pipewire: Add a superficial test for the plugin.
+    This would reproduce #919880, if it comes back.
+
+ -- Simon McVittie <smcv@debian.org>  Sat, 19 Sep 2020 15:59:33 +0100
+
+pipewire (0.3.10-4) unstable; urgency=medium
+
+  * Team upload
+  * Release to unstable (starts transition: #966535)
+
+ -- Simon McVittie <smcv@debian.org>  Thu, 10 Sep 2020 09:12:14 +0100
+
+pipewire (0.3.10-3) experimental; urgency=medium
+
+  * Team upload
+  * d/rules: Adjust test timeouts again, based on feedback from the buildds.
+    mips* now get 10 times as long as fast architectures, and ia64
+    is added to the list of slowish architectures that get 5 times as long.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Update patch to the version that was applied upstream
+
+ -- Simon McVittie <smcv@debian.org>  Tue, 08 Sep 2020 21:06:23 +0100
+
+pipewire (0.3.10-2) experimental; urgency=medium
+
+  * Team upload
+  * Use debhelper compat level 13.
+    This runs 'meson test' rather than 'ninja test', which will make it
+    easier to expand the test timeout.
+  * Increase test timeout on slower architectures.
+    The resampling tests can be a bit slow, particularly on architectures
+    without a real FPU.
+  * d/p/Link-pipewire-jack-to-libatomic-if-required.patch:
+    Add patch to fix FTBFS on armel (and hopefully also mipsel) by
+    explicitly linking to libatomic where needed.
+
+ -- Simon McVittie <smcv@debian.org>  Sun, 06 Sep 2020 21:03:55 +0100
+
+pipewire (0.3.10-1) experimental; urgency=medium
+
+  * Team upload.
+
+  [ Laurent Bigonville ]
+  * New upstream release (Closes: #954022)
+    - 0.3.x fixes FTBFS with gcc 10 (Closes: #957685)
+    - debian/control: Adjust the build-dependencies
+    - Bump the soname of the libraries
+    - Ship the new plugins (jack and vulkan) in new packages
+    - Re-enable some plugins that were enabled before but disabled in this
+      release
+  * Drop debian/pipewire.links, with debhelper 12, dh_installsystemduser is
+    called during the build process and it's taking care of enabling the
+    systemd user service and socket (Closes: #953216)
+  * Rename libpipewire-0.2-doc to pipewire-doc as the documentation is not
+    installed in a versinized directory
+  * debian/control: Bump Standards-Version to 4.5.0 (no further changes)
+  * debian/rules: Tell dh_shlibdeps to also search for the private libraries
+  * debian/pipewire.install: Install the control audioconvert and videoconvert
+    module in the main package, they are not pulling new dependencies
+
+  [ Debian Janitor ]
+  * Set upstream metadata fields: Repository, Repository-Browse.
+  * Update standards version to 4.4.1, no changes needed.
+
+  [ Simon McVittie ]
+  * New upstream release
+  * Version the names of the plugin packages.
+    They're installed in a versioned directory, and this package is going
+    to have to go through NEW anyway if there are incompatible changes
+    to SPA (0.3 or 1.0).
+  * d/copyright: Update
+  * d/libpipewire-0.3-0.symbols: Update
+  * Move executables and modules to their own packages.
+    PipeWire clients have to load some of the SPA and PipeWire modules into
+    their own address space, so it makes sense for the pipewire package to
+    be Multi-Arch: same, with a dependency on the modules for the necessary
+    architecture. This means the parts that would collide have to be split
+    out into a -bin package, which in turn needs a dependency on the modules
+    themselves (for its architecture).
+  * Put pipewire, pipewire-bin in Section: video.
+    The focus is currently on its video role rather than on its audio role,
+    and we don't have a Section: multimedia for things that do both.
+    Either audio or video seems more appropriate than Section: net, since
+    pipewire is not network-transparent.
+  * Separate out a Multi-Arch: same pipewire-audio-client-libraries
+    package. Using PipeWire for audio is considered experimental, so we
+    probably don't want xdg-desktop-portal and gnome-shell to pull this in.
+    - Reduce libpulse-mainloop-glib's GLib dependency to a Recommends.
+      It's a hard requirement for that library, but any application that
+      would be linked to it must already have a GLib dependency.
+  * Improve various package descriptions
+  * Disable ffmpeg and vulkan plugins.
+    According to upstream developer George Kiagiadakis, these are not
+    practically useful.
+  * d/p/conf-disable-bluez5.patch: Disable BlueZ support by default.
+    PipeWire is intended to be a suitable replacement for PulseAudio
+    eventually, but at the moment only the video side is ready for production
+    use, with the audio side considered experimental.
+    For ordinary ALSA audio devices, it is harmless to have audio support
+    available in PipeWire, because both PipeWire and PulseAudio will
+    close the audio device when not in use, so they can coexist (as long
+    as you do not try to use both at the same time). However, Bluetooth
+    audio devices need to be configured even when not in active use, so
+    they would fight.
+    Patch taken from Fedora.
+    Thanks to Wim Taymans
+  * d/shlibs.local: Generate lockstep dependencies between binaries.
+    Upstream developers are never going to support mixing libraries from
+    different builds of PipeWire, and neither should we.
+  * Install automated tests and example programs into a new
+    pipewire-tests package.
+    - d/p/spa-examples-Load-plugins-from-SPA_PLUGIN_DIR-or-installe.patch,
+      d/p/Optionally-install-examples-and-tests.patch:
+      Make the tests and examples installable
+    - d/tests/gnome-desktop-testing: Run most of the tests
+  * d/tests/manual.md: Add some manual test instructions.
+    Ideally some of these would be automated into autopkgtests (we can't
+    assert that we hear a sound, but we can at least assert that aplay
+    exits successfully) but for now they are just manual tests.
+  * pipewire-tests: Override custom-library-search-path Lintian tag.
+    Some of these tests use a RUNPATH to link to libraries from
+    pipewire itself.
+  * Install symlinks to pw-cat(1) for its various aliases
+  * d/rules: Update exclusion paths for dh_makeshlibs
+  * Set upstream metadata fields: Bug-Database, Bug-Submit
+  * Rename libspa-lib-0.2-dev to libspa-0.2-dev.
+    There used to be a shared library named libspa-lib, but recent versions
+    have moved to a purely header- and plugin-based system, making the -lib
+    postfix meaningless.
+  * Break out SPA modules into libspa-0.2-modules.
+    This will make compatibility more straightforward if PipeWire and SPA
+    break API/ABI out of sync with each other.
+    Thanks to Sjoerd Simons
+  * Document more ways to test bits of PipeWire manually
+
+  [ Andreas Henriksson ]
+  * New upstream release (0.3.10)
+  * Update libpipewire-0.3-0.symbols with new additions
+  * Improve pipewire short description
+  * debian/copyright: Add module-portal.c and Red Hat
+
+ -- Andreas Henriksson <andreas@fatal.se>  Mon, 24 Aug 2020 16:03:42 +0200
+
+pipewire (0.2.7-1) unstable; urgency=medium
+
+  * New upstream release
+  * debian/libpipewire-0.2-1.symbols: Update
+  * Build-Depend on debhelper-compat 12 and drop debian/compat
+
+ -- Jeremy Bicha <jbicha@debian.org>  Fri, 01 Nov 2019 21:50:48 -0400
+
+pipewire (0.2.5-1) unstable; urgency=medium
+
+  [ Jeremy Bicha ]
+  * New upstream release
+  * Bump minimum meson to 0.47
+  * debian/libpipewire-0.2-1.symbols: Add new symbol
+  * Drop all patches: applied in new release
+  * Bump Standards-Version to 4.3.0
+
+  [ Laurent Bigonville ]
+  * debian/libpipewire-0.2-1.symbols: Add the Build-Depends-Package annotation
+  * debian/control: Set Section to net for the main pipewire package
+    (Closes: #908524)
+
+ -- Jeremy Bicha <jbicha@debian.org>  Fri, 04 Jan 2019 14:24:46 -0500
+
+pipewire (0.2.3-3) unstable; urgency=medium
+
+  * Team upload.
+  * Make libpipewire-0.2-dev depend against libspa-lib-0.1-dev (Closes:
+    #909623)
+  * Enable pipewire.socket by default (Closes: #909625)
+
+ -- Laurent Bigonville <bigon@debian.org>  Wed, 26 Sep 2018 01:40:56 +0200
+
+pipewire (0.2.3-2) unstable; urgency=medium
+
+  * Make libpipewire-0.2-dev depend against libspa-lib-0.1-dev (Closes: #909623)
+  * Enable pipewire.socket by default (Closes: #909625)
+
+ -- Laurent Bigonville <bigon@debian.org>  Wed, 26 Sep 2018 01:40:45 +0200
+
+pipewire (0.2.3-1) unstable; urgency=medium
+
+  * New upstream release
+  * Drop make-spa-lib-version.patch: Applied in new release
+  * debian/rules: Update configure options
+  * libspa-lib-0.1-1 has been dropped in this release
+  * debian/libpipewire-0.2-1.symbols: Update
+  * Cherry-pick 7 commits since last release
+
+ -- Jeremy Bicha <jbicha@debian.org>  Wed, 19 Sep 2018 19:48:19 -0400
+
+pipewire (0.2.2-1) unstable; urgency=medium
+
+  * Initial release (Closes: #874089)
+
+ -- Jeremy Bicha <jbicha@debian.org>  Mon, 13 Aug 2018 11:17:57 -0400
