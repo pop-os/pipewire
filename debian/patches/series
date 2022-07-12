@@ -1,0 +1,11 @@
+Don-t-automatically-start-pipewire-for-root-logins.patch
+Don-t-build_same_binary_twice.patch
+Fix_services.patch
+# Recommended patch for 0.3.60
+b720da771efa950cf380101bed42d5d5ee177908.patch
+
+# Pop!_OS
+
+alsa-type-pulse.patch
+discord.patch
+pop-defaults.patch
