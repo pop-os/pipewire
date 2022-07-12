@@ -1,0 +1,2 @@
+usr/lib/systemd/user/pipewire.service
+usr/lib/systemd/user/pipewire.socket

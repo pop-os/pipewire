@@ -1,0 +1,18 @@
+Index: pipewire/src/daemon/pipewire-pulse.conf.in
+===================================================================
+--- pipewire.orig/src/daemon/pipewire-pulse.conf.in
++++ pipewire/src/daemon/pipewire-pulse.conf.in
+@@ -143,4 +143,13 @@ pulse.rules = [
+             }
+         }
+     }
++    {
++        # Discord notification sounds fix
++        matches = [ { application.process.binary = "Discord" } ]
++        actions = {
++            update-props = {
++                pulse.min.quantum      = 1024/48000     # 21ms
++            }
++        }
++    }
+ ]
