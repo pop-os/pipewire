@@ -1,0 +1,40 @@
+From 249c39787684dba59c288a3ac6dcb8cb0150ec02 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Dylan=20A=C3=AFssi?= <dylan.aissi@collabora.com>
+Date: Thu, 4 Nov 2021 16:01:36 +0100
+Subject: [PATCH] meson: create a symlink for pipewire-pulse instead of
+ building binary twice
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Because meson does not have native support for symlinks.
+See https://github.com/mesonbuild/meson/issues/1602
+
+Inspired by xserver:
+https://gitlab.freedesktop.org/xorg/xserver/-/commit/a3931ec6f43857aeed7feac5d223d7db6728145e
+
+Signed-off-by: Dylan Aïssi <dylan.aissi@collabora.com>
+---
+ src/daemon/meson.build | 12 +++++-------
+ 1 file changed, 5 insertions(+), 7 deletions(-)
+
+--- a/src/daemon/meson.build
++++ b/src/daemon/meson.build
+@@ -90,12 +90,11 @@
+   dependencies : [ spa_dep, pipewire_dep, ],
+ )
+ 
+-executable('pipewire-pulse',
+-  pipewire_daemon_sources,
+-  install: true,
+-  c_args : pipewire_c_args,
+-  include_directories : [ configinc ],
+-  dependencies : [ spa_dep, pipewire_dep, ],
++meson.add_install_script(
++    'sh', '-c',
++    'ln -fs pipewire @0@@1@'.format(
++        '${DESTDIR}',
++        join_paths(get_option('prefix'), get_option('bindir'), 'pipewire-pulse'))
+ )
+ 
+ ln = find_program('ln')
