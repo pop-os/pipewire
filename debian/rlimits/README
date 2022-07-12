@@ -1,0 +1,8 @@
+Setting pipewire real-time priority limits
+---------------------------------------
+
+The debian/rlimits/95-pipewire.conf defines the real-time priority limits
+for the system group "pipewire" as recommended by upstream.
+This file is installed in /etc/security/limits.d/.
+
+See https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/Performance-tuning#rlimits
