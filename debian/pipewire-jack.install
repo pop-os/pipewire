@@ -1,0 +1,5 @@
+usr/bin/pw-jack
+usr/lib/*/pipewire-0.3/jack
+usr/share/man/man1/pw-jack.*
+debian/ld.so.conf.d/* usr/share/doc/pipewire/examples/ld.so.conf.d
+
