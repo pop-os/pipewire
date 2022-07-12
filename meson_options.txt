@@ -301,7 +301,7 @@ option('pam-memlock-default',
 option('rlimits-install',
        description: 'Install PAM limits.d file. Voids all following rlimits-* options, if false',
        type: 'boolean',
-       value: 'true')
+       value: 'false')
 option('rlimits-match',
        description : 'PAM match rule for the generated limits.d file. @<name> denotes matching a group.',
        type : 'string',

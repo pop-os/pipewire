@@ -1,0 +1,2 @@
+usr/lib/*/pipewire-0.3/*.so
+usr/share/man/man7/libpipewire-module*
