@@ -1,0 +1,9 @@
+Don-t-automatically-start-pipewire-for-root-logins.patch
+Don-t-build_same_binary_twice.patch
+Fix_services.patch
+
+# Pop!_OS
+
+alsa-type-pulse.patch
+discord.patch
+pop-defaults.patch
