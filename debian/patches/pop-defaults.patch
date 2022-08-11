@@ -5,7 +5,8 @@ Index: pipewire/src/daemon/pipewire.conf.in
 @@ -27,7 +27,7 @@ context.properties = {
  
      ## Properties for the DSP configuration.
-     #default.clock.rate          = 48000
+-    #default.clock.rate          = 48000
++    default.clock.rate          = 96000
 -    #default.clock.allowed-rates = [ 48000 ]
 +    default.clock.allowed-rates = [ 48000 88200 96000 176400 192000 352800 384000 ]
      #default.clock.quantum       = 1024
