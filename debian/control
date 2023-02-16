@@ -182,7 +182,7 @@ Depends: libpipewire-0.3-modules (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
          adduser
-Recommends: libspa-0.2-avb, pipewire-avb
+Recommends: libspa-0.2-avb, pipewire-avb, pipewire-aes76
 Description: audio and video processing engine multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -264,6 +264,15 @@ Description: PipeWire ALSA plugin
  This package contains the ALSA plugin.
 
 Package: pipewire-avb
+Section: sound
+Architecture: i386 amd64 arm64
+Multi-Arch: foreign
+Depends: pipewire (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
+Description: PipeWire AVB plugin
+
+Package: pipewire-aes67
 Section: sound
 Architecture: i386 amd64 arm64
 Multi-Arch: foreign
