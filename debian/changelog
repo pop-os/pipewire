@@ -1,3 +1,9 @@
+pipewire (0.3.66) jammy; urgency=medium
+
+  * Pop!_OS Release
+
+ -- Brock Szuszczewicz <brock@szu.email>  Thu, 16 Feb 2023 15:56:20 -0700
+
 pipewire (0.3.65) jammy; urgency=medium
 
   * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.65
