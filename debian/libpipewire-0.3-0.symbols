@@ -106,6 +106,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_filter_get_properties@Base 0.3.1
  pw_filter_get_state@Base 0.3.1
  pw_filter_get_time@Base 0.3.1
+ pw_filter_is_driving@Base 0.3.65
  pw_filter_new@Base 0.3.1
  pw_filter_new_simple@Base 0.3.1
  pw_filter_queue_buffer@Base 0.3.1
@@ -113,6 +114,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_filter_set_active@Base 0.3.1
  pw_filter_set_error@Base 0.3.1
  pw_filter_state_as_string@Base 0.3.1
+ pw_filter_trigger_process@Base 0.3.65
  pw_filter_update_params@Base 0.3.1
  pw_filter_update_properties@Base 0.3.1
  pw_free_strv@Base 0.3.1
