@@ -1,4 +1,4 @@
-pipewire (0.3.66-1) UNRELEASED; urgency=medium
+pipewire (0.3.66-1) experimental; urgency=medium
 
   * New upstream release
   * Drop patch included in upstream release:
@@ -11,8 +11,9 @@ pipewire (0.3.66-1) UNRELEASED; urgency=medium
   * Update symbols file
   * Install filter-chain service file and config files in pipewire and
       pipewire-bin respectively.
+  * Upload to experimental because of the Bookworm freeze
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 15:01:23 +0100
 
 pipewire (0.3.65-2) unstable; urgency=medium
 
