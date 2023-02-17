@@ -1,3 +1,9 @@
+pipewire (0.3.66-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
+
 pipewire (0.3.65-2) unstable; urgency=medium
 
   * pipewire-pulse: Add wireplumber or pipewire-media-session-pulseaudio
