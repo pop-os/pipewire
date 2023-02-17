@@ -432,8 +432,10 @@ Depends: ${misc:Depends},
          pipewire-alsa,
          pipewire-pulse,
          wireplumber
-Conflicts: pulseaudio
-Replaces: pulseaudio
+Conflicts: pulseaudio,
+           pulseaudio-module-bluetooth
+Replaces: pulseaudio,
+          pulseaudio-module-bluetooth
 Description: recommended set of PipeWire packages for a standard audio desktop use
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
