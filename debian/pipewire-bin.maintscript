@@ -11,3 +11,4 @@ rm_conffile /etc/pipewire/media-session.d/media-session.conf 0.3.28-1~ pipewire-
 rm_conffile /etc/pipewire/media-session.d/v4l2-monitor.conf 0.3.28-1~ pipewire-bin
 rm_conffile /usr/share/pipewire/media-session.d/bluez-hardware.conf 0.3.37-1~ pipewire-bin
 rm_conffile /etc/xdg/autostart/pipewire.desktop 0.3.50-2~ pipewire-bin
+rm_conffile /etc/security/limits.d/95-pipewire.conf 0.3.66-1~ pipewire-bin

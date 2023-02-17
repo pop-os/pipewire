@@ -39,4 +39,4 @@ usr/share/man/man1/pw-mon.*
 usr/share/man/man1/pw-profiler.*
 usr/share/man/man1/pw-top.*
 usr/share/man/man5
-debian/rlimits/95-pipewire.conf		/etc/security/limits.d/
+etc/security/limits.d/25-pw-rlimits.conf
