@@ -8,6 +8,7 @@ pipewire (0.3.66-1) UNRELEASED; urgency=medium
   * Add libmysofa-dev in Build-Deps
   * Install new pipewire-aes67 in pipewire-bin
   * Install the upstream recommended PAM limits.d file
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
 
