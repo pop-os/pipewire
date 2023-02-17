@@ -9,6 +9,8 @@ pipewire (0.3.66-1) UNRELEASED; urgency=medium
   * Install new pipewire-aes67 in pipewire-bin
   * Install the upstream recommended PAM limits.d file
   * Update symbols file
+  * Install filter-chain service file and config files in pipewire and
+      pipewire-bin respectively.
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
 
