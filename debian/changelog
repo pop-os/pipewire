@@ -6,6 +6,7 @@ pipewire (0.3.66-1) UNRELEASED; urgency=medium
   * Cherry-pick upstream recommended patch:
       - 3601ecc9: Improve NEWS
   * Add libmysofa-dev in Build-Deps
+  * Install new pipewire-aes67 in pipewire-bin
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
 
