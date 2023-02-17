@@ -83,6 +83,7 @@ struct fc_descriptor {
 	void (*cleanup) (void *instance);
 
 	void (*connect_port) (void *instance, unsigned long port, float *data);
+	void (*control_changed) (void *instance);
 
 	void (*activate) (void *instance);
 	void (*deactivate) (void *instance);
@@ -107,6 +108,8 @@ struct fc_plugin *load_ladspa_plugin(const struct spa_support *support, uint32_t
 struct fc_plugin *load_lv2_plugin(const struct spa_support *support, uint32_t n_support,
 		struct dsp_ops *dsp, const char *path, const char *config);
 struct fc_plugin *load_builtin_plugin(const struct spa_support *support, uint32_t n_support,
+		struct dsp_ops *dsp, const char *path, const char *config);
+struct fc_plugin *load_sofa_plugin(const struct spa_support *support, uint32_t n_support,
 		struct dsp_ops *dsp, const char *path, const char *config);
 
 #endif /* PLUGIN_H */

@@ -95,15 +95,15 @@ struct port {
 
 	struct pw_properties *props;
 
-	uint32_t change_mask_all;
+	uint64_t change_mask_all;
 	struct spa_port_info info;
 	struct spa_list param_list;
-#define IDX_EnumFormat	0
-#define IDX_Meta	1
-#define IDX_IO		2
-#define IDX_Format	3
-#define IDX_Buffers	4
-#define IDX_Latency	5
+#define PORT_EnumFormat	0
+#define PORT_Meta	1
+#define PORT_IO		2
+#define PORT_Format	3
+#define PORT_Buffers	4
+#define PORT_Latency	5
 #define N_PORT_PARAMS	6
 	struct spa_param_info params[N_PORT_PARAMS];
 
@@ -133,6 +133,7 @@ struct filter {
 	struct spa_node impl_node;
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
+	struct spa_io_clock *clock;
 	struct spa_io_position *position;
 
 	struct {
@@ -142,12 +143,12 @@ struct filter {
 	struct spa_list port_list;
 	struct pw_map ports[2];
 
-	uint32_t change_mask_all;
+	uint64_t change_mask_all;
 	struct spa_node_info info;
 	struct spa_list param_list;
-#define IDX_PropInfo		0
-#define IDX_Props		1
-#define IDX_ProcessLatency	2
+#define NODE_PropInfo		0
+#define NODE_Props		1
+#define NODE_ProcessLatency	2
 #define N_NODE_PARAMS		3
 	struct spa_param_info params[N_NODE_PARAMS];
 
@@ -168,17 +169,18 @@ struct filter {
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
 	unsigned int process_rt:1;
+	unsigned int driving:1;
 };
 
 static int get_param_index(uint32_t id)
 {
 	switch (id) {
 	case SPA_PARAM_PropInfo:
-		return IDX_PropInfo;
+		return NODE_PropInfo;
 	case SPA_PARAM_Props:
-		return IDX_Props;
+		return NODE_Props;
 	case SPA_PARAM_ProcessLatency:
-		return IDX_ProcessLatency;
+		return NODE_ProcessLatency;
 	default:
 		return -1;
 	}
@@ -188,17 +190,17 @@ static int get_port_param_index(uint32_t id)
 {
 	switch (id) {
 	case SPA_PARAM_EnumFormat:
-		return IDX_EnumFormat;
+		return PORT_EnumFormat;
 	case SPA_PARAM_Meta:
-		return IDX_Meta;
+		return PORT_Meta;
 	case SPA_PARAM_IO:
-		return IDX_IO;
+		return PORT_IO;
 	case SPA_PARAM_Format:
-		return IDX_Format;
+		return PORT_Format;
 	case SPA_PARAM_Buffers:
-		return IDX_Buffers;
+		return PORT_Buffers;
 	case SPA_PARAM_Latency:
-		return IDX_Latency;
+		return PORT_Latency;
 	default:
 		return -1;
 	}
@@ -475,6 +477,12 @@ static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
 	pw_log_debug("%p: io %d %p/%zd", impl, id, data, size);
 
 	switch(id) {
+	case SPA_IO_Clock:
+		if (data && size >= sizeof(struct spa_io_clock))
+			impl->clock = data;
+		else
+			impl->clock = NULL;
+		break;
 	case SPA_IO_Position:
 		if (data && size >= sizeof(struct spa_io_position))
 			impl->position = data;
@@ -484,6 +492,7 @@ static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
 			do_set_position, 1, NULL, 0, true, impl);
 		break;
 	}
+	impl->driving = impl->clock && impl->position && impl->position->clock.id == impl->clock->id;
 	pw_filter_emit_io_changed(&impl->this, NULL, id, data, size);
 
 	return 0;
@@ -1530,9 +1539,9 @@ pw_filter_connect(struct pw_filter *filter,
 	impl->info.max_output_ports = UINT32_MAX;
 	impl->info.flags = impl->process_rt ? SPA_NODE_FLAG_RT : 0;
 	impl->info.props = &filter->properties->dict;
-	impl->params[IDX_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, 0);
-	impl->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
-	impl->params[IDX_ProcessLatency] = SPA_PARAM_INFO(SPA_PARAM_ProcessLatency, 0);
+	impl->params[NODE_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, 0);
+	impl->params[NODE_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
+	impl->params[NODE_ProcessLatency] = SPA_PARAM_INFO(SPA_PARAM_ProcessLatency, 0);
 	impl->info.params = impl->params;
 	impl->info.n_params = N_NODE_PARAMS;
 	impl->info.change_mask = impl->change_mask_all;
@@ -1712,12 +1721,12 @@ void *pw_filter_add_port(struct pw_filter *filter,
 		p->info.flags |= SPA_PORT_FLAG_CAN_ALLOC_BUFFERS;
 	p->info.props = &p->props->dict;
 	p->change_mask_all |= SPA_PORT_CHANGE_MASK_PARAMS;
-	p->params[IDX_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, 0);
-	p->params[IDX_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, 0);
-	p->params[IDX_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, 0);
-	p->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	p->params[IDX_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
-	p->params[IDX_Latency] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_WRITE);
+	p->params[PORT_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, 0);
+	p->params[PORT_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, 0);
+	p->params[PORT_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, 0);
+	p->params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	p->params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	p->params[PORT_Latency] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_WRITE);
 	p->info.params = p->params;
 	p->info.n_params = N_PORT_PARAMS;
 
@@ -1749,22 +1758,23 @@ error_cleanup:
 	return NULL;
 }
 
+static inline void free_port(struct filter *impl, struct port *port)
+{
+	spa_list_remove(&port->link);
+	spa_node_emit_port_info(&impl->hooks, port->direction, port->id, NULL);
+	pw_map_remove(&impl->ports[port->direction], port->id);
+	clear_buffers(port);
+	clear_params(impl, port, SPA_ID_INVALID);
+	pw_properties_free(port->props);
+	free(port);
+}
+
 SPA_EXPORT
 int pw_filter_remove_port(void *port_data)
 {
 	struct port *port = SPA_CONTAINER_OF(port_data, struct port, user_data);
 	struct filter *impl = port->filter;
-
-	spa_node_emit_port_info(&impl->hooks, port->direction, port->id, NULL);
-
-	spa_list_remove(&port->link);
-	pw_map_remove(&impl->ports[port->direction], port->id);
-
-	clear_buffers(port);
-	clear_params(impl, port, SPA_ID_INVALID);
-	pw_properties_free(port->props);
-	free(port);
-
+	free_port(impl, port);
 	return 0;
 }
 
@@ -1844,25 +1854,6 @@ int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time)
 	return 0;
 }
 
-static int
-do_process(struct spa_loop *loop,
-                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct filter *impl = user_data;
-	int res = impl_node_process(impl);
-	return spa_node_call_ready(&impl->callbacks, res);
-}
-
-static inline int call_trigger(struct filter *impl)
-{
-	int res = 0;
-	if (SPA_FLAG_IS_SET(impl->flags, PW_FILTER_FLAG_DRIVER)) {
-		res = pw_loop_invoke(impl->context->data_loop,
-			do_process, 1, NULL, 0, false, impl);
-	}
-	return res;
-}
-
 SPA_EXPORT
 struct pw_buffer *pw_filter_dequeue_buffer(void *port_data)
 {
@@ -1894,7 +1885,7 @@ int pw_filter_queue_buffer(void *port_data, struct pw_buffer *buffer)
 	if ((res = push_queue(p, &p->queued, b)) < 0)
 		return res;
 
-	return call_trigger(impl);
+	return res;
 }
 
 SPA_EXPORT
@@ -1959,4 +1950,49 @@ int pw_filter_flush(struct pw_filter *filter, bool drain)
 	pw_loop_invoke(impl->context->data_loop,
 			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
 	return 0;
+}
+
+SPA_EXPORT
+bool pw_filter_is_driving(struct pw_filter *filter)
+{
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+	return impl->driving;
+}
+
+static int
+do_trigger_process(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct filter *impl = user_data;
+	int res = impl_node_process(impl);
+	return spa_node_call_ready(&impl->callbacks, res);
+}
+
+static int trigger_request_process(struct filter *impl)
+{
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = { 0 };
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_node_emit_event(&impl->hooks,
+			spa_pod_builder_add_object(&b,
+				SPA_TYPE_EVENT_Node, SPA_NODE_EVENT_RequestProcess));
+	return 0;
+}
+
+SPA_EXPORT
+int pw_filter_trigger_process(struct pw_filter *filter)
+{
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+	int res = 0;
+
+	pw_log_trace_fp("%p", impl);
+
+	if (!impl->driving) {
+		res = trigger_request_process(impl);
+	} else {
+		res = pw_loop_invoke(impl->context->data_loop,
+			do_trigger_process, 1, NULL, 0, false, impl);
+	}
+	return res;
 }

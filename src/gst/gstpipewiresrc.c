@@ -615,6 +615,27 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
     }
   }
 
+  if (pwsrc->is_video) {
+    gsize video_size = 0;
+    GstVideoInfo *info = &pwsrc->video_info;
+    GstVideoMeta *meta = gst_buffer_add_video_meta_full (buf, GST_VIDEO_FRAME_FLAG_NONE,
+                             GST_VIDEO_INFO_FORMAT (info),
+                             GST_VIDEO_INFO_WIDTH (info),
+                             GST_VIDEO_INFO_HEIGHT (info),
+                             GST_VIDEO_INFO_N_PLANES (info),
+                             info->offset,
+                             info->stride);
+
+    meta->n_planes = MIN(meta->n_planes, b->buffer->n_datas);
+    for (i = 0; i < meta->n_planes; i++) {
+      struct spa_data *d = &b->buffer->datas[i];
+      meta->offset[i] = video_size;
+      meta->stride[i] = d->chunk->stride;
+
+      video_size += d->chunk->size;
+    }
+  }
+
   for (i = 0; i < b->buffer->n_datas; i++) {
     struct spa_data *d = &b->buffer->datas[i];
     GstMemory *pmem = gst_buffer_peek_memory (data->buf, i);
@@ -658,6 +679,7 @@ on_state_changed (void *data,
     case PW_STREAM_STATE_STREAMING:
       break;
     case PW_STREAM_STATE_ERROR:
+      pw_stream_set_error (pwsrc->stream, -EPIPE, "%s", error);
       GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED,
           ("stream error: %s", error), (NULL));
       break;
@@ -957,6 +979,10 @@ on_param_changed (void *data, uint32_t id,
   if (pwsrc->caps)
           gst_caps_unref(pwsrc->caps);
   pwsrc->caps = gst_caps_from_format (param);
+
+  pwsrc->is_video = pwsrc->caps != NULL
+                      ? gst_video_info_from_caps (&pwsrc->video_info, pwsrc->caps)
+                      : FALSE;
 
   pwsrc->negotiated = pwsrc->caps != NULL;
 

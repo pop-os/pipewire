@@ -273,6 +273,12 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - `max-delay` the maximum delay in seconds. The "Delay (s)" parameter will
  *              be clamped to this value.
  *
+ * ### Invert
+ *
+ * The invert plugin can be used to invert the phase of the signal.
+ *
+ * It has an input port "In" and an output port "Out".
+ *
  * ## General options
  *
  * Options with well-known behavior. Most options can be added to the global
@@ -445,7 +451,7 @@ static float discard_data[MAX_SAMPLES];
 struct plugin {
 	struct spa_list link;
 	int ref;
-	char type[64];
+	char type[256];
 	char path[PATH_MAX];
 
 	struct fc_plugin *plugin;
@@ -506,6 +512,7 @@ struct node {
 	unsigned int n_deps;
 	unsigned int visited:1;
 	unsigned int disabled:1;
+	unsigned int control_changed:1;
 };
 
 struct link {
@@ -878,7 +885,8 @@ static int set_control_value(struct node *node, const char *name, float *value)
 	old = port->control_data;
 	port->control_data = value ? *value : desc->default_control[port->idx];
 	pw_log_info("control %d ('%s') from %f to %f", port->idx, name, old, port->control_data);
-	return old == port->control_data ? 0 : 1;
+	node->control_changed = old != port->control_data;
+	return node->control_changed ? 1 : 0;
 }
 
 static int parse_params(struct graph *graph, const struct spa_pod *pod)
@@ -938,6 +946,24 @@ static void graph_reset(struct graph *graph)
 			d->activate(*hndl->hndl);
 	}
 }
+
+static void node_control_changed(struct node *node)
+{
+	const struct fc_descriptor *d = node->desc->desc;
+	uint32_t i;
+
+	if (!node->control_changed)
+		return;
+
+	for (i = 0; i < node->n_hndl; i++) {
+		if (node->hndl[i] == NULL)
+			continue;
+		if (d->control_changed)
+			d->control_changed(node->hndl[i]);
+	}
+	node->control_changed = false;
+}
+
 static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 {
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
@@ -953,6 +979,10 @@ static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 		uint8_t buffer[1024];
 		struct spa_pod_dynamic_builder b;
 		const struct spa_pod *params[1];
+		struct node *node;
+
+		spa_list_for_each(node, &graph->node_list, link)
+			node_control_changed(node);
 
 		spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 		params[0] = get_props_param(graph, &b.b);
@@ -1204,6 +1234,9 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 
 	if (spa_streq(type, "builtin")) {
 		pl = load_builtin_plugin(support, n_support, &impl->dsp, path, NULL);
+	}
+	else if (spa_streq(type, "sofa")) {
+		pl = load_sofa_plugin(support, n_support, &impl->dsp, path, NULL);
 	}
 	else if (spa_streq(type, "ladspa")) {
 		pl = load_ladspa_plugin(support, n_support, &impl->dsp, path, NULL);
@@ -1696,6 +1729,7 @@ static void node_free(struct node *node)
 	free(node->output_port);
 	free(node->control_port);
 	free(node->notify_port);
+	free(node->config);
 	free(node);
 }
 
@@ -1767,6 +1801,8 @@ static int graph_instantiate(struct graph *graph)
 			}
 			if (d->activate)
 				d->activate(node->hndl[i]);
+			if (node->control_changed && d->control_changed)
+				d->control_changed(node->hndl[i]);
 		}
 	}
 	return 0;
@@ -1902,6 +1938,8 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 					pw_log_error("input port %s not found", v);
 					goto error;
 				} else {
+					bool disabled = false;
+
 					desc = port->node->desc;
 					d = desc->desc;
 					if (i == 0 && port->external != SPA_ID_INVALID) {
@@ -1936,12 +1974,14 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 								gp->hndl = &peer->node->hndl[i];
 								gp->port = peer->p;
 								gp->next = true;
+								disabled = true;
 							}
 							if (gp != NULL)
 								gp->next = false;
 						}
-						port->node->disabled = true;
-					} else {
+						port->node->disabled = disabled;
+					}
+					if (!disabled) {
 						pw_log_info("input port %s[%d]:%s",
 							port->node->name, i, d->ports[port->p].name);
 						port->external = graph->n_input;

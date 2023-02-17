@@ -970,15 +970,114 @@ static int fraction_compare(const struct spa_fraction *a, const struct spa_fract
 	return fa < fb ? -1 : (fa > fb ? 1 : 0);
 }
 
-static uint32_t find_best_rate(const uint32_t *rates, uint32_t n_rates, uint32_t rate, uint32_t best)
+static inline uint32_t calc_gcd(uint32_t a, uint32_t b)
 {
-	uint32_t i;
-	for (i = 0; i < n_rates; i++) {
-		if (SPA_ABS((int32_t)rate - (int32_t)rates[i]) <
-		    SPA_ABS((int32_t)rate - (int32_t)best))
-			best = rates[i];
+	while (b != 0) {
+		uint32_t temp = a;
+		a = b;
+		b = temp % b;
 	}
-	return best;
+	return a;
+}
+
+struct rate_info {
+	uint32_t rate;
+	uint32_t gcd;
+	uint32_t diff;
+};
+
+static inline void update_highest_rate(struct rate_info *best, struct rate_info *current)
+{
+	/* find highest rate */
+	if (best->rate == 0 || best->rate < current->rate)
+		*best = *current;
+}
+
+static inline void update_nearest_gcd(struct rate_info *best, struct rate_info *current)
+{
+	/* find nearest GCD */
+	if (best->rate == 0 ||
+	    (best->gcd < current->gcd) ||
+	    (best->gcd == current->gcd && best->diff > current->diff))
+		*best = *current;
+}
+static inline void update_nearest_rate(struct rate_info *best, struct rate_info *current)
+{
+	/* find nearest rate */
+	if (best->rate == 0 || best->diff > current->diff)
+		*best = *current;
+}
+
+static uint32_t find_best_rate(const uint32_t *rates, uint32_t n_rates, uint32_t rate, uint32_t def)
+{
+	uint32_t i, limit;
+	struct rate_info best;
+	struct rate_info info[n_rates];
+
+	for (i = 0; i < n_rates; i++) {
+		info[i].rate = rates[i];
+		info[i].gcd = calc_gcd(rate, rates[i]);
+		info[i].diff = SPA_ABS((int32_t)rate - (int32_t)rates[i]);
+	}
+
+	/* first find higher nearest GCD. This tries to find next bigest rate that
+	 * requires the least amount of resample filter banks. Usually these are
+	 * rates that are multiples of eachother or multiples of a common rate.
+	 *
+	 * 44100 and [ 32000 56000 88200 96000 ]  -> 88200
+	 * 48000 and [ 32000 56000 88200 96000 ]  -> 96000
+	 * 88200 and [ 44100 48000 96000 192000 ]  -> 96000
+	 * 32000 and [ 44100 192000 ] -> 44100
+	 * 8000 and [ 44100 48000 ] -> 48000
+	 * 8000 and [ 44100 192000 ] -> 44100
+	 * 11025 and [ 44100 48000 ] -> 44100
+	 * 44100 and [ 48000 176400 ] -> 48000
+	 */
+	spa_zero(best);
+	/* Don't try to do excessive upsampling by limiting the max rate
+	 * for desired < default to default*2. For other rates allow
+	 * a x3 upsample rate max */
+	limit = rate < def ? def*2 : rate*3;
+	for (i = 0; i < n_rates; i++) {
+		if (info[i].rate >= rate && info[i].rate <= limit)
+			update_nearest_gcd(&best, &info[i]);
+	}
+	if (best.rate != 0)
+		return best.rate;
+
+	/* we would need excessive upsampling, pick a nearest higher rate */
+	spa_zero(best);
+	for (i = 0; i < n_rates; i++) {
+		if (info[i].rate >= rate)
+			update_nearest_rate(&best, &info[i]);
+	}
+	if (best.rate != 0)
+		return best.rate;
+
+	/* There is nothing above the rate, we need to downsample. Try to downsample
+	 * but only to something that is from a common rate family. Also don't
+	 * try to downsample to something that will sound worse (< 44100).
+	 *
+	 * 88200 and [ 22050 44100 48000 ] -> 44100
+	 * 88200 and [ 22050 48000 ] -> 48000
+	 */
+	spa_zero(best);
+	for (i = 0; i < n_rates; i++) {
+		if (info[i].rate >= 44100)
+			update_nearest_gcd(&best, &info[i]);
+	}
+	if (best.rate != 0)
+		return best.rate;
+
+	/* There is nothing to downsample above our threshold. Downsample to whatever
+	 * is the highest rate then. */
+	spa_zero(best);
+	for (i = 0; i < n_rates; i++)
+		update_highest_rate(&best, &info[i]);
+	if (best.rate != 0)
+		return best.rate;
+
+	return def;
 }
 
 /* here we evaluate the complete state of the graph.
@@ -1201,10 +1300,12 @@ again:
 			running = true;
 
 		current_rate = n->current_rate.denom;
-		if (lock_rate || n->reconfigure ||
+		if (lock_rate || n->reconfigure || !running ||
 		    (!force_rate &&
 		    (n->info.state > PW_NODE_STATE_IDLE)))
 			/* when someone wants us to lock the rate of this driver or
+			 * when we are in the process of reconfiguring the driver or
+			 * when we are not running any followers or
 			 * when the driver is busy and we don't need to force a rate,
 			 * keep the current rate */
 			target_rate = current_rate;
