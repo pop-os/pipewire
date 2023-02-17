@@ -72,6 +72,8 @@ static void test_mix(uint32_t src_chan, uint32_t src_mask, uint32_t dst_chan, ui
 	mix.src_mask = src_mask;
 	mix.dst_mask = dst_mask;
 	mix.log = &logger.log;
+	mix.fc_cutoff = 120.0f;
+	mix.lfe_cutoff = 12000.0f;
 
 	spa_assert_se(channelmix_init(&mix) == 0);
 	channelmix_set_volume(&mix, 1.0f, false, 0, NULL);
@@ -83,11 +85,17 @@ static void test_1_N_MONO(void)
 	test_mix(1, _M(MONO), 2, _M(FL)|_M(FR), 0,
 			MATRIX(1.0, 1.0));
 	test_mix(1, _M(MONO), 3, _M(FL)|_M(FR)|_M(LFE), 0,
+			MATRIX(1.0, 1.0, 0.0));
+	test_mix(1, _M(MONO), 3, _M(FL)|_M(FR)|_M(LFE), CHANNELMIX_OPTION_UPMIX,
 			MATRIX(1.0, 1.0, 1.0));
 	test_mix(1, _M(MONO), 4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), 0,
+			MATRIX(1.0, 1.0, 0.0, 0.0));
+	test_mix(1, _M(MONO), 4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), CHANNELMIX_OPTION_UPMIX,
 			MATRIX(1.0, 1.0, 1.0, 1.0));
 	test_mix(1, _M(MONO), 4, _M(FL)|_M(FR)|_M(RL)|_M(RR), 0,
-			MATRIX(1.0, 1.0, 1.0, 1.0));
+			MATRIX(1.0, 1.0, 0.0, 0.0));
+	test_mix(1, _M(MONO), 4, _M(FL)|_M(FR)|_M(RL)|_M(RR), CHANNELMIX_OPTION_UPMIX,
+			MATRIX(1.0, 1.0, 0.0, 0.0));
 	test_mix(1, _M(MONO), 12, 0, 0,
 			MATRIX(1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
 			       1.0, 1.0, 1.0, 1.0, 1.0, 1.0));
@@ -119,16 +127,49 @@ static void test_N_1(void)
 	test_mix(1, _M(FC), 1, _M(FC), 0,
 			MATRIX(1.0));
 	test_mix(2, _M(FL)|_M(FR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107));
+			MATRIX(0.5, 0.5));
 	test_mix(12, 0, 1, _M(MONO), 0,
 			MATRIX(0.083333, 0.083333, 0.083333, 0.083333, 0.083333, 0.083333,
 			       0.083333, 0.083333, 0.083333, 0.083333, 0.083333, 0.0833333));
 }
 
+static void test_2_N(void)
+{
+	test_mix(2, _M(FL)|_M(FR), 1, _M(MONO), 0, MATRIX(0.5, 0.5));
+	test_mix(2, _M(FL)|_M(FR), 1, 0, 0, MATRIX(0.5, 0.5));
+	test_mix(2, _M(FL)|_M(FR), 2, 0, 0, MATRIX(1.0, 0.0, 0.0, 1.0));
+	test_mix(2, _M(FL)|_M(FR), 2, _M(MONO), 0, MATRIX(1.0, 0.0, 0.0, 1.0));
+	test_mix(2, _M(FL)|_M(FR), 2, _M(FL)|_M(FR), 0, MATRIX(1.0, 0.0, 0.0, 1.0));
+	test_mix(2, _M(FL)|_M(FR), 4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), 0,
+			MATRIX(1.0, 0.0,
+			       0.0, 1.0,
+			       0.0, 0.0,
+			       0.0, 0.0));
+	test_mix(2, _M(FL)|_M(FR), 4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), CHANNELMIX_OPTION_UPMIX,
+			MATRIX(1.0, 0.0,
+			       0.0, 1.0,
+			       0.707107, 0.707107,
+			       0.5, 0.5));
+	test_mix(2, _M(FL)|_M(FR), 6, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR), 0,
+			MATRIX(1.0, 0.0,
+			       0.0, 1.0,
+			       0.0, 0.0,
+			       0.0, 0.0,
+			       0.0, 0.0,
+			       0.0, 0.0));
+	test_mix(2, _M(FL)|_M(FR), 6, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR), CHANNELMIX_OPTION_UPMIX,
+			MATRIX(1.0, 0.0,
+			       0.0, 1.0,
+			       0.707107, 0.707107,
+			       0.5, 0.5,
+			       0.0, 0.0,
+			       0.0, 0.0));
+}
+
 static void test_3p1_N(void)
 {
 	test_mix(4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 1.0, 0.0));
+			MATRIX(0.333333, 0.333333, 0.333333, 0.0));
 	test_mix(4, _M(FL)|_M(FR)|_M(LFE)|_M(FC), 2, _M(FL)|_M(FR), 0,
 			MATRIX(1.0, 0.0, 0.707107, 0.0,
 			       0.0, 1.0, 0.707107, 0.0 ));
@@ -151,9 +192,9 @@ static void test_3p1_N(void)
 static void test_4_N(void)
 {
 	test_mix(4, _M(FL)|_M(FR)|_M(RL)|_M(RR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 0.5, 0.5));
+			MATRIX(0.25, 0.25, 0.25, 0.25));
 	test_mix(4, _M(FL)|_M(FR)|_M(SL)|_M(SR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 0.5, 0.5));
+			MATRIX(0.25, 0.25, 0.25, 0.25));
 	test_mix(4, _M(FL)|_M(FR)|_M(RL)|_M(RR), 2, _M(FL)|_M(FR), 0,
 			MATRIX(1.0, 0.0, 0.707107, 0.0,
 			       0.0, 1.0, 0.0, 0.707107));
@@ -178,13 +219,13 @@ static void test_4_N(void)
 			MATRIX(1.0, 0.0, 0.707107, 0.0,
 			       0.0, 1.0, 0.0, 0.707107,
 			       0.707107, 0.707107, 0.0, 0.0,
-			       0.0, 0.0, 0.0, 0.0));
+			       0.5, 0.5, 0.0, 0.0));
 }
 
 static void test_5p1_N(void)
 {
 	test_mix(6, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 1.0, 0.0, 0.5, 0.5));
+			MATRIX(0.20, 0.20, 0.20, 0.0, 0.20, 0.20));
 	test_mix(6, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR), 2, _M(FL)|_M(FR), 0,
 			MATRIX(1.0, 0.0, 0.707107, 0.0, 0.707107, 0.0,
 			       0.0, 1.0, 0.707107, 0.0, 0.0, 0.707107));
@@ -223,7 +264,7 @@ static void test_5p1_N(void)
 static void test_6p1_N(void)
 {
 	test_mix(7, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(RC)|_M(SL)|_M(SR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 1.0, 0.0, 0.5, 0.5, 0.5));
+			MATRIX(0.166667, 0.166667, 0.166667, 0.0, 0.166667, 0.166667, 0.166667));
 	test_mix(7, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR)|_M(RC),
 		 6, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR), 0,
 			MATRIX(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -263,7 +304,7 @@ static void test_6p1_N(void)
 static void test_7p1_N(void)
 {
 	test_mix(8, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR)|_M(RL)|_M(RR), 1, _M(MONO), 0,
-			MATRIX(0.707107, 0.707107, 1.0, 0.0, 0.5, 0.5, 0.5, 0.5));
+			MATRIX(0.142857, 0.142857, 0.142857, 0.0, 0.142857, 0.142857, 0.142857, 0.142857));
 	test_mix(8, _M(FL)|_M(FR)|_M(LFE)|_M(FC)|_M(SL)|_M(SR)|_M(RL)|_M(RR), 2, _M(FL)|_M(FR), 0,
 			MATRIX(1.0, 0.0, 0.707107, 0.0, 0.707107, 0.0, 0.707107, 0.0,
 			       0.0, 1.0, 0.707107, 0.0, 0.0, 0.707107, 0.0, 0.707107));
@@ -362,6 +403,7 @@ int main(int argc, char *argv[])
 	test_1_N_MONO();
 	test_1_N_FC();
 	test_N_1();
+	test_2_N();
 	test_3p1_N();
 	test_4_N();
 	test_5p1_N();

@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.65',
+  version : '0.3.66',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -285,6 +285,9 @@ ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump/filter-chain')
 cdata.set('HAVE_SNDFILE', sndfile_dep.found())
+libmysofa_dep = dependency('libmysofa', required : get_option('libmysofa'))
+summary({'libmysofa': libmysofa_dep.found()}, bool_yn: true, section: 'filter-chain')
+cdata.set('HAVE_LIBMYSOFA', libmysofa_dep.found())
 pulseaudio_dep = dependency('libpulse', required : get_option('libpulse'))
 summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
