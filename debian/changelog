@@ -1,6 +1,10 @@
 pipewire (0.3.66-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Drop patch included in upstream release:
+      - fba7083f: module-combine-stream was not installed
+  * Cherry-pick upstream recommended patch:
+      - 3601ecc9: Improve NEWS
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 13:43:34 +0100
 
