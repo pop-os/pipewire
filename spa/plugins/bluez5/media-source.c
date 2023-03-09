@@ -1,27 +1,7 @@
-/* Spa Media Source
- *
- * Copyright © 2018 Wim Taymans
- * Copyright © 2019 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa Media Source */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-FileCopyrightText: Copyright © 2019 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -68,7 +48,6 @@ struct props {
 	char clock_name[64];
 };
 
-#define FILL_FRAMES 2
 #define MAX_BUFFERS 32
 
 struct buffer {
@@ -143,6 +122,8 @@ struct impl {
 	unsigned int is_input:1;
 	unsigned int is_duplex:1;
 	unsigned int use_duplex_source:1;
+
+	unsigned int node_latency;
 
 	int fd;
 	struct spa_source source;
@@ -319,6 +300,31 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 }
 
 static void emit_node_info(struct impl *this, bool full);
+
+static void set_latency(struct impl *this, bool emit_latency)
+{
+	if (this->codec->bap && !this->is_input && this->transport &&
+			this->transport->delay_us != SPA_BT_UNKNOWN_DELAY) {
+		unsigned int node_latency = 2048;
+		unsigned int target = this->transport->delay_us*48000ll/SPA_USEC_PER_SEC * 1/2;
+
+		/* Adjust requested node latency to be somewhat (~1/2) smaller
+		 * than presentation delay. The difference functions as room
+		 * for buffering rate control.
+		 */
+		while (node_latency > 64 && node_latency > target)
+			node_latency /= 2;
+
+		if (this->node_latency != node_latency) {
+			this->node_latency = node_latency;
+			if (emit_latency)
+				emit_node_info(this, false);
+		}
+
+		spa_log_info(this->log, "BAP presentation delay %d us, node latency %u/48000",
+				(int)this->transport->delay_us, node_latency);
+	}
+}
 
 static int apply_props(struct impl *this, const struct spa_pod *param)
 {
@@ -621,8 +627,9 @@ static void media_on_timeout(struct spa_source *source)
 	}
 
 	if (port->io) {
+		int io_status = port->io->status;
 		int status = produce_buffer(this);
-		spa_log_trace(this->log, "%p: io:%d status:%d", this, port->io->status, status);
+		spa_log_trace(this->log, "%p: io:%d->%d status:%d", this, io_status, port->io->status, status);
 	}
 
 	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
@@ -661,20 +668,16 @@ static int transport_start(struct impl *this)
 	spa_log_info(this->log, "%p: using %s codec %s", this,
 	             this->codec->bap ? "BAP" : "A2DP", this->codec->description);
 
-	val = fcntl(this->transport->fd, F_GETFL);
-	if (fcntl(this->transport->fd, F_SETFL, val | O_NONBLOCK) < 0)
-		spa_log_warn(this->log, "%p: fcntl %u %m", this, val | O_NONBLOCK);
-
-	val = FILL_FRAMES * this->transport->write_mtu;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0)
-		spa_log_warn(this->log, "%p: SO_SNDBUF %m", this);
-
-	val = FILL_FRAMES * this->transport->read_mtu;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
-		spa_log_warn(this->log, "%p: SO_RCVBUF %m", this);
+	/*
+	 * If the link is bidirectional, media-sink may also be polling the same FD,
+	 * and this won't work properly with epoll. Always dup to avoid problems.
+	 */
+	this->fd = dup(this->transport->fd);
+	if (this->fd < 0)
+		return -errno;
 
 	val = 6;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
+	if (setsockopt(this->fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, "SO_PRIORITY failed: %m");
 
 	reset_buffers(port);
@@ -685,12 +688,16 @@ static int transport_start(struct impl *this)
 			this->quantum_limit, this->quantum_limit)) < 0)
 		return res;
 
-	this->fd = this->transport->fd;
+	if (this->is_duplex) {
+		/* 80 ms max buffer */
+		spa_bt_decode_buffer_set_max_latency(&port->buffer,
+				port->current_format.info.raw.rate * 80 / 1000);
+	}
 
 	this->source.data = this;
 
 	if (!this->use_duplex_source) {
-		this->source.fd = this->transport->fd;
+		this->source.fd = this->fd;
 		this->source.func = media_on_ready_read;
 		this->source.mask = SPA_IO_IN;
 		this->source.rmask = 0;
@@ -793,6 +800,11 @@ static int transport_stop(struct impl *this)
 
 	spa_loop_invoke(this->data_loop, do_remove_source, 0, NULL, 0, true, this);
 
+	if (this->fd >= 0) {
+		close(this->fd);
+		this->fd = -1;
+	}
+
 	if (this->transport && this->transport_acquired)
 		res = spa_bt_transport_release(this->transport);
 	else
@@ -860,15 +872,18 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 static void emit_node_info(struct impl *this, bool full)
 {
 	uint64_t old = full ? this->info.change_mask : 0;
+	char latency[64];
 
 	struct spa_dict_item node_info_items[] = {
 		{ SPA_KEY_DEVICE_API, "bluez5" },
 		{ SPA_KEY_MEDIA_CLASS, this->is_input ? "Audio/Source" : "Stream/Output/Audio" },
-		{ SPA_KEY_NODE_LATENCY, this->is_input ? "" : "512/48000" },
+		{ SPA_KEY_NODE_LATENCY, this->is_input ? "" : latency },
 		{ "media.name", ((this->transport && this->transport->device->name) ?
 					this->transport->device->name : this->codec->bap ? "BAP" : "A2DP") },
 		{ SPA_KEY_NODE_DRIVER, this->is_input ? "true" : "false" },
 	};
+
+	spa_scnprintf(latency, sizeof(latency), "%d/48000", this->node_latency);
 
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -1306,6 +1321,48 @@ static uint32_t get_samples(struct impl *this, uint32_t *duration)
 	return samples;
 }
 
+static void update_target_latency(struct impl *this)
+{
+	struct port *port = &this->port;
+	uint32_t samples, duration;
+
+	if (this->transport == NULL || !port->have_format)
+		return;
+
+	if (!this->codec->bap || this->is_input ||
+			this->transport->delay_us == SPA_BT_UNKNOWN_DELAY)
+		return;
+
+	get_samples(this, &duration);
+
+	/* Presentation delay for BAP server
+	 *
+	 * This assumes the time when we receive the packet is (on average)
+	 * the SDU synchronization reference (see Core v5.3 Vol 6/G Sec 3.2.2 Fig. 3.2,
+	 * BAP v1.0 Sec 7.1.1).
+	 *
+	 * XXX: This is not exactly true, there might be some latency in between,
+	 * XXX: but currently kernel does not provide us any better information.
+	 * XXX: Some controllers (e.g. Intel AX210) also do not seem to set timestamps
+	 * XXX: to the HCI ISO data packets, so it's not clear what we can do here
+	 * XXX: better.
+	 */
+	samples = (uint64_t)this->transport->delay_us *
+		port->current_format.info.raw.rate / SPA_USEC_PER_SEC;
+
+	if (samples > duration)
+		samples -= duration;
+	else
+		samples = 1;
+
+	/* Too small target latency might not produce working audio.
+	 * The minimum (Presentation_Delay_Min) is configured in endpoint
+	 * DBus properties, with some default value on BlueZ side if unspecified.
+	 */
+
+	spa_bt_decode_buffer_set_target_latency(&port->buffer, samples);
+}
+
 static void process_buffering(struct impl *this)
 {
 	struct port *port = &this->port;
@@ -1314,6 +1371,8 @@ static void process_buffering(struct impl *this)
 	uint32_t avail;
 	void *buf;
 
+	update_target_latency(this);
+
 	spa_bt_decode_buffer_process(&port->buffer, samples, duration);
 
 	setup_matching(this);
@@ -1321,7 +1380,7 @@ static void process_buffering(struct impl *this)
 	buf = spa_bt_decode_buffer_get_read(&port->buffer, &avail);
 
 	/* copy data to buffers */
-	if (!spa_list_is_empty(&port->free) && avail > 0) {
+	if (!spa_list_is_empty(&port->free)) {
 		struct buffer *buffer;
 		struct spa_data *datas;
 		uint32_t data_size;
@@ -1348,15 +1407,19 @@ static void process_buffering(struct impl *this)
 		spa_assert(datas[0].maxsize >= data_size);
 
 		datas[0].chunk->offset = 0;
-		datas[0].chunk->size = avail;
+		datas[0].chunk->size = data_size;
 		datas[0].chunk->stride = port->frame_size;
 
 		memcpy(datas[0].data, buf, avail);
 
-		this->sample_count += avail / port->frame_size;
+		/* pad with silence */
+		if (avail < data_size)
+			memset(SPA_PTROFF(datas[0].data, avail, void), 0, data_size - avail);
+
+		this->sample_count += samples;
 
 		/* ready buffer if full */
-		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)avail / port->frame_size);
+		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)samples);
 		spa_list_append(&port->ready, &buffer->link);
 	}
 }
@@ -1371,7 +1434,8 @@ static int produce_buffer(struct impl *this)
 		return -EIO;
 
 	/* Return if we already have a buffer */
-	if (io->status == SPA_STATUS_HAVE_DATA)
+	if (io->status == SPA_STATUS_HAVE_DATA &&
+			(this->following || port->rate_match == NULL))
 		return SPA_STATUS_HAVE_DATA;
 
 	/* Recycle */
@@ -1450,6 +1514,14 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static void transport_delay_changed(void *data)
+{
+	struct impl *this = data;
+
+	spa_log_debug(this->log, "transport %p delay changed", this->transport);
+	set_latency(this, true);
+}
+
 static int do_transport_destroy(struct spa_loop *loop,
 				bool async,
 				uint32_t seq,
@@ -1472,6 +1544,7 @@ static void transport_destroy(void *data)
 
 static const struct spa_bt_transport_events transport_events = {
 	SPA_VERSION_BT_TRANSPORT_EVENTS,
+	.delay_changed = transport_delay_changed,
         .destroy = transport_destroy,
 };
 
@@ -1652,6 +1725,12 @@ impl_init(const struct spa_handle_factory *factory,
 	} else {
 		this->duplex_timerfd = -1;
 	}
+
+	this->node_latency = 512;
+
+	set_latency(this, false);
+
+	this->fd = -1;
 
 	return 0;
 }

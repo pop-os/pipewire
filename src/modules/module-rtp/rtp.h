@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PIPEWIRE_RTP_H
 #define PIPEWIRE_RTP_H
@@ -68,6 +48,24 @@ struct rtp_payload {
 	unsigned is_last_fragment:1;
 	unsigned rfa0:1;
 	unsigned frame_count:4;
+#endif
+} __attribute__ ((packed));
+
+struct rtp_midi_header {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+	unsigned len:4;
+	unsigned p:1;
+	unsigned z:1;
+	unsigned j:1;
+	unsigned b:1;
+	uint8_t len_b;
+#elif __BYTE_ORDER == __BIG_ENDIAN
+	unsigned b:1;
+	unsigned j:1;
+	unsigned z:1;
+	unsigned p:1;
+	unsigned len:4;
+	uint8_t len_b;
 #endif
 } __attribute__ ((packed));
 

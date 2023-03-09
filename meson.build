@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.66',
+  version : '0.3.67',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.59.0',
   default_options : [ 'warning_level=3',
@@ -91,6 +91,8 @@ cc_flags = common_flags + [
   '-D_GNU_SOURCE',
   '-DFASTPATH',
 # '-DSPA_DEBUG_MEMCPY',
+  '-Werror=implicit-function-declaration',
+  '-Werror=int-conversion',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
 
@@ -267,13 +269,14 @@ if not readline_dep.found()
 endif
 
 # Both the FFmpeg SPA plugin and the pw-cat FFmpeg integration use libavcodec.
-# But only the latter also needs libavformat.
+# But only the latter also needs libavformat and libavutil.
 # Search for these libraries here, globally, so both of these subprojects can reuse the results.
 pw_cat_ffmpeg = get_option('pw-cat-ffmpeg')
 ffmpeg = get_option('ffmpeg')
 if pw_cat_ffmpeg.allowed() or ffmpeg.allowed()
   avcodec_dep = dependency('libavcodec', required: pw_cat_ffmpeg.enabled() or ffmpeg.enabled())
   avformat_dep = dependency('libavformat', required: pw_cat_ffmpeg.enabled())
+  avutil_dep = dependency('libavutil', required: pw_cat_ffmpeg.enabled())
 else
   avcodec_dep = dependency('', required: false)
 endif
@@ -401,6 +404,7 @@ check_functions = [
   ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
   ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE'], []],
   ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE'], []],
+  ['random_r', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['reallocarray', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE'], []],
   ['XSetIOErrorExitHandler', '#include <X11/Xlib.h>', [], [x11_dep]],

@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -31,6 +11,7 @@
 #include <sys/random.h>
 #endif
 #include <string.h>
+#include <time.h>
 
 #include <pipewire/array.h>
 #include <pipewire/log.h>
@@ -173,16 +154,7 @@ char *pw_strip(char *str, const char *whitespace)
 	return str;
 }
 
-/** Fill a buffer with random data
- * \param buf a buffer to fill
- * \param buflen the number of bytes to fill
- * \param flags optional flags
- * \return the number of bytes filled
- *
- * Fill \a buf with \a buflen random bytes.
- */
-SPA_EXPORT
-ssize_t pw_getrandom(void *buf, size_t buflen, unsigned int flags)
+static inline ssize_t make_random(void *buf, size_t buflen, unsigned int flags)
 {
 	ssize_t bytes;
 	int read_errno;
@@ -201,6 +173,73 @@ ssize_t pw_getrandom(void *buf, size_t buflen, unsigned int flags)
 	close(fd);
 	errno = read_errno;
 	return bytes;
+}
+
+/** Fill a buffer with random data
+ * \param buf a buffer to fill
+ * \param buflen the number of bytes to fill
+ * \param flags optional flags
+ * \return the number of bytes filled
+ *
+ * Fill \a buf with \a buflen random bytes.
+ */
+SPA_EXPORT
+ssize_t pw_getrandom(void *buf, size_t buflen, unsigned int flags)
+{
+	ssize_t res;
+	do {
+		res = make_random(buf, buflen, flags);
+	} while ((res == -1) && (errno == EINTR));
+	if (res == -1)
+		return -errno;
+	if ((size_t)res != buflen)
+		return -ENODATA;
+	return res;
+}
+
+#ifdef HAVE_RANDOM_R
+static char statebuf[256];
+static struct random_data random_state;
+#endif
+
+/** Fill a buffer with random data
+ * \param buf a buffer to fill
+ * \param buflen the number of bytes to fill
+ *
+ * Fill \a buf with \a buflen random bytes. This functions uses
+ * pw_getrandom() but falls back to a pseudo random number
+ * generator in case of failure.
+ */
+SPA_EXPORT
+void pw_random(void *buf, size_t buflen)
+{
+	if (pw_getrandom(buf, buflen, 0) < 0) {
+		uint8_t *p = buf;
+		while (buflen-- > 0) {
+			int32_t val;
+#ifdef HAVE_RANDOM_R
+			random_r(&random_state, &val);
+#else
+			val = rand();
+#endif
+			*p++ = (uint8_t) val;;
+		}
+	}
+}
+
+void pw_random_init()
+{
+	unsigned int seed;
+	if (pw_getrandom(&seed, sizeof(seed), 0) < 0) {
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		seed = (unsigned int) SPA_TIMESPEC_TO_NSEC(&ts);
+	}
+#ifdef HAVE_RANDOM_R
+	initstate_r(seed, statebuf, sizeof(statebuf), &random_state);
+#else
+	srand(seed);
+#endif
 }
 
 SPA_EXPORT

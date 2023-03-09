@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -404,6 +384,7 @@ struct client {
 	int rt_max;
 	unsigned int fix_midi_events:1;
 	unsigned int global_buffer_size:1;
+	unsigned int passive_links:1;
 	char filter_char;
 
 	jack_position_t jack_position;
@@ -2946,7 +2927,7 @@ static void registry_event_global(void *data, uint32_t id,
 			goto exit;
 
 		spa_dict_for_each(item, props) {
-	                if (spa_streq(item->key, PW_KEY_PORT_DIRECTION)) {
+			if (spa_streq(item->key, PW_KEY_PORT_DIRECTION)) {
 				if (spa_streq(item->value, "in"))
 					flags |= JackPortIsInput;
 				else if (spa_streq(item->value, "out"))
@@ -3426,7 +3407,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
 		pw_properties_set(client->props, PW_KEY_NODE_RATE, str);
 	if ((str = getenv("PIPEWIRE_LINK_PASSIVE")) != NULL)
-		pw_properties_set(client->props, PW_KEY_NODE_PASSIVE, str);
+		pw_properties_set(client->props, "jack.passive-links", str);
 
 	if ((str = pw_properties_get(client->props, PW_KEY_NODE_LATENCY)) != NULL) {
 		uint32_t num, denom;
@@ -3483,6 +3464,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	client->merge_monitor = pw_properties_get_bool(client->props, "jack.merge-monitor", true);
 	client->short_name = pw_properties_get_bool(client->props, "jack.short-name", false);
 	client->filter_name = pw_properties_get_bool(client->props, "jack.filter-name", false);
+	client->passive_links = pw_properties_get_bool(client->props, "jack.passive-links", false);
 	client->filter_char = ' ';
 	if ((str = pw_properties_get(client->props, "jack.filter-char")) != NULL && str[0] != '\0')
 		client->filter_char = str[0];
@@ -5175,7 +5157,6 @@ int jack_connect (jack_client_t *client,
 	struct pw_proxy *proxy;
 	struct spa_hook listener;
 	char val[4][16];
-	const char *str;
 	int res, link_res = 0;
 
 	spa_return_val_if_fail(c != NULL, EINVAL);
@@ -5210,8 +5191,7 @@ int jack_connect (jack_client_t *client,
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_LINK_INPUT_NODE, val[2]);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_LINK_INPUT_PORT, val[3]);
 	items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_OBJECT_LINGER, "true");
-	if ((str = pw_properties_get(c->props, PW_KEY_NODE_PASSIVE)) != NULL &&
-	    pw_properties_parse_bool(str))
+	if (c->passive_links)
 		items[props.n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_LINK_PASSIVE, "true");
 
 	proxy = pw_core_create_object(c->core,
@@ -6296,9 +6276,9 @@ int jack_client_stop_thread(jack_client_t* client, jack_native_thread_t thread)
 
 	spa_return_val_if_fail(client != NULL, -EINVAL);
 
-	pw_log_debug("join thread %lu", thread);
+	pw_log_debug("join thread %p", (void *) thread);
 	spa_thread_utils_join(&c->context.thread_utils, (struct spa_thread*)thread, &status);
-	pw_log_debug("stopped thread %lu", thread);
+	pw_log_debug("stopped thread %p", (void *) thread);
 	return 0;
 }
 
@@ -6313,11 +6293,11 @@ int jack_client_kill_thread(jack_client_t* client, jack_native_thread_t thread)
 
 	spa_return_val_if_fail(client != NULL, -EINVAL);
 
-	pw_log_debug("cancel thread %lu", thread);
+	pw_log_debug("cancel thread %p", (void *) thread);
 	pthread_cancel(thread);
-	pw_log_debug("join thread %lu", thread);
+	pw_log_debug("join thread %p", (void *) thread);
 	spa_thread_utils_join(&c->context.thread_utils, (struct spa_thread*)thread, &status);
-	pw_log_debug("stopped thread %lu", thread);
+	pw_log_debug("stopped thread %p", (void *) thread);
 	return 0;
 }
 

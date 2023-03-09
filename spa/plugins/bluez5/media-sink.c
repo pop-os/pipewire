@@ -1,26 +1,6 @@
-/* Spa Media Sink
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa Media Sink */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -711,11 +691,6 @@ again:
 		spa_log_trace(this->log, "%p: written %u frames", this, total_frames);
 	}
 
-	if (written > 0 && this->buffer_used == this->header_size) {
-		enable_flush_timer(this, false);
-		return 0;
-	}
-
 	if (this->flush_pending) {
 		spa_log_trace(this->log, "%p: wait for flush timer", this);
 		return 0;
@@ -779,13 +754,16 @@ again:
 						/ port->current_format.info.raw.rate);
 
 			/*
-			 * We could delay the output by one packet to avoid waiting
+			 * We can delay the output by one packet to avoid waiting
 			 * for the next buffer and so make send intervals exactly regular.
 			 * However, this is not needed for A2DP or BAP. The controller
 			 * will do the scheduling for us, and there's also the socket buffer
 			 * in between.
+			 *
+			 * Although in principle this should not be needed, we
+			 * do it regardless in case it helps.
 			 */
-#if 0
+#if 1
 			this->next_flush_time += SPA_MIN(packet_time,
 					duration_ns * (port->n_buffers - 1));
 #endif
@@ -814,6 +792,9 @@ again:
 				this->next_flush_time, this->process_time);
 		reset_buffer(this);
 		enable_flush_timer(this, true);
+
+		/* Encode next packet already now; it will be flushed later on timer */
+		goto again;
 	}
 	else {
 		/* Don't want to flush yet, or failed to write anything */
@@ -995,10 +976,6 @@ static int do_start(struct impl *this)
 		spa_log_debug(this->log, "%p: SO_SNDBUF: %d", this, val);
 	}
 	this->fd_buffer_size = val;
-
-	val = FILL_FRAMES * this->transport->read_mtu;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
-		spa_log_warn(this->log, "%p: SO_RCVBUF %m", this);
 
 	val = 6;
 	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)

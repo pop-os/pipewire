@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -72,6 +52,7 @@
  * - `sess.name = <str>`: a session name
  * - `sess.ts-offset = <int>`: an offset to apply to the timestamp, default -1 = random offset
  * - `sess.ts-refclk = <string>`: the name of a reference clock
+ * - `sess.media = <string>`: the session media type audio|midi, default audio
  * - `stream.props = {}`: properties to be passed to the stream
  *
  * ## General options
@@ -108,6 +89,7 @@
  *         #sess.min-ptime = 2
  *         #sess.max-ptime = 20
  *         #sess.name = "PipeWire RTP stream"
+ *         #sess.media = audio
  *         #audio.format = "S16BE"
  *         #audio.rate = 48000
  *         #audio.channels = 2
@@ -137,6 +119,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_SAP_IP		"224.0.0.56"
 #define DEFAULT_SAP_PORT	9875
 
+#define DEFAULT_SESS_MEDIA	"audio"
+
 #define DEFAULT_FORMAT		"S16BE"
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
@@ -148,6 +132,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_TTL		1
 #define DEFAULT_MTU		1280
 #define DEFAULT_LOOP		false
+#define DEFAULT_DSCP		34 /* Default to AES-67 AF41 (34) */
 
 #define DEFAULT_MIN_PTIME	2
 #define DEFAULT_MAX_PTIME	20
@@ -161,9 +146,11 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 		"net.mtu=<desired MTU, default:"SPA_STRINGIFY(DEFAULT_MTU)"> "			\
 		"net.ttl=<desired TTL, default:"SPA_STRINGIFY(DEFAULT_TTL)"> "			\
 		"net.loop=<desired loopback, default:"SPA_STRINGIFY(DEFAULT_LOOP)"> "		\
+		"net.dscp=<desired DSCP, default:"SPA_STRINGIFY(DEFAULT_DSCP)"> "		\
 		"sess.name=<a name for the session> "						\
 		"sess.min-ptime=<minimum packet time in milliseconds, default:2> "		\
 		"sess.max-ptime=<maximum packet time in milliseconds, default:20> "		\
+		"sess.media=<media type, audio or midi, default:audio> "			\
 		"audio.format=<format, default:"DEFAULT_FORMAT"> "				\
 		"audio.rate=<sample rate, default:"SPA_STRINGIFY(DEFAULT_RATE)"> "		\
 		"audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS)"> "\
@@ -176,26 +163,6 @@ static const struct spa_dict_item module_info[] = {
 	{ PW_KEY_MODULE_USAGE, USAGE },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
-
-static const struct format_info {
-	uint32_t format;
-	uint32_t size;
-	const char *mime;
-} format_info[] = {
-	{ SPA_AUDIO_FORMAT_U8, 1, "L8" },
-	{ SPA_AUDIO_FORMAT_ALAW, 1, "PCMA" },
-	{ SPA_AUDIO_FORMAT_ULAW, 1, "PCMU" },
-	{ SPA_AUDIO_FORMAT_S16_BE, 2, "L16" },
-	{ SPA_AUDIO_FORMAT_S24_BE, 3, "L24" },
-};
-
-static const struct format_info *find_format_info(uint32_t format)
-{
-	SPA_FOR_EACH_ELEMENT_VAR(format_info, f)
-		if (f->format == format)
-			return f;
-	return NULL;
-}
 
 struct impl {
 	struct pw_impl_module *module;
@@ -221,13 +188,15 @@ struct impl {
 
 	char *ifname;
 	char *session_name;
-	int sess_latency_msec;
-	int mtu;
+	uint32_t mtu;
 	bool ttl;
 	bool mcast_loop;
+	uint32_t dscp;
 	float min_ptime;
 	float max_ptime;
 	uint32_t psamples;
+	uint32_t min_samples;
+	uint32_t max_samples;
 
 	struct sockaddr_storage src_addr;
 	socklen_t src_len;
@@ -243,8 +212,9 @@ struct impl {
 	uint16_t msg_id_hash;
 	uint32_t ntp;
 
-	struct spa_audio_info_raw info;
+	struct spa_audio_info info;
 	const struct format_info *format_info;
+	uint32_t rate;
 	uint32_t stride;
 	int payload;
 	uint16_t seq;
@@ -259,6 +229,7 @@ struct impl {
 	int sap_fd;
 
 	unsigned sync:1;
+	unsigned has_sent_sap:1;
 };
 
 
@@ -279,13 +250,58 @@ set_iovec(struct spa_ringbuffer *rbuf, void *buffer, uint32_t size,
 	iov[1].iov_base = buffer;
 }
 
-static void flush_packets(struct impl *impl)
+struct format_info {
+	uint32_t media_subtype;
+	uint32_t format;
+	uint32_t size;
+	const char *mime;
+	const char *media_type;
+};
+
+static const struct format_info audio_format_info[] = {
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_U8, 1, "L8", "audio" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ALAW, 1, "PCMA", "audio" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ULAW, 1, "PCMU", "audio" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S16_BE, 2, "L16", "audio" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S24_BE, 3, "L24", "audio" },
+	{ SPA_MEDIA_SUBTYPE_control, 0, 1, "rtp-midi", "audio" },
+};
+
+static const struct format_info *find_audio_format_info(const struct spa_audio_info *info)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(audio_format_info, f)
+		if (f->media_subtype == info->media_subtype &&
+		    (f->format == 0 || f->format == info->info.raw.format))
+			return f;
+	return NULL;
+}
+
+static ssize_t send_packet(struct impl *impl, struct msghdr *msg)
+{
+	ssize_t n;
+	n = sendmsg(impl->rtp_fd, msg, MSG_NOSIGNAL);
+	if (n < 0) {
+		switch (errno) {
+		case ECONNREFUSED:
+		case ECONNRESET:
+			pw_log_debug("remote end not listening");
+			break;
+		default:
+			pw_log_warn("sendmsg() failed, seq:%u dropped: %m",
+					impl->seq);
+			break;
+		}
+	}
+	impl->seq++;
+	return n;
+}
+
+static void flush_audio_packets(struct impl *impl)
 {
 	int32_t avail;
 	uint32_t stride, timestamp;
 	struct iovec iov[3];
 	struct msghdr msg;
-	ssize_t n;
 	struct rtp_header header;
 	int32_t tosend;
 
@@ -323,21 +339,8 @@ static void flush_packets(struct impl *impl)
 			&iov[1], tosend * stride);
 
 		pw_log_trace("sending %d timestamp:%d", tosend, timestamp);
-		n = sendmsg(impl->rtp_fd, &msg, MSG_NOSIGNAL);
-		if (n < 0) {
-			switch (errno) {
-			case ECONNREFUSED:
-			case ECONNRESET:
-				pw_log_debug("remote end not listening");
-				break;
-			default:
-				pw_log_warn("sendmsg() failed, seq:%u dropped: %m",
-						impl->seq);
-				break;
-			}
-		}
 
-		impl->seq++;
+		send_packet(impl, &msg);
 
 		timestamp += tosend;
 		avail -= tosend;
@@ -345,9 +348,8 @@ static void flush_packets(struct impl *impl)
 	spa_ringbuffer_read_update(&impl->ring, timestamp);
 }
 
-static void stream_process(void *data)
+static void stream_audio_process(struct impl *impl)
 {
-	struct impl *impl = data;
 	struct pw_buffer *buf;
 	struct spa_data *d;
 	uint32_t offs, size, timestamp, expected_timestamp, stride;
@@ -396,8 +398,167 @@ static void stream_process(void *data)
 
 	pw_stream_queue_buffer(impl->stream, buf);
 
-	flush_packets(impl);
+	flush_audio_packets(impl);
 }
+
+static int write_event(uint8_t *p, uint32_t value, void *ev, uint32_t size)
+{
+        uint64_t buffer;
+        uint8_t b;
+        int count = 0;
+
+        buffer = value & 0x7f;
+        while ((value >>= 7)) {
+                buffer <<= 8;
+                buffer |= ((value & 0x7f) | 0x80);
+        }
+        do  {
+		b = buffer & 0xff;
+                p[count++] = b;
+                buffer >>= 8;
+        } while (b & 0x80);
+
+	memcpy(&p[count], ev, size);
+        return count + size;
+}
+
+static void flush_midi_packets(struct impl *impl, struct spa_pod_sequence *sequence, uint32_t timestamp)
+{
+	struct spa_pod_control *c;
+	struct rtp_header header;
+	struct rtp_midi_header midi_header;
+	struct iovec iov[3];
+	struct msghdr msg;
+	uint32_t len, prev_offset, base;
+
+	spa_zero(header);
+	header.v = 2;
+	header.pt = impl->payload;
+	header.ssrc = htonl(impl->ssrc);
+
+	spa_zero(midi_header);
+	midi_header.b = 1;
+	midi_header.z = 1;
+
+	iov[0].iov_base = &header;
+	iov[0].iov_len = sizeof(header);
+	iov[1].iov_base = &midi_header;
+	iov[1].iov_len = sizeof(midi_header);
+	iov[2].iov_base = impl->buffer;
+	iov[2].iov_len = 0;
+
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 3;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+
+	prev_offset = len = base = 0;
+
+	SPA_POD_SEQUENCE_FOREACH(sequence, c) {
+		void *ev;
+		uint32_t size, delta;
+
+		if (c->type != SPA_CONTROL_Midi)
+			continue;
+
+		ev = SPA_POD_BODY(&c->value),
+                size = SPA_POD_BODY_SIZE(&c->value);
+
+		if (len > 0 && (len + size > impl->mtu ||
+		    c->offset - base > impl->max_samples)) {
+			/* flush packet when we have one and when it's either
+			 * too large or has too much data. */
+			midi_header.len = (len >> 8) & 0xf;
+			midi_header.len_b = len & 0xff;
+			iov[2].iov_len = len;
+
+			pw_log_debug("sending %d timestamp:%d %u %u",
+					len, timestamp + base,
+					c->offset, impl->max_samples);
+			send_packet(impl, &msg);
+
+			len = 0;
+		}
+		if (len == 0) {
+			/* start new packet */
+			base = prev_offset = c->offset;
+			header.sequence_number = htons(impl->seq);
+			header.timestamp = htonl(impl->ts_offset + timestamp + base);
+		}
+
+		delta = c->offset - prev_offset;
+		prev_offset = c->offset;
+
+		len += write_event(&impl->buffer[len], delta, ev, size);
+	}
+	if (len > 0) {
+		/* flush last packet */
+		midi_header.len = (len >> 8) & 0xf;
+		midi_header.len_b = len & 0xff;
+		iov[2].iov_len = len;
+
+		pw_log_debug("sending %d timestamp:%d", len, base);
+		send_packet(impl, &msg);
+	}
+}
+
+static void stream_midi_process(void *data)
+{
+	struct impl *impl = data;
+	struct pw_buffer *buf;
+	struct spa_data *d;
+	uint32_t offs, size, timestamp;
+	struct spa_pod *pod;
+	void *ptr;
+
+	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
+		pw_log_debug("Out of stream buffers: %m");
+		return;
+	}
+	d = buf->buffer->datas;
+
+	offs = SPA_MIN(d[0].chunk->offset, d[0].maxsize);
+	size = SPA_MIN(d[0].chunk->size, d[0].maxsize - offs);
+
+	if (SPA_LIKELY(impl->io_position))
+		timestamp = impl->io_position->clock.position;
+	else
+		timestamp = 0;
+
+	ptr = SPA_PTROFF(d[0].data, offs, void);
+
+	if ((pod = spa_pod_from_data(ptr, size, 0, size)) == NULL)
+		goto done;
+	if (!spa_pod_is_sequence(pod))
+		goto done;
+
+	if (!impl->sync) {
+		pw_log_info("sync to timestamp %u", timestamp);
+		impl->sync = true;
+	}
+
+	flush_midi_packets(impl, (struct spa_pod_sequence*)pod, timestamp);
+
+done:
+	pw_stream_queue_buffer(impl->stream, buf);
+}
+
+static void stream_process(void *data)
+{
+	struct impl *impl = data;
+	switch (impl->info.media_type) {
+	case SPA_MEDIA_TYPE_audio:
+		stream_audio_process(impl);
+		break;
+	case SPA_MEDIA_TYPE_application:
+		stream_midi_process(impl);
+		break;
+	}
+}
+
 
 static void stream_io_changed(void *data, uint32_t id, void *area, uint32_t size)
 {
@@ -473,7 +634,7 @@ static bool is_multicast(struct sockaddr *sa, socklen_t salen)
 
 static int make_socket(struct sockaddr_storage *src, socklen_t src_len,
 		struct sockaddr_storage *dst, socklen_t dst_len,
-		bool loop, int ttl)
+		bool loop, int ttl, int dscp)
 {
 	int af, fd, val, res;
 
@@ -506,10 +667,11 @@ static int make_socket(struct sockaddr_storage *src, socklen_t src_len,
 	if (setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
 		pw_log_warn("setsockopt(SO_PRIORITY) failed: %m");
 #endif
-	/* FIXME AES67 wants IPTOS_DSCP_AF41 */
-	val = IPTOS_LOWDELAY;
-	if (setsockopt(fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
-		pw_log_warn("setsockopt(IP_TOS) failed: %m");
+	if (dscp > 0) {
+		val = IPTOS_DSCP(dscp << 2);
+		if (setsockopt(fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
+			pw_log_warn("setsockopt(IP_TOS) failed: %m");
+	}
 
 
 	return fd;
@@ -533,9 +695,9 @@ static int setup_stream(struct impl *impl)
 
 	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL) {
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY,
-				"%d/%d", impl->psamples, impl->info.rate);
+				"%d/%d", impl->psamples, impl->rate);
 	}
-	pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%d", impl->info.rate);
+	pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%d", impl->rate);
 
 	impl->stream = pw_stream_new(impl->core,
 			"rtp-sink capture", props);
@@ -548,8 +710,21 @@ static int setup_stream(struct impl *impl)
 
 	n_params = 0;
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	params[n_params++] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat,
-			&impl->info);
+
+	switch (impl->info.media_type) {
+	case SPA_MEDIA_TYPE_audio:
+		params[n_params++] = spa_format_audio_build(&b,
+				SPA_PARAM_EnumFormat, &impl->info);
+		break;
+	case SPA_MEDIA_TYPE_application:
+		params[n_params++] = spa_pod_builder_add_object(&b,
+                                SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+                                SPA_FORMAT_mediaType,           SPA_POD_Id(SPA_MEDIA_TYPE_application),
+                                SPA_FORMAT_mediaSubtype,        SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	if ((res = pw_stream_connect(impl->stream,
 			PW_DIRECTION_INPUT,
@@ -563,7 +738,8 @@ static int setup_stream(struct impl *impl)
 
 	if ((fd = make_socket(&impl->src_addr, impl->src_len,
 					&impl->dst_addr, impl->dst_len,
-					impl->mcast_loop, impl->ttl)) < 0)
+					impl->mcast_loop, impl->ttl,
+					impl->dscp)) < 0)
 		return fd;
 
 	impl->rtp_fd = fd;
@@ -592,6 +768,9 @@ static void send_sap(struct impl *impl, bool bye)
 	struct iovec iov[4];
 	struct msghdr msg;
 	struct spa_strbuf buf;
+
+	if (!impl->has_sent_sap && bye)
+		return;
 
 	spa_zero(header);
 	header.v = 1;
@@ -633,19 +812,35 @@ static void send_sap(struct impl *impl, bool bye)
 			"t=%u 0\n"
 			"a=recvonly\n"
 			"a=tool:PipeWire %s\n"
-			"m=audio %u RTP/AVP %i\n"
-			"a=rtpmap:%i %s/%u/%u\n"
-			"a=type:broadcast\n"
-			"a=ptime:%d\n",
+			"a=type:broadcast\n",
 			user_name, impl->ntp, af, src_addr,
 			impl->session_name,
 			af, dst_addr, dst_ttl,
 			impl->ntp,
-			pw_get_library_version(),
-			impl->port, impl->payload,
-			impl->payload, impl->format_info->mime,
-			impl->info.rate, impl->info.channels,
-			impl->psamples * 1000 / impl->info.rate);
+			pw_get_library_version());
+	spa_strbuf_append(&buf,
+			"m=%s %u RTP/AVP %i\n",
+			impl->format_info->media_type,
+			impl->port, impl->payload);
+
+	switch (impl->info.media_type) {
+	case SPA_MEDIA_TYPE_audio:
+		spa_strbuf_append(&buf,
+				"a=rtpmap:%i %s/%u/%u\n"
+				"a=ptime:%d\n",
+				impl->payload, impl->format_info->mime,
+				impl->info.info.raw.rate,
+				impl->info.info.raw.channels,
+				impl->psamples * 1000 / impl->info.info.raw.rate);
+		break;
+	case SPA_MEDIA_TYPE_application:
+		spa_strbuf_append(&buf,
+				"a=rtpmap:%i %s/%u\n",
+				impl->payload, impl->format_info->mime,
+				impl->rate);
+		break;
+
+	}
 
 	if (impl->ts_refclk[0] != '\0') {
 		spa_strbuf_append(&buf,
@@ -669,6 +864,8 @@ static void send_sap(struct impl *impl, bool bye)
 	msg.msg_flags = 0;
 
 	sendmsg(impl->sap_fd, &msg, MSG_NOSIGNAL);
+
+	impl->has_sent_sap = true;
 }
 
 static void on_timer_event(void *data, uint64_t expirations)
@@ -684,7 +881,7 @@ static int start_sap_announce(struct impl *impl)
 
 	if ((fd = make_socket(&impl->src_addr, impl->src_len,
 					&impl->sap_addr, impl->sap_len,
-					impl->mcast_loop, impl->ttl)) < 0)
+					impl->mcast_loop, impl->ttl, 0)) < 0)
 		return fd;
 
 	impl->sap_fd = fd;
@@ -848,7 +1045,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct impl *impl;
 	struct pw_properties *props = NULL, *stream_props = NULL;
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
-	uint32_t pid = getpid(), port, min_samples, max_samples;
+	uint32_t pid = getpid(), port;
 	int64_t ts_offset;
 	char addr[64];
 	const char *str;
@@ -914,16 +1111,50 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_MEDIA_NAME);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
 
-	parse_audio_info(impl->stream_props, &impl->info);
+	if ((str = pw_properties_get(props, "sess.media")) == NULL)
+		str = DEFAULT_SESS_MEDIA;
 
-	impl->format_info = find_format_info(impl->info.format);
-	if (impl->format_info == NULL) {
-		pw_log_error("unsupported audio format:%d channels:%d",
-				impl->info.format, impl->info.channels);
+	if (spa_streq(str, "audio")) {
+		impl->info.media_type = SPA_MEDIA_TYPE_audio;
+		impl->info.media_subtype = SPA_MEDIA_SUBTYPE_raw;
+	}
+	else if (spa_streq(str, "midi")) {
+		impl->info.media_type = SPA_MEDIA_TYPE_application;
+		impl->info.media_subtype = SPA_MEDIA_SUBTYPE_control;
+	}
+	else {
+		pw_log_error("unsupported media type:%s", str);
 		res = -EINVAL;
 		goto out;
 	}
-	impl->stride = impl->format_info->size * impl->info.channels;
+
+	switch (impl->info.media_type) {
+	case SPA_MEDIA_TYPE_audio:
+		parse_audio_info(impl->stream_props, &impl->info.info.raw);
+		impl->format_info = find_audio_format_info(&impl->info);
+		if (impl->format_info == NULL) {
+			pw_log_error("unsupported audio format:%d channels:%d",
+					impl->info.info.raw.format, impl->info.info.raw.channels);
+			res = -EINVAL;
+			goto out;
+		}
+		impl->stride = impl->format_info->size * impl->info.info.raw.channels;
+		impl->rate = impl->info.info.raw.rate;
+		break;
+	case SPA_MEDIA_TYPE_application:
+		impl->format_info = find_audio_format_info(&impl->info);
+		if (impl->format_info == NULL) {
+			res = -EINVAL;
+			goto out;
+		}
+		pw_properties_set(impl->stream_props, PW_KEY_FORMAT_DSP, "8 bit raw midi");
+		impl->stride = impl->format_info->size;
+		impl->rate = 48000;
+		break;
+	default:
+		spa_assert_not_reached();
+		break;
+	}
 	impl->msg_id_hash = rand();
 	impl->ntp = (uint32_t) time(NULL) + 2208988800U;
 
@@ -961,6 +1192,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->mtu = pw_properties_get_uint32(props, "net.mtu", DEFAULT_MTU);
 	impl->ttl = pw_properties_get_uint32(props, "net.ttl", DEFAULT_TTL);
 	impl->mcast_loop = pw_properties_get_bool(props, "net.loop", DEFAULT_LOOP);
+	impl->dscp = pw_properties_get_uint32(props, "net.dscp", DEFAULT_DSCP);
 
 	ts_offset = pw_properties_get_int64(props, "sess.ts-offset", DEFAULT_TS_OFFSET);
 	impl->ts_offset = ts_offset < 0 ? rand() : ts_offset;
@@ -976,11 +1208,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (!spa_atof(str, &impl->max_ptime))
 		impl->max_ptime = DEFAULT_MAX_PTIME;
 
-	min_samples = impl->min_ptime * impl->info.rate / 1000;
-	max_samples = impl->max_ptime * impl->info.rate / 1000;
+	impl->min_samples = impl->min_ptime * impl->rate / 1000;
+	impl->max_samples = impl->max_ptime * impl->rate / 1000;
 
 	impl->psamples = impl->mtu / impl->stride;
-	impl->psamples = SPA_CLAMP(impl->psamples, min_samples, max_samples);
+	impl->psamples = SPA_CLAMP(impl->psamples, impl->min_samples, impl->max_samples);
 
 	if ((str = pw_properties_get(props, "sess.name")) == NULL)
 		pw_properties_setf(props, "sess.name", "PipeWire RTP Stream on %s",
@@ -997,7 +1229,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_properties_setf(stream_props, "rtp.mtu", "%u", impl->mtu);
 	pw_properties_setf(stream_props, "rtp.ttl", "%u", impl->ttl);
 	pw_properties_setf(stream_props, "rtp.ptime", "%u",
-			impl->psamples * 1000 / impl->info.rate);
+			impl->psamples * 1000 / impl->rate);
+	pw_properties_setf(stream_props, "rtp.dscp", "%u", impl->dscp);
 
 	impl->core = pw_context_get_object(impl->module_context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {

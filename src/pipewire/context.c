@@ -1,26 +1,7 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
+
 #include <errno.h>
 #include <unistd.h>
 #include <time.h>
@@ -199,6 +180,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
 	if (impl == NULL) {
+		pw_properties_free(properties);
 		res = -errno;
 		goto error_cleanup;
 	}
@@ -810,11 +792,11 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 	/* now follow all the links from the nodes in the queue
 	 * and add the peers to the queue. */
 	spa_list_consume(n, &queue, sort_link) {
-		pw_log_debug(" next node %p: '%s'", n, n->name);
-
 		spa_list_remove(&n->sort_link);
 		spa_list_append(collect, &n->sort_link);
-		n->passive = true;
+		n->runnable = n->always_process;
+
+		pw_log_debug(" next node %p: '%s' runnable:%u", n, n->name, n->runnable);
 
 		if (!n->active)
 			continue;
@@ -832,7 +814,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 					continue;
 
 				if (!l->passive)
-					node->passive = n->passive = false;
+					n->runnable = true;
 
 				if (!t->visited) {
 					t->visited = true;
@@ -853,7 +835,7 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 					continue;
 
 				if (!l->passive)
-					node->passive = n->passive = false;
+					n->runnable = true;
 
 				if (!t->visited) {
 					t->visited = true;
@@ -863,17 +845,17 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 		}
 		/* now go through all the nodes that have the same group and
 		 * that are not yet visited */
-		if (n->group[0] == '\0')
-			continue;
-
-		spa_list_for_each(t, &context->node_list, link) {
-			if (t->exported || t == n || !t->active || t->visited)
-				continue;
-			if (!spa_streq(t->group, n->group))
-				continue;
-			pw_log_debug("%p join group %s: '%s'", t, t->group, n->group);
-			t->visited = true;
-			spa_list_append(&queue, &t->sort_link);
+		if (n->group != NULL) {
+			spa_list_for_each(t, &context->node_list, link) {
+				if (t->exported || !t->active || t->visited)
+					continue;
+				if (!spa_streq(t->group, n->group))
+					continue;
+				pw_log_debug("%p: %s join group %s",
+						t, t->name, t->group);
+				t->visited = true;
+				spa_list_append(&queue, &t->sort_link);
+			}
 		}
 	}
 	return 0;
@@ -883,10 +865,13 @@ static void move_to_driver(struct pw_context *context, struct spa_list *nodes,
 		struct pw_impl_node *driver)
 {
 	struct pw_impl_node *n;
-	pw_log_debug("driver: %p %s", driver, driver->name);
+	pw_log_debug("driver: %p %s runnable:%u", driver, driver->name, driver->runnable);
 	spa_list_consume(n, nodes, sort_link) {
 		spa_list_remove(&n->sort_link);
-		pw_log_debug(" follower: %p %s", n, n->name);
+		if (n->runnable)
+			driver->runnable = true;
+		pw_log_debug(" follower: %p %s runnable:%u driver-runnable:%u", n, n->name,
+				n->runnable, driver->runnable);
 		pw_impl_node_set_driver(n, driver);
 	}
 }
@@ -1148,7 +1133,7 @@ again:
 		if (fallback == NULL)
 			fallback = n;
 
-		if (n->passive)
+		if (!n->runnable)
 			continue;
 
 		spa_list_for_each(s, &n->follower_list, follower_link) {
@@ -1193,14 +1178,14 @@ again:
 
 		driver = NULL;
 		spa_list_for_each(t, &collect, sort_link) {
-			/* is any active and want a driver or it want process */
-			if ((t->want_driver && t->active && !n->passive) ||
-			    t->always_process)
+			/* is any active and want a driver */
+			if (t->want_driver && t->active && t->runnable) {
 				driver = target;
+				break;
+			}
 		}
 		if (driver != NULL) {
 			/* driver needed for this group */
-			driver->passive = false;
 			move_to_driver(context, &collect, driver);
 		} else {
 			/* no driver, make sure the nodes stops */
@@ -1282,10 +1267,10 @@ again:
 				rate = s->rate;
 
 			if (s->active)
-				running = !n->passive;
+				running = n->runnable;
 
-			pw_log_debug("%p: follower %p running:%d passive:%d rate:%u/%u latency %u/%u '%s'",
-				context, s, running, s->passive, rate.num, rate.denom,
+			pw_log_debug("%p: follower %p running:%d runnable:%d rate:%u/%u latency %u/%u '%s'",
+				context, s, running, s->runnable, rate.num, rate.denom,
 				latency.num, latency.denom, s->name);
 
 			s->moved = false;
@@ -1394,8 +1379,8 @@ again:
 			n->current_pending = false;
 		}
 
-		pw_log_debug("%p: driver %p running:%d passive:%d quantum:%u '%s'",
-				context, n, running, n->passive, quantum, n->name);
+		pw_log_debug("%p: driver %p running:%d runnable:%d quantum:%u '%s'",
+				context, n, running, n->runnable, quantum, n->name);
 
 		/* first change the node states of the followers to the new target */
 		spa_list_for_each(s, &n->follower_list, follower_link) {

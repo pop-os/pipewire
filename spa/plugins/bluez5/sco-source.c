@@ -1,26 +1,6 @@
-/* Spa SCO Source
- *
- * Copyright © 2019 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa SCO Source */
+/* SPDX-FileCopyrightText: Copyright © 2019 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -642,8 +622,9 @@ static void sco_on_timeout(struct spa_source *source)
 	}
 
 	if (port->io) {
+		int io_status = port->io->status;
 		int status = produce_buffer(this);
-		spa_log_trace(this->log, "%p: io:%d status:%d", this, port->io->status, status);
+		spa_log_trace(this->log, "%p: io:%d->%d status:%d", this, io_status, port->io->status, status);
 	}
 
 	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
@@ -698,6 +679,10 @@ static int do_start(struct impl *this)
 			port->frame_size, port->current_format.info.raw.rate,
 			this->quantum_limit, this->quantum_limit)) < 0)
 		return res;
+
+	/* 40 ms max buffer */
+	spa_bt_decode_buffer_set_max_latency(&port->buffer,
+			port->current_format.info.raw.rate * 40 / 1000);
 
 	/* Init mSBC if needed */
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
@@ -1274,7 +1259,7 @@ static void process_buffering(struct impl *this)
 	buf = spa_bt_decode_buffer_get_read(&port->buffer, &avail);
 
 	/* copy data to buffers */
-	if (!spa_list_is_empty(&port->free) && avail > 0) {
+	if (!spa_list_is_empty(&port->free)) {
 		struct buffer *buffer;
 		struct spa_data *datas;
 		uint32_t data_size;
@@ -1295,12 +1280,17 @@ static void process_buffering(struct impl *this)
 		spa_assert(datas[0].maxsize >= data_size);
 
 		datas[0].chunk->offset = 0;
-		datas[0].chunk->size = avail;
+		datas[0].chunk->size = data_size;
 		datas[0].chunk->stride = port->frame_size;
+
 		memcpy(datas[0].data, buf, avail);
 
+		/* pad with silence */
+		if (avail < data_size)
+			memset(SPA_PTROFF(datas[0].data, avail, void), 0, data_size - avail);
+
 		/* ready buffer if full */
-		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)avail / port->frame_size);
+		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)samples);
 		spa_list_append(&port->ready, &buffer->link);
 	}
 }
@@ -1315,7 +1305,8 @@ static int produce_buffer(struct impl *this)
 		return -EIO;
 
 	/* Return if we already have a buffer */
-	if (io->status == SPA_STATUS_HAVE_DATA)
+	if (io->status == SPA_STATUS_HAVE_DATA &&
+			(this->following || port->rate_match == NULL))
 		return SPA_STATUS_HAVE_DATA;
 
 	/* Recycle */
@@ -1355,6 +1346,8 @@ static int impl_node_process(void *object)
 	port = &this->port;
 	if ((io = port->io) == NULL)
 		return -EIO;
+
+	spa_log_trace(this->log, "%p status:%d", this, io->status);
 
 	/* Return if we already have a buffer */
 	if (io->status == SPA_STATUS_HAVE_DATA)

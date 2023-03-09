@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -79,12 +59,12 @@
  *         #  client.access = "restricted"     # permissions for clients
  *         #}
  *     ]
- *     #pulse.min.req          = 256/48000     # 5ms
+ *     #pulse.min.req          = 128/48000     # 2.7ms
  *     #pulse.default.req      = 960/48000     # 20 milliseconds
- *     #pulse.min.frag         = 256/48000     # 5ms
+ *     #pulse.min.frag         = 128/48000     # 2.7ms
  *     #pulse.default.frag     = 96000/48000   # 2 seconds
  *     #pulse.default.tlength  = 96000/48000   # 2 seconds
- *     #pulse.min.quantum      = 256/48000     # 5ms
+ *     #pulse.min.quantum      = 128/48000     # 2.7ms
  *     #pulse.default.format   = F32
  *     #pulse.default.position = [ FL FR ]
  *     # These overrides are only applied when running in a vm.
@@ -130,7 +110,7 @@
  * ### Playback buffering options
  *
  *\code{.unparsed}
- *     pulse.min.req = 256/48000              # 5ms
+ *     pulse.min.req = 128/48000              # 2.7ms
  *\endcode
  *
  * The minimum amount of data to request for clients. The client requested
@@ -156,7 +136,7 @@
  * ### Record buffering options
  *
  *\code{.unparsed}
- *     pulse.min.frag = 256/48000             # 5ms
+ *     pulse.min.frag = 128/48000             # 2.7ms
  *\endcode
  *
  * The minimum allowed size of the capture buffer before it is sent to a client.
@@ -174,7 +154,7 @@
  * ### Scheduling options
  *
  *\code{.unparsed}
- *     pulse.min.quantum = 256/48000          # 5ms
+ *     pulse.min.quantum = 128/48000          # 2.7ms
  *\endcode
  *
  * The minimum quantum (buffer size in samples) to use for pulseaudio clients.
@@ -213,6 +193,23 @@
  * in pulse.properties with the given values. This might be interesting because
  * VMs usually can't support the low latency settings that are possible on real
  * hardware.
+ *
+ * ## Command execution
+ *
+ * As part of the server startup sequence, a set of commands can be executed.
+ * Currently, this can be used to load additional modules into the server.
+ *
+ *\code{.unparsed}
+ * # Extra commands can be executed here.
+ * #   load-module : loads a module with args and flags
+ * #      args = "<module-name> <module-args>"
+ * #      flags = [ "no-fail" ]
+ * pulse.cmd = [
+ *     { cmd = "load-module" args = "module-always-sink" flags = [ ] }
+ *     #{ cmd = "load-module" args = "module-switch-on-connect" }
+ *     #{ cmd = "load-module" args = "module-gsettings" flags = [ "nofail" ] }
+ * ]
+ *\endcode
  *
  * ## Stream settings and rules
  *
