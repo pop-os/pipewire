@@ -16,6 +16,7 @@ usr/bin/pw-cli
 usr/bin/pw-dot
 usr/bin/pw-dsdplay
 usr/bin/pw-dump
+usr/bin/pw-encplay
 usr/bin/pw-link
 usr/bin/pw-loopback
 usr/bin/pw-metadata

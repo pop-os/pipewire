@@ -5,6 +5,7 @@ pipewire (0.3.67-1) UNRELEASED; urgency=medium
       to help apt make a choice (Closes: #1031396)
   * Drop patches included in upstream release:
       - 3601ecc9: Improve NEWS
+  * Install new pw-encplay in pipewire-bin
 
  -- Dylan Aïssi <daissi@debian.org>  Sun, 19 Feb 2023 21:21:35 +0100
 
