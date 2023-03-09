@@ -1,5 +1,6 @@
-pipewire (0.3.66-2) UNRELEASED; urgency=medium
+pipewire (0.3.67-1) UNRELEASED; urgency=medium
 
+  * New upstream release
   * pipewire-audio: add pulseaudio-module-bluetooth in Conflicts+Replaces
       to help apt make a choice (Closes: #1031396)
 
