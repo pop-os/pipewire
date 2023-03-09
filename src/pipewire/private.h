@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PIPEWIRE_PRIVATE_H
 #define PIPEWIRE_PRIVATE_H
@@ -692,7 +672,8 @@ struct pw_impl_node {
 	char *name;				/** for debug */
 
 	uint32_t priority_driver;	/** priority for being driver */
-	char group[128];		/** group to schedule this node in */
+	char *group;			/** group to schedule this node in */
+	char *link_group;		/** group this node is linked to */
 	uint64_t spa_flags;
 
 	unsigned int registered:1;
@@ -705,7 +686,9 @@ struct pw_impl_node {
 					  *  is selected to drive the graph */
 	unsigned int visited:1;		/**< for sorting */
 	unsigned int want_driver:1;	/**< this node wants to be assigned to a driver */
-	unsigned int passive:1;		/**< driver graph only has passive links */
+	unsigned int in_passive:1;	/**< node input links should be passive */
+	unsigned int out_passive:1;	/**< node output links should be passive */
+	unsigned int runnable:1;	/**< node is runnable */
 	unsigned int freewheel:1;	/**< if this is the freewheel driver */
 	unsigned int loopchecked:1;	/**< for feedback loop checking */
 	unsigned int always_process:1;	/**< this node wants to always be processing, even when idle */
@@ -877,6 +860,7 @@ struct pw_impl_port {
 	} rt;					/**< data only accessed from the data thread */
 	unsigned int added:1;
 	unsigned int destroying:1;
+	unsigned int passive:1;
 	int busy_count;
 
 	struct spa_latency_info latency[2];	/**< latencies */
@@ -1295,6 +1279,8 @@ bool pw_log_is_default(void);
 
 void pw_log_init(void);
 void pw_log_deinit(void);
+
+void pw_random_init();
 
 void pw_settings_init(struct pw_context *context);
 int pw_settings_expose(struct pw_context *context);

@@ -1,26 +1,6 @@
-/* Simple Plugin API
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Simple Plugin API */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef SPA_UTILS_DEFS_H
 #define SPA_UTILS_DEFS_H
@@ -28,18 +8,21 @@
 #ifdef __cplusplus
 extern "C" {
 # if __cplusplus >= 201103L
-#  define SPA_STATIC_ASSERT static_assert
+#  define SPA_STATIC_ASSERT_IMPL(expr, msg, ...) static_assert(expr, msg)
 # endif
 #else
 # include <stdbool.h>
 # if __STDC_VERSION__ >= 201112L
-#  define SPA_STATIC_ASSERT _Static_assert
+#  define SPA_STATIC_ASSERT_IMPL(expr, msg, ...) _Static_assert(expr, msg)
 # endif
 #endif
-#ifndef SPA_STATIC_ASSERT
-#define SPA_STATIC_ASSERT(a, b)						\
-	((void)sizeof(struct { int spa_static_assertion_failed : 2 * !!(a) - 1; }))
+#ifndef SPA_STATIC_ASSERT_IMPL
+#define SPA_STATIC_ASSERT_IMPL(expr, ...) \
+	((void)sizeof(struct { int spa_static_assertion_failed : 2 * !!(expr) - 1; }))
 #endif
+
+#define SPA_STATIC_ASSERT(expr, ...) SPA_STATIC_ASSERT_IMPL(expr, ## __VA_ARGS__, "`" #expr "` evaluated to false")
+
 #include <inttypes.h>
 #include <signal.h>
 #include <stdlib.h>

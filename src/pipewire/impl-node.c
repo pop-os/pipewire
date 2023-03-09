@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdlib.h>
@@ -481,6 +461,8 @@ static int suspend_node(struct pw_impl_node *this)
 static void
 clear_info(struct pw_impl_node *this)
 {
+	free(this->group);
+	free(this->link_group);
 	free(this->name);
 	free((char*)this->info.error);
 }
@@ -947,16 +929,32 @@ static void check_properties(struct pw_impl_node *node)
 		node->rt.activation->state[0].required++;
 
 	/* group defines what nodes are scheduled together */
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)) == NULL)
-		str = "";
-
+	str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP);
 	if (!spa_streq(str, node->group)) {
 		pw_log_info("%p: group '%s'->'%s'", node, node->group, str);
-		snprintf(node->group, sizeof(node->group), "%s", str);
+		free(node->group);
+		node->group = str ? strdup(str) : NULL;
 		node->freewheel = spa_streq(node->group, "pipewire.freewheel");
 		recalc_reason = "group changed";
 	}
 
+	/* link group defines what nodes are logically linked together */
+	str = pw_properties_get(node->properties, PW_KEY_NODE_LINK_GROUP);
+	if (!spa_streq(str, node->link_group)) {
+		pw_log_info("%p: link group '%s'->'%s'", node, node->link_group, str);
+		free(node->link_group);
+		node->link_group = str ? strdup(str) : NULL;
+		recalc_reason = "link group changed";
+	}
+
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_PASSIVE)) == NULL)
+		str = "false";
+	if (spa_streq(str, "out"))
+		node->out_passive = true;
+	else if (spa_streq(str, "in"))
+		node->in_passive = true;
+	else
+		node->in_passive = node->out_passive = spa_atob(str);
 
 	node->want_driver = pw_properties_get_bool(node->properties, PW_KEY_NODE_WANT_DRIVER, false);
 	node->always_process = pw_properties_get_bool(node->properties, PW_KEY_NODE_ALWAYS_PROCESS, false);
@@ -1128,7 +1126,7 @@ static inline int process_node(void *data)
 	a->status = PW_NODE_ACTIVATION_AWAKE;
 	a->awake_time = SPA_TIMESPEC_TO_NSEC(&ts);
 
-	pw_log_trace_fp("%p: process %"PRIu64, this, a->awake_time);
+	pw_log_trace_fp("%p: %s process %"PRIu64, this, this->name, a->awake_time);
 
 	/* when transport sync is not supported, just clear the flag */
 	if (!this->transport_sync)

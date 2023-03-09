@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -76,12 +56,12 @@
 #include "utils.h"
 #include "volume.h"
 
-#define DEFAULT_MIN_REQ		"256/48000"
+#define DEFAULT_MIN_REQ		"128/48000"
 #define DEFAULT_DEFAULT_REQ	"960/48000"
-#define DEFAULT_MIN_FRAG	"256/48000"
+#define DEFAULT_MIN_FRAG	"128/48000"
 #define DEFAULT_DEFAULT_FRAG	"96000/48000"
 #define DEFAULT_DEFAULT_TLENGTH	"96000/48000"
-#define DEFAULT_MIN_QUANTUM	"256/48000"
+#define DEFAULT_MIN_QUANTUM	"128/48000"
 #define DEFAULT_FORMAT		"F32"
 #define DEFAULT_POSITION	"[ FL FR ]"
 #define DEFAULT_IDLE_TIMEOUT	"0"
@@ -1569,8 +1549,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	struct impl *impl = client->impl;
 	const char *name = NULL;
 	int res;
-	struct sample_spec ss;
-	struct channel_map map;
+	struct sample_spec ss, fix_ss;
+	struct channel_map map, fix_map;
 	uint32_t sink_index, syncid, rate = 0;
 	const char *sink_name;
 	struct buffer_attr attr = { 0 };
@@ -1645,6 +1625,24 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
+
+	spa_zero(fix_ss);
+	spa_zero(fix_map);
+	if (fix_format || fix_rate || fix_channels) {
+		struct pw_manager_object *o;
+		bool is_monitor;
+
+		o = find_device(client, sink_index, sink_name, true, &is_monitor);
+		if (o != NULL) {
+			struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_OUTPUT);
+			collect_device_info(o, NULL, &dev_info, is_monitor, &impl->defs);
+			fix_ss.format = fix_format ? dev_info.ss.format : 0;
+			fix_ss.rate = fix_rate ? dev_info.ss.rate : 0;
+			fix_ss.channels = fix_channels ? dev_info.ss.channels : 0;
+			fix_map = dev_info.map;
+		}
+	}
+
 	if (client->version >= 13) {
 		if (message_get(m,
 				TAG_BOOLEAN, &muted,
@@ -1713,26 +1711,17 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 		}
 	}
 	if (sample_spec_valid(&ss)) {
-		if (fix_format || fix_rate || fix_channels) {
-			struct sample_spec sfix = ss;
-			if (fix_format)
-				sfix.format = SPA_AUDIO_FORMAT_UNKNOWN;
-			if (fix_rate)
-				sfix.rate = 0;
-			if (fix_channels)
-				sfix.channels = 0;
-			if (n_params < MAX_FORMATS &&
-			    (params[n_params] = format_build_param(&b,
-					SPA_PARAM_EnumFormat, &sfix,
-					sfix.channels > 0 ? &map : NULL)) != NULL) {
-				n_params++;
-				n_valid_formats++;
-			}
-		}
-		else if (n_params < MAX_FORMATS &&
+		struct sample_spec sfix = ss;
+		struct channel_map mfix = map;
+
+		rate = ss.rate;
+
+		sample_spec_fix(&sfix, &mfix, &fix_ss, &fix_map, &props->dict);
+
+		if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss,
-				ss.channels > 0 ? &map : NULL)) != NULL) {
+				SPA_PARAM_EnumFormat, &sfix,
+				sfix.channels > 0 ? &mfix : NULL)) != NULL) {
 			n_params++;
 			n_valid_formats++;
 		} else {
@@ -1740,7 +1729,6 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 					impl, format_id2name(ss.format), ss.rate,
 					ss.channels);
 		}
-		rate = ss.rate;
 	}
 
 	if (m->offset != m->length)
@@ -1831,8 +1819,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	struct impl *impl = client->impl;
 	const char *name = NULL;
 	int res;
-	struct sample_spec ss;
-	struct channel_map map;
+	struct sample_spec ss, fix_ss;
+	struct channel_map map, fix_map;
 	uint32_t source_index;
 	const char *source_name;
 	struct buffer_attr attr = { 0 };
@@ -1927,6 +1915,24 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 				TAG_INVALID) < 0)
 			goto error_protocol;
 	}
+
+	spa_zero(fix_ss);
+	spa_zero(fix_map);
+	if (fix_format || fix_rate || fix_channels) {
+		struct pw_manager_object *o;
+		bool is_monitor;
+
+		o = find_device(client, source_index, source_name, false, &is_monitor);
+		if (o != NULL) {
+			struct device_info dev_info = DEVICE_INFO_INIT(PW_DIRECTION_INPUT);
+			collect_device_info(o, NULL, &dev_info, is_monitor, &impl->defs);
+			fix_ss.format = fix_format ? dev_info.ss.format : 0;
+			fix_ss.rate = fix_rate ? dev_info.ss.rate : 0;
+			fix_ss.channels = fix_channels ? dev_info.ss.channels : 0;
+			fix_map = dev_info.map;
+		}
+	}
+
 	if (client->version >= 22) {
 		if (message_get(m,
 				TAG_U8, &n_formats,
@@ -1970,26 +1976,17 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		volume_set = false;
 	}
 	if (sample_spec_valid(&ss)) {
-		if (fix_format || fix_rate || fix_channels) {
-			struct sample_spec sfix = ss;
-			if (fix_format)
-				sfix.format = SPA_AUDIO_FORMAT_UNKNOWN;
-			if (fix_rate)
-				sfix.rate = 0;
-			if (fix_channels)
-				sfix.channels = 0;
-			if (n_params < MAX_FORMATS &&
-			    (params[n_params] = format_build_param(&b,
-					SPA_PARAM_EnumFormat, &sfix,
-					sfix.channels > 0 ? &map : NULL)) != NULL) {
-				n_params++;
-				n_valid_formats++;
-			}
-		}
-		else if (n_params < MAX_FORMATS &&
+		struct sample_spec sfix = ss;
+		struct channel_map mfix = map;
+
+		rate = ss.rate;
+
+		sample_spec_fix(&sfix, &mfix, &fix_ss, &fix_map, &props->dict);
+
+		if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
-				SPA_PARAM_EnumFormat, &ss,
-				ss.channels > 0 ? &map : NULL)) != NULL) {
+				SPA_PARAM_EnumFormat, &sfix,
+				sfix.channels > 0 ? &mfix : NULL)) != NULL) {
 			n_params++;
 			n_valid_formats++;
 		} else {
@@ -1997,7 +1994,6 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 					impl, format_id2name(ss.format), ss.rate,
 					ss.channels);
 		}
-		rate = ss.rate;
 	}
 	if (m->offset != m->length)
 		goto error_protocol;
@@ -5513,22 +5509,13 @@ static int parse_position(struct pw_properties *props, const char *key, const ch
 		struct channel_map *res)
 {
 	const char *str;
-	struct spa_json it[2];
-	char v[256];
 
 	if (props == NULL ||
 	    (str = pw_properties_get(props, key)) == NULL)
 		str = def;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-		spa_json_init(&it[1], str, strlen(str));
+	channel_map_parse_position(str, res);
 
-	res->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    res->channels < SPA_AUDIO_MAX_CHANNELS) {
-		res->map[res->channels++] = channel_name2id(v);
-	}
 	pw_log_info(": defaults: %s = %s", key, str);
 	return 0;
 }

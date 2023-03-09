@@ -1,26 +1,6 @@
-/* Spa Bluez5 decode buffer
- *
- * Copyright © 2022 Pauli Virtanen
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa Bluez5 decode buffer */
+/* SPDX-FileCopyrightText: Copyright © 2022 Pauli Virtanen */
+/* SPDX-License-Identifier: MIT */
 
 /**
  * \file decode-buffer.h   Buffering for Bluetooth sources
@@ -68,8 +48,8 @@
  * The spike is the long-window maximum difference
  * between minimum and average buffer level.
  */
-#define BUFFERING_TARGET(spike,packet_size)				\
-	SPA_CLAMP((spike)*3/2, (packet_size), 6*(packet_size))
+#define BUFFERING_TARGET(spike,packet_size,max_buf)			\
+	SPA_CLAMP((spike)*3/2, (packet_size), (max_buf) - 2*(packet_size))
 
 /**
  * Rate controller.
@@ -237,6 +217,9 @@ struct spa_bt_decode_buffer
 	uint32_t underrun;
 	uint32_t pos;
 
+	int32_t target;		/**< target buffer (0: automatic) */
+	int32_t max_target;
+
 	uint8_t received:1;
 	uint8_t buffering:1;
 };
@@ -286,7 +269,9 @@ static int spa_bt_decode_buffer_init(struct spa_bt_decode_buffer *this, struct s
 	this->buffer_size = this->frame_size * quantum_limit * 2;
 	this->buffer_size += this->buffer_reserve;
 	this->corr = 1.0;
+	this->target = 0;
 	this->buffering = true;
+	this->max_target = INT32_MAX;
 
 	spa_bt_rate_control_init(&this->ctl, 0);
 
@@ -386,6 +371,18 @@ static void spa_bt_decode_buffer_recover(struct spa_bt_decode_buffer *this)
 	spa_bt_rate_control_init(&this->ctl, level);
 }
 
+static SPA_UNUSED
+void spa_bt_decode_buffer_set_target_latency(struct spa_bt_decode_buffer *this, int32_t samples)
+{
+	this->target = samples;
+}
+
+static SPA_UNUSED
+void spa_bt_decode_buffer_set_max_latency(struct spa_bt_decode_buffer *this, int32_t samples)
+{
+	this->max_target = samples;
+}
+
 static void spa_bt_decode_buffer_process(struct spa_bt_decode_buffer *this, uint32_t samples, uint32_t duration)
 {
 	const uint32_t data_size = samples * this->frame_size;
@@ -419,6 +416,7 @@ static void spa_bt_decode_buffer_process(struct spa_bt_decode_buffer *this, uint
 
 	if (this->received) {
 		const uint32_t avg_period = (uint64_t)this->rate * BUFFERING_SHORT_MSEC / 1000;
+		const int32_t max_buf = (this->buffer_size - this->buffer_reserve) / this->frame_size;
 		int32_t level, target;
 
 		/* Track buffer level */
@@ -429,13 +427,18 @@ static void spa_bt_decode_buffer_process(struct spa_bt_decode_buffer *this, uint
 		spa_bt_ptp_update(&this->spike, this->ctl.avg - level, this->prev_consumed);
 
 		/* Update target level */
-		target = BUFFERING_TARGET(this->spike.max, packet_size);
+		if (this->target)
+			target = this->target;
+		else
+			target = BUFFERING_TARGET(this->spike.max, packet_size, max_buf);
+
+		target = SPA_MIN(target, this->max_target);
 
 		if (level > SPA_MAX(4 * target, 2*(int32_t)duration) &&
 				avail > data_size) {
 			/* Lagging too much: drop data */
 			uint32_t size = SPA_MIN(avail - data_size,
-					(level - target*5/2) * this->frame_size);
+					(level - target) * this->frame_size);
 
 			spa_bt_decode_buffer_read(this, size);
 			spa_log_trace(this->log, "%p overrun samples:%d level:%d target:%d",

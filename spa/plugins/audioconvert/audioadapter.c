@@ -1,26 +1,6 @@
-/* SPA
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* SPA */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/support/plugin.h>
 #include <spa/support/log.h>
@@ -68,14 +48,14 @@ struct impl {
 
 	struct spa_node *follower;
 	struct spa_hook follower_listener;
-	uint32_t follower_flags;
+	uint64_t follower_flags;
 	struct spa_audio_info follower_current_format;
 	struct spa_audio_info default_format;
 
 	struct spa_handle *hnd_convert;
 	struct spa_node *convert;
 	struct spa_hook convert_listener;
-	uint32_t convert_flags;
+	uint64_t convert_flags;
 
 	uint32_t n_buffers;
 	struct spa_buffer **buffers;
@@ -98,6 +78,7 @@ struct impl {
 	struct spa_param_info params[N_NODE_PARAMS];
 	uint32_t convert_params_flags[N_NODE_PARAMS];
 	uint32_t follower_params_flags[N_NODE_PARAMS];
+	uint64_t follower_port_flags;
 
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
@@ -334,7 +315,7 @@ static int debug_params(struct impl *this, struct spa_node *node,
 
 	if (filter) {
 		spa_log_error(this->log, "with this filter:");
-		spa_debug_log_pod(this->log, SPA_LOG_LEVEL_DEBUG, 2, NULL, filter);
+		spa_debug_log_pod(this->log, SPA_LOG_LEVEL_ERROR, 2, NULL, filter);
 	} else {
 		spa_log_error(this->log, "there was no filter");
 	}
@@ -352,7 +333,7 @@ static int debug_params(struct impl *this, struct spa_node *node,
 			break;
 		}
 		spa_log_error(this->log, "unmatched %s %d:", debug, count);
-		spa_debug_log_pod(this->log, SPA_LOG_LEVEL_DEBUG, 2, NULL, param);
+		spa_debug_log_pod(this->log, SPA_LOG_LEVEL_ERROR, 2, NULL, param);
 		count++;
 	}
 	if (count == 0)
@@ -372,7 +353,7 @@ static int negotiate_buffers(struct impl *this)
 	uint32_t i, size, buffers, blocks, align, flags, stride = 0;
 	uint32_t *aligns;
 	struct spa_data *datas;
-	uint32_t follower_flags, conv_flags;
+	uint64_t follower_flags, conv_flags;
 
 	spa_log_debug(this->log, "%p: n_buffers:%d", this, this->n_buffers);
 
@@ -952,12 +933,19 @@ static void convert_port_info(void *data,
 		const struct spa_port_info *info)
 {
 	struct impl *this = data;
+	struct spa_port_info pi;
 
 	if (direction != this->direction) {
+		/* skip the converter output port into the follower */
 		if (port_id == 0)
 			return;
 		else
+			/* the monitor ports are exposed */
 			port_id--;
+	} else if (info) {
+		pi = *info;
+		pi.flags = this->follower_port_flags;
+		info = &pi;
 	}
 
 	spa_log_debug(this->log, "%p: port info %d:%d", this,
@@ -1105,6 +1093,11 @@ static void follower_port_info(void *data,
 	      spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 	      return;
 	}
+
+	this->follower_port_flags = info->flags &
+		(SPA_PORT_FLAG_LIVE |
+		 SPA_PORT_FLAG_PHYSICAL |
+		 SPA_PORT_FLAG_TERMINAL);
 
 	spa_log_debug(this->log, "%p: follower port info %s %p %08"PRIx64, this,
 			this->direction == SPA_DIRECTION_INPUT ?

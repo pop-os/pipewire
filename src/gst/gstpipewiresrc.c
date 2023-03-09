@@ -1,26 +1,6 @@
-/* GStreamer
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* GStreamer */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 /**
  * SECTION:element-pipewiresrc
@@ -66,6 +46,7 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_src_debug);
 #define DEFAULT_MAX_BUFFERS     INT32_MAX
 #define DEFAULT_RESEND_LAST     false
 #define DEFAULT_KEEPALIVE_TIME  0
+#define DEFAULT_AUTOCONNECT     true
 
 enum
 {
@@ -81,6 +62,7 @@ enum
   PROP_FD,
   PROP_RESEND_LAST,
   PROP_KEEPALIVE_TIME,
+  PROP_AUTOCONNECT,
 };
 
 
@@ -170,6 +152,10 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->keepalive_time = g_value_get_int (value);
       break;
 
+    case PROP_AUTOCONNECT:
+      pwsrc->autoconnect = g_value_get_boolean (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -225,6 +211,10 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
 
     case PROP_KEEPALIVE_TIME:
       g_value_set_int (value, pwsrc->keepalive_time);
+      break;
+
+    case PROP_AUTOCONNECT:
+      g_value_set_boolean (value, pwsrc->autoconnect);
       break;
 
     default:
@@ -396,6 +386,15 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                      G_PARAM_READWRITE |
                                                      G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class,
+                                   PROP_AUTOCONNECT,
+                                   g_param_spec_boolean ("autoconnect",
+                                                         "Connect automatically",
+                                                         "Attempt to find a peer to connect to",
+                                                         DEFAULT_AUTOCONNECT,
+                                                         G_PARAM_READWRITE |
+                                                         G_PARAM_STATIC_STRINGS));
+
   gstelement_class->provide_clock = gst_pipewire_src_provide_clock;
   gstelement_class->change_state = gst_pipewire_src_change_state;
   gstelement_class->send_event = gst_pipewire_src_send_event;
@@ -439,6 +438,7 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   src->fd = -1;
   src->resend_last = DEFAULT_RESEND_LAST;
   src->keepalive_time = DEFAULT_KEEPALIVE_TIME;
+  src->autoconnect = DEFAULT_AUTOCONNECT;
 
   src->client_name = g_strdup(pw_get_client_name ());
 
@@ -626,8 +626,7 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
                              info->offset,
                              info->stride);
 
-    meta->n_planes = MIN(meta->n_planes, b->buffer->n_datas);
-    for (i = 0; i < meta->n_planes; i++) {
+    for (i = 0; i < MIN (b->buffer->n_datas, GST_VIDEO_MAX_PLANES); i++) {
       struct spa_data *d = &b->buffer->datas[i];
       meta->offset[i] = video_size;
       meta->stride[i] = d->chunk->stride;
@@ -890,10 +889,13 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s, target-object %s",
                     pwsrc->path, pwsrc->target_object);
   pwsrc->negotiated = FALSE;
+  enum pw_stream_flags flags = PW_STREAM_FLAG_DONT_RECONNECT;
+  if (pwsrc->autoconnect)
+    flags |= PW_STREAM_FLAG_AUTOCONNECT;
   pw_stream_connect (pwsrc->stream,
                      PW_DIRECTION_INPUT,
                      target_id,
-                     PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_DONT_RECONNECT,
+                     flags,
                      (const struct spa_pod **)possible->pdata,
                      possible->len);
   g_ptr_array_free (possible, TRUE);
@@ -942,18 +944,26 @@ no_nego_needed:
   }
 no_caps:
   {
+    const gchar * error_string = "No supported formats found";
+
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
-        ("No supported formats found"),
+        ("%s", error_string),
         ("This element did not produce valid caps"));
+    pw_stream_set_error (pwsrc->stream, -EINVAL, "%s", error_string);
+
     if (thiscaps)
       gst_caps_unref (thiscaps);
     return FALSE;
   }
 no_common_caps:
   {
+    const gchar * error_string = "No supported formats found";
+
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
-        ("No supported formats found"),
+        ("%s", error_string),
         ("This element does not have formats in common with the peer"));
+    pw_stream_set_error (pwsrc->stream, -EPIPE, "%s", error_string);
+
     if (caps)
       gst_caps_unref (caps);
     return FALSE;

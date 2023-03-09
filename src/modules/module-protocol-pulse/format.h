@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PULSE_SERVER_FORMAT_H
 #define PULSE_SERVER_FORMAT_H
@@ -58,12 +38,22 @@ enum sample_format {
 #define SAMPLE_S32NE		SAMPLE_S32BE
 #define	SAMPLE_S24NE		SAMPLE_S24BE
 #define SAMPLE_S24_32NE		SAMPLE_S24_32BE
+#define SAMPLE_S16RE		SAMPLE_S16LE
+#define SAMPLE_FLOAT32RE	SAMPLE_FLOAT32LE
+#define SAMPLE_S32RE		SAMPLE_S32LE
+#define	SAMPLE_S24RE		SAMPLE_S24LE
+#define SAMPLE_S24_32RE		SAMPLE_S24_32LE
 #elif __BYTE_ORDER == __LITTLE_ENDIAN
 #define SAMPLE_S16NE		SAMPLE_S16LE
 #define SAMPLE_FLOAT32NE	SAMPLE_FLOAT32LE
 #define SAMPLE_S32NE		SAMPLE_S32LE
 #define	SAMPLE_S24NE		SAMPLE_S24LE
 #define SAMPLE_S24_32NE		SAMPLE_S24_32LE
+#define SAMPLE_S16RE		SAMPLE_S16BE
+#define SAMPLE_FLOAT32RE	SAMPLE_FLOAT32BE
+#define SAMPLE_S32RE		SAMPLE_S32BE
+#define	SAMPLE_S24RE		SAMPLE_S24BE
+#define SAMPLE_S24_32RE		SAMPLE_S24_32BE
 #endif
 
 struct format {
@@ -194,6 +184,10 @@ uint32_t format_encoding2id(enum encoding enc);
 uint32_t sample_spec_frame_size(const struct sample_spec *ss);
 bool sample_spec_valid(const struct sample_spec *ss);
 
+void sample_spec_fix(struct sample_spec *ss, struct channel_map *map,
+		const struct sample_spec *fix_ss, const struct channel_map *fix_map,
+		struct spa_dict *props);
+
 uint32_t channel_pa2id(enum channel_position channel);
 const char *channel_id2name(uint32_t channel);
 uint32_t channel_name2id(const char *name);
@@ -204,6 +198,7 @@ uint32_t channel_paname2id(const char *name, size_t size);
 void channel_map_to_positions(const struct channel_map *map, uint32_t *pos);
 void channel_map_parse(const char *str, struct channel_map *map);
 bool channel_map_valid(const struct channel_map *map);
+void channel_map_parse_position(const char *str, struct channel_map *map);
 
 int format_parse_param(const struct spa_pod *param, bool collect, struct sample_spec *ss,
 		struct channel_map *map, const struct sample_spec *def_ss,

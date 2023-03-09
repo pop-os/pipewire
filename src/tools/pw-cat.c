@@ -1,28 +1,7 @@
-/* PipeWire - pw-cat
- *
- * Copyright © 2020 Konsulko Group
-
- * Author: Pantelis Antoniou <pantelis.antoniou@konsulko.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire - pw-cat */
+/* SPDX-FileCopyrightText: Copyright © 2020 Konsulko Group */
+/*                         @author Pantelis Antoniou <pantelis.antoniou@konsulko.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdio.h>
 #include <errno.h>
@@ -56,6 +35,7 @@
 #ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/log.h>
 #endif
 
 #include "midifile.h"
@@ -92,7 +72,7 @@ enum unit {
 
 struct data;
 
-typedef int (*fill_fn)(struct data *d, void *dest, unsigned int n_frames);
+typedef int (*fill_fn)(struct data *d, void *dest, unsigned int n_frames, bool *null_frame);
 
 struct channelmap {
 	int n_channels;
@@ -163,11 +143,13 @@ struct data {
 	} dsf;
 
 #ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
-	FILE *encoded_file;
-	AVFormatContext *fmt_context;
-	AVStream *astream;
-	AVCodecContext *ctx;
-	enum AVSampleFormat sfmt;
+	struct {
+		AVFormatContext *format_context;
+		AVStream *audio_stream;
+		AVPacket *packet;
+		int stream_index;
+		int64_t accumulated_excess_playtime;
+	} encoded;
 #endif
 };
 
@@ -207,7 +189,7 @@ static const struct format_info *format_info_by_sf_format(int format)
 	return NULL;
 }
 
-static int sf_playback_fill_x8(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_x8(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -215,7 +197,7 @@ static int sf_playback_fill_x8(struct data *d, void *dest, unsigned int n_frames
 	return (int)rn / d->stride;
 }
 
-static int sf_playback_fill_s16(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_s16(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -224,7 +206,7 @@ static int sf_playback_fill_s16(struct data *d, void *dest, unsigned int n_frame
 	return (int)rn;
 }
 
-static int sf_playback_fill_s32(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_s32(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -233,7 +215,7 @@ static int sf_playback_fill_s32(struct data *d, void *dest, unsigned int n_frame
 	return (int)rn;
 }
 
-static int sf_playback_fill_f32(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_f32(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -242,7 +224,7 @@ static int sf_playback_fill_f32(struct data *d, void *dest, unsigned int n_frame
 	return (int)rn;
 }
 
-static int sf_playback_fill_f64(struct data *d, void *dest, unsigned int n_frames)
+static int sf_playback_fill_f64(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -252,24 +234,86 @@ static int sf_playback_fill_f64(struct data *d, void *dest, unsigned int n_frame
 }
 
 #ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
-static int encoded_playback_fill(struct data *d, void *dest, unsigned int n_frames)
+static int encoded_playback_fill(struct data *d, void *dest, unsigned int n_frames, bool *null_frame)
 {
-	int ret, size = 0;
-	uint8_t buffer[16384];
+	AVPacket *packet = d->encoded.packet;
+	int ret;
+	struct pw_time time;
+	int64_t quantum_duration;
+	int64_t excess_playtime;
+	int64_t cycle_length;
+	int64_t av_time_base_num, av_time_base_denom;
 
-	ret = fread(buffer, 1, SPA_MIN(n_frames, sizeof(buffer)), d->encoded_file);
-	if (ret > 0) {
-		memcpy(dest, buffer, ret);
-		size = ret;
+	pw_stream_get_time_n(d->stream, &time, sizeof(time));
+	cycle_length = n_frames;
+	av_time_base_num = d->encoded.audio_stream->time_base.num;
+	av_time_base_denom = d->encoded.audio_stream->time_base.den;
+
+	/* When playing compressed/encoded frames, it is important to watch
+	 * the length of the frames (that is, how long one frame plays)
+	 * and compare this with the requested playtime length (which is
+	 * n_frames). If an encoded frame's playtime length is greater than
+	 * the playtime length that n_frames corresponds to, then we are
+	 * effectively sending more data to be played than what was requested.
+	 * If this is not taken into account, we eventually get an overrun,
+	 * since at each cycle, the sink ultimately gets more data than what
+	 * was originally requested.
+	 *
+	 * To solve this, we need to check how much excess playtime we sent
+	 * and accumulate that. When the accumulated length exceeds the requested
+	 * playtime, we send a "null frame", that is, we set the chunk size
+	 * to 0, and queue that empty buffer. At that point, the sink has
+	 * enough excess data to fully cover a cycle without extra input data.
+	 *
+	 * To do this excess playtime calculation, we first must convert
+	 *  the quantum size from PW ticks to FFmpeg time_base units
+	 * to be able to directly accumulate FFmpeg packet durations and
+	 * compare that with the quantum length. */
+	quantum_duration = cycle_length *
+		(time.rate.num * av_time_base_denom) /
+		(time.rate.denom * av_time_base_num);
+
+	/* If we reached the point where the excess playtime fully covers
+	 * the amount of requested playtime, produce the null frame. */
+	if (d->encoded.accumulated_excess_playtime >= quantum_duration) {
+		fprintf(
+			stderr, "skipping cycle to compensate excess playtime by producing null frame "
+			"(excess playtime: %" PRId64 " quantum duration: %" PRId64 ")\n",
+			d->encoded.accumulated_excess_playtime, quantum_duration);
+
+		d->encoded.accumulated_excess_playtime -= quantum_duration;
+		*null_frame = true;
+
+		return 0;
 	}
-	return (int)size;
+
+	/* Keep reading packets until we get one from the stream we are
+	 * interested in. This is relevant when playing data that contains
+	 * several multiplexed streams. */
+	while (true) {
+		if ((ret = av_read_frame(d->encoded.format_context, packet) < 0))
+			break;
+
+		if (packet->stream_index == d->encoded.stream_index)
+			break;
+	}
+
+	memcpy(dest, packet->data, packet->size);
+
+	if (packet->duration > quantum_duration)
+		excess_playtime = packet->duration - quantum_duration;
+	else
+		excess_playtime = 0;
+	d->encoded.accumulated_excess_playtime += excess_playtime;
+
+	return packet->size;
 }
 
-static int avcodec_ctx_to_info(struct data *data, AVCodecContext *ctx, struct spa_audio_info *info)
+static int av_codec_params_to_audio_info(struct data *data, AVCodecParameters *codec_params, struct spa_audio_info *info)
 {
 	int32_t profile;
 
-	switch (ctx->codec_id) {
+	switch (codec_params->codec_id) {
 	case AV_CODEC_ID_VORBIS:
 		info->media_subtype = SPA_MEDIA_SUBTYPE_vorbis;
 		info->info.vorbis.rate = data->rate;
@@ -293,7 +337,7 @@ static int avcodec_ctx_to_info(struct data *data, AVCodecContext *ctx, struct sp
 	case AV_CODEC_ID_WMAVOICE:
 	case AV_CODEC_ID_WMALOSSLESS:
 		info->media_subtype = SPA_MEDIA_SUBTYPE_wma;
-		switch (ctx->codec_tag) {
+		switch (codec_params->codec_tag) {
 		/* TODO see if these hex constants can be replaced by named constants from FFmpeg */
 		case 0x161:
 			profile = SPA_AUDIO_WMA_PROFILE_WMA9;
@@ -317,7 +361,7 @@ static int avcodec_ctx_to_info(struct data *data, AVCodecContext *ctx, struct sp
 		info->info.wma.rate = data->rate;
 		info->info.wma.channels = data->channels;
 		info->info.wma.bitrate = data->bitrate;
-		info->info.wma.block_align = ctx->block_align;
+		info->info.wma.block_align = codec_params->block_align;
 		info->info.wma.profile = profile;
 		break;
 	case AV_CODEC_ID_FLAC:
@@ -403,7 +447,7 @@ playback_fill_fn(uint32_t fmt)
 	return NULL;
 }
 
-static int sf_record_fill_x8(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_x8(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -411,7 +455,7 @@ static int sf_record_fill_x8(struct data *d, void *src, unsigned int n_frames)
 	return (int)rn / d->stride;
 }
 
-static int sf_record_fill_s16(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_s16(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -420,7 +464,7 @@ static int sf_record_fill_s16(struct data *d, void *src, unsigned int n_frames)
 	return (int)rn;
 }
 
-static int sf_record_fill_s32(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_s32(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -429,7 +473,7 @@ static int sf_record_fill_s32(struct data *d, void *src, unsigned int n_frames)
 	return (int)rn;
 }
 
-static int sf_record_fill_f32(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_f32(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -438,7 +482,7 @@ static int sf_record_fill_f32(struct data *d, void *src, unsigned int n_frames)
 	return (int)rn;
 }
 
-static int sf_record_fill_f64(struct data *d, void *src, unsigned int n_frames)
+static int sf_record_fill_f64(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	sf_count_t rn;
 
@@ -782,17 +826,32 @@ static void on_process(void *userdata)
 		return;
 
 	if (data->mode == mode_playback) {
+		bool null_frame = false;
+
 		n_frames = d->maxsize / data->stride;
 		n_frames = SPA_MIN(n_frames, (int)b->requested);
 
-		n_fill_frames = data->fill(data, p, n_frames);
+		/* Note that when playing encoded audio, the encoded_playback_fill()
+		 * fill callback actually returns number of bytes, not frames, since
+		 * this is encoded data. However, the calculations below still work
+		 * out because the stride is set to 1 in setup_encodedfile(). */
+		n_fill_frames = data->fill(data, p, n_frames, &null_frame);
 
-		if (n_fill_frames > 0 || n_frames == 0) {
+		if (null_frame) {
+			/* A null frame is not to be confused with the drain scenario.
+			 * In this case, we want to continue streaming, but in this
+			 * cycle, we need to queue a buffer with an empty chunk. */
+			d->chunk->offset = 0;
+			d->chunk->stride = data->stride;
+			d->chunk->size = 0;
+			have_data = true;
+			b->size = 0;
+		} else if (n_fill_frames > 0 || n_frames == 0) {
 			d->chunk->offset = 0;
 			d->chunk->stride = data->stride;
 			d->chunk->size = n_fill_frames * data->stride;
 			have_data = true;
-			b->size = n_frames;
+			b->size = n_fill_frames;
 		} else if (n_fill_frames < 0) {
 			fprintf(stderr, "fill error %d\n", n_fill_frames);
 		} else {
@@ -800,6 +859,8 @@ static void on_process(void *userdata)
 				printf("drain start\n");
 		}
 	} else {
+		bool null_frame = false;
+
 		offset = SPA_MIN(d->chunk->offset, d->maxsize);
 		size = SPA_MIN(d->chunk->size, d->maxsize - offset);
 
@@ -807,7 +868,7 @@ static void on_process(void *userdata)
 
 		n_frames = size / data->stride;
 
-		n_fill_frames = data->fill(data, p, n_frames);
+		n_fill_frames = data->fill(data, p, n_frames, &null_frame);
 
 		have_data = true;
 	}
@@ -957,13 +1018,13 @@ static void show_usage(const char *name, bool is_error)
 		     "  -m, --midi                            Midi mode\n"
 		     "  -d, --dsd                             DSD mode\n"
 #ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
-		     "  -o, --encoded			      Encoded mode\n"
+		     "  -o, --encoded                         Encoded mode\n"
 #endif
 		     "\n"), fp);
 	}
 }
 
-static int midi_play(struct data *d, void *src, unsigned int n_frames)
+static int midi_play(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	int res;
 	struct spa_pod_builder b;
@@ -1016,7 +1077,7 @@ static int midi_play(struct data *d, void *src, unsigned int n_frames)
 	return b.state.offset;
 }
 
-static int midi_record(struct data *d, void *src, unsigned int n_frames)
+static int midi_record(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	struct spa_pod *pod;
 	struct spa_pod_control *c;
@@ -1092,7 +1153,7 @@ static const struct dsd_layout_info dsd_layouts[] = {
 	{ 7, { SPA_AUDIO_LAYOUT_5_1R }, },
 };
 
-static int dsf_play(struct data *d, void *src, unsigned int n_frames)
+static int dsf_play(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	return dsf_file_read(d->dsf.file, src, n_frames, &d->dsf.layout);
 }
@@ -1120,12 +1181,12 @@ static int setup_dsffile(struct data *data)
 	return 0;
 }
 
-static int stdout_record(struct data *d, void *src, unsigned int n_frames)
+static int stdout_record(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	return fwrite(src, d->stride, n_frames, stdout);
 }
 
-static int stdin_play(struct data *d, void *src, unsigned int n_frames)
+static int stdin_play(struct data *d, void *src, unsigned int n_frames, bool *null_frame)
 {
 	return fread(src, d->stride, n_frames, stdin);
 }
@@ -1252,6 +1313,8 @@ static int setup_encodedfile(struct data *data)
 	int ret;
 	int bits_per_sample;
 	int num_channels;
+	unsigned int stream_index;
+	const AVCodecParameters *codecpar;
 	char path[256] = { 0 };
 
 	/* We do not support record with encoded media */
@@ -1262,72 +1325,63 @@ static int setup_encodedfile(struct data *data)
 	strcpy(path, "file:");
 	strcat(path, data->filename);
 
-	data->fmt_context = NULL;
-	ret = avformat_open_input(&data->fmt_context, path, NULL, NULL);
-	if (ret < 0) {
-		fprintf(stderr, "Failed to open input\n");
+	data->encoded.format_context = NULL;
+	if ((ret = avformat_open_input(&data->encoded.format_context, path, NULL, NULL)) < 0) {
+		fprintf(stderr, "Failed to open input: %s\n", av_err2str(ret));
 		return -EINVAL;
 	}
 
-	avformat_find_stream_info (data->fmt_context, NULL);
-
-	data->ctx = avcodec_alloc_context3(NULL);
-	if (!data->ctx) {
-		fprintf(stderr, "Could not allocate audio codec context\n");
-		avformat_close_input(&data->fmt_context);
+	if ((ret = avformat_find_stream_info(data->encoded.format_context, NULL)) < 0) {
+		fprintf(stderr, "Could not find stream info: %s\n", av_err2str(ret));
 		return -EINVAL;
 	}
 
-	// We expect only one stream with audio
-	data->astream = data->fmt_context->streams[0];
-	avcodec_parameters_to_context (data->ctx, data->astream->codecpar);
-
-	if (data->ctx->codec_type != AVMEDIA_TYPE_AUDIO) {
-		fprintf(stderr, "Not an audio file\n");
-		avformat_close_input(&data->fmt_context);
+	data->encoded.audio_stream = NULL;
+	for (stream_index = 0; stream_index < data->encoded.format_context->nb_streams; ++stream_index) {
+		AVStream *stream = data->encoded.format_context->streams[stream_index];
+		codecpar = stream->codecpar;
+		if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+			if (data->verbose) {
+				fprintf(stderr, "Stream #%u in media is an audio stream with codec \"%s\"\n",
+				        stream_index, avcodec_get_name(codecpar->codec_id));
+			}
+			data->encoded.audio_stream = stream;
+			data->encoded.stream_index = stream_index;
+			break;
+		}
+	}
+	if (data->encoded.audio_stream == NULL) {
+		fprintf(stderr, "Could not find audio stream in media\n");
 		return -EINVAL;
 	}
 
-	printf("Number of streams: %d Codec id: %x\n", data->fmt_context->nb_streams,
-			data->ctx->codec_id);
+	data->encoded.packet = av_packet_alloc();
 
 	/* FFmpeg 5.1 (which contains libavcodec 59.37.100) introduced
 	 * a new channel layout API and deprecated the old one. */
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 37, 100)
-	num_channels = data->ctx->ch_layout.nb_channels;
+	num_channels = codecpar->ch_layout.nb_channels;
 #else
-	num_channels = data->ctx->channels;
+	num_channels = codecpar->channels;
 #endif
 
-	data->rate = data->ctx->sample_rate;
+	data->rate = codecpar->sample_rate;
 	data->channels = num_channels;
-	data->sfmt = data->ctx->sample_fmt;
-	data->stride = 1; // Don't care
+	/* Stride is not relevant for encoded audio. Set it to 1 to make sure
+	 * the code in on_process() performs correct calculations. */
+	data->stride = 1;
 
-	bits_per_sample = av_get_bits_per_sample(data->ctx->codec_id);
+	bits_per_sample = av_get_bits_per_sample(codecpar->codec_id);
 	data->bitrate = bits_per_sample ?
-		data->ctx->sample_rate * num_channels * bits_per_sample : data->ctx->bit_rate;
+		data->rate * num_channels * bits_per_sample : codecpar->bit_rate;
 
 	data->spa_format = SPA_AUDIO_FORMAT_ENCODED;
-	data->fill = playback_fill_fn(data->spa_format);
+	data->fill = encoded_playback_fill;
 
-	if (data->verbose)
-		printf("Opened file \"%s\" sample format %08x channels:%d rate:%d bitrate: %d\n",
-				data->filename, data->ctx->sample_fmt, data->channels,
-				data->rate, data->bitrate);
-
-	if (data->fill == NULL) {
-		fprintf(stderr, "Unhandled encoded format %d\n", data->spa_format);
-		avformat_close_input(&data->fmt_context);
-		return -EINVAL;
-	}
-
-	avformat_close_input(&data->fmt_context);
-
-	data->encoded_file = fopen(data->filename, "rb");
-	if (!data->encoded_file) {
-		fprintf(stderr, "Failed to open file\n");
-		return -EINVAL;
+	if (data->verbose) {
+		printf("Opened file \"%s\" with encoded audio; channels:%d rate:%d bitrate: %d time units %d/%d\n",
+		       data->filename, data->channels, data->rate, data->bitrate,
+		       data->encoded.audio_stream->time_base.num, data->encoded.audio_stream->time_base.den);
 	}
 
 	return 0;
@@ -1517,6 +1571,10 @@ int main(int argc, char *argv[])
 	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
+#ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
+	av_log_set_level(AV_LOG_DEBUG);
+#endif
+
 	flags |= PW_STREAM_FLAG_AUTOCONNECT;
 
 	prog = argv[0];
@@ -1541,6 +1599,11 @@ int main(int argc, char *argv[])
 	} else if (spa_streq(prog, "pw-dsdplay")) {
 		data.mode = mode_playback;
 		data.data_type = TYPE_DSD;
+#ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
+	} else if (spa_streq(prog, "pw-encplay")) {
+		data.mode = mode_playback;
+		data.data_type = TYPE_ENCODED;
+#endif
 	} else
 		data.mode = mode_none;
 
@@ -1806,13 +1869,9 @@ int main(int argc, char *argv[])
 		spa_zero(info);
 		info.media_type = SPA_MEDIA_TYPE_audio;
 
-		ret = avcodec_ctx_to_info(&data, data.ctx, &info);
-		if (ret < 0) {
-			if (data.encoded_file) {
-				fclose(data.encoded_file);
-			}
+		ret = av_codec_params_to_audio_info(&data, data.encoded.audio_stream->codecpar, &info);
+		if (ret < 0)
 			goto error_bad_file;
-		}
 		params[0] = spa_format_audio_build(&b, SPA_PARAM_EnumFormat, &info);
 		break;
 	}
@@ -1906,11 +1965,6 @@ int main(int argc, char *argv[])
 	/* and wait while we let things run */
 	pw_main_loop_run(data.loop);
 
-#ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
-	if (data.encoded_file)
-		fclose(data.encoded_file);
-#endif
-
 	/* we're returning OK only if got to the point to drain */
 	if (data.drained)
 		exit_code = EXIT_SUCCESS;
@@ -1935,6 +1989,12 @@ error_no_main_loop:
 		sf_close(data.file);
 	if (data.midi.file)
 		midi_file_close(data.midi.file);
+#ifdef HAVE_PW_CAT_FFMPEG_INTEGRATION
+	if (data.encoded.packet)
+		av_packet_free(&data.encoded.packet);
+	if (data.encoded.format_context)
+		avformat_close_input(&data.encoded.format_context);
+#endif
 	pw_deinit();
 	return exit_code;
 

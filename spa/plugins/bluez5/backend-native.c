@@ -1,27 +1,7 @@
-/* Spa HSP/HFP native backend
- *
- * Copyright © 2018 Wim Taymans
- * Copyright © 2021 Collabora
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa HSP/HFP native backend */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-FileCopyrightText: Copyright © 2021 Collabora */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <unistd.h>
@@ -940,6 +920,15 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
 		rfcomm_send_reply(rfcomm, "OK");
 		if (was_switching_codec)
 			spa_bt_device_emit_codec_switched(rfcomm->device, 0);
+	} else if (spa_strstartswith(buf, "AT+BCC")) {
+		if (!rfcomm->codec_negotiation_supported)
+			return false;
+
+		rfcomm_send_reply(rfcomm, "OK");
+		rfcomm_send_reply(rfcomm, "+BCS: %u", rfcomm->codec);
+		rfcomm->hfp_ag_switching_codec = true;
+		rfcomm->hfp_ag_initial_codec_setup = HFP_AG_INITIAL_CODEC_SETUP_NONE;
+		codec_switch_start_timer(rfcomm, HFP_CODEC_SWITCH_TIMEOUT_MSEC);
 	} else if (spa_strstartswith(buf, "AT+BIA=")) {
 		/* retrieve indicators activation
 		 * form: AT+BIA=[indrep1],[indrep2],[indrepx] */

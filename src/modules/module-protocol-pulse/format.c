@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/utils/string.h>
 #include <spa/debug/types.h>
@@ -33,8 +13,8 @@
 
 static const struct format audio_formats[] = {
 	[SAMPLE_U8] = { SAMPLE_U8, SPA_AUDIO_FORMAT_U8, "u8", 1 },
-	[SAMPLE_ALAW] = { SAMPLE_ALAW, SPA_AUDIO_FORMAT_ALAW, "aLaw", 1 },
-	[SAMPLE_ULAW] = { SAMPLE_ULAW, SPA_AUDIO_FORMAT_ULAW, "uLaw", 1 },
+	[SAMPLE_ALAW] = { SAMPLE_ALAW, SPA_AUDIO_FORMAT_ALAW, "alaw", 1 },
+	[SAMPLE_ULAW] = { SAMPLE_ULAW, SPA_AUDIO_FORMAT_ULAW, "ulaw", 1 },
 	[SAMPLE_S16LE] = { SAMPLE_S16LE, SPA_AUDIO_FORMAT_S16_LE, "s16le", 2 },
 	[SAMPLE_S16BE] = { SAMPLE_S16BE, SPA_AUDIO_FORMAT_S16_BE, "s16be", 2 },
 	[SAMPLE_FLOAT32LE] = { SAMPLE_FLOAT32LE, SPA_AUDIO_FORMAT_F32_LE, "float32le", 4 },
@@ -46,19 +26,30 @@ static const struct format audio_formats[] = {
 	[SAMPLE_S24_32LE] = { SAMPLE_S24_32LE, SPA_AUDIO_FORMAT_S24_32_LE, "s24-32le", 4 },
 	[SAMPLE_S24_32BE] = { SAMPLE_S24_32BE, SPA_AUDIO_FORMAT_S24_32_BE, "s24-32be", 4 },
 
-#if __BYTE_ORDER == __BIG_ENDIAN
-	{ SAMPLE_S16BE, SPA_AUDIO_FORMAT_S16_BE, "s16ne", 2 },
-	{ SAMPLE_FLOAT32BE, SPA_AUDIO_FORMAT_F32_BE, "float32ne", 4 },
-	{ SAMPLE_S32BE, SPA_AUDIO_FORMAT_S32_BE, "s32ne", 4 },
-	{ SAMPLE_S24BE, SPA_AUDIO_FORMAT_S24_BE, "s24ne", 3 },
-	{ SAMPLE_S24_32BE, SPA_AUDIO_FORMAT_S24_32_BE, "s24-32ne", 4 },
-#elif __BYTE_ORDER == __LITTLE_ENDIAN
-	{ SAMPLE_S16LE, SPA_AUDIO_FORMAT_S16_LE, "s16ne", 2 },
-	{ SAMPLE_FLOAT32LE, SPA_AUDIO_FORMAT_F32_LE, "float32ne", 4 },
-	{ SAMPLE_S32LE, SPA_AUDIO_FORMAT_S32_LE, "s32ne", 4 },
-	{ SAMPLE_S24LE, SPA_AUDIO_FORMAT_S24_LE, "s24ne", 3 },
-	{ SAMPLE_S24_32LE, SPA_AUDIO_FORMAT_S24_32_LE, "s24-32ne", 4 },
-#endif
+	{ SAMPLE_U8, SPA_AUDIO_FORMAT_U8, "8", 1 },
+	{ SAMPLE_ULAW, SPA_AUDIO_FORMAT_ULAW, "mulaw", 1 },
+
+	{ SAMPLE_S16NE, SPA_AUDIO_FORMAT_S16, "s16ne", 2 },
+	{ SAMPLE_S16NE, SPA_AUDIO_FORMAT_S16, "s16", 2 },
+	{ SAMPLE_S16NE, SPA_AUDIO_FORMAT_S16, "16", 2 },
+	{ SAMPLE_FLOAT32NE, SPA_AUDIO_FORMAT_F32, "float32ne", 4 },
+	{ SAMPLE_FLOAT32NE, SPA_AUDIO_FORMAT_F32, "float32", 4 },
+	{ SAMPLE_FLOAT32NE, SPA_AUDIO_FORMAT_F32, "float", 4 },
+	{ SAMPLE_S32NE, SPA_AUDIO_FORMAT_S32, "s32ne", 4 },
+	{ SAMPLE_S32NE, SPA_AUDIO_FORMAT_S32, "s32", 4 },
+	{ SAMPLE_S32NE, SPA_AUDIO_FORMAT_S32, "32", 4 },
+	{ SAMPLE_S24NE, SPA_AUDIO_FORMAT_S24, "s24ne", 3 },
+	{ SAMPLE_S24NE, SPA_AUDIO_FORMAT_S24, "s24", 3 },
+	{ SAMPLE_S24NE, SPA_AUDIO_FORMAT_S24, "24", 3 },
+	{ SAMPLE_S24_32NE, SPA_AUDIO_FORMAT_S24_32, "s24-32ne", 4 },
+	{ SAMPLE_S24_32NE, SPA_AUDIO_FORMAT_S24_32, "s24-32", 4 },
+
+	{ SAMPLE_S16RE, SPA_AUDIO_FORMAT_S16_OE, "s16re", 2 },
+	{ SAMPLE_FLOAT32RE, SPA_AUDIO_FORMAT_F32_OE, "float32re", 4 },
+	{ SAMPLE_S32RE, SPA_AUDIO_FORMAT_S32_OE, "s32re", 4 },
+	{ SAMPLE_S24RE, SPA_AUDIO_FORMAT_S24_OE, "s24re", 3 },
+	{ SAMPLE_S24_32RE, SPA_AUDIO_FORMAT_S24_32_OE, "s24-32re", 4 },
+
 	/* planar formats, we just report them as interleaved */
 	{ SAMPLE_U8, SPA_AUDIO_FORMAT_U8P, "u8ne", 1 },
 	{ SAMPLE_S16NE, SPA_AUDIO_FORMAT_S16P, "s16ne", 2 },
@@ -154,14 +145,15 @@ uint32_t format_name2id(const char *name)
 		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_format[i].name)))
 			return spa_type_audio_format[i].type;
 	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
+	return SPA_AUDIO_FORMAT_UNKNOWN;
 }
 
 uint32_t format_paname2id(const char *name, size_t size)
 {
 	SPA_FOR_EACH_ELEMENT_VAR(audio_formats, f) {
 		if (f->name != NULL &&
-		    strncmp(name, f->name, size) == 0)
+		    strncasecmp(name, f->name, size) == 0 &&
+		    strlen(f->name) == size)
 			return f->id;
 	}
 	return SPA_AUDIO_FORMAT_UNKNOWN;
@@ -245,6 +237,38 @@ bool sample_spec_valid(const struct sample_spec *ss)
 	    ss->channels > 0 && ss->channels <= CHANNELS_MAX);
 }
 
+void sample_spec_fix(struct sample_spec *ss, struct channel_map *map,
+		const struct sample_spec *fix_ss, const struct channel_map *fix_map,
+		struct spa_dict *props)
+{
+	const char *str;
+	if (fix_ss->format != 0) {
+		if ((str = spa_dict_lookup(props, "pulse.fix.format")) != NULL)
+			ss->format = format_name2id(str);
+		else
+			ss->format = fix_ss->format;
+		/* convert back and forth to convert potential planar to packed */
+		ss->format = format_pa2id(format_id2pa(ss->format));
+	}
+	if (fix_ss->rate != 0) {
+		if ((str = spa_dict_lookup(props, "pulse.fix.rate")) != NULL)
+			ss->rate = atoi(str);
+		else
+			ss->rate = fix_ss->rate;
+		ss->rate = SPA_CLAMP(ss->rate, 0u, RATE_MAX);
+	}
+	if (fix_ss->channels != 0) {
+		if ((str = spa_dict_lookup(props, "pulse.fix.position")) != NULL) {
+			channel_map_parse_position(str, map);
+			ss->channels = map->channels;
+		} else {
+			ss->channels = fix_ss->channels;
+			*map = *fix_map;
+		}
+		ss->channels = SPA_CLAMP(ss->channels, 0u, CHANNELS_MAX);
+	}
+}
+
 uint32_t channel_pa2id(enum channel_position channel)
 {
 	if (channel < 0 || (size_t)channel >= SPA_N_ELEMENTS(audio_channels))
@@ -292,10 +316,21 @@ const char *channel_id2paname(uint32_t id, uint32_t *aux)
 	return audio_channels[CHANNEL_POSITION_AUX0 + ((*aux)++ & 31)].name;
 }
 
+#define spa_streqn(a,s,b) (strlen(b) == (s) && strncmp((a),(b),(s)) == 0)
+
 uint32_t channel_paname2id(const char *name, size_t size)
 {
+	if (spa_streqn(name, size, "left"))
+		return SPA_AUDIO_CHANNEL_FL;
+	else if (spa_streqn(name, size, "right"))
+		return SPA_AUDIO_CHANNEL_FR;
+	else if (spa_streqn(name, size, "center"))
+		return SPA_AUDIO_CHANNEL_FC;
+	else if (spa_streqn(name, size, "subwoofer"))
+		return SPA_AUDIO_CHANNEL_LFE;
+
 	SPA_FOR_EACH_ELEMENT_VAR(audio_channels, i) {
-		if (strncmp(name, i->name, size) == 0)
+		if (spa_streqn(name, size, i->name))
 			return i->channel;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
@@ -313,6 +348,7 @@ void channel_map_parse(const char *str, struct channel_map *map)
 {
 	const char *p = str;
 	size_t len;
+	uint32_t channels = 0;
 
 	if (spa_streq(p, "stereo")) {
 		*map = (struct channel_map) {
@@ -376,13 +412,35 @@ void channel_map_parse(const char *str, struct channel_map *map)
 			.map[7] = SPA_AUDIO_CHANNEL_SR,
 		};
 	} else {
-		map->channels = 0;
-		while (*p && map->channels < SPA_AUDIO_MAX_CHANNELS) {
+		channels = map->channels = 0;
+		while (*p && channels < SPA_AUDIO_MAX_CHANNELS) {
+			uint32_t chname;
+
 			if ((len = strcspn(p, ",")) == 0)
 				break;
-			map->map[map->channels++] = channel_paname2id(p, len);
+			chname = channel_paname2id(p, len);
+			if (chname == SPA_AUDIO_CHANNEL_UNKNOWN)
+				return;
+			map->map[channels++] = chname;
 			p += len + strspn(p+len, ",");
 		}
+		map->channels = channels;
+	}
+}
+
+void channel_map_parse_position(const char *str, struct channel_map *map)
+{
+	struct spa_json it[2];
+	char v[256];
+
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+		spa_json_init(&it[1], str, strlen(str));
+
+	map->channels = 0;
+	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
+	    map->channels < SPA_AUDIO_MAX_CHANNELS) {
+		map->map[map->channels++] = channel_name2id(v);
 	}
 }
 
