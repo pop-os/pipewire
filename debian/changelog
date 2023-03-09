@@ -1,4 +1,4 @@
-pipewire (0.3.67-1) UNRELEASED; urgency=medium
+pipewire (0.3.67-1) experimental; urgency=medium
 
   * New upstream release
   * pipewire-audio: add pulseaudio-module-bluetooth in Conflicts+Replaces
@@ -8,7 +8,7 @@ pipewire (0.3.67-1) UNRELEASED; urgency=medium
   * Install new pw-encplay in pipewire-bin
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Sun, 19 Feb 2023 21:21:35 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Mar 2023 15:41:34 +0100
 
 pipewire (0.3.66-1) experimental; urgency=medium
 
