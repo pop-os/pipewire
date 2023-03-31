@@ -1,3 +1,10 @@
+pipewire (0.3.67-2) UNRELEASED; urgency=medium
+
+  * Set minimum libcamera to 0.0.4 to force a build against the version in
+      experimental during the freeze.
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 31 Mar 2023 17:03:51 +0200
+
 pipewire (0.3.67-1) experimental; urgency=medium
 
   * New upstream release
