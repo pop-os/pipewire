@@ -6,6 +6,7 @@ pipewire (0.3.68-1) UNRELEASED; urgency=medium
   * Install new module-combine-stream in libpipewire-0.3-modules
   * Don't install for now config override files to enable the upmixing.
       These files should go in a new binary package.
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Apr 2023 22:36:17 +0200
 
