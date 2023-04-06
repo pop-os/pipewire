@@ -346,6 +346,7 @@ struct pw_global {
 #define pw_core_resource_bound_id(r,...)	pw_core_resource(r,bound_id,0,__VA_ARGS__)
 #define pw_core_resource_add_mem(r,...)		pw_core_resource(r,add_mem,0,__VA_ARGS__)
 #define pw_core_resource_remove_mem(r,...)	pw_core_resource(r,remove_mem,0,__VA_ARGS__)
+#define pw_core_resource_bound_props(r,...)	pw_core_resource(r,bound_props,1,__VA_ARGS__)
 
 static inline SPA_PRINTF_FUNC(5,0) void
 pw_core_resource_errorv(struct pw_resource *resource, uint32_t id, int seq,
@@ -372,6 +373,29 @@ pw_core_resource_errorf(struct pw_resource *resource, uint32_t id, int seq,
 	pw_core_resource_errorv(resource, id, seq, res, message, args);
 	va_end(args);
 }
+
+struct pw_loop_callbacks {
+#define PW_VERSION_LOOP_CALLBACKS	0
+	uint32_t version;
+
+	int (*check) (void *data, struct pw_loop *loop);
+};
+
+void
+pw_loop_set_callbacks(struct pw_loop *loop, const struct pw_loop_callbacks *cb, void *data);
+
+int pw_loop_check(struct pw_loop *loop);
+
+#define ensure_loop(loop,...) ({							\
+	int res = pw_loop_check(loop);							\
+	if (res != 1) {									\
+		pw_log_warn("%s called from wrong context, check thread and locking: %s",		\
+				__func__, spa_strerror(res));				\
+		fprintf(stderr, "*** %s called from wrong context, check thread and locking: %s\n",\
+				__func__, spa_strerror(res));				\
+		/* __VA_ARGS__ */							\
+	}										\
+})
 
 #define pw_context_driver_emit(c,m,v,...) spa_hook_list_call_simple(&c->driver_listener_list, struct pw_context_driver_events, m, v, ##__VA_ARGS__)
 #define pw_context_driver_emit_start(c,n)	pw_context_driver_emit(c, start, 0, n)
@@ -695,12 +719,16 @@ struct pw_impl_node {
 	unsigned int lock_quantum:1;	/**< don't change graph quantum */
 	unsigned int lock_rate:1;	/**< don't change graph rate */
 	unsigned int transport_sync:1;	/**< supports transport sync */
-	unsigned int current_pending:1;	/**< a quantum/rate update is pending */
+	unsigned int target_pending:1;	/**< a quantum/rate update is pending */
 	unsigned int moved:1;		/**< the node was moved drivers */
 	unsigned int added:1;		/**< the node was add to graph */
 	unsigned int pause_on_idle:1;	/**< Pause processing when IDLE */
 	unsigned int suspend_on_idle:1;
 	unsigned int reconfigure:1;
+	unsigned int forced_rate:1;
+	unsigned int trigger:1;		/**< has the TRIGGER property and needs an extra
+					  *  trigger to start processing. */
+	unsigned int can_suspend:1;
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 
@@ -748,10 +776,10 @@ struct pw_impl_node {
 
 		struct ratelimit rate_limit;
 	} rt;
-	struct spa_fraction current_rate;
-	uint64_t current_quantum;
+	struct spa_fraction target_rate;
+	uint64_t target_quantum;
 
-        void *user_data;                /**< extra user data */
+	void *user_data;                /**< extra user data */
 };
 
 struct pw_impl_port_mix {
@@ -965,6 +993,7 @@ struct pw_resource {
 #define pw_proxy_emit_removed(p)	pw_proxy_emit(p, removed, 0)
 #define pw_proxy_emit_done(p,s)		pw_proxy_emit(p, done, 0, s)
 #define pw_proxy_emit_error(p,s,r,m)	pw_proxy_emit(p, error, 0, s, r, m)
+#define pw_proxy_emit_bound_props(p,g,r) pw_proxy_emit(p, bound_props, 1, g, r)
 
 struct pw_proxy {
 	struct spa_interface impl;	/**< object implementation */

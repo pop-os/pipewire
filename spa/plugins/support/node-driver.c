@@ -88,9 +88,13 @@ static const struct clock_info {
 	clockid_t id;
 } clock_info[] = {
 	{ "realtime", CLOCK_REALTIME },
+#ifdef CLOCK_TAI
 	{ "tai", CLOCK_TAI },
+#endif
 	{ "monotonic", CLOCK_MONOTONIC },
+#ifdef CLOCK_MONOTONIC_RAW
 	{ "monotonic-raw", CLOCK_MONOTONIC_RAW },
+#endif
 	{ "boottime", CLOCK_BOOTTIME },
 };
 
@@ -145,7 +149,7 @@ static int set_timers(struct impl *this)
 
 	spa_log_debug(this->log, "%p now:%"PRIu64, this, this->next_time);
 
-	if (this->following) {
+	if (this->following || !this->started) {
 		set_timeout(this, 0);
 	} else {
 		set_timeout(this, this->next_time);
@@ -158,7 +162,7 @@ static inline bool is_following(struct impl *this)
 	return this->position && this->clock && this->position->clock.id != this->clock->id;
 }
 
-static int do_reassign_follower(struct spa_loop *loop,
+static int do_set_timers(struct spa_loop *loop,
 			    bool async,
 			    uint32_t seq,
 			    const void *data,
@@ -185,7 +189,7 @@ static int reassign_follower(struct impl *this)
 	if (following != this->following) {
 		spa_log_debug(this->log, NAME" %p: reassign follower %d->%d", this, this->following, following);
 		this->following = following;
-		spa_loop_invoke(this->data_loop, do_reassign_follower, 0, NULL, 0, true, this);
+		spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	}
 	return 0;
 }
@@ -243,8 +247,8 @@ static void on_timeout(struct spa_source *source)
 		return;
 	}
 	if (SPA_LIKELY(this->position)) {
-		duration = this->position->clock.duration;
-		rate = this->position->clock.rate.denom;
+		duration = this->position->clock.target_duration;
+		rate = this->position->clock.target_rate.denom;
 	} else {
 		duration = 1024;
 		rate = 48000;
@@ -259,14 +263,13 @@ static void on_timeout(struct spa_source *source)
 
 	current_position = scale_u64(current_time, rate, SPA_NSEC_PER_SEC);
 
-	if (SPA_LIKELY(this->clock))
-		position = this->clock->position;
-	else
-		position = current_position;
-
 	if (this->last_time == 0) {
 		spa_dll_set_bw(&this->dll, SPA_DLL_BW_MIN, duration, rate);
 		this->max_error = rate * MAX_ERROR_MS / 1000;
+		position = current_position;
+	} else if (SPA_LIKELY(this->clock)) {
+		position = this->clock->position + this->clock->duration;
+	} else {
 		position = current_position;
 	}
 
@@ -279,7 +282,6 @@ static void on_timeout(struct spa_source *source)
 	else if (err < -this->max_error)
 		err = -this->max_error;
 
-	position += duration;
 	this->last_time = current_time;
 
 	if (this->tracking) {
@@ -287,7 +289,7 @@ static void on_timeout(struct spa_source *source)
 		this->next_time = nsec + duration / corr * 1e9 / rate;
 	} else {
 		corr = 1.0;
-		this->next_time = scale_u64(position, SPA_NSEC_PER_SEC, rate);
+		this->next_time = scale_u64(position + duration, SPA_NSEC_PER_SEC, rate);
 	}
 
 	if (SPA_UNLIKELY((this->next_time - this->base_time) > BW_PERIOD)) {
@@ -300,6 +302,7 @@ static void on_timeout(struct spa_source *source)
 
 	if (SPA_LIKELY(this->clock)) {
 		this->clock->nsec = nsec;
+		this->clock->rate = this->clock->target_rate;
 		this->clock->position = position;
 		this->clock->duration = duration;
 		this->clock->delay = 0;
@@ -319,9 +322,9 @@ static int do_start(struct impl *this)
 		return 0;
 
 	this->following = is_following(this);
-	set_timers(this);
 	this->started = true;
 	this->last_time = 0;
+	spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	return 0;
 }
 
@@ -330,7 +333,7 @@ static int do_stop(struct impl *this)
 	if (!this->started)
 		return 0;
 	this->started = false;
-	set_timeout(this, 0);
+	spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	return 0;
 }
 

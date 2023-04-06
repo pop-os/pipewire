@@ -119,10 +119,10 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_RT_TIME_SOFT	-1
 #define DEFAULT_RT_TIME_HARD	-1
 
-#define MODULE_USAGE	"[nice.level=<priority: default "SPA_STRINGIFY(DEFAULT_NICE_LEVEL)"(don't change)>] "	\
-			"[rt.prio=<priority: default "SPA_STRINGIFY(DEFAULT_RT_PRIO)">] "		\
-			"[rt.time.soft=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_SOFT)"] "	\
-			"[rt.time.hard=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_HARD)"] "
+#define MODULE_USAGE	"( nice.level=<priority: default "SPA_STRINGIFY(DEFAULT_NICE_LEVEL)"(don't change)> ) "	\
+			"( rt.prio=<priority: default "SPA_STRINGIFY(DEFAULT_RT_PRIO)"> ) "		\
+			"( rt.time.soft=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_SOFT)" ) "	\
+			"( rt.time.hard=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_HARD)" ) "
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -574,6 +574,7 @@ static bool check_realtime_privileges(struct impl *impl)
 			return false;
 		}
 		if (try == 2) {
+#ifdef RLIMIT_RTPRIO
 			struct rlimit rlim;
 			/* second try, try to clamp to RLIMIT_RTPRIO */
 			if (getrlimit(RLIMIT_RTPRIO, &rlim) == 0 && max > (int)rlim.rlim_max) {
@@ -581,6 +582,7 @@ static bool check_realtime_privileges(struct impl *impl)
 				max = (int)rlim.rlim_max;
 			}
 			else
+#endif
 				break;
 		}
 		if (max < DEFAULT_RT_PRIO_MIN) {

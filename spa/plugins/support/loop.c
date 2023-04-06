@@ -333,7 +333,7 @@ static void loop_enter(void *object)
 		impl->enter_count = 1;
 	} else {
 		spa_return_if_fail(impl->enter_count > 0);
-		spa_return_if_fail(impl->thread == thread_id);
+		spa_return_if_fail(pthread_equal(impl->thread, thread_id));
 		impl->enter_count++;
 	}
 	spa_log_trace(impl->log, "%p: enter %p", impl, (void *) impl->thread);
@@ -345,7 +345,7 @@ static void loop_leave(void *object)
 	pthread_t thread_id = pthread_self();
 
 	spa_return_if_fail(impl->enter_count > 0);
-	spa_return_if_fail(impl->thread == thread_id);
+	spa_return_if_fail(pthread_equal(impl->thread, thread_id));
 
 	spa_log_trace(impl->log, "%p: leave %p", impl, (void *) impl->thread);
 
@@ -354,6 +354,13 @@ static void loop_leave(void *object)
 		flush_items(impl);
 		impl->polling = false;
 	}
+}
+
+static int loop_check(void *object)
+{
+	struct impl *impl = object;
+	pthread_t thread_id = pthread_self();
+	return (impl->thread == 0 || pthread_equal(impl->thread, thread_id)) ? 1 : 0;
 }
 
 static inline void free_source(struct source_impl *s)
@@ -826,6 +833,7 @@ static const struct spa_loop_control_methods impl_loop_control = {
 	.enter = loop_enter,
 	.leave = loop_leave,
 	.iterate = loop_iterate,
+	.check = loop_check,
 };
 
 static const struct spa_loop_utils_methods impl_loop_utils = {

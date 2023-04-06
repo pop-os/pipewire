@@ -898,17 +898,19 @@ static void on_node_destroy(void *data)
 	spa_hook_remove(&client->node_listener);
 }
 
-static void on_node_bound(void *data, uint32_t global_id)
+static void on_node_bound_props(void *data, uint32_t global_id, const struct spa_dict *props)
 {
 	struct client *client = data;
 	client->node_id = global_id;
+	if (props)
+		pw_properties_update(client->props, props);
 }
 
 static const struct pw_proxy_events node_proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
 	.removed = on_node_removed,
 	.destroy = on_node_destroy,
-	.bound = on_node_bound,
+	.bound_props = on_node_bound_props,
 };
 
 static struct link *find_activation(struct spa_list *links, uint32_t node_id)
@@ -3798,6 +3800,8 @@ int jack_deactivate (jack_client_t *client)
 		return 0;
 
 	pw_thread_loop_lock(c->context.loop);
+	c->active = false;
+
 	pw_data_loop_stop(c->loop);
 
 	pw_client_node_set_active(c->node, false);
@@ -3816,12 +3820,7 @@ int jack_deactivate (jack_client_t *client)
 
 	pw_thread_loop_unlock(c->context.loop);
 
-	if (res < 0)
-		return res;
-
-	c->active = false;
-
-	return 0;
+	return res;
 }
 
 SPA_EXPORT
@@ -5414,6 +5413,8 @@ void jack_port_set_latency_range (jack_port_t *port, jack_latency_callback_mode_
 	latency = SPA_LATENCY_INFO(direction);
 
 	nframes = jack_get_buffer_size((jack_client_t*)c);
+	if (nframes == 0)
+		nframes = 1;
 
 	latency.min_rate = range->min;
 	if (latency.min_rate >= nframes) {

@@ -522,6 +522,8 @@ void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device);
 #define spa_bt_device_add_listener(d,listener,events,data)           \
 	spa_hook_list_append(&(d)->listener_list, listener, events, data)
 
+struct spa_bt_iso_io;
+
 struct spa_bt_sco_io;
 
 struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_loop *data_loop, int fd, uint16_t read_mtu, uint16_t write_mtu);
@@ -539,9 +541,10 @@ int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *data, int size);
 #define SPA_BT_VOLUME_A2DP_MAX	127
 
 enum spa_bt_transport_state {
-        SPA_BT_TRANSPORT_STATE_IDLE,
-        SPA_BT_TRANSPORT_STATE_PENDING,
-        SPA_BT_TRANSPORT_STATE_ACTIVE,
+        SPA_BT_TRANSPORT_STATE_ERROR = -1,
+        SPA_BT_TRANSPORT_STATE_IDLE = 0,
+        SPA_BT_TRANSPORT_STATE_PENDING = 1,
+        SPA_BT_TRANSPORT_STATE_ACTIVE = 2,
 };
 
 struct spa_bt_transport_events {
@@ -600,16 +603,22 @@ struct spa_bt_transport {
 	int acquire_refcount;
 	bool acquired;
 	bool keepalive;
+	int error_count;
+	uint64_t last_error_time;
 	int fd;
 	uint16_t read_mtu;
 	uint16_t write_mtu;
 	unsigned int delay_us;
 	unsigned int latency_us;
+	uint8_t bap_cig;
+	uint8_t bap_cis;
 
+	struct spa_bt_iso_io *iso_io;
 	struct spa_bt_sco_io *sco_io;
 
 	struct spa_source volume_timer;
 	struct spa_source release_timer;
+	DBusPendingCall *acquire_call;
 
 	struct spa_hook_list listener_list;
 	struct spa_callbacks impl;

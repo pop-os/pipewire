@@ -1203,7 +1203,10 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 
 	/* passive means that this link does not make the nodes active */
 	str = pw_properties_get(properties, PW_KEY_LINK_PASSIVE);
-	this->passive = str ? spa_atob(str) : output->passive | input->passive;
+	this->passive = str ? spa_atob(str) :
+		(output->passive && input_node->can_suspend) ||
+		(input->passive && output_node->can_suspend) ||
+		(input->passive && output->passive);
 	if (this->passive && str == NULL)
 		 pw_properties_set(properties, PW_KEY_LINK_PASSIVE, "true");
 
@@ -1256,10 +1259,9 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 		     output_node, output->port_id, this->rt.out_mix.port.port_id,
 		     input_node, input->port_id, this->rt.in_mix.port.port_id);
 
-	if (asprintf(&this->name, "%d.%d -> %d.%d",
+	this->name = spa_aprintf("%d.%d -> %d.%d",
 			output_node->info.id, output->port_id,
-			input_node->info.id, input->port_id) < 0)
-		this->name = NULL;
+			input_node->info.id, input->port_id);
 	pw_log_info("(%s) (%s) -> (%s)", this->name, output_node->name, input_node->name);
 
 	pw_impl_port_emit_link_added(output, this);
