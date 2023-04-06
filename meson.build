@@ -1,7 +1,7 @@
 project('pipewire', ['c' ],
-  version : '0.3.67',
+  version : '0.3.68',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
-  meson_version : '>= 0.59.0',
+  meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
                       'c_std=gnu11',
                       'cpp_std=c++17',
@@ -281,6 +281,10 @@ else
   avcodec_dep = dependency('', required: false)
 endif
 cdata.set('HAVE_PW_CAT_FFMPEG_INTEGRATION', pw_cat_ffmpeg.allowed())
+
+opus_dep = dependency('opus', required : get_option('opus'))
+summary({'opus (Bluetooth, RTP)': opus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+cdata.set('HAVE_OPUS', opus_dep.found())
 
 summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 cdata.set('HAVE_READLINE', readline_dep.found())

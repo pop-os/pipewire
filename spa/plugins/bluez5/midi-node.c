@@ -868,13 +868,20 @@ static void on_timeout(struct spa_source *source)
 	spa_log_trace(this->log, "%p: timer %"PRIu64" %"PRIu64"", this,
 			now_time, now_time - prev_time);
 
-	update_position(this);
+	if (SPA_LIKELY(this->position)) {
+		this->duration = this->position->clock.target_duration;
+		this->rate = this->position->clock.target_rate.denom;
+	} else {
+		this->duration = 1024;
+		this->rate = 48000;
+	}
 
 	this->next_time = now_time + this->duration * SPA_NSEC_PER_SEC / this->rate;
 
 	if (SPA_LIKELY(this->clock)) {
 		this->clock->nsec = now_time;
-		this->clock->position += this->duration;
+		this->clock->rate = this->clock->target_rate;
+		this->clock->position += this->clock->duration;
 		this->clock->duration = this->duration;
 		this->clock->rate_diff = 1.0f;
 		this->clock->next_nsec = this->next_time;
@@ -1103,17 +1110,10 @@ static int do_remove_source(struct spa_loop *loop,
 		void *user_data)
 {
 	struct impl *this = user_data;
-	struct itimerspec ts;
 
 	if (this->timer_source.loop)
 		spa_loop_remove_source(this->data_loop, &this->timer_source);
-
-	ts.it_value.tv_sec = 0;
-	ts.it_value.tv_nsec = 0;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(this->data_system, this->timerfd, 0, &ts, NULL);
-
+	set_timeout(this, 0);
 	return 0;
 }
 
@@ -1217,7 +1217,6 @@ static int do_reassign_follower(struct spa_loop *loop,
 		void *user_data)
 {
 	struct impl *this = user_data;
-
 	set_timers(this);
 	return 0;
 }

@@ -688,8 +688,9 @@ static void update_io(struct pw_impl_node *node)
 		pw_log_debug("%p: set position %p", node, &node->rt.activation->position);
 		node->rt.position = &node->rt.activation->position;
 
-		node->current_rate = node->rt.position->clock.rate;
-		node->current_quantum = node->rt.position->clock.duration;
+		node->target_rate = node->rt.position->clock.target_rate;
+		node->target_quantum = node->rt.position->clock.target_duration;
+		node->target_pending = false;
 	} else if (node->driver) {
 		pw_log_warn("%p: can't set position on driver", node);
 	}
@@ -804,8 +805,8 @@ do_move_nodes(struct spa_loop *loop,
 	pw_log_trace("%p: set position %p", node, &driver->rt.activation->position);
 	node->rt.position = &driver->rt.activation->position;
 
-	node->current_rate = node->rt.position->clock.rate;
-	node->current_quantum = node->rt.position->clock.duration;
+	node->target_rate = node->rt.position->clock.target_rate;
+	node->target_quantum = node->rt.position->clock.target_duration;
 
 	if (node->source.loop != NULL) {
 		remove_node(node);
@@ -841,14 +842,16 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 	remove_segment_owner(old, node->info.id);
 
 	if (old != node && old->driving && driver->info.state < PW_NODE_STATE_RUNNING) {
-		driver->current_rate = old->current_rate;
-		driver->current_quantum = old->current_quantum;
-		driver->current_pending = true;
-		pw_log_info("move quantum:%"PRIu64" rate:%d (%s-%d -> %s-%d)",
-				driver->current_quantum,
-				driver->current_rate.denom,
+		pw_log_info("move quantum:%"PRIu64"->%"PRIu64" rate:%d->%d (%s-%d -> %s-%d)",
+				driver->target_quantum,
+				old->target_quantum,
+				driver->target_rate.denom,
+				old->target_rate.denom,
 				old->name, old->info.id,
 				driver->name, driver->info.id);
+		driver->target_rate = old->target_rate;
+		driver->target_quantum = old->target_quantum;
+		driver->target_pending = true;
 	}
 	was_driving = node->driving;
 	node->driving = node->driver && driver == node;
@@ -892,7 +895,7 @@ static void check_properties(struct pw_impl_node *node)
 	const char *str, *recalc_reason = NULL;
 	struct spa_fraction frac;
 	uint32_t value;
-	bool driver;
+	bool driver, trigger;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
 		node->priority_driver = pw_properties_parse_int(str);
@@ -925,8 +928,14 @@ static void check_properties(struct pw_impl_node *node)
 	}
 
 	/* not scheduled automatically so we add an additional required trigger */
-	if (pw_properties_get_bool(node->properties, PW_KEY_NODE_TRIGGER, false))
-		node->rt.activation->state[0].required++;
+	trigger = pw_properties_get_bool(node->properties, PW_KEY_NODE_TRIGGER, false);
+	if (trigger != node->trigger) {
+		node->trigger = trigger;
+		if (trigger)
+			node->rt.activation->state[0].required++;
+		else
+			node->rt.activation->state[0].required--;
+	}
 
 	/* group defines what nodes are scheduled together */
 	str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP);
@@ -947,6 +956,12 @@ static void check_properties(struct pw_impl_node *node)
 		recalc_reason = "link group changed";
 	}
 
+	if ((str = pw_properties_get(node->properties, PW_KEY_MEDIA_CLASS)) != NULL &&
+	    (strstr(str, "/Sink") != NULL || strstr(str, "/Source") != NULL)) {
+		node->can_suspend = true;
+	} else {
+		node->can_suspend = false;
+	}
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_PASSIVE)) == NULL)
 		str = "false";
 	if (spa_streq(str, "out"))
@@ -1009,11 +1024,16 @@ static void check_properties(struct pw_impl_node *node)
 	node->lock_rate = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_RATE, false);
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_FORCE_RATE))) {
-		if (spa_atou32(str, &value, 0) &&
-		    node->force_rate != value) {
-			node->force_rate = value;
-			node->stamp = ++context->stamp;
-			recalc_reason = "force rate changed";
+		if (spa_atou32(str, &value, 0)) {
+			if (value == 0)
+				value = node->rate.denom;
+			if (node->force_rate != value) {
+				pw_log_info("(%s-%u) force-rate:%u -> %u", node->name,
+							node->info.id, node->force_rate, value);
+				node->force_rate = value;
+				node->stamp = ++context->stamp;
+				recalc_reason = "force rate changed";
+			}
 		}
 	}
 
@@ -1218,11 +1238,11 @@ static void reset_position(struct pw_impl_node *this, struct spa_io_position *po
 	uint32_t quantum = s->clock_force_quantum == 0 ? s->clock_quantum : s->clock_force_quantum;
 	uint32_t rate = s->clock_force_rate == 0 ? s->clock_rate : s->clock_force_rate;
 
-	this->current_rate = SPA_FRACTION(1, rate);
-	this->current_quantum = quantum;
+	this->target_rate = SPA_FRACTION(1, rate);
+	this->target_quantum = quantum;
 
-	pos->clock.rate = this->current_rate;
-	pos->clock.duration = this->current_quantum;
+	pos->clock.rate = pos->clock.target_rate = this->target_rate;
+	pos->clock.duration = pos->clock.target_duration = this->target_quantum;
 	pos->video.flags = SPA_IO_VIDEO_SIZE_VALID;
 	pos->video.size = s->video_size;
 	pos->video.stride = pos->video.size.width * 16;
@@ -1681,10 +1701,15 @@ static int node_ready(void *data, int status)
 			node->rt.target.signal_func(node->rt.target.data);
 		}
 
-		if (node->current_pending) {
-			node->rt.position->clock.duration = node->current_quantum;
-			node->rt.position->clock.rate = node->current_rate;
-			node->current_pending = false;
+		/* This update is done too late, the driver should do this
+		 * before calling the ready callback so that it can use the new target
+		 * duration and rate to schedule the next update. We do this here to
+		 * help drivers that don't support this yet */
+		if (node->rt.position->clock.duration != node->rt.position->clock.target_duration ||
+		    node->rt.position->clock.rate.denom != node->rt.position->clock.target_rate.denom) {
+			pw_log_warn("driver %s did not update duration/rate", node->name);
+			node->rt.position->clock.duration = node->rt.position->clock.target_duration;
+			node->rt.position->clock.rate = node->rt.position->clock.target_rate;
 		}
 
 		sync_type = check_updates(node, &reposition_owner);

@@ -191,7 +191,7 @@ static int set_timers(struct impl *this)
 	    return res;
 	this->next_time = SPA_TIMESPEC_TO_NSEC(&now);
 
-	if (this->following) {
+	if (this->following || !this->started) {
 		set_timeout(this, 0);
 	} else {
 		set_timeout(this, this->next_time);
@@ -204,7 +204,7 @@ static inline bool is_following(struct impl *this)
 	return this->position && this->clock && this->position->clock.id != this->clock->id;
 }
 
-static int do_reassign_follower(struct spa_loop *loop,
+static int do_set_timers(struct spa_loop *loop,
 			    bool async,
 			    uint32_t seq,
 			    const void *data,
@@ -227,7 +227,7 @@ static int reassign_follower(struct impl *this)
 	if (following != this->following) {
 		spa_log_debug(this->log, NAME" %p: reassign follower %d->%d", this, this->following, following);
 		this->following = following;
-		spa_loop_invoke(this->data_loop, do_reassign_follower, 0, NULL, 0, true, this);
+		spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	}
 	return 0;
 }
@@ -280,8 +280,8 @@ static void on_timeout(struct spa_source *source)
 	nsec = this->next_time;
 
 	if (SPA_LIKELY(this->position)) {
-		duration = this->position->clock.duration;
-		rate = this->position->clock.rate.denom;
+		duration = this->position->clock.target_duration;
+		rate = this->position->clock.target_rate.denom;
 	} else {
 		duration = 1024;
 		rate = 48000;
@@ -291,7 +291,8 @@ static void on_timeout(struct spa_source *source)
 
 	if (SPA_LIKELY(this->clock)) {
 		this->clock->nsec = nsec;
-		this->clock->position += duration;
+		this->clock->rate = this->clock->target_rate;
+		this->clock->position += this->clock->duration;
 		this->clock->duration = duration;
 		this->clock->delay = 0;
 		this->clock->rate_diff = 1.0;
@@ -309,8 +310,8 @@ static int do_start(struct impl *this)
 		return 0;
 
 	this->following = is_following(this);
-	set_timers(this);
 	this->started = true;
+	spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	return 0;
 }
 
@@ -319,7 +320,7 @@ static int do_stop(struct impl *this)
 	if (!this->started)
 		return 0;
 	this->started = false;
-	set_timeout(this, 0);
+	spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	return 0;
 }
 

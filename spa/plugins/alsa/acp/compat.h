@@ -47,10 +47,12 @@ typedef void (*pa_free_cb_t)(void *p);
 #define PA_LIKELY(x) (__builtin_expect(!!(x),1))
 #define PA_UNLIKELY(x) (__builtin_expect(!!(x),0))
 #define PA_PRINTF_FUNC(fmt, arg1) __attribute__((format(printf, fmt, arg1)))
+#define PA_UNUSED __attribute__ ((unused))
 #else
 #define PA_LIKELY(x) (x)
 #define PA_UNLIKELY(x) (x)
 #define PA_PRINTF_FUNC(fmt, arg1)
+#define PA_UNUSED
 #endif
 
 #define PA_MIN(a,b)                    \
@@ -96,7 +98,7 @@ typedef enum pa_available {
 	PA_AVAILABLE_YES = 2,
 } pa_available_t;
 
-#define PA_RATE_MAX (48000U*8U)
+#define PA_RATE_MAX (48000U*16U)
 
 typedef enum pa_sample_format {
 	PA_SAMPLE_U8,		/**< Unsigned 8 Bit PCM */
@@ -348,6 +350,48 @@ static inline void pa_xstrfreev(char **a) {
     pa_xfreev((void**)a);
 }
 
+typedef struct {
+	size_t size;
+	char *ptr;
+	FILE *f;
+} pa_strbuf;
+
+static inline pa_strbuf *pa_strbuf_new(void)
+{
+	pa_strbuf *s = pa_xnew0(pa_strbuf,1);
+	s->f = open_memstream(&s->ptr, &s->size);
+	return s;
+}
+
+static PA_PRINTF_FUNC(2,3) inline size_t pa_strbuf_printf(pa_strbuf *sb, const char *format, ...)
+{
+	int ret;
+	va_list args;
+	va_start(args, format);
+	ret = vfprintf(sb->f, format, args);
+	va_end(args);
+	return ret > 0 ? ret : 0;
+}
+
+static inline void pa_strbuf_puts(pa_strbuf *sb, const char *t)
+{
+	fputs(t, sb->f);
+}
+
+static inline bool pa_strbuf_isempty(pa_strbuf *sb)
+{
+	fflush(sb->f);
+	return sb->size == 0;
+}
+
+static inline char *pa_strbuf_to_string_free(pa_strbuf *sb)
+{
+	char *ptr;
+	fclose(sb->f);
+	ptr = sb->ptr;
+	free(sb);
+	return ptr;
+}
 
 #define pa_cstrerror	strerror
 

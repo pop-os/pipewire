@@ -17,6 +17,7 @@
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
+#include <spa/debug/dict.h>
 
 #define PW_ENABLE_DEPRECATED
 
@@ -1044,7 +1045,6 @@ again:
 			impl->drained = false;
 			io->buffer_id = b->id;
 			res = io->status = SPA_STATUS_HAVE_DATA;
-			pw_log_trace_fp("%p: pop %d %p", stream, b->id, io);
 			/* we have a buffer, if we are not rt and don't follow
 			 * any rate matching and there are no more
 			 * buffers queued and there is a buffer to dequeue, ask for
@@ -1055,6 +1055,8 @@ again:
 			ask_more = !impl->process_rt && impl->rate_match == NULL &&
 				queue_is_empty(impl, &impl->queued) &&
 				!queue_is_empty(impl, &impl->dequeued);
+			pw_log_trace_fp("%p: pop %d %p ask_more:%u %p", stream, b->id, io,
+					ask_more, impl->rate_match);
 		} else if (impl->draining || impl->drained) {
 			impl->draining = true;
 			impl->drained = true;
@@ -1137,10 +1139,12 @@ static void proxy_error(void *_data, int seq, int res, const char *message)
 			PW_STREAM_STATE_ERROR, message);
 }
 
-static void proxy_bound(void *data, uint32_t global_id)
+static void proxy_bound_props(void *data, uint32_t global_id, const struct spa_dict *props)
 {
 	struct pw_stream *stream = data;
 	stream->node_id = global_id;
+	if (props)
+		pw_properties_update(stream->properties, props);
 	stream_set_state(stream, PW_STREAM_STATE_PAUSED, NULL);
 }
 
@@ -1149,7 +1153,7 @@ static const struct pw_proxy_events proxy_events = {
 	.removed = proxy_removed,
 	.destroy = proxy_destroy,
 	.error = proxy_error,
-	.bound = proxy_bound,
+	.bound_props = proxy_bound_props,
 };
 
 static struct control *find_control(struct pw_stream *stream, uint32_t id)
@@ -1332,6 +1336,14 @@ static int node_event_param(void *object, int seq,
 	return 0;
 }
 
+static void node_event_destroy(void *data)
+{
+	struct pw_stream *stream = data;
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	spa_hook_remove(&stream->node_listener);
+	impl->node = NULL;
+}
+
 static void node_event_info(void *data, const struct pw_node_info *info)
 {
 	struct pw_stream *stream = data;
@@ -1359,6 +1371,7 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 
 static const struct pw_impl_node_events node_events = {
 	PW_VERSION_IMPL_NODE_EVENTS,
+	.destroy = node_event_destroy,
 	.info_changed = node_event_info,
 };
 
@@ -1422,6 +1435,8 @@ stream_new(struct pw_context *context, const char *name,
 	const char *str;
 	struct match match;
 	int res;
+
+	ensure_loop(context->main_loop, return NULL);
 
 	impl = calloc(1, sizeof(struct stream));
 	if (impl == NULL) {
@@ -1596,18 +1611,52 @@ const char *pw_stream_state_as_string(enum pw_stream_state state)
 	return "invalid-state";
 }
 
+static int stream_disconnect(struct stream *impl)
+{
+	struct pw_stream *stream = &impl->this;
+
+	pw_log_debug("%p: disconnect", stream);
+
+	if (impl->disconnecting)
+		return -EBUSY;
+
+	impl->disconnecting = true;
+
+	if (impl->node)
+		pw_impl_node_set_active(impl->node, false);
+
+	if (stream->proxy) {
+		pw_proxy_destroy(stream->proxy);
+		stream->proxy = NULL;
+	}
+
+	if (impl->node)
+		pw_impl_node_destroy(impl->node);
+
+	if (impl->disconnect_core) {
+		impl->disconnect_core = false;
+		spa_hook_remove(&stream->core_listener);
+		spa_list_remove(&stream->link);
+		pw_core_disconnect(stream->core);
+		stream->core = NULL;
+	}
+	return 0;
+}
+
 SPA_EXPORT
 void pw_stream_destroy(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	struct control *c;
 
+	ensure_loop(impl->context->main_loop, return);
+
 	pw_log_debug("%p: destroy", stream);
 
 	pw_stream_emit_destroy(stream);
 
 	if (!impl->disconnecting)
-		pw_stream_disconnect(stream);
+		stream_disconnect(impl);
 
 	if (stream->core) {
 		spa_hook_remove(&stream->core_listener);
@@ -1656,6 +1705,9 @@ void pw_stream_add_listener(struct pw_stream *stream,
 			    void *data)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+
+	ensure_loop(impl->context->main_loop);
+
 	spa_hook_list_append(&stream->listener_list, listener, events, data);
 
 	if (events->process && impl->rt_callbacks.funcs == NULL) {
@@ -1691,6 +1743,8 @@ int pw_stream_update_properties(struct pw_stream *stream, const struct spa_dict 
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int changed, res = 0;
 	struct match match;
+
+	ensure_loop(impl->context->main_loop, return -EIO);
 
 	changed = pw_properties_update(stream->properties, dict);
 	if (!changed)
@@ -1786,8 +1840,7 @@ static const char *get_media_class(struct stream *impl)
 	}
 }
 
-SPA_EXPORT
-int
+SPA_EXPORT int
 pw_stream_connect(struct pw_stream *stream,
 		  enum pw_direction direction,
 		  uint32_t target_id,
@@ -1802,7 +1855,13 @@ pw_stream_connect(struct pw_stream *stream,
 	uint32_t i;
 	int res;
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	pw_log_debug("%p: connect target:%d", stream, target_id);
+
+	if (impl->node != NULL || stream->state != PW_STREAM_STATE_UNCONNECTED)
+		return -EBUSY;
+
 	impl->direction =
 	    direction == PW_DIRECTION_INPUT ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT;
 	impl->flags = flags;
@@ -1879,6 +1938,11 @@ pw_stream_connect(struct pw_stream *stream,
 		return res;
 
 	impl->disconnecting = false;
+	impl->drained = false;
+	impl->draining = false;
+	impl->driving = false;
+	impl->trigger = false;
+	impl->using_trigger = false;
 	stream_set_state(stream, PW_STREAM_STATE_CONNECTING, NULL);
 
 	if ((str = getenv("PIPEWIRE_NODE")) != NULL)
@@ -2022,40 +2086,18 @@ SPA_EXPORT
 int pw_stream_disconnect(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
-
-	pw_log_debug("%p: disconnect", stream);
-
-	if (impl->disconnecting)
-		return 0;
-
-	impl->disconnecting = true;
-
-	if (impl->node)
-		pw_impl_node_set_active(impl->node, false);
-
-	if (stream->proxy) {
-		pw_proxy_destroy(stream->proxy);
-		stream->proxy = NULL;
-	}
-
-	if (impl->node) {
-		pw_impl_node_destroy(impl->node);
-		impl->node = NULL;
-	}
-	if (impl->disconnect_core) {
-		impl->disconnect_core = false;
-		spa_hook_remove(&stream->core_listener);
-		spa_list_remove(&stream->link);
-		pw_core_disconnect(stream->core);
-		stream->core = NULL;
-	}
-	return 0;
+	ensure_loop(impl->context->main_loop, return -EIO);
+	return stream_disconnect(impl);
 }
 
 SPA_EXPORT
 int pw_stream_set_error(struct pw_stream *stream,
 			int res, const char *error, ...)
 {
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	if (res < 0) {
 		va_list args;
 		char *value;
@@ -2084,6 +2126,8 @@ int pw_stream_update_params(struct pw_stream *stream,
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int res;
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	pw_log_debug("%p: update params", stream);
 	if ((res = update_params(impl, SPA_ID_INVALID, params, n_params)) < 0)
 		return res;
@@ -2105,6 +2149,8 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 	struct spa_pod *pod;
 	struct control *c;
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	if (impl->node == NULL)
 		return -EIO;
 
@@ -2115,8 +2161,9 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 		pw_log_debug("%p: set control %d %d %f", stream, id, n_values, values[0]);
 
 		if ((c = find_control(stream, id))) {
+			uint32_t container = n_values > 0 ? c->container : SPA_TYPE_None;
 			spa_pod_builder_prop(&b, id, 0);
-			switch (c->container) {
+			switch (container) {
 			case SPA_TYPE_Float:
 				spa_pod_builder_float(&b, values[0]);
 				break;
@@ -2172,9 +2219,15 @@ SPA_EXPORT
 int pw_stream_set_active(struct pw_stream *stream, bool active)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	pw_log_debug("%p: active:%d", stream, active);
-	if (impl->node)
-		pw_impl_node_set_active(impl->node, active);
+
+	if (impl->node == NULL)
+		return -EIO;
+
+	pw_impl_node_set_active(impl->node, active);
 
 	if (!active || impl->drained)
 		impl->drained = impl->draining = false;
@@ -2329,9 +2382,14 @@ SPA_EXPORT
 int pw_stream_flush(struct pw_stream *stream, bool drain)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+
+	if (impl->node == NULL)
+		return -EIO;
+
 	pw_loop_invoke(impl->context->data_loop,
 			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
-	if (!drain && impl->node != NULL)
+
+	if (!drain)
 		spa_node_send_command(impl->node->node,
 				&SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Flush));
 	return 0;
@@ -2360,8 +2418,10 @@ do_trigger_process(struct spa_loop *loop,
 	return spa_node_call_ready(&impl->callbacks, res);
 }
 
-static int trigger_request_process(struct stream *impl)
+static int do_trigger_request_process(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
+	struct stream *impl = user_data;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = { 0 };
 
@@ -2384,7 +2444,8 @@ int pw_stream_trigger_process(struct pw_stream *stream)
 	impl->using_trigger = true;
 
 	if (!impl->driving && !impl->trigger) {
-		res = trigger_request_process(impl);
+		res = pw_loop_invoke(impl->context->main_loop,
+			do_trigger_request_process, 1, NULL, 0, false, impl);
 	} else {
 		if (!impl->process_rt)
 			call_process(impl);

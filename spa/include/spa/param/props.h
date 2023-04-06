@@ -59,7 +59,7 @@ enum spa_prop {
 	SPA_PROP_START_Audio	= 0x10000,	/**< audio related properties */
 	SPA_PROP_waveType,
 	SPA_PROP_frequency,
-	SPA_PROP_volume,			/**< a volume (Float), 0.0 silence, 1.0 normal */
+	SPA_PROP_volume,				/**< a volume (Float), 0.0 silence, 1.0 normal */
 	SPA_PROP_mute,				/**< mute (Bool) */
 	SPA_PROP_patternType,
 	SPA_PROP_ditherType,
@@ -80,6 +80,14 @@ enum spa_prop {
 
 	SPA_PROP_iec958Codecs,			/**< enabled IEC958 (S/PDIF) codecs,
 						  *  (Array (Id enum spa_audio_iec958_codec) */
+	SPA_PROP_volumeRampSamples,		/**< Samples to ramp the volume over */
+	SPA_PROP_volumeRampStepSamples,		/**< Step or incremental Samples to ramp
+						  *  the volume over */
+	SPA_PROP_volumeRampTime,		/**< Time in millisec to ramp the volume over */
+	SPA_PROP_volumeRampStepTime,		/**< Step or incremental Time in nano seconds
+						  *  to ramp the */
+	SPA_PROP_volumeRampScale,		/**< the scale or graph to used to ramp the
+						  *  volume */
 
 	SPA_PROP_START_Video	= 0x20000,	/**< video related properties */
 	SPA_PROP_brightness,

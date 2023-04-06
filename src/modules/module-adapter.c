@@ -26,7 +26,7 @@ PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define FACTORY_USAGE	SPA_KEY_FACTORY_NAME"=<factory-name> " \
-			"["SPA_KEY_LIBRARY_NAME"=<library-name>] " \
+			"("SPA_KEY_LIBRARY_NAME"=<library-name>) " \
 			ADAPTER_USAGE
 
 static const struct spa_dict_item module_props[] = {
@@ -203,7 +203,7 @@ static void *create_object(void *_data,
 
 		handle = pw_context_load_spa_handle(d->context,
 				factory_name,
-				properties ? &properties->dict : NULL);
+				&properties->dict);
 		if (handle == NULL)
 			goto error_errno;
 

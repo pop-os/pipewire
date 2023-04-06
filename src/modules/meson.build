@@ -28,6 +28,8 @@ module_sources = [
   'module-rt.c',
   'module-raop-discover.c',
   'module-raop-sink.c',
+  'module-rtp-sap.c',
+  'module-rtp-session.c',
   'module-rtp-source.c',
   'module-rtp-sink.c',
   'module-session-manager.c',
@@ -153,7 +155,7 @@ pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, pipewire_dep],
+  dependencies : [mathlib, dl_lib, pipewire_dep, audioconvert_dep],
 )
 
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
@@ -519,16 +521,41 @@ roc_dep = dependency('roc', required: get_option('roc'))
 summary({'ROC': roc_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 
 pipewire_module_rtp_source = shared_library('pipewire-module-rtp-source',
-  [ 'module-rtp-source.c' ],
+  [ 'module-rtp-source.c',
+    'module-rtp/stream.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep],
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, opus_dep],
 )
 
 pipewire_module_rtp_sink = shared_library('pipewire-module-rtp-sink',
-  [ 'module-rtp-sink.c' ],
+  [ 'module-rtp-sink.c',
+    'module-rtp/stream.c' ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, opus_dep],
+)
+
+build_module_rtp_session = avahi_dep.found()
+if build_module_rtp_session
+  pipewire_module_rtp_session = shared_library('pipewire-module-rtp-session',
+    [ 'module-rtp/stream.c',
+      'module-zeroconf-discover/avahi-poll.c',
+     'module-rtp-session.c' ],
+    include_directories : [configinc],
+    install : true,
+    install_dir : modules_install_dir,
+    install_rpath: modules_install_dir,
+    dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, avahi_dep, opus_dep],
+  )
+endif
+
+pipewire_module_rtp_sap = shared_library('pipewire-module-rtp-sap',
+  [ 'module-rtp-sap.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,

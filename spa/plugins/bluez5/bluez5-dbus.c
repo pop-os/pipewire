@@ -35,6 +35,7 @@
 #include "config.h"
 #include "codec-loader.h"
 #include "player.h"
+#include "iso-io.h"
 #include "defs.h"
 
 static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5");
@@ -65,6 +66,12 @@ enum backend_selection {
 
 #define CODEC_SWITCH_RETRIES	1
 
+/* How many times to retry acquire on errors, and how long delay to require before we can
+ * try again.
+ */
+#define TRANSPORT_ERROR_MAX_RETRY	3
+#define TRANSPORT_ERROR_TIMEOUT		(2*BLUEZ_ACTION_RATE_MSEC*SPA_NSEC_PER_MSEC)
+
 
 struct spa_bt_monitor {
 	struct spa_handle handle;
@@ -72,7 +79,9 @@ struct spa_bt_monitor {
 
 	struct spa_log *log;
 	struct spa_loop *main_loop;
+	struct spa_loop *data_loop;
 	struct spa_system *main_system;
+	struct spa_system *data_system;
 	struct spa_plugin_loader *plugin_loader;
 	struct spa_dbus *dbus;
 	struct spa_dbus_connection *dbus_connection;
@@ -102,6 +111,8 @@ struct spa_bt_monitor {
 	enum backend_selection backend_selection;
 
 	struct spa_dict enabled_codecs;
+
+	enum spa_bt_profile enabled_profiles;
 
 	unsigned int connection_info_supported:1;
 	unsigned int dummy_avrcp_player:1;
@@ -178,11 +189,12 @@ struct spa_bt_media_codec_switch {
  * SCO socket connect may fail with ECONNABORTED if it is done too soon after
  * previous close. To avoid this in cases where nodes are toggled between
  * stopped/started rapidly, postpone release until the transport has remained
- * unused for a time. Since this appears common to multiple SCO backends, we do
- * it for all SCO backends here.
+ * unused for a time.
+ *
+ * Avoiding unnecessary release+reacquire also makes sense for other transports,
+ * so we use the release timeout for all of them.
  */
-#define SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC 1000
-#define SPA_BT_TRANSPORT_IS_SCO(transport) (transport->backend != NULL)
+#define TRANSPORT_RELEASE_TIMEOUT_MSEC 1000
 
 #define TRANSPORT_VOLUME_TIMEOUT_MSEC 200
 
@@ -508,6 +520,19 @@ static bool codec_has_direction(const struct media_codec *codec, enum spa_bt_med
 	}
 }
 
+static enum spa_bt_profile get_codec_profile(const struct media_codec *codec,
+		enum spa_bt_media_direction direction)
+{
+	switch (direction) {
+	case SPA_BT_MEDIA_SOURCE:
+		return codec->bap ? SPA_BT_PROFILE_BAP_SOURCE : SPA_BT_PROFILE_A2DP_SOURCE;
+	case SPA_BT_MEDIA_SINK:
+		return codec->bap ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_A2DP_SINK;
+	default:
+		spa_assert_not_reached();
+	}
+}
+
 static bool endpoint_should_be_registered(struct spa_bt_monitor *monitor,
 					  const struct media_codec *codec,
 					  enum spa_bt_media_direction direction)
@@ -517,7 +542,8 @@ static bool endpoint_should_be_registered(struct spa_bt_monitor *monitor,
 	 */
 	return is_media_codec_enabled(monitor, codec) &&
 		codec_has_direction(codec, direction) &&
-		codec->fill_caps;
+		codec->fill_caps &&
+		(get_codec_profile(codec, direction) & monitor->enabled_profiles);
 }
 
 static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBusMessage *m, void *userdata)
@@ -1209,11 +1235,17 @@ struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monit
 	return NULL;
 }
 
-void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device)
+static uint64_t get_time_now(struct spa_bt_monitor *monitor)
 {
 	struct timespec ts;
-	spa_system_clock_gettime(device->monitor->main_system, CLOCK_MONOTONIC, &ts);
-	device->last_bluez_action_time = SPA_TIMESPEC_TO_NSEC(&ts);
+
+	spa_system_clock_gettime(monitor->main_system, CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device)
+{
+	device->last_bluez_action_time = get_time_now(device->monitor);
 }
 
 static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const char *path)
@@ -2199,6 +2231,8 @@ struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor,
 	t->sco_io = NULL;
 	t->delay_us = SPA_BT_UNKNOWN_DELAY;
 	t->latency_us = SPA_BT_UNKNOWN_DELAY;
+	t->bap_cig = 0xff;
+	t->bap_cis = 0xff;
 	t->user_data = SPA_PTROFF(t, sizeof(struct spa_bt_transport), void);
 	spa_hook_list_init(&t->listener_list);
 	spa_list_init(&t->bap_transport_linked);
@@ -2236,6 +2270,18 @@ void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_
 		spa_bt_transport_emit_state_changed(transport, old, state);
 		if (state >= SPA_BT_TRANSPORT_STATE_PENDING && old < SPA_BT_TRANSPORT_STATE_PENDING)
 			transport_sync_volume(transport);
+
+		if (state == SPA_BT_TRANSPORT_STATE_ERROR) {
+			uint64_t now = get_time_now(monitor);
+
+			if (now > transport->last_error_time + TRANSPORT_ERROR_TIMEOUT) {
+				spa_log_error(monitor->log, "Failure in Bluetooth audio transport %s",
+						transport->path);
+			}
+
+			transport->last_error_time = now;
+			++transport->error_count;
+		}
 	}
 }
 
@@ -2261,7 +2307,15 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 		transport->sco_io = NULL;
 	}
 
+	if (transport->iso_io)
+		spa_bt_iso_io_destroy(transport->iso_io);
+
 	spa_bt_transport_destroy(transport);
+
+	if (transport->acquire_call) {
+		dbus_pending_call_cancel(transport->acquire_call);
+		transport->acquire_call = NULL;
+	}
 
 	if (transport->fd >= 0) {
 		spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
@@ -2313,9 +2367,16 @@ int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
 	if (transport->acquire_refcount > 0) {
 		spa_log_debug(monitor->log, "transport %p: incref %s", transport, transport->path);
 		transport->acquire_refcount += 1;
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
 		return 0;
 	}
 	spa_assert(transport->acquire_refcount == 0);
+
+	/* If we are getting into error state too often, stop trying */
+	if (get_time_now(monitor) > transport->last_error_time + TRANSPORT_ERROR_TIMEOUT)
+		transport->error_count = 0;
+	if (transport->error_count >= TRANSPORT_ERROR_MAX_RETRY)
+		return -EIO;
 
 	if (!transport->acquired)
 		res = spa_bt_transport_impl(transport, acquire, 0, optional);
@@ -2333,11 +2394,11 @@ int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
 int spa_bt_transport_release(struct spa_bt_transport *transport)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
-	int res;
 
 	if (transport->acquire_refcount > 1) {
 		spa_log_debug(monitor->log, "transport %p: decref %s", transport, transport->path);
 		transport->acquire_refcount -= 1;
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
 		return 0;
 	}
 	else if (transport->acquire_refcount == 0) {
@@ -2347,23 +2408,8 @@ int spa_bt_transport_release(struct spa_bt_transport *transport)
 	spa_assert(transport->acquire_refcount == 1);
 	spa_assert(transport->acquired);
 
-	if (SPA_BT_TRANSPORT_IS_SCO(transport)) {
-		/* Postpone SCO transport releases, since we might need it again soon */
-		res = spa_bt_transport_start_release_timer(transport);
-	} else if (transport->keepalive) {
-		res = 0;
-		transport->acquire_refcount = 0;
-		spa_log_debug(monitor->log, "transport %p: keepalive %s on release",
-				transport, transport->path);
-	} else {
-		res = spa_bt_transport_impl(transport, release, 0);
-		if (res >= 0) {
-			transport->acquire_refcount = 0;
-			transport->acquired = false;
-		}
-	}
-
-	return res;
+	/* Postpone transport releases, since we might need it again soon */
+	return spa_bt_transport_start_release_timer(transport);
 }
 
 static int spa_bt_transport_release_now(struct spa_bt_transport *transport)
@@ -2460,7 +2506,7 @@ static int spa_bt_transport_start_release_timer(struct spa_bt_transport *transpo
 	return start_timeout_timer(transport->monitor,
 		&transport->release_timer,
 		spa_bt_transport_release_timer_event,
-		SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC, transport);
+		TRANSPORT_RELEASE_TIMEOUT_MSEC, transport);
 }
 
 static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transport)
@@ -2623,7 +2669,16 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				}
 			}
 			else if (spa_streq(key, "State")) {
-				spa_bt_transport_set_state(transport, spa_bt_transport_state_from_string(value));
+				enum spa_bt_transport_state state  = spa_bt_transport_state_from_string(value);
+
+				/* Emit transition to active only for transports with
+				 * acquired fd. If the acquire completes after prop
+				 * update, we set the state in acquire completion.  BlueZ
+				 * currently sends events in the order where this never
+				 * happens, but let's not rely on that.
+				 */
+				if (state != SPA_BT_TRANSPORT_STATE_ACTIVE || transport->fd >= 0)
+					spa_bt_transport_set_state(transport, state);
 			}
 			else if (spa_streq(key, "Device")) {
 				struct spa_bt_device *device = spa_bt_device_find(monitor, value);
@@ -2809,6 +2864,20 @@ static int transport_update_props(struct spa_bt_transport *transport,
 
 			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
 		}
+		else if (spa_streq(key, "CIG") || spa_streq(key, "CIS")) {
+			uint8_t value;
+
+			if (type != DBUS_TYPE_BYTE)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+
+			if (spa_streq(key, "CIG"))
+				transport->bap_cig = value;
+			else
+				transport->bap_cis = value;
+		}
 next:
 		dbus_message_iter_next(props_iter);
 	}
@@ -2888,61 +2957,79 @@ static int transport_set_volume(void *data, int id, float volume)
 	return 0;
 }
 
-static int transport_acquire(void *data, bool optional)
+static int transport_create_iso_io(struct spa_bt_transport *transport)
 {
-	struct spa_bt_transport *transport = data;
 	struct spa_bt_monitor *monitor = transport->monitor;
-	DBusMessage *m, *r = NULL;
-	DBusError err;
-	int ret = 0;
-	const char *method = optional ? "TryAcquire" : "Acquire";
-	struct spa_bt_transport *t_linked;
+	struct spa_bt_transport *t;
+	bool sink = (transport->profile & SPA_BT_PROFILE_BAP_SINK) != 0;
 
-	/* For LE Audio, multiple transport from the same device may share the same
-	 * stream (CIS) and group (CIG) but for different direction, e.g. a speaker and
-	 * a microphone. In this case they are linked.
-	 * If one of them has already been acquired this function should not call Acquire
-	 * or TryAcquire but re-use values from the previously acquired transport.
-	 */
-	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
-		if (t_linked->acquired && t_linked->device == transport->device) {
-			transport->fd = t_linked->fd;
-			transport->read_mtu = t_linked->read_mtu;
-			transport->write_mtu = t_linked->write_mtu;
-			spa_log_debug(monitor->log, "transport %p: linked transport %s", transport, t_linked->path);
-			goto done;
+	if (!(transport->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)))
+		return 0;
+
+	if (transport->bap_cig == 0xff || transport->bap_cis == 0xff)
+		return -EINVAL;
+
+	if (transport->iso_io) {
+		spa_log_debug(monitor->log, "transport %p: remove ISO IO", transport);
+		spa_bt_iso_io_destroy(transport->iso_io);
+		transport->iso_io = NULL;
+	}
+
+	/* Transports in same connected iso group share the same i/o */
+	spa_list_for_each(t, &monitor->transport_list, link) {
+		if (!(t->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)))
+			continue;
+		if (t->bap_cig != transport->bap_cig)
+			continue;
+
+		if (t->iso_io) {
+			spa_log_debug(monitor->log, "transport %p: attach ISO IO to %p",
+					transport, t);
+			transport->iso_io = spa_bt_iso_io_attach(t->iso_io, transport->fd, sink);
+			return 0;
 		}
 	}
 
-	m = dbus_message_new_method_call(BLUEZ_SERVICE,
-					 transport->path,
-					 BLUEZ_MEDIA_TRANSPORT_INTERFACE,
-					 method);
-	if (m == NULL)
-		return -ENOMEM;
+	spa_log_debug(monitor->log, "transport %p: new ISO IO", transport);
+	transport->iso_io = spa_bt_iso_io_create(transport->fd, sink,
+			monitor->log, monitor->data_loop, monitor->data_system);
+	if (transport->iso_io == NULL)
+		return -errno;
+
+	return 0;
+}
+
+static void transport_acquire_reply(DBusPendingCall *pending, void *user_data)
+{
+	struct spa_bt_transport *transport = user_data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_device *device = transport->device;
+	int ret = 0;
+	DBusError err;
+	DBusMessage *r;
+	struct spa_bt_transport *t_linked;
+
+	r = dbus_pending_call_steal_reply(pending);
+
+	spa_assert(transport->acquire_call == pending);
+	dbus_pending_call_unref(pending);
+	transport->acquire_call = NULL;
+
+	spa_bt_device_update_last_bluez_action_time(device);
+
+	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
+		spa_log_error(monitor->log, "Acquire %s returned error: %s",
+				transport->path,
+				dbus_message_get_error_name(r));
+		ret = -EIO;
+		goto finish;
+	}
 
 	dbus_error_init(&err);
 
-	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
-	dbus_message_unref(m);
-	m = NULL;
-
-	if (r == NULL) {
-		if (optional && spa_streq(err.name, "org.bluez.Error.NotAvailable")) {
-			spa_log_info(monitor->log, "Failed optional acquire of unavailable transport %s",
-					transport->path);
-		}
-		else {
-			spa_log_error(monitor->log, "Transport %s() failed for transport %s (%s)",
-					method, transport->path, err.message);
-		}
-		dbus_error_free(&err);
-		return -EIO;
-	}
-
-	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
-		spa_log_error(monitor->log, "%s returned error: %s", method, dbus_message_get_error_name(r));
-		ret = -EIO;
+	if (transport->fd >= 0) {
+		spa_log_error(monitor->log, "transport %p: invalid duplicate acquire", transport);
+		ret = -EINVAL;
 		goto finish;
 	}
 
@@ -2951,13 +3038,14 @@ static int transport_acquire(void *data, bool optional)
 				   DBUS_TYPE_UINT16, &transport->read_mtu,
 				   DBUS_TYPE_UINT16, &transport->write_mtu,
 				   DBUS_TYPE_INVALID)) {
-		spa_log_error(monitor->log, "Failed to parse %s() reply: %s", method, err.message);
+		spa_log_error(monitor->log, "Failed to parse Acquire %s reply: %s",
+				transport->path, err.message);
 		dbus_error_free(&err);
 		ret = -EIO;
 		goto finish;
 	}
-done:
-	spa_log_debug(monitor->log, "transport %p: %s %s, fd %d MTU %d:%d", transport, method,
+
+	spa_log_debug(monitor->log, "transport %p: Acquired %s, fd %d MTU %d:%d", transport,
 			transport->path, transport->fd, transport->read_mtu, transport->write_mtu);
 
 	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_PLAYING);
@@ -2967,17 +3055,153 @@ done:
 finish:
 	if (r)
 		dbus_message_unref(r);
-	return ret;
+	if (ret < 0)
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ERROR);
+	else {
+		if (transport_create_iso_io(transport) < 0)
+			spa_log_error(monitor->log, "transport %p: transport_create_iso_io failed",
+					transport);
+
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
+	}
+
+	/* For LE Audio, multiple transport from the same device may share the same
+	 * stream (CIS) and group (CIG) but for different direction, e.g. a speaker and
+	 * a microphone. In this case they are linked, and we need to set the values
+	 * for all of them here.
+	 */
+	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
+		if (ret < 0) {
+			spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ERROR);
+			continue;
+		}
+
+		t_linked->fd = transport->fd;
+		t_linked->read_mtu = transport->read_mtu;
+		t_linked->write_mtu = transport->write_mtu;
+		spa_log_debug(monitor->log, "transport %p: linked Acquired %s, fd %d MTU %d:%d", t_linked,
+				t_linked->path, t_linked->fd, t_linked->read_mtu, t_linked->write_mtu);
+
+		if (transport_create_iso_io(t_linked) < 0)
+			spa_log_error(monitor->log, "transport %p: transport_create_iso_io failed",
+					t_linked);
+
+		spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ACTIVE);
+	}
 }
 
-static int transport_release(void *data)
+static int do_transport_acquire(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusMessage *m;
+	DBusError err;
+	dbus_bool_t ret;
+	struct spa_bt_transport *t_linked;
+
+	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
+		/* If a linked transport has been acquired, it will do all the work */
+		if (t_linked->acquire_call || t_linked->acquired) {
+			spa_log_debug(monitor->log, "Acquiring %s: use linked transport %s",
+					transport->path, t_linked->path);
+			spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
+			return 0;
+		}
+	}
+
+	if (transport->acquire_call)
+		return -EBUSY;
+
+	spa_log_info(monitor->log, "Acquiring transport %s", transport->path);
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE,
+					 transport->path,
+					 BLUEZ_MEDIA_TRANSPORT_INTERFACE,
+					 "Acquire");
+	if (m == NULL)
+		return -ENOMEM;
+
+	dbus_error_init(&err);
+
+	ret = dbus_connection_send_with_reply(monitor->conn, m, &transport->acquire_call, -1);
+	dbus_message_unref(m);
+
+	if (!ret || transport->acquire_call == NULL)
+		return -EIO;
+
+	ret = dbus_pending_call_set_notify(transport->acquire_call, transport_acquire_reply, transport, NULL);
+	if (!ret)
+		return -EIO;
+
+	return 0;
+}
+
+static bool transport_in_same_cig(struct spa_bt_transport *transport, struct spa_bt_transport *other)
+{
+	return (other->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)) &&
+		other->bap_cig == transport->bap_cig &&
+		other->bap_initiator;
+}
+
+static bool another_cig_transport_active(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_transport *t;
+
+	spa_list_for_each(t, &monitor->transport_list, link) {
+		if (!transport_in_same_cig(transport, t) || t == transport)
+			continue;
+		if (t->acquired)
+			return true;
+	}
+
+	return false;
+}
+
+static int transport_acquire(void *data, bool optional)
 {
 	struct spa_bt_transport *transport = data;
 	struct spa_bt_monitor *monitor = transport->monitor;
-	DBusMessage *m, *r;
-	DBusError err;
-	bool is_idle = (transport->state == SPA_BT_TRANSPORT_STATE_IDLE);
+
+	/*
+	 * XXX: When as BAP Central, all CIS in a CIG must be acquired at the same time.
+	 * XXX: This is because of kernel ISO socket limitations, which does not handle
+	 * XXX: currently starting streams in the group one by one.
+	 */
+	if (transport->bap_initiator && !another_cig_transport_active(transport)) {
+		struct spa_bt_transport *t;
+
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t) || t == transport)
+				continue;
+
+			spa_log_debug(monitor->log, "Acquire CIG %d: transport %s",
+					transport->bap_cig, t->path);
+
+			do_transport_acquire(t);
+		}
+
+		spa_log_debug(monitor->log, "Acquire CIG %d: transport %s",
+				transport->bap_cig, transport->path);
+	}
+	if (transport->bap_initiator &&
+			(transport->fd >= 0 || transport->acquire_call)) {
+		/* Already acquired/acquiring */
+		spa_log_debug(monitor->log, "Acquiring %s: was in acquired CIG", transport->path);
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
+		return 0;
+	}
+
+	return do_transport_acquire(data);
+}
+
+static int do_transport_release(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusMessage *m;
 	struct spa_bt_transport *t_linked;
+	bool is_idle = (transport->state == SPA_BT_TRANSPORT_STATE_IDLE);
+	DBusMessage *r;
+	DBusError err;
 	bool linked = false;
 
 	spa_log_debug(monitor->log, "transport %p: Release %s",
@@ -2985,12 +3209,25 @@ static int transport_release(void *data)
 
 	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
 
+	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
+
+	if (transport->acquire_call) {
+		dbus_pending_call_cancel(transport->acquire_call);
+		transport->acquire_call = NULL;
+	}
+
+	if (transport->iso_io) {
+		spa_log_debug(monitor->log, "transport %p: remove ISO IO", transport);
+		spa_bt_iso_io_destroy(transport->iso_io);
+		transport->iso_io = NULL;
+	}
+
 	/* For LE Audio, multiple transport stream (CIS) can be linked together (CIG).
 	 * If they are part of the same device they re-use the same fd, and call to
 	 * release should be done for the last one only.
 	 */
 	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
-		if (t_linked->acquired && t_linked->device == transport->device) {
+		if (t_linked->acquire_call || t_linked->acquired) {
 			linked = true;
 			break;
 		}
@@ -3001,8 +3238,12 @@ static int transport_release(void *data)
 		return 0;
 	}
 
-	close(transport->fd);
-	transport->fd = -1;
+	if (transport->fd >= 0) {
+		close(transport->fd);
+		transport->fd = -1;
+	}
+
+	spa_log_info(monitor->log, "Releasing transport %s", transport->path);
 
 	m = dbus_message_new_method_call(BLUEZ_SERVICE,
 					 transport->path,
@@ -3012,15 +3253,10 @@ static int transport_release(void *data)
 		return -ENOMEM;
 
 	dbus_error_init(&err);
-
 	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
 	dbus_message_unref(m);
-	m = NULL;
 
-	if (r != NULL)
-		dbus_message_unref(r);
-
-	if (dbus_error_is_set(&err)) {
+	if (r == NULL)  {
 		if (is_idle) {
 			/* XXX: The fd always needs to be closed. However, Release()
 			 * XXX: apparently doesn't need to be called on idle transports
@@ -3034,12 +3270,51 @@ static int transport_release(void *data)
 			              transport->path, err.message);
 		}
 		dbus_error_free(&err);
-	}
-	else
+	} else {
 		spa_log_info(monitor->log, "Transport %s released", transport->path);
+		dbus_message_unref(r);
+	}
 
 	return 0;
 }
+
+static int transport_release(void *data)
+{
+	struct spa_bt_transport *transport = data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_transport *t;
+
+	/*
+	 * XXX: When as BAP Central, release CIS in a CIG when the last transport
+	 * XXX: goes away.
+	 */
+	if (transport->bap_initiator) {
+		/* Check if another transport is alive */
+		if (another_cig_transport_active(transport)) {
+			spa_log_debug(monitor->log, "Releasing %s: wait for CIG %d",
+					transport->path, transport->bap_cig);
+			return 0;
+		}
+
+		/* Release remaining transports in CIG */
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t) || t == transport)
+				continue;
+
+			spa_log_debug(monitor->log, "Release CIG %d: transport %s",
+					transport->bap_cig, t->path);
+
+			if (t->fd >= 0)
+				do_transport_release(t);
+		}
+
+		spa_log_debug(monitor->log, "Release CIG %d: transport %s",
+				transport->bap_cig, transport->path);
+	}
+
+	return do_transport_release(data);
+}
+
 
 static const struct spa_bt_transport_implementation transport_impl = {
 	SPA_VERSION_BT_TRANSPORT_IMPLEMENTATION,
@@ -3230,12 +3505,10 @@ next:
 static void media_codec_switch_process(struct spa_bt_media_codec_switch *sw)
 {
 	while (*sw->codec_iter != NULL && *sw->path_iter != NULL) {
-		struct timespec ts;
 		uint64_t now, threshold;
 
 		/* Rate limit BlueZ calls */
-		spa_system_clock_gettime(sw->device->monitor->main_system, CLOCK_MONOTONIC, &ts);
-		now = SPA_TIMESPEC_TO_NSEC(&ts);
+		now = get_time_now(sw->device->monitor);
 		threshold = sw->device->last_bluez_action_time + BLUEZ_ACTION_RATE_MSEC * SPA_NSEC_PER_MSEC;
 		if (now < threshold) {
 			/* Wait for timeout */
@@ -5000,6 +5273,30 @@ int spa_bt_profiles_from_json_array(const char *str)
 	return profiles;
 }
 
+static int parse_roles(struct spa_bt_monitor *monitor, const struct spa_dict *info)
+{
+	const char *str;
+	int res = 0;
+	int profiles = SPA_BT_PROFILE_MEDIA_SINK | SPA_BT_PROFILE_MEDIA_SOURCE;
+
+	/* HSP/HFP backends parse this property separately */
+	if (info && (str = spa_dict_lookup(info, "bluez5.roles"))) {
+		res = spa_bt_profiles_from_json_array(str);
+		if (res < 0) {
+			spa_log_warn(monitor->log, "malformed bluez5.roles setting ignored");
+			goto done;
+		}
+
+		profiles &= res;
+	}
+
+	res = 0;
+
+done:
+	monitor->enabled_profiles = profiles;
+	return res;
+}
+
 static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict *info)
 {
 	const struct media_codec * const * const media_codecs = this->media_codecs;
@@ -5118,7 +5415,9 @@ impl_init(const struct spa_handle_factory *factory,
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
 	this->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->main_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 	this->plugin_loader = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_PluginLoader);
 
 	spa_log_topic_init(this->log, &log_topic);
@@ -5184,6 +5483,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	if ((res = parse_codec_array(this, info)) < 0)
 		goto fail;
+
+	parse_roles(this, info);
 
 	this->default_audio_info.rate = A2DP_CODEC_DEFAULT_RATE;
 	this->default_audio_info.channels = A2DP_CODEC_DEFAULT_CHANNELS;

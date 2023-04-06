@@ -35,6 +35,10 @@
  * - a new virtual sink that forwards audio to other sinks
  * - a new virtual source that combines audio from other sources
  *
+ * The sources and sink that need to be combined can be selected using generic match
+ * rules. This makes it possible to combine static nodes or nodes based on certain
+ * properties.
+ *
  * ## Module Options
  *
  * - `node.name`: a unique name for the stream
@@ -42,6 +46,7 @@
  * - `combine.mode` = capture | playback | sink | source, default sink
  * - `combine.props = {}`: properties to be passed to the sink/source
  * - `stream.props = {}`: properties to be passed to the streams
+ * - `stream.rules = {}`: rules for matching streams, use create-stream actions
  *
  * ## General options
  *
@@ -198,15 +203,15 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_CHANNELS 2
 #define DEFAULT_POSITION "[ FL FR ]"
 
-#define MODULE_USAGE	"[ node.latency=<latency as fraction> ] "				\
-			"[ combine.mode=<mode of stream, playback|capture|sink|source>, default:sink ] "	\
-			"[ node.name=<name of the stream> ] "					\
-			"[ node.description=<description of the stream> ] "			\
-			"[ audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS) "> ] "	\
-			"[ audio.position=<channel map, default:"DEFAULT_POSITION"> ] "		\
-			"[ combine.props=<properties> ] "						\
-			"[ stream.props=<properties> ] "					\
-			"[ stream.rules=<properties> ] "
+#define MODULE_USAGE	"( node.latency=<latency as fraction> ) "				\
+			"( combine.mode=<mode of stream, playback|capture|sink|source>, default:sink ) "	\
+			"( node.name=<name of the stream> ) "					\
+			"( node.description=<description of the stream> ) "			\
+			"( audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS) "> ) "	\
+			"( audio.position=<channel map, default:"DEFAULT_POSITION"> ) "		\
+			"( combine.props=<properties> ) "					\
+			"( stream.props=<properties> ) "					\
+			"( stream.rules=<properties> ) "
 
 
 static const struct spa_dict_item module_props[] = {
@@ -576,7 +581,7 @@ static void registry_event_global(void *data, uint32_t id,
 		if (impl->mode == MODE_CAPTURE || impl->mode == MODE_SINK)
 			str = "[ { matches = [ { media.class = \"Audio/Sink\" } ] "
 				"  actions = { create-stream = {} } } ]";
-		else if (impl->mode == MODE_PLAYBACK || impl->mode == MODE_SOURCE)
+		else
 			str = "[ { matches = [ { media.class = \"Audio/Source\" } ] "
 				"  actions = { create-stream = {} } } ]";
 	}

@@ -684,7 +684,7 @@ static int process_write(struct seq_state *state)
 
 static void update_position(struct seq_state *state)
 {
-	if (state->position) {
+	if (SPA_LIKELY(state->position)) {
 		struct spa_io_clock *clock = &state->position->clock;
 		state->rate = clock->rate;
 		if (state->rate.num == 0 || state->rate.denom == 0)
@@ -744,7 +744,8 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 
 	if (!follower && state->clock) {
 		state->clock->nsec = nsec;
-		state->clock->position += state->duration;
+		state->clock->rate = state->rate;
+		state->clock->position += state->clock->duration;
 		state->clock->duration = state->duration;
 		state->clock->delay = state->duration * corr;
 		state->clock->rate_diff = corr;
@@ -793,7 +794,17 @@ static void alsa_on_timeout_event(struct spa_source *source)
 
 	spa_log_trace(state->log, "timeout %"PRIu64, state->current_time);
 
-	update_position(state);
+	if (SPA_LIKELY(state->position)) {
+		struct spa_io_clock *clock = &state->position->clock;
+		state->rate = clock->target_rate;
+		if (state->rate.num == 0 || state->rate.denom == 0)
+			state->rate = SPA_FRACTION(1, 48000);
+		state->duration = clock->target_duration;
+	} else {
+		state->rate = SPA_FRACTION(1, 48000);
+		state->duration = 1024;
+	}
+	state->threshold = state->duration;
 
 	update_time(state, state->current_time, false);
 

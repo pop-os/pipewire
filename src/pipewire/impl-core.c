@@ -5,9 +5,6 @@
 #include "config.h"
 
 #include <unistd.h>
-#ifndef ENODATA
-#define ENODATA 9919
-#endif
 
 #include <spa/debug/types.h>
 #include <spa/utils/string.h>
@@ -174,6 +171,8 @@ static int core_hello(void *object, uint32_t version)
 
 	pw_log_debug("%p: hello %d from resource %p", context, version, resource);
 	pw_map_for_each(&client->objects, destroy_resource, client);
+
+	resource->version = version;
 
 	pw_mempool_clear(client->pool);
 

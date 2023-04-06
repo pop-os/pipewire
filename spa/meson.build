@@ -74,10 +74,13 @@ if get_option('spa-plugins').allowed()
       endif
     endif
     summary({'LC3plus': lc3plus_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
-    opus_dep = dependency('opus', required : get_option('bluez5-codec-opus'))
+    if get_option('bluez5-codec-opus').enabled() and not opus_dep.found()
+        error('bluez5-codec-opus enabled, but opus dependency not found')
+    endif
     summary({'Opus': opus_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
     lc3_dep = dependency('lc3', required : get_option('bluez5-codec-lc3'))
     summary({'LC3': lc3_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
+    cdata.set('HAVE_BLUETOOTH_BAP', get_option('bluez5-codec-lc3').allowed() and lc3_dep.found())
     if get_option('bluez5-backend-hsp-native').allowed() or get_option('bluez5-backend-hfp-native').allowed()
       mm_dep = dependency('ModemManager', version : '>= 1.10.0', required : get_option('bluez5-backend-native-mm'))
       summary({'ModemManager': mm_dep.found()}, bool_yn: true, section: 'Bluetooth backends')

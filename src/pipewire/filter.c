@@ -144,7 +144,6 @@ struct filter {
 
 	unsigned int disconnecting:1;
 	unsigned int disconnect_core:1;
-	unsigned int subscribe:1;
 	unsigned int draining:1;
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
@@ -1133,10 +1132,12 @@ static void proxy_error(void *_data, int seq, int res, const char *message)
 			PW_FILTER_STATE_ERROR, message);
 }
 
-static void proxy_bound(void *_data, uint32_t global_id)
+static void proxy_bound_props(void *_data, uint32_t global_id, const struct spa_dict *props)
 {
 	struct pw_filter *filter = _data;
 	filter->node_id = global_id;
+	if (props)
+		pw_properties_update(filter->properties, props);
 	filter_set_state(filter, PW_FILTER_STATE_PAUSED, NULL);
 }
 
@@ -1145,7 +1146,7 @@ static const struct pw_proxy_events proxy_events = {
 	.removed = proxy_removed,
 	.destroy = proxy_destroy,
 	.error = proxy_error,
-	.bound = proxy_bound,
+	.bound_props = proxy_bound_props,
 };
 
 static void on_core_error(void *_data, uint32_t id, int seq, int res, const char *message)
@@ -1190,6 +1191,8 @@ filter_new(struct pw_context *context, const char *name,
 	const char *str;
 	struct match match;
 	int res;
+
+	ensure_loop(context->main_loop, return NULL);
 
 	impl = calloc(1, sizeof(struct filter));
 	if (impl == NULL) {
@@ -1355,21 +1358,58 @@ const char *pw_filter_state_as_string(enum pw_filter_state state)
 	return "invalid-state";
 }
 
+static int filter_disconnect(struct filter *impl)
+{
+	struct pw_filter *filter = &impl->this;
+	pw_log_debug("%p: disconnect", impl);
+
+	if (impl->disconnecting)
+		return -EBUSY;
+
+	impl->disconnecting = true;
+
+	if (filter->proxy) {
+		pw_proxy_destroy(filter->proxy);
+		filter->proxy = NULL;
+	}
+	if (impl->disconnect_core) {
+		impl->disconnect_core = false;
+		spa_hook_remove(&filter->core_listener);
+		spa_list_remove(&filter->link);
+		pw_core_disconnect(filter->core);
+		filter->core = NULL;
+	}
+	return 0;
+}
+
+static void free_port(struct filter *impl, struct port *port)
+{
+	spa_list_remove(&port->link);
+	spa_node_emit_port_info(&impl->hooks, port->direction, port->id, NULL);
+	pw_map_remove(&impl->ports[port->direction], port->id);
+	clear_buffers(port);
+	clear_params(impl, port, SPA_ID_INVALID);
+	pw_properties_free(port->props);
+	free(port);
+}
+
 SPA_EXPORT
 void pw_filter_destroy(struct pw_filter *filter)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	struct port *p;
 
+	ensure_loop(impl->context->main_loop, return);
+
 	pw_log_debug("%p: destroy", filter);
 
 	pw_filter_emit_destroy(filter);
 
 	if (!impl->disconnecting)
-		pw_filter_disconnect(filter);
+		filter_disconnect(impl);
 
 	spa_list_consume(p, &impl->port_list, link)
-		pw_filter_remove_port(p->user_data);
+		free_port(impl, p);
 
 	if (filter->core) {
 		spa_hook_remove(&filter->core_listener);
@@ -1412,6 +1452,9 @@ void pw_filter_add_listener(struct pw_filter *filter,
 			    void *data)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+
+	ensure_loop(impl->context->main_loop);
+
 	spa_hook_list_append(&filter->listener_list, listener, events, data);
 	if (events->process && impl->rt_callbacks.funcs == NULL) {
 		impl->rt_callbacks = SPA_CALLBACKS_INIT(events, data);
@@ -1460,6 +1503,8 @@ int pw_filter_update_properties(struct pw_filter *filter, void *port_data, const
 	struct port *port = SPA_CONTAINER_OF(port_data, struct port, user_data);
 	int changed = 0;
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	if (port_data) {
 		changed = pw_properties_update(port->props, dict);
 		port->info.props = &port->props->dict;
@@ -1497,6 +1542,11 @@ pw_filter_connect(struct pw_filter *filter,
 	uint32_t i;
 	struct spa_dict_item items[1];
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
+	if (filter->proxy != NULL || filter->state != PW_FILTER_STATE_UNCONNECTED)
+		return -EBUSY;
+
 	pw_log_debug("%p: connect", filter);
 	impl->flags = flags;
 
@@ -1532,6 +1582,8 @@ pw_filter_connect(struct pw_filter *filter,
 	}
 
 	impl->disconnecting = false;
+	impl->draining = false;
+	impl->driving = false;
 	filter_set_state(filter, PW_FILTER_STATE_CONNECTING, NULL);
 
 	if (flags & PW_FILTER_FLAG_DRIVER)
@@ -1585,22 +1637,8 @@ SPA_EXPORT
 int pw_filter_disconnect(struct pw_filter *filter)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-
-	pw_log_debug("%p: disconnect", filter);
-	impl->disconnecting = true;
-
-	if (filter->proxy) {
-		pw_proxy_destroy(filter->proxy);
-		filter->proxy = NULL;
-	}
-	if (impl->disconnect_core) {
-		impl->disconnect_core = false;
-		spa_hook_remove(&filter->core_listener);
-		spa_list_remove(&filter->link);
-		pw_core_disconnect(filter->core);
-		filter->core = NULL;
-	}
-	return 0;
+	ensure_loop(impl->context->main_loop, return -EIO);
+	return filter_disconnect(impl);
 }
 
 static void add_port_params(struct filter *impl, struct port *port)
@@ -1682,6 +1720,8 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	struct port *p;
 	const char *str;
 
+	ensure_loop(impl->context->main_loop, return NULL);
+
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
 	if (props == NULL)
@@ -1738,22 +1778,14 @@ error_cleanup:
 	return NULL;
 }
 
-static inline void free_port(struct filter *impl, struct port *port)
-{
-	spa_list_remove(&port->link);
-	spa_node_emit_port_info(&impl->hooks, port->direction, port->id, NULL);
-	pw_map_remove(&impl->ports[port->direction], port->id);
-	clear_buffers(port);
-	clear_params(impl, port, SPA_ID_INVALID);
-	pw_properties_free(port->props);
-	free(port);
-}
-
 SPA_EXPORT
 int pw_filter_remove_port(void *port_data)
 {
 	struct port *port = SPA_CONTAINER_OF(port_data, struct port, user_data);
 	struct filter *impl = port->filter;
+
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	free_port(impl, port);
 	return 0;
 }
@@ -1762,6 +1794,10 @@ SPA_EXPORT
 int pw_filter_set_error(struct pw_filter *filter,
 			int res, const char *error, ...)
 {
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	if (res < 0) {
 		va_list args;
 		char *value;
@@ -1792,6 +1828,8 @@ int pw_filter_update_params(struct pw_filter *filter,
 	struct port *port;
 	int res;
 
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	pw_log_debug("%p: update params", filter);
 
 	port = port_data ? SPA_CONTAINER_OF(port_data, struct port, user_data) : NULL;
@@ -1811,6 +1849,10 @@ int pw_filter_update_params(struct pw_filter *filter,
 SPA_EXPORT
 int pw_filter_set_active(struct pw_filter *filter, bool active)
 {
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+
+	ensure_loop(impl->context->main_loop, return -EIO);
+
 	pw_log_debug("%p: active:%d", filter, active);
 	return 0;
 }
@@ -1948,8 +1990,10 @@ do_trigger_process(struct spa_loop *loop,
 	return spa_node_call_ready(&impl->callbacks, res);
 }
 
-static int trigger_request_process(struct filter *impl)
+static int do_trigger_request_process(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
+	struct filter *impl = user_data;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = { 0 };
 
@@ -1969,7 +2013,8 @@ int pw_filter_trigger_process(struct pw_filter *filter)
 	pw_log_trace_fp("%p", impl);
 
 	if (!impl->driving) {
-		res = trigger_request_process(impl);
+		res = pw_loop_invoke(impl->context->main_loop,
+			do_trigger_request_process, 1, NULL, 0, false, impl);
 	} else {
 		res = pw_loop_invoke(impl->context->data_loop,
 			do_trigger_process, 1, NULL, 0, false, impl);
