@@ -3,6 +3,7 @@ pipewire (0.3.68-1) UNRELEASED; urgency=medium
   * New upstream release
   * Drop patches included in upstream release:
       - Don-t-build_same_binary_twice.patch
+  * Install new module-combine-stream in libpipewire-0.3-modules
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Apr 2023 22:36:17 +0200
 
