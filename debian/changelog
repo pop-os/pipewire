@@ -7,6 +7,8 @@ pipewire (0.3.68-1) UNRELEASED; urgency=medium
   * Don't install for now config override files to enable the upmixing.
       These files should go in a new binary package.
   * Update symbols file
+  * Cherry-pick upstream recommended patch:
+      - 8748c774: fix for nodes staying IDLE in some cases
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Apr 2023 22:36:17 +0200
 
