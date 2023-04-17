@@ -1567,9 +1567,12 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	is_batch = snd_pcm_hw_params_is_batch(params) &&
 		!state->disable_batch;
 
+	/* no period size specified. If we are batch or not using timers,
+	 * use the graph duration as the period */
+	if (period_size == 0 && (is_batch || state->disable_tsched))
+		period_size = state->position ? state->position->clock.duration : DEFAULT_PERIOD;
+
 	if (is_batch) {
-		if (period_size == 0)
-			period_size = state->position ? state->position->clock.duration : DEFAULT_PERIOD;
 		if (period_size == 0)
 			period_size = DEFAULT_PERIOD;
 		/* batch devices get their hw pointers updated every period. Make
@@ -1616,10 +1619,18 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	}
 
 	state->headroom = state->default_headroom;
-	/* If tsched is disabled, we know the pointers are updated when we wake
-	 * up, so we don't need the additional headroom */
-	if (is_batch && !state->disable_tsched)
-		state->headroom += period_size;
+	if (!state->disable_tsched) {
+		/* When using timers, we might miss the pointer update for batch
+		 * devices so add some extra headroom. With IRQ, we know the pointers
+		 * are updated when we wake up and we don't need the headroom. */
+		if (is_batch)
+			state->headroom += period_size;
+		/* Add 32 extra samples of headroom to handle jitter in capture.
+		 * For IRQ, we don't need this because when we wake up, we have
+		 * exactly enough samples to read or write. */
+		if (state->stream == SND_PCM_STREAM_CAPTURE)
+			state->headroom = SPA_MAX(state->headroom, 32u);
+	}
 
 	state->max_delay = state->buffer_frames / 2;
 	if (spa_strstartswith(state->props.device, "a52") ||
@@ -1921,9 +1932,7 @@ static int get_status(struct state *state, uint64_t current_time,
 		*delay = state->buffer_frames - avail;
 	} else {
 		*delay = avail;
-		*target = SPA_MAX(*target, state->read_size);
-		if (state->matching)
-			*target += 32;
+		*target = SPA_MAX(*target, state->read_size + state->headroom);
 	}
 	*target = SPA_CLAMP(*target, state->min_delay, state->max_delay);
 	return 0;
@@ -1935,10 +1944,15 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 	double err, corr;
 	int32_t diff;
 
-	if (state->stream == SND_PCM_STREAM_PLAYBACK)
-		err = delay - target;
-	else
-		err = target - delay;
+	if (state->disable_tsched && !follower) {
+		err = (int64_t)(current_time - state->next_time);
+		err = err / 1e9 * state->rate;
+	} else {
+		if (state->stream == SND_PCM_STREAM_PLAYBACK)
+			err = delay - target;
+		else
+			err = target - delay;
+	}
 
 	if (SPA_UNLIKELY(state->dll.bw == 0.0)) {
 		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold, state->rate);
@@ -1955,12 +1969,14 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 		state->alsa_sync = true;
 		state->alsa_sync_warning = false;
 	}
-	if (err > state->max_error) {
-		err = state->max_error;
+	if (err > state->max_resync) {
 		state->alsa_sync = true;
-	} else if (err < -state->max_error) {
-		err = -state->max_error;
+		if (err > state->max_error)
+			err = state->max_error;
+	} else if (err < -state->max_resync) {
 		state->alsa_sync = true;
+		if (err < -state->max_error)
+			err = -state->max_error;
 	}
 
 	if (!follower || state->matching)
@@ -2002,8 +2018,8 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 		state->clock->next_nsec = state->next_time;
 	}
 
-	spa_log_trace_fp(state->log, "%p: follower:%d %"PRIu64" %f %ld %f %f %u",
-			state, follower, current_time, corr, delay, err, state->threshold * corr,
+	spa_log_trace_fp(state->log, "%p: follower:%d %"PRIu64" %f %ld %ld %f %f %u",
+			state, follower, current_time, corr, delay, target, err, state->threshold * corr,
 			state->threshold);
 
 	return 0;
@@ -2065,6 +2081,7 @@ static inline int check_position_config(struct state *state)
 			return -EIO;
 		state->threshold = SPA_SCALE32_UP(state->duration, state->rate, state->rate_denom);
 		state->max_error = SPA_MAX(256.0f, state->threshold / 2.0f);
+		state->max_resync = SPA_MIN(state->threshold, state->max_error);
 		state->resample = ((uint32_t)state->rate != state->rate_denom) || state->matching;
 		state->alsa_sync = true;
 	}
@@ -2478,14 +2495,15 @@ static int handle_capture(struct state *state, uint64_t current_time,
 	int res;
 	struct spa_io_buffers *io;
 
-	if (SPA_UNLIKELY(delay < target)) {
-		spa_log_trace(state->log, "%p: early wakeup %ld %ld", state, delay, target);
+	if (SPA_UNLIKELY(delay < state->read_size)) {
+		spa_log_trace(state->log, "%p: early wakeup %ld %ld %d", state, delay, target,
+				state->read_size);
 		state->next_time = current_time + (target - delay) * SPA_NSEC_PER_SEC /
 			state->rate;
 		return -EAGAIN;
 	}
 
-	if (SPA_UNLIKELY(res = update_time(state, current_time, delay, target, false)) < 0)
+	if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, false)) < 0))
 		return res;
 
 	if ((res = spa_alsa_read(state)) < 0)
@@ -2514,6 +2532,14 @@ static int handle_capture(struct state *state, uint64_t current_time,
 	return 0;
 }
 
+static uint64_t get_time_ns(struct state *state)
+{
+	struct timespec now;
+	if (spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now) < 0)
+		return 0;
+	return SPA_TIMESPEC_TO_NSEC(&now);
+}
+
 static void alsa_wakeup_event(struct spa_source *source)
 {
 	struct state *state = source->data;
@@ -2525,6 +2551,8 @@ static void alsa_wakeup_event(struct spa_source *source)
 		/* ALSA poll fds need to be "demangled" to know whether it's a real wakeup */
 		int err;
 		unsigned short revents;
+
+		current_time = get_time_ns(state);
 
 		for (int i = 0; i < state->n_fds; i++) {
 			state->pfds[i].revents = state->source[i].rmask;
@@ -2543,17 +2571,20 @@ static void alsa_wakeup_event(struct spa_source *source)
 			spa_log_trace_fp(state->log, "Woken up with no work to do");
 			return;
 		}
-	} else if (SPA_LIKELY(state->started)) {
-		if (SPA_UNLIKELY((res = spa_system_timerfd_read(state->data_system,
+	} else {
+		if (SPA_LIKELY(state->started)) {
+			if (SPA_UNLIKELY((res = spa_system_timerfd_read(state->data_system,
 						state->timerfd, &expire)) < 0)) {
 			/* we can get here when the timer is changed since the last
-			 * timerfd wakeup, for example by do_reassign_follower() executed
-			 * in the same epoll wakeup cycle */
-			if (res != -EAGAIN)
-				spa_log_warn(state->log, "%p: error reading timerfd: %s",
-						state, spa_strerror(res));
-			return;
+				 * timerfd wakeup, for example by do_reassign_follower() executed
+				 * in the same epoll wakeup cycle */
+				if (res != -EAGAIN)
+					spa_log_warn(state->log, "%p: error reading timerfd: %s",
+							state, spa_strerror(res));
+				return;
+			}
 		}
+		current_time = state->next_time;
 	}
 
 	if (SPA_UNLIKELY((res = check_position_config(state)) < 0)) {
@@ -2561,8 +2592,6 @@ static void alsa_wakeup_event(struct spa_source *source)
 						state, spa_strerror(res));
 		return;
 	}
-
-	current_time = state->next_time;
 
 	if (SPA_UNLIKELY(get_status(state, current_time, &delay, &target) < 0)) {
 		spa_log_error(state->log, "get_status error");
@@ -2572,11 +2601,7 @@ static void alsa_wakeup_event(struct spa_source *source)
 
 #ifndef FASTPATH
 	if (SPA_UNLIKELY(spa_log_level_topic_enabled(state->log, SPA_LOG_TOPIC_DEFAULT, SPA_LOG_LEVEL_TRACE))) {
-		struct timespec now;
-		uint64_t nsec;
-		if (spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now) < 0)
-		    return;
-		nsec = SPA_TIMESPEC_TO_NSEC(&now);
+		uint64_t nsec = get_time_ns(state);
 		spa_log_trace_fp(state->log, "%p: wakeup %lu %lu %"PRIu64" %"PRIu64" %"PRIi64
 				" %d %"PRIi64, state, delay, target, nsec, nsec,
 				nsec - current_time, state->threshold, state->sample_count);
@@ -2636,12 +2661,7 @@ static void clear_period_sources(struct state *state) {
 
 static int setup_sources(struct state *state)
 {
-	struct timespec now;
-	int res;
-
-	if ((res = spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now)) < 0)
-		return res;
-	state->next_time = SPA_TIMESPEC_TO_NSEC(&now);
+	state->next_time = get_time_ns(state);
 
 	if (state->following) {
 		/* Disable wakeups from this node */
