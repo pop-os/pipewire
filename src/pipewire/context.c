@@ -885,13 +885,16 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 
 				pw_impl_link_prepare(l);
 
-				if (!l->prepared || t->visited)
+				if (!l->prepared || (t != n && t->visited))
 					continue;
 
 				if (!l->passive)
 					t->runnable = true;
-				t->visited = true;
-				spa_list_append(&queue, &t->sort_link);
+
+				if (!t->visited) {
+					t->visited = true;
+					spa_list_append(&queue, &t->sort_link);
+				}
 			}
 		}
 		spa_list_for_each(p, &n->output_ports, link) {
@@ -903,13 +906,16 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 
 				pw_impl_link_prepare(l);
 
-				if (!l->prepared || t->visited)
+				if (!l->prepared || (t != n && t->visited))
 					continue;
 
 				if (!l->passive)
 					t->runnable = true;
-				t->visited = true;
-				spa_list_append(&queue, &t->sort_link);
+
+				if (!t->visited) {
+					t->visited = true;
+					spa_list_append(&queue, &t->sort_link);
+				}
 			}
 		}
 		/* now go through all the nodes that have the same group and
@@ -942,6 +948,8 @@ static void move_to_driver(struct pw_context *context, struct spa_list *nodes,
 	pw_log_debug("driver: %p %s runnable:%u", driver, driver->name, driver->runnable);
 	spa_list_consume(n, nodes, sort_link) {
 		spa_list_remove(&n->sort_link);
+
+		driver->runnable |= n->runnable;
 
 		pw_log_debug(" follower: %p %s runnable:%u driver-runnable:%u", n, n->name,
 				n->runnable, driver->runnable);
