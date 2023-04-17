@@ -1,6 +1,8 @@
 pipewire (0.3.69-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Drop patch included in upstream release:
+      - 8748c774: fix for nodes staying IDLE in some cases
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 17 Apr 2023 09:47:33 +0200
 
