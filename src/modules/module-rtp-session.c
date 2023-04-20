@@ -264,17 +264,8 @@ static ssize_t send_packet(int fd, struct msghdr *msg)
 {
 	ssize_t n;
 	n = sendmsg(fd, msg, MSG_NOSIGNAL);
-	if (n < 0) {
-		switch (errno) {
-		case ECONNREFUSED:
-		case ECONNRESET:
-			pw_log_debug("remote end not listening");
-			break;
-		default:
-			pw_log_debug("sendmsg() failed: %m");
-			break;
-		}
-	}
+	if (n < 0)
+		pw_log_debug("sendmsg() failed: %m");
 	return n;
 }
 
@@ -889,7 +880,7 @@ static void parse_apple_midi_cmd_ck(struct impl *impl, bool ctrl, uint8_t *buffe
 		latency = t3 - t1;
 		offset = ((t3 + t1) / 2) - t2;
 
-		pw_log_info("latency:%f offset:%f", latency / 1e5, offset / 1e5);
+		pw_log_debug("latency:%f offset:%f", latency / 1e5, offset / 1e5);
 		if (hdr->count >= 2)
 			return;
 	}
@@ -1654,7 +1645,7 @@ static void on_timer_event(void *data, uint64_t expirations)
 	struct session *sess;
 	uint64_t current_time = impl->next_time;
 
-	pw_log_info("timeout");
+	pw_log_debug("timeout");
 	spa_list_for_each(sess, &impl->sessions, link) {
 		if (sess->state != SESSION_STATE_ESTABLISHED)
 			continue;
