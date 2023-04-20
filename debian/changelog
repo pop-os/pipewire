@@ -1,6 +1,12 @@
+pipewire (0.3.70) jammy; urgency=medium
+
+  * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.69
+
+ -- Brock Szuszczewicz <brock@szu.email>  Thu, 20 Apr 2023 15:22:50 -0600
+
 pipewire (0.3.69) jammy; urgency=medium
 
-  * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.69 
+  * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.69
 
  -- Michael Murphy <michael@mmurphy.dev>  Wed, 19 Apr 2023 12:53:24 +0200
 
