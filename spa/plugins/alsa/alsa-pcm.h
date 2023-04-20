@@ -13,6 +13,7 @@ extern "C" {
 #include <math.h>
 
 #include <alsa/asoundlib.h>
+#include <alsa/version.h>
 #include <alsa/use-case.h>
 
 #include <spa/support/plugin.h>
@@ -353,6 +354,12 @@ static inline int ratelimit_test(struct ratelimit *r, uint64_t now)
 	return missed;
 }
 
+/* This function is also as snd_pcm_channel_area_addr() since 1.2.6 which is not yet
+ * in ubuntu and I can't figure out how to do the ALSA version check. */
+static inline void *channel_area_addr(const snd_pcm_channel_area_t *area, snd_pcm_uframes_t offset)
+{
+        return (char *)area->addr + (area->first + area->step * offset) / 8;
+}
 
 #ifdef __cplusplus
 } /* extern "C" */
