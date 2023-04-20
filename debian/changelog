@@ -1,3 +1,9 @@
+pipewire (0.3.70-1~) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 20 Apr 2023 16:25:13 +0200
+
 pipewire (0.3.69-1) experimental; urgency=medium
 
   * New upstream release
