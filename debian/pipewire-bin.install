@@ -12,6 +12,7 @@ lib/udev/rules.d
 usr/bin/pipewire
 usr/bin/pw-cat
 usr/bin/pw-cli
+usr/bin/pw-config
 usr/bin/pw-dot
 usr/bin/pw-dsdplay
 usr/bin/pw-dump
@@ -33,6 +34,7 @@ usr/share/alsa-card-profile
 usr/share/man/man1/pipewire.*
 usr/share/man/man1/pw-cat.*
 usr/share/man/man1/pw-cli.*
+usr/share/man/man1/pw-config.*
 usr/share/man/man1/pw-dot.*
 usr/share/man/man1/pw-link.*
 usr/share/man/man1/pw-metadata.*
