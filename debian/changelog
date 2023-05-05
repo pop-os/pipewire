@@ -1,3 +1,11 @@
+pipewire (0.3.70-2) experimental; urgency=medium
+
+  [ Alban Browaeys ]
+  * Cherry-pick upstream patch:
+      - Fix pulse tunnel unload segfaulting pipewire-pulse (Closes: #1035280)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 05 May 2023 11:56:36 +0200
+
 pipewire (0.3.70-1) experimental; urgency=medium
 
   * New upstream release
