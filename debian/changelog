@@ -1,3 +1,10 @@
+pipewire (0.3.70-3) UNRELEASED; urgency=medium
+
+  * Don't use libmysofa in the Ubuntu build for now since the package
+    is in universe (Closes: #1035718)
+
+ -- Sebastien Bacher <seb128@ubuntu.com>  Mon, 08 May 2023 11:07:31 +0200
+
 pipewire (0.3.70-2) experimental; urgency=medium
 
   [ Alban Browaeys ]
