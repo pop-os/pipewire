@@ -8,6 +8,8 @@ pipewire (0.3.71-1) UNRELEASED; urgency=medium
       - ce71b37b: fixes a bug with buffer_size updates for JACK apps
   * Set minimum libcamera to 0.0.5 to force a build against the version in
       experimental during the freeze.
+  * Install new module-jack-tunnel and module-jackdbus-detect
+      in libpipewire-0.3-modules.
 
   [ Sebastien Bacher ]
   * Don't use libmysofa in the Ubuntu build for now since the package
