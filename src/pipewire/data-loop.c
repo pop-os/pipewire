@@ -51,6 +51,10 @@ static void *do_loop(void *user_data)
 {
 	struct pw_data_loop *this = user_data;
 	int res;
+	struct spa_callbacks *cb = &this->loop->control->iface.cb;
+	const struct spa_loop_control_methods *m = cb->funcs;
+	void *data = cb->data;
+	int (*iterate) (void *object, int timeout) = m->iterate;
 
 	pw_log_debug("%p: enter thread", this);
 	pw_loop_enter(this->loop);
@@ -58,7 +62,7 @@ static void *do_loop(void *user_data)
 	pthread_cleanup_push(thread_cleanup, this);
 
 	while (SPA_LIKELY(this->running)) {
-		if (SPA_UNLIKELY((res = pw_loop_iterate(this->loop, -1)) < 0)) {
+		if (SPA_UNLIKELY((res = iterate(data, -1)) < 0)) {
 			if (res == -EINTR)
 				continue;
 			pw_log_error("%p: iterate error %d (%s)",

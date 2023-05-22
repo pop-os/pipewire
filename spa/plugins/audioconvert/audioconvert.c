@@ -218,6 +218,7 @@ struct impl {
 	unsigned int ramp_volume:1;
 	unsigned int drained:1;
 	unsigned int rate_adjust:1;
+	unsigned int port_ignore_latency:1;
 
 	uint32_t empty_size;
 	float *empty;
@@ -265,7 +266,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
-		struct spa_dict_item items[3];
+		struct spa_dict_item items[4];
 		uint32_t n_items = 0;
 
 		if (PORT_IS_DSP(this, port->direction, port->id)) {
@@ -273,6 +274,8 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_AUDIO_CHANNEL, port->position);
 			if (port->is_monitor)
 				items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_MONITOR, "true");
+			if (this->port_ignore_latency)
+				items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_IGNORE_LATENCY, "true");
 		} else if (PORT_IS_CONTROL(this, port->direction, port->id)) {
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, "control");
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
@@ -1563,7 +1566,7 @@ static int setup_resample(struct impl *this)
 			out->format.info.raw.channels,
 			out->format.info.raw.rate);
 
-	if (this->props.resample_disabled &&
+	if (this->props.resample_disabled && !this->resample_peaks &&
 	    in->format.info.raw.rate != out->format.info.raw.rate)
 		return -EPERM;
 
@@ -1698,7 +1701,7 @@ static int setup_convert(struct impl *this)
 	if (!in->have_format || !out->have_format)
 		return -EINVAL;
 
-	rate = this->io_position ?  this->io_position->clock.rate.denom : DEFAULT_RATE;
+	rate = this->io_position ? this->io_position->clock.target_rate.denom : DEFAULT_RATE;
 
 	/* in DSP mode we always convert to the DSP rate */
 	if (in->mode == SPA_PARAM_PORT_CONFIG_MODE_dsp)
@@ -1853,7 +1856,7 @@ static int port_enum_formats(void *object,
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
 		} else {
 			uint32_t rate = this->io_position ?
-				this->io_position->clock.rate.denom : DEFAULT_RATE;
+				this->io_position->clock.target_rate.denom : DEFAULT_RATE;
 
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -1974,7 +1977,7 @@ impl_node_port_enum_params(void *object, int seq,
 			/* collect the other port rate */
 			dir = &this->dir[SPA_DIRECTION_REVERSE(direction)];
 			if (dir->mode == SPA_PARAM_PORT_CONFIG_MODE_dsp)
-				orate = this->io_position ?  this->io_position->clock.rate.denom : DEFAULT_RATE;
+				orate = this->io_position ?  this->io_position->clock.target_rate.denom : DEFAULT_RATE;
 			else
 				orate = dir->format.info.raw.rate;
 
@@ -2672,11 +2675,21 @@ static int impl_node_process(void *object)
 		}
 	}
 
+	resample_passthrough = resample_is_passthrough(this);
+
 	/* calculate how many samples we are going to produce. */
 	if (this->direction == SPA_DIRECTION_INPUT) {
 		/* in split mode we need to output exactly the size of the
 		 * duration so we don't try to flush early */
 		max_out = quant_samples;
+		if (!in_avail || this->drained) {
+			n_out = max_out - SPA_MIN(max_out, this->out_offset);
+			/* no input, ask for more, update rate-match first */
+			resample_update_rate_match(this, resample_passthrough, n_out, 0);
+			spa_log_trace_fp(this->log, "%p: no input drained:%d", this, this->drained);
+			res |= this->drained ? SPA_STATUS_DRAINED : SPA_STATUS_NEED_DATA;
+			return res;
+		}
 		flush_out = false;
 	} else {
 		/* in merge mode we consume one duration of samples and
@@ -2777,18 +2790,9 @@ static int impl_node_process(void *object)
 	/* we only need to output the remaining samples */
 	n_out = max_out - SPA_MIN(max_out, this->out_offset);
 
-	resample_passthrough = resample_is_passthrough(this);
-
 	/* calculate how many samples we are going to consume. */
 	if (this->direction == SPA_DIRECTION_INPUT) {
-		if (!in_avail || this->drained) {
-			/* no input, ask for more, update rate-match first */
-			resample_update_rate_match(this, resample_passthrough, n_out, 0);
-			spa_log_trace_fp(this->log, "%p: no input drained:%d", this, this->drained);
-			res |= this->drained ? SPA_STATUS_DRAINED : SPA_STATUS_NEED_DATA;
-			return res;
-		}
-		/* else figure out how much input samples we need to consume */
+		/* figure out how much input samples we need to consume */
 		n_samples = SPA_MIN(n_samples,
 				resample_get_in_size(this, resample_passthrough, n_out));
 	} else {
@@ -3144,6 +3148,8 @@ impl_init(const struct spa_handle_factory *factory,
 			if (s != NULL)
 	                        this->props.n_channels = parse_position(this->props.channel_map, s, strlen(s));
 		}
+		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
+			this->port_ignore_latency = spa_atob(s);
 		else
 			audioconvert_set_param(this, k, s);
 	}

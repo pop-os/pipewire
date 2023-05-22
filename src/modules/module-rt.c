@@ -111,7 +111,9 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_SCHED_RESET_ON_FORK  0
 #endif
 
-#define IS_VALID_NICE_LEVEL(l)	((l)>=-20 && (l)<=19)
+#define MIN_NICE_LEVEL		-20
+#define MAX_NICE_LEVEL		19
+#define IS_VALID_NICE_LEVEL(l)	((l)>=MIN_NICE_LEVEL && (l)<=MAX_NICE_LEVEL)
 
 #define DEFAULT_NICE_LEVEL	20
 #define DEFAULT_RT_PRIO_MIN	11
@@ -251,7 +253,7 @@ struct pw_rtkit_bus *pw_rtkit_bus_get_session(void)
 bool pw_rtkit_check_xdg_portal(struct pw_rtkit_bus *system_bus)
 {
 	if (!dbus_bus_name_has_owner(system_bus->bus, XDG_PORTAL_SERVICE_NAME, NULL)) {
-		pw_log_warn("Can't find %s. Is xdg-desktop-portal running?", XDG_PORTAL_SERVICE_NAME);
+		pw_log_info("Can't find %s. Is xdg-desktop-portal running?", XDG_PORTAL_SERVICE_NAME);
 		return false;
 	}
 
@@ -277,7 +279,14 @@ static int translate_error(const char *name)
 	if (spa_streq(name, DBUS_ERROR_ACCESS_DENIED) ||
 	    spa_streq(name, DBUS_ERROR_AUTH_FAILED))
 		return -EACCES;
-
+	if (spa_streq(name, DBUS_ERROR_IO_ERROR))
+		return -EIO;
+	if (spa_streq(name, DBUS_ERROR_NOT_SUPPORTED))
+		return -ENOTSUP;
+	if (spa_streq(name, DBUS_ERROR_INVALID_ARGS))
+		return -EINVAL;
+	if (spa_streq(name, DBUS_ERROR_TIMED_OUT))
+		return -ETIMEDOUT;
 	return -EIO;
 }
 
@@ -624,8 +633,16 @@ static int set_nice(struct impl *impl, int nice_level, bool warn)
 	int res = 0;
 
 #ifdef HAVE_DBUS
-	if (impl->use_rtkit)
+	if (impl->use_rtkit) {
+		int min_nice = nice_level;
+		pw_rtkit_get_min_nice_level(impl, &min_nice);
+		if (nice_level < min_nice) {
+			pw_log_info("clamped nice level %d to %d",
+					nice_level, min_nice);
+			nice_level = min_nice;
+		}
 		res = pw_rtkit_make_high_priority(impl, 0, nice_level);
+	}
 	else
 		res = sched_set_nice(nice_level);
 #else
@@ -979,6 +996,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	bool can_use_rtkit = false, use_rtkit = false;
 
+	if (!IS_VALID_NICE_LEVEL(impl->nice_level)) {
+		pw_log_info("invalid nice level %d (not between %d and %d). "
+				"nice level will not be adjusted",
+				impl->nice_level, MIN_NICE_LEVEL, MAX_NICE_LEVEL);
+	}
+
 #ifdef HAVE_DBUS
 	spa_list_init(&impl->threads_list);
 	pthread_mutex_init(&impl->lock, NULL);
@@ -992,7 +1015,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (!check_realtime_privileges(impl)) {
 		if (!can_use_rtkit) {
 			res = -ENOTSUP;
-			pw_log_warn("regular realtime scheduling not available (RTKit fallback disabled)");
+			pw_log_warn("regular realtime scheduling not available"
+					" (Portal/RTKit fallback disabled)");
 			goto error;
 		}
 		use_rtkit = true;
@@ -1014,7 +1038,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 				impl->object_path = XDG_PORTAL_OBJECT_PATH;
 				impl->interface = XDG_PORTAL_INTERFACE;
 			} else {
-				pw_log_warn("found session bus but no portal");
+				pw_log_info("found session bus but no portal, trying RTKit fallback");
 				pw_rtkit_bus_free(impl->rtkit_bus);
 				impl->rtkit_bus = NULL;
 			}
@@ -1028,7 +1052,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 				impl->interface = RTKIT_INTERFACE;
 			} else {
 				res = -errno;
-				pw_log_warn("could not get system bus: %m");
+				pw_log_warn("Realtime scheduling disabled: unsufficient realtime privileges, "
+					"Portal not found on session bus, and no system bus for RTKit: %m");
 				goto error;
 			}
 		}

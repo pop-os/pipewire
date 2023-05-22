@@ -9,6 +9,7 @@
 #ifdef HAVE_SNDFILE
 #include <sndfile.h>
 #endif
+#include <unistd.h>
 
 #include <spa/utils/json.h>
 #include <spa/utils/result.h>
@@ -686,10 +687,11 @@ static float *read_closest(char **filenames, float gain, int delay, int offset,
 
 	int diff = INT_MAX;
 	uint32_t best = 0, i;
+	float *samples = NULL;
 
 	for (i = 0; i < MAX_RATES && filenames[i] && filenames[i][0]; i++) {
 		fs[i] = sf_open(filenames[i], SFM_READ, &infos[i]);
-		if (!fs[i])
+		if (fs[i] == NULL)
 			continue;
 
 		if (labs((long)infos[i].samplerate - (long)*rate) < diff) {
@@ -698,13 +700,24 @@ static float *read_closest(char **filenames, float gain, int delay, int offset,
 			pw_log_debug("new closest match: %d", infos[i].samplerate);
 		}
 	}
-
-	pw_log_debug("loading %s", filenames[best]);
-	float *samples = read_samples_from_sf(fs[best], infos[best], gain, delay,
-		offset, length, channel, rate, n_samples);
-
+	if (fs[best] != NULL) {
+		pw_log_info("loading best rate:%u %s", infos[best].samplerate, filenames[best]);
+		samples = read_samples_from_sf(fs[best], infos[best], gain, delay,
+			offset, length, channel, rate, n_samples);
+	} else {
+		char buf[PATH_MAX];
+		pw_log_error("Can't open any sample file (CWD %s):",
+				getcwd(buf, sizeof(buf)));
+		for (i = 0; i < MAX_RATES && filenames[i] && filenames[i][0]; i++) {
+			fs[i] = sf_open(filenames[i], SFM_READ, &infos[i]);
+			if (fs[i] == NULL)
+				pw_log_error(" failed file %s: %s", filenames[i], sf_strerror(fs[i]));
+			else
+				pw_log_warn(" unexpectedly opened file %s", filenames[i]);
+		}
+	}
 	for (i = 0; i < MAX_RATES; i++)
-		if (fs[i])
+		if (fs[i] != NULL)
 			sf_close(fs[i]);
 
 	return samples;
