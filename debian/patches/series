@@ -1,3 +1,4 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 Fix_services.patch
 # Recommended patch for 0.3.71
+ce71b37b58d5e251ae7acda0799f696688df11c2.patch

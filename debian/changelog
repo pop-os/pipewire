@@ -4,6 +4,8 @@ pipewire (0.3.71-1) UNRELEASED; urgency=medium
   * New upstream release
   * Drop patch included in upstream release:
       - module-pulse-tunnel-avoid-using-NULL-module.patch
+  * Cherry-pick upstream recommended patch:
+      - ce71b37b: fixes a bug with buffer_size updates for JACK apps
 
   [ Sebastien Bacher ]
   * Don't use libmysofa in the Ubuntu build for now since the package
