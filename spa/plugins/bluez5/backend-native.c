@@ -684,6 +684,21 @@ static bool device_supports_required_mSBC_transport_modes(
 
 static int codec_switch_start_timer(struct rfcomm *rfcomm, int timeout_msec);
 
+static void process_xevent_indicator(struct rfcomm *rfcomm, unsigned int level, unsigned int nlevels)
+{
+	struct impl *backend = rfcomm->backend;
+	uint8_t perc;
+
+	spa_log_debug(backend->log, "AT+XEVENT level:%u nlevels:%u", level, nlevels);
+
+	if (nlevels <= 1)
+		return;
+
+	/* 0 <= level < nlevels */
+	perc = SPA_MIN(level, nlevels - 1) * 100 / (nlevels - 1);
+	spa_bt_device_report_battery_level(rfcomm->device, perc);
+}
+
 static void process_iphoneaccev_indicator(struct rfcomm *rfcomm, unsigned int key, unsigned int value)
 {
 	struct impl *backend = rfcomm->backend;
@@ -760,6 +775,8 @@ static bool rfcomm_hfp_ag(struct rfcomm *rfcomm, char* buf)
 	unsigned int indicator;
 	unsigned int indicator_value;
 	unsigned int value;
+	unsigned int xevent_level;
+	unsigned int xevent_nlevels;
 	int xapl_vendor;
 	int xapl_product;
 	int xapl_features;
@@ -1068,6 +1085,14 @@ next_indicator:
 			/* claim, that we support battery status reports */
 			rfcomm_send_reply(rfcomm, "+XAPL=iPhone,%u", SPA_BT_HFP_HF_XAPL_FEATURE_BATTERY_REPORTING);
 		}
+		rfcomm_send_reply(rfcomm, "OK");
+	} else if (spa_strstartswith(buf, "AT+XEVENT=USER-AGENT")) {
+		rfcomm_send_reply(rfcomm, "OK");
+	} else if (sscanf(buf, "AT+XEVENT=BATTERY,%u,%u,%*u,%*u", &xevent_level, &xevent_nlevels) == 2) {
+		process_xevent_indicator(rfcomm, xevent_level, xevent_nlevels);
+		rfcomm_send_reply(rfcomm, "OK");
+	} else if (sscanf(buf, "AT+XEVENT=BATTERY,%u", &xevent_level) == 1) {
+		process_xevent_indicator(rfcomm, xevent_level + 1, 11);
 		rfcomm_send_reply(rfcomm, "OK");
 	} else if (sscanf(buf, "AT+IPHONEACCEV=%u%n", &count, &r) == 1) {
 		if (count < 1 || count > 100)
@@ -2769,7 +2794,7 @@ static int backend_native_free(void *data)
 	sco_close(backend);
 
 	if (backend->modemmanager) {
-		mm_unregister(backend);
+		mm_unregister(backend->modemmanager);
 		backend->modemmanager = NULL;
 	}
 

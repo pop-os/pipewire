@@ -235,7 +235,7 @@ struct impl {
 	struct spa_source *timer;
 
 	char *ifname;
-	bool ttl;
+	uint32_t ttl;
 	bool mcast_loop;
 
 	struct sockaddr_storage src_addr;
@@ -266,7 +266,7 @@ static const struct format_info audio_format_info[] = {
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ALAW, 1, "PCMA", "audio", "ALAW" },
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ULAW, 1, "PCMU", "audio", "ULAW" },
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S16_BE, 2, "L16", "audio", "S16BE" },
-	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S24_BE, 3, "L24", "audio", "S16LE" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S24_BE, 3, "L24", "audio", "S24BE" },
 	{ SPA_MEDIA_SUBTYPE_control, 0, 1, "rtp-midi", "midi", NULL },
 	{ SPA_MEDIA_SUBTYPE_opus, 0, 1, "opus", "opus", NULL },
 };
@@ -307,7 +307,7 @@ static void session_free(struct session *sess)
 		if (sess->announce)
 			send_sap(impl, sess, 1);
 		spa_list_remove(&sess->link);
-		impl->n_sessions++;
+		impl->n_sessions--;
 	}
 	if (sess->node && sess->node->session != NULL)
 		sess->node->session = NULL;

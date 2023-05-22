@@ -389,10 +389,10 @@ int pw_loop_check(struct pw_loop *loop);
 #define ensure_loop(loop,...) ({							\
 	int res = pw_loop_check(loop);							\
 	if (res != 1) {									\
-		pw_log_warn("%s called from wrong context, check thread and locking: %s",		\
-				__func__, spa_strerror(res));				\
+		pw_log_warn("%s called from wrong context, check thread and locking: %s",	\
+				__func__, res < 0 ? spa_strerror(res) : "Not in loop");	\
 		fprintf(stderr, "*** %s called from wrong context, check thread and locking: %s\n",\
-				__func__, spa_strerror(res));				\
+				__func__, res < 0 ? spa_strerror(res) : "Not in loop");	\
 		/* __VA_ARGS__ */							\
 	}										\
 })
@@ -475,7 +475,6 @@ struct pw_context {
 	struct spa_thread_utils *thread_utils;
 	struct pw_loop *main_loop;		/**< main loop for control */
 	struct pw_loop *data_loop;		/**< data loop for data passing */
-	struct pw_data_loop *data_loop_impl;
 	struct spa_system *data_system;		/**< data system for data passing */
 	struct pw_work_queue *work_queue;	/**< work queue */
 
@@ -587,8 +586,8 @@ struct pw_node_target {
 	struct spa_list link;
 	struct pw_impl_node *node;
 	struct pw_node_activation *activation;
-	int (*signal_func) (void *data);
-	void *data;
+	struct spa_system *system;
+	int fd;
 	unsigned int active:1;
 };
 
@@ -739,6 +738,8 @@ struct pw_impl_node {
 
 	struct spa_list sort_link;	/**< link used to sort nodes */
 
+	struct spa_list peer_list;	/* list of peers */
+
 	struct spa_node *node;		/**< SPA node implementation */
 	struct spa_hook listener;
 
@@ -750,6 +751,7 @@ struct pw_impl_node {
 	struct spa_hook_list listener_list;
 
 	struct pw_loop *data_loop;		/**< the data loop for this node */
+	struct spa_system *data_system;
 
 	struct spa_fraction latency;		/**< requested latency */
 	struct spa_fraction max_latency;	/**< maximum latency */
@@ -893,6 +895,7 @@ struct pw_impl_port {
 
 	struct spa_latency_info latency[2];	/**< latencies */
 	unsigned int have_latency_param:1;
+	unsigned int ignore_latency:1;
 
 	void *owner_data;		/**< extra owner data */
 	void *user_data;                /**< extra user data */
@@ -906,6 +909,14 @@ struct pw_control_link {
 	uint32_t out_port;
 	uint32_t in_port;
 	unsigned int valid:1;
+};
+
+struct pw_node_peer {
+	int ref;
+	int active_count;
+	struct spa_list link;			/**< link in peer list */
+	struct pw_impl_node *output;		/**< the output node */
+	struct pw_node_target target;		/**< target of the input node */
 };
 
 #define pw_impl_link_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_impl_link_events, m, v, ##__VA_ARGS__)
@@ -939,10 +950,11 @@ struct pw_impl_link {
 	struct pw_control_link control;
 	struct pw_control_link notify;
 
+	struct pw_node_peer *peer;
+
 	struct {
 		struct pw_impl_port_mix out_mix;	/**< port added to the output mixer */
 		struct pw_impl_port_mix in_mix;		/**< port added to the input mixer */
-		struct pw_node_target target;		/**< target to trigger the input node */
 	} rt;
 
 	void *user_data;
@@ -1076,12 +1088,14 @@ struct pw_stream {
 						  *  CONFIGURE state and higher */
 	enum pw_stream_state state;		/**< stream state */
 	char *error;				/**< error reason when state is in error */
+	int error_res;				/**< error code when in error */
 
 	struct spa_hook_list listener_list;
 
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
 
+	struct pw_impl_node *node;
 	struct spa_hook node_listener;
 
 	struct spa_list controls;
@@ -1112,11 +1126,15 @@ struct pw_filter {
 						  *  CONFIGURE state and higher */
 	enum pw_filter_state state;		/**< filter state */
 	char *error;				/**< error reason when state is in error */
+	int error_res;				/**< error code when in error */
 
 	struct spa_hook_list listener_list;
 
 	struct pw_proxy *proxy;
 	struct spa_hook proxy_listener;
+
+	struct pw_impl_node *node;
+	struct spa_hook node_listener;
 
 	struct spa_list controls;
 };
@@ -1262,6 +1280,8 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state);
 int pw_impl_node_update_ports(struct pw_impl_node *node);
 
 int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driver);
+
+int pw_impl_node_trigger(struct pw_impl_node *node);
 
 /** Prepare a link
   * Starts the negotiation of formats and buffers on \a link */

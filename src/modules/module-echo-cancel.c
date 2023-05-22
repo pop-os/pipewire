@@ -639,7 +639,6 @@ static int set_params(struct impl* impl, const struct spa_pod *params)
 {
 	struct spa_pod_parser prs;
 	struct spa_pod_frame f;
-	int changed = 0;
 
 	spa_pod_parser_pod(&prs, params);
 	if (spa_pod_parser_push_struct(&prs, &f) < 0)
@@ -668,7 +667,6 @@ static int set_params(struct impl* impl, const struct spa_pod *params)
 		if (spa_streq(name, "debug.aec.wav-path")) {
 			spa_scnprintf(impl->wav_path,
 				sizeof(impl->wav_path), "%s", value);
-			changed++;
 		}
 	}
 	spa_audio_aec_set_params(impl->aec, params);
@@ -1429,9 +1427,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 		res = spa_audio_aec_init(impl->aec, &aec_props->dict, &info);
 
-		impl->rec_info.channels = info.channels;
-		impl->out_info.channels = info.channels;
-		impl->play_info.channels = info.channels;
+		impl->rec_info = info;
+		impl->out_info = info;
+		impl->play_info = info;
 	}
 
 	pw_properties_free(aec_props);

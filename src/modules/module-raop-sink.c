@@ -857,6 +857,17 @@ static int rtsp_do_flush(struct impl *impl)
 	return res;
 }
 
+static int rtsp_send_volume(struct impl *impl)
+{
+	if (!impl->recording)
+		return 0;
+
+	char header[128], volstr[64];
+	snprintf(header, sizeof(header), "volume: %s\r\n",
+			spa_dtoa(volstr, sizeof(volstr), impl->volume));
+	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, NULL);
+}
+
 static int rtsp_record_reply(void *data, int status, const struct spa_dict *headers)
 {
 	struct impl *impl = data;
@@ -891,6 +902,8 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	impl->sync = 0;
 	impl->sync_period = impl->info.rate / (impl->block_size / impl->frame_size);
 	impl->recording = true;
+
+	rtsp_send_volume(impl);
 
 	snprintf(progress, sizeof(progress), "progress: %s/%s/%s\r\n", "0", "0", "0");
 	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", progress, NULL);
@@ -1582,7 +1595,6 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 			uint32_t i, n_vols;
 			float vols[SPA_AUDIO_MAX_CHANNELS], volume;
 			float soft_vols[SPA_AUDIO_MAX_CHANNELS];
-			char header[128], volstr[64];
 
 			if ((n_vols = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
 					vols, SPA_AUDIO_MAX_CHANNELS)) > 0) {
@@ -1595,10 +1607,9 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 				volume = SPA_CLAMPF(20.0 * log10(volume), VOLUME_MIN, VOLUME_MAX);
 				impl->volume = volume;
 
-				snprintf(header, sizeof(header), "volume: %s\r\n",
-						spa_dtoa(volstr, sizeof(volstr), volume));
-				rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, NULL);
+				rtsp_send_volume(impl);
 			}
+
 			spa_pod_builder_prop(&b, SPA_PROP_softVolumes, 0);
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, soft_vols);
@@ -1632,6 +1643,7 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 	case SPA_PARAM_Props:
 		if (param != NULL)
 			stream_props_changed(impl, id, param);
+		break;
 	default:
 		break;
 	}
@@ -1854,7 +1866,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props = NULL;
 	struct impl *impl;
-	const char *str, *name, *hostname, *ipv;
+	const char *str, *name, *hostname, *ip, *port;
 	int res;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
@@ -1895,11 +1907,22 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
 
+	ip = pw_properties_get(props, "raop.ip");
+	port = pw_properties_get(props, "raop.port");
+	if (ip == NULL || port == NULL) {
+		pw_log_error("Missing raop.ip or raop.port");
+		res = -EINVAL;
+		goto error;
+	}
+
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 
 	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
+
+	if (pw_properties_get(props, PW_KEY_DEVICE_ICON_NAME) == NULL)
+		pw_properties_set(props, PW_KEY_DEVICE_ICON_NAME, "audio-speakers");
 
 	if ((name = pw_properties_get(props, "raop.name")) == NULL)
 		name = "RAOP";
@@ -1909,17 +1932,15 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		if (strlen(str) > 0)
 			name = str;
 	}
-	if ((ipv = pw_properties_get(props, "raop.ip.version")) == NULL)
-		ipv = "4";
 	if ((hostname = pw_properties_get(props, "raop.hostname")) == NULL)
 		hostname = name;
 
+	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_NAME, "raop_sink.%s.%s.%s",
+				hostname, ip, port);
 	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_DESCRIPTION,
-					"%s (IPv%s)", name, ipv);
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_NAME, "raop_sink.%s.ipv%s",
-				hostname, ipv);
+					"%s", name);
 	if (pw_properties_get(props, PW_KEY_NODE_LATENCY) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_LATENCY, "352/44100");
 
@@ -1930,6 +1951,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
+	copy_props(impl, props, PW_KEY_DEVICE_ICON_NAME);
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);

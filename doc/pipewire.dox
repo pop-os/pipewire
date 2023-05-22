@@ -10,6 +10,8 @@
 - \subpage page_objects_design
 - \subpage page_library
 - \subpage page_dma_buf
+- \subpage page_scheduling
+- \subpage page_native_protocol
 
 
 # Components

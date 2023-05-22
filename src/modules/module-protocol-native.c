@@ -199,8 +199,8 @@ static void debug_msg(const char *prefix, const struct pw_protocol_native_messag
 {
 	struct spa_pod *pod;
 	pw_logt_debug(mod_topic_connection,
-		      "%s: id:%d op:%d size:%d seq:%d", prefix,
-		      msg->id, msg->opcode, msg->size, msg->seq);
+		      "%s: id:%d op:%d size:%d seq:%d fds:%d", prefix,
+		      msg->id, msg->opcode, msg->size, msg->seq, msg->n_fds);
 
 	if ((pod = get_first_pod_from_data(msg->data, msg->size, 0)) != NULL)
 		spa_debug_pod(0, NULL, pod);
@@ -285,6 +285,7 @@ process_messages(struct client_data *data)
 			break;
 
 		if (client->core_resource == NULL) {
+			pw_log_debug("%p: no core resource", client);
 			res = -EPROTO;
 			goto error;
 		}

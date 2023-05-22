@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.70',
+  version : '0.3.71',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -191,6 +191,7 @@ versiondata.set('PIPEWIRE_VERSION_NANO', pipewire_version_nano)
 versiondata.set_quoted('PIPEWIRE_API_VERSION', apiversion)
 
 cdata = configuration_data()
+cdata.set_quoted('PREFIX', prefix)
 cdata.set_quoted('PIPEWIRE_CONFDATADIR', pipewire_confdatadir)
 cdata.set_quoted('LOCALEDIR', pipewire_localedir)
 cdata.set_quoted('LIBDIR', pipewire_libdir)

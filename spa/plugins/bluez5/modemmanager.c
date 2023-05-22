@@ -18,8 +18,6 @@ struct modem {
 };
 
 struct impl {
-	struct spa_bt_monitor *monitor;
-
 	struct spa_log *log;
 	DBusConnection *conn;
 
@@ -44,26 +42,31 @@ struct dbus_cmd_data {
 static bool mm_dbus_connection_send_with_reply(struct impl *this, DBusMessage *m, DBusPendingCall **pending_return,
                                                DBusPendingCallNotifyFunction function, void *user_data)
 {
-	dbus_bool_t dbus_ret;
-
 	spa_assert(*pending_return == NULL);
 
-	dbus_ret = dbus_connection_send_with_reply(this->conn, m, pending_return, -1);
-	if (!dbus_ret || *pending_return == NULL) {
+	DBusPendingCall *pending_call;
+	bool ret = dbus_connection_send_with_reply(this->conn, m, &pending_call, -1);
+	if (!ret) {
 		spa_log_debug(this->log, "dbus call failure");
-		return false;
+		goto out;
 	}
 
-	dbus_ret = dbus_pending_call_set_notify(*pending_return, function, user_data, NULL);
-	if (!dbus_ret) {
+	spa_assert(pending_call);
+
+	ret = dbus_pending_call_set_notify(pending_call, function, user_data, NULL);
+	if (!ret) {
 		spa_log_debug(this->log, "dbus set notify failure");
-		dbus_pending_call_cancel(*pending_return);
-		dbus_pending_call_unref(*pending_return);
-		*pending_return = NULL;
-		return false;
+		dbus_pending_call_cancel(pending_call);
+		dbus_pending_call_unref(pending_call);
+		goto out;
 	}
 
-	return true;
+	*pending_return = pending_call;
+
+out:
+	dbus_message_unref(m);
+
+	return ret;
 }
 
 static int mm_state_to_clcc(struct impl *this, MMCallState state)
@@ -122,10 +125,10 @@ static void mm_get_call_properties_reply(DBusPendingCall *pending, void *user_da
 	MMCallState state;
 
 	spa_assert(call->pending == pending);
-	dbus_pending_call_unref(pending);
 	call->pending = NULL;
 
 	r = dbus_pending_call_steal_reply(pending);
+	dbus_pending_call_unref(pending);
 	if (r == NULL)
 		return;
 
@@ -421,10 +424,10 @@ static void mm_get_managed_objects_reply(DBusPendingCall *pending, void *user_da
 	DBusMessageIter i, array_i;
 
 	spa_assert(this->pending == pending);
-	dbus_pending_call_unref(pending);
 	this->pending = NULL;
 
 	r = dbus_pending_call_steal_reply(pending);
+	dbus_pending_call_unref(pending);
 	if (r == NULL)
 		return;
 
@@ -541,8 +544,6 @@ static DBusHandlerResult mm_filter_cb(DBusConnection *bus, DBusMessage *m, void 
 	} else if (dbus_message_is_signal(m, DBUS_INTERFACE_OBJECTMANAGER, DBUS_SIGNAL_INTERFACES_ADDED)) {
 		DBusMessageIter arg_i;
 
-		spa_log_warn(this->log, "sender: %s", dbus_message_get_sender(m));
-
 		if (!dbus_message_iter_init(m, &arg_i) || !spa_streq(dbus_message_get_signature(m), "oa{sa{sv}}")) {
 				spa_log_error(this->log, "Invalid signature found in InterfacesAdded");
 				goto finish;
@@ -644,7 +645,6 @@ static DBusHandlerResult mm_filter_cb(DBusConnection *bus, DBusMessage *m, void 
 		dbus_message_append_args(m, DBUS_TYPE_STRING, &mm_call_interface, DBUS_TYPE_INVALID);
 		if (!mm_dbus_connection_send_with_reply(this, m, &call_object->pending, mm_get_call_properties_reply, call_object)) {
 			spa_log_error(this->log, "dbus call failure");
-			dbus_message_unref(m);
 			goto finish;
 		}
 	} else if (dbus_message_is_signal(m, MM_DBUS_INTERFACE_MODEM_VOICE, MM_MODEM_VOICE_SIGNAL_CALLDELETED)) {
@@ -761,49 +761,6 @@ fail:
 	return -EIO;
 }
 
-static bool is_dbus_service_available(struct impl *this, const char *service)
-{
-	DBusMessage *m, *r;
-	DBusError err;
-	bool success = false;
-
-	m = dbus_message_new_method_call("org.freedesktop.DBus", "/org/freedesktop/DBus",
-	                                  "org.freedesktop.DBus", "NameHasOwner");
-	if (m == NULL)
-		return false;
-	dbus_message_append_args(m, DBUS_TYPE_STRING, &service, DBUS_TYPE_INVALID);
-
-	dbus_error_init(&err);
-	r = dbus_connection_send_with_reply_and_block(this->conn, m, -1, &err);
-	dbus_message_unref(m);
-	m = NULL;
-
-	if (r == NULL) {
-		spa_log_info(this->log, "NameHasOwner failed for %s", service);
-		dbus_error_free(&err);
-		goto finish;
-	}
-
-	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
-		spa_log_error(this->log, "NameHasOwner() returned error: %s", dbus_message_get_error_name(r));
-		goto finish;
-	}
-
-	if (!dbus_message_get_args(r, &err,
-				   DBUS_TYPE_BOOLEAN, &success,
-				   DBUS_TYPE_INVALID)) {
-		spa_log_error(this->log, "Failed to parse NameHasOwner() reply: %s", err.message);
-		dbus_error_free(&err);
-		goto finish;
-	}
-
-finish:
-	if (r)
-		dbus_message_unref(r);
-
-	return success;
-}
-
 bool mm_is_available(void *modemmanager)
 {
 	struct impl *this = modemmanager;
@@ -830,10 +787,10 @@ static void mm_get_call_simple_reply(DBusPendingCall *pending, void *data)
 	free(data);
 
 	spa_assert(call->pending == pending);
-	dbus_pending_call_unref(pending);
 	call->pending = NULL;
 
 	r = dbus_pending_call_steal_reply(pending);
+	dbus_pending_call_unref(pending);
 	if (r == NULL)
 		return;
 
@@ -863,10 +820,10 @@ static void mm_get_call_create_reply(DBusPendingCall *pending, void *data)
 	free(data);
 
 	spa_assert(this->voice_pending == pending);
-	dbus_pending_call_unref(pending);
 	this->voice_pending = NULL;
 
 	r = dbus_pending_call_steal_reply(pending);
+	dbus_pending_call_unref(pending);
 	if (r == NULL)
 		return;
 
@@ -925,7 +882,6 @@ bool mm_answer_call(void *modemmanager, void *user_data, enum cmee_error *error)
 	}
 	if (!mm_dbus_connection_send_with_reply(this, m, &call_object->pending, mm_get_call_simple_reply, data)) {
 		spa_log_error(this->log, "dbus call failure");
-		dbus_message_unref(m);
 		if (error)
 			*error = CMEE_AG_FAILURE;
 		return false;
@@ -983,7 +939,6 @@ bool mm_hangup_call(void *modemmanager, void *user_data, enum cmee_error *error)
 	}
 	if (!mm_dbus_connection_send_with_reply(this, m, &call_object->pending, mm_get_call_simple_reply, data)) {
 		spa_log_error(this->log, "dbus call failure");
-		dbus_message_unref(m);
 		if (error)
 			*error = CMEE_AG_FAILURE;
 		return false;
@@ -1049,7 +1004,6 @@ bool mm_do_call(void *modemmanager, const char* number, void *user_data, enum cm
 	dbus_message_iter_close_container(&iter, &dict);
 	if (!mm_dbus_connection_send_with_reply(this, m, &this->voice_pending, mm_get_call_create_reply, data)) {
 		spa_log_error(this->log, "dbus call failure");
-		dbus_message_unref(m);
 		if (error)
 			*error = CMEE_AG_FAILURE;
 		return false;
@@ -1109,7 +1063,6 @@ bool mm_send_dtmf(void *modemmanager, const char *dtmf, void *user_data, enum cm
 	dbus_message_append_args(m, DBUS_TYPE_STRING, &dtmf, DBUS_TYPE_INVALID);
 	if (!mm_dbus_connection_send_with_reply(this, m, &call_object->pending, mm_get_call_simple_reply, data)) {
 		spa_log_error(this->log, "dbus call failure");
-		dbus_message_unref(m);
 		if (error)
 			*error = CMEE_AG_FAILURE;
 		return false;
@@ -1182,26 +1135,23 @@ void *mm_register(struct spa_log *log, void *dbus_connection, const struct spa_d
 		goto fail;
 	}
 
-	if (is_dbus_service_available(this, MM_DBUS_SERVICE)) {
-		DBusMessage *m;
+	DBusMessage *m = dbus_message_new_method_call(MM_DBUS_SERVICE, "/org/freedesktop/ModemManager1",
+						      DBUS_INTERFACE_OBJECTMANAGER, "GetManagedObjects");
+	if (m == NULL)
+		goto fail;
 
-		m = dbus_message_new_method_call(MM_DBUS_SERVICE, "/org/freedesktop/ModemManager1",
-		                                 DBUS_INTERFACE_OBJECTMANAGER, "GetManagedObjects");
-		if (m == NULL)
-			goto fail;
+	dbus_message_set_auto_start(m, false);
 
-		if (!mm_dbus_connection_send_with_reply(this, m, &this->pending, mm_get_managed_objects_reply, this)) {
-			spa_log_error(this->log, "dbus call failure");
-			dbus_message_unref(m);
-			goto fail;
-		}
+	if (!mm_dbus_connection_send_with_reply(this, m, &this->pending, mm_get_managed_objects_reply, this)) {
+		spa_log_error(this->log, "dbus call failure");
+		goto fail;
 	}
 
-    return this;
+	return this;
 
 fail:
-    free(this);
-    return NULL;
+	free(this);
+	return NULL;
 }
 
 void mm_unregister(void *data)

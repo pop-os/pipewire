@@ -564,9 +564,21 @@ static const struct rtp_stream_events recv_stream_events = {
 	.send_feedback = recv_send_feedback,
 };
 
+static int
+do_unlink_session(struct spa_loop *loop,
+		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct session *sess = user_data;
+	spa_list_remove(&sess->link);
+	return 0;
+}
+
 static void free_session(struct session *sess)
 {
-	spa_list_remove(&sess->link);
+	struct impl *impl = sess->impl;
+
+	pw_loop_invoke(impl->data_loop, do_unlink_session, 1, NULL, 0, true, sess);
+
 	sess->impl->n_sessions--;
 
 	if (sess->send)
@@ -1710,6 +1722,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->loop = pw_context_get_main_loop(context);
 	impl->data_loop = pw_data_loop_get_loop(pw_context_get_data_loop(context));
 
+	if (pw_properties_get(props, "sess.media") == NULL)
+		pw_properties_set(props, "sess.media", "midi");
+
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(stream_props, str, strlen(str));
 
@@ -1735,10 +1750,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->ttl = pw_properties_get_uint32(props, "net.ttl", DEFAULT_TTL);
 	impl->mcast_loop = pw_properties_get_bool(props, "net.loop", DEFAULT_LOOP);
 
-	if ((str = pw_properties_get(stream_props, "sess.media")) == NULL) {
-		str = "midi";
-		pw_properties_set(stream_props, "sess.media", str);
-	}
+	str = pw_properties_get(stream_props, "sess.media");
+
 	if (spa_streq(str, "audio")) {
 		struct spa_dict_item items[] = {
 			{ "audio.format", DEFAULT_FORMAT },

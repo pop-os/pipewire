@@ -72,6 +72,7 @@ jack.properties = {
      #node.force-quantum = 0
      #jack.show-monitor  = true
      #jack.merge-monitor = true
+     #jack.show-midi     = true
      #jack.short-name    = false
      #jack.filter-name   = false
      #jack.filter-char   = " "
@@ -86,6 +87,8 @@ jack.properties = {
      #jack.default-as-system = false
      #jack.fix-midi-events   = true
      #jack.global-buffer-size = false
+     #jack.max-client-ports   = 768
+     #jack.fill-aliases       = false
 }
 
 # client specific properties

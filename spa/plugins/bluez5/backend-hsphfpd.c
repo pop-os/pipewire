@@ -495,7 +495,6 @@ static DBusHandlerResult audio_agent_getall_properties(DBusConnection *conn, DBu
 {
 	const char *interface;
 	DBusMessageIter iter, array, dict, data;
-	const char *agent_codec_key = "AgentCodec";
 	const char *agent_codec;
 	DBusMessage *r = NULL;
 
@@ -527,9 +526,9 @@ static DBusHandlerResult audio_agent_getall_properties(DBusConnection *conn, DBu
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &array);
 	dbus_message_iter_open_container(&array, DBUS_TYPE_DICT_ENTRY, NULL, &dict);
-	dbus_message_iter_append_basic(&dict, DBUS_TYPE_STRING, &agent_codec_key);
+	dbus_message_iter_append_basic(&dict, DBUS_TYPE_STRING, &(const char *){ "AgentCodec" });
 	dbus_message_iter_open_container(&dict, DBUS_TYPE_VARIANT, "s", &data);
-	dbus_message_iter_append_basic(&data, DBUS_TYPE_BOOLEAN, &agent_codec);
+	dbus_message_iter_append_basic(&data, DBUS_TYPE_STRING, &agent_codec);
 	dbus_message_iter_close_container(&dict, &data);
 	dbus_message_iter_close_container(&array, &dict);
 	dbus_message_iter_close_container(&iter, &array);
@@ -1036,7 +1035,7 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct impl *backend,
 
 			case DBUS_TYPE_BOOLEAN:
 				{
-					bool value;
+					dbus_bool_t value;
 					dbus_message_iter_get_basic(&value_i, &value);
 					if (spa_streq(key, "Connected"))
 						endpoint->connected = value;
