@@ -6,6 +6,8 @@ pipewire (0.3.71-1) UNRELEASED; urgency=medium
       - module-pulse-tunnel-avoid-using-NULL-module.patch
   * Cherry-pick upstream recommended patch:
       - ce71b37b: fixes a bug with buffer_size updates for JACK apps
+  * Set minimum libcamera to 0.0.5 to force a build against the version in
+      experimental during the freeze.
 
   [ Sebastien Bacher ]
   * Don't use libmysofa in the Ubuntu build for now since the package
