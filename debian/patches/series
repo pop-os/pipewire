@@ -1,4 +1,3 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 Fix_services.patch
-# Recommended patch for 0.3.70
-0001-module-pulse-tunnel-avoid-using-NULL-module.patch
+# Recommended patch for 0.3.71
