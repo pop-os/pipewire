@@ -1,3 +1,10 @@
+pipewire (0.3.71-2) unstable; urgency=medium
+
+  * Upload to unstable
+  * Remove minimum version of libcamera-dev, not yet in unstable
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 12 Jun 2023 11:59:49 +0200
+
 pipewire (0.3.71-1) experimental; urgency=medium
 
   [ Dylan Aïssi ]
