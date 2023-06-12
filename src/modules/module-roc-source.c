@@ -1,27 +1,7 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
- * Copyright © 2021 Sanchayan Maity <sanchayan@asymptotic.io>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-FileCopyrightText: Copyright © 2021 Sanchayan Maity <sanchayan@asymptotic.io> */
+/* SPDX-License-Identifier: MIT */
 
 #include <limits.h>
 #include <sys/stat.h>
@@ -311,7 +291,7 @@ static int roc_source_setup(struct module_roc_source_data *data)
 	 * See API reference:
 	 * https://roc-streaming.org/toolkit/docs/api/reference.html
 	 */
-	receiver_config.target_latency = data->sess_latency_msec * 1000000;
+	receiver_config.target_latency = (unsigned long long)data->sess_latency_msec * 1000000ULL;
 
 	res = roc_receiver_open(data->context, &receiver_config, &data->receiver);
 	if (res) {
@@ -391,14 +371,14 @@ static int roc_source_setup(struct module_roc_source_data *data)
 static const struct spa_dict_item module_roc_source_info[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Sanchayan Maity <sanchayan@asymptotic.io>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "roc source" },
-	{ PW_KEY_MODULE_USAGE,	"source.name=<name for the source> "
-				"resampler.profile=<empty>|disable|high|medium|low "
-				"fec.code=<empty>|disable|rs8m|ldpc "
-				"sess.latency.msec=<target network latency in milliseconds> "
-				"local.ip=<local receiver ip> "
-				"local.source.port=<local receiver port for source packets> "
-				"local.repair.port=<local receiver port for repair packets> "
-				"source.props= { key=value ... }" },
+	{ PW_KEY_MODULE_USAGE,	"( source.name=<name for the source> ) "
+				"( resampler.profile=<empty>|disable|high|medium|low ) "
+				"( fec.code=<empty>|disable|rs8m|ldpc ) "
+				"( sess.latency.msec=<target network latency in milliseconds> ) "
+				"( local.ip=<local receiver ip> ) "
+				"( local.source.port=<local receiver port for source packets> ) "
+				"( local.repair.port=<local receiver port for repair packets> ) "
+				"( source.props= { key=value ... } ) " },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 

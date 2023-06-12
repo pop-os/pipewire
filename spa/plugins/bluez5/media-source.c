@@ -1,27 +1,7 @@
-/* Spa Media Source
- *
- * Copyright © 2018 Wim Taymans
- * Copyright © 2019 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa Media Source */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-FileCopyrightText: Copyright © 2019 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -68,7 +48,6 @@ struct props {
 	char clock_name[64];
 };
 
-#define FILL_FRAMES 2
 #define MAX_BUFFERS 32
 
 struct buffer {
@@ -135,14 +114,17 @@ struct impl {
 	struct port port;
 
 	unsigned int started:1;
-	unsigned int transport_acquired:1;
+	unsigned int start_ready:1;
+	unsigned int transport_started:1;
 	unsigned int following:1;
 	unsigned int matching:1;
 	unsigned int resampling:1;
 
 	unsigned int is_input:1;
 	unsigned int is_duplex:1;
-	unsigned int use_duplex_source:1;
+	unsigned int is_internal:1;
+
+	unsigned int node_latency;
 
 	int fd;
 	struct spa_source source;
@@ -165,9 +147,6 @@ struct impl {
 	uint8_t buffer_read[4096];
 	struct timespec now;
 	uint64_t sample_count;
-
-	int duplex_timerfd;
-	uint64_t duplex_timeout;
 };
 
 #define CHECK_PORT(this,d,p)    ((d) == SPA_DIRECTION_OUTPUT && (p) == 0)
@@ -277,7 +256,8 @@ static int do_reassign_follower(struct spa_loop *loop,
 	struct port *port = &this->port;
 
 	set_timers(this);
-	spa_bt_decode_buffer_recover(&port->buffer);
+	if (this->transport_started)
+		spa_bt_decode_buffer_recover(&port->buffer);
 	return 0;
 }
 
@@ -319,6 +299,31 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 }
 
 static void emit_node_info(struct impl *this, bool full);
+
+static void set_latency(struct impl *this, bool emit_latency)
+{
+	if (this->codec->bap && !this->is_input && this->transport &&
+			this->transport->delay_us != SPA_BT_UNKNOWN_DELAY) {
+		unsigned int node_latency = 2048;
+		unsigned int target = this->transport->delay_us*48000ll/SPA_USEC_PER_SEC * 1/2;
+
+		/* Adjust requested node latency to be somewhat (~1/2) smaller
+		 * than presentation delay. The difference functions as room
+		 * for buffering rate control.
+		 */
+		while (node_latency > 64 && node_latency > target)
+			node_latency /= 2;
+
+		if (this->node_latency != node_latency) {
+			this->node_latency = node_latency;
+			if (emit_latency)
+				emit_node_info(this, false);
+		}
+
+		spa_log_info(this->log, "BAP presentation delay %d us, node latency %u/48000",
+				(int)this->transport->delay_us, node_latency);
+	}
+}
 
 static int apply_props(struct impl *this, const struct spa_pod *param)
 {
@@ -523,44 +528,19 @@ stop:
 		spa_loop_remove_source(this->data_loop, &this->source);
 }
 
-static int set_duplex_timeout(struct impl *this, uint64_t timeout)
-{
-	struct itimerspec ts;
-	ts.it_value.tv_sec = timeout / SPA_NSEC_PER_SEC;
-	ts.it_value.tv_nsec = timeout % SPA_NSEC_PER_SEC;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	return spa_system_timerfd_settime(this->data_system,
-			this->duplex_timerfd, 0, &ts, NULL);
-}
-
-static void media_on_duplex_timeout(struct spa_source *source)
-{
-	struct impl *this = source->data;
-	uint64_t exp;
-	int res;
-
-	if ((res = spa_system_timerfd_read(this->data_system, this->duplex_timerfd, &exp)) < 0) {
-		if (res != -EAGAIN)
-			spa_log_warn(this->log, "error reading timerfd: %s", spa_strerror(res));
-		return;
-	}
-
-	set_duplex_timeout(this, this->duplex_timeout);
-
-	media_on_ready_read(source);
-}
-
 static int setup_matching(struct impl *this)
 {
 	struct port *port = &this->port;
+
+	if (!this->transport_started)
+		port->buffer.corr = 1.0;
 
 	if (this->position && port->rate_match) {
 		port->rate_match->rate = 1 / port->buffer.corr;
 
 		this->matching = this->following;
 		this->resampling = this->matching ||
-			(port->current_format.info.raw.rate != this->position->clock.rate.denom);
+			(port->current_format.info.raw.rate != this->position->clock.target_rate.denom);
 	} else {
 		this->matching = false;
 		this->resampling = false;
@@ -601,8 +581,8 @@ static void media_on_timeout(struct spa_source *source)
 			now_time, now_time - prev_time);
 
 	if (SPA_LIKELY(this->position)) {
-		duration = this->position->clock.duration;
-		rate = this->position->clock.rate.denom;
+		duration = this->position->clock.target_duration;
+		rate = this->position->clock.target_rate.denom;
 	} else {
 		duration = 1024;
 		rate = 48000;
@@ -614,15 +594,17 @@ static void media_on_timeout(struct spa_source *source)
 
 	if (SPA_LIKELY(this->clock)) {
 		this->clock->nsec = now_time;
-		this->clock->position += duration;
+		this->clock->rate = this->clock->target_rate;
+		this->clock->position += this->clock->duration;
 		this->clock->duration = duration;
 		this->clock->rate_diff = port->buffer.corr;
 		this->clock->next_nsec = this->next_time;
 	}
 
 	if (port->io) {
+		int io_status = port->io->status;
 		int status = produce_buffer(this);
-		spa_log_trace(this->log, "%p: io:%d status:%d", this, port->io->status, status);
+		spa_log_trace(this->log, "%p: io:%d->%d status:%d", this, io_status, port->io->status, status);
 	}
 
 	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
@@ -636,15 +618,15 @@ static int transport_start(struct impl *this)
 	struct port *port = &this->port;
 	uint32_t flags;
 
-	if (this->transport_acquired)
+	if (this->transport_started)
 		return 0;
+	if (!this->start_ready)
+		return -EIO;
 
-	spa_log_debug(this->log, "%p: transport %p acquire", this,
-			this->transport);
-	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0)
-		return res;
+	spa_return_val_if_fail(this->transport != NULL, -EIO);
 
-	this->transport_acquired = true;
+	spa_log_debug(this->log, "%p: start transport state:%d",
+			this, this->transport->state);
 
 	flags = this->is_duplex ? 0 : MEDIA_CODEC_FLAG_SINK;
 
@@ -661,20 +643,16 @@ static int transport_start(struct impl *this)
 	spa_log_info(this->log, "%p: using %s codec %s", this,
 	             this->codec->bap ? "BAP" : "A2DP", this->codec->description);
 
-	val = fcntl(this->transport->fd, F_GETFL);
-	if (fcntl(this->transport->fd, F_SETFL, val | O_NONBLOCK) < 0)
-		spa_log_warn(this->log, "%p: fcntl %u %m", this, val | O_NONBLOCK);
-
-	val = FILL_FRAMES * this->transport->write_mtu;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0)
-		spa_log_warn(this->log, "%p: SO_SNDBUF %m", this);
-
-	val = FILL_FRAMES * this->transport->read_mtu;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0)
-		spa_log_warn(this->log, "%p: SO_RCVBUF %m", this);
+	/*
+	 * If the link is bidirectional, media-sink may also be polling the same FD,
+	 * and this won't work properly with epoll. Always dup to avoid problems.
+	 */
+	this->fd = dup(this->transport->fd);
+	if (this->fd < 0)
+		return -errno;
 
 	val = 6;
-	if (setsockopt(this->transport->fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
+	if (setsockopt(this->fd, SOL_SOCKET, SO_PRIORITY, &val, sizeof(val)) < 0)
 		spa_log_warn(this->log, "SO_PRIORITY failed: %m");
 
 	reset_buffers(port);
@@ -685,36 +663,49 @@ static int transport_start(struct impl *this)
 			this->quantum_limit, this->quantum_limit)) < 0)
 		return res;
 
-	this->fd = this->transport->fd;
+	if (this->is_duplex) {
+		/* 80 ms max buffer */
+		spa_bt_decode_buffer_set_max_latency(&port->buffer,
+				port->current_format.info.raw.rate * 80 / 1000);
+	}
 
 	this->source.data = this;
 
-	if (!this->use_duplex_source) {
-		this->source.fd = this->transport->fd;
-		this->source.func = media_on_ready_read;
-		this->source.mask = SPA_IO_IN;
-		this->source.rmask = 0;
-		spa_loop_add_source(this->data_loop, &this->source);
-	} else {
-		/*
-		 * XXX: For an unknown reason (on Linux 5.13.10), the socket when working with
-		 * XXX: "duplex" stream sometimes stops waking up from the poll, even though
-		 * XXX: you can recv() from the socket with no problem.
-		 * XXX:
-		 * XXX: The reason for this should be found and fixed.
-		 * XXX: To work around this, for now we just do the stupid thing and poll
-		 * XXX: on a timer, chosen so that it's fast enough for the aptX-LL codec
-		 * XXX: we currently support (which sends mSBC data), and also for Opus
-		 * XXX: forward stream.
-		 */
-		this->source.fd = this->duplex_timerfd;
-		this->source.func = media_on_duplex_timeout;
-		this->source.mask = SPA_IO_IN;
-		this->source.rmask = 0;
-		spa_loop_add_source(this->data_loop, &this->source);
+	this->source.fd = this->fd;
+	this->source.func = media_on_ready_read;
+	this->source.mask = SPA_IO_IN;
+	this->source.rmask = 0;
+	if ((res = spa_loop_add_source(this->data_loop, &this->source)) < 0)
+		spa_log_error(this->log, "%p: failed to add poll source: %s", this,
+				spa_strerror(res));
 
-		this->duplex_timeout = SPA_NSEC_PER_MSEC * 25/10;
-		set_duplex_timeout(this, this->duplex_timeout);
+	this->sample_count = 0;
+
+	this->transport_started = true;
+
+	return 0;
+}
+
+static int do_start(struct impl *this)
+{
+	int res;
+
+	if (this->started)
+		return 0;
+
+	spa_return_val_if_fail(this->transport != NULL, -EIO);
+
+	this->following = is_following(this);
+
+	this->start_ready = true;
+
+	spa_log_debug(this->log, "%p: start following:%d", this, this->following);
+
+	spa_log_debug(this->log, "%p: transport %p acquire", this,
+			this->transport);
+	if ((res = spa_bt_transport_acquire(this->transport, false)) < 0) {
+		this->start_ready = false;
+		return res;
 	}
 
 	this->timer_source.data = this;
@@ -724,36 +715,13 @@ static int transport_start(struct impl *this)
 	this->timer_source.rmask = 0;
 	spa_loop_add_source(this->data_loop, &this->timer_source);
 
-	this->sample_count = 0;
-
 	setup_matching(this);
 
 	set_timers(this);
 
-	return 0;
-}
-
-static int do_start(struct impl *this)
-{
-	int res = 0;
-
-	if (this->started)
-		return 0;
-
-	spa_return_val_if_fail(this->transport != NULL, -EIO);
-
-	this->following = is_following(this);
-
-	spa_log_debug(this->log, "%p: start state:%d following:%d",
-			this, this->transport->state, this->following);
-
-	if (this->transport->state >= SPA_BT_TRANSPORT_STATE_PENDING ||
-			this->is_duplex || this->codec->bap)
-		res = transport_start(this);
-
 	this->started = true;
 
-	return res;
+	return 0;
 }
 
 static int do_remove_source(struct spa_loop *loop,
@@ -764,49 +732,56 @@ static int do_remove_source(struct spa_loop *loop,
 			    void *user_data)
 {
 	struct impl *this = user_data;
-	struct itimerspec ts;
 
 	spa_log_debug(this->log, "%p: remove source", this);
 
-	set_duplex_timeout(this, 0);
-
-	if (this->source.loop)
-		spa_loop_remove_source(this->data_loop, &this->source);
-
 	if (this->timer_source.loop)
 		spa_loop_remove_source(this->data_loop, &this->timer_source);
-	ts.it_value.tv_sec = 0;
-	ts.it_value.tv_nsec = 0;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(this->data_system, this->timerfd, 0, &ts, NULL);
+	set_timeout(this, 0);
 
 	return 0;
 }
 
-static int transport_stop(struct impl *this)
+static int do_remove_transport_source(struct spa_loop *loop,
+			    bool async,
+			    uint32_t seq,
+			    const void *data,
+			    size_t size,
+			    void *user_data)
+{
+	struct impl *this = user_data;
+
+	spa_log_debug(this->log, "%p: remove transport source", this);
+
+	this->transport_started = false;
+
+	if (this->source.loop)
+		spa_loop_remove_source(this->data_loop, &this->source);
+
+	return 0;
+}
+
+static void transport_stop(struct impl *this)
 {
 	struct port *port = &this->port;
-	int res;
+
+	if (!this->transport_started)
+		return;
 
 	spa_log_debug(this->log, "%p: transport stop", this);
 
-	spa_loop_invoke(this->data_loop, do_remove_source, 0, NULL, 0, true, this);
+	spa_loop_invoke(this->data_loop, do_remove_transport_source, 0, NULL, 0, true, this);
 
-	if (this->transport && this->transport_acquired)
-		res = spa_bt_transport_release(this->transport);
-	else
-		res = 0;
-
-	this->transport_acquired = false;
+	if (this->fd >= 0) {
+		close(this->fd);
+		this->fd = -1;
+	}
 
 	if (this->codec_data)
 		this->codec->deinit(this->codec_data);
 	this->codec_data = NULL;
 
 	spa_bt_decode_buffer_clear(&port->buffer);
-
-	return res;
 }
 
 static int do_stop(struct impl *this)
@@ -818,7 +793,16 @@ static int do_stop(struct impl *this)
 
 	spa_log_debug(this->log, "%p: stop", this);
 
-	res = transport_stop(this);
+	this->start_ready = false;
+
+	spa_loop_invoke(this->data_loop, do_remove_source, 0, NULL, 0, true, this);
+
+	transport_stop(this);
+
+	if (this->transport)
+		res = spa_bt_transport_release(this->transport);
+	else
+		res = 0;
 
 	this->started = false;
 
@@ -860,15 +844,19 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 static void emit_node_info(struct impl *this, bool full)
 {
 	uint64_t old = full ? this->info.change_mask : 0;
+	char latency[64];
 
 	struct spa_dict_item node_info_items[] = {
 		{ SPA_KEY_DEVICE_API, "bluez5" },
-		{ SPA_KEY_MEDIA_CLASS, this->is_input ? "Audio/Source" : "Stream/Output/Audio" },
-		{ SPA_KEY_NODE_LATENCY, this->is_input ? "" : "512/48000" },
+		{ SPA_KEY_MEDIA_CLASS, this->is_internal ? "Audio/Source/Internal" :
+		  this->is_input ? "Audio/Source" : "Stream/Output/Audio" },
+		{ SPA_KEY_NODE_LATENCY, this->is_input ? "" : latency },
 		{ "media.name", ((this->transport && this->transport->device->name) ?
 					this->transport->device->name : this->codec->bap ? "BAP" : "A2DP") },
 		{ SPA_KEY_NODE_DRIVER, this->is_input ? "true" : "false" },
 	};
+
+	spa_scnprintf(latency, sizeof(latency), "%d/48000", this->node_latency);
 
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -1279,31 +1267,70 @@ static int impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t 
 	return 0;
 }
 
-static uint32_t get_samples(struct impl *this, uint32_t *duration)
+static uint32_t get_samples(struct impl *this, uint32_t *result_duration)
 {
 	struct port *port = &this->port;
-	uint32_t samples;
+	uint32_t samples, rate_denom;
+	uint64_t duration;
+
+	if (SPA_LIKELY(this->position)) {
+		duration = this->position->clock.duration;
+		rate_denom = this->position->clock.rate.denom;
+	} else {
+		duration = 1024;
+		rate_denom = port->current_format.info.raw.rate;
+	}
+
+	*result_duration = duration * port->current_format.info.raw.rate / rate_denom;
 
 	if (SPA_LIKELY(port->rate_match) && this->resampling) {
 		samples = port->rate_match->size;
 	} else {
-		if (SPA_LIKELY(this->position))
-			samples = this->position->clock.duration * port->current_format.info.raw.rate
-				/ this->position->clock.rate.denom;
-		else
-			samples = 1024;
+		samples = *result_duration;
 	}
-
-	if (SPA_LIKELY(this->position))
-		*duration = this->position->clock.duration * port->current_format.info.raw.rate
-			/ this->position->clock.rate.denom;
-	else if (SPA_LIKELY(this->clock))
-		*duration = this->clock->duration * port->current_format.info.raw.rate
-			/ this->clock->rate.denom;
-	else
-		*duration = 1024 * port->current_format.info.raw.rate / 48000;
-
 	return samples;
+}
+
+static void update_target_latency(struct impl *this)
+{
+	struct port *port = &this->port;
+	uint32_t samples, duration;
+
+	if (this->transport == NULL || !port->have_format)
+		return;
+
+	if (!this->codec->bap || this->is_input ||
+			this->transport->delay_us == SPA_BT_UNKNOWN_DELAY)
+		return;
+
+	get_samples(this, &duration);
+
+	/* Presentation delay for BAP server
+	 *
+	 * This assumes the time when we receive the packet is (on average)
+	 * the SDU synchronization reference (see Core v5.3 Vol 6/G Sec 3.2.2 Fig. 3.2,
+	 * BAP v1.0 Sec 7.1.1).
+	 *
+	 * XXX: This is not exactly true, there might be some latency in between,
+	 * XXX: but currently kernel does not provide us any better information.
+	 * XXX: Some controllers (e.g. Intel AX210) also do not seem to set timestamps
+	 * XXX: to the HCI ISO data packets, so it's not clear what we can do here
+	 * XXX: better.
+	 */
+	samples = (uint64_t)this->transport->delay_us *
+		port->current_format.info.raw.rate / SPA_USEC_PER_SEC;
+
+	if (samples > duration)
+		samples -= duration;
+	else
+		samples = 1;
+
+	/* Too small target latency might not produce working audio.
+	 * The minimum (Presentation_Delay_Min) is configured in endpoint
+	 * DBus properties, with some default value on BlueZ side if unspecified.
+	 */
+
+	spa_bt_decode_buffer_set_target_latency(&port->buffer, samples);
 }
 
 static void process_buffering(struct impl *this)
@@ -1314,6 +1341,8 @@ static void process_buffering(struct impl *this)
 	uint32_t avail;
 	void *buf;
 
+	update_target_latency(this);
+
 	spa_bt_decode_buffer_process(&port->buffer, samples, duration);
 
 	setup_matching(this);
@@ -1321,7 +1350,7 @@ static void process_buffering(struct impl *this)
 	buf = spa_bt_decode_buffer_get_read(&port->buffer, &avail);
 
 	/* copy data to buffers */
-	if (!spa_list_is_empty(&port->free) && avail > 0) {
+	if (!spa_list_is_empty(&port->free)) {
 		struct buffer *buffer;
 		struct spa_data *datas;
 		uint32_t data_size;
@@ -1348,15 +1377,19 @@ static void process_buffering(struct impl *this)
 		spa_assert(datas[0].maxsize >= data_size);
 
 		datas[0].chunk->offset = 0;
-		datas[0].chunk->size = avail;
+		datas[0].chunk->size = data_size;
 		datas[0].chunk->stride = port->frame_size;
 
 		memcpy(datas[0].data, buf, avail);
 
-		this->sample_count += avail / port->frame_size;
+		/* pad with silence */
+		if (avail < data_size)
+			memset(SPA_PTROFF(datas[0].data, avail, void), 0, data_size - avail);
+
+		this->sample_count += samples;
 
 		/* ready buffer if full */
-		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)avail / port->frame_size);
+		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)samples);
 		spa_list_append(&port->ready, &buffer->link);
 	}
 }
@@ -1371,7 +1404,8 @@ static int produce_buffer(struct impl *this)
 		return -EIO;
 
 	/* Return if we already have a buffer */
-	if (io->status == SPA_STATUS_HAVE_DATA)
+	if (io->status == SPA_STATUS_HAVE_DATA &&
+			(this->following || port->rate_match == NULL))
 		return SPA_STATUS_HAVE_DATA;
 
 	/* Recycle */
@@ -1380,8 +1414,14 @@ static int produce_buffer(struct impl *this)
 		io->buffer_id = SPA_ID_INVALID;
 	}
 
+	if (this->transport_started && !this->source.loop) {
+		io->status = -EIO;
+		return SPA_STATUS_STOPPED;
+	}
+
 	/* Handle buffering */
-	process_buffering(this);
+	if (this->transport_started)
+		process_buffering(this);
 
 	/* Return if there are no buffers ready to be processed */
 	if (spa_list_is_empty(&port->ready))
@@ -1411,6 +1451,9 @@ static int impl_node_process(void *object)
 	port = &this->port;
 	if ((io = port->io) == NULL)
 		return -EIO;
+
+	if (!this->started || !this->transport_started)
+		return SPA_STATUS_OK;
 
 	spa_log_trace(this->log, "%p status:%d", this, io->status);
 
@@ -1450,6 +1493,38 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static void transport_state_changed(void *data,
+	enum spa_bt_transport_state old,
+	enum spa_bt_transport_state state)
+{
+	struct impl *this = data;
+
+	spa_log_debug(this->log, "%p: transport %p state %d->%d", this, this->transport, old, state);
+
+	if (state == SPA_BT_TRANSPORT_STATE_ACTIVE)
+		transport_start(this);
+	else
+		transport_stop(this);
+
+	if (state == SPA_BT_TRANSPORT_STATE_ERROR) {
+		uint8_t buffer[1024];
+		struct spa_pod_builder b = { 0 };
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		spa_node_emit_event(&this->hooks,
+				spa_pod_builder_add_object(&b,
+						SPA_TYPE_EVENT_Node, SPA_NODE_EVENT_Error));
+	}
+}
+
+static void transport_delay_changed(void *data)
+{
+	struct impl *this = data;
+
+	spa_log_debug(this->log, "transport %p delay changed", this->transport);
+	set_latency(this, true);
+}
+
 static int do_transport_destroy(struct spa_loop *loop,
 				bool async,
 				uint32_t seq,
@@ -1459,7 +1534,6 @@ static int do_transport_destroy(struct spa_loop *loop,
 {
 	struct impl *this = user_data;
 	this->transport = NULL;
-	this->transport_acquired = false;
 	return 0;
 }
 
@@ -1472,6 +1546,8 @@ static void transport_destroy(void *data)
 
 static const struct spa_bt_transport_events transport_events = {
 	SPA_VERSION_BT_TRANSPORT_EVENTS,
+	.delay_changed = transport_delay_changed,
+	.state_changed = transport_state_changed,
         .destroy = transport_destroy,
 };
 
@@ -1503,10 +1579,6 @@ static int impl_clear(struct spa_handle *handle)
 	if (this->transport)
 		spa_hook_remove(&this->transport_listener);
 	spa_system_close(this->data_system, this->timerfd);
-	if (this->duplex_timerfd >= 0) {
-		spa_system_close(this->data_system, this->duplex_timerfd);
-		this->duplex_timerfd = -1;
-	}
 	spa_bt_decode_buffer_clear(&port->buffer);
 	return 0;
 }
@@ -1610,6 +1682,8 @@ impl_init(const struct spa_handle_factory *factory,
 			this->is_input = spa_streq(str, "input");
 		if ((str = spa_dict_lookup(info, "api.bluez5.a2dp-duplex")) != NULL)
 			this->is_duplex = spa_atob(str);
+		if ((str = spa_dict_lookup(info, "api.bluez5.internal")) != NULL)
+			this->is_internal = spa_atob(str);
 	}
 
 	if (this->transport == NULL) {
@@ -1630,7 +1704,6 @@ impl_init(const struct spa_handle_factory *factory,
 		this->codec = this->codec->duplex_codec;
 		this->is_input = true;
 	}
-	this->use_duplex_source = this->is_duplex || (this->codec->duplex_codec != NULL);
 
 	if (this->codec->bap)
 		this->is_input = this->transport->bap_initiator;
@@ -1646,12 +1719,11 @@ impl_init(const struct spa_handle_factory *factory,
 	this->timerfd = spa_system_timerfd_create(this->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 
-	if (this->use_duplex_source) {
-		this->duplex_timerfd = spa_system_timerfd_create(this->data_system,
-				CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
-	} else {
-		this->duplex_timerfd = -1;
-	}
+	this->node_latency = 512;
+
+	set_latency(this, false);
+
+	this->fd = -1;
 
 	return 0;
 }

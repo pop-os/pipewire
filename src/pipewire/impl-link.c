@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <string.h>
@@ -71,6 +51,81 @@ struct impl {
 };
 
 /** \endcond */
+
+static struct pw_node_peer *pw_node_peer_ref(struct pw_impl_node *onode, struct pw_impl_node *inode)
+{
+	struct pw_node_peer *peer;
+
+	spa_list_for_each(peer, &onode->peer_list, link) {
+		if (peer->target.node == inode) {
+			pw_log_debug("exiting peer %p from %p to %p", peer, onode, inode);
+			peer->ref++;
+			return peer;
+		}
+	}
+	peer = calloc(1, sizeof(*peer));
+	if (peer == NULL)
+		return NULL;
+
+	peer->ref = 1;
+	peer->output = onode;
+	peer->active_count = 0;
+	peer->target.node = inode;
+	peer->target.activation = inode->rt.activation;
+	peer->target.system = inode->data_system;
+	peer->target.fd = inode->source.fd;
+
+	spa_list_append(&onode->peer_list, &peer->link);
+	pw_log_debug("new peer %p from %p to %p", peer, onode, inode);
+	pw_impl_node_emit_peer_added(onode, inode);
+
+	return peer;
+}
+
+static void pw_node_peer_unref(struct pw_node_peer *peer)
+{
+	if (--peer->ref > 0)
+		return;
+	spa_list_remove(&peer->link);
+	pw_log_debug("remove peer %p from %p to %p", peer, peer->output, peer->target.node);
+	pw_impl_node_emit_peer_removed(peer->output, peer->target.node);
+	free(peer);
+}
+
+static void pw_node_peer_activate(struct pw_node_peer *peer)
+{
+	struct pw_node_activation_state *state;
+
+	state = &peer->target.activation->state[0];
+
+	if (peer->active_count++ == 0) {
+		spa_list_append(&peer->output->rt.target_list, &peer->target.link);
+		if (!peer->target.active && peer->output->rt.driver_target.node != NULL) {
+			state->required++;
+			peer->target.active = true;
+		}
+	}
+	pw_log_trace("%p: node:%p state:%p pending:%d/%d", peer->output,
+			peer->target.node, state, state->pending, state->required);
+}
+
+static void pw_node_peer_deactivate(struct pw_node_peer *peer)
+{
+	struct pw_node_activation_state *state;
+	state = &peer->target.activation->state[0];
+	if (--peer->active_count == 0) {
+
+		spa_list_remove(&peer->target.link);
+
+		if (peer->target.active) {
+			state->required--;
+			peer->target.active = false;
+		}
+	}
+	pw_log_trace("%p: node:%p state:%p pending:%d/%d", peer->output,
+			peer->target.node, state, state->pending, state->required);
+}
+
 
 static void info_changed(struct pw_impl_link *link)
 {
@@ -586,28 +641,15 @@ do_activate_link(struct spa_loop *loop,
 		 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct pw_impl_link *this = user_data;
-	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 
 	pw_log_trace("%p: activate", this);
 
 	spa_list_append(&this->output->rt.mix_list, &this->rt.out_mix.rt_link);
 	spa_list_append(&this->input->rt.mix_list, &this->rt.in_mix.rt_link);
 
-	if (impl->inode != impl->onode) {
-		struct pw_node_activation_state *state;
+	if (this->peer)
+		pw_node_peer_activate(this->peer);
 
-		this->rt.target.activation = impl->inode->rt.activation;
-		spa_list_append(&impl->onode->rt.target_list, &this->rt.target.link);
-
-		state = &this->rt.target.activation->state[0];
-		if (!this->rt.target.active && impl->onode->rt.driver_target.node != NULL) {
-			state->required++;
-			this->rt.target.active = true;
-		}
-
-		pw_log_trace("%p: node:%p state:%p pending:%d/%d", this, impl->inode,
-				state, state->pending, state->required);
-	}
 	return 0;
 }
 
@@ -620,7 +662,7 @@ int pw_impl_link_activate(struct pw_impl_link *this)
 			pw_link_state_as_string(this->info.state));
 
 	if (impl->activated || !this->prepared ||
-		!impl->inode->active || !impl->onode->active)
+		!impl->inode->runnable || !impl->onode->runnable)
 		return 0;
 
 	if (!impl->io_set) {
@@ -779,9 +821,9 @@ int pw_impl_link_prepare(struct pw_impl_link *this)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 
-	pw_log_debug("%p: prepared:%d preparing:%d in_active:%d out_active:%d",
+	pw_log_debug("%p: prepared:%d preparing:%d in_active:%d out_active:%d passive:%u",
 			this, this->prepared, this->preparing,
-			impl->inode->active, impl->onode->active);
+			impl->inode->active, impl->onode->active, this->passive);
 
 	if (!impl->inode->active || !impl->onode->active)
 		return 0;
@@ -802,26 +844,14 @@ do_deactivate_link(struct spa_loop *loop,
 		   bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
         struct pw_impl_link *this = user_data;
-	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 
 	pw_log_trace("%p: disable %p and %p", this, &this->rt.in_mix, &this->rt.out_mix);
 
 	spa_list_remove(&this->rt.out_mix.rt_link);
 	spa_list_remove(&this->rt.in_mix.rt_link);
 
-	if (impl->inode != impl->onode) {
-		struct pw_node_activation_state *state;
-
-		spa_list_remove(&this->rt.target.link);
-		state = &this->rt.target.activation->state[0];
-		if (this->rt.target.active) {
-			state->required--;
-			this->rt.target.active = false;
-		}
-
-		pw_log_trace("%p: node:%p state:%p pending:%d/%d", this, impl->inode,
-				state, state->pending, state->required);
-	}
+	if (this->peer)
+		pw_node_peer_deactivate(this->peer);
 
 	return 0;
 }
@@ -1172,6 +1202,7 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	struct impl *impl;
 	struct pw_impl_link *this;
 	struct pw_impl_node *input_node, *output_node;
+	const char *str;
 	int res;
 
 	if (output == input)
@@ -1221,7 +1252,13 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	this->input = input;
 
 	/* passive means that this link does not make the nodes active */
-	this->passive = pw_properties_get_bool(properties, PW_KEY_LINK_PASSIVE, false);
+	str = pw_properties_get(properties, PW_KEY_LINK_PASSIVE);
+	this->passive = str ? spa_atob(str) :
+		(output->passive && input_node->can_suspend) ||
+		(input->passive && output_node->can_suspend) ||
+		(input->passive && output->passive);
+	if (this->passive && str == NULL)
+		 pw_properties_set(properties, PW_KEY_LINK_PASSIVE, "true");
 
 	spa_hook_list_init(&this->listener_list);
 
@@ -1265,17 +1302,13 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 		impl->inode = input_node;
 	}
 
-	this->rt.target.signal_func = impl->inode->rt.target.signal_func;
-	this->rt.target.data = impl->inode->rt.target.data;
-
 	pw_log_debug("%p: constructed out:%p:%d.%d -> in:%p:%d.%d", impl,
 		     output_node, output->port_id, this->rt.out_mix.port.port_id,
 		     input_node, input->port_id, this->rt.in_mix.port.port_id);
 
-	if (asprintf(&this->name, "%d.%d -> %d.%d",
+	this->name = spa_aprintf("%d.%d -> %d.%d",
 			output_node->info.id, output->port_id,
-			input_node->info.id, input->port_id) < 0)
-		this->name = NULL;
+			input_node->info.id, input->port_id);
 	pw_log_info("(%s) (%s) -> (%s)", this->name, output_node->name, input_node->name);
 
 	pw_impl_port_emit_link_added(output, this);
@@ -1286,7 +1319,8 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	pw_impl_port_recalc_latency(output);
 	pw_impl_port_recalc_latency(input);
 
-	pw_impl_node_emit_peer_added(impl->onode, impl->inode);
+	if (impl->onode != impl->inode)
+		this->peer = pw_node_peer_ref(impl->onode, impl->inode);
 
 	return this;
 
@@ -1421,7 +1455,8 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 	if (link->registered)
 		spa_list_remove(&link->link);
 
-	pw_impl_node_emit_peer_removed(impl->onode, impl->inode);
+	if (link->peer)
+		pw_node_peer_unref(link->peer);
 
 	try_unlink_controls(impl, link->output, link->input);
 

@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/utils/hook.h>
 #include <pipewire/pipewire.h>
@@ -71,13 +51,16 @@ static int module_rtp_recv_load(struct module *module)
 
 	fprintf(f, "{");
 	pw_properties_serialize_dict(f, &data->global_props->dict, 0);
-	fprintf(f, " stream.props = {");
+	fprintf(f, " stream.rules = ");
+	fprintf(f, "[ { matches = [ { rtp.session = \"~.*\" } ] "),
+	fprintf(f, "    actions = { create-stream = { ");
 	pw_properties_serialize_dict(f, &data->stream_props->dict, 0);
-	fprintf(f, " } }");
+	fprintf(f, "    } } } ] ");
+	fprintf(f, " }");
 	fclose(f);
 
 	data->mod = pw_context_load_module(module->impl->context,
-			"libpipewire-module-rtp-source",
+			"libpipewire-module-rtp-sap",
 			args, NULL);
 
 	free(args);
@@ -133,14 +116,13 @@ static int module_rtp_recv_prepare(struct module * const module)
 		res = -errno;
 		goto out;
 	}
-	if ((str = pw_properties_get(props, "sink")) != NULL)
-		pw_properties_set(stream_props, PW_KEY_TARGET_OBJECT, str);
-
 	if ((str = pw_properties_get(props, "sap_address")) != NULL)
 		pw_properties_set(global_props, "sap.ip", str);
 
+	if ((str = pw_properties_get(props, "sink")) != NULL)
+		pw_properties_set(stream_props, PW_KEY_TARGET_OBJECT, str);
 	if ((str = pw_properties_get(props, "latency_msec")) != NULL)
-		pw_properties_set(global_props, "sess.latency.msec", str);
+		pw_properties_set(stream_props, "sess.latency.msec", str);
 
 	d->module = module;
 	d->stream_props = stream_props;

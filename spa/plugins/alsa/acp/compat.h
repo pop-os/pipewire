@@ -348,6 +348,48 @@ static inline void pa_xstrfreev(char **a) {
     pa_xfreev((void**)a);
 }
 
+typedef struct {
+	size_t size;
+	char *ptr;
+	FILE *f;
+} pa_strbuf;
+
+static inline pa_strbuf *pa_strbuf_new(void)
+{
+	pa_strbuf *s = pa_xnew0(pa_strbuf,1);
+	s->f = open_memstream(&s->ptr, &s->size);
+	return s;
+}
+
+static PA_PRINTF_FUNC(2,3) inline size_t pa_strbuf_printf(pa_strbuf *sb, const char *format, ...)
+{
+	int ret;
+	va_list args;
+	va_start(args, format);
+	ret = vfprintf(sb->f, format, args);
+	va_end(args);
+	return ret > 0 ? ret : 0;
+}
+
+static inline void pa_strbuf_puts(pa_strbuf *sb, const char *t)
+{
+	fputs(t, sb->f);
+}
+
+static inline bool pa_strbuf_isempty(pa_strbuf *sb)
+{
+	fflush(sb->f);
+	return sb->size == 0;
+}
+
+static inline char *pa_strbuf_to_string_free(pa_strbuf *sb)
+{
+	char *ptr;
+	fclose(sb->f);
+	ptr = sb->ptr;
+	free(sb);
+	return ptr;
+}
 
 #define pa_cstrerror	strerror
 

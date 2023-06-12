@@ -1,26 +1,6 @@
-/* Spa
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -38,6 +18,7 @@
 #include <spa/node/node.h>
 #include <spa/node/io.h>
 #include <spa/debug/mem.h>
+#include <spa/debug/log.h>
 #include <spa/support/log-impl.h>
 
 SPA_LOG_IMPL(logger);
@@ -72,7 +53,7 @@ static int setup_context(struct context *ctx)
 	size_t size;
 	int res;
 	struct spa_support support[1];
-	struct spa_dict_item items[2];
+	struct spa_dict_item items[6];
 	const struct spa_handle_factory *factory;
 	void *iface;
 
@@ -89,10 +70,15 @@ static int setup_context(struct context *ctx)
 	spa_assert_se(ctx->convert_handle != NULL);
 
 	items[0] = SPA_DICT_ITEM_INIT("clock.quantum-limit", "8192");
+	items[1] = SPA_DICT_ITEM_INIT("channelmix.upmix", "true");
+	items[2] = SPA_DICT_ITEM_INIT("channelmix.upmix-method", "psd");
+	items[3] = SPA_DICT_ITEM_INIT("channelmix.lfe-cutoff", "150");
+	items[4] = SPA_DICT_ITEM_INIT("channelmix.fc-cutoff", "12000");
+	items[5] = SPA_DICT_ITEM_INIT("channelmix.rear-delay", "12.0");
 
 	res = spa_handle_factory_init(factory,
 			ctx->convert_handle,
-			&SPA_DICT_INIT(items, 1),
+			&SPA_DICT_INIT(items, 6),
 			support, 1);
 	spa_assert_se(res >= 0);
 
@@ -682,8 +668,10 @@ static int run_convert(struct context *ctx, struct data *in_data,
 			res = memcmp(b->datas[j].data, out_data->data[k], out_data->size);
 			if (res != 0) {
 				fprintf(stderr, "error port %d plane %d\n", i, j);
-				spa_debug_mem(0, b->datas[j].data, out_data->size);
-				spa_debug_mem(0, out_data->data[k], out_data->size);
+				spa_debug_log_mem(&logger.log, SPA_LOG_LEVEL_WARN,
+						0, b->datas[j].data, out_data->size);
+				spa_debug_log_mem(&logger.log, SPA_LOG_LEVEL_WARN,
+						2, out_data->data[k], out_data->size);
 			}
 			spa_assert_se(res == 0);
 

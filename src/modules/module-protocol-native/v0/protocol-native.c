@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2017 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2017 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdio.h>
 #include <errno.h>
@@ -420,7 +400,7 @@ struct spa_pod_prop_body0 {
 static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_impl_client *client,
 		struct spa_pod_builder *builder)
 {
-	int res;
+	int res = 0;
 
 	switch (type) {
 	case SPA_TYPE_Id:
@@ -465,17 +445,17 @@ static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_imp
 		if (b->value.type == SPA_TYPE_Id) {
 			uint32_t id;
 			if ((res = spa_pod_get_id(&b->value, &id)) < 0)
-				return res;
+				goto done;
+
 			spa_pod_builder_id(builder, pw_protocol_native0_type_from_v2(client, id));
 			SPA_POD_PROP_ALTERNATIVE_FOREACH0(b, size, alt)
 				if ((res = remap_from_v2(b->value.type, alt, b->value.size, client, builder)) < 0)
-					return res;
+					break;
 		} else {
 			spa_pod_builder_raw(builder, &b->value, size - sizeof(struct spa_pod));
 		}
-
+done:
 		spa_pod_builder_pop(builder, &f);
-
 		break;
 	}
 	case SPA_TYPE_Object:
@@ -513,7 +493,7 @@ static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_imp
 						SPA_POD_BODY(p),
 						p->size,
 						client, builder)) < 0)
-				return res;
+				break;
 		}
 		spa_pod_builder_pop(builder, &f);
 		break;
@@ -526,14 +506,14 @@ static int remap_from_v2(uint32_t type, void *body, uint32_t size, struct pw_imp
 		spa_pod_builder_push_struct(builder, &f);
 		SPA_POD_FOREACH(b, size, p)
 			if ((res = remap_from_v2(p->type, SPA_POD_BODY(p), p->size, client, builder)) < 0)
-				return res;
+				break;
 		spa_pod_builder_pop(builder, &f);
 		break;
 	}
 	default:
 		break;
 	}
-	return 0;
+	return res;
 }
 
 static int remap_to_v2(struct pw_impl_client *client, const struct spa_type_info *info,

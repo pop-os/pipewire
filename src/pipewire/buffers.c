@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/node/utils.h>
 #include <spa/pod/parser.h>
@@ -312,6 +292,9 @@ int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 		align = SPA_MAX(align, qalign);
 		types = qtypes;
 
+		if (SPA_FLAG_IS_SET(flags, PW_BUFFERS_FLAG_ASYNC))
+			max_buffers = SPA_MAX(2u, max_buffers);
+
 		pw_log_debug("%p: %d %d %d %d %d %d -> %d %zd %zd %d %zd %d", result,
 				qblocks, qminsize, qstride, qmax_buffers, qalign, qtypes,
 				blocks, minsize, stride, max_buffers, align, types);
@@ -320,6 +303,7 @@ int pw_buffers_negotiate(struct pw_context *context, uint32_t flags,
 		minsize = 8192;
 		max_buffers = 2;
 	}
+
 	if (SPA_FLAG_IS_SET(flags, PW_BUFFERS_FLAG_SHARED_MEM)) {
 		if (types != SPA_ID_INVALID)
 			SPA_FLAG_CLEAR(types, 1<<SPA_DATA_MemPtr);

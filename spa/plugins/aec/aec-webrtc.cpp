@@ -1,27 +1,7 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
- *           © 2021 Arun Raghavan <arun@asymptotic.io>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-FileCopyrightText: Copyright © 2021 Arun Raghavan <arun@asymptotic.io> */
+/* SPDX-License-Identifier: MIT */
 
 #include <memory>
 #include <utility>
@@ -30,6 +10,7 @@
 #include <spa/support/log.h>
 #include <spa/utils/string.h>
 #include <spa/utils/names.h>
+#include <spa/utils/json.h>
 #include <spa/support/plugin.h>
 
 #include <webrtc/modules/audio_processing/include/audio_processing.h>
@@ -42,7 +23,9 @@ struct impl_data {
 
 	struct spa_log *log;
 	std::unique_ptr<webrtc::AudioProcessing> apm;
-	spa_audio_info_raw info;
+	spa_audio_info_raw rec_info;
+	spa_audio_info_raw out_info;
+	spa_audio_info_raw play_info;
 	std::unique_ptr<float *[]> play_buffer, rec_buffer, out_buffer;
 };
 
@@ -58,9 +41,59 @@ static bool webrtc_get_spa_bool(const struct spa_dict *args, const char *key, bo
 	return default_value;
 }
 
-static int webrtc_init(void *object, const struct spa_dict *args, const struct spa_audio_info_raw *info)
+
+/* [ f0 f1 f2 ] */
+static int parse_point(struct spa_json *it, float (&f)[3])
+{
+	struct spa_json arr;
+	int i, res;
+
+	if (spa_json_enter_array(it, &arr) <= 0)
+		return -EINVAL;
+
+	for (i = 0; i < 3; i++) {
+		if ((res = spa_json_get_float(&arr, &f[i])) <= 0)
+			return -EINVAL;
+	}
+	return 0;
+}
+
+/* [ point1 point2 ... ] */
+static int parse_mic_geometry(struct impl_data *impl, const char *mic_geometry,
+		std::vector<webrtc::Point>& geometry)
+{
+	int res;
+	size_t i;
+	struct spa_json it[2];
+
+	spa_json_init(&it[0], mic_geometry, strlen(mic_geometry));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0) {
+		spa_log_error(impl->log, "Error: webrtc.mic-geometry expects an array");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < geometry.size(); i++) {
+		float f[3];
+
+		if ((res = parse_point(&it[1], f)) < 0) {
+			spa_log_error(impl->log, "Error: can't parse webrtc.mic-geometry points: %d", res);
+			return res;
+		}
+
+		spa_log_info(impl->log, "mic %zd position: (%g %g %g)", i, f[0], f[1], f[2]);
+		geometry[i].c[0] = f[0];
+		geometry[i].c[1] = f[1];
+		geometry[i].c[2] = f[2];
+	}
+	return 0;
+}
+
+static int webrtc_init2(void *object, const struct spa_dict *args,
+		struct spa_audio_info_raw *rec_info, struct spa_audio_info_raw *out_info,
+		struct spa_audio_info_raw *play_info)
 {
 	auto impl = static_cast<struct impl_data*>(object);
+	int res;
 
 	bool extended_filter = webrtc_get_spa_bool(args, "webrtc.extended_filter", true);
 	bool delay_agnostic = webrtc_get_spa_bool(args, "webrtc.delay_agnostic", true);
@@ -76,6 +109,8 @@ static int webrtc_init(void *object, const struct spa_dict *args, const struct s
 	bool experimental_agc = webrtc_get_spa_bool(args, "webrtc.experimental_agc", false);
 	bool experimental_ns = webrtc_get_spa_bool(args, "webrtc.experimental_ns", false);
 
+	bool beamforming = webrtc_get_spa_bool(args, "webrtc.beamforming", false);
+
 	// FIXME: Intelligibility enhancer is not currently supported
 	// This filter will modify playback buffer (when calling ProcessReverseStream), but now
 	// playback buffer modifications are discarded.
@@ -86,17 +121,55 @@ static int webrtc_init(void *object, const struct spa_dict *args, const struct s
 	config.Set<webrtc::ExperimentalAgc>(new webrtc::ExperimentalAgc(experimental_agc));
 	config.Set<webrtc::ExperimentalNs>(new webrtc::ExperimentalNs(experimental_ns));
 
+	if (beamforming) {
+		std::vector<webrtc::Point> geometry(rec_info->channels);
+		const char *mic_geometry, *target_direction;
+
+		/* The beamformer gives a single mono channel */
+		out_info->channels = 1;
+		out_info->position[0] = SPA_AUDIO_CHANNEL_MONO;
+
+		if ((mic_geometry = spa_dict_lookup(args, "webrtc.mic-geometry")) == NULL) {
+			spa_log_error(impl->log, "Error: webrtc.beamforming requires webrtc.mic-geometry");
+			return -EINVAL;
+		}
+
+		if ((res = parse_mic_geometry(impl, mic_geometry, geometry)) < 0)
+			return res;
+
+		if ((target_direction = spa_dict_lookup(args, "webrtc.target-direction")) != NULL) {
+			webrtc::SphericalPointf direction(0.0f, 0.0f, 0.0f);
+			struct spa_json it;
+			float f[3];
+
+			spa_json_init(&it, target_direction, strlen(target_direction));
+			if (parse_point(&it, f) < 0) {
+				spa_log_error(impl->log, "Error: can't parse target-direction %s",
+						target_direction);
+				return -EINVAL;
+			}
+
+			direction.s[0] = f[0];
+			direction.s[1] = f[1];
+			direction.s[2] = f[2];
+
+			config.Set<webrtc::Beamforming>(new webrtc::Beamforming(true, geometry, direction));
+		} else {
+			config.Set<webrtc::Beamforming>(new webrtc::Beamforming(true, geometry));
+		}
+	}
+
 	webrtc::ProcessingConfig pconfig = {{
-		webrtc::StreamConfig(info->rate, info->channels, false), /* input stream */
-		webrtc::StreamConfig(info->rate, info->channels, false), /* output stream */
-		webrtc::StreamConfig(info->rate, info->channels, false), /* reverse input stream */
-		webrtc::StreamConfig(info->rate, info->channels, false), /* reverse output stream */
+		webrtc::StreamConfig(rec_info->rate, rec_info->channels, false), /* input stream */
+		webrtc::StreamConfig(out_info->rate, out_info->channels, false), /* output stream */
+		webrtc::StreamConfig(play_info->rate, play_info->channels, false), /* reverse input stream */
+		webrtc::StreamConfig(play_info->rate, play_info->channels, false), /* reverse output stream */
 	}};
 
 	auto apm = std::unique_ptr<webrtc::AudioProcessing>(webrtc::AudioProcessing::Create(config));
-	if (apm->Initialize(pconfig) != webrtc::AudioProcessing::kNoError) {
-		spa_log_error(impl->log, "Error initialising webrtc audio processing module");
-		return -1;
+	if ((res = apm->Initialize(pconfig)) != webrtc::AudioProcessing::kNoError) {
+		spa_log_error(impl->log, "Error initialising webrtc audio processing module: %d", res);
+		return -EINVAL;
 	}
 
 	apm->high_pass_filter()->Enable(high_pass_filter);
@@ -114,48 +187,72 @@ static int webrtc_init(void *object, const struct spa_dict *args, const struct s
 	apm->gain_control()->set_mode(webrtc::GainControl::kAdaptiveDigital);
 	apm->gain_control()->Enable(gain_control);
 	impl->apm = std::move(apm);
-	impl->info = *info;
-	impl->play_buffer = std::make_unique<float *[]>(info->channels);
-	impl->rec_buffer = std::make_unique<float *[]>(info->channels);
-	impl->out_buffer = std::make_unique<float *[]>(info->channels);
+	impl->rec_info = *rec_info;
+	impl->out_info = *out_info;
+	impl->play_info = *play_info;
+	impl->play_buffer = std::make_unique<float *[]>(play_info->channels);
+	impl->rec_buffer = std::make_unique<float *[]>(rec_info->channels);
+	impl->out_buffer = std::make_unique<float *[]>(out_info->channels);
 	return 0;
+}
+
+static int webrtc_init(void *object, const struct spa_dict *args,
+		const struct spa_audio_info_raw *info)
+{
+	int res;
+	struct spa_audio_info_raw rec_info = *info;
+	struct spa_audio_info_raw out_info = *info;
+	struct spa_audio_info_raw play_info = *info;
+	res = webrtc_init2(object, args, &rec_info, &out_info, &play_info);
+	if (rec_info.channels != out_info.channels)
+		res = -EINVAL;
+	return res;
 }
 
 static int webrtc_run(void *object, const float *rec[], const float *play[], float *out[], uint32_t n_samples)
 {
 	auto impl = static_cast<struct impl_data*>(object);
-	webrtc::StreamConfig config =
-		webrtc::StreamConfig(impl->info.rate, impl->info.channels, false);
-	unsigned int num_blocks = n_samples * 1000 / impl->info.rate / 10;
+	int res;
 
-	if (n_samples * 1000 / impl->info.rate % 10 != 0) {
+	webrtc::StreamConfig play_config =
+		webrtc::StreamConfig(impl->play_info.rate, impl->play_info.channels, false);
+	webrtc::StreamConfig rec_config =
+		webrtc::StreamConfig(impl->rec_info.rate, impl->rec_info.channels, false);
+	webrtc::StreamConfig out_config =
+		webrtc::StreamConfig(impl->out_info.rate, impl->out_info.channels, false);
+	unsigned int num_blocks = n_samples * 1000 / impl->play_info.rate / 10;
+
+	if (n_samples * 1000 / impl->play_info.rate % 10 != 0) {
 		spa_log_error(impl->log, "Buffers must be multiples of 10ms in length (currently %u samples)", n_samples);
-		return -1;
+		return -EINVAL;
 	}
 
 	for (size_t i = 0; i < num_blocks; i ++) {
-		for (size_t j = 0; j < impl->info.channels; j++) {
-			impl->play_buffer[j] = const_cast<float *>(play[j]) + config.num_frames() * i;
-			impl->rec_buffer[j] = const_cast<float *>(rec[j]) + config.num_frames() * i;
-			impl->out_buffer[j] = out[j] + config.num_frames() * i;
-		}
+		for (size_t j = 0; j < impl->play_info.channels; j++)
+			impl->play_buffer[j] = const_cast<float *>(play[j]) + play_config.num_frames() * i;
+		for (size_t j = 0; j < impl->rec_info.channels; j++)
+			impl->rec_buffer[j] = const_cast<float *>(rec[j]) + rec_config.num_frames() * i;
+		for (size_t j = 0; j < impl->out_info.channels; j++)
+			impl->out_buffer[j] = out[j] + out_config.num_frames() * i;
+
 		/* FIXME: ProcessReverseStream may change the playback buffer, in which
 		* case we should use that, if we ever expose the intelligibility
 		* enhancer */
-		if (impl->apm->ProcessReverseStream(impl->play_buffer.get(), config, config, impl->play_buffer.get()) !=
+		if ((res = impl->apm->ProcessReverseStream(impl->play_buffer.get(),
+					play_config, play_config, impl->play_buffer.get())) !=
 				webrtc::AudioProcessing::kNoError) {
-			spa_log_error(impl->log, "Processing reverse stream failed");
+			spa_log_error(impl->log, "Processing reverse stream failed: %d", res);
 		}
 
 		// Extra delay introduced by multiple frames
 		impl->apm->set_stream_delay_ms((num_blocks - 1) * 10);
 
-		if (impl->apm->ProcessStream(impl->rec_buffer.get(), config, config, impl->out_buffer.get()) !=
+		if ((res = impl->apm->ProcessStream(impl->rec_buffer.get(),
+					rec_config, out_config, impl->out_buffer.get())) !=
 				webrtc::AudioProcessing::kNoError) {
-			spa_log_error(impl->log, "Processing stream failed");
+			spa_log_error(impl->log, "Processing stream failed: %d", res);
 		}
 	}
-
 	return 0;
 }
 
@@ -164,6 +261,7 @@ static const struct spa_audio_aec_methods impl_aec = {
 	.add_listener = NULL,
 	.init = webrtc_init,
 	.run = webrtc_run,
+	.init2 = webrtc_init2,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)

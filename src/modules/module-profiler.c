@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -93,6 +73,8 @@ static const struct spa_dict_item module_props[] = {
 struct impl {
 	struct pw_context *context;
 	struct pw_properties *properties;
+
+	struct pw_loop *data_loop;
 
 	struct spa_hook context_listener;
 	struct spa_hook module_listener;
@@ -304,7 +286,7 @@ static int do_stop(struct spa_loop *loop,
 static void stop_listener(struct impl *impl)
 {
 	if (impl->listening) {
-		pw_loop_invoke(impl->context->data_loop,
+		pw_loop_invoke(impl->data_loop,
                        do_stop, SPA_ID_INVALID, NULL, 0, true, impl);
 		impl->listening = false;
 	}
@@ -358,7 +340,7 @@ global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
 
 	if (++impl->busy == 1) {
 		pw_log_info("%p: starting profiler", impl);
-		pw_loop_invoke(impl->context->data_loop,
+		pw_loop_invoke(impl->data_loop,
                        do_start, SPA_ID_INVALID, NULL, 0, false, impl);
 		impl->listening = true;
 	}
@@ -431,6 +413,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->context = context;
 	impl->properties = props;
+	impl->data_loop = pw_context_get_data_loop(impl->context)->loop;
 
 	spa_ringbuffer_init(&impl->buffer);
 

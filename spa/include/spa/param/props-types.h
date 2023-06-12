@@ -1,26 +1,6 @@
-/* Simple Plugin API
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Simple Plugin API */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef SPA_PARAM_PROPS_TYPES_H
 #define SPA_PARAM_PROPS_TYPES_H
@@ -78,6 +58,11 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_softMute, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "softMute", NULL },
 	{ SPA_PROP_softVolumes, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "softVolumes", spa_type_prop_float_array },
 	{ SPA_PROP_iec958Codecs, SPA_TYPE_Array, SPA_TYPE_INFO_PROPS_BASE "iec958Codecs", spa_type_prop_iec958_codec },
+	{ SPA_PROP_volumeRampSamples, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "volumeRampSamples", NULL },
+	{ SPA_PROP_volumeRampStepSamples, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "volumeRampStepSamples", NULL },
+	{ SPA_PROP_volumeRampTime, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "volumeRampTime", NULL },
+	{ SPA_PROP_volumeRampStepTime, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "volumeRampStepTime", NULL },
+	{ SPA_PROP_volumeRampScale, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "volumeRampScale", NULL },
 
 	{ SPA_PROP_brightness, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "brightness", NULL },
 	{ SPA_PROP_contrast, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "contrast", NULL },

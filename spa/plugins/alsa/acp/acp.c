@@ -1,26 +1,6 @@
-/* ALSA Card Profile
- *
- * Copyright © 2020 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* ALSA Card Profile */
+/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "acp.h"
 #include "alsa-mixer.h"
@@ -315,7 +295,7 @@ static int add_pro_profile(pa_card *impl, uint32_t index)
 
 	ss.format = PA_SAMPLE_S32LE;
 	ss.rate = impl->rate;
-	ss.channels = 64;
+	ss.channels = impl->pro_channels;
 
 	ap = pa_xnew0(pa_alsa_profile, 1);
 	ap->profile_set = ps;
@@ -1564,6 +1544,7 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	impl->auto_port = true;
 	impl->ignore_dB = false;
 	impl->rate = DEFAULT_RATE;
+	impl->pro_channels = 64;
 
 	if (props) {
 		if ((s = acp_dict_lookup(props, "api.alsa.use-ucm")) != NULL)
@@ -1582,6 +1563,8 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 			impl->auto_port = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.acp.probe-rate")) != NULL)
 			impl->rate = atoi(s);
+		if ((s = acp_dict_lookup(props, "api.acp.pro-channels")) != NULL)
+			impl->pro_channels = atoi(s);
 	}
 
 	impl->ucm.default_sample_spec.format = PA_SAMPLE_S16NE;
@@ -1606,7 +1589,7 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 
 	res = impl->use_ucm ? pa_alsa_ucm_query_profiles(&impl->ucm, card->index) : -1;
 	if (res == -PA_ALSA_ERR_UCM_LINKED) {
-		res = -ENOENT;
+		res = -EEXIST;
 		goto error;
 	}
 	if (res == 0) {

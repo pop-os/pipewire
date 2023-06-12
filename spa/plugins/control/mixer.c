@@ -1,26 +1,6 @@
-/* Spa
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <string.h>
@@ -43,7 +23,7 @@
 #define NAME "control-mixer"
 
 #define MAX_BUFFERS     64
-#define MAX_PORTS       128
+#define MAX_PORTS       512
 
 struct buffer {
 	uint32_t id;
@@ -89,6 +69,9 @@ struct impl {
 	uint32_t last_port;
 	struct port *in_ports[MAX_PORTS];
 	struct port out_ports[1];
+
+	struct spa_pod_control *mix_ctrl[MAX_PORTS];
+	struct spa_pod_sequence *mix_seq[MAX_PORTS];
 
 	int n_formats;
 
@@ -644,9 +627,9 @@ static int impl_node_process(void *object)
                 return -EPIPE;
         }
 
-	ctrl = alloca(MAX_PORTS * sizeof(struct spa_pod_control *));
-	seq = alloca(MAX_PORTS * sizeof(struct spa_pod_sequence *));
-        n_seq = 0;
+	ctrl = this->mix_ctrl;
+	seq = this->mix_seq;
+	n_seq = 0;
 
 	/* collect all sequence pod on input ports */
 	for (i = 0; i < this->last_port; i++) {

@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdlib.h>
@@ -61,6 +41,8 @@ struct impl {
 
 	unsigned int cache_params:1;
 	unsigned int pending_play:1;
+
+	uint64_t prev_signal_time;
 };
 
 #define pw_node_resource(r,m,v,...)	pw_resource_call(r,struct pw_node_events,m,v,__VA_ARGS__)
@@ -85,6 +67,19 @@ struct resource_data {
 
 /** \endcond */
 
+/* Called from the node data loop when a node needs to be scheduled by
+ * the given driver. 3 things needs to happen:
+ *
+ * - the node is added to the driver target list and the required state
+ *   is incremented. This makes sure the node is woken up when the driver
+ *   starts a new cycle.
+ * - the node needs to trigger the driver when it completes. This means
+ *   the driver is added to the target list.
+ * - the node targets (including the driver we added above) have their
+ *   required state incremented.
+ *
+ * This code is called from the data-loop to ensure synchronization
+ */
 static void add_node(struct pw_impl_node *this, struct pw_impl_node *driver)
 {
 	struct pw_node_activation_state *dstate, *nstate;
@@ -96,12 +91,7 @@ static void add_node(struct pw_impl_node *this, struct pw_impl_node *driver)
 	pw_log_trace("%p: add to driver %p %p %p", this, driver,
 			driver->rt.activation, this->rt.activation);
 
-	/* signal the driver */
-	this->rt.driver_target.activation = driver->rt.activation;
-	this->rt.driver_target.node = driver;
-	this->rt.driver_target.data = driver;
-	spa_list_append(&this->rt.target_list, &this->rt.driver_target.link);
-
+	/* let the driver trigger us as part of the processing cycle */
 	spa_list_append(&driver->rt.target_list, &this->rt.target.link);
 	nstate = &this->rt.activation->state[0];
 	if (!this->rt.target.active) {
@@ -109,6 +99,15 @@ static void add_node(struct pw_impl_node *this, struct pw_impl_node *driver)
 		this->rt.target.active = true;
 	}
 
+	/* trigger the driver when we complete */
+	this->rt.driver_target.activation = driver->rt.activation;
+	this->rt.driver_target.node = driver;
+	this->rt.driver_target.system = driver->data_system;
+	this->rt.driver_target.fd = driver->source.fd;
+	spa_list_append(&this->rt.target_list, &this->rt.driver_target.link);
+
+	/* now increment the required states of all this node targets, including
+	 * the driver we added above */
 	spa_list_for_each(t, &this->rt.target_list, link) {
 		dstate = &t->activation->state[0];
 		if (!t->active) {
@@ -121,6 +120,7 @@ static void add_node(struct pw_impl_node *this, struct pw_impl_node *driver)
 	}
 }
 
+/* called from the data loop and undoes the changes done in add_node.  */
 static void remove_node(struct pw_impl_node *this)
 {
 	struct pw_node_activation_state *dstate, *nstate;
@@ -130,7 +130,7 @@ static void remove_node(struct pw_impl_node *this)
 		return;
 
 	pw_log_trace("%p: remove from driver %p %p %p",
-			this, this->rt.driver_target.data,
+			this, this->rt.driver_target.node,
 			this->rt.driver_target.activation, this->rt.activation);
 
 	spa_list_remove(&this->rt.target.link);
@@ -157,37 +157,41 @@ static void remove_node(struct pw_impl_node *this)
 }
 
 static int
-do_node_add(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+do_node_add(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
 {
 	struct pw_impl_node *this = user_data;
 	struct pw_impl_node *driver = this->driver_node;
 
-	this->added = true;
-	if (this->source.loop == NULL) {
-		struct spa_system *data_system = this->context->data_system;
+	if (!this->added) {
 		uint64_t dummy;
 		int res;
 
 		/* clear the eventfd in case it was written to while the node was stopped */
-		res = spa_system_eventfd_read(data_system, this->source.fd, &dummy);
+		res = spa_system_eventfd_read(this->data_system, this->source.fd, &dummy);
 		if (SPA_UNLIKELY(res != -EAGAIN && res != 0))
 			pw_log_warn("%p: read failed %m", this);
 
-		spa_loop_add_source(loop, &this->source);
+		this->added = true;
+		/* remote nodes have their source added in client-node instead */
+		if (!this->remote)
+			spa_loop_add_source(loop, &this->source);
 		add_node(this, driver);
 	}
 	return 0;
 }
 
 static int
-do_node_remove(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+do_node_remove(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
 {
 	struct pw_impl_node *this = user_data;
-	if (this->source.loop != NULL) {
-		spa_loop_remove_source(loop, &this->source);
+	if (this->added) {
+		if (!this->remote)
+			spa_loop_remove_source(loop, &this->source);
 		remove_node(this);
+		this->added = false;
 	}
-	this->added = false;
 	return 0;
 }
 
@@ -481,6 +485,8 @@ static int suspend_node(struct pw_impl_node *this)
 static void
 clear_info(struct pw_impl_node *this)
 {
+	free(this->group);
+	free(this->link_group);
 	free(this->name);
 	free((char*)this->info.error);
 }
@@ -590,8 +596,12 @@ static int node_send_command(void *object, const struct spa_command *command)
 {
 	struct resource_data *data = object;
 	struct pw_impl_node *node = data->node;
+	uint32_t id = SPA_NODE_COMMAND_ID(command);
 
-	switch (SPA_NODE_COMMAND_ID(command)) {
+	pw_log_debug("%p: got command %d (%s)", node, id,
+		    spa_debug_type_find_name(spa_type_node_command_id, id));
+
+	switch (id) {
 	case SPA_NODE_COMMAND_Suspend:
 		suspend_node(node);
 		break;
@@ -706,8 +716,9 @@ static void update_io(struct pw_impl_node *node)
 		pw_log_debug("%p: set position %p", node, &node->rt.activation->position);
 		node->rt.position = &node->rt.activation->position;
 
-		node->current_rate = node->rt.position->clock.rate;
-		node->current_quantum = node->rt.position->clock.duration;
+		node->target_rate = node->rt.position->clock.target_rate;
+		node->target_quantum = node->rt.position->clock.target_duration;
+		node->target_pending = false;
 	} else if (node->driver) {
 		pw_log_warn("%p: can't set position on driver", node);
 	}
@@ -822,10 +833,10 @@ do_move_nodes(struct spa_loop *loop,
 	pw_log_trace("%p: set position %p", node, &driver->rt.activation->position);
 	node->rt.position = &driver->rt.activation->position;
 
-	node->current_rate = node->rt.position->clock.rate;
-	node->current_quantum = node->rt.position->clock.duration;
+	node->target_rate = node->rt.position->clock.target_rate;
+	node->target_quantum = node->rt.position->clock.target_duration;
 
-	if (node->source.loop != NULL) {
+	if (node->added) {
 		remove_node(node);
 		add_node(node, driver);
 	}
@@ -858,16 +869,6 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 
 	remove_segment_owner(old, node->info.id);
 
-	if (old != node && old->driving && driver->info.state < PW_NODE_STATE_RUNNING) {
-		driver->current_rate = old->current_rate;
-		driver->current_quantum = old->current_quantum;
-		driver->current_pending = true;
-		pw_log_info("move quantum:%"PRIu64" rate:%d (%s-%d -> %s-%d)",
-				driver->current_quantum,
-				driver->current_rate.denom,
-				old->name, old->info.id,
-				driver->name, driver->info.id);
-	}
 	was_driving = node->driving;
 	node->driving = node->driver && driver == node;
 
@@ -910,7 +911,7 @@ static void check_properties(struct pw_impl_node *node)
 	const char *str, *recalc_reason = NULL;
 	struct spa_fraction frac;
 	uint32_t value;
-	bool driver;
+	bool driver, trigger;
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
 		node->priority_driver = pw_properties_parse_int(str);
@@ -939,24 +940,54 @@ static void check_properties(struct pw_impl_node *node)
 			else
 				spa_list_remove(&node->driver_link);
 		}
+		if (driver && node->driver_node == node)
+			node->driving = true;
 		recalc_reason = "driver changed";
 	}
 
 	/* not scheduled automatically so we add an additional required trigger */
-	if (pw_properties_get_bool(node->properties, PW_KEY_NODE_TRIGGER, false))
-		node->rt.activation->state[0].required++;
+	trigger = pw_properties_get_bool(node->properties, PW_KEY_NODE_TRIGGER, false);
+	if (trigger != node->trigger) {
+		node->trigger = trigger;
+		if (trigger)
+			node->rt.activation->state[0].required++;
+		else
+			node->rt.activation->state[0].required--;
+	}
 
 	/* group defines what nodes are scheduled together */
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP)) == NULL)
-		str = "";
-
+	str = pw_properties_get(node->properties, PW_KEY_NODE_GROUP);
 	if (!spa_streq(str, node->group)) {
 		pw_log_info("%p: group '%s'->'%s'", node, node->group, str);
-		snprintf(node->group, sizeof(node->group), "%s", str);
+		free(node->group);
+		node->group = str ? strdup(str) : NULL;
 		node->freewheel = spa_streq(node->group, "pipewire.freewheel");
 		recalc_reason = "group changed";
 	}
 
+	/* link group defines what nodes are logically linked together */
+	str = pw_properties_get(node->properties, PW_KEY_NODE_LINK_GROUP);
+	if (!spa_streq(str, node->link_group)) {
+		pw_log_info("%p: link group '%s'->'%s'", node, node->link_group, str);
+		free(node->link_group);
+		node->link_group = str ? strdup(str) : NULL;
+		recalc_reason = "link group changed";
+	}
+
+	if ((str = pw_properties_get(node->properties, PW_KEY_MEDIA_CLASS)) != NULL &&
+	    (strstr(str, "/Sink") != NULL || strstr(str, "/Source") != NULL)) {
+		node->can_suspend = true;
+	} else {
+		node->can_suspend = false;
+	}
+	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_PASSIVE)) == NULL)
+		str = "false";
+	if (spa_streq(str, "out"))
+		node->out_passive = true;
+	else if (spa_streq(str, "in"))
+		node->in_passive = true;
+	else
+		node->in_passive = node->out_passive = spa_atob(str);
 
 	node->want_driver = pw_properties_get_bool(node->properties, PW_KEY_NODE_WANT_DRIVER, false);
 	node->always_process = pw_properties_get_bool(node->properties, PW_KEY_NODE_ALWAYS_PROCESS, false);
@@ -1011,11 +1042,16 @@ static void check_properties(struct pw_impl_node *node)
 	node->lock_rate = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_RATE, false);
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_FORCE_RATE))) {
-		if (spa_atou32(str, &value, 0) &&
-		    node->force_rate != value) {
-			node->force_rate = value;
-			node->stamp = ++context->stamp;
-			recalc_reason = "force rate changed";
+		if (spa_atou32(str, &value, 0)) {
+			if (value == 0)
+				value = node->rate.denom;
+			if (node->force_rate != value) {
+				pw_log_info("(%s-%u) force-rate:%u -> %u", node->name,
+							node->info.id, node->force_rate, value);
+				node->force_rate = value;
+				node->stamp = ++context->stamp;
+				recalc_reason = "force rate changed";
+			}
 		}
 	}
 
@@ -1072,20 +1108,26 @@ static void dump_states(struct pw_impl_node *driver)
 	}
 }
 
-static inline int resume_node(struct pw_impl_node *this, int status)
+static inline uint64_t get_time_ns(struct spa_system *system)
+{
+	struct timespec ts;
+	spa_system_clock_gettime(system, CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+static inline void node_trigger(struct pw_impl_node *this)
+{
+	pw_log_trace_fp("node %p %s", this, this->name);
+	if (SPA_UNLIKELY(spa_system_eventfd_write(this->data_system, this->source.fd, 1) < 0))
+		pw_log_warn("node %p: write failed %m", this);
+}
+
+/* called from data-loop when all the targets of a node need to be triggered */
+static inline int trigger_targets(struct pw_impl_node *this, int status, uint64_t nsec)
 {
 	struct pw_node_target *t;
-	struct timespec ts;
-	struct pw_node_activation *activation = this->rt.activation;
-	struct spa_system *data_system = this->context->data_system;
-	uint64_t nsec;
 
-	spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
-	nsec = SPA_TIMESPEC_TO_NSEC(&ts);
-	activation->status = PW_NODE_ACTIVATION_FINISHED;
-	activation->finish_time = nsec;
-
-	pw_log_trace_fp("%p: trigger peers %"PRIu64, this, nsec);
+	pw_log_trace_fp("%p: %s trigger targets %"PRIu64, this, this->name, nsec);
 
 	spa_list_for_each(t, &this->rt.target_list, link) {
 		struct pw_node_activation *a = t->activation;
@@ -1097,88 +1139,88 @@ static inline int resume_node(struct pw_impl_node *this, int status)
 		if (pw_node_activation_state_dec(state, 1)) {
 			a->status = PW_NODE_ACTIVATION_TRIGGERED;
 			a->signal_time = nsec;
-			t->signal_func(t->data);
+			if (SPA_UNLIKELY(spa_system_eventfd_write(t->system, t->fd, 1) < 0))
+				pw_log_warn("node %p: write failed %m", this);
 		}
 	}
 	return 0;
 }
 
-static inline void calculate_stats(struct pw_impl_node *this,  struct pw_node_activation *a)
-{
-	if (SPA_LIKELY(a->signal_time > a->prev_signal_time)) {
-		uint64_t process_time = a->finish_time - a->signal_time;
-		uint64_t period_time = a->signal_time - a->prev_signal_time;
-		float load = (float) process_time / (float) period_time;
-		a->cpu_load[0] = (a->cpu_load[0] + load) / 2.0f;
-		a->cpu_load[1] = (a->cpu_load[1] * 7.0f + load) / 8.0f;
-		a->cpu_load[2] = (a->cpu_load[2] * 31.0f + load) / 32.0f;
-	}
-}
-
+/* The main processing entry point of a node. This is called from the data-loop and usually
+ * as a result of signaling the eventfd of the node.
+ *
+ * This code runs on the client and the server, depending on where the node is.
+ */
 static inline int process_node(void *data)
 {
 	struct pw_impl_node *this = data;
-	struct timespec ts;
-        struct pw_impl_port *p;
+	struct pw_impl_port *p;
 	struct pw_node_activation *a = this->rt.activation;
-	struct spa_system *data_system = this->context->data_system;
+	struct spa_system *data_system = this->data_system;
 	int status;
+	uint64_t nsec;
 
-	spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
+	nsec = get_time_ns(data_system);
+	pw_log_trace_fp("%p: %s process remote:%u exported:%u %"PRIu64,
+			this, this->name, this->remote, this->exported, nsec);
 	a->status = PW_NODE_ACTIVATION_AWAKE;
-	a->awake_time = SPA_TIMESPEC_TO_NSEC(&ts);
-
-	pw_log_trace_fp("%p: process %"PRIu64, this, a->awake_time);
+	a->awake_time = nsec;
 
 	/* when transport sync is not supported, just clear the flag */
-	if (!this->transport_sync)
+	if (SPA_UNLIKELY(!this->transport_sync))
 		a->pending_sync = false;
 
-	if (this->added) {
+	if (SPA_LIKELY(this->added)) {
+		/* process input mixers */
 		spa_list_for_each(p, &this->rt.input_mix, rt.node_link)
-			spa_node_process(p->mix);
+			spa_node_process_fast(p->mix);
 
-		status = spa_node_process(this->node);
+		/* process the actual node */
+		status = spa_node_process_fast(this->node);
 
+		/* process output tee */
 		if (status & SPA_STATUS_HAVE_DATA) {
 			spa_list_for_each(p, &this->rt.output_mix, rt.node_link)
-				spa_node_process(p->mix);
+				spa_node_process_fast(p->mix);
 		}
 	} else {
 		/* This can happen when we deactivated the node but some links are
 		 * still not shut down. We simply don't schedule the node and make
-		 * sure we trigger the peers in resume_node below. */
+		 * sure we trigger the peers in trigger_targets below. */
 		pw_log_debug("%p: scheduling non-active node %s", this, this->name);
 		status = SPA_STATUS_HAVE_DATA;
 	}
 	a->state[0].status = status;
 
-	if (SPA_UNLIKELY(this == this->driver_node && !this->exported)) {
-		spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
-		a->status = PW_NODE_ACTIVATION_FINISHED;
-		a->signal_time = a->finish_time;
-		a->finish_time = SPA_TIMESPEC_TO_NSEC(&ts);
+	nsec = get_time_ns(data_system);
 
-		/* calculate CPU time */
-		calculate_stats(this, a);
+	pw_log_trace_fp("%p: finished %"PRIu64, this, nsec);
+	a->status = PW_NODE_ACTIVATION_FINISHED;
+	a->finish_time = nsec;
 
-		pw_log_trace_fp("%p: graph completed wait:%"PRIu64" run:%"PRIu64
-				" busy:%"PRIu64" period:%"PRIu64" cpu:%f:%f:%f", this,
-				a->awake_time - a->signal_time,
-				a->finish_time - a->awake_time,
-				a->finish_time - a->signal_time,
-				a->signal_time - a->prev_signal_time,
-				a->cpu_load[0], a->cpu_load[1], a->cpu_load[2]);
+	/* we don't need to trigger targets when the node was driving the
+	 * graph because that means we finished the graph. Also don't schedule
+	 * peers when the node returns OK, because that means the resume will
+	 * happen asynchronously later (unimplemented though). */
+	if (SPA_LIKELY(!this->driving && status != SPA_STATUS_OK))
+		trigger_targets(this, status, nsec);
 
-		pw_context_driver_emit_complete(this->context, this);
-
-	} else if (status == SPA_STATUS_OK) {
-		pw_log_trace_fp("%p: async continue", this);
-	} else {
-		resume_node(this, status);
-	}
-	if (status & SPA_STATUS_DRAINED) {
+	if (SPA_UNLIKELY(status & SPA_STATUS_DRAINED))
 		pw_context_driver_emit_drained(this->context, this);
+
+	return status;
+}
+
+int pw_impl_node_trigger(struct pw_impl_node *node)
+{
+	struct pw_node_activation *a = node->rt.activation;
+	struct pw_node_activation_state *state = &a->state[0];
+
+	if (pw_node_activation_state_dec(state, 1)) {
+		uint64_t nsec = get_time_ns(node->data_system);
+		a->status = PW_NODE_ACTIVATION_TRIGGERED;
+		a->signal_time = nsec;
+		node_trigger(node);
 	}
 	return 0;
 }
@@ -1186,24 +1228,23 @@ static inline int process_node(void *data)
 static void node_on_fd_events(struct spa_source *source)
 {
 	struct pw_impl_node *this = source->data;
-	struct spa_system *data_system = this->context->data_system;
 
 	if (SPA_UNLIKELY(source->rmask & (SPA_IO_ERR | SPA_IO_HUP))) {
 		pw_log_warn("%p: got socket error %08x", this, source->rmask);
 		return;
 	}
-
 	if (SPA_LIKELY(source->rmask & SPA_IO_IN)) {
 		uint64_t cmd;
 
-		if (SPA_UNLIKELY(spa_system_eventfd_read(data_system, this->source.fd, &cmd) < 0))
+		if (SPA_UNLIKELY(spa_system_eventfd_read(this->data_system, this->source.fd, &cmd) < 0))
 			pw_log_warn("%p: read failed %m", this);
 		else if (SPA_UNLIKELY(cmd > 1))
 			pw_log_info("(%s-%u) client missed %"PRIu64" wakeups",
 				this->name, this->info.id, cmd - 1);
 
-		pw_log_trace_fp("%p: got process", this);
-		this->rt.target.signal_func(this->rt.target.data);
+		pw_log_trace_fp("%p: remote:%u exported:%u %s got process", this, this->remote,
+				this->exported, this->name);
+		process_node(this);
 	}
 }
 
@@ -1220,11 +1261,11 @@ static void reset_position(struct pw_impl_node *this, struct spa_io_position *po
 	uint32_t quantum = s->clock_force_quantum == 0 ? s->clock_quantum : s->clock_force_quantum;
 	uint32_t rate = s->clock_force_rate == 0 ? s->clock_rate : s->clock_force_rate;
 
-	this->current_rate = SPA_FRACTION(1, rate);
-	this->current_quantum = quantum;
+	this->target_rate = SPA_FRACTION(1, rate);
+	this->target_quantum = quantum;
 
-	pos->clock.rate = this->current_rate;
-	pos->clock.duration = this->current_quantum;
+	pos->clock.rate = pos->clock.target_rate = this->target_rate;
+	pos->clock.duration = pos->clock.target_duration = this->target_quantum;
 	pos->video.flags = SPA_IO_VIDEO_SIZE_VALID;
 	pos->video.size = s->video_size;
 	pos->video.stride = pos->video.size.width * 16;
@@ -1244,7 +1285,6 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	struct impl *impl;
 	struct pw_impl_node *this;
 	size_t size;
-	struct spa_system *data_system = context->data_system;
 	int res;
 
 	impl = calloc(1, sizeof(struct impl) + user_data_size);
@@ -1260,6 +1300,9 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	this->context = context;
 	this->name = strdup("node");
 
+	this->data_loop = pw_context_get_data_loop(context)->loop;
+	this->data_system = this->data_loop->system;
+
 	if (user_data_size > 0)
                 this->user_data = SPA_PTROFF(impl, sizeof(struct impl), void);
 
@@ -1272,7 +1315,9 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 
 	this->properties = properties;
 
-	if ((res = spa_system_eventfd_create(data_system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
+	/* the eventfd used to signal the node */
+	if ((res = spa_system_eventfd_create(this->data_system,
+					SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
 		goto error_clean;
 
 	pw_log_debug("%p: new fd:%d", this, res);
@@ -1298,9 +1343,8 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	impl->work = pw_context_get_work_queue(this->context);
 	impl->pending_id = SPA_ID_INVALID;
 
-	this->data_loop = context->data_loop;
-
 	spa_list_init(&this->follower_list);
+	spa_list_init(&this->peer_list);
 
 	spa_hook_list_init(&this->listener_list);
 
@@ -1320,9 +1364,8 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 	this->rt.activation = this->activation->map->ptr;
 	this->rt.target.activation = this->rt.activation;
 	this->rt.target.node = this;
-	this->rt.target.signal_func = process_node;
-	this->rt.target.data = this;
-	this->rt.driver_target.signal_func = process_node;
+	this->rt.target.system = this->data_system;
+	this->rt.target.fd = this->source.fd;
 
 	reset_position(this, &this->rt.activation->position);
 	this->rt.activation->sync_timeout = DEFAULT_SYNC_TIMEOUT;
@@ -1335,7 +1378,7 @@ struct pw_impl_node *pw_context_create_node(struct pw_context *context,
 
 	this->driver_node = this;
 	spa_list_append(&this->follower_list, &this->follower_link);
-	this->driving = true;
+	this->driving = this->driver;
 
 	return this;
 
@@ -1343,7 +1386,7 @@ error_clean:
 	if (this->activation)
 		pw_memblock_unref(this->activation);
 	if (this->source.fd != -1)
-		spa_system_close(this->context->data_system, this->source.fd);
+		spa_system_close(this->data_system, this->source.fd);
 	free(impl);
 error_exit:
 	pw_properties_free(properties);
@@ -1526,10 +1569,12 @@ static void node_event(void *data, const struct spa_event *event)
 {
 	struct pw_impl_node *node = data;
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
+	uint32_t id = SPA_NODE_EVENT_ID(event);
 
-	pw_log_trace("%p: event %d", node, SPA_EVENT_TYPE(event));
+	pw_log_debug("%p: event %d (%s)", node, id,
+		    spa_debug_type_find_name(spa_type_node_event_id, id));
 
-	switch (SPA_NODE_EVENT_ID(event)) {
+	switch (id) {
 	case SPA_NODE_EVENT_Error:
 		impl->last_error = -EFAULT;
 		node_update_state(node, PW_NODE_STATE_ERROR,
@@ -1557,11 +1602,25 @@ static const struct spa_node_events node_events = {
 	.event = node_event,
 };
 
+static inline void calculate_stats(struct pw_impl_node *this,  struct pw_node_activation *a)
+{
+	uint64_t signal_time = a->signal_time;
+	uint64_t prev_signal_time = a->prev_signal_time;
+	if (SPA_LIKELY(signal_time > prev_signal_time)) {
+		uint64_t process_time = a->finish_time - a->signal_time;
+		uint64_t period_time = signal_time - prev_signal_time;
+		float load = (float) process_time / (float) period_time;
+		a->cpu_load[0] = (a->cpu_load[0] + load) / 2.0f;
+		a->cpu_load[1] = (a->cpu_load[1] * 7.0f + load) / 8.0f;
+		a->cpu_load[2] = (a->cpu_load[2] * 31.0f + load) / 32.0f;
+	}
+}
+
 #define SYNC_CHECK	0
 #define SYNC_START	1
 #define SYNC_STOP	2
 
-static int check_updates(struct pw_impl_node *node, uint32_t *reposition_owner)
+static inline int check_updates(struct pw_impl_node *node, uint32_t *reposition_owner)
 {
 	int res = SYNC_CHECK;
 	struct pw_node_activation *a = node->rt.activation;
@@ -1626,11 +1685,11 @@ static void do_reposition(struct pw_impl_node *driver, struct pw_impl_node *node
 	}
 }
 
-static void update_position(struct pw_impl_node *node, int all_ready)
+static inline void update_position(struct pw_impl_node *node, int all_ready)
 {
 	struct pw_node_activation *a = node->rt.activation;
 
-	if (a->position.state == SPA_IO_POSITION_STATE_STARTING) {
+	if (SPA_UNLIKELY(a->position.state == SPA_IO_POSITION_STATE_STARTING)) {
 		if (!all_ready && --a->sync_left == 0) {
 			pw_log_warn("(%s-%u) sync timeout, going to RUNNING",
 					node->name, node->info.id);
@@ -1641,21 +1700,28 @@ static void update_position(struct pw_impl_node *node, int all_ready)
 		if (all_ready)
 			a->position.state = SPA_IO_POSITION_STATE_RUNNING;
 	}
-	if (a->position.state != SPA_IO_POSITION_STATE_RUNNING)
+	if (SPA_LIKELY(a->position.state != SPA_IO_POSITION_STATE_RUNNING))
 		a->position.offset += a->position.clock.duration;
 }
 
+/* Called from the data-loop and it is the starting point for driver nodes.
+ * Most of the logic here is to check for reposition updates and transport changes.
+ */
 static int node_ready(void *data, int status)
 {
 	struct pw_impl_node *node = data, *reposition_node = NULL;
+	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	struct pw_impl_node *driver = node->driver_node;
+	struct pw_node_activation *a = node->rt.activation;
+	struct spa_system *data_system = node->data_system;
 	struct pw_node_target *t;
 	struct pw_impl_port *p;
+	uint64_t nsec;
 
 	pw_log_trace_fp("%p: ready driver:%d exported:%d %p status:%d added:%d", node,
 			node->driver, node->exported, driver, status, node->added);
 
-	if (!node->added) {
+	if (SPA_UNLIKELY(!node->added)) {
 		/* This can happen when we are stopping a node and removed it from the
 		 * graph but we still have not completed the Pause/Suspend command on
 		 * the node. In that case, the node might still emit ready events,
@@ -1664,8 +1730,9 @@ static int node_ready(void *data, int status)
 		return -EIO;
 	}
 
-	if (SPA_UNLIKELY(node == driver)) {
-		struct pw_node_activation *a = node->rt.activation;
+	nsec = get_time_ns(data_system);
+
+	if (SPA_LIKELY(node == driver)) {
 		struct pw_node_activation_state *state = &a->state[0];
 		int sync_type, all_ready, update_sync, target_sync;
 		uint32_t owner[2], reposition_owner;
@@ -1680,13 +1747,41 @@ static int node_ready(void *data, int status)
 						state->pending, state->required);
 				dump_states(node);
 			}
-			node->rt.target.signal_func(node->rt.target.data);
+			node_trigger(node);
+		} else {
+			uint64_t signal_time = a->signal_time;
+			/* old nodes set the TRIGGERED status on node_ready, patch this
+			 * up here to avoid errors in pw-top */
+			a->status = PW_NODE_ACTIVATION_FINISHED;
+			a->signal_time = a->prev_signal_time;
+			a->prev_signal_time = impl->prev_signal_time;
+
+			/* calculate CPU time */
+			calculate_stats(node, a);
+
+			pw_log_trace_fp("%p: graph completed wait:%"PRIu64" run:%"PRIu64
+					" busy:%"PRIu64" period:%"PRIu64" cpu:%f:%f:%f", node,
+					a->awake_time - a->signal_time,
+					a->finish_time - a->awake_time,
+					a->finish_time - a->signal_time,
+					a->signal_time - a->prev_signal_time,
+					a->cpu_load[0], a->cpu_load[1], a->cpu_load[2]);
+
+			pw_context_driver_emit_complete(node->context, node);
+
+			a->prev_signal_time = a->signal_time;
+			a->signal_time = signal_time;
 		}
 
-		if (node->current_pending) {
-			node->rt.position->clock.duration = node->current_quantum;
-			node->rt.position->clock.rate = node->current_rate;
-			node->current_pending = false;
+		/* This update is done too late, the driver should do this
+		 * before calling the ready callback so that it can use the new target
+		 * duration and rate to schedule the next update. We do this here to
+		 * help drivers that don't support this yet */
+		if (SPA_UNLIKELY(node->rt.position->clock.duration != node->rt.position->clock.target_duration ||
+		    node->rt.position->clock.rate.denom != node->rt.position->clock.target_rate.denom)) {
+			pw_log_warn("driver %s did not update duration/rate", node->name);
+			node->rt.position->clock.duration = node->rt.position->clock.target_duration;
+			node->rt.position->clock.rate = node->rt.position->clock.target_rate;
 		}
 
 		sync_type = check_updates(node, &reposition_owner);
@@ -1726,7 +1821,15 @@ again:
 				all_ready &= ta->pending_sync == false;
 			}
 		}
+
+		a->status = PW_NODE_ACTIVATION_TRIGGERED;
+		/* remote nodes set the signal_time before writing the ready
+		 * eventfd */
+		if (!node->remote)
+			a->signal_time = nsec;
+		impl->prev_signal_time = a->prev_signal_time;
 		a->prev_signal_time = a->signal_time;
+
 		a->sync_timeout = SPA_MIN(min_timeout, DEFAULT_SYNC_TIMEOUT);
 
 		if (SPA_UNLIKELY(reposition_node)) {
@@ -1741,24 +1844,25 @@ again:
 
 		pw_context_driver_emit_start(node->context, node);
 	}
+	/* this should not happen, driver nodes that are not currently driving
+	 * should not emit the ready callback */
 	if (SPA_UNLIKELY(node->driver && !node->driving))
 		return 0;
 
-	if (!node->driver) {
-		struct timespec ts;
-		struct pw_node_activation *a = node->rt.activation;
-		struct spa_system *data_system = node->context->data_system;
-
-		spa_system_clock_gettime(data_system, CLOCK_MONOTONIC, &ts);
-		a->status = PW_NODE_ACTIVATION_AWAKE;
-		a->signal_time = a->awake_time = SPA_TIMESPEC_TO_NSEC(&ts);
+	if (SPA_UNLIKELY(!node->driver)) {
+		/* legacy, nodes should directly resume the graph by calling
+		 * the peer eventfd directly, node_ready is only for drivers */
+		a->status = PW_NODE_ACTIVATION_FINISHED;
+		a->finish_time = nsec;
 	}
-
-	if (status & SPA_STATUS_HAVE_DATA) {
+	if (!node->remote && (status & SPA_STATUS_HAVE_DATA)) {
+		/* remote nodes have done the output mix already before
+		 * they wrote the ready eventfd */
 		spa_list_for_each(p, &node->rt.output_mix, rt.node_link)
-			spa_node_process(p->mix);
+			spa_node_process_fast(p->mix);
 	}
-	return resume_node(node, status);
+	/* now signal all the nodes we drive */
+	return trigger_targets(node, status, nsec);
 }
 
 static int node_reuse_buffer(void *data, uint32_t port_id, uint32_t buffer_id)
@@ -1943,7 +2047,7 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 
 	clear_info(node);
 
-	spa_system_close(context->data_system, node->source.fd);
+	spa_system_close(node->data_system, node->source.fd);
 	free(impl);
 }
 

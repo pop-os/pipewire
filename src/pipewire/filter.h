@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PIPEWIRE_FILTER_H
 #define PIPEWIRE_FILTER_H
@@ -238,6 +218,16 @@ int pw_filter_set_active(struct pw_filter *filter, bool active);
 /** Flush a filter. When \a drain is true, the drained callback will
  * be called when all data is played or recorded */
 int pw_filter_flush(struct pw_filter *filter, bool drain);
+
+/** Check if the filter is driving. The filter needs to have the
+ * PW_FILTER_FLAG_DRIVER set. When the filter is driving,
+ * pw_filter_trigger_process() needs to be called when data is
+ * available (output) or needed (input). Since 0.3.66 */
+bool pw_filter_is_driving(struct pw_filter *filter);
+
+/** Trigger a push/pull on the filter. One iteration of the graph will
+ * be scheduled and process() will be called. Since 0.3.66 */
+int pw_filter_trigger_process(struct pw_filter *filter);
 
 /**
  * \}

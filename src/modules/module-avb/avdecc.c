@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -260,6 +240,7 @@ error_no_source:
 struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 {
 	struct server *server;
+	const char *str;
 	int res = 0;
 
 	server = calloc(1, sizeof(*server));
@@ -268,7 +249,8 @@ struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 
 	server->impl = impl;
 	spa_list_append(&impl->servers, &server->link);
-	server->ifname = strdup(spa_dict_lookup(props, "ifname"));
+	str = spa_dict_lookup(props, "ifname");
+	server->ifname = str ? strdup(str) : NULL;
 	spa_hook_list_init(&server->listener_list);
 	spa_list_init(&server->descriptors);
 	spa_list_init(&server->streams);
@@ -329,7 +311,7 @@ void avdecc_server_free(struct server *server)
 	if (server->source)
 		pw_loop_destroy_source(impl->loop, server->source);
 	if (server->timer)
-		pw_loop_destroy_source(impl->loop, server->source);
+		pw_loop_destroy_source(impl->loop, server->timer);
 	spa_hook_list_clean(&server->listener_list);
 	free(server);
 }

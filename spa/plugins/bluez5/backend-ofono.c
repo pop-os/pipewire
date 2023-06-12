@@ -1,26 +1,6 @@
-/* Spa oFono backend
- *
- * Copyright © 2020 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa oFono backend */
+/* SPDX-FileCopyrightText: Copyright © 2020 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <unistd.h>
@@ -251,7 +231,9 @@ static int ofono_audio_acquire(void *data, bool optional)
 		ts.tv_nsec = 1;
 		spa_loop_utils_update_timer(backend->loop_utils, backend->timer,
 				&ts, NULL, false);
-		return -EIO;
+
+		ret = -EIO;
+		goto finish;
 	}
 
 	td->broken = false;
@@ -263,6 +245,11 @@ static int ofono_audio_acquire(void *data, bool optional)
 	ret = 0;
 
 finish:
+	if (ret < 0)
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ERROR);
+	else
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
+
 	return ret;
 }
 
@@ -273,6 +260,8 @@ static int ofono_audio_release(void *data)
 
 	spa_log_debug(backend->log, "transport %p: Release %s",
 			transport, transport->path);
+
+	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
 
 	if (transport->sco_io) {
 		spa_bt_sco_io_destroy(transport->sco_io);

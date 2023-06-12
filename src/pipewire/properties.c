@@ -1,29 +1,11 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdio.h>
 #include <stdarg.h>
+
+#include <spa/utils/ansi.h>
 #include <spa/utils/json.h>
 #include <spa/utils/string.h>
 
@@ -660,12 +642,30 @@ const char *pw_properties_iterate(const struct pw_properties *properties, void *
 	return pw_array_get_unchecked(&impl->items, index, struct spa_dict_item)->key;
 }
 
-static int encode_string(FILE *f, const char *val)
+#define NORMAL(c)	((c)->colors ? SPA_ANSI_RESET : "")
+#define LITERAL(c)	((c)->colors ? SPA_ANSI_BRIGHT_MAGENTA : "")
+#define NUMBER(c)	((c)->colors ? SPA_ANSI_BRIGHT_CYAN : "")
+#define STRING(c)	((c)->colors ? SPA_ANSI_BRIGHT_GREEN : "")
+#define KEY(c)		((c)->colors ? SPA_ANSI_BRIGHT_BLUE : "")
+#define CONTAINER(c)	((c)->colors ? SPA_ANSI_BRIGHT_YELLOW : "")
+
+struct dump_config {
+	FILE *file;
+	int indent;
+	const char *sep;
+	bool colors;
+	bool recurse;
+};
+
+static int encode_string(struct dump_config *c, const char *before,
+		const char *val, int size, const char *after)
 {
-	int len = 0;
-	len += fprintf(f, "\"");
-	while (*val) {
-		switch (*val) {
+	FILE *f = c->file;
+	int i, len = 0;
+	len += fprintf(f, "%s\"", before);
+	for (i = 0; i < size; i++) {
+		char v = val[i];
+		switch (v) {
 		case '\n':
 			len += fprintf(f, "\\n");
 			break;
@@ -681,21 +681,74 @@ static int encode_string(FILE *f, const char *val)
 		case '\f':
 			len += fprintf(f, "\\f");
 			break;
-		case '\\':
-		case '"':
-			len += fprintf(f, "\\%c", *val);
-		break;
+		case '\\': case '"':
+			len += fprintf(f, "\\%c", v);
+			break;
 		default:
-			if (*val > 0 && *val < 0x20)
-				len += fprintf(f, "\\u%04x", *val);
+			if (v > 0 && v < 0x20)
+				len += fprintf(f, "\\u%04x", v);
 			else
-				len += fprintf(f, "%c", *val);
+				len += fprintf(f, "%c", v);
 			break;
 		}
-		val++;
 	}
-	len += fprintf(f, "\"");
+	len += fprintf(f, "\"%s", after);
 	return len-1;
+}
+
+static int dump(struct dump_config *c, int indent, struct spa_json *it, const char *value, int len)
+{
+	FILE *file = c->file;
+	struct spa_json sub;
+	int count = 0;
+	char key[1024];
+
+	if (value == NULL || len == 0) {
+		fprintf(file, "%snull%s", LITERAL(c), NORMAL(c));
+	} else if (spa_json_is_container(value, len) && !c->recurse) {
+		len = spa_json_container_len(it, value, len);
+		fprintf(file, "%s%.*s%s", CONTAINER(c), len, value, NORMAL(c));
+	} else if (spa_json_is_array(value, len)) {
+		fprintf(file, "[");
+		spa_json_enter(it, &sub);
+		indent += c->indent;
+		while ((len = spa_json_next(&sub, &value)) > 0) {
+			fprintf(file, "%s%s%*s", count++ > 0 ? "," : "",
+					c->sep, indent, "");
+			dump(c, indent, &sub, value, len);
+		}
+		indent -= c->indent;
+		fprintf(file, "%s%*s]", count > 0 ? c->sep : "",
+				count > 0 ? indent : 0, "");
+	} else if (spa_json_is_object(value, len)) {
+		fprintf(file, "{");
+		spa_json_enter(it, &sub);
+		indent += c->indent;
+		while (spa_json_get_string(&sub, key, sizeof(key)) > 0) {
+			fprintf(file, "%s%s%*s",
+					count++ > 0 ? "," : "",
+					c->sep, indent, "");
+			encode_string(c, KEY(c), key, strlen(key), NORMAL(c));
+			fprintf(file, ": ");
+			if ((len = spa_json_next(&sub, &value)) <= 0)
+				break;
+			dump(c, indent, &sub, value, len);
+		}
+		indent -= c->indent;
+		fprintf(file, "%s%*s}", count > 0 ? c->sep : "",
+				count > 0 ? indent : 0, "");
+	} else if (spa_json_is_null(value, len) ||
+	    spa_json_is_bool(value, len)) {
+		fprintf(file, "%s%.*s%s", LITERAL(c), len, value, NORMAL(c));
+	} else if (spa_json_is_int(value, len) ||
+	    spa_json_is_float(value, len)) {
+		fprintf(file, "%s%.*s%s", NUMBER(c), len, value, NORMAL(c));
+	} else if (spa_json_is_string(value, len)) {
+		fprintf(file, "%s%.*s%s", STRING(c), len, value, NORMAL(c));
+	} else {
+		encode_string(c, STRING(c), value, len, NORMAL(c));
+	}
+	return 0;
 }
 
 SPA_EXPORT
@@ -703,31 +756,45 @@ int pw_properties_serialize_dict(FILE *f, const struct spa_dict *dict, uint32_t 
 {
 	const struct spa_dict_item *it;
 	int count = 0;
-	char key[1024];
+	struct dump_config cfg = {
+		.file = f,
+		.indent = flags & PW_PROPERTIES_FLAG_NL ? 2 : 0,
+		.sep = flags & PW_PROPERTIES_FLAG_NL ? "\n" : " ",
+		.colors = SPA_FLAG_IS_SET(flags, PW_PROPERTIES_FLAG_COLORS),
+		.recurse = SPA_FLAG_IS_SET(flags, PW_PROPERTIES_FLAG_RECURSE),
+	}, *c = &cfg;
+	const char *enc = flags & PW_PROPERTIES_FLAG_ARRAY ? "[]" : "{}";
+
+	if (SPA_FLAG_IS_SET(flags, PW_PROPERTIES_FLAG_ENCLOSE))
+		fprintf(f, "%c", enc[0]);
 
 	spa_dict_for_each(it, dict) {
-		size_t len = it->value ? strlen(it->value) : 0;
+		char key[1024];
+		int len;
+		const char *value;
+		struct spa_json sub;
 
-		if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
-			continue;
+		fprintf(f, "%s%s%*s", count == 0 ? "" : ",", c->sep, c->indent, "");
 
-		fprintf(f, "%s%s %s: ",
-				count == 0 ? "" : ",",
-				flags & PW_PROPERTIES_FLAG_NL ? "\n" : "",
-				key);
-
-		if (it->value == NULL) {
-			fprintf(f, "null");
-		} else if (spa_json_is_null(it->value, len) ||
-		    spa_json_is_float(it->value, len) ||
-		    spa_json_is_bool(it->value, len) ||
-		    spa_json_is_container(it->value, len) ||
-		    spa_json_is_string(it->value, len)) {
-			fprintf(f, "%s", it->value);
-		} else {
-			encode_string(f, it->value);
+		if (!(flags & PW_PROPERTIES_FLAG_ARRAY)) {
+			if (spa_json_encode_string(key, sizeof(key)-1, it->key) >= (int)sizeof(key)-1)
+				continue;
+			fprintf(f, "%s%s%s: ", KEY(c), key, NORMAL(c));
 		}
+		value = it->value;
+
+		len = value ? strlen(value) : 0;
+		spa_json_init(&sub, value, len);
+		if ((len = spa_json_next(&sub, &value)) < 0)
+			break;
+
+		if (!spa_json_is_container(value, len))
+			len = value ? strlen(value) : 0;
+
+		dump(c, c->indent, &sub, value, len);
 		count++;
 	}
+	if (SPA_FLAG_IS_SET(flags, PW_PROPERTIES_FLAG_ENCLOSE))
+		fprintf(f, "%s%c", c->sep, enc[1]);
 	return count;
 }

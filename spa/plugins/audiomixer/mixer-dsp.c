@@ -1,26 +1,6 @@
-/* Spa
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <string.h>
@@ -46,7 +26,7 @@
 static struct spa_log_topic *log_topic = &SPA_LOG_TOPIC(0, "spa.mixer-dsp");
 
 #define MAX_BUFFERS	64
-#define MAX_PORTS	128
+#define MAX_PORTS	512
 #define MAX_ALIGN	MIX_OPS_MAX_ALIGN
 
 #define PORT_DEFAULT_VOLUME	1.0
@@ -119,6 +99,9 @@ struct impl {
 	uint32_t last_port;
 	struct port *in_ports[MAX_PORTS];
 	struct port out_ports[1];
+
+	struct buffer *mix_buffers[MAX_PORTS];
+	const void *mix_datas[MAX_PORTS];
 
 	int n_formats;
 	struct spa_audio_info format;
@@ -693,8 +676,8 @@ static int impl_node_process(void *object)
 		outio->buffer_id = SPA_ID_INVALID;
 	}
 
-	buffers = alloca(MAX_PORTS * sizeof(struct buffer *));
-	datas = alloca(MAX_PORTS * sizeof(void *));
+	buffers = this->mix_buffers;
+	datas = this->mix_datas;
 	n_buffers = 0;
 
 	maxsize = UINT32_MAX;
@@ -726,9 +709,9 @@ static int impl_node_process(void *object)
 		size = SPA_MIN(bd->maxsize - offs, bd->chunk->size);
 		maxsize = SPA_MIN(maxsize, size);
 
-		spa_log_trace_fp(this->log, "%p: mix input %d %p->%p %d %d %d:%d", this,
+		spa_log_trace_fp(this->log, "%p: mix input %d %p->%p %d %d %d:%d/%d", this,
 				i, inio, outio, inio->status, inio->buffer_id,
-				offs, size);
+				offs, size, (int)sizeof(float));
 
 		if (!SPA_FLAG_IS_SET(bd->chunk->flags, SPA_CHUNK_FLAG_EMPTY)) {
 			datas[n_buffers] = SPA_PTROFF(bd->data, offs, void);

@@ -1,26 +1,6 @@
-/* PCM - PipeWire plugin
- *
- * Copyright © 2017 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PCM - PipeWire plugin */
+/* SPDX-FileCopyrightText: Copyright © 2017 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #define __USE_GNU
 
@@ -84,6 +64,7 @@ typedef struct {
 	unsigned int xrun_detected:1;
 	unsigned int hw_params_changed:1;
 	unsigned int active:1;
+	unsigned int negotiated:1;
 
 	snd_pcm_uframes_t hw_ptr;
 	snd_pcm_uframes_t boundary;
@@ -405,6 +386,20 @@ static void on_stream_param_changed(void *data, uint32_t id, const struct spa_po
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(pw->stride));
 
 	pw_stream_update_params(pw->stream, params, n_params);
+
+	pw->negotiated = true;
+	pw_thread_loop_signal(pw->main_loop, false);
+}
+
+static void on_stream_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error)
+{
+	snd_pcm_pipewire_t *pw = data;
+
+	if (state == PW_STREAM_STATE_ERROR) {
+		pw_log_warn("%s", error);
+		pw->error = -EIO;
+		update_active(&pw->io);
+	}
 }
 
 static void on_stream_drained(void *data)
@@ -483,6 +478,7 @@ done:
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.param_changed = on_stream_param_changed,
+	.state_changed = on_stream_state_changed,
 	.process = on_stream_process,
 	.drained = on_stream_drained,
 };
@@ -566,6 +562,7 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 
 	pw->error = 0;
 
+	pw->negotiated = false;
 	pw_stream_connect(pw->stream,
 				io->stream == SND_PCM_STREAM_PLAYBACK ?
 				PW_DIRECTION_OUTPUT :
@@ -583,13 +580,18 @@ done:
 	pw->drained = false;
 	pw->draining = false;
 
+	while (!pw->negotiated && pw->error >= 0)
+		pw_thread_loop_wait(pw->main_loop);
+	if (pw->error < 0)
+		goto error;
+
 	pw_thread_loop_unlock(pw->main_loop);
 
 	return 0;
 
 error:
 	pw_thread_loop_unlock(pw->main_loop);
-	return -ENOMEM;
+	return pw->error < 0 ? pw->error : -ENOMEM;
 }
 
 static int snd_pcm_pipewire_start(snd_pcm_ioplug_t *io)
@@ -1141,7 +1143,15 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp,
 		pw_properties_setf(pw->props, PW_KEY_APP_NAME, "PipeWire ALSA [%s]",
 				pw_get_prgname());
 	if (pw_properties_get(pw->props, PW_KEY_NODE_NAME) == NULL)
-		pw_properties_setf(pw->props, PW_KEY_NODE_NAME, "ALSA %s",
+		pw_properties_setf(pw->props, PW_KEY_NODE_NAME, "alsa_%s.%s",
+			       stream == SND_PCM_STREAM_PLAYBACK ? "playback" : "capture",
+			       pw_get_prgname());
+	if (pw_properties_get(pw->props, PW_KEY_NODE_DESCRIPTION) == NULL)
+		pw_properties_setf(pw->props, PW_KEY_NODE_DESCRIPTION, "ALSA %s [%s]",
+			       stream == SND_PCM_STREAM_PLAYBACK ? "Playback" : "Capture",
+			       pw_get_prgname());
+	if (pw_properties_get(pw->props, PW_KEY_MEDIA_NAME) == NULL)
+		pw_properties_setf(pw->props, PW_KEY_MEDIA_NAME, "ALSA %s",
 			       stream == SND_PCM_STREAM_PLAYBACK ? "Playback" : "Capture");
 	if (pw_properties_get(pw->props, PW_KEY_MEDIA_TYPE) == NULL)
 		pw_properties_set(pw->props, PW_KEY_MEDIA_TYPE, "Audio");

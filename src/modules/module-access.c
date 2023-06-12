@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -29,6 +9,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "config.h"
 
@@ -131,10 +112,10 @@
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
-#define MODULE_USAGE	"[ access.force=flatpak ] "		\
-			"[ access.allowed=<cmd-line> ] "	\
-			"[ access.rejected=<cmd-line> ] "	\
-			"[ access.restricted=<cmd-line> ] "	\
+#define MODULE_USAGE	"( access.force=flatpak ) "		\
+			"( access.allowed= [ <cmd-line>,.. ] ) "	\
+			"( access.rejected= [ <cmd-line>,.. ] ) "	\
+			"( access.restricted= [ <cmd-line>,.. ] ) "	\
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -151,41 +132,57 @@ struct impl {
 	struct spa_hook module_listener;
 };
 
-static int check_cmdline(struct pw_impl_client *client, int pid, const char *str)
+static int get_exe_name(int pid, char *buf, size_t buf_size)
 {
-	char path[2048], key[1024];
-	ssize_t len;
-	int fd, res;
+	char path[256];
+	struct stat s1, s2;
+	int res;
+
+	/*
+	 * Find executable name, checking it is an existing file
+	 * (in the current namespace).
+	 */
+
+#if defined(__linux__)
+	spa_scnprintf(path, sizeof(path), "/proc/%u/exe", pid);
+#elif defined(__FreeBSD__) || defined(__MidnightBSD__)
+	spa_scnprintf(path, sizeof(path), "/proc/%u/file", pid);
+#else
+	return -ENOTSUP;
+#endif
+
+	res = readlink(path, buf, buf_size);
+	if (res < 0)
+		return -errno;
+	if ((size_t)res >= buf_size)
+		return -E2BIG;
+	buf[res] = '\0';
+
+	/* Check the file exists (= not deleted, and is in current namespace) */
+	if (stat(path, &s1) != 0 || stat(buf, &s2) != 0)
+		return -errno;
+	if (s1.st_dev != s2.st_dev || s1.st_ino != s2.st_ino)
+		return -ENXIO;
+
+	return 0;
+}
+
+static int check_exe(struct pw_impl_client *client, const char *path, const char *str)
+{
+	char key[1024];
+	int res;
 	struct spa_json it[2];
-
-	sprintf(path, "/proc/%u/cmdline", pid);
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		res = -errno;
-		goto exit;
-	}
-	if ((len = read(fd, path, sizeof(path)-1)) < 0) {
-		res = -errno;
-		goto exit_close;
-	}
-	path[len] = '\0';
 
 	spa_json_init(&it[0], str, strlen(str));
 	if ((res = spa_json_enter_array(&it[0], &it[1])) <= 0)
-		goto exit_close;
+		return res;
 
 	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
-		if (spa_streq(path, key)) {
-			res = 1;
-			goto exit_close;
-		}
+		if (spa_streq(path, key))
+			return 1;
 	}
-	res = 0;
-exit_close:
-	close(fd);
-exit:
-	return res;
+
+	return 0;
 }
 
 static void
@@ -194,6 +191,7 @@ context_check_access(void *data, struct pw_impl_client *client)
 	struct impl *impl = data;
 	struct pw_permission permissions[1];
 	struct spa_dict_item items[2];
+	char exe_path[PATH_MAX];
 	const struct pw_properties *props;
 	const char *str, *access;
 	char *flatpak_app_id = NULL;
@@ -215,10 +213,17 @@ context_check_access(void *data, struct pw_impl_client *client)
 		goto granted;
 	} else {
 		pw_log_info("client %p has trusted pid %d", client, pid);
+		if ((res = get_exe_name(pid, exe_path, sizeof(exe_path))) >= 0) {
+			pw_log_info("client %p has trusted exe path '%s'", client, exe_path);
+		} else {
+			pw_log_info("client %p has no trusted exe path: %s",
+					client, spa_strerror(res));
+			exe_path[0] = '\0';
+		}
 	}
 
 	if (impl->properties && (str = pw_properties_get(impl->properties, "access.allowed")) != NULL) {
-		res = check_cmdline(client, pid, str);
+		res = check_exe(client, exe_path, str);
 		if (res < 0) {
 			pw_log_warn("%p: client %p allowed check failed: %s",
 				impl, client, spa_strerror(res));
@@ -229,7 +234,7 @@ context_check_access(void *data, struct pw_impl_client *client)
 	}
 
 	if (impl->properties && (str = pw_properties_get(impl->properties, "access.rejected")) != NULL) {
-		res = check_cmdline(client, pid, str);
+		res = check_exe(client, exe_path, str);
 		if (res < 0) {
 			pw_log_warn("%p: client %p rejected check failed: %s",
 				impl, client, spa_strerror(res));
@@ -241,7 +246,7 @@ context_check_access(void *data, struct pw_impl_client *client)
 	}
 
 	if (impl->properties && (str = pw_properties_get(impl->properties, "access.restricted")) != NULL) {
-		res = check_cmdline(client, pid, str);
+		res = check_exe(client, exe_path, str);
 		if (res < 0) {
 			pw_log_warn("%p: client %p restricted check failed: %s",
 				impl, client, spa_strerror(res));

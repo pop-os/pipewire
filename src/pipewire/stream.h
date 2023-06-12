@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PIPEWIRE_STREAM_H
 #define PIPEWIRE_STREAM_H
@@ -142,7 +122,7 @@ extern "C" {
  * metadata of the buffer.
  *
  * The buffer is owned by the stream and stays alive until the
- * remove_buffer event is emitted or the stream is destroyed.
+ * remove_buffer callback has returned or the stream is destroyed.
  *
  * When the buffer has been processed, call \ref pw_stream_queue_buffer()
  * to let PipeWire reuse the buffer.
@@ -467,18 +447,21 @@ int pw_stream_set_error(struct pw_stream *stream,	/**< a \ref pw_stream */
 			const char *error,		/**< an error message */
 			...) SPA_PRINTF_FUNC(3, 4);
 
-/** Complete the negotiation process with result code \a res
- *
- * This function should be called after notification of the format.
-
- * When \a res indicates success, \a params contain the parameters for the
- * allocation state.  */
+/** Update the param exposed on the stream. */
 int
 pw_stream_update_params(struct pw_stream *stream,	/**< a \ref pw_stream */
 			const struct spa_pod **params,	/**< an array of params. The params should
 							  *  ideally contain parameters for doing
 							  *  buffer allocation. */
 			uint32_t n_params		/**< number of elements in \a params */);
+
+/**
+ * Set a parameter on the stream. This is like pw_stream_set_control() but with
+ * a complete spa_pod param. It can also be called from the param_changed event handler
+ * to intercept and modify the param for the adapter. Since 0.3.70 */
+int pw_stream_set_param(struct pw_stream *stream,	/**< a \ref pw_stream */
+			uint32_t id,			/**< the id of the param */
+			const struct spa_pod *param	/**< the params to set */);
 
 /** Get control values */
 const struct pw_stream_control *pw_stream_get_control(struct pw_stream *stream, uint32_t id);

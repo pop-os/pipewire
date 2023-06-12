@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -111,6 +91,32 @@
  * ]
  *\endcode
  *
+ * ## Example configuration of a virtual source
+ *
+ * This Virtual source routes the front-left channel of a multi-channel input to a mono channel.
+ * This is useful for splitting up multi-channel inputs from USB audio interfaces that are not yet fully supported by alsa.
+ *
+ *\code{.unparsed}
+ * context.modules = [
+ * {   name = libpipewire-module-loopback
+ *     args = {
+ *       node.description = "Scarlett Focusrite Line 1"
+ *       capture.props = {
+ *           audio.position = [ FL ]
+ *           stream.dont-remix = true
+ *           node.target = "alsa_input.usb-Focusrite_Scarlett_Solo_USB_Y7ZD17C24495BC-00.analog-stereo"
+ *           node.passive = true
+ *       }
+ *       playback.props = {
+ *           node.name = "SF_mono_in_1"
+ *           media.class = "Audio/Source"
+ *           audio.position = [ MONO ]
+ *       }
+ *     }
+ * }
+ * ]
+ *\endcode
+ *
  * ## See also
  *
  * `pw-loopback` : a tool that loads the loopback module with given parameters.
@@ -124,15 +130,15 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "Create loopback streams" },
-	{ PW_KEY_MODULE_USAGE, " [ remote.name=<remote> ] "
-				"[ node.latency=<latency as fraction> ] "
-				"[ node.description=<description of the nodes> ] "
-				"[ audio.rate=<sample rate> ] "
-				"[ audio.channels=<number of channels> ] "
-				"[ audio.position=<channel map> ] "
-				"[ target.delay.sec=<delay as seconds in float> ] "
-				"[ capture.props=<properties> ] "
-				"[ playback.props=<properties> ] " },
+	{ PW_KEY_MODULE_USAGE, " ( remote.name=<remote> ) "
+				"( node.latency=<latency as fraction> ) "
+				"( node.description=<description of the nodes> ) "
+				"( audio.rate=<sample rate> ) "
+				"( audio.channels=<number of channels> ) "
+				"( audio.position=<channel map> ) "
+				"( target.delay.sec=<delay as seconds in float> ) "
+				"( capture.props=<properties> ) "
+				"( playback.props=<properties> ) " },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 

@@ -1,30 +1,9 @@
-/* Spa
- *
- * Copyright (C) 2020, Collabora Ltd.
- *     Author: Raghavendra Rao Sidlagatta <raghavendra.rao@collabora.com>
- * Copyright (C) 2021 Wim Taymans <wim.taymans@gmail.com>
- *
- * libcamera-utils.cpp
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2020 Collabora Ltd. */
+/*                         @author Raghavendra Rao Sidlagatta <raghavendra.rao@collabora.com> */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -35,6 +14,7 @@
 #include <limits.h>
 
 #include <linux/media.h>
+#include <libcamera/control_ids.h>
 
 int spa_libcamera_open(struct impl *impl)
 {
@@ -458,6 +438,38 @@ error:
 
 }
 
+static struct {
+	uint32_t id;
+	uint32_t spa_id;
+} control_map[] = {
+	{ libcamera::controls::BRIGHTNESS, SPA_PROP_brightness },
+	{ libcamera::controls::CONTRAST, SPA_PROP_contrast },
+	{ libcamera::controls::SATURATION, SPA_PROP_saturation },
+	{ libcamera::controls::EXPOSURE_TIME, SPA_PROP_exposure },
+	{ libcamera::controls::ANALOGUE_GAIN, SPA_PROP_gain },
+	{ libcamera::controls::SHARPNESS, SPA_PROP_sharpness },
+};
+
+static uint32_t control_to_prop_id(struct impl *impl, uint32_t control_id)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(control_map, c) {
+		if (c->id == control_id)
+			return c->spa_id;
+	}
+	return SPA_PROP_START_CUSTOM + control_id;
+}
+
+static uint32_t prop_id_to_control(struct impl *impl, uint32_t prop_id)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(control_map, c) {
+		if (c->spa_id == prop_id)
+			return c->id;
+	}
+	if (prop_id >= SPA_PROP_START_CUSTOM)
+		return prop_id - SPA_PROP_START_CUSTOM;
+	return SPA_ID_INVALID;
+}
+
 static int
 spa_libcamera_enum_controls(struct impl *impl, struct port *port, int seq,
 		       uint32_t start, uint32_t num,
@@ -469,7 +481,7 @@ spa_libcamera_enum_controls(struct impl *impl, struct port *port, int seq,
 	struct spa_pod_frame f[2];
 	struct spa_result_node_params result;
 	struct spa_pod *ctrl;
-	uint32_t count = 0, skip;
+	uint32_t count = 0, skip, id;
 	int res;
 	const ControlId *ctrl_id;
 	ControlInfo ctrl_info;
@@ -492,10 +504,12 @@ next:
 	ctrl_id = it->first;
 	ctrl_info = it->second;
 
+	id = control_to_prop_id(impl, ctrl_id->id());
+
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 	spa_pod_builder_push_object(&b, &f[0], SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo);
 	spa_pod_builder_add(&b,
-			SPA_PROP_INFO_id,   SPA_POD_Id(ctrl_id->id()),
+			SPA_PROP_INFO_id,   SPA_POD_Id(id),
 			SPA_PROP_INFO_description, SPA_POD_String(ctrl_id->name().c_str()),
 			0);
 
@@ -601,8 +615,13 @@ spa_libcamera_set_control(struct impl *impl, const struct spa_pod_prop *prop)
 	const ControlId *ctrl_id;
 	int res;
 	struct val d;
+	uint32_t control_id;
 
-	auto v = info.idmap().find(prop->key);
+	control_id = prop_id_to_control(impl, prop->key);
+	if (control_id == SPA_ID_INVALID)
+		return -ENOENT;
+
+	auto v = info.idmap().find(control_id);
 	if (v == info.idmap().end())
 		return -ENOENT;
 
@@ -866,9 +885,12 @@ void impl::requestComplete(libcamera::Request *request)
 	}
 	const FrameMetadata &fmd = buffer->metadata();
 
-
-
 	if (impl->clock) {
+		/* FIXME, we should follow the driver clock and target_ values.
+		 * for now we ignore and use our own. */
+		impl->clock->target_rate = port->rate;
+		impl->clock->target_duration = 1;
+
 		impl->clock->nsec = fmd.timestamp;
 		impl->clock->rate = port->rate;
 		impl->clock->position = fmd.sequence;

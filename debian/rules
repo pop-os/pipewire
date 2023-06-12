@@ -27,8 +27,10 @@ endif
 # lilv and some of its dependencies are in universe
 ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
 LV2=disabled
+LIBMYSOFA=disabled
 else
 LV2=enabled
+LIBMYSOFA=enabled
 endif
 
 override_dh_auto_configure:
@@ -44,6 +46,7 @@ override_dh_auto_configure:
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
 		-Dbluez5-codec-opus=enabled \
 		-Dlibcamera=$(LIBCAMERA) \
+		-Dlibmysofa=$(LIBMYSOFA) \
 		-Ddocs=$(DOCS) \
 		-Dffmpeg=disabled \
 		-Dinstalled_tests=enabled \

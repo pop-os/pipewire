@@ -1,7 +1,7 @@
 project('pipewire', ['c' ],
-  version : '0.3.65',
+  version : '0.3.71',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
-  meson_version : '>= 0.59.0',
+  meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
                       'c_std=gnu11',
                       'cpp_std=c++17',
@@ -91,6 +91,8 @@ cc_flags = common_flags + [
   '-D_GNU_SOURCE',
   '-DFASTPATH',
 # '-DSPA_DEBUG_MEMCPY',
+  '-Werror=implicit-function-declaration',
+  '-Werror=int-conversion',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
 
@@ -189,6 +191,7 @@ versiondata.set('PIPEWIRE_VERSION_NANO', pipewire_version_nano)
 versiondata.set_quoted('PIPEWIRE_API_VERSION', apiversion)
 
 cdata = configuration_data()
+cdata.set_quoted('PREFIX', prefix)
 cdata.set_quoted('PIPEWIRE_CONFDATADIR', pipewire_confdatadir)
 cdata.set_quoted('LOCALEDIR', pipewire_localedir)
 cdata.set_quoted('LIBDIR', pipewire_libdir)
@@ -267,17 +270,22 @@ if not readline_dep.found()
 endif
 
 # Both the FFmpeg SPA plugin and the pw-cat FFmpeg integration use libavcodec.
-# But only the latter also needs libavformat.
+# But only the latter also needs libavformat and libavutil.
 # Search for these libraries here, globally, so both of these subprojects can reuse the results.
 pw_cat_ffmpeg = get_option('pw-cat-ffmpeg')
 ffmpeg = get_option('ffmpeg')
 if pw_cat_ffmpeg.allowed() or ffmpeg.allowed()
   avcodec_dep = dependency('libavcodec', required: pw_cat_ffmpeg.enabled() or ffmpeg.enabled())
   avformat_dep = dependency('libavformat', required: pw_cat_ffmpeg.enabled())
+  avutil_dep = dependency('libavutil', required: pw_cat_ffmpeg.enabled())
 else
   avcodec_dep = dependency('', required: false)
 endif
 cdata.set('HAVE_PW_CAT_FFMPEG_INTEGRATION', pw_cat_ffmpeg.allowed())
+
+opus_dep = dependency('opus', required : get_option('opus'))
+summary({'opus (Bluetooth, RTP)': opus_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+cdata.set('HAVE_OPUS', opus_dep.found())
 
 summary({'readline (for pw-cli)': readline_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 cdata.set('HAVE_READLINE', readline_dep.found())
@@ -285,6 +293,9 @@ ncurses_dep = dependency('ncursesw', required : false)
 sndfile_dep = dependency('sndfile', version : '>= 1.0.20', required : get_option('sndfile'))
 summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-play/pw-dump/filter-chain')
 cdata.set('HAVE_SNDFILE', sndfile_dep.found())
+libmysofa_dep = dependency('libmysofa', required : get_option('libmysofa'))
+summary({'libmysofa': libmysofa_dep.found()}, bool_yn: true, section: 'filter-chain')
+cdata.set('HAVE_LIBMYSOFA', libmysofa_dep.found())
 pulseaudio_dep = dependency('libpulse', required : get_option('libpulse'))
 summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
@@ -398,6 +409,7 @@ check_functions = [
   ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
   ['memfd_create', '#include <sys/mman.h>', ['-D_GNU_SOURCE'], []],
   ['getrandom', '#include <stddef.h>\n#include <sys/random.h>', ['-D_GNU_SOURCE'], []],
+  ['random_r', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['reallocarray', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE'], []],
   ['XSetIOErrorExitHandler', '#include <X11/Xlib.h>', [], [x11_dep]],

@@ -60,8 +60,9 @@ context.spa-libs = {
 
 context.modules = [
     #{ name = <module-name>
-    #    [ args  = { <key> = <value> ... } ]
-    #    [ flags = [ [ ifexists ] [ nofail ] ]
+    #    ( args  = { <key> = <value> ... } )
+    #    ( flags = [ ( ifexists ) ( nofail ) ] )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
     # Loads a module with the given parameters.
@@ -135,8 +136,9 @@ context.modules = [
 
 context.objects = [
     #{ factory = <factory-name>
-    #    [ args  = { <key> = <value> ... } ]
-    #    [ flags = [ [ nofail ] ]
+    #    ( args  = { <key> = <value> ... } )
+    #    ( flags = [ ( nofail ) ] )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
     # Creates an object from a PipeWire factory with the given parameters.
@@ -150,7 +152,15 @@ context.objects = [
     #{ factory = spa-node-factory   args = { factory.name = api.vulkan.compute.source node.name = my-compute-source } }
 
     # Make a default metadata store
-    { factory = metadata            args = { metadata.name = default } }
+    { factory = metadata
+        args = {
+            metadata.name = default
+    #       metadata.values = [
+    #            { key = default.audio.sink   value = { name = somesink } }
+    #            { key = default.audio.source value = { name = somesource } }
+    #        ]
+        }
+    }
 
     # A default dummy driver. This handles nodes marked with the "node.always-driver"
     # property when no other driver is currently active. JACK clients need this.
@@ -324,7 +334,6 @@ context.objects = [
     #        link.output.port = capture_1
     #        link.input.node  = my-mic
     #        link.input.port  = input_FL
-    #        link.passive     = true
     #    }
     #}
     #{ factory = link-factory
@@ -333,13 +342,15 @@ context.objects = [
     #        link.output.port = capture_2
     #        link.input.node  = my-mic
     #        link.input.port  = input_FR
-    #        link.passive     = true
     #    }
     #}
 ]
 
 context.exec = [
-    #{ path = <program-name> [ args = "<arguments>" ] }
+    #{   path = <program-name>
+    #    ( args = "<arguments>" )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
+    #}
     #
     # Execute the given program with arguments.
     #

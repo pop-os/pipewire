@@ -1,27 +1,7 @@
-/* Spa hsphfpd backend
- *
- * Based on previous work for pulseaudio by: Pali Rohár <pali.rohar@gmail.com>
- * Copyright © 2020 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa hsphfpd backend */
+/* SPDX-FileCopyrightText: Copyright © 2020 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
+/* Based on previous work for pulseaudio by: Pali Rohár <pali.rohar@gmail.com> */
 
 #include <errno.h>
 #include <unistd.h>
@@ -515,7 +495,6 @@ static DBusHandlerResult audio_agent_getall_properties(DBusConnection *conn, DBu
 {
 	const char *interface;
 	DBusMessageIter iter, array, dict, data;
-	const char *agent_codec_key = "AgentCodec";
 	const char *agent_codec;
 	DBusMessage *r = NULL;
 
@@ -547,9 +526,9 @@ static DBusHandlerResult audio_agent_getall_properties(DBusConnection *conn, DBu
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "{sv}", &array);
 	dbus_message_iter_open_container(&array, DBUS_TYPE_DICT_ENTRY, NULL, &dict);
-	dbus_message_iter_append_basic(&dict, DBUS_TYPE_STRING, &agent_codec_key);
+	dbus_message_iter_append_basic(&dict, DBUS_TYPE_STRING, &(const char *){ "AgentCodec" });
 	dbus_message_iter_open_container(&dict, DBUS_TYPE_VARIANT, "s", &data);
-	dbus_message_iter_append_basic(&data, DBUS_TYPE_BOOLEAN, &agent_codec);
+	dbus_message_iter_append_basic(&data, DBUS_TYPE_STRING, &agent_codec);
 	dbus_message_iter_close_container(&dict, &data);
 	dbus_message_iter_close_container(&array, &dict);
 	dbus_message_iter_close_container(&iter, &array);
@@ -855,12 +834,14 @@ static DBusHandlerResult application_object_manager_handler(DBusConnection *c, D
 
 static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_data)
 {
-	struct impl *backend = user_data;
+	struct spa_bt_transport *transport = user_data;
+	struct impl *backend = SPA_CONTAINER_OF(transport->backend, struct impl, this);
 	DBusMessage *r;
 	const char *transport_path;
 	const char *service_id;
 	const char *agent_path;
 	DBusError error;
+	int ret = 0;
 
 	dbus_error_init(&error);
 
@@ -873,16 +854,19 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
 		spa_log_error(backend->log, "RegisterApplication() failed: %s",
 				dbus_message_get_error_name(r));
+		ret = -EIO;
 		goto finish;
 	}
 
 	if (!spa_streq(dbus_message_get_sender(r), backend->hsphfpd_service_id)) {
 		spa_log_error(backend->log, "Reply for " HSPHFPD_ENDPOINT_INTERFACE ".ConnectAudio() from invalid sender");
+		ret = -EIO;
 		goto finish;
 	}
 
 	if (!check_signature(r, "oso")) {
 		spa_log_error(backend->log, "Invalid reply signature for " HSPHFPD_ENDPOINT_INTERFACE ".ConnectAudio()");
+		ret = -EIO;
 		goto finish;
 	}
 
@@ -892,11 +876,13 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 	                          DBUS_TYPE_OBJECT_PATH, &agent_path,
 	                          DBUS_TYPE_INVALID) == FALSE) {
 		spa_log_error(backend->log, "Failed to parse " HSPHFPD_ENDPOINT_INTERFACE ".ConnectAudio() reply: %s", error.message);
+		ret = -EIO;
 		goto finish;
 	}
 
 	if (!spa_streq(service_id, dbus_bus_get_unique_name(backend->conn))) {
 		spa_log_warn(backend->log, HSPHFPD_ENDPOINT_INTERFACE ".ConnectAudio() failed: Other audio application took audio socket");
+		ret = -EIO;
 		goto finish;
 	}
 
@@ -905,6 +891,11 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 finish:
 	dbus_message_unref(r);
 	dbus_pending_call_unref(pending);
+
+	if (ret < 0)
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ERROR);
+	else
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
 }
 
 static int hsphfpd_audio_acquire(void *data, bool optional)
@@ -939,15 +930,10 @@ static int hsphfpd_audio_acquire(void *data, bool optional)
 	dbus_error_init(&err);
 
 	dbus_connection_send_with_reply(backend->conn, m, &call, -1);
-	dbus_pending_call_set_notify(call, hsphfpd_audio_acquire_reply, backend, NULL);
+	dbus_pending_call_set_notify(call, hsphfpd_audio_acquire_reply, transport, NULL);
 	dbus_message_unref(m);
 
-	/* The ConnectAudio method triggers Introspect and NewConnection calls,
-	   which will set the fd to use for the SCO data.
-	   We need to run the DBus loop to be able to reply to those method calls */
 	backend->acquire_in_progress = true;
-	while (backend->acquire_in_progress && dbus_connection_read_write_dispatch(backend->conn, -1))
-		; // empty loop body
 
 	return 0;
 }
@@ -960,6 +946,8 @@ static int hsphfpd_audio_release(void *data)
 
 	spa_log_debug(backend->log, "transport %p: Release %s",
 			transport, transport->path);
+
+	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
 
 	if (transport->sco_io) {
 		spa_bt_sco_io_destroy(transport->sco_io);
@@ -1047,7 +1035,7 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct impl *backend,
 
 			case DBUS_TYPE_BOOLEAN:
 				{
-					bool value;
+					dbus_bool_t value;
 					dbus_message_iter_get_basic(&value_i, &value);
 					if (spa_streq(key, "Connected"))
 						endpoint->connected = value;

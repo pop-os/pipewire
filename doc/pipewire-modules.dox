@@ -60,6 +60,8 @@ List of known modules:
 - \subpage page_module_example_source
 - \subpage page_module_fallback_sink
 - \subpage page_module_filter_chain
+- \subpage page_module_jackdbus_detect
+- \subpage page_module_jack_tunnel
 - \subpage page_module_link_factory
 - \subpage page_module_loopback
 - \subpage page_module_metadata
@@ -74,8 +76,10 @@ List of known modules:
 - \subpage page_module_raop_discover
 - \subpage page_module_roc_sink
 - \subpage page_module_roc_source
+- \subpage page_module_rtp_sap
 - \subpage page_module_rtp_sink
 - \subpage page_module_rtp_source
+- \subpage page_module_rtp_session
 - \subpage page_module_rt
 - \subpage page_module_session_manager
 - \subpage page_module_x11_bell

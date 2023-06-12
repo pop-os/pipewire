@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/utils/json.h>
 
@@ -37,9 +17,9 @@ static int do_load_module(struct impl *impl, char *args, const char *flags)
 	struct module *module;
 	char *a[2] = { NULL };
 
-	n = pw_split_ip(args, WHITESPACE, 2, a);
+	n = args != NULL ? pw_split_ip(args, WHITESPACE, 2, a) : 0;
 	if (n < 1) {
-		pw_log_info("load-module expects module name");
+		pw_log_info("load-module expects module name got '%s'", args);
 		return -EINVAL;
 	}
 
@@ -76,7 +56,10 @@ static int do_cmd(struct impl *impl, const char *cmd, char *args, const char *fl
 
 /*
  * pulse.cmd = [
- *   { cmd = <command> [ args = "<arguments>" ] }
+ *   {   cmd = <command>
+ *       ( args = "<arguments>" )
+ *       ( flags = [ ( nofail ) ] )
+ *   }
  *   ...
  * ]
  */

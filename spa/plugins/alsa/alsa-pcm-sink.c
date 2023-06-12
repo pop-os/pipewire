@@ -1,26 +1,6 @@
-/* Spa ALSA Sink
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa ALSA Sink */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stddef.h>
 
@@ -67,7 +47,8 @@ static void emit_node_info(struct state *this, bool full)
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_MAX_LATENCY, latency);
 			snprintf(period, sizeof(period), "%lu", this->period_frames);
 			items[n_items++] = SPA_DICT_ITEM_INIT("api.alsa.period-size", period);
-			snprintf(nperiods, sizeof(nperiods), "%lu", this->buffer_frames / this->period_frames);
+			snprintf(nperiods, sizeof(nperiods), "%lu",
+					this->period_frames != 0 ? this->buffer_frames / this->period_frames : 0);
 			items[n_items++] = SPA_DICT_ITEM_INIT("api.alsa.period-num", nperiods);
 			snprintf(headroom, sizeof(headroom), "%u", this->headroom);
 			items[n_items++] = SPA_DICT_ITEM_INIT("api.alsa.headroom", headroom);

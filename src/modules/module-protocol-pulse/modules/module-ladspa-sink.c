@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <spa/utils/hook.h>
 #include <spa/utils/json.h>
@@ -164,19 +144,6 @@ static const struct spa_dict_item module_ladspa_sink_info[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-static void position_to_props(struct spa_audio_info_raw *info, struct pw_properties *props)
-{
-	char *s, *p;
-	uint32_t i;
-
-	pw_properties_setf(props, SPA_KEY_AUDIO_CHANNELS, "%u", info->channels);
-	p = s = alloca(info->channels * 8);
-	for (i = 0; i < info->channels; i++)
-		p += spa_scnprintf(p, 8, "%s%s", i == 0 ? "" : ",",
-				channel_id2name(info->position[i]));
-	pw_properties_set(props, SPA_KEY_AUDIO_POSITION, s);
-}
-
 static int module_ladspa_sink_prepare(struct module * const module)
 {
 	struct module_ladspa_sink_data * const d = module->user_data;
@@ -223,14 +190,15 @@ static int module_ladspa_sink_prepare(struct module * const module)
 		pw_properties_set(props, "master", NULL);
 	}
 
-	if (module_args_to_audioinfo(module->impl, props, &capture_info) < 0) {
+	if (module_args_to_audioinfo_keys(module->impl, props,
+			NULL, NULL, "channels", "channel_map", &capture_info) < 0) {
 		res = -EINVAL;
 		goto out;
 	}
 	playback_info = capture_info;
 
-	position_to_props(&capture_info, capture_props);
-	position_to_props(&playback_info, playback_props);
+	audioinfo_to_properties(&capture_info, capture_props);
+	audioinfo_to_properties(&playback_info, playback_props);
 
 	if (pw_properties_get(playback_props, PW_KEY_NODE_PASSIVE) == NULL)
 		pw_properties_set(playback_props, PW_KEY_NODE_PASSIVE, "true");

@@ -1,26 +1,6 @@
-/* Spa V4l2 dbus
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa V4l2 dbus */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <stddef.h>
@@ -30,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #include <bluetooth/bluetooth.h>
 
@@ -55,6 +36,7 @@
 #include "config.h"
 #include "codec-loader.h"
 #include "player.h"
+#include "iso-io.h"
 #include "defs.h"
 
 static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5");
@@ -85,6 +67,12 @@ enum backend_selection {
 
 #define CODEC_SWITCH_RETRIES	1
 
+/* How many times to retry acquire on errors, and how long delay to require before we can
+ * try again.
+ */
+#define TRANSPORT_ERROR_MAX_RETRY	3
+#define TRANSPORT_ERROR_TIMEOUT		(2*BLUEZ_ACTION_RATE_MSEC*SPA_NSEC_PER_MSEC)
+
 
 struct spa_bt_monitor {
 	struct spa_handle handle;
@@ -92,7 +80,9 @@ struct spa_bt_monitor {
 
 	struct spa_log *log;
 	struct spa_loop *main_loop;
+	struct spa_loop *data_loop;
 	struct spa_system *main_system;
+	struct spa_system *data_system;
 	struct spa_plugin_loader *plugin_loader;
 	struct spa_dbus *dbus;
 	struct spa_dbus_connection *dbus_connection;
@@ -123,6 +113,8 @@ struct spa_bt_monitor {
 
 	struct spa_dict enabled_codecs;
 
+	enum spa_bt_profile enabled_profiles;
+
 	unsigned int connection_info_supported:1;
 	unsigned int dummy_avrcp_player:1;
 
@@ -134,8 +126,6 @@ struct spa_bt_monitor {
 
 	/* A reference audio info for A2DP codec configuration. */
 	struct media_codec_audio_info default_audio_info;
-
-	bool le_audio_supported;
 };
 
 /* Stream endpoints owned by BlueZ for each device */
@@ -200,11 +190,12 @@ struct spa_bt_media_codec_switch {
  * SCO socket connect may fail with ECONNABORTED if it is done too soon after
  * previous close. To avoid this in cases where nodes are toggled between
  * stopped/started rapidly, postpone release until the transport has remained
- * unused for a time. Since this appears common to multiple SCO backends, we do
- * it for all SCO backends here.
+ * unused for a time.
+ *
+ * Avoiding unnecessary release+reacquire also makes sense for other transports,
+ * so we use the release timeout for all of them.
  */
-#define SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC 1000
-#define SPA_BT_TRANSPORT_IS_SCO(transport) (transport->backend != NULL)
+#define TRANSPORT_RELEASE_TIMEOUT_MSEC 1000
 
 #define TRANSPORT_VOLUME_TIMEOUT_MSEC 200
 
@@ -530,6 +521,19 @@ static bool codec_has_direction(const struct media_codec *codec, enum spa_bt_med
 	}
 }
 
+static enum spa_bt_profile get_codec_profile(const struct media_codec *codec,
+		enum spa_bt_media_direction direction)
+{
+	switch (direction) {
+	case SPA_BT_MEDIA_SOURCE:
+		return codec->bap ? SPA_BT_PROFILE_BAP_SOURCE : SPA_BT_PROFILE_A2DP_SOURCE;
+	case SPA_BT_MEDIA_SINK:
+		return codec->bap ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_A2DP_SINK;
+	default:
+		spa_assert_not_reached();
+	}
+}
+
 static bool endpoint_should_be_registered(struct spa_bt_monitor *monitor,
 					  const struct media_codec *codec,
 					  enum spa_bt_media_direction direction)
@@ -539,7 +543,8 @@ static bool endpoint_should_be_registered(struct spa_bt_monitor *monitor,
 	 */
 	return is_media_codec_enabled(monitor, codec) &&
 		codec_has_direction(codec, direction) &&
-		codec->fill_caps;
+		codec->fill_caps &&
+		(get_codec_profile(codec, direction) & monitor->enabled_profiles);
 }
 
 static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBusMessage *m, void *userdata)
@@ -625,10 +630,14 @@ static DBusHandlerResult endpoint_select_properties(DBusConnection *conn, DBusMe
 	const struct media_codec *codec;
 	bool sink;
 	const char *err_msg = "Unknown error";
+	struct spa_dict settings;
+	struct spa_dict_item setting_items[SPA_N_ELEMENTS(monitor->global_setting_items) + 1];
+	int i;
 
 	const char *endpoint_path = NULL;
 	uint8_t caps[A2DP_MAX_CAPS_SIZE];
 	uint8_t config[A2DP_MAX_CAPS_SIZE];
+	char locations[64] = {0};
 	int caps_size = 0;
 	int conf_size;
 	DBusMessageIter dict;
@@ -744,6 +753,8 @@ static DBusHandlerResult endpoint_select_properties(DBusConnection *conn, DBusMe
 				endpoint_qos.preferred_delay_min = v;
 			else if (spa_streq(key, "PreferredMaximumDelay"))
 				endpoint_qos.preferred_delay_max = v;
+			else if (spa_streq(key, "Location"))
+				spa_scnprintf(locations, sizeof(locations), "%"PRIu32, v);
 			else
 				spa_log_info(monitor->log, "Unknown property %s", key);
 		} else {
@@ -768,10 +779,12 @@ static DBusHandlerResult endpoint_select_properties(DBusConnection *conn, DBusMe
 		ep->acceptor = true;
 	}
 
-	/* TODO: determine which device the SelectConfiguration() call is associated
-	 * with; it's known here based on the remote endpoint.
-	 */
-	conf_size = codec->select_config(codec, 0, caps, caps_size, &monitor->default_audio_info, NULL, config);
+	for (i = 0; i < (int)monitor->global_settings.n_items; ++i)
+		setting_items[i] = monitor->global_settings.items[i];
+	setting_items[i] = SPA_DICT_ITEM_INIT("bluez5.bap.locations", locations);
+	settings = SPA_DICT_INIT(setting_items, monitor->global_settings.n_items + 1);
+
+	conf_size = codec->select_config(codec, 0, caps, caps_size, &monitor->default_audio_info, &settings, config);
 	if (conf_size < 0) {
 		spa_log_error(monitor->log, "can't select config: %d (%s)",
 				conf_size, spa_strerror(conf_size));
@@ -1008,6 +1021,52 @@ next:
 	return 0;
 }
 
+static int adapter_media_update_props(struct spa_bt_adapter *adapter,
+				DBusMessageIter *props_iter,
+				DBusMessageIter *invalidated_iter)
+{
+	/* Handle org.bluez.Media1 interface properties of .Adapter1 objects */
+	struct spa_bt_monitor *monitor = adapter->monitor;
+
+	while (dbus_message_iter_get_arg_type(props_iter) != DBUS_TYPE_INVALID) {
+		DBusMessageIter it[2];
+		const char *key;
+
+		dbus_message_iter_recurse(props_iter, &it[0]);
+		dbus_message_iter_get_basic(&it[0], &key);
+		dbus_message_iter_next(&it[0]);
+		dbus_message_iter_recurse(&it[0], &it[1]);
+
+		if (spa_streq(key, "SupportedUUIDs")) {
+			DBusMessageIter iter;
+
+			if (!check_iter_signature(&it[1], "as"))
+				goto next;
+
+			dbus_message_iter_recurse(&it[1], &iter);
+
+			while (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_INVALID) {
+				const char *uuid;
+
+				dbus_message_iter_get_basic(&iter, &uuid);
+
+				if (spa_streq(uuid, SPA_BT_UUID_BAP_SINK)) {
+					adapter->le_audio_supported = true;
+					spa_log_info(monitor->log, "Adapter %s: LE Audio supported",
+							adapter->path);
+				}
+				dbus_message_iter_next(&iter);
+			}
+		}
+		else
+			spa_log_debug(monitor->log, "media: unhandled key %s", key);
+
+next:
+		dbus_message_iter_next(props_iter);
+	}
+	return 0;
+}
+
 static void adapter_update_devices(struct spa_bt_adapter *adapter)
 {
 	struct spa_bt_monitor *monitor = adapter->monitor;
@@ -1185,11 +1244,17 @@ struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monit
 	return NULL;
 }
 
-void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device)
+static uint64_t get_time_now(struct spa_bt_monitor *monitor)
 {
 	struct timespec ts;
-	spa_system_clock_gettime(device->monitor->main_system, CLOCK_MONOTONIC, &ts);
-	device->last_bluez_action_time = SPA_TIMESPEC_TO_NSEC(&ts);
+
+	spa_system_clock_gettime(monitor->main_system, CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device)
+{
+	device->last_bluez_action_time = get_time_now(device->monitor);
 }
 
 static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const char *path)
@@ -1210,6 +1275,7 @@ static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const
 	spa_list_init(&d->remote_endpoint_list);
 	spa_list_init(&d->transport_list);
 	spa_list_init(&d->codec_switch_list);
+	spa_list_init(&d->set_membership_list);
 
 	spa_hook_list_init(&d->listener_list);
 
@@ -1236,6 +1302,7 @@ static void device_free(struct spa_bt_device *device)
 	struct spa_bt_media_codec_switch *sw;
 	struct spa_bt_transport *t, *tt;
 	struct spa_bt_monitor *monitor = device->monitor;
+	struct spa_bt_set_membership *s;
 
 	spa_log_debug(monitor->log, "%p", device);
 
@@ -1265,6 +1332,13 @@ static void device_free(struct spa_bt_device *device)
 	spa_list_consume(sw, &device->codec_switch_list, device_link)
 		media_codec_switch_free(sw);
 
+	spa_list_consume(s, &device->set_membership_list, link) {
+		spa_list_remove(&s->link);
+		spa_list_remove(&s->others);
+		free(s->path);
+		free(s);
+	}
+
 	spa_list_remove(&device->link);
 	free(device->path);
 	free(device->alias);
@@ -1274,6 +1348,84 @@ static void device_free(struct spa_bt_device *device)
 	free(device->name);
 	free(device->icon);
 	free(device);
+}
+
+static struct spa_bt_set_membership *device_set_find(struct spa_bt_monitor *monitor, const char *path)
+{
+	struct spa_bt_device *d;
+
+	spa_list_for_each(d, &monitor->device_list, link) {
+		struct spa_bt_set_membership *s;
+
+		spa_list_for_each(s, &d->set_membership_list, link) {
+			if (spa_streq(s->path, path))
+				return s;
+		}
+	}
+
+	return NULL;
+}
+
+static int device_add_device_set(struct spa_bt_device *device, const char *path, uint8_t rank)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	struct spa_bt_set_membership *s, *set;
+
+	spa_list_for_each(s, &device->set_membership_list, link) {
+		if (spa_streq(s->path, path)) {
+			if (rank)
+				s->rank = rank;
+			return 0;
+		}
+	}
+
+	s = calloc(1, sizeof(struct spa_bt_set_membership));
+	if (s == NULL)
+		return -ENOMEM;
+
+	s->path = strdup(path);
+	if (!s->path) {
+		free(s);
+		return -ENOMEM;
+	}
+
+	s->device = device;
+	s->rank = rank;
+
+	spa_list_init(&s->others);
+
+	/* Join with other set members, if any */
+	set = device_set_find(monitor, path);
+	if (set)
+		spa_list_append(&set->others, &s->others);
+
+	spa_list_append(&device->set_membership_list, &s->link);
+
+	spa_log_debug(monitor->log, "device %p: add %s to device set %s", device,
+			device->path, path);
+
+	return 1;
+}
+
+static bool device_remove_device_set(struct spa_bt_device *device, const char *path)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	struct spa_bt_set_membership *s;
+
+	spa_list_for_each(s, &device->set_membership_list, link) {
+		if (spa_streq(s->path, path)) {
+			spa_log_debug(monitor->log,
+					"device %p: remove %s from device set %s", device,
+					device->path, path);
+			spa_list_remove(&s->link);
+			spa_list_remove(&s->others);
+			free(s->path);
+			free(s);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 int spa_bt_format_vendor_product_id(uint16_t source_id, uint16_t vendor_id, uint16_t product_id,
@@ -1612,6 +1764,7 @@ static int device_stop_timer(struct spa_bt_device *device)
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 {
 	struct spa_bt_monitor *monitor = device->monitor;
+	struct spa_bt_set_membership *s, *set;
 	uint32_t connected_profiles = device->connected_profiles;
 	uint32_t connectable_profiles =
 		device->adapter ? adapter_connectable_profiles(device->adapter) : 0;
@@ -1621,6 +1774,7 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 		SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY,
 	};
 	bool direction_connected = false;
+	bool set_connected = true;
 	bool all_connected;
 	size_t i;
 
@@ -1637,14 +1791,19 @@ int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force)
 
 	all_connected = (device->profiles & connected_profiles) == device->profiles;
 
-	spa_log_debug(monitor->log, "device %p: profiles %08x %08x connectable:%08x added:%d all:%d dir:%d",
+	spa_list_for_each(set, &device->set_membership_list, link)
+		spa_bt_for_each_set_member(s, set)
+			if ((s->device->connected_profiles & s->device->profiles) != s->device->profiles)
+				set_connected = false;
+
+	spa_log_debug(monitor->log, "device %p: profiles %08x %08x connectable:%08x added:%d all:%d dir:%d set:%d",
 			device, device->profiles, connected_profiles, connectable_profiles,
-			device->added, all_connected, direction_connected);
+			device->added, all_connected, direction_connected, set_connected);
 
 	if (connected_profiles == 0 && spa_list_is_empty(&device->codec_switch_list)) {
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_DISCONNECTED);
-	} else if (force || direction_connected || all_connected) {
+	} else if (force || ((direction_connected || all_connected) && set_connected)) {
 		device_stop_timer(device);
 		device_connected(monitor, device, BT_DEVICE_CONNECTED);
 	} else {
@@ -1678,10 +1837,14 @@ static void device_set_connected(struct spa_bt_device *device, int connected)
 	}
 }
 
+static void device_update_set_status(struct spa_bt_device *device, bool force, const char *path);
+
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile)
 {
 	uint32_t prev_connected = device->connected_profiles;
 	device->connected_profiles |= profile;
+	if ((prev_connected ^ device->connected_profiles) & SPA_BT_PROFILE_BAP_DUPLEX)
+		device_update_set_status(device, true, NULL);
 	spa_bt_device_check_profiles(device, false);
 	if (device->connected_profiles != prev_connected)
 		spa_bt_device_emit_profiles_changed(device, device->profiles, prev_connected);
@@ -1703,6 +1866,214 @@ static void device_update_hw_volume_profiles(struct spa_bt_device *device)
 		device->hw_volume_profiles = 0;
 
 	spa_log_debug(monitor->log, "hw-volume-profiles:%08x", (int)device->hw_volume_profiles);
+}
+
+static bool device_set_update_leader(struct spa_bt_set_membership *set)
+{
+	struct spa_bt_set_membership *s, *leader;
+	int min_rank = INT_MAX;
+	int leader_rank = INT_MAX;
+
+	leader = NULL;
+
+	spa_bt_for_each_set_member(s, set) {
+		if (!(s->device->connected_profiles & SPA_BT_PROFILE_BAP_DUPLEX))
+			continue;
+		min_rank = SPA_MIN(min_rank, s->rank);
+		if (s->leader) {
+			leader_rank = s->rank;
+			leader = s;
+		}
+	}
+
+	if (min_rank >= leader_rank && leader)
+		return false;
+
+	spa_bt_for_each_set_member(s, set) {
+		if (leader == NULL && s->rank == min_rank &&
+				(s->device->connected_profiles & SPA_BT_PROFILE_BAP_DUPLEX)) {
+			s->leader = true;
+			leader = s;
+		} else {
+			s->leader = false;
+		}
+	}
+
+	if (leader) {
+		struct spa_bt_monitor *monitor = leader->device->monitor;
+
+		spa_log_debug(monitor->log, "device set %s: leader is %s",
+				leader->path, leader->device->path);
+	}
+
+	return true;
+}
+
+static void device_update_set_status(struct spa_bt_device *device, bool force, const char *path)
+{
+	struct spa_bt_set_membership *s, *set;
+
+	spa_list_for_each(set, &device->set_membership_list, link) {
+		if (path && !spa_streq(set->path, path))
+			continue;
+
+		if (device_set_update_leader(set) || force) {
+			spa_bt_for_each_set_member(s, set)
+				if (!s->leader)
+					spa_bt_device_emit_device_set_changed(s->device);
+			spa_bt_for_each_set_member(s, set)
+				if (s->leader)
+					spa_bt_device_emit_device_set_changed(s->device);
+		}
+	}
+}
+
+static int device_set_update_props(struct spa_bt_monitor *monitor,
+		const char *path, DBusMessageIter *props_iter, DBusMessageIter *invalidated_iter)
+{
+	struct spa_bt_device *old[256];
+	struct spa_bt_device *new[256];
+	struct spa_bt_set_membership *set;
+	size_t num_old = 0, num_new = 0;
+	size_t i;
+
+	if (!props_iter)
+		goto done;
+
+	/* Find current devices */
+	while (dbus_message_iter_get_arg_type(props_iter) != DBUS_TYPE_INVALID) {
+		DBusMessageIter it[2];
+		const char *key;
+
+		dbus_message_iter_recurse(props_iter, &it[0]);
+		dbus_message_iter_get_basic(&it[0], &key);
+		dbus_message_iter_next(&it[0]);
+		dbus_message_iter_recurse(&it[0], &it[1]);
+
+		if (spa_streq(key, "Devices")) {
+			DBusMessageIter iter;
+			int i = 0;
+
+			if (!check_iter_signature(&it[1], "ao"))
+				goto next;
+
+			dbus_message_iter_recurse(&it[1], &iter);
+
+			while (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_INVALID) {
+				struct spa_bt_device *d;
+				const char *dev_path;
+
+				dbus_message_iter_get_basic(&iter, &dev_path);
+
+				spa_log_debug(monitor->log, "device set %s: Devices[%d]=%s",
+						path, i++, dev_path);
+
+				if (num_new >= SPA_N_ELEMENTS(new))
+					break;
+				d = spa_bt_device_find(monitor, dev_path);
+				if (d)
+					new[num_new++] = d;
+
+				dbus_message_iter_next(&iter);
+			}
+
+		}
+		else
+			spa_log_debug(monitor->log, "device set %s: unhandled key %s",
+					path, key);
+
+next:
+		dbus_message_iter_next(props_iter);
+	}
+
+done:
+	/* Find devices to remove */
+	set = device_set_find(monitor, path);
+	if (set) {
+		struct spa_bt_set_membership *s;
+
+		spa_bt_for_each_set_member(s, set) {
+			for (i = 0; i < num_new; ++i)
+				if (s->device == new[i])
+					break;
+			if (i == num_new) {
+				if (num_old >= SPA_N_ELEMENTS(old))
+					break;
+				old[num_old++] = s->device;
+			}
+		}
+	}
+
+	/* Remove old devices */
+	for (i = 0; i < num_old; ++i)
+		device_remove_device_set(old[i], path);
+
+	/* Add new devices */
+	for (i = 0; i < num_new; ++i)
+		device_add_device_set(new[i], path, 0);
+
+	/* Emit signals & update set leader */
+	for (i = 0; i < num_old; ++i)
+		spa_bt_device_emit_device_set_changed(old[i]);
+
+	if (num_new > 0)
+		device_update_set_status(new[0], true, path);
+
+	return 0;
+}
+
+static int device_update_device_sets_prop(struct spa_bt_device *device,
+		DBusMessageIter *iter)
+{
+	struct spa_bt_monitor *monitor = device->monitor;
+	DBusMessageIter it[5];
+	bool changed = false;
+
+	if (!check_iter_signature(iter, "a{oa{sv}}"))
+		return -EINVAL;
+
+	dbus_message_iter_recurse(iter, &it[0]);
+
+	while (dbus_message_iter_get_arg_type(&it[0]) != DBUS_TYPE_INVALID) {
+		uint8_t rank = 0;
+		const char *set_path;
+
+		dbus_message_iter_recurse(&it[0], &it[1]);
+		dbus_message_iter_get_basic(&it[1], &set_path);
+		dbus_message_iter_next(&it[1]);
+		dbus_message_iter_recurse(&it[1], &it[2]);
+
+		while (dbus_message_iter_get_arg_type(&it[2]) != DBUS_TYPE_INVALID) {
+			const char *key;
+			int type;
+
+			dbus_message_iter_recurse(&it[2], &it[3]);
+			dbus_message_iter_get_basic(&it[3], &key);
+			dbus_message_iter_next(&it[3]);
+			dbus_message_iter_recurse(&it[3], &it[4]);
+
+			type = dbus_message_iter_get_arg_type(&it[4]);
+
+			if (spa_streq(key, "Rank") && type == DBUS_TYPE_BYTE)
+				dbus_message_iter_get_basic(&it[4], &rank);
+
+			dbus_message_iter_next(&it[2]);
+		}
+
+		spa_log_debug(monitor->log, "device %p: path %s device set %s rank %d",
+				device, device->path, set_path, (int)rank);
+
+		/* Only add. Removals are handled in device set updates. */
+		if (device_add_device_set(device, set_path, rank) == 1)
+			changed = true;
+
+		dbus_message_iter_next(&it[0]);
+	}
+
+	/* Emit change signals */
+	device_update_set_status(device, changed, NULL);
+
+	return 0;
 }
 
 static int device_update_props(struct spa_bt_device *device,
@@ -1853,6 +2224,9 @@ static int device_update_props(struct spa_bt_device *device,
 				spa_bt_device_emit_profiles_changed(
 					device, prev_profiles, device->connected_profiles);
 		}
+		else if (spa_streq(key, "Sets")) {
+			device_update_device_sets_prop(device, &it[1]);
+		}
 		else
 			spa_log_debug(monitor->log, "device %p: unhandled key %s type %d", device, key, type);
 
@@ -1875,6 +2249,8 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 {
 	struct spa_bt_monitor *monitor = device->monitor;
 	struct spa_bt_remote_endpoint *ep;
+	enum spa_bt_profile codec_profile;
+	struct spa_bt_transport *t;
 	const struct { enum spa_bluetooth_audio_codec codec; uint32_t mask; } quirks[] = {
 		{ SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ, SPA_BT_FEATURE_SBC_XQ },
 		{ SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM, SPA_BT_FEATURE_FASTSTREAM },
@@ -1887,10 +2263,13 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 	if (!is_media_codec_enabled(device->monitor, codec))
 		return false;
 
-	if (!device->adapter->application_registered) {
+	if (!device->adapter->a2dp_application_registered && !codec->bap) {
 		/* Codec switching not supported: only plain SBC allowed */
-		return (codec->codec_id == A2DP_CODEC_SBC && spa_streq(codec->name, "sbc"));
+		return (codec->codec_id == A2DP_CODEC_SBC && spa_streq(codec->name, "sbc") &&
+				device->adapter->legacy_endpoints_registered);
 	}
+	if (!device->adapter->bap_application_registered && codec->bap)
+		return false;
 
 	/* Check codec quirks */
 	for (i = 0; i < SPA_N_ELEMENTS(quirks); ++i) {
@@ -1906,20 +2285,34 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 			return false;
 	}
 
+	if (codec->bap)
+		codec_profile = sink ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_BAP_SOURCE;
+	else
+		codec_profile = sink ? SPA_BT_PROFILE_A2DP_SINK : SPA_BT_PROFILE_A2DP_SOURCE;
+
 	spa_list_for_each(ep, &device->remote_endpoint_list, device_link) {
 		const enum spa_bt_profile profile = spa_bt_profile_from_uuid(ep->uuid);
-		enum spa_bt_profile expected;
 
-		if (codec->bap)
-			expected = sink ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_BAP_SOURCE;
-		else
-			expected = sink ? SPA_BT_PROFILE_A2DP_SINK : SPA_BT_PROFILE_A2DP_SOURCE;
-
-		if (profile != expected)
+		if (profile != codec_profile)
 			continue;
 
 		if (media_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len,
 						&ep->monitor->default_audio_info, &monitor->global_settings))
+			return true;
+	}
+
+	/* Codecs on configured transports are always supported.
+	 *
+	 * Remote BAP endpoints correspond to capabilities of the remote
+	 * BAP Server, not to remote BAP Client, and need not be the same.
+	 * BAP Clients may not have any remote endpoints. In this case we
+	 * can only know that the currently configured codec is supported.
+	 */
+	spa_list_for_each(t, &device->transport_list, device_link) {
+		if (t->profile != codec_profile)
+			continue;
+
+		if (codec == t->media_codec)
 			return true;
 	}
 
@@ -2154,7 +2547,10 @@ struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor,
 	t->path = path;
 	t->fd = -1;
 	t->sco_io = NULL;
-	t->delay = SPA_BT_UNKNOWN_DELAY;
+	t->delay_us = SPA_BT_UNKNOWN_DELAY;
+	t->latency_us = SPA_BT_UNKNOWN_DELAY;
+	t->bap_cig = 0xff;
+	t->bap_cis = 0xff;
 	t->user_data = SPA_PTROFF(t, sizeof(struct spa_bt_transport), void);
 	spa_hook_list_init(&t->listener_list);
 	spa_list_init(&t->bap_transport_linked);
@@ -2192,6 +2588,18 @@ void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_
 		spa_bt_transport_emit_state_changed(transport, old, state);
 		if (state >= SPA_BT_TRANSPORT_STATE_PENDING && old < SPA_BT_TRANSPORT_STATE_PENDING)
 			transport_sync_volume(transport);
+
+		if (state == SPA_BT_TRANSPORT_STATE_ERROR) {
+			uint64_t now = get_time_now(monitor);
+
+			if (now > transport->last_error_time + TRANSPORT_ERROR_TIMEOUT) {
+				spa_log_error(monitor->log, "Failure in Bluetooth audio transport %s",
+						transport->path);
+			}
+
+			transport->last_error_time = now;
+			++transport->error_count;
+		}
 	}
 }
 
@@ -2217,7 +2625,22 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 		transport->sco_io = NULL;
 	}
 
+	if (transport->iso_io)
+		spa_bt_iso_io_destroy(transport->iso_io);
+
 	spa_bt_transport_destroy(transport);
+
+	if (transport->acquire_call) {
+		dbus_pending_call_cancel(transport->acquire_call);
+		dbus_pending_call_unref(transport->acquire_call);
+		transport->acquire_call = NULL;
+	}
+
+	if (transport->volume_call) {
+		dbus_pending_call_cancel(transport->volume_call);
+		dbus_pending_call_unref(transport->volume_call);
+		transport->volume_call = NULL;
+	}
 
 	if (transport->fd >= 0) {
 		spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
@@ -2234,8 +2657,11 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 		spa_list_remove(&transport->device_link);
 	}
 
-	if (device && device->connected_profiles != prev_connected)
+	if (device && device->connected_profiles != prev_connected) {
+		if ((prev_connected ^ device->connected_profiles) & SPA_BT_PROFILE_BAP_DUPLEX)
+			device_update_set_status(device, true, NULL);
 		spa_bt_device_emit_profiles_changed(device, device->profiles, prev_connected);
+	}
 
 	spa_list_remove(&transport->bap_transport_linked);
 
@@ -2269,9 +2695,16 @@ int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
 	if (transport->acquire_refcount > 0) {
 		spa_log_debug(monitor->log, "transport %p: incref %s", transport, transport->path);
 		transport->acquire_refcount += 1;
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
 		return 0;
 	}
 	spa_assert(transport->acquire_refcount == 0);
+
+	/* If we are getting into error state too often, stop trying */
+	if (get_time_now(monitor) > transport->last_error_time + TRANSPORT_ERROR_TIMEOUT)
+		transport->error_count = 0;
+	if (transport->error_count >= TRANSPORT_ERROR_MAX_RETRY)
+		return -EIO;
 
 	if (!transport->acquired)
 		res = spa_bt_transport_impl(transport, acquire, 0, optional);
@@ -2289,11 +2722,11 @@ int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
 int spa_bt_transport_release(struct spa_bt_transport *transport)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
-	int res;
 
 	if (transport->acquire_refcount > 1) {
 		spa_log_debug(monitor->log, "transport %p: decref %s", transport, transport->path);
 		transport->acquire_refcount -= 1;
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
 		return 0;
 	}
 	else if (transport->acquire_refcount == 0) {
@@ -2303,23 +2736,8 @@ int spa_bt_transport_release(struct spa_bt_transport *transport)
 	spa_assert(transport->acquire_refcount == 1);
 	spa_assert(transport->acquired);
 
-	if (SPA_BT_TRANSPORT_IS_SCO(transport)) {
-		/* Postpone SCO transport releases, since we might need it again soon */
-		res = spa_bt_transport_start_release_timer(transport);
-	} else if (transport->keepalive) {
-		res = 0;
-		transport->acquire_refcount = 0;
-		spa_log_debug(monitor->log, "transport %p: keepalive %s on release",
-				transport, transport->path);
-	} else {
-		res = spa_bt_transport_impl(transport, release, 0);
-		if (res >= 0) {
-			transport->acquire_refcount = 0;
-			transport->acquired = false;
-		}
-	}
-
-	return res;
+	/* Postpone transport releases, since we might need it again soon */
+	return spa_bt_transport_start_release_timer(transport);
 }
 
 static int spa_bt_transport_release_now(struct spa_bt_transport *transport)
@@ -2416,7 +2834,7 @@ static int spa_bt_transport_start_release_timer(struct spa_bt_transport *transpo
 	return start_timeout_timer(transport->monitor,
 		&transport->release_timer,
 		spa_bt_transport_release_timer_event,
-		SCO_TRANSPORT_RELEASE_TIMEOUT_MSEC, transport);
+		TRANSPORT_RELEASE_TIMEOUT_MSEC, transport);
 }
 
 static int spa_bt_transport_stop_release_timer(struct spa_bt_transport *transport)
@@ -2493,8 +2911,17 @@ int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *
 
 int64_t spa_bt_transport_get_delay_nsec(struct spa_bt_transport *t)
 {
-	if (t->delay != SPA_BT_UNKNOWN_DELAY)
-		return (int64_t)t->delay * 100 * SPA_NSEC_PER_USEC;
+	if (t->delay_us != SPA_BT_UNKNOWN_DELAY) {
+		/* end-to-end delay = (presentation) delay + transport latency
+		 *
+		 * For BAP, see Core v5.3 Vol 6/G Sec 3.2.2 Fig. 3.2 &
+		 * BAP v1.0 Sec 7.1.1.
+		 */
+		int64_t delay = t->delay_us;
+		if (t->latency_us != SPA_BT_UNKNOWN_DELAY)
+			delay += t->latency_us;
+		return delay * SPA_NSEC_PER_USEC;
+	}
 
 	/* Fallback values when device does not provide information */
 
@@ -2570,7 +2997,11 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				}
 			}
 			else if (spa_streq(key, "State")) {
-				spa_bt_transport_set_state(transport, spa_bt_transport_state_from_string(value));
+				enum spa_bt_transport_state state  = spa_bt_transport_state_from_string(value);
+
+				/* Transition to active emitted only from acquire callback. */
+				if (state != SPA_BT_TRANSPORT_STATE_ACTIVE)
+					spa_bt_transport_set_state(transport, state);
 			}
 			else if (spa_streq(key, "Device")) {
 				struct spa_bt_device *device = spa_bt_device_find(monitor, value);
@@ -2655,27 +3086,40 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				spa_bt_transport_volume_changed(transport);
 		}
 		else if (spa_streq(key, "Delay")) {
+			if (transport->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)) {
+				uint32_t value;
+
+				if (type != DBUS_TYPE_UINT32)
+					goto next;
+				dbus_message_iter_get_basic(&it[1], &value);
+
+				spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+
+				transport->delay_us = value;
+			} else {
+				uint16_t value;
+
+				if (type != DBUS_TYPE_UINT16)
+					goto next;
+				dbus_message_iter_get_basic(&it[1], &value);
+
+				spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+
+				transport->delay_us = value * 100;
+			}
+
+			spa_bt_transport_emit_delay_changed(transport);
+		}
+		else if (spa_streq(key, "Latency")) {
 			uint16_t value;
 
 			if (type != DBUS_TYPE_UINT16)
 				goto next;
 			dbus_message_iter_get_basic(&it[1], &value);
 
-			spa_log_debug(monitor->log, "transport %p: %s=%02x", transport, key, value);
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
 
-			transport->delay = value;
-			spa_bt_transport_emit_delay_changed(transport);
-		}
-		else if (spa_streq(key, "PresentationDelay")) {
-			uint32_t value;
-
-			if (type != DBUS_TYPE_UINT32)
-				goto next;
-			dbus_message_iter_get_basic(&it[1], &value);
-
-			spa_log_debug(monitor->log, "transport %p: %s=%02x", transport, key, value);
-
-			transport->delay = value / 100;
+			transport->latency_us = value * 1000;
 			spa_bt_transport_emit_delay_changed(transport);
 		}
 		else if (spa_streq(key, "Links")) {
@@ -2707,28 +3151,113 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				dbus_message_iter_next(&iter);
 			}
 		}
+		else if (spa_streq(key, "Interval")) {
+			uint32_t value;
+
+			if (type != DBUS_TYPE_UINT32)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+			transport->bap_interval = value;
+		}
+		else if (spa_streq(key, "Framing")) {
+			dbus_bool_t value;
+
+			if (type != DBUS_TYPE_BOOLEAN)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+		}
+		else if (spa_streq(key, "SDU")) {
+			uint16_t value;
+
+			if (type != DBUS_TYPE_UINT16)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+		}
+		else if (spa_streq(key, "Retransmissions")) {
+			uint8_t value;
+
+			if (type != DBUS_TYPE_BYTE)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+		}
+		else if (spa_streq(key, "CIG") || spa_streq(key, "CIS")) {
+			uint8_t value;
+
+			if (type != DBUS_TYPE_BYTE)
+				goto next;
+			dbus_message_iter_get_basic(&it[1], &value);
+
+			spa_log_debug(monitor->log, "transport %p: %s=%d", transport, key, (int)value);
+
+			if (spa_streq(key, "CIG"))
+				transport->bap_cig = value;
+			else
+				transport->bap_cis = value;
+		}
 next:
 		dbus_message_iter_next(props_iter);
 	}
 	return 0;
 }
 
-static int transport_set_property_volume(struct spa_bt_transport *transport, uint16_t value)
+static void transport_set_property_volume_reply(DBusPendingCall *pending, void *user_data)
+{
+	struct spa_bt_transport *transport = user_data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusError err = DBUS_ERROR_INIT;
+	DBusMessage *r;
+
+	r = dbus_pending_call_steal_reply(pending);
+
+	spa_assert(transport->volume_call == pending);
+	dbus_pending_call_unref(pending);
+	transport->volume_call = NULL;
+
+	if (dbus_set_error_from_message(&err, r)) {
+		spa_log_info(monitor->log, "transport %p: set volume failed for transport %s: %s",
+				transport, transport->path, err.message);
+		dbus_error_free(&err);
+	} else {
+		spa_log_debug(monitor->log, "transport %p: set volume complete",
+				transport);
+	}
+
+	dbus_message_unref(r);
+}
+
+static void transport_set_property_volume(struct spa_bt_transport *transport, uint16_t value)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
-	DBusMessage *m, *r;
+	DBusMessage *m;
 	DBusMessageIter it[2];
 	DBusError err;
 	const char *interface = BLUEZ_MEDIA_TRANSPORT_INTERFACE;
 	const char *name = "Volume";
 	int res = 0;
+	dbus_bool_t ret;
+
+	if (transport->volume_call) {
+		dbus_pending_call_cancel(transport->volume_call);
+		dbus_pending_call_unref(transport->volume_call);
+		transport->volume_call = NULL;
+	}
 
 	m = dbus_message_new_method_call(BLUEZ_SERVICE,
 					 transport->path,
 	                                 DBUS_INTERFACE_PROPERTIES,
 					 "Set");
-	if (m == NULL)
-		return -ENOMEM;
+	if (m == NULL) {
+		res = -ENOMEM;
+		goto fail;
+	}
 
 	dbus_message_iter_init_append(m, &it[0]);
 	dbus_message_iter_append_basic(&it[0], DBUS_TYPE_STRING, &interface);
@@ -2740,25 +3269,27 @@ static int transport_set_property_volume(struct spa_bt_transport *transport, uin
 
 	dbus_error_init(&err);
 
-	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
-
+	ret = dbus_connection_send_with_reply(monitor->conn, m, &transport->volume_call, -1);
 	dbus_message_unref(m);
 
-	if (r == NULL) {
-		spa_log_error(monitor->log, "set volume %u failed for transport %s (%s)",
-				value, transport->path, err.message);
-		dbus_error_free(&err);
-		return -EIO;
+	if (!ret || !transport->volume_call) {
+		res = -EIO;
+		goto fail;
 	}
 
-	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR)
+	ret = dbus_pending_call_set_notify(transport->volume_call,
+			transport_set_property_volume_reply, transport, NULL);
+	if (!ret) {
 		res = -EIO;
+		goto fail;
+	}
 
-	dbus_message_unref(r);
+	spa_log_debug(monitor->log, "transport %p: setting volume to %d", transport, value);
+	return;
 
-	spa_log_debug(monitor->log, "transport %p: set volume to %d", transport, value);
-
-	return res;
+fail:
+	spa_log_debug(monitor->log, "transport %p: failed to set volume %d: %s",
+			transport, value, spa_strerror(res));
 }
 
 static int transport_set_volume(void *data, int id, float volume)
@@ -2786,61 +3317,86 @@ static int transport_set_volume(void *data, int id, float volume)
 	return 0;
 }
 
-static int transport_acquire(void *data, bool optional)
+static int transport_create_iso_io(struct spa_bt_transport *transport)
 {
-	struct spa_bt_transport *transport = data;
 	struct spa_bt_monitor *monitor = transport->monitor;
-	DBusMessage *m, *r = NULL;
-	DBusError err;
-	int ret = 0;
-	const char *method = optional ? "TryAcquire" : "Acquire";
-	struct spa_bt_transport *t_linked;
+	struct spa_bt_transport *t;
 
-	/* For LE Audio, multiple transport from the same device may share the same
-	 * stream (CIS) and group (CIG) but for different direction, e.g. a speaker and
-	 * a microphone. In this case they are linked.
-	 * If one of them has already been acquired this function should not call Acquire
-	 * or TryAcquire but re-use values from the previously acquired transport.
-	 */
-	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
-		if (t_linked->acquired && t_linked->device == transport->device) {
-			transport->fd = t_linked->fd;
-			transport->read_mtu = t_linked->read_mtu;
-			transport->write_mtu = t_linked->write_mtu;
-			spa_log_debug(monitor->log, "transport %p: linked transport %s", transport, t_linked->path);
-			goto done;
+	if (!(transport->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)))
+		return 0;
+
+	if (transport->bap_cig == 0xff || transport->bap_cis == 0xff)
+		return -EINVAL;
+
+	if (transport->iso_io) {
+		spa_log_debug(monitor->log, "transport %p: remove ISO IO", transport);
+		spa_bt_iso_io_destroy(transport->iso_io);
+		transport->iso_io = NULL;
+	}
+
+	/* Transports in same connected iso group share the same i/o */
+	spa_list_for_each(t, &monitor->transport_list, link) {
+		if (!(t->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)))
+			continue;
+		if (t->bap_cig != transport->bap_cig)
+			continue;
+
+		if (t->iso_io) {
+			spa_log_debug(monitor->log, "transport %p: attach ISO IO to %p",
+					transport, t);
+			transport->iso_io = spa_bt_iso_io_attach(t->iso_io, transport);
+			if (transport->iso_io == NULL)
+				return -errno;
+			return 0;
 		}
 	}
 
-	m = dbus_message_new_method_call(BLUEZ_SERVICE,
-					 transport->path,
-					 BLUEZ_MEDIA_TRANSPORT_INTERFACE,
-					 method);
-	if (m == NULL)
-		return -ENOMEM;
+	spa_log_debug(monitor->log, "transport %p: new ISO IO", transport);
+	transport->iso_io = spa_bt_iso_io_create(transport, monitor->log, monitor->data_loop, monitor->data_system);
+	if (transport->iso_io == NULL)
+		return -errno;
+
+	return 0;
+}
+
+static bool transport_in_same_cig(struct spa_bt_transport *transport, struct spa_bt_transport *other)
+{
+	return (other->profile & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)) &&
+		other->bap_cig == transport->bap_cig &&
+		other->bap_initiator;
+}
+
+static void transport_acquire_reply(DBusPendingCall *pending, void *user_data)
+{
+	struct spa_bt_transport *transport = user_data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_device *device = transport->device;
+	int ret = 0;
+	DBusError err;
+	DBusMessage *r;
+	struct spa_bt_transport *t, *t_linked;
+
+	r = dbus_pending_call_steal_reply(pending);
+
+	spa_assert(transport->acquire_call == pending);
+	dbus_pending_call_unref(pending);
+	transport->acquire_call = NULL;
+
+	spa_bt_device_update_last_bluez_action_time(device);
+
+	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
+		spa_log_error(monitor->log, "Acquire %s returned error: %s",
+				transport->path,
+				dbus_message_get_error_name(r));
+		ret = -EIO;
+		goto finish;
+	}
 
 	dbus_error_init(&err);
 
-	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
-	dbus_message_unref(m);
-	m = NULL;
-
-	if (r == NULL) {
-		if (optional && spa_streq(err.name, "org.bluez.Error.NotAvailable")) {
-			spa_log_info(monitor->log, "Failed optional acquire of unavailable transport %s",
-					transport->path);
-		}
-		else {
-			spa_log_error(monitor->log, "Transport %s() failed for transport %s (%s)",
-					method, transport->path, err.message);
-		}
-		dbus_error_free(&err);
-		return -EIO;
-	}
-
-	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
-		spa_log_error(monitor->log, "%s returned error: %s", method, dbus_message_get_error_name(r));
-		ret = -EIO;
+	if (transport->fd >= 0) {
+		spa_log_error(monitor->log, "transport %p: invalid duplicate acquire", transport);
+		ret = -EINVAL;
 		goto finish;
 	}
 
@@ -2849,13 +3405,14 @@ static int transport_acquire(void *data, bool optional)
 				   DBUS_TYPE_UINT16, &transport->read_mtu,
 				   DBUS_TYPE_UINT16, &transport->write_mtu,
 				   DBUS_TYPE_INVALID)) {
-		spa_log_error(monitor->log, "Failed to parse %s() reply: %s", method, err.message);
+		spa_log_error(monitor->log, "Failed to parse Acquire %s reply: %s",
+				transport->path, err.message);
 		dbus_error_free(&err);
 		ret = -EIO;
 		goto finish;
 	}
-done:
-	spa_log_debug(monitor->log, "transport %p: %s %s, fd %d MTU %d:%d", transport, method,
+
+	spa_log_debug(monitor->log, "transport %p: Acquired %s, fd %d MTU %d:%d", transport,
 			transport->path, transport->fd, transport->read_mtu, transport->write_mtu);
 
 	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_PLAYING);
@@ -2865,17 +3422,167 @@ done:
 finish:
 	if (r)
 		dbus_message_unref(r);
-	return ret;
+	if (ret < 0)
+		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ERROR);
+	else {
+		if (transport_create_iso_io(transport) < 0)
+			spa_log_error(monitor->log, "transport %p: transport_create_iso_io failed",
+					transport);
+
+		if (!transport->bap_initiator)
+			spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
+	}
+
+	/* For LE Audio, multiple transport from the same device may share the same
+	 * stream (CIS) and group (CIG) but for different direction, e.g. a speaker and
+	 * a microphone. In this case they are linked, and we need to set the values
+	 * for all of them here.
+	 */
+	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
+		if (ret < 0) {
+			spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ERROR);
+			continue;
+		}
+
+		t_linked->fd = transport->fd;
+		t_linked->read_mtu = transport->read_mtu;
+		t_linked->write_mtu = transport->write_mtu;
+		spa_log_debug(monitor->log, "transport %p: linked Acquired %s, fd %d MTU %d:%d", t_linked,
+				t_linked->path, t_linked->fd, t_linked->read_mtu, t_linked->write_mtu);
+
+		if (transport_create_iso_io(t_linked) < 0)
+			spa_log_error(monitor->log, "transport %p: transport_create_iso_io failed",
+					t_linked);
+
+		if (!transport->bap_initiator)
+			spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ACTIVE);
+	}
+
+	/*
+	 * Transports in same CIG emit state change events at the same time,
+	 * after all pending acquires complete.
+	 */
+	if (transport->bap_initiator) {
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t))
+				continue;
+			if (t->acquire_call)
+				return;
+		}
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t))
+				continue;
+			if (t->fd >= 0)
+				spa_bt_transport_set_state(t, SPA_BT_TRANSPORT_STATE_ACTIVE);
+		}
+	}
 }
 
-static int transport_release(void *data)
+static int do_transport_acquire(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusMessage *m;
+	DBusError err;
+	dbus_bool_t ret;
+	struct spa_bt_transport *t_linked;
+
+	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
+		/* If a linked transport has been acquired, it will do all the work */
+		if (t_linked->acquire_call || t_linked->acquired) {
+			spa_log_debug(monitor->log, "Acquiring %s: use linked transport %s",
+					transport->path, t_linked->path);
+			spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
+			return 0;
+		}
+	}
+
+	if (transport->acquire_call)
+		return -EBUSY;
+
+	spa_log_info(monitor->log, "Acquiring transport %s", transport->path);
+
+	m = dbus_message_new_method_call(BLUEZ_SERVICE,
+					 transport->path,
+					 BLUEZ_MEDIA_TRANSPORT_INTERFACE,
+					 "Acquire");
+	if (m == NULL)
+		return -ENOMEM;
+
+	dbus_error_init(&err);
+
+	ret = dbus_connection_send_with_reply(monitor->conn, m, &transport->acquire_call, -1);
+	dbus_message_unref(m);
+
+	if (!ret || transport->acquire_call == NULL)
+		return -EIO;
+
+	ret = dbus_pending_call_set_notify(transport->acquire_call, transport_acquire_reply, transport, NULL);
+	if (!ret)
+		return -EIO;
+
+	return 0;
+}
+
+static bool another_cig_transport_active(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_transport *t;
+
+	spa_list_for_each(t, &monitor->transport_list, link) {
+		if (!transport_in_same_cig(transport, t) || t == transport)
+			continue;
+		if (t->acquired)
+			return true;
+	}
+
+	return false;
+}
+
+static int transport_acquire(void *data, bool optional)
 {
 	struct spa_bt_transport *transport = data;
 	struct spa_bt_monitor *monitor = transport->monitor;
-	DBusMessage *m, *r;
-	DBusError err;
-	bool is_idle = (transport->state == SPA_BT_TRANSPORT_STATE_IDLE);
+
+	/*
+	 * XXX: When as BAP Central, all CIS in a CIG must be acquired at the same time.
+	 * XXX: This is because of kernel ISO socket limitations, which does not handle
+	 * XXX: currently starting streams in the group one by one.
+	 */
+	if (transport->bap_initiator && !another_cig_transport_active(transport)) {
+		struct spa_bt_transport *t;
+
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t) || t == transport)
+				continue;
+
+			spa_log_debug(monitor->log, "Acquire CIG %d: transport %s",
+					transport->bap_cig, t->path);
+
+			do_transport_acquire(t);
+		}
+
+		spa_log_debug(monitor->log, "Acquire CIG %d: transport %s",
+				transport->bap_cig, transport->path);
+	}
+	if (transport->bap_initiator &&
+			(transport->fd >= 0 || transport->acquire_call)) {
+		/* Already acquired/acquiring */
+		spa_log_debug(monitor->log, "Acquiring %s: was in acquired CIG", transport->path);
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
+		return 0;
+	}
+
+	return do_transport_acquire(data);
+}
+
+static int do_transport_release(struct spa_bt_transport *transport)
+{
+	struct spa_bt_monitor *monitor = transport->monitor;
+	DBusMessage *m;
 	struct spa_bt_transport *t_linked;
+	bool is_idle = (transport->state == SPA_BT_TRANSPORT_STATE_IDLE);
+	DBusMessage *r;
+	DBusError err;
 	bool linked = false;
 
 	spa_log_debug(monitor->log, "transport %p: Release %s",
@@ -2883,12 +3590,26 @@ static int transport_release(void *data)
 
 	spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
 
+	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
+
+	if (transport->acquire_call) {
+		dbus_pending_call_cancel(transport->acquire_call);
+		dbus_pending_call_unref(transport->acquire_call);
+		transport->acquire_call = NULL;
+	}
+
+	if (transport->iso_io) {
+		spa_log_debug(monitor->log, "transport %p: remove ISO IO", transport);
+		spa_bt_iso_io_destroy(transport->iso_io);
+		transport->iso_io = NULL;
+	}
+
 	/* For LE Audio, multiple transport stream (CIS) can be linked together (CIG).
 	 * If they are part of the same device they re-use the same fd, and call to
 	 * release should be done for the last one only.
 	 */
 	spa_list_for_each(t_linked, &transport->bap_transport_linked, bap_transport_linked) {
-		if (t_linked->acquired && t_linked->device == transport->device) {
+		if (t_linked->acquire_call || t_linked->acquired) {
 			linked = true;
 			break;
 		}
@@ -2899,8 +3620,12 @@ static int transport_release(void *data)
 		return 0;
 	}
 
-	close(transport->fd);
-	transport->fd = -1;
+	if (transport->fd >= 0) {
+		close(transport->fd);
+		transport->fd = -1;
+	}
+
+	spa_log_info(monitor->log, "Releasing transport %s", transport->path);
 
 	m = dbus_message_new_method_call(BLUEZ_SERVICE,
 					 transport->path,
@@ -2910,15 +3635,10 @@ static int transport_release(void *data)
 		return -ENOMEM;
 
 	dbus_error_init(&err);
-
 	r = dbus_connection_send_with_reply_and_block(monitor->conn, m, -1, &err);
 	dbus_message_unref(m);
-	m = NULL;
 
-	if (r != NULL)
-		dbus_message_unref(r);
-
-	if (dbus_error_is_set(&err)) {
+	if (r == NULL)  {
 		if (is_idle) {
 			/* XXX: The fd always needs to be closed. However, Release()
 			 * XXX: apparently doesn't need to be called on idle transports
@@ -2932,12 +3652,51 @@ static int transport_release(void *data)
 			              transport->path, err.message);
 		}
 		dbus_error_free(&err);
-	}
-	else
+	} else {
 		spa_log_info(monitor->log, "Transport %s released", transport->path);
+		dbus_message_unref(r);
+	}
 
 	return 0;
 }
+
+static int transport_release(void *data)
+{
+	struct spa_bt_transport *transport = data;
+	struct spa_bt_monitor *monitor = transport->monitor;
+	struct spa_bt_transport *t;
+
+	/*
+	 * XXX: When as BAP Central, release CIS in a CIG when the last transport
+	 * XXX: goes away.
+	 */
+	if (transport->bap_initiator) {
+		/* Check if another transport is alive */
+		if (another_cig_transport_active(transport)) {
+			spa_log_debug(monitor->log, "Releasing %s: wait for CIG %d",
+					transport->path, transport->bap_cig);
+			return 0;
+		}
+
+		/* Release remaining transports in CIG */
+		spa_list_for_each(t, &monitor->transport_list, link) {
+			if (!transport_in_same_cig(transport, t) || t == transport)
+				continue;
+
+			spa_log_debug(monitor->log, "Release CIG %d: transport %s",
+					transport->bap_cig, t->path);
+
+			if (t->fd >= 0)
+				do_transport_release(t);
+		}
+
+		spa_log_debug(monitor->log, "Release CIG %d: transport %s",
+				transport->bap_cig, transport->path);
+	}
+
+	return do_transport_release(data);
+}
+
 
 static const struct spa_bt_transport_implementation transport_impl = {
 	SPA_VERSION_BT_TRANSPORT_IMPLEMENTATION,
@@ -3128,12 +3887,10 @@ next:
 static void media_codec_switch_process(struct spa_bt_media_codec_switch *sw)
 {
 	while (*sw->codec_iter != NULL && *sw->path_iter != NULL) {
-		struct timespec ts;
 		uint64_t now, threshold;
 
 		/* Rate limit BlueZ calls */
-		spa_system_clock_gettime(sw->device->monitor->main_system, CLOCK_MONOTONIC, &ts);
-		now = SPA_TIMESPEC_TO_NSEC(&ts);
+		now = get_time_now(sw->device->monitor);
 		threshold = sw->device->last_bluez_action_time + BLUEZ_ACTION_RATE_MSEC * SPA_NSEC_PER_MSEC;
 		if (now < threshold) {
 			/* Wait for timeout */
@@ -3355,7 +4112,8 @@ int spa_bt_device_ensure_media_codec(struct spa_bt_device *device, const struct 
 	const struct media_codec *preferred_codec = NULL;
 	size_t i, j, num_codecs, num_eps;
 
-	if (!device->adapter->application_registered) {
+	if (!device->adapter->a2dp_application_registered &&
+			!device->adapter->bap_application_registered) {
 		/* Codec switching not supported */
 		return -ENOTSUP;
 	}
@@ -3690,9 +4448,10 @@ static DBusHandlerResult endpoint_handler(DBusConnection *c, DBusMessage *m, voi
 	return res;
 }
 
-static void bluez_register_endpoint_reply(DBusPendingCall *pending, void *user_data)
+static void bluez_register_endpoint_legacy_reply(DBusPendingCall *pending, void *user_data)
 {
-	struct spa_bt_monitor *monitor = user_data;
+	struct spa_bt_adapter *adapter = user_data;
+	struct spa_bt_monitor *monitor = adapter->monitor;
 	DBusMessage *r;
 
 	r = dbus_pending_call_steal_reply(pending);
@@ -3710,6 +4469,8 @@ static void bluez_register_endpoint_reply(DBusPendingCall *pending, void *user_d
 				dbus_message_get_error_name(r));
 		goto finish;
 	}
+
+	adapter->legacy_endpoints_registered = true;
 
 finish:
 	dbus_message_unref(r);
@@ -3739,10 +4500,12 @@ static void append_basic_array_variant_dict_entry(DBusMessageIter *dict, const c
 	dbus_message_iter_close_container(dict, &dict_entry_it);
 }
 
-static int bluez_register_endpoint(struct spa_bt_monitor *monitor,
-				   const char *path, enum spa_bt_media_direction direction,
+static int bluez_register_endpoint_legacy(struct spa_bt_adapter *adapter,
+				   enum spa_bt_media_direction direction,
 				   const char *uuid, const struct media_codec *codec)
 {
+	struct spa_bt_monitor *monitor = adapter->monitor;
+	const char *path = adapter->path;
 	char  *object_path = NULL;
 	DBusMessage *m;
 	DBusMessageIter object_it, dict_it;
@@ -3783,7 +4546,7 @@ static int bluez_register_endpoint(struct spa_bt_monitor *monitor,
 	dbus_message_iter_close_container(&object_it, &dict_it);
 
 	dbus_connection_send_with_reply(monitor->conn, m, &call, -1);
-	dbus_pending_call_set_notify(call, bluez_register_endpoint_reply, monitor, NULL);
+	dbus_pending_call_set_notify(call, bluez_register_endpoint_legacy_reply, adapter, NULL);
 	dbus_message_unref(m);
 
 	free(object_path);
@@ -3795,14 +4558,15 @@ error:
 	return ret;
 }
 
-static int adapter_register_endpoints(struct spa_bt_adapter *a)
+static int adapter_register_endpoints_legacy(struct spa_bt_adapter *a)
 {
 	struct spa_bt_monitor *monitor = a->monitor;
 	const struct media_codec * const * const media_codecs = monitor->media_codecs;
 	int i;
 	int err = 0;
+	bool registered = false;
 
-	if (a->endpoints_registered)
+	if (a->legacy_endpoints_registered)
 	    return err;
 
 	/* The legacy bluez5 api doesn't support codec switching
@@ -3813,9 +4577,7 @@ static int adapter_register_endpoints(struct spa_bt_adapter *a)
 	 * */
 	spa_log_warn(monitor->log,
 		     "Using legacy bluez5 API for A2DP - only SBC will be supported. "
-		     "No LE Audio. Please upgrade bluez5.");
-
-	monitor->le_audio_supported = false;
+		     "Please upgrade bluez5.");
 
 	for (i = 0; media_codecs[i]; i++) {
 		const struct media_codec *codec = media_codecs[i];
@@ -3824,26 +4586,24 @@ static int adapter_register_endpoints(struct spa_bt_adapter *a)
 			continue;
 
 		if (endpoint_should_be_registered(monitor, codec, SPA_BT_MEDIA_SOURCE)) {
-			if ((err = bluez_register_endpoint(monitor, a->path,
-									SPA_BT_MEDIA_SOURCE,
+			if ((err = bluez_register_endpoint_legacy(a, SPA_BT_MEDIA_SOURCE,
 									SPA_BT_UUID_A2DP_SOURCE,
 									codec)))
 				goto out;
 		}
 
 		if (endpoint_should_be_registered(monitor, codec, SPA_BT_MEDIA_SINK)) {
-			if ((err = bluez_register_endpoint(monitor, a->path,
-									SPA_BT_MEDIA_SINK,
+			if ((err = bluez_register_endpoint_legacy(a, SPA_BT_MEDIA_SINK,
 									SPA_BT_UUID_A2DP_SINK,
 									codec)))
 				goto out;
 		}
 
-		a->endpoints_registered = true;
+		registered = true;
 		break;
 	}
 
-	if (!a->endpoints_registered) {
+	if (!registered) {
 		/* Should never happen as SBC support is always enabled */
 		spa_log_error(monitor->log, "Broken PipeWire build - unable to locate SBC codec");
 		err = -ENOSYS;
@@ -3887,7 +4647,7 @@ static void append_media_object(DBusMessageIter *iter, const char *endpoint,
 	dbus_message_iter_close_container(iter, &object);
 }
 
-static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *m, void *user_data)
+static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *m, void *user_data, bool is_bap)
 {
 	struct spa_bt_monitor *monitor = user_data;
 	const struct media_codec * const * const media_codecs = monitor->media_codecs;
@@ -3930,20 +4690,11 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 			int caps_size, ret;
 			uint16_t codec_id = codec->codec_id;
 
-			if (!is_media_codec_enabled(monitor, codec))
+			if (codec->bap != is_bap)
 				continue;
 
-			if (codec->bap && !monitor->le_audio_supported) {
-				/* The legacy bluez5 api doesn't support LE Audio
-				 * It doesn't make sense to register unsupported codecs as it prevents
-				 * registration of A2DP codecs
-				 * let's incentivize users to upgrade their bluez5 daemon
-				 * if they want proper media codec support
-				 * */
-				spa_log_warn(monitor->log, "Trying to use legacy bluez5 API for LE Audio - only A2DP will be supported. "
-										"Please upgrade bluez5.");
+			if (!is_media_codec_enabled(monitor, codec))
 				continue;
-			}
 
 			if (endpoint_should_be_registered(monitor, codec, SPA_BT_MEDIA_SINK)) {
 				caps_size = codec->fill_caps(codec, MEDIA_CODEC_FLAG_SINK, caps);
@@ -3987,7 +4738,17 @@ static DBusHandlerResult object_manager_handler(DBusConnection *c, DBusMessage *
 	return res;
 }
 
-static void bluez_register_application_reply(DBusPendingCall *pending, void *user_data)
+static DBusHandlerResult object_manager_handler_a2dp(DBusConnection *c, DBusMessage *m, void *user_data)
+{
+	return object_manager_handler(c, m, user_data, false);
+}
+
+static DBusHandlerResult object_manager_handler_bap(DBusConnection *c, DBusMessage *m, void *user_data)
+{
+	return object_manager_handler(c, m, user_data, true);
+}
+
+static void bluez_register_application_a2dp_reply(DBusPendingCall *pending, void *user_data)
 {
 	struct spa_bt_adapter *adapter = user_data;
 	struct spa_bt_monitor *monitor = adapter->monitor;
@@ -4012,13 +4773,37 @@ static void bluez_register_application_reply(DBusPendingCall *pending, void *use
 	}
 
 	fallback = false;
-	adapter->application_registered = true;
+	adapter->a2dp_application_registered = true;
 
 finish:
 	dbus_message_unref(r);
 
 	if (fallback)
-		adapter_register_endpoints(adapter);
+		adapter_register_endpoints_legacy(adapter);
+}
+
+static void bluez_register_application_bap_reply(DBusPendingCall *pending, void *user_data)
+{
+	struct spa_bt_adapter *adapter = user_data;
+	struct spa_bt_monitor *monitor = adapter->monitor;
+	DBusMessage *r;
+
+	r = dbus_pending_call_steal_reply(pending);
+	dbus_pending_call_unref(pending);
+
+	if (r == NULL)
+		return;
+
+	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
+		spa_log_error(monitor->log, "RegisterApplication() failed: %s",
+		        dbus_message_get_error_name(r));
+		goto finish;
+	}
+
+	adapter->bap_application_registered = true;
+
+finish:
+	dbus_message_unref(r);
 }
 
 static int register_media_endpoint(struct spa_bt_monitor *monitor,
@@ -4037,7 +4822,7 @@ static int register_media_endpoint(struct spa_bt_monitor *monitor,
 	if (ret < 0)
 		return ret;
 
-	spa_log_info(monitor->log, "registering endpoint: %s", object_path);
+	spa_log_info(monitor->log, "Registering DBus media endpoint: %s", object_path);
 
 	if (!dbus_connection_register_object_path(monitor->conn,
 						  object_path,
@@ -4053,15 +4838,27 @@ static int register_media_endpoint(struct spa_bt_monitor *monitor,
 static int register_media_application(struct spa_bt_monitor * monitor)
 {
 	const struct media_codec * const * const media_codecs = monitor->media_codecs;
-	const DBusObjectPathVTable vtable_object_manager = {
-		.message_function = object_manager_handler,
+	const DBusObjectPathVTable vtable_object_manager_a2dp = {
+		.message_function = object_manager_handler_a2dp,
+	};
+	const DBusObjectPathVTable vtable_object_manager_bap = {
+		.message_function = object_manager_handler_bap,
 	};
 
-	spa_log_info(monitor->log, "Registering media application object: " MEDIA_OBJECT_MANAGER_PATH);
+	spa_log_info(monitor->log, "Registering DBus media object manager: %s",
+			A2DP_OBJECT_MANAGER_PATH);
 
 	if (!dbus_connection_register_object_path(monitor->conn,
-	                                          MEDIA_OBJECT_MANAGER_PATH,
-	                                          &vtable_object_manager, monitor))
+	                                          A2DP_OBJECT_MANAGER_PATH,
+	                                          &vtable_object_manager_a2dp, monitor))
+		return -EIO;
+
+	spa_log_info(monitor->log, "Registering DBus media object manager: %s",
+			BAP_OBJECT_MANAGER_PATH);
+
+	if (!dbus_connection_register_object_path(monitor->conn,
+	                                          BAP_OBJECT_MANAGER_PATH,
+	                                          &vtable_object_manager_bap, monitor))
 		return -EIO;
 
 	for (int i = 0; media_codecs[i]; i++) {
@@ -4105,20 +4902,31 @@ static void unregister_media_application(struct spa_bt_monitor * monitor)
 		unregister_media_endpoint(monitor, codec, SPA_BT_MEDIA_SINK);
 	}
 
-	dbus_connection_unregister_object_path(monitor->conn, MEDIA_OBJECT_MANAGER_PATH);
+	dbus_connection_unregister_object_path(monitor->conn, BAP_OBJECT_MANAGER_PATH);
+	dbus_connection_unregister_object_path(monitor->conn, A2DP_OBJECT_MANAGER_PATH);
 }
 
-static int adapter_register_application(struct spa_bt_adapter *a) {
-	const char *object_manager_path = MEDIA_OBJECT_MANAGER_PATH;
+static int adapter_register_application(struct spa_bt_adapter *a, bool bap)
+{
+	const char *object_manager_path = bap ? BAP_OBJECT_MANAGER_PATH : A2DP_OBJECT_MANAGER_PATH;
 	struct spa_bt_monitor *monitor = a->monitor;
 	DBusMessage *m;
 	DBusMessageIter i, d;
 	DBusPendingCall *call;
 
-	if (a->application_registered)
+	if (bap && a->bap_application_registered)
+		return 0;
+	if (!bap && a->a2dp_application_registered)
 		return 0;
 
-	spa_log_debug(monitor->log, "Registering bluez5 media application on adapter %s", a->path);
+	if (bap && !a->le_audio_supported) {
+		spa_log_info(monitor->log, "Adapter %s indicates LE Audio unsupported: not registering application",
+				a->path);
+		return -ENOTSUP;
+	}
+
+	spa_log_debug(monitor->log, "Registering bluez5 %s media application on adapter %s",
+			(bap ? "LE Audio" : "A2DP"), a->path);
 
 	m = dbus_message_new_method_call(BLUEZ_SERVICE,
 	                                 a->path,
@@ -4133,7 +4941,9 @@ static int adapter_register_application(struct spa_bt_adapter *a) {
 	dbus_message_iter_close_container(&i, &d);
 
 	dbus_connection_send_with_reply(monitor->conn, m, &call, -1);
-	dbus_pending_call_set_notify(call, bluez_register_application_reply, a, NULL);
+	dbus_pending_call_set_notify(call,
+			bap ? bluez_register_application_bap_reply : bluez_register_application_a2dp_reply,
+			a, NULL);
 	dbus_message_unref(m);
 
 	return 0;
@@ -4205,48 +5015,6 @@ static void reselect_backend(struct spa_bt_monitor *monitor, bool silent)
 				backend ? backend->name : "none");
 }
 
-static int media_update_props(struct spa_bt_monitor *monitor,
-				DBusMessageIter *props_iter,
-				DBusMessageIter *invalidated_iter)
-{
-	while (dbus_message_iter_get_arg_type(props_iter) != DBUS_TYPE_INVALID) {
-		DBusMessageIter it[2];
-		const char *key;
-
-		dbus_message_iter_recurse(props_iter, &it[0]);
-		dbus_message_iter_get_basic(&it[0], &key);
-		dbus_message_iter_next(&it[0]);
-		dbus_message_iter_recurse(&it[0], &it[1]);
-
-		if (spa_streq(key, "SupportedUUIDs")) {
-			DBusMessageIter iter;
-
-			if (!check_iter_signature(&it[1], "as"))
-				goto next;
-
-			dbus_message_iter_recurse(&it[1], &iter);
-
-			while (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_INVALID) {
-				const char *uuid;
-
-				dbus_message_iter_get_basic(&iter, &uuid);
-
-				if (spa_streq(uuid, SPA_BT_UUID_BAP_SINK)) {
-					monitor->le_audio_supported = true;
-					spa_log_info(monitor->log, "LE Audio supported");
-				}
-				dbus_message_iter_next(&iter);
-			}
-		}
-		else
-			spa_log_debug(monitor->log, "media: unhandled key %s", key);
-
-next:
-		dbus_message_iter_next(props_iter);
-	}
-	return 0;
-}
-
 static void interface_added(struct spa_bt_monitor *monitor,
 			    DBusConnection *conn,
 			    const char *object_path,
@@ -4255,7 +5023,8 @@ static void interface_added(struct spa_bt_monitor *monitor,
 {
 	spa_log_debug(monitor->log, "Found object %s, interface %s", object_path, interface_name);
 
-	if (spa_streq(interface_name, BLUEZ_ADAPTER_INTERFACE)) {
+	if (spa_streq(interface_name, BLUEZ_ADAPTER_INTERFACE) ||
+			spa_streq(interface_name, BLUEZ_MEDIA_INTERFACE)) {
 		struct spa_bt_adapter *a;
 
 		a = adapter_find(monitor, object_path);
@@ -4266,10 +5035,21 @@ static void interface_added(struct spa_bt_monitor *monitor,
 				return;
 			}
 		}
-		adapter_update_props(a, props_iter, NULL);
-		adapter_register_application(a);
-		adapter_register_player(a);
-		adapter_update_devices(a);
+
+		if (spa_streq(interface_name, BLUEZ_ADAPTER_INTERFACE)) {
+			adapter_update_props(a, props_iter, NULL);
+			a->has_adapter1_interface = true;
+		} else {
+			adapter_media_update_props(a, props_iter, NULL);
+			a->has_media1_interface = true;
+		}
+
+		if (a->has_adapter1_interface && a->has_media1_interface) {
+			adapter_register_application(a, false);
+			adapter_register_application(a, true);
+			adapter_register_player(a);
+			adapter_update_devices(a);
+		}
 	}
 	else if (spa_streq(interface_name, BLUEZ_PROFILE_MANAGER_INTERFACE)) {
 		if (monitor->backends[BACKEND_NATIVE])
@@ -4301,6 +5081,9 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		 * profile connection handlers can receive per-device settings during profile negotiation. */
 		spa_bt_device_add_profile(d, SPA_BT_PROFILE_NULL);
 	}
+	else if (spa_streq(interface_name, BLUEZ_DEVICE_SET_INTERFACE)) {
+		device_set_update_props(monitor, object_path, props_iter, NULL);
+	}
 	else if (spa_streq(interface_name, BLUEZ_MEDIA_ENDPOINT_INTERFACE)) {
 		struct spa_bt_remote_endpoint *ep;
 		struct spa_bt_device *d;
@@ -4319,9 +5102,6 @@ static void interface_added(struct spa_bt_monitor *monitor,
 		d = ep->device;
 		if (d)
 			spa_bt_device_emit_profiles_changed(d, d->profiles, d->connected_profiles);
-	}
-	else if (spa_streq(interface_name, BLUEZ_MEDIA_INTERFACE)) {
-		media_update_props(monitor, props_iter, NULL);
 	}
 }
 
@@ -4371,7 +5151,10 @@ static void interfaces_removed(struct spa_bt_monitor *monitor, DBusMessageIter *
 			d = spa_bt_device_find(monitor, object_path);
 			if (d != NULL)
 				device_free(d);
-		} else if (spa_streq(interface_name, BLUEZ_ADAPTER_INTERFACE)) {
+		} else if (spa_streq(interface_name, BLUEZ_DEVICE_SET_INTERFACE)) {
+			device_set_update_props(monitor, object_path, NULL, NULL);
+		} else if (spa_streq(interface_name, BLUEZ_ADAPTER_INTERFACE) ||
+				spa_streq(interface_name, BLUEZ_MEDIA_INTERFACE)) {
 			struct spa_bt_adapter *a;
 			a = adapter_find(monitor, object_path);
 			if (a != NULL)
@@ -4575,7 +5358,8 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 		dbus_message_iter_next(&it[0]);
 		dbus_message_iter_recurse(&it[0], &it[1]);
 
-		if (spa_streq(iface, BLUEZ_ADAPTER_INTERFACE)) {
+		if (spa_streq(iface, BLUEZ_ADAPTER_INTERFACE) ||
+				spa_streq(iface, BLUEZ_MEDIA_INTERFACE)) {
 			struct spa_bt_adapter *a;
 
 			a = adapter_find(monitor, path);
@@ -4586,7 +5370,10 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			}
 			spa_log_debug(monitor->log, "Properties changed in adapter %s", path);
 
-			adapter_update_props(a, &it[1], NULL);
+			if (spa_streq(iface, BLUEZ_ADAPTER_INTERFACE))
+				adapter_update_props(a, &it[1], NULL);
+			else
+				adapter_media_update_props(a, &it[1], NULL);
 		}
 		else if (spa_streq(iface, BLUEZ_DEVICE_INTERFACE)) {
 			struct spa_bt_device *d;
@@ -4607,6 +5394,9 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			device_update_hw_volume_profiles(d);
 
 			spa_bt_device_add_profile(d, SPA_BT_PROFILE_NULL);
+		}
+		else if (spa_streq(iface, BLUEZ_DEVICE_SET_INTERFACE)) {
+			device_set_update_props(monitor, path, &it[1], NULL);
 		}
 		else if (spa_streq(iface, BLUEZ_MEDIA_ENDPOINT_INTERFACE)) {
 			struct spa_bt_remote_endpoint *ep;
@@ -4691,7 +5481,15 @@ static void add_filters(struct spa_bt_monitor *this)
 	dbus_bus_add_match(this->conn,
 			"type='signal',sender='" BLUEZ_SERVICE "',"
 			"interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',"
+			"arg0='" BLUEZ_MEDIA_INTERFACE "'", &err);
+	dbus_bus_add_match(this->conn,
+			"type='signal',sender='" BLUEZ_SERVICE "',"
+			"interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',"
 			"arg0='" BLUEZ_DEVICE_INTERFACE "'", &err);
+	dbus_bus_add_match(this->conn,
+			"type='signal',sender='" BLUEZ_SERVICE "',"
+			"interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',"
+			"arg0='" BLUEZ_DEVICE_SET_INTERFACE "'", &err);
 	dbus_bus_add_match(this->conn,
 			"type='signal',sender='" BLUEZ_SERVICE "',"
 			"interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',"
@@ -4869,6 +5667,30 @@ int spa_bt_profiles_from_json_array(const char *str)
 	return profiles;
 }
 
+static int parse_roles(struct spa_bt_monitor *monitor, const struct spa_dict *info)
+{
+	const char *str;
+	int res = 0;
+	int profiles = SPA_BT_PROFILE_MEDIA_SINK | SPA_BT_PROFILE_MEDIA_SOURCE;
+
+	/* HSP/HFP backends parse this property separately */
+	if (info && (str = spa_dict_lookup(info, "bluez5.roles"))) {
+		res = spa_bt_profiles_from_json_array(str);
+		if (res < 0) {
+			spa_log_warn(monitor->log, "malformed bluez5.roles setting ignored");
+			goto done;
+		}
+
+		profiles &= res;
+	}
+
+	res = 0;
+
+done:
+	monitor->enabled_profiles = profiles;
+	return res;
+}
+
 static int parse_codec_array(struct spa_bt_monitor *this, const struct spa_dict *info)
 {
 	const struct media_codec * const * const media_codecs = this->media_codecs;
@@ -4987,7 +5809,9 @@ impl_init(const struct spa_handle_factory *factory,
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->dbus = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DBus);
 	this->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->main_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
+	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 	this->plugin_loader = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_PluginLoader);
 
 	spa_log_topic_init(this->log, &log_topic);
@@ -5053,6 +5877,8 @@ impl_init(const struct spa_handle_factory *factory,
 
 	if ((res = parse_codec_array(this, info)) < 0)
 		goto fail;
+
+	parse_roles(this, info);
 
 	this->default_audio_info.rate = A2DP_CODEC_DEFAULT_RATE;
 	this->default_audio_info.channels = A2DP_CODEC_DEFAULT_CHANNELS;

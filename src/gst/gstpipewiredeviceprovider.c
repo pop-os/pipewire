@@ -1,26 +1,6 @@
-/* GStreamer
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* GStreamer */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -230,6 +210,7 @@ new_node (GstPipeWireDeviceProvider *self, struct node_data *data)
   const struct pw_node_info *info = data->info;
   const gchar *element = NULL;
   GstPipeWireDevice *gstdev;
+  int priority = 0;
 
   if (info->max_input_ports > 0 && info->max_output_ports == 0) {
     type = GST_PIPEWIRE_DEVICE_TYPE_SINK;
@@ -244,11 +225,16 @@ new_node (GstPipeWireDeviceProvider *self, struct node_data *data)
   props = gst_structure_new_empty ("pipewire-proplist");
   if (info->props) {
     const struct spa_dict_item *item;
+    const char *str;
+
     spa_dict_for_each (item, info->props)
       gst_structure_set (props, item->key, G_TYPE_STRING, item->value, NULL);
 
     klass = spa_dict_lookup (info->props, PW_KEY_MEDIA_CLASS);
     name = spa_dict_lookup (info->props, PW_KEY_NODE_DESCRIPTION);
+
+    if ((str = spa_dict_lookup(info->props, PW_KEY_PRIORITY_SESSION)))
+      priority = atoi(str);
   }
   if (klass == NULL)
     klass = "unknown/unknown";
@@ -264,26 +250,56 @@ new_node (GstPipeWireDeviceProvider *self, struct node_data *data)
   gstdev->serial = data->serial;
   gstdev->type = type;
   gstdev->element = element;
+  gstdev->priority = priority;
   if (props)
     gst_structure_free (props);
 
   return GST_DEVICE (gstdev);
 }
 
+static int
+compare_device_session_priority (const void *a,
+                                 const void *b)
+{
+  const GstPipeWireDevice *dev_a = a;
+  const GstPipeWireDevice *dev_b = b;
+
+  if (dev_a->priority < dev_b->priority)
+    return 1;
+  else if (dev_a->priority > dev_b->priority)
+    return -1;
+  else
+    return 0;
+}
+
 static void do_add_nodes(GstPipeWireDeviceProvider *self)
 {
   struct node_data *nd;
+  GList *new_devices = NULL;
+  GList *l;
 
   spa_list_for_each(nd, &self->nodes, link) {
     if (nd->dev != NULL)
 	    continue;
     pw_log_info("add node %d", nd->id);
     nd->dev = new_node (self, nd);
-    if (nd->dev) {
-      if(self->list_only)
-        self->devices = g_list_prepend (self->devices, gst_object_ref_sink (nd->dev));
-      else
-        gst_device_provider_device_add (GST_DEVICE_PROVIDER (self), nd->dev);
+    if (nd->dev)
+      new_devices = g_list_prepend (new_devices, nd->dev);
+  }
+  if (!new_devices)
+    return;
+
+  new_devices = g_list_sort (new_devices,
+                             compare_device_session_priority);
+  for (l = new_devices; l != NULL; l = l->next) {
+    GstDevice *device = l->data;
+
+    if(self->list_only) {
+      self->devices = g_list_insert_sorted (self->devices,
+                                            gst_object_ref_sink (device),
+                                            compare_device_session_priority);
+    } else {
+      gst_device_provider_device_add (GST_DEVICE_PROVIDER (self), device);
     }
   }
 }

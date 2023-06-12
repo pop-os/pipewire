@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdio.h>
 
@@ -29,6 +9,7 @@
 #include <spa/utils/result.h>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/private.h>
 #include <pipewire/loop.h>
 #include <pipewire/log.h>
 #include <pipewire/type.h>
@@ -43,6 +24,9 @@ struct impl {
 
 	struct spa_handle *system_handle;
 	struct spa_handle *loop_handle;
+
+	void *user_data;
+	const struct pw_loop_callbacks *cb;
 };
 /** \endcond */
 
@@ -125,6 +109,12 @@ struct pw_loop *pw_loop_new(const struct spa_dict *props)
                 goto error_unload_loop;
         }
 	this->control = iface;
+	if (!spa_interface_callback_check(&this->control->iface,
+			struct spa_loop_control_methods, iterate, 0)) {
+		res = -EINVAL;
+		pw_log_error("%p: loop does not support iterate", this);
+		goto error_unload_loop;
+	}
 
         if ((res = spa_handle_get_interface(impl->loop_handle,
 					    SPA_TYPE_INTERFACE_LoopUtils,
@@ -159,4 +149,25 @@ void pw_loop_destroy(struct pw_loop *loop)
 	pw_unload_spa_handle(impl->loop_handle);
 	pw_unload_spa_handle(impl->system_handle);
 	free(impl);
+}
+
+void
+pw_loop_set_callbacks(struct pw_loop *loop, const struct pw_loop_callbacks *cb, void *data)
+{
+	struct impl *impl = SPA_CONTAINER_OF(loop, struct impl, this);
+
+	impl->user_data = data;
+	impl->cb = cb;
+}
+
+SPA_EXPORT
+int pw_loop_check(struct pw_loop *loop)
+{
+	struct impl *impl = SPA_CONTAINER_OF(loop, struct impl, this);
+	int res;
+	if (impl->cb && impl->cb->check)
+		res = impl->cb->check(impl->user_data, loop);
+	else
+		res = spa_loop_control_check(loop->control);
+	return res;
 }

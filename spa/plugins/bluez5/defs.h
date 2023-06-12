@@ -1,26 +1,6 @@
-/* Spa Bluez5 Monitor
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa Bluez5 Monitor */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef SPA_BLUEZ5_DEFS_H
 #define SPA_BLUEZ5_DEFS_H
@@ -47,6 +27,7 @@ extern "C" {
 #define BLUEZ_PROFILE_INTERFACE BLUEZ_SERVICE ".Profile1"
 #define BLUEZ_ADAPTER_INTERFACE BLUEZ_SERVICE ".Adapter1"
 #define BLUEZ_DEVICE_INTERFACE BLUEZ_SERVICE ".Device1"
+#define BLUEZ_DEVICE_SET_INTERFACE BLUEZ_SERVICE ".DeviceSet1"
 #define BLUEZ_MEDIA_INTERFACE BLUEZ_SERVICE ".Media1"
 #define BLUEZ_MEDIA_ENDPOINT_INTERFACE BLUEZ_SERVICE ".MediaEndpoint1"
 #define BLUEZ_MEDIA_TRANSPORT_INTERFACE BLUEZ_SERVICE ".MediaTransport1"
@@ -161,12 +142,13 @@ extern "C" {
 #define HFP_AUDIO_CODEC_CVSD    0x01
 #define HFP_AUDIO_CODEC_MSBC    0x02
 
-#define MEDIA_OBJECT_MANAGER_PATH "/MediaEndpoint"
-#define A2DP_SINK_ENDPOINT	MEDIA_OBJECT_MANAGER_PATH "/A2DPSink"
-#define A2DP_SOURCE_ENDPOINT	MEDIA_OBJECT_MANAGER_PATH "/A2DPSource"
+#define A2DP_OBJECT_MANAGER_PATH "/MediaEndpoint"
+#define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
+#define A2DP_SOURCE_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSource"
 
-#define BAP_SINK_ENDPOINT	MEDIA_OBJECT_MANAGER_PATH "/BAPSink"
-#define BAP_SOURCE_ENDPOINT	MEDIA_OBJECT_MANAGER_PATH "/BAPSource"
+#define BAP_OBJECT_MANAGER_PATH "/MediaEndpointLE"
+#define BAP_SINK_ENDPOINT	BAP_OBJECT_MANAGER_PATH "/BAPSink"
+#define BAP_SOURCE_ENDPOINT	BAP_OBJECT_MANAGER_PATH "/BAPSource"
 
 #define SPA_BT_UNKNOWN_DELAY			0
 
@@ -358,11 +340,15 @@ struct spa_bt_adapter {
 	int powered;
 	unsigned int has_msbc:1;
 	unsigned int msbc_probed:1;
-	unsigned int endpoints_registered:1;
-	unsigned int application_registered:1;
+	unsigned int legacy_endpoints_registered:1;
+	unsigned int a2dp_application_registered:1;
+	unsigned int bap_application_registered:1;
 	unsigned int player_registered:1;
 	unsigned int has_battery_provider:1;
 	unsigned int battery_provider_unavailable:1;
+	unsigned int le_audio_supported:1;
+	unsigned int has_adapter1_interface:1;
+	unsigned int has_media1_interface:1;
 };
 
 enum spa_bt_form_factor {
@@ -455,11 +441,26 @@ struct spa_bt_device_events {
 	/** Profile configuration changed */
 	void (*profiles_changed) (void *data, uint32_t prev_profiles, uint32_t prev_connected);
 
+	/** Device set configuration changed */
+	void (*device_set_changed) (void *data);
+
 	/** Device freed */
 	void (*destroy) (void *data);
 };
 
 struct media_codec;
+
+struct spa_bt_set_membership {
+	struct spa_list link;
+	struct spa_list others;
+	struct spa_bt_device *device;
+	char *path;
+	uint8_t rank;
+	bool leader;
+};
+
+#define spa_bt_for_each_set_member(s, set) \
+	for ((s) = (set); (s); (s) = spa_list_next((s), others), (s) = (s) != (set) ? (s) : NULL)
 
 struct spa_bt_device {
 	struct spa_list link;
@@ -492,6 +493,7 @@ struct spa_bt_device {
 	struct spa_list remote_endpoint_list;
 	struct spa_list transport_list;
 	struct spa_list codec_switch_list;
+	struct spa_list set_membership_list;
 	uint8_t battery;
 	int has_battery;
 
@@ -533,9 +535,12 @@ void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device);
 #define spa_bt_device_emit_connected(d,...)	        spa_bt_device_emit(d, connected, 0, __VA_ARGS__)
 #define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
 #define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
+#define spa_bt_device_emit_device_set_changed(d)	spa_bt_device_emit(d, device_set_changed, 0)
 #define spa_bt_device_emit_destroy(d)			spa_bt_device_emit(d, destroy, 0)
 #define spa_bt_device_add_listener(d,listener,events,data)           \
 	spa_hook_list_append(&(d)->listener_list, listener, events, data)
+
+struct spa_bt_iso_io;
 
 struct spa_bt_sco_io;
 
@@ -554,9 +559,10 @@ int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *data, int size);
 #define SPA_BT_VOLUME_A2DP_MAX	127
 
 enum spa_bt_transport_state {
-        SPA_BT_TRANSPORT_STATE_IDLE,
-        SPA_BT_TRANSPORT_STATE_PENDING,
-        SPA_BT_TRANSPORT_STATE_ACTIVE,
+        SPA_BT_TRANSPORT_STATE_ERROR = -1,
+        SPA_BT_TRANSPORT_STATE_IDLE = 0,
+        SPA_BT_TRANSPORT_STATE_PENDING = 1,
+        SPA_BT_TRANSPORT_STATE_ACTIVE = 2,
 };
 
 struct spa_bt_transport_events {
@@ -615,15 +621,24 @@ struct spa_bt_transport {
 	int acquire_refcount;
 	bool acquired;
 	bool keepalive;
+	int error_count;
+	uint64_t last_error_time;
 	int fd;
 	uint16_t read_mtu;
 	uint16_t write_mtu;
-	uint16_t delay;
+	unsigned int delay_us;
+	unsigned int latency_us;
+	uint8_t bap_cig;
+	uint8_t bap_cis;
+	uint32_t bap_interval;
 
+	struct spa_bt_iso_io *iso_io;
 	struct spa_bt_sco_io *sco_io;
 
 	struct spa_source volume_timer;
 	struct spa_source release_timer;
+	DBusPendingCall *acquire_call;
+	DBusPendingCall *volume_call;
 
 	struct spa_hook_list listener_list;
 	struct spa_callbacks impl;

@@ -1,27 +1,7 @@
-/* PipeWire
- *
- * Copyright © 2021 Sanchayan Maity <sanchayan@asymptotic.io>
- * Copyright © 2022 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Sanchayan Maity <sanchayan@asymptotic.io> */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -63,16 +43,16 @@
  * - `stream.props`: Extra properties for the local stream.
  *
  * When `tunnel.mode` is `capture`, a capture stream on the default source is
- * created. Samples read from the pipe will be the contents of the captured source.
+ * created. The samples captured from the source will be written to the pipe.
  *
- * When `tunnel.mode` is `sink`, a sink node is created. Samples read from the
- * pipe will be the samples played on the sink.
+ * When `tunnel.mode` is `sink`, a sink node is created. Samples played on the
+ * sink will be written to the pipe.
  *
  * When `tunnel.mode` is `playback`, a playback stream on the default sink is
- * created. Samples written to the pipe will be played on the sink.
+ * created. The samples read from the pipe will be played on the sink.
  *
- * When `tunnel.mode` is `source`, a source node is created. Samples written to
- * the pipe will be made available to streams connected to the source.
+ * When `tunnel.mode` is `source`, a source node is created. Samples read from
+ * the the pipe will be made available on the source.
  *
  * When `pipe.filename` is not given, a default fifo in `/tmp/fifo_input` or
  * `/tmp/fifo_output` will be created that can be written and read respectively,
@@ -123,7 +103,7 @@
 
 #define NAME "pipe-tunnel"
 
-#define DEFAULT_CAPTURE_FILENAME 	"/tmp/fifo_input"
+#define DEFAULT_CAPTURE_FILENAME	"/tmp/fifo_input"
 #define DEFAULT_PLAYBACK_FILENAME	"/tmp/fifo_output"
 
 #define DEFAULT_FORMAT "S16"
@@ -134,18 +114,18 @@
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
-#define MODULE_USAGE	"[ remote.name=<remote> ] "				\
-			"[ node.latency=<latency as fraction> ] "		\
-			"[ node.name=<name of the nodes> ] "			\
-			"[ node.description=<description of the nodes> ] "	\
-			"[ target.object=<remote node target name or serial> ] "\
-			"[ audio.format=<sample format> ] "			\
-			"[ audio.rate=<sample rate> ] "				\
-			"[ audio.channels=<number of channels> ] "		\
-			"[ audio.position=<channel map> ] "			\
-			"[ tunnel.mode=capture|playback|sink|source "		\
-			"[ pipe.filename=<filename> ]"				\
-			"[ stream.props=<properties> ] "
+#define MODULE_USAGE	"( remote.name=<remote> ) "				\
+			"( node.latency=<latency as fraction> ) "		\
+			"( node.name=<name of the nodes> ) "			\
+			"( node.description=<description of the nodes> ) "	\
+			"( target.object=<remote node target name or serial> ) "\
+			"( audio.format=<sample format> ) "			\
+			"( audio.rate=<sample rate> ) "				\
+			"( audio.channels=<number of channels> ) "		\
+			"( audio.position=<channel map> ) "			\
+			"( tunnel.mode=capture|playback|sink|source )"		\
+			"( pipe.filename=<filename> )"				\
+			"( stream.props=<properties> ) "
 
 
 static const struct spa_dict_item module_props[] = {
@@ -314,7 +294,7 @@ static const struct pw_stream_events capture_stream_events = {
 	.process = capture_stream_process
 };
 
-static int  create_stream(struct impl *impl)
+static int create_stream(struct impl *impl)
 {
 	int res;
 	uint32_t n_params;

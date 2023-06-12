@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2022 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2022 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -179,8 +159,8 @@ static int x11_connect(struct impl *impl, const char *name)
 	unsigned int auto_ctrls, auto_values;
 
 	if (!(impl->display = XOpenDisplay(name))) {
-		pw_log_error("XOpenDisplay() failed");
-		return -EIO;
+		pw_log_info("XOpenDisplay() failed. Uninstall or disable the module-x11-bell module");
+		return -EHOSTDOWN;
 	}
 
 	impl->source = pw_loop_add_io(impl->loop,
@@ -250,10 +230,10 @@ static const struct pw_impl_module_events module_events = {
 static const struct spa_dict_item module_x11_bell_info[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "X11 Bell interceptor" },
-	{ PW_KEY_MODULE_USAGE,	"sink.name=<name for the sink> "
-				"sample.name=<the sample name> "
-				"x11.display=<the X11 display> "
-				"x11.xauthority=<the X11 XAuthority> " },
+	{ PW_KEY_MODULE_USAGE,	"( sink.name=<name for the sink> ) "
+				"( sample.name=<the sample name> ) "
+				"( x11.display=<the X11 display> ) "
+				".x11.xauthority=<the X11 XAuthority> )" },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 SPA_EXPORT

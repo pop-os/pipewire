@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -82,7 +62,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *     filter.graph = {
  *         nodes = [
  *             {
- *                 type = <ladspa | lv2 | builtin>
+ *                 type = <ladspa | lv2 | builtin | sofa>
  *                 name = <name>
  *                 plugin = <plugin>
  *                 label = <label>
@@ -109,22 +89,24 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * Nodes describe the processing filters in the graph. Use a tool like lv2ls
  * or listplugins to get a list of available plugins, labels and the port names.
  *
- * - `type` is one of `ladspa`, `lv2` or `builtin`
+ * - `type` is one of `ladspa`, `lv2`, `builtin` or `sofa`.
  * - `name` is the name for this node, you might need this later to refer to this node
  *    and its ports when setting controls or making links.
  * - `plugin` is the type specific plugin name.
  *    - For LADSPA plugins it will append `.so` to find the shared object with that
  *       name in the LADSPA plugin path.
  *    - For LV2, this is the plugin URI obtained with lv2ls.
- *    - For builtin this is ignored
+ *    - For builtin and sofa this is ignored
  * - `label` is the type specific filter inside the plugin.
  *    - For LADSPA this is the label
  *    - For LV2 this is unused
- *    - For builtin this is the name of the filter to use
+ *    - For builtin and sofa this is the name of the filter to use
  *
- * - `config` contains a filter specific configuration section. The convolver
- *            plugin needs this.
+ * - `config` contains a filter specific configuration section. Some plugins need
+ *            this. (convolver, sofa, delay, ...)
  * - `control` contains the initial values for the control ports of the filter.
+ *            normally these are given with the port name but it is also possible
+ *            to give the control index as the key.
  *
  * ### Links
  *
@@ -180,7 +162,11 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * All biquad filters have an input port "In" and an output port "Out". They have
  * a "Freq", "Q" and "Gain" control. Their meaning depends on the particular biquad that
- * is used. The following labels can be used:
+ * is used. The biquads also have "b0", "b1", "b2", "a0", "a1" and "a2" ports that
+ * are read-only except for the bq_raw biquad, which can configure default values
+ * depending on the graph rate and change those at runtime.
+ *
+ * The following labels can be used:
  *
  * - `bq_lowpass` a lowpass filter.
  * - `bq_highpass` a highpass filter.
@@ -190,6 +176,30 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - `bq_peaking` a peaking filter.
  * - `bq_notch` a notch filter.
  * - `bq_allpass` an allpass filter.
+ * - `bq_raw` a raw biquad filter. You need a config section to specify coefficients
+ *   		per sample rate. The coefficients of the sample rate closest to the
+ *   		graph rate are selected:
+ *
+ *\code{.unparsed}
+ * filter.graph = {
+ *     nodes = [
+ *         {
+ *             type   = builtin
+ *             name   = ...
+ *             label  = bq_raw
+ *             config = {
+ *                 coefficients = [
+ *                     { rate =  44100, b0=.., b1=.., b2=.., a0=.., a1=.., a2=.. },
+ *                     { rate =  48000, b0=.., b1=.., b2=.., a0=.., a1=.., a2=.. },
+ *                     { rate = 192000, b0=.., b1=.., b2=.., a0=.., a1=.., a2=.. }
+ *                 ]
+ *             }
+ *             ...
+ *         }
+ *     }
+ *     ...
+ * }
+ *\endcode
  *
  * ### Convolver
  *
@@ -216,6 +226,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *                 offset = ...
  *                 length = ...
  *                 channel = ...
+ *                 resample_quality = ...
  *             }
  *             ...
  *         }
@@ -238,9 +249,13 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *                 can be used as gain.
  *     - A filename to load as the IR. This needs to be a file format supported
  *               by sndfile.
+ *     - [ filename, ... ] an array of filenames. The file with the closest samplerate match
+ *               with the graph samplerate will be used.
  * - `offset`  The sample offset in the file as the start of the IR.
  * - `length`  The number of samples to use as the IR.
  * - `channel` The channel to use from the file as the IR.
+ * - `resample_quality` The resample quality in case the IR does not match the graph
+ *                      samplerate.
  *
  * ### Delay
  *
@@ -272,6 +287,67 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * - `max-delay` the maximum delay in seconds. The "Delay (s)" parameter will
  *              be clamped to this value.
+ *
+ * ### Invert
+ *
+ * The invert plugin can be used to invert the phase of the signal.
+ *
+ * It has an input port "In" and an output port "Out".
+ *
+ * ## SOFA filter
+ *
+ * There is an optional builtin SOFA filter available.
+ *
+ * ### Spatializer
+ *
+ * The spatializer can be used to place the sound in a 3D space.
+ *
+ * The spatializer has an input port "In" and a stereo pair of output ports
+ * called "Out L" and "Out R". It requires a config section in the node
+ * declaration in this format:
+ *
+ * The control can be changed at runtime to move the sounds around in the
+ * 3D space.
+ *
+ *\code{.unparsed}
+ * filter.graph = {
+ *     nodes = [
+ *         {
+ *             type   = sofa
+ *             name   = ...
+ *             label  = spatializer
+ *             config = {
+ *                 blocksize = ...
+ *                 tailsize = ...
+ *                 filename = ...
+ *             }
+ *             control = {
+ *                 "Azimuth" = ...
+ *                 "Elevation" = ...
+ *                 "Radius" = ...
+ *             }
+ *             ...
+ *         }
+ *     }
+ *     ...
+ * }
+ *\endcode
+ *
+ * - `blocksize` specifies the size of the blocks to use in the FFT. It is a value
+ *               between 64 and 256. When not specified, this value is
+ *               computed automatically from the number of samples in the file.
+ * - `tailsize` specifies the size of the tail blocks to use in the FFT.
+ * - `filename` The SOFA file to load. SOFA files usually end in the .sofa extension
+ *              and contain the HRTF for the various spatial positions.
+ *
+ * - `Azimuth`   controls the azimuth, this is the direction the sound is coming from
+ *               in degrees between 0 and 360. 0 is straight ahead. 90 is left, 180
+ *               behind, 270 right.
+ * - `Elevation` controls the elevation, this is how high/low the signal is in degrees
+ *               between -90 and 90. 0 is straight in front, 90 is directly above
+ *               and -90 directly below.
+ * - `Radius`    controls how far away the signal is as a value between 0 and 100.
+ *               default is 1.0.
  *
  * ## General options
  *
@@ -389,16 +465,16 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "Create filter chain streams" },
-	{ PW_KEY_MODULE_USAGE, " [ remote.name=<remote> ] "
-				"[ node.latency=<latency as fraction> ] "
-				"[ node.description=<description of the nodes> ] "
-				"[ audio.rate=<sample rate> ] "
-				"[ audio.channels=<number of channels> ] "
-				"[ audio.position=<channel map> ] "
+	{ PW_KEY_MODULE_USAGE, " ( remote.name=<remote> ) "
+				"( node.latency=<latency as fraction> ) "
+				"( node.description=<description of the nodes> ) "
+				"( audio.rate=<sample rate> ) "
+				"( audio.channels=<number of channels> ) "
+				"( audio.position=<channel map> ) "
 				"filter.graph = [ "
 				"    nodes = [ "
 				"        { "
-				"          type = <ladspa | lv2 | builtin> "
+				"          type = <ladspa | lv2 | builtin | sofa> "
 				"          name = <name> "
 				"          plugin = <plugin> "
 				"          label = <label> "
@@ -416,8 +492,8 @@ static const struct spa_dict_item module_props[] = {
 				"    inputs = [ <portname> ... ] "
 				"    outputs = [ <portname> ... ] "
 				"] "
-				"[ capture.props=<properties> ] "
-				"[ playback.props=<properties> ] " },
+				"( capture.props=<properties> ) "
+				"( playback.props=<properties> ) " },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
@@ -445,7 +521,7 @@ static float discard_data[MAX_SAMPLES];
 struct plugin {
 	struct spa_list link;
 	int ref;
-	char type[64];
+	char type[256];
 	char path[PATH_MAX];
 
 	struct fc_plugin *plugin;
@@ -506,6 +582,7 @@ struct node {
 	unsigned int n_deps;
 	unsigned int visited:1;
 	unsigned int disabled:1;
+	unsigned int control_changed:1;
 };
 
 struct link {
@@ -878,7 +955,8 @@ static int set_control_value(struct node *node, const char *name, float *value)
 	old = port->control_data;
 	port->control_data = value ? *value : desc->default_control[port->idx];
 	pw_log_info("control %d ('%s') from %f to %f", port->idx, name, old, port->control_data);
-	return old == port->control_data ? 0 : 1;
+	node->control_changed = old != port->control_data;
+	return node->control_changed ? 1 : 0;
 }
 
 static int parse_params(struct graph *graph, const struct spa_pod *pod)
@@ -938,6 +1016,38 @@ static void graph_reset(struct graph *graph)
 			d->activate(*hndl->hndl);
 	}
 }
+
+static void node_control_changed(struct node *node)
+{
+	const struct fc_descriptor *d = node->desc->desc;
+	uint32_t i;
+
+	if (!node->control_changed)
+		return;
+
+	for (i = 0; i < node->n_hndl; i++) {
+		if (node->hndl[i] == NULL)
+			continue;
+		if (d->control_changed)
+			d->control_changed(node->hndl[i]);
+	}
+	node->control_changed = false;
+}
+
+static void update_props_param(struct impl *impl)
+{
+	struct graph *graph = &impl->graph;
+	uint8_t buffer[1024];
+	struct spa_pod_dynamic_builder b;
+	const struct spa_pod *params[1];
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
+	params[0] = get_props_param(graph, &b.b);
+
+	pw_stream_update_params(impl->capture, params, 1);
+	spa_pod_dynamic_builder_clean(&b);
+}
+
 static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 {
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
@@ -950,15 +1060,12 @@ static void param_props_changed(struct impl *impl, const struct spa_pod *param)
 			changed += parse_params(graph, &prop->value);
 	}
 	if (changed > 0) {
-		uint8_t buffer[1024];
-		struct spa_pod_dynamic_builder b;
-		const struct spa_pod *params[1];
+		struct node *node;
 
-		spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
-		params[0] = get_props_param(graph, &b.b);
+		spa_list_for_each(node, &graph->node_list, link)
+			node_control_changed(node);
 
-		pw_stream_update_params(impl->capture, params, 1);
-		spa_pod_dynamic_builder_clean(&b);
+		update_props_param(impl);
 	}
 }
 
@@ -1204,6 +1311,9 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 
 	if (spa_streq(type, "builtin")) {
 		pl = load_builtin_plugin(support, n_support, &impl->dsp, path, NULL);
+	}
+	else if (spa_streq(type, "sofa")) {
+		pl = load_sofa_plugin(support, n_support, &impl->dsp, path, NULL);
 	}
 	else if (spa_streq(type, "ladspa")) {
 		pl = load_ladspa_plugin(support, n_support, &impl->dsp, path, NULL);
@@ -1696,6 +1806,7 @@ static void node_free(struct node *node)
 	free(node->output_port);
 	free(node->control_port);
 	free(node->notify_port);
+	free(node->config);
 	free(node);
 }
 
@@ -1767,8 +1878,11 @@ static int graph_instantiate(struct graph *graph)
 			}
 			if (d->activate)
 				d->activate(node->hndl[i]);
+			if (node->control_changed && d->control_changed)
+				d->control_changed(node->hndl[i]);
 		}
 	}
+	update_props_param(impl);
 	return 0;
 error:
 	graph_cleanup(graph);
@@ -1902,6 +2016,8 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 					pw_log_error("input port %s not found", v);
 					goto error;
 				} else {
+					bool disabled = false;
+
 					desc = port->node->desc;
 					d = desc->desc;
 					if (i == 0 && port->external != SPA_ID_INVALID) {
@@ -1936,12 +2052,14 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 								gp->hndl = &peer->node->hndl[i];
 								gp->port = peer->p;
 								gp->next = true;
+								disabled = true;
 							}
 							if (gp != NULL)
 								gp->next = false;
 						}
-						port->node->disabled = true;
-					} else {
+						port->node->disabled = disabled;
+					}
+					if (!disabled) {
 						pw_log_info("input port %s[%d]:%s",
 							port->node->name, i, d->ports[port->p].name);
 						port->external = graph->n_input;

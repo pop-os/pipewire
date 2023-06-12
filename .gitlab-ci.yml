@@ -25,8 +25,8 @@ include:
 .fedora:
   variables:
     # Update this tag when you want to trigger a rebuild
-    FDO_DISTRIBUTION_TAG: '2022-11-07.0'
-    FDO_DISTRIBUTION_VERSION: '35'
+    FDO_DISTRIBUTION_TAG: '2023-04-18.0'
+    FDO_DISTRIBUTION_VERSION: '37'
     FDO_DISTRIBUTION_PACKAGES: >-
       alsa-lib-devel
       avahi-devel
@@ -44,18 +44,23 @@ include:
       gstreamer1-devel
       gstreamer1-plugins-base-devel
       jack-audio-connection-kit-devel
+      libasan
       libcanberra-devel
       libldac-devel
+      libmysofa-devel
       libsndfile-devel
-      libusb-devel
+      libubsan
+      libusb1-devel
       lilv-devel
       libv4l-devel
       libva-devel
       libX11-devel
       ModemManager-devel
+      meson
       openssl-devel
       pulseaudio-libs-devel
       python3-docutils
+      python3-pip
       sbc-devel
       ShellCheck
       SDL2-devel
@@ -66,18 +71,25 @@ include:
       valgrind
       ninja-build
       pkgconf
-      python3-pip
       pulseaudio-utils
       openal-soft
       readline-devel
-    FDO_DISTRIBUTION_EXEC: >-
-      pip3 install meson
+# Uncommenting the following two lines and disabling the meson entry above
+# will re-enable use of Meson via pip but please consider using a newer distro
+# image first or making the build system compatible instead! This is because
+# using pip or another 3rd party repo defeats the point testing the particular
+# distro for regressions.
+# NOTE: If you do end up using pip3 for meson, be sure to also update the
+# build_meson_prerelease and build_meson_exact_release build instructions
+# to uninstall the pip3 version again and probably to not call dnf remove
+#    FDO_DISTRIBUTION_EXEC: >-
+#      pip3 install meson
 
 .ubuntu:
   variables:
     # Update this tag when you want to trigger a rebuild
-    FDO_DISTRIBUTION_TAG: '2022-01-27.0'
-    FDO_DISTRIBUTION_VERSION: '20.04'
+    FDO_DISTRIBUTION_TAG: '2023-04-18.0'
+    FDO_DISTRIBUTION_VERSION: '22.04'
     FDO_DISTRIBUTION_PACKAGES: >-
       debhelper-compat
       findutils
@@ -87,6 +99,7 @@ include:
       libavfilter-dev
       libavformat-dev
       libdbus-1-dev
+      libbluetooth-dev
       libglib2.0-dev
       libgstreamer1.0-dev
       libgstreamer-plugins-base1.0-dev
@@ -96,19 +109,25 @@ include:
       libva-dev
       libv4l-dev
       libx11-dev
+      meson
       ninja-build
       pkg-config
       python3-docutils
       systemd
-      python3-pip
-    FDO_DISTRIBUTION_EXEC: >-
-      pip3 install meson
+# Uncommenting the following three lines and disabling the meson entry above
+# will re-enable use of Meson via pip but please consider using a newer distro
+# image first or making the build system compatible instead! This is because
+# using pip or another 3rd party repo defeats the point testing the particular
+# distro for regressions.
+#      python3-pip
+#    FDO_DISTRIBUTION_EXEC: >-
+#      pip3 install meson
 
 .alpine:
   variables:
     # Update this tag when you want to trigger a rebuild
-    FDO_DISTRIBUTION_TAG: '2022-09-07.0'
-    FDO_DISTRIBUTION_VERSION: '3.15'
+    FDO_DISTRIBUTION_TAG: '2023-04-17.0'
+    FDO_DISTRIBUTION_VERSION: '3.17'
     FDO_DISTRIBUTION_PACKAGES: >-
       alsa-lib-dev
       avahi-dev
@@ -170,15 +189,15 @@ include:
     - export XDG_RUNTIME_DIR="$(mktemp -p $PWD -d xdg-runtime-XXXXXX)"
     - |
       if [ -n "$FDO_CI_CONCURRENT" ]; then
-         NINJA_ARGS="-j$FDO_CI_CONCURRENT $NINJA_ARGS"
-         export NINJA_ARGS
+         COMPILE_ARGS="-j$FDO_CI_CONCURRENT"
+         export COMPILE_ARGS
       fi
   script:
     - echo "Building with meson options $MESON_OPTIONS"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
-    - ninja $NINJA_ARGS -C "$BUILD_DIR"
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" test
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" install
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" $MESON_OPTIONS
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson test -C "$BUILD_DIR" --no-rebuild
+    - meson install -C "$BUILD_DIR" --no-rebuild
   artifacts:
     name: pipewire-$CI_COMMIT_SHA
     when: always
@@ -310,9 +329,18 @@ build_with_custom_options:
         MESON_OPTION_VALUE: [enabled, disabled]
   script:
     - echo "Building with -D$MESON_OPTION=$MESON_OPTION_VALUE"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" "-D$MESON_OPTION=$MESON_OPTION_VALUE" -Dsession-managers=[]
-    - ninja $NINJA_ARGS -C "$BUILD_DIR"
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" test
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" "-D$MESON_OPTION=$MESON_OPTION_VALUE" -Dsession-managers=[]
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson test -C "$BUILD_DIR" --no-rebuild
+
+build_with_asan_ubsan:
+  extends:
+    - .build_on_fedora
+  script:
+    - echo "Building with ASan and UBSan"
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" -D debug=true -D optimization=g -D b_sanitize=address,undefined -D session-managers=[]
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson test -C "$BUILD_DIR" --no-rebuild
 
 # A release build with NDEBUG, all options on auto() but tests explicitly
 # enabled. This should show issues with tests failing due to different
@@ -331,9 +359,9 @@ build_session_managers:
     - .build_on_fedora
   script:
     - echo "Building with meson options $MESON_OPTIONS"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
-    - ninja $NINJA_ARGS -C "$BUILD_DIR"
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" install
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" $MESON_OPTIONS
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson install -C "$BUILD_DIR" --no-rebuild
   variables:
     MESON_OPTIONS: "-Dsession-managers=$SESSION_MANAGERS"
   parallel:
@@ -345,11 +373,12 @@ build_meson_prerelease:
   extends:
     - .build_on_fedora
   script:
+    - dnf remove --assumeyes meson
     - pip3 install --upgrade --pre meson
     - echo "Building with meson options $MESON_OPTIONS"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
-    - ninja $NINJA_ARGS -C "$BUILD_DIR"
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" install
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" $MESON_OPTIONS
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson install -C "$BUILD_DIR" --no-rebuild
   variables:
     MESON_OPTIONS: "-Dsession-managers=wireplumber,media-session"
   allow_failure: true
@@ -361,12 +390,13 @@ build_meson_exact_release:
     - meson_version=$(head -n 5 meson.build | grep 'meson_version' | sed -e 's/.*\([0-9]\+\.[0-9]\+\.[0-9]\+\).*/\1/')
     - echo "Requiring meson version $meson_version"
     - test -n "$meson_version" || (echo "Meson version parser failed" && exit 1)
-    - pip3 uninstall --yes meson
+    - dnf remove --assumeyes meson
+#    - pip3 uninstall --yes meson
     - pip3 install "meson==$meson_version"
     - echo "Building with meson options $MESON_OPTIONS"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
-    - ninja $NINJA_ARGS -C "$BUILD_DIR"
-    - ninja $NINJA_ARGS -C "$BUILD_DIR" install
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" $MESON_OPTIONS
+    - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+    - meson install -C "$BUILD_DIR" --no-rebuild
   variables:
     MESON_OPTIONS: "-Dsession-managers=[]"
 
@@ -375,7 +405,7 @@ valgrind:
     - .build_on_fedora
   script:
     - echo "Building with meson options $MESON_OPTIONS"
-    - meson "$BUILD_DIR" . --prefix="$PREFIX" $MESON_OPTIONS
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX" $MESON_OPTIONS
     - meson test -C "$BUILD_DIR" --setup=valgrind
   variables:
     MESON_OPTIONS: "-Dsession-managers=[]"
@@ -389,7 +419,7 @@ build_with_coverity:
   stage: analysis
   script:
     - export PATH=/opt/coverity/bin:$PATH
-    - meson "$BUILD_DIR" . --prefix="$PREFIX"
+    - meson setup "$BUILD_DIR" --prefix="$PREFIX"
         -Ddocs=disabled
         -Dbluez5-backend-hsphfpd=enabled
         -Daudiotestsrc=enabled
@@ -408,7 +438,7 @@ build_with_coverity:
         --xml-option=append_arg@C:"replace/GLIB_(DEPRECATED|AVAILABLE)_ENUMERATOR_IN_\d_\d\d(_FOR\(\w+\)|)\s+=/ ="
         --xml-option=append_arg@C:--ppp_translator
         --xml-option=append_arg@C:"replace/(__has_builtin|_GLIBCXX_HAS_BUILTIN)\(\w+\)/1"
-    - cov-build --dir cov-int --config coverity_conf.xml ninja $NINJA_ARGS -C "$BUILD_DIR"
+    - cov-build --dir cov-int --config coverity_conf.xml meson compile -C "$BUILD_DIR" $COMPILE_ARGS
     - tar czf cov-int.tar.gz cov-int
     - curl https://scan.coverity.com/builds?project=$COVERITY_SCAN_PROJECT_NAME
         --form token=$COVERITY_SCAN_TOKEN --form email=$GITLAB_USER_EMAIL

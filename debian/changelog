@@ -1,3 +1,96 @@
+pipewire (0.3.71-1) experimental; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+  * Drop patch included in upstream release:
+      - module-pulse-tunnel-avoid-using-NULL-module.patch
+  * Cherry-pick upstream recommended patch:
+      - ce71b37b: fixes a bug with buffer_size updates for JACK apps
+  * Set minimum libcamera to 0.0.5 to force a build against the version in
+      experimental during the freeze.
+  * Install new module-jack-tunnel and module-jackdbus-detect
+      in libpipewire-0.3-modules.
+
+  [ Sebastien Bacher ]
+  * Don't use libmysofa in the Ubuntu build for now since the package
+    is in universe (Closes: #1035718)
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 22 May 2023 12:35:03 +0200
+
+pipewire (0.3.70-2) experimental; urgency=medium
+
+  [ Alban Browaeys ]
+  * Cherry-pick upstream patch:
+      - Fix pulse tunnel unload segfaulting pipewire-pulse (Closes: #1035280)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 05 May 2023 11:56:36 +0200
+
+pipewire (0.3.70-1) experimental; urgency=medium
+
+  * New upstream release
+  * Install new pw-config in pipewire-bin
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 20 Apr 2023 17:01:11 +0200
+
+pipewire (0.3.69-1) experimental; urgency=medium
+
+  * New upstream release
+  * Drop patch included in upstream release:
+      - 8748c774: fix for nodes staying IDLE in some cases
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 17 Apr 2023 10:08:36 +0200
+
+pipewire (0.3.68-1) experimental; urgency=medium
+
+  * New upstream release
+  * Drop patches included in upstream release:
+      - Don-t-build_same_binary_twice.patch
+  * Cherry-pick upstream recommended patch:
+      - 8748c774: fix for nodes staying IDLE in some cases
+  * Install new module-rtp-sap and module-rtp-session in libpipewire-0.3-modules
+  * Don't install for now config override files to enable the upmixing.
+      These files should go in a new binary package.
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 12 Apr 2023 10:23:25 +0200
+
+pipewire (0.3.67-2) experimental; urgency=medium
+
+  * Set minimum libcamera to 0.0.4 to force a build against the version in
+      experimental during the freeze.
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 31 Mar 2023 22:12:00 +0200
+
+pipewire (0.3.67-1) experimental; urgency=medium
+
+  * New upstream release
+  * pipewire-audio: add pulseaudio-module-bluetooth in Conflicts+Replaces
+      to help apt make a choice (Closes: #1031396)
+  * Drop patches included in upstream release:
+      - 3601ecc9: Improve NEWS
+  * Install new pw-encplay in pipewire-bin
+  * Update symbols file
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Mar 2023 15:41:34 +0100
+
+pipewire (0.3.66-1) experimental; urgency=medium
+
+  * New upstream release
+  * Drop patch included in upstream release:
+      - fba7083f: module-combine-stream was not installed
+  * Cherry-pick upstream recommended patch:
+      - 3601ecc9: Improve NEWS
+  * Add libmysofa-dev in Build-Deps
+  * Install new pipewire-aes67 in pipewire-bin
+  * Install the upstream recommended PAM limits.d file
+  * Update symbols file
+  * Install filter-chain service file and config files in pipewire and
+      pipewire-bin respectively.
+  * Upload to experimental because of the Bookworm freeze
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 17 Feb 2023 15:01:23 +0100
+
 pipewire (0.3.65-3) unstable; urgency=medium
 
   * pipewire-audio: add pulseaudio-module-bluetooth in Conflicts+Replaces

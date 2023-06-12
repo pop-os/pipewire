@@ -1,33 +1,10 @@
-/* PipeWire
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
 #include <unistd.h>
-#ifndef ENODATA
-#define ENODATA 9919
-#endif
 
 #include <spa/debug/types.h>
 #include <spa/utils/string.h>
@@ -195,6 +172,8 @@ static int core_hello(void *object, uint32_t version)
 	pw_log_debug("%p: hello %d from resource %p", context, version, resource);
 	pw_map_for_each(&client->objects, destroy_resource, client);
 
+	resource->version = version;
+
 	pw_mempool_clear(client->pool);
 
 	this->info.change_mask = PW_CORE_CHANGE_MASK_ALL;
@@ -351,7 +330,7 @@ core_create_object(void *object,
 	if (obj == NULL)
 		goto error_create_failed;
 
-	return 0;
+	return obj;
 
 error_no_factory:
 	res = -ENOENT;
@@ -433,17 +412,7 @@ struct pw_impl_core *pw_context_create_core(struct pw_context *context,
 	this->info.user_name = pw_get_user_name();
 	this->info.host_name = pw_get_host_name();
 	this->info.version = pw_get_library_version();
-	do {
-		res = pw_getrandom(&this->info.cookie,
-				sizeof(this->info.cookie), 0);
-	} while ((res == -1) && (errno == EINTR));
-	if (res == -1) {
-		res = -errno;
-		goto error_exit;
-	} else if (res != sizeof(this->info.cookie)) {
-		res = -ENODATA;
-		goto error_exit;
-	}
+	this->info.cookie = pw_rand32();
 	this->info.name = name;
 	spa_hook_list_init(&this->listener_list);
 

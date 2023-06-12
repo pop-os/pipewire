@@ -1,26 +1,6 @@
-/* GStreamer
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* GStreamer */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 /**
  * SECTION:element-pipewiresrc
@@ -66,6 +46,7 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_src_debug);
 #define DEFAULT_MAX_BUFFERS     INT32_MAX
 #define DEFAULT_RESEND_LAST     false
 #define DEFAULT_KEEPALIVE_TIME  0
+#define DEFAULT_AUTOCONNECT     true
 
 enum
 {
@@ -81,6 +62,7 @@ enum
   PROP_FD,
   PROP_RESEND_LAST,
   PROP_KEEPALIVE_TIME,
+  PROP_AUTOCONNECT,
 };
 
 
@@ -109,6 +91,8 @@ static gboolean gst_pipewire_src_start (GstBaseSrc * basesrc);
 static gboolean gst_pipewire_src_stop (GstBaseSrc * basesrc);
 static gboolean gst_pipewire_src_event (GstBaseSrc * src, GstEvent * event);
 static gboolean gst_pipewire_src_query (GstBaseSrc * src, GstQuery * query);
+static void gst_pipewire_src_get_times (GstBaseSrc * basesrc, GstBuffer * buffer,
+    GstClockTime * start, GstClockTime * end);
 
 static void
 gst_pipewire_src_set_property (GObject * object, guint prop_id,
@@ -170,6 +154,10 @@ gst_pipewire_src_set_property (GObject * object, guint prop_id,
       pwsrc->keepalive_time = g_value_get_int (value);
       break;
 
+    case PROP_AUTOCONNECT:
+      pwsrc->autoconnect = g_value_get_boolean (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -225,6 +213,10 @@ gst_pipewire_src_get_property (GObject * object, guint prop_id,
 
     case PROP_KEEPALIVE_TIME:
       g_value_set_int (value, pwsrc->keepalive_time);
+      break;
+
+    case PROP_AUTOCONNECT:
+      g_value_set_boolean (value, pwsrc->autoconnect);
       break;
 
     default:
@@ -396,6 +388,15 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
                                                      G_PARAM_READWRITE |
                                                      G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class,
+                                   PROP_AUTOCONNECT,
+                                   g_param_spec_boolean ("autoconnect",
+                                                         "Connect automatically",
+                                                         "Attempt to find a peer to connect to",
+                                                         DEFAULT_AUTOCONNECT,
+                                                         G_PARAM_READWRITE |
+                                                         G_PARAM_STATIC_STRINGS));
+
   gstelement_class->provide_clock = gst_pipewire_src_provide_clock;
   gstelement_class->change_state = gst_pipewire_src_change_state;
   gstelement_class->send_event = gst_pipewire_src_send_event;
@@ -414,6 +415,7 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
   gstbasesrc_class->stop = gst_pipewire_src_stop;
   gstbasesrc_class->event = gst_pipewire_src_event;
   gstbasesrc_class->query = gst_pipewire_src_query;
+  gstbasesrc_class->get_times = gst_pipewire_src_get_times;
   gstpushsrc_class->create = gst_pipewire_src_create;
 
   GST_DEBUG_CATEGORY_INIT (pipewire_src_debug, "pipewiresrc", 0,
@@ -439,6 +441,7 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   src->fd = -1;
   src->resend_last = DEFAULT_RESEND_LAST;
   src->keepalive_time = DEFAULT_KEEPALIVE_TIME;
+  src->autoconnect = DEFAULT_AUTOCONNECT;
 
   src->client_name = g_strdup(pw_get_client_name ());
 
@@ -578,7 +581,7 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
     GST_LOG_OBJECT (pwsrc, "pts %" G_GUINT64_FORMAT ", dts_offset %" G_GUINT64_FORMAT, h->pts, h->dts_offset);
 
     if (GST_CLOCK_TIME_IS_VALID (h->pts)) {
-      GST_BUFFER_PTS (buf) = h->pts + GST_PIPEWIRE_CLOCK (pwsrc->clock)->time_offset;
+      GST_BUFFER_PTS (buf) = h->pts;
       if (GST_BUFFER_PTS (buf) + h->dts_offset > 0)
         GST_BUFFER_DTS (buf) = GST_BUFFER_PTS (buf) + h->dts_offset;
     }
@@ -612,6 +615,26 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
       gst_pad_push_event (GST_BASE_SRC_PAD (pwsrc), tag_event);
 
       pwsrc->transform_value = videotransform->transform;
+    }
+  }
+
+  if (pwsrc->is_video) {
+    gsize video_size = 0;
+    GstVideoInfo *info = &pwsrc->video_info;
+    GstVideoMeta *meta = gst_buffer_add_video_meta_full (buf, GST_VIDEO_FRAME_FLAG_NONE,
+                             GST_VIDEO_INFO_FORMAT (info),
+                             GST_VIDEO_INFO_WIDTH (info),
+                             GST_VIDEO_INFO_HEIGHT (info),
+                             GST_VIDEO_INFO_N_PLANES (info),
+                             info->offset,
+                             info->stride);
+
+    for (i = 0; i < MIN (b->buffer->n_datas, GST_VIDEO_MAX_PLANES); i++) {
+      struct spa_data *d = &b->buffer->datas[i];
+      meta->offset[i] = video_size;
+      meta->stride[i] = d->chunk->stride;
+
+      video_size += d->chunk->size;
     }
   }
 
@@ -658,6 +681,7 @@ on_state_changed (void *data,
     case PW_STREAM_STATE_STREAMING:
       break;
     case PW_STREAM_STATE_ERROR:
+      pw_stream_set_error (pwsrc->stream, -EPIPE, "%s", error);
       GST_ELEMENT_ERROR (pwsrc, RESOURCE, FAILED,
           ("stream error: %s", error), (NULL));
       break;
@@ -868,10 +892,13 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s, target-object %s",
                     pwsrc->path, pwsrc->target_object);
   pwsrc->negotiated = FALSE;
+  enum pw_stream_flags flags = PW_STREAM_FLAG_DONT_RECONNECT;
+  if (pwsrc->autoconnect)
+    flags |= PW_STREAM_FLAG_AUTOCONNECT;
   pw_stream_connect (pwsrc->stream,
                      PW_DIRECTION_INPUT,
                      target_id,
-                     PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_DONT_RECONNECT,
+                     flags,
                      (const struct spa_pod **)possible->pdata,
                      possible->len);
   g_ptr_array_free (possible, TRUE);
@@ -920,18 +947,26 @@ no_nego_needed:
   }
 no_caps:
   {
+    const gchar * error_string = "No supported formats found";
+
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
-        ("No supported formats found"),
+        ("%s", error_string),
         ("This element did not produce valid caps"));
+    pw_stream_set_error (pwsrc->stream, -EINVAL, "%s", error_string);
+
     if (thiscaps)
       gst_caps_unref (thiscaps);
     return FALSE;
   }
 no_common_caps:
   {
+    const gchar * error_string = "No supported formats found";
+
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
-        ("No supported formats found"),
+        ("%s", error_string),
         ("This element does not have formats in common with the peer"));
+    pw_stream_set_error (pwsrc->stream, -EPIPE, "%s", error_string);
+
     if (caps)
       gst_caps_unref (caps);
     return FALSE;
@@ -957,6 +992,10 @@ on_param_changed (void *data, uint32_t id,
   if (pwsrc->caps)
           gst_caps_unref(pwsrc->caps);
   pwsrc->caps = gst_caps_from_format (param);
+
+  pwsrc->is_video = pwsrc->caps != NULL
+                      ? gst_video_info_from_caps (&pwsrc->video_info, pwsrc->caps)
+                      : FALSE;
 
   pwsrc->negotiated = pwsrc->caps != NULL;
 
@@ -1090,14 +1129,43 @@ gst_pipewire_src_query (GstBaseSrc * src, GstQuery * query)
   return res;
 }
 
+static void
+gst_pipewire_src_get_times (GstBaseSrc * basesrc, GstBuffer * buffer,
+    GstClockTime * start, GstClockTime * end)
+{
+  GstPipeWireSrc *pwsrc = GST_PIPEWIRE_SRC (basesrc);
+
+  /* for live sources, sync on the timestamp of the buffer */
+  if (gst_base_src_is_live (basesrc)) {
+    GstClockTime timestamp = GST_BUFFER_PTS (buffer);
+
+    if (GST_CLOCK_TIME_IS_VALID (timestamp)) {
+      /* get duration to calculate end time */
+      GstClockTime duration = GST_BUFFER_DURATION (buffer);
+
+      if (GST_CLOCK_TIME_IS_VALID (duration)) {
+        *end = timestamp + duration;
+      }
+      *start = timestamp;
+    }
+  } else {
+    *start = GST_CLOCK_TIME_NONE;
+    *end = GST_CLOCK_TIME_NONE;
+  }
+
+  GST_LOG_OBJECT (pwsrc, "start %" GST_TIME_FORMAT " (%" G_GUINT64_FORMAT
+      "), end %" GST_TIME_FORMAT " (%" G_GUINT64_FORMAT ")",
+      GST_TIME_ARGS (*start), *start, GST_TIME_ARGS (*end), *end);
+}
+
 static GstFlowReturn
 gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
 {
   GstPipeWireSrc *pwsrc;
-  GstClockTime pts, dts, base_time;
   const char *error = NULL;
   GstBuffer *buf;
   gboolean update_time = FALSE, timeout = FALSE;
+  GstCaps *caps = NULL;
 
   pwsrc = GST_PIPEWIRE_SRC (psrc);
 
@@ -1120,6 +1188,18 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
 
     if (state != PW_STREAM_STATE_STREAMING)
       goto streaming_stopped;
+
+    if ((caps = pwsrc->caps) != NULL) {
+      pwsrc->caps = NULL;
+      pw_thread_loop_unlock (pwsrc->core->loop);
+
+      GST_DEBUG_OBJECT (pwsrc, "set format %" GST_PTR_FORMAT, caps);
+      gst_base_src_set_caps (GST_BASE_SRC (pwsrc), caps);
+      gst_caps_unref (caps);
+
+      pw_thread_loop_lock (pwsrc->core->loop);
+      continue;
+    }
 
     if (pwsrc->eos) {
       if (pwsrc->last_buffer == NULL)
@@ -1160,37 +1240,24 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
 
   *buffer = buf;
 
-  if (pwsrc->is_live)
-    base_time = GST_ELEMENT_CAST (psrc)->base_time;
-  else
-    base_time = 0;
-
   if (update_time) {
-    GstClock *clock = gst_element_get_clock (GST_ELEMENT_CAST (pwsrc));
+    GstClock *clock;
+    GstClockTime pts, dts;
+
+    clock = gst_element_get_clock (GST_ELEMENT_CAST (pwsrc));
     if (clock != NULL) {
       pts = dts = gst_clock_get_time (clock);
       gst_object_unref (clock);
     } else {
       pts = dts = GST_CLOCK_TIME_NONE;
     }
-  } else {
-    pts = GST_BUFFER_PTS (*buffer);
-    dts = GST_BUFFER_DTS (*buffer);
+
+    GST_BUFFER_PTS (*buffer) = pts;
+    GST_BUFFER_DTS (*buffer) = dts;
+
+    GST_LOG_OBJECT (pwsrc, "Sending keepalive buffer pts/dts: %" GST_TIME_FORMAT
+      " (%" G_GUINT64_FORMAT ")", GST_TIME_ARGS (pts), pts);
   }
-
-  if (GST_CLOCK_TIME_IS_VALID (pts))
-    pts = (pts >= base_time ? pts - base_time : 0);
-  if (GST_CLOCK_TIME_IS_VALID (dts))
-    dts = (dts >= base_time ? dts - base_time : 0);
-
-  GST_LOG_OBJECT (pwsrc,
-      "pts %" G_GUINT64_FORMAT ", dts %" G_GUINT64_FORMAT
-      ", base-time %" GST_TIME_FORMAT " -> %" GST_TIME_FORMAT ", %" GST_TIME_FORMAT,
-      GST_BUFFER_PTS (*buffer), GST_BUFFER_DTS (*buffer), GST_TIME_ARGS (base_time),
-      GST_TIME_ARGS (pts), GST_TIME_ARGS (dts));
-
-  GST_BUFFER_PTS (*buffer) = pts;
-  GST_BUFFER_DTS (*buffer) = dts;
 
   return GST_FLOW_OK;
 

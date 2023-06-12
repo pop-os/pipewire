@@ -30,8 +30,9 @@ context.spa-libs = {
 
 context.modules = [
     #{ name = <module-name>
-    #    [ args  = { <key> = <value> ... } ]
-    #    [ flags = [ [ ifexists ] [ nofail ] ]
+    #    ( args  = { <key> = <value> ... } )
+    #    ( flags = [ ( ifexists ) ( nofail ) ] )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
     # Loads a module with the given parameters.
@@ -71,6 +72,7 @@ jack.properties = {
      #node.force-quantum = 0
      #jack.show-monitor  = true
      #jack.merge-monitor = true
+     #jack.show-midi     = true
      #jack.short-name    = false
      #jack.filter-name   = false
      #jack.filter-char   = " "
@@ -85,6 +87,8 @@ jack.properties = {
      #jack.default-as-system = false
      #jack.fix-midi-events   = true
      #jack.global-buffer-size = false
+     #jack.max-client-ports   = 768
+     #jack.fill-aliases       = false
 }
 
 # client specific properties
@@ -113,8 +117,9 @@ jack.rules = [
     {   matches = [ { application.process.binary = "qsynth" } ]
         actions = {
             update-props = {
+                node.always-process = false # makes qsynth idle
                 node.pause-on-idle = false  # makes audio fade out when idle
-                node.passive = true         # makes the sink and qsynth suspend
+                node.passive = out          # makes the sink and qsynth suspend
             }
         }
     }

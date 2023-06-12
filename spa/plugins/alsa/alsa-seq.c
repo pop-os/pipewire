@@ -1,26 +1,6 @@
-/* Spa ALSA Sequencer
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa ALSA Sequencer */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -704,7 +684,7 @@ static int process_write(struct seq_state *state)
 
 static void update_position(struct seq_state *state)
 {
-	if (state->position) {
+	if (SPA_LIKELY(state->position)) {
 		struct spa_io_clock *clock = &state->position->clock;
 		state->rate = clock->rate;
 		if (state->rate.num == 0 || state->rate.denom == 0)
@@ -764,7 +744,8 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 
 	if (!follower && state->clock) {
 		state->clock->nsec = nsec;
-		state->clock->position += state->duration;
+		state->clock->rate = state->rate;
+		state->clock->position += state->clock->duration;
 		state->clock->duration = state->duration;
 		state->clock->delay = state->duration * corr;
 		state->clock->rate_diff = corr;
@@ -813,7 +794,17 @@ static void alsa_on_timeout_event(struct spa_source *source)
 
 	spa_log_trace(state->log, "timeout %"PRIu64, state->current_time);
 
-	update_position(state);
+	if (SPA_LIKELY(state->position)) {
+		struct spa_io_clock *clock = &state->position->clock;
+		state->rate = clock->target_rate;
+		if (state->rate.num == 0 || state->rate.denom == 0)
+			state->rate = SPA_FRACTION(1, 48000);
+		state->duration = clock->target_duration;
+	} else {
+		state->rate = SPA_FRACTION(1, 48000);
+		state->duration = 1024;
+	}
+	state->threshold = state->duration;
 
 	update_time(state, state->current_time, false);
 

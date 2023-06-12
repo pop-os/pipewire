@@ -1,26 +1,6 @@
-/* Spa
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stddef.h>
 #include <unistd.h>
@@ -313,7 +293,8 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct spa_loop *loop = NULL;
-	const char *str;
+	const char *str, *dest = "";
+	bool linebuf = false;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -357,25 +338,37 @@ impl_init(const struct spa_handle_factory *factory,
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_LEVEL)) != NULL)
 			this->log.level = atoi(str);
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_FILE)) != NULL) {
-			this->file = fopen(str, "we");
-			if (this->file == NULL)
-				fprintf(stderr, "Warning: failed to open file %s: (%m)", str);
-			else
-				this->close_file = true;
+			dest = str;
+			if (spa_streq(str, "stderr"))
+				this->file = stderr;
+			else if (spa_streq(str, "stdout"))
+				this->file = stdout;
+			else {
+				this->file = fopen(str, "we");
+				if (this->file == NULL)
+					fprintf(stderr, "Warning: failed to open file %s: (%m)", str);
+				else
+					this->close_file = true;
+			}
 		}
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_PATTERNS)) != NULL)
 			support_log_parse_patterns(&this->patterns, str);
 	}
-	if (this->file == NULL)
+	if (this->file == NULL) {
 		this->file = stderr;
+		dest = "stderr";
+	} else {
+		linebuf = true;
+	}
+	if (linebuf)
+		setlinebuf(this->file);
+
 	if (!isatty(fileno(this->file)))
 		this->colors = false;
 
 	spa_ringbuffer_init(&this->trace_rb);
 
-	spa_log_debug(&this->log, NAME " %p: initialized", this);
-
-	setlinebuf(this->file);
+	spa_log_debug(&this->log, NAME " %p: initialized to %s linebuf:%u", this, dest, linebuf);
 
 	return 0;
 }

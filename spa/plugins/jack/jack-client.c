@@ -1,26 +1,6 @@
-/* Spa JACK Client
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa JACK Client */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 
@@ -38,6 +18,8 @@ static int jack_process(jack_nframes_t nframes, void *arg)
 
 	client->buffer_size = nframes;
 
+	spa_log_trace_fp(client->log, "frames %u", nframes);
+
 	spa_jack_client_emit_process(client);
 
 	return 0;
@@ -46,6 +28,8 @@ static int jack_process(jack_nframes_t nframes, void *arg)
 static void jack_shutdown(void* arg)
 {
 	struct spa_jack_client *client = arg;
+
+	spa_log_warn(client->log, "%p", client);
 
 	spa_jack_client_emit_shutdown(client);
 
@@ -87,6 +71,8 @@ int spa_jack_client_open(struct spa_jack_client *client,
 
 	spa_hook_list_init(&client->listener_list);
 
+	spa_log_info(client->log, "%p: %s", client, client_name);
+
 	jack_set_process_callback(client->client, jack_process, client);
 	jack_on_shutdown(client->client, jack_shutdown, client);
 	client->frame_rate = jack_get_sample_rate(client->client);
@@ -100,6 +86,8 @@ int spa_jack_client_close(struct spa_jack_client *client)
 {
 	if (client->client == NULL)
 		return 0;
+
+	spa_log_info(client->log, "%p:", client);
 
 	spa_jack_client_emit_destroy(client);
 

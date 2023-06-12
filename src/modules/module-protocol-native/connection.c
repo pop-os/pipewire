@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -278,10 +258,12 @@ recv_error:
 	return -errno;
 
 cmsgs_truncated:
+	pw_log_debug("connection %p: cmsg truncated", conn);
 	close_all_fds(&msg, CMSG_FIRSTHDR(&msg));
 	return -EPROTO;
 
 too_many_fds:
+	pw_log_debug("connection %p: too many fds", conn);
 	close_all_fds(&msg, cmsg);
 	return -EPROTO;
 }
@@ -289,16 +271,22 @@ too_many_fds:
 static void clear_buffer(struct buffer *buf, bool fds)
 {
 	uint32_t i;
+
+	pw_log_debug("clear fds:%d", fds);
 	if (fds) {
 		for (i = 0; i < buf->n_fds; i++) {
 			pw_log_debug("%p: close fd:%d", buf, buf->fds[i]);
 			close(buf->fds[i]);
 		}
+		buf->n_fds = 0;
+		buf->fds_offset = 0;
+	} else {
+		buf->n_fds -= SPA_MIN(buf->fds_offset, buf->n_fds);
+		memmove(buf->fds, &buf->fds[buf->fds_offset], buf->n_fds * sizeof(int));
+		buf->fds_offset = 0;
 	}
-	buf->n_fds = 0;
 	buf->buffer_size = 0;
 	buf->offset = 0;
-	buf->fds_offset = 0;
 }
 
 /** Prepare connection for calling from reentered context.
@@ -729,8 +717,9 @@ pw_protocol_native_connection_end(struct pw_protocol_native_connection *conn,
 
 	if (mod_topic_connection->level >= SPA_LOG_LEVEL_DEBUG) {
 		pw_logt_debug(mod_topic_connection,
-			">>>>>>>>> out: id:%d op:%d size:%d seq:%d",
-				buf->msg.id, buf->msg.opcode, size, buf->msg.seq);
+			">>>>>>>>> out: id:%d op:%d size:%d seq:%d fds:%d",
+				buf->msg.id, buf->msg.opcode, size, buf->msg.seq,
+				buf->msg.n_fds);
 	        spa_debug_pod(0, NULL, SPA_PTROFF(p, impl->hdr_size, struct spa_pod));
 		pw_logt_debug(mod_topic_connection,
 			">>>>>>>>> out: done");

@@ -1,26 +1,6 @@
-/* Spa
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <errno.h>
@@ -339,6 +319,8 @@ loop_add_hook(void *object,
 	      void *data)
 {
 	struct impl *impl = object;
+	spa_return_if_fail(SPA_CALLBACK_CHECK(hooks, before, 0));
+	spa_return_if_fail(SPA_CALLBACK_CHECK(hooks, after, 0));
 	spa_hook_list_append(&impl->hooks_list, hook, hooks, data);
 }
 
@@ -353,10 +335,10 @@ static void loop_enter(void *object)
 		impl->enter_count = 1;
 	} else {
 		spa_return_if_fail(impl->enter_count > 0);
-		spa_return_if_fail(impl->thread == thread_id);
+		spa_return_if_fail(pthread_equal(impl->thread, thread_id));
 		impl->enter_count++;
 	}
-	spa_log_trace(impl->log, "%p: enter %lu", impl, impl->thread);
+	spa_log_trace_fp(impl->log, "%p: enter %p", impl, (void *) impl->thread);
 }
 
 static void loop_leave(void *object)
@@ -365,15 +347,22 @@ static void loop_leave(void *object)
 	pthread_t thread_id = pthread_self();
 
 	spa_return_if_fail(impl->enter_count > 0);
-	spa_return_if_fail(impl->thread == thread_id);
+	spa_return_if_fail(pthread_equal(impl->thread, thread_id));
 
-	spa_log_trace(impl->log, "%p: leave %lu", impl, impl->thread);
+	spa_log_trace_fp(impl->log, "%p: leave %p", impl, (void *) impl->thread);
 
 	if (--impl->enter_count == 0) {
 		impl->thread = 0;
 		flush_items(impl);
 		impl->polling = false;
 	}
+}
+
+static int loop_check(void *object)
+{
+	struct impl *impl = object;
+	pthread_t thread_id = pthread_self();
+	return (impl->thread == 0 || pthread_equal(impl->thread, thread_id)) ? 1 : 0;
 }
 
 static inline void free_source(struct source_impl *s)
@@ -410,7 +399,7 @@ static void cancellation_handler(void *closure)
 	}
 }
 
-static int loop_iterate(void *object, int timeout)
+static int loop_iterate_cancel(void *object, int timeout)
 {
 	struct impl *impl = object;
 	struct spa_poll_event ep[MAX_EP], *e;
@@ -454,6 +443,52 @@ static int loop_iterate(void *object, int timeout)
 
 	pthread_cleanup_pop(true);
 
+	return nfds;
+}
+
+static int loop_iterate(void *object, int timeout)
+{
+	struct impl *impl = object;
+	struct spa_poll_event ep[MAX_EP], *e;
+	int i, nfds;
+
+	impl->polling = true;
+	spa_loop_control_hook_before(&impl->hooks_list);
+
+	nfds = spa_system_pollfd_wait(impl->system, impl->poll_fd, ep, SPA_N_ELEMENTS(ep), timeout);
+
+	spa_loop_control_hook_after(&impl->hooks_list);
+	impl->polling = false;
+
+	/* first we set all the rmasks, then call the callbacks. The reason is that
+	 * some callback might also want to look at other sources it manages and
+	 * can then reset the rmask to suppress the callback */
+	for (i = 0; i < nfds; i++) {
+		struct spa_source *s = ep[i].data;
+
+		s->rmask = ep[i].events;
+		/* already active in another iteration of the loop,
+		 * remove it from that iteration */
+		if (SPA_UNLIKELY(e = s->priv))
+			e->data = NULL;
+		s->priv = &ep[i];
+	}
+
+	if (SPA_UNLIKELY(!spa_list_is_empty(&impl->destroy_list)))
+		process_destroy(impl);
+
+	for (i = 0; i < nfds; i++) {
+		struct spa_source *s = ep[i].data;
+		if (SPA_LIKELY(s && s->rmask))
+			s->func(s);
+	}
+	for (i = 0; i < nfds; i++) {
+		struct spa_source *s = ep[i].data;
+		if (SPA_LIKELY(s)) {
+			s->rmask = 0;
+			s->priv = NULL;
+		}
+	}
 	return nfds;
 }
 
@@ -839,6 +874,16 @@ static const struct spa_loop_methods impl_loop = {
 	.invoke = loop_invoke,
 };
 
+static const struct spa_loop_control_methods impl_loop_control_cancel = {
+	SPA_VERSION_LOOP_CONTROL_METHODS,
+	.get_fd = loop_get_fd,
+	.add_hook = loop_add_hook,
+	.enter = loop_enter,
+	.leave = loop_leave,
+	.iterate = loop_iterate_cancel,
+	.check = loop_check,
+};
+
 static const struct spa_loop_control_methods impl_loop_control = {
 	SPA_VERSION_LOOP_CONTROL_METHODS,
 	.get_fd = loop_get_fd,
@@ -846,6 +891,7 @@ static const struct spa_loop_control_methods impl_loop_control = {
 	.enter = loop_enter,
 	.leave = loop_leave,
 	.iterate = loop_iterate,
+	.check = loop_check,
 };
 
 static const struct spa_loop_utils_methods impl_loop_utils = {
@@ -920,6 +966,7 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *impl;
+	const char *str;
 	int res;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -941,6 +988,12 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_TYPE_INTERFACE_LoopUtils,
 			SPA_VERSION_LOOP_UTILS,
 			&impl_loop_utils, impl);
+
+	if (info) {
+		if ((str = spa_dict_lookup(info, "loop.cancel")) != NULL &&
+		    spa_atob(str))
+			impl->control.iface.cb.funcs = &impl_loop_control_cancel;
+	}
 
 	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	spa_log_topic_init(impl->log, &log_topic);

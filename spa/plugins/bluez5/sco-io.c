@@ -1,26 +1,6 @@
-/* Spa SCO I/O
- *
- * Copyright © 2019 Collabora Ltd.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa SCO I/O */
+/* SPDX-FileCopyrightText: Copyright © 2019 Collabora Ltd. */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -109,7 +89,7 @@ static void sco_io_on_ready(struct spa_source *source)
 		int res;
 
 	read_again:
-		res = read(io->fd, io->read_buffer, SPA_MIN(io->read_mtu, MAX_MTU));
+		res = recv(io->fd, io->read_buffer, SPA_MIN(io->read_mtu, MAX_MTU), MSG_DONTWAIT);
 		if (res <= 0) {
 			if (errno == EINTR) {
 				/* retry if interrupted */
@@ -185,7 +165,7 @@ int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *buf, int size)
 	do {
 		int written;
 
-		written = write(io->fd, buf, packet_size);
+		written = send(io->fd, buf, packet_size, MSG_DONTWAIT | MSG_NOSIGNAL);
 		if (written < 0) {
 			if (errno == EINTR) {
 				/* retry if interrupted */

@@ -1,26 +1,6 @@
-/* Spa ALSA Sink
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa ALSA Sink */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef SPA_ALSA_UTILS_H
 #define SPA_ALSA_UTILS_H
@@ -33,6 +13,7 @@ extern "C" {
 #include <math.h>
 
 #include <alsa/asoundlib.h>
+#include <alsa/version.h>
 #include <alsa/use-case.h>
 
 #include <spa/support/plugin.h>
@@ -67,6 +48,7 @@ struct props {
 };
 
 #define MAX_BUFFERS 32
+#define MAX_POLL 16
 
 struct buffer {
 	uint32_t id;
@@ -151,6 +133,7 @@ struct state {
 	struct channel_map default_pos;
 	unsigned int disable_mmap;
 	unsigned int disable_batch;
+	unsigned int disable_tsched;
 	char clock_name[64];
 	uint32_t quantum_limit;
 
@@ -191,13 +174,17 @@ struct state {
 	size_t ready_offset;
 
 	bool started;
-	struct spa_source source;
+	/* Either a single source for tsched, or a set of pollfds from ALSA */
+	struct spa_source source[MAX_POLL];
 	int timerfd;
+	struct pollfd pfds[MAX_POLL];
+	int n_fds;
 	uint32_t threshold;
 	uint32_t last_threshold;
 	uint32_t headroom;
 	uint32_t start_delay;
 	uint32_t min_delay;
+	uint32_t max_delay;
 
 	uint32_t duration;
 	unsigned int alsa_started:1;
@@ -227,6 +214,7 @@ struct state {
 
 	struct spa_dll dll;
 	double max_error;
+	double max_resync;
 
 	struct spa_latency_info latency[2];
 	struct spa_process_latency_info process_latency;
@@ -366,6 +354,12 @@ static inline int ratelimit_test(struct ratelimit *r, uint64_t now)
 	return missed;
 }
 
+/* This function is also as snd_pcm_channel_area_addr() since 1.2.6 which is not yet
+ * in ubuntu and I can't figure out how to do the ALSA version check. */
+static inline void *channel_area_addr(const snd_pcm_channel_area_t *area, snd_pcm_uframes_t offset)
+{
+        return (char *)area->addr + (area->first + area->step * offset) / 8;
+}
 
 #ifdef __cplusplus
 } /* extern "C" */

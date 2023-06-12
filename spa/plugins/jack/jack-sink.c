@@ -1,26 +1,6 @@
-/* Spa jack client
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa jack client */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <errno.h>
 #include <stddef.h>
@@ -87,7 +67,6 @@ struct impl {
 	struct spa_node node;
 
 	struct spa_log *log;
-	struct spa_loop *data_loop;
 
 	uint64_t info_all;
 	struct spa_node_info info;
@@ -189,6 +168,11 @@ static int impl_node_enum_params(void *object, int seq,
 	return 0;
 }
 
+static inline bool is_following(struct impl *impl)
+{
+	return impl->position && impl->clock && impl->position->clock.id != impl->clock->id;
+}
+
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
 	struct impl *this = object;
@@ -255,15 +239,18 @@ static void emit_node_info(struct impl *this, bool full)
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
-		struct spa_dict_item items[5];
+		struct spa_dict_item items[8];
 		char latency[64];
 		snprintf(latency, sizeof(latency), "%d/%d",
 				this->client->buffer_size, this->client->frame_rate);
 		items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Sink");
-		items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_NAME, "JACK System");
+		items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_NAME, "JACK Sink");
 		items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_DRIVER, "true");
 		items[3] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_PAUSE_ON_IDLE, "false");
-		items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_LATENCY, latency);
+		items[4] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_ALWAYS_PROCESS, "true");
+		items[5] = SPA_DICT_ITEM_INIT("priority.driver", "30001");
+		items[6] = SPA_DICT_ITEM_INIT("node.group", "jack-group");
+		items[7] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_LATENCY, latency);
 		this->info.props = &SPA_DICT_INIT_ARRAY(items);
 		spa_node_emit_info(&this->hooks, &this->info);
 		this->info.change_mask = old;
@@ -338,6 +325,9 @@ impl_node_set_callbacks(void *object,
 static void client_process(void *data)
 {
 	struct impl *this = data;
+
+	if (is_following(this))
+		return;
 
 	if (this->clock) {
 		struct spa_io_clock *c = this->clock;
@@ -775,10 +765,8 @@ static int impl_node_process(void *object)
 		spa_memcpy(dst, src->data, n_frames * port->stride);
 
 		io->status = SPA_STATUS_NEED_DATA;
-
-		res |= SPA_STATUS_NEED_DATA;
 	}
-	return res;
+	return res | SPA_STATUS_NEED_DATA;
 }
 
 static const struct spa_node_methods impl_node = {

@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2019 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2019 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -30,6 +10,7 @@
 #include "config.h"
 
 #include <spa/utils/result.h>
+#include <spa/utils/json.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/extensions/metadata.h>
@@ -38,6 +19,12 @@
  */
 
 #define NAME "metadata"
+
+#define FACTORY_USAGE   "("PW_KEY_METADATA_NAME" = <name> ) "						\
+                        "("PW_KEY_METADATA_VALUES" = [ "						\
+                        "   { ( id = <int> ) key = <string> ( type = <string> ) value = <json> } "	\
+                        "   ..."									\
+                        "  ] )"
 
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
@@ -49,7 +36,7 @@ static const struct spa_dict_item module_props[] = {
 };
 
 
-void * pw_metadata_new(struct pw_context *context, struct pw_resource *resource,
+struct pw_metadata *pw_metadata_new(struct pw_context *context, struct pw_resource *resource,
 		   struct pw_properties *properties);
 
 struct pw_proxy *pw_core_metadata_export(struct pw_core *core,
@@ -67,6 +54,56 @@ struct factory_data {
 	struct pw_export_type export_metadata;
 };
 
+/*
+ * [
+ *     { ( "id" = <int>, ) "key" = <string> ("type" = <string>) "value" = <json> }
+ *     ....
+ * ]
+ */
+static int fill_metadata(struct pw_metadata *metadata, const char *str)
+{
+	struct spa_json it[3];
+
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+		return -EINVAL;
+
+	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+		char key[256], *k = NULL, *v = NULL, *t = NULL;
+		int id = 0;
+
+		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
+			int len;
+			const char *val;
+
+			if ((len = spa_json_next(&it[2], &val)) <= 0)
+				return -EINVAL;
+
+			if (spa_streq(key, "id")) {
+				if (spa_json_parse_int(val, len, &id) <= 0)
+					return -EINVAL;
+			} else if (spa_streq(key, "key")) {
+				if ((k = malloc(len+1)) != NULL)
+					spa_json_parse_stringn(val, len, k, len+1);
+			} else if (spa_streq(key, "type")) {
+				if ((t = malloc(len+1)) != NULL)
+					spa_json_parse_stringn(val, len, t, len+1);
+			} else if (spa_streq(key, "value")) {
+				if (spa_json_is_container(val, len))
+					len = spa_json_container_len(&it[2], val, len);
+				if ((v = malloc(len+1)) != NULL)
+					spa_json_parse_stringn(val, len, v, len+1);
+			}
+		}
+		if (k != NULL && v != NULL)
+			pw_metadata_set_property(metadata, id, k, t, v);
+		free(k);
+		free(v);
+		free(t);
+	}
+	return 0;
+}
+
 static void *create_object(void *_data,
 			   struct pw_resource *resource,
 			   const char *type,
@@ -76,9 +113,10 @@ static void *create_object(void *_data,
 {
 	struct factory_data *data = _data;
 	struct pw_context *context = pw_impl_module_get_context(data->module);
-	void *result;
+	struct pw_metadata *result;
 	struct pw_resource *metadata_resource = NULL;
 	struct pw_impl_client *client = resource ? pw_resource_get_client(resource) : NULL;
+	const char *str;
 	int res;
 
 	if (properties == NULL)
@@ -111,14 +149,20 @@ static void *create_object(void *_data,
 			goto error_node;
 		}
 	} else {
-		result = pw_context_create_metadata(context, NULL, properties, 0);
-		if (result == NULL) {
+		struct pw_impl_metadata *impl;
+
+		impl = pw_context_create_metadata(context, NULL, properties, 0);
+		if (impl == NULL) {
 			properties = NULL;
 			res = -errno;
 			goto error_node;
 		}
-		pw_impl_metadata_register(result, NULL);
+		pw_impl_metadata_register(impl, NULL);
+		result = pw_impl_metadata_get_implementation(impl);
 	}
+	if ((str = pw_properties_get(properties, PW_KEY_METADATA_VALUES)) != NULL)
+		fill_metadata(result, str);
+
 	return result;
 
 error_resource:
@@ -209,7 +253,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 				 "metadata",
 				 PW_TYPE_INTERFACE_Metadata,
 				 PW_VERSION_METADATA,
-				 NULL,
+				 pw_properties_new(
+                                         PW_KEY_FACTORY_USAGE, FACTORY_USAGE,
+                                         NULL),
 				 sizeof(*data));
 	if (factory == NULL)
 		return -errno;

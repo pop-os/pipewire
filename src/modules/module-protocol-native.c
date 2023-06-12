@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -219,8 +199,8 @@ static void debug_msg(const char *prefix, const struct pw_protocol_native_messag
 {
 	struct spa_pod *pod;
 	pw_logt_debug(mod_topic_connection,
-		      "%s: id:%d op:%d size:%d seq:%d", prefix,
-		      msg->id, msg->opcode, msg->size, msg->seq);
+		      "%s: id:%d op:%d size:%d seq:%d fds:%d", prefix,
+		      msg->id, msg->opcode, msg->size, msg->seq, msg->n_fds);
 
 	if ((pod = get_first_pod_from_data(msg->data, msg->size, 0)) != NULL)
 		spa_debug_pod(0, NULL, pod);
@@ -305,6 +285,7 @@ process_messages(struct client_data *data)
 			break;
 
 		if (client->core_resource == NULL) {
+			pw_log_debug("%p: no core resource", client);
 			res = -EPROTO;
 			goto error;
 		}

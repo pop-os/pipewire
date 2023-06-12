@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 #ifndef PIPEWIRE_UTILS_H
 #define PIPEWIRE_UTILS_H
@@ -34,6 +14,10 @@ extern "C" {
 #include <sys/un.h>
 #ifndef _POSIX_C_SOURCE
 # include <sys/mount.h>
+#endif
+
+#ifndef ENODATA
+#define ENODATA 9919
 #endif
 
 #include <spa/utils/defs.h>
@@ -91,6 +75,10 @@ pw_strip(char *str, const char *whitespace);
 
 SPA_WARN_UNUSED_RESULT
 ssize_t pw_getrandom(void *buf, size_t buflen, unsigned int flags);
+
+void pw_random(void *buf, size_t buflen);
+
+#define pw_rand32() ({ uint32_t val; pw_random(&val, sizeof(val)); val; })
 
 void* pw_reallocarray(void *ptr, size_t nmemb, size_t size);
 

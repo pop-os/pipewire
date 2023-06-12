@@ -1,27 +1,7 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans
- *           © 2021 Arun Raghavan <arun@asymptotic.io>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
+/* SPDX-FileCopyrightText: Copyright © 2021 Arun Raghavan <arun@asymptotic.io> */
+/* SPDX-License-Identifier: MIT */
 
 #include "config.h"
 
@@ -53,6 +33,8 @@
 #include <spa/support/plugin-loader.h>
 #include <spa/interfaces/audio/aec.h>
 
+#include <spa/plugins/audioconvert/wavfile.h>
+
 #include <pipewire/impl.h>
 #include <pipewire/pipewire.h>
 
@@ -63,6 +45,40 @@
  * The `echo-cancel` module performs echo cancellation. The module creates
  * virtual `echo-cancel-capture` source and `echo-cancel-playback` sink
  * nodes and the associated streams.
+ *
+ * The echo-cancel module is mostly used in video or audio conference
+ * applications. When the other participants talk and the audio is going out to
+ * the speakers, the signal will be picked up again by the microphone and sent
+ * back to the other participants (along with your talking), resulting in an
+ * echo. This is annoying because the other participants will hear their own
+ * echo from you.
+ *
+ * Conceptually the echo-canceler is composed of 4 streams:
+ *
+ *\code{.unparsed}
+ * .--------.     .---------.     .--------.     .----------.     .-------.
+ * |  mic   | --> | capture | --> |        | --> |  source  | --> |  app  |
+ * '--------'     '---------'     | echo   |     '----------'     '-------'
+ *                                | cancel |
+ * .--------.     .---------.     |        |     .----------.     .---------.
+ * |  app   | --> |  sink   | --> |        | --> | playback | --> | speaker |
+ * '--------'     '---------'     '--------'     '----------'     '---------'
+ *\endcode
+
+ * - A capture stream that captures audio from a microphone.
+ * - A Sink that takes the signal containing the data that should be canceled
+ *   out from the capture stream. This is where the application (video conference
+ *   application) send the audio to and it contains the signal from the other
+ *   participants that are speaking and that needs to be cancelled out.
+ * - A playback stream that just passes the signal from the Sink to the speaker.
+ *   This is so that you can hear the other participants. It is also the signal
+ *   that gets picked up by the microphone and that eventually needs to be
+ *   removed again.
+ * - A Source that exposes the echo-canceled data captured from the capture
+ *   stream. The data from the sink stream and capture stream are correlated and
+ *   the signal from the sink stream is removed from the capture stream data.
+ *   This data then goes into the application (the conference application) and
+ *   does not contain the echo from the other participants anymore.
  *
  * ## Module Options
  *
@@ -123,13 +139,6 @@
  */
 
 /**
- * .--------.     .---------.     .--------.     .----------.     .-------.
- * | source | --> | capture | --> |        | --> |  source  | --> |  app  |
- * '--------'     '---------'     | echo   |     '----------'     '-------'
- *                                | cancel |
- * .--------.     .---------.     |        |     .----------.     .--------.
- * |  app   | --> |  sink   | --> |        | --> | playback | --> |  sink  |
- * '--------'     '---------'     '--------'     '----------'     '--------'
  */
 #define NAME "echo-cancel"
 
@@ -148,19 +157,19 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "Echo Cancellation" },
-	{ PW_KEY_MODULE_USAGE, " [ remote.name=<remote> ] "
-				"[ node.latency=<latency as fraction> ] "
-				"[ audio.rate=<sample rate> ] "
-				"[ audio.channels=<number of channels> ] "
-				"[ audio.position=<channel map> ] "
-				"[ buffer.max_size=<max buffer size in ms> ] "
-				"[ buffer.play_delay=<delay as fraction> ] "
-				"[ library.name =<library name> ] "
-				"[ aec.args=<aec arguments> ] "
-				"[ capture.props=<properties> ] "
-				"[ source.props=<properties> ] "
-				"[ sink.props=<properties> ] "
-				"[ playback.props=<properties> ] " },
+	{ PW_KEY_MODULE_USAGE, " ( remote.name=<remote> ) "
+				"( node.latency=<latency as fraction> ) "
+				"( audio.rate=<sample rate> ) "
+				"( audio.channels=<number of channels> ) "
+				"( audio.position=<channel map> ) "
+				"( buffer.max_size=<max buffer size in ms> ) "
+				"( buffer.play_delay=<delay as fraction> ) "
+				"( library.name =<library name> ) "
+				"( aec.args=<aec arguments> ) "
+				"( capture.props=<properties> ) "
+				"( source.props=<properties> ) "
+				"( sink.props=<properties> ) "
+				"( playback.props=<properties> ) " },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
@@ -174,7 +183,9 @@ struct impl {
 	struct spa_hook core_proxy_listener;
 	struct spa_hook core_listener;
 
-	struct spa_audio_info_raw info;
+	struct spa_audio_info_raw rec_info;
+	struct spa_audio_info_raw out_info;
+	struct spa_audio_info_raw play_info;
 
 	struct pw_properties *capture_props;
 	struct pw_stream *capture;
@@ -224,24 +235,71 @@ struct impl {
 	struct spa_plugin_loader *loader;
 
 	bool monitor_mode;
+
+	char wav_path[512];
+	struct wav_file *wav_file;
 };
+
+static inline void aec_run(struct impl *impl, const float *rec[], const float *play[],
+		float *out[], uint32_t n_samples)
+{
+	spa_audio_aec_run(impl->aec, rec, play, out, n_samples);
+
+	if (SPA_UNLIKELY(impl->wav_path[0])) {
+		if (impl->wav_file == NULL) {
+			struct wav_file_info info;
+
+			spa_zero(info);
+			info.info.media_type = SPA_MEDIA_TYPE_audio;
+			info.info.media_subtype = SPA_MEDIA_SUBTYPE_raw;
+			info.info.info.raw.format = SPA_AUDIO_FORMAT_F32P;
+			info.info.info.raw.rate = impl->rec_info.rate;
+			info.info.info.raw.channels = impl->play_info.channels +
+				impl->rec_info.channels + impl->out_info.channels;
+
+			impl->wav_file = wav_file_open(impl->wav_path,
+					"w", &info);
+			if (impl->wav_file == NULL)
+				pw_log_warn("can't open wav path '%s': %m",
+						impl->wav_path);
+		}
+		if (impl->wav_file) {
+			uint32_t i, n, c = impl->play_info.channels +
+				impl->rec_info.channels + impl->out_info.channels;
+			const float *data[c];
+
+			for (i = n = 0; i < impl->play_info.channels; i++)
+				data[n++] = play[i];
+			for (i = 0; i < impl->rec_info.channels; i++)
+				data[n++] = rec[i];
+			for (i = 0; i < impl->out_info.channels; i++)
+				data[n++] = out[i];
+
+			wav_file_write(impl->wav_file, (void*)data, n_samples);
+		} else {
+			spa_zero(impl->wav_path);
+		}
+	} else if (impl->wav_file != NULL) {
+		wav_file_close(impl->wav_file);
+		impl->wav_file = NULL;
+	}
+}
 
 static void process(struct impl *impl)
 {
 	struct pw_buffer *cout;
 	struct pw_buffer *pout = NULL;
-	float rec_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
-	float play_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
-	float play_delayed_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
-	float out_buf[impl->info.channels][impl->aec_blocksize / sizeof(float)];
-	const float *rec[impl->info.channels];
-	const float *play[impl->info.channels];
-	const float *play_delayed[impl->info.channels];
-	float *out[impl->info.channels];
+	float rec_buf[impl->rec_info.channels][impl->aec_blocksize / sizeof(float)];
+	float play_buf[impl->play_info.channels][impl->aec_blocksize / sizeof(float)];
+	float play_delayed_buf[impl->play_info.channels][impl->aec_blocksize / sizeof(float)];
+	float out_buf[impl->out_info.channels][impl->aec_blocksize / sizeof(float)];
+	const float *rec[impl->rec_info.channels];
+	const float *play[impl->play_info.channels];
+	const float *play_delayed[impl->play_info.channels];
+	float *out[impl->out_info.channels];
 	struct spa_data *dd;
 	uint32_t i, size;
 	uint32_t rindex, pindex, oindex, pdindex, avail;
-	int32_t stride = 0;
 
 	if (impl->playback != NULL && (pout = pw_stream_dequeue_buffer(impl->playback)) == NULL) {
 		pw_log_debug("out of playback buffers: %m");
@@ -251,32 +309,37 @@ static void process(struct impl *impl)
 	size = impl->aec_blocksize;
 
 	/* First read a block from the playback and capture ring buffers */
-
 	spa_ringbuffer_get_read_index(&impl->rec_ring, &rindex);
-	spa_ringbuffer_get_read_index(&impl->play_ring, &pindex);
-	spa_ringbuffer_get_read_index(&impl->play_delayed_ring, &pdindex);
 
-	for (i = 0; i < impl->info.channels; i++) {
+	for (i = 0; i < impl->rec_info.channels; i++) {
 		/* captured samples, with echo from sink */
 		rec[i] = &rec_buf[i][0];
-		/* echo from sink */
-		play[i] = &play_buf[i][0];
-		/* echo from sink delayed */
-		play_delayed[i] = &play_delayed_buf[i][0];
-		/* filtered samples, without echo from sink */
-		out[i] = &out_buf[i][0];
 
-		stride = 0;
 		spa_ringbuffer_read_data(&impl->rec_ring, impl->rec_buffer[i],
 				impl->rec_ringsize, rindex % impl->rec_ringsize,
 				(void*)rec[i], size);
 
-		stride = 0;
+	}
+	spa_ringbuffer_read_update(&impl->rec_ring, rindex + size);
+
+	for (i = 0; i < impl->out_info.channels; i++) {
+		/* filtered samples, without echo from sink */
+		out[i] = &out_buf[i][0];
+	}
+
+	spa_ringbuffer_get_read_index(&impl->play_ring, &pindex);
+	spa_ringbuffer_get_read_index(&impl->play_delayed_ring, &pdindex);
+
+	for (i = 0; i < impl->play_info.channels; i++) {
+		/* echo from sink */
+		play[i] = &play_buf[i][0];
+		/* echo from sink delayed */
+		play_delayed[i] = &play_delayed_buf[i][0];
+
 		spa_ringbuffer_read_data(&impl->play_ring, impl->play_buffer[i],
 				impl->play_ringsize, pindex % impl->play_ringsize,
 				(void *)play[i], size);
 
-		stride = 0;
 		spa_ringbuffer_read_data(&impl->play_delayed_ring, impl->play_buffer[i],
 				impl->play_ringsize, pdindex % impl->play_ringsize,
 				(void *)play_delayed[i], size);
@@ -288,11 +351,9 @@ static void process(struct impl *impl)
 
 			dd->chunk->offset = 0;
 			dd->chunk->size = size;
-			dd->chunk->stride = stride;
+			dd->chunk->stride = sizeof(float);
 		}
 	}
-
-	spa_ringbuffer_read_update(&impl->rec_ring, rindex + size);
 	spa_ringbuffer_read_update(&impl->play_ring, pindex + size);
 	spa_ringbuffer_read_update(&impl->play_delayed_ring, pdindex + size);
 
@@ -306,24 +367,25 @@ static void process(struct impl *impl)
 		/* don't run the canceller until play_buffer has been filled,
 		 * copy silence to output in the meantime */
 		silence_size = SPA_MIN(size, delay_left * sizeof(float));
-		for (i = 0; i < impl->info.channels; i++)
+		for (i = 0; i < impl->out_info.channels; i++)
 			memset(out[i], 0, silence_size);
 		impl->current_delay += silence_size / sizeof(float);
 		pw_log_debug("current_delay %d", impl->current_delay);
 
 		if (silence_size != size) {
-			const float *pd[impl->info.channels];
-			float *o[impl->info.channels];
+			const float *pd[impl->play_info.channels];
+			float *o[impl->out_info.channels];
 
-			for (i = 0; i < impl->info.channels; i++) {
+			for (i = 0; i < impl->play_info.channels; i++)
 				pd[i] = play_delayed[i] + delay_left;
+			for (i = 0; i < impl->out_info.channels; i++)
 				o[i] = out[i] + delay_left;
-			}
-			spa_audio_aec_run(impl->aec, rec, pd, o, size / sizeof(float) - delay_left);
+
+			aec_run(impl, rec, pd, o, size / sizeof(float) - delay_left);
 		}
 	} else {
 		/* run the canceller */
-		spa_audio_aec_run(impl->aec, rec, play_delayed, out, size / sizeof(float));
+		aec_run(impl, rec, play_delayed, out, size / sizeof(float));
 	}
 
 	/* Next, copy over the output to the output ringbuffer */
@@ -342,7 +404,7 @@ static void process(struct impl *impl)
 		avail += drop;
 	}
 
-	for (i = 0; i < impl->info.channels; i++) {
+	for (i = 0; i < impl->out_info.channels; i++) {
 		/* captured samples, with echo from sink */
 		spa_ringbuffer_write_data(&impl->out_ring, impl->out_buffer[i],
 				impl->out_ringsize, oindex % impl->out_ringsize,
@@ -361,14 +423,14 @@ static void process(struct impl *impl)
 			break;
 		}
 
-		for (i = 0; i < impl->info.channels; i++) {
+		for (i = 0; i < impl->out_info.channels; i++) {
 			dd = &cout->buffer->datas[i];
 			spa_ringbuffer_read_data(&impl->out_ring, impl->out_buffer[i],
 					impl->out_ringsize, oindex % impl->out_ringsize,
 					(void *)dd->data, size);
 			dd->chunk->offset = 0;
 			dd->chunk->size = size;
-			dd->chunk->stride = 0;
+			dd->chunk->stride = sizeof(float);
 		}
 
 		pw_stream_queue_buffer(impl->source, cout);
@@ -431,7 +493,7 @@ static void capture_process(void *data)
 		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
 	}
 
-	for (i = 0; i < impl->info.channels; i++) {
+	for (i = 0; i < impl->rec_info.channels; i++) {
 		/* captured samples, with echo from sink */
 		d = &buf->buffer->datas[i];
 
@@ -513,6 +575,28 @@ static void source_state_changed(void *data, enum pw_stream_state old,
 	}
 }
 
+static void reset_buffers(struct impl *impl)
+{
+	uint32_t index, i;
+
+	spa_ringbuffer_init(&impl->rec_ring);
+	spa_ringbuffer_init(&impl->play_ring);
+	spa_ringbuffer_init(&impl->play_delayed_ring);
+	spa_ringbuffer_init(&impl->out_ring);
+
+	for (i = 0; i < impl->rec_info.channels; i++)
+		memset(impl->rec_buffer[i], 0, impl->rec_ringsize);
+	for (i = 0; i < impl->play_info.channels; i++)
+		memset(impl->play_buffer[i], 0, impl->play_ringsize);
+	for (i = 0; i < impl->out_info.channels; i++)
+		memset(impl->out_buffer[i], 0, impl->out_ringsize);
+
+	spa_ringbuffer_get_write_index(&impl->play_ring, &index);
+	spa_ringbuffer_write_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
+	spa_ringbuffer_get_read_index(&impl->play_ring, &index);
+	spa_ringbuffer_read_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
+}
+
 static void input_param_latency_changed(struct impl *impl, const struct spa_pod *param)
 {
 	struct spa_latency_info latency;
@@ -531,21 +615,62 @@ static void input_param_latency_changed(struct impl *impl, const struct spa_pod 
 	else
 		pw_stream_update_params(impl->capture, params, 1);
 }
+
 static struct spa_pod* get_props_param(struct impl* impl, struct spa_pod_builder* b)
 {
-	if (spa_audio_aec_get_params(impl->aec, NULL) > 0) {
-		struct spa_pod_frame f[2];
-		spa_pod_builder_push_object(
-		    b, &f[0], SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
-		spa_pod_builder_prop(b, SPA_PROP_params, 0);
-		spa_pod_builder_push_struct(b, &f[1]);
+	struct spa_pod_frame f[2];
 
+	spa_pod_builder_push_object(
+	    b, &f[0], SPA_TYPE_OBJECT_Props, SPA_PARAM_Props);
+	spa_pod_builder_prop(b, SPA_PROP_params, 0);
+	spa_pod_builder_push_struct(b, &f[1]);
+
+	spa_pod_builder_string(b, "debug.aec.wav-path");
+	spa_pod_builder_string(b, impl->wav_path);
+
+	if (spa_audio_aec_get_params(impl->aec, NULL) > 0)
 		spa_audio_aec_get_params(impl->aec, b);
 
-		spa_pod_builder_pop(b, &f[1]);
-		return spa_pod_builder_pop(b, &f[0]);
+	spa_pod_builder_pop(b, &f[1]);
+	return spa_pod_builder_pop(b, &f[0]);
+}
+
+static int set_params(struct impl* impl, const struct spa_pod *params)
+{
+	struct spa_pod_parser prs;
+	struct spa_pod_frame f;
+
+	spa_pod_parser_pod(&prs, params);
+	if (spa_pod_parser_push_struct(&prs, &f) < 0)
+		return 0;
+
+	while (true) {
+		const char *name;
+		struct spa_pod *pod;
+		char value[512];
+
+		if (spa_pod_parser_get_string(&prs, &name) < 0)
+			break;
+
+		if (spa_pod_parser_get_pod(&prs, &pod) < 0)
+			break;
+
+		if (spa_pod_is_string(pod)) {
+			spa_pod_copy_string(pod, sizeof(value), value);
+		} else if (spa_pod_is_none(pod)) {
+			spa_zero(value);
+		} else
+			continue;
+
+		pw_log_info("key:'%s' val:'%s'", name, value);
+
+		if (spa_streq(name, "debug.aec.wav-path")) {
+			spa_scnprintf(impl->wav_path,
+				sizeof(impl->wav_path), "%s", value);
+		}
 	}
-	return NULL;
+	spa_audio_aec_set_params(impl->aec, params);
+	return 1;
 }
 
 static void input_param_changed(void *data, uint32_t id, const struct spa_pod* param)
@@ -553,7 +678,12 @@ static void input_param_changed(void *data, uint32_t id, const struct spa_pod* p
 	struct spa_pod_object* obj = (struct spa_pod_object*)param;
 	const struct spa_pod_prop* prop;
 	struct impl* impl = data;
+
 	switch (id) {
+	case SPA_PARAM_Format:
+		if (param == NULL)
+			reset_buffers(impl);
+		break;
 	case SPA_PARAM_Latency:
 		input_param_latency_changed(impl, param);
 		break;
@@ -562,18 +692,18 @@ static void input_param_changed(void *data, uint32_t id, const struct spa_pod* p
 			uint8_t buffer[1024];
 			struct spa_pod_dynamic_builder b;
 			const struct spa_pod* params[1];
-			SPA_POD_OBJECT_FOREACH(obj, prop)
-			{
-				if (prop->key == SPA_PROP_params) {
-					spa_audio_aec_set_params(impl->aec, &prop->value);
-				}
+
+			SPA_POD_OBJECT_FOREACH(obj, prop) {
+				if (prop->key == SPA_PROP_params)
+					set_params(impl, &prop->value);
 			}
 
 			spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 			params[0] = get_props_param(impl, &b.b);
 			if (params[0]) {
 				pw_stream_update_params(impl->capture, params, 1);
-				pw_stream_update_params(impl->playback, params, 1);
+				if (impl->playback != NULL)
+					pw_stream_update_params(impl->playback, params, 1);
 			}
 			spa_pod_dynamic_builder_clean(&b);
 		} else {
@@ -654,7 +784,12 @@ static void output_param_changed(void *data, uint32_t id, const struct spa_pod *
 	struct spa_pod_object *obj = (struct spa_pod_object *) param;
 	const struct spa_pod_prop *prop;
 	struct impl *impl = data;
+
 	switch (id) {
+	case SPA_PARAM_Format:
+		if (param == NULL)
+			reset_buffers(impl);
+		break;
 	case SPA_PARAM_Latency:
 		output_param_latency_changed(impl, param);
 		break;
@@ -674,7 +809,8 @@ static void output_param_changed(void *data, uint32_t id, const struct spa_pod *
 			params[0] = get_props_param(impl, &b.b);
 			if (params[0] != NULL) {
 				pw_stream_update_params(impl->capture, params, 1);
-				pw_stream_update_params(impl->playback, params, 1);
+				if (impl->playback != NULL)
+					pw_stream_update_params(impl->playback, params, 1);
 			}
 			spa_pod_dynamic_builder_clean(&b);
 		}
@@ -730,7 +866,7 @@ static void sink_process(void *data)
 		pw_log_debug("Setting AEC block size to %u", impl->aec_blocksize);
 	}
 
-	for (i = 0; i < impl->info.channels; i++) {
+	for (i = 0; i < impl->play_info.channels; i++) {
 		/* echo from sink */
 		d = &buf->buffer->datas[i];
 
@@ -782,7 +918,6 @@ static int setup_streams(struct impl *impl)
 	uint32_t offsets[512];
 	const struct spa_pod *params[512];
 	struct spa_pod_dynamic_builder b;
-	uint32_t index;
 
 	impl->capture = pw_stream_new(impl->core,
 			"Echo-Cancel Capture", impl->capture_props);
@@ -909,23 +1044,17 @@ static int setup_streams(struct impl *impl)
 
 	spa_pod_dynamic_builder_clean(&b);
 
-	impl->rec_ringsize = sizeof(float) * impl->max_buffer_size * impl->info.rate / 1000;
-	impl->play_ringsize = sizeof(float) * ((impl->max_buffer_size * impl->info.rate / 1000) + impl->buffer_delay);
-	impl->out_ringsize = sizeof(float) * impl->max_buffer_size * impl->info.rate / 1000;
-	for (i = 0; i < impl->info.channels; i++) {
+	impl->rec_ringsize = sizeof(float) * impl->max_buffer_size * impl->rec_info.rate / 1000;
+	impl->play_ringsize = sizeof(float) * ((impl->max_buffer_size * impl->play_info.rate / 1000) + impl->buffer_delay);
+	impl->out_ringsize = sizeof(float) * impl->max_buffer_size * impl->out_info.rate / 1000;
+	for (i = 0; i < impl->rec_info.channels; i++)
 		impl->rec_buffer[i] = malloc(impl->rec_ringsize);
+	for (i = 0; i < impl->play_info.channels; i++)
 		impl->play_buffer[i] = malloc(impl->play_ringsize);
+	for (i = 0; i < impl->out_info.channels; i++)
 		impl->out_buffer[i] = malloc(impl->out_ringsize);
-	}
-	spa_ringbuffer_init(&impl->rec_ring);
-	spa_ringbuffer_init(&impl->play_ring);
-	spa_ringbuffer_init(&impl->play_delayed_ring);
-	spa_ringbuffer_init(&impl->out_ring);
 
-	spa_ringbuffer_get_write_index(&impl->play_ring, &index);
-	spa_ringbuffer_write_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
-	spa_ringbuffer_get_read_index(&impl->play_ring, &index);
-	spa_ringbuffer_read_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
+	reset_buffers(impl);
 
 	return 0;
 }
@@ -983,14 +1112,12 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->playback_props);
 	pw_properties_free(impl->sink_props);
 
-	for (i = 0; i < impl->info.channels; i++) {
-		if (impl->rec_buffer[i])
-			free(impl->rec_buffer[i]);
-		if (impl->play_buffer[i])
-			free(impl->play_buffer[i]);
-		if (impl->out_buffer[i])
-			free(impl->out_buffer[i]);
-	}
+	for (i = 0; i < impl->rec_info.channels; i++)
+		free(impl->rec_buffer[i]);
+	for (i = 0; i < impl->play_info.channels; i++)
+		free(impl->play_buffer[i]);
+	for (i = 0; i < impl->out_info.channels; i++)
+		free(impl->out_buffer[i]);
 
 	free(impl);
 }
@@ -1071,6 +1198,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props, *aec_props;
+	struct spa_audio_info_raw info;
 	struct impl *impl;
 	uint32_t id = pw_global_get_id(pw_impl_module_get_global(module));
 	uint32_t pid = getpid();
@@ -1125,12 +1253,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(props, "resample.prefill") == NULL)
 		pw_properties_set(props, "resample.prefill", "true");
 
-	parse_audio_info(props, &impl->info);
+	parse_audio_info(props, &info);
 
-	impl->capture_info = impl->info;
-	impl->source_info = impl->info;
-	impl->sink_info = impl->info;
-	impl->playback_info = impl->info;
+	impl->capture_info = info;
+	impl->source_info = info;
+	impl->sink_info = info;
+	impl->playback_info = info;
 
 	if ((str = pw_properties_get(props, "capture.props")) != NULL)
 		pw_properties_update_string(impl->capture_props, str, strlen(str));
@@ -1178,6 +1306,48 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			pw_properties_set(impl->sink_props, PW_KEY_STREAM_CAPTURE_SINK, "true");
 	}
 
+	copy_props(impl, props, PW_KEY_NODE_GROUP);
+	copy_props(impl, props, PW_KEY_NODE_LINK_GROUP);
+	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
+	copy_props(impl, props, SPA_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
+	copy_props(impl, props, "resample.prefill");
+
+	impl->max_buffer_size = pw_properties_get_uint32(props,"buffer.max_size", MAX_BUFSIZE_MS);
+
+	if ((str = pw_properties_get(props, "buffer.play_delay")) != NULL) {
+		int req_num, req_denom;
+		if (sscanf(str, "%u/%u", &req_num, &req_denom) == 2) {
+			if (req_denom != 0) {
+				impl->buffer_delay = (info.rate * req_num) / req_denom;
+			} else {
+				impl->buffer_delay = DELAY_MS * info.rate / 1000;
+				pw_log_warn("Sample rate for buffer.play_delay is 0 using default");
+			}
+		} else {
+			impl->buffer_delay = DELAY_MS * info.rate / 1000;
+			pw_log_warn("Wrong value/format for buffer.play_delay using default");
+		}
+	} else {
+		impl->buffer_delay = DELAY_MS * info.rate / 1000;
+	}
+
+	if ((str = pw_properties_get(impl->capture_props, SPA_KEY_AUDIO_POSITION)) != NULL) {
+		parse_position(&impl->capture_info, str, strlen(str));
+	}
+	if ((str = pw_properties_get(impl->source_props, SPA_KEY_AUDIO_POSITION)) != NULL) {
+		parse_position(&impl->source_info, str, strlen(str));
+	}
+	if ((str = pw_properties_get(impl->sink_props, SPA_KEY_AUDIO_POSITION)) != NULL) {
+		parse_position(&impl->sink_info, str, strlen(str));
+		impl->playback_info = impl->sink_info;
+	}
+	if ((str = pw_properties_get(impl->playback_props, SPA_KEY_AUDIO_POSITION)) != NULL) {
+		parse_position(&impl->playback_info, str, strlen(str));
+		if (impl->playback_info.channels != impl->sink_info.channels)
+			impl->playback_info = impl->sink_info;
+	}
+
 	if ((str = pw_properties_get(props, "aec.method")) != NULL)
 		pw_log_warn("aec.method is not supported anymore use library.name");
 
@@ -1195,12 +1365,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		return -EINVAL;
 	}
 
-	struct spa_dict_item info_items[] = {
+	struct spa_dict_item dict_items[] = {
 		{ SPA_KEY_LIBRARY_NAME, path },
 	};
-	struct spa_dict info = SPA_DICT_INIT_ARRAY(info_items);
+	struct spa_dict dict = SPA_DICT_INIT_ARRAY(dict_items);
 
-	handle = spa_plugin_loader_load(impl->loader, SPA_NAME_AEC, &info);
+	handle = spa_plugin_loader_load(impl->loader, SPA_NAME_AEC, &dict);
 	if (handle == NULL) {
 		pw_log_error("aec plugin %s not available library.name %s", SPA_NAME_AEC, path);
 		return -ENOENT;
@@ -1228,7 +1398,39 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	else
 		aec_props = pw_properties_new(NULL, NULL);
 
-	res = spa_audio_aec_init(impl->aec, &aec_props->dict, &impl->info);
+
+	if (spa_interface_callback_check(&impl->aec->iface, struct spa_audio_aec_methods, init2, 3)) {
+		impl->rec_info = impl->capture_info;
+		impl->out_info = impl->source_info;
+		impl->play_info = impl->sink_info;
+
+		res = spa_audio_aec_init2(impl->aec, &aec_props->dict,
+				&impl->rec_info, &impl->out_info, &impl->play_info);
+
+		if (impl->sink_info.channels != impl->play_info.channels)
+			impl->sink_info = impl->play_info;
+		if (impl->playback_info.channels != impl->play_info.channels)
+			impl->playback_info = impl->play_info;
+		if (impl->capture_info.channels != impl->rec_info.channels)
+			impl->capture_info = impl->rec_info;
+		if (impl->source_info.channels != impl->out_info.channels)
+			impl->source_info = impl->out_info;
+	} else {
+		if (impl->source_info.channels != impl->sink_info.channels)
+			impl->source_info = impl->sink_info;
+		if (impl->capture_info.channels != impl->source_info.channels)
+			impl->capture_info = impl->source_info;
+		if (impl->playback_info.channels != impl->sink_info.channels)
+			impl->playback_info = impl->sink_info;
+
+		info = impl->playback_info;
+
+		res = spa_audio_aec_init(impl->aec, &aec_props->dict, &info);
+
+		impl->rec_info = info;
+		impl->out_info = info;
+		impl->play_info = info;
+	}
 
 	pw_properties_free(aec_props);
 
@@ -1254,16 +1456,18 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		if (factor == 0 || new_num == 0) {
 			pw_log_info("Setting node latency to %s", impl->aec->latency);
 			pw_properties_set(props, PW_KEY_NODE_LATENCY, impl->aec->latency);
-			impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom;
+			impl->aec_blocksize = sizeof(float) * info.rate * num / denom;
 		} else {
 			pw_log_info("Setting node latency to %u/%u", new_num, req_denom);
 			pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%u/%u", new_num, req_denom);
-			impl->aec_blocksize = sizeof(float) * impl->info.rate * num / denom * factor;
+			impl->aec_blocksize = sizeof(float) * info.rate * num / denom * factor;
 		}
 	} else {
 		/* Implementation doesn't care about the block size */
 		impl->aec_blocksize = 0;
 	}
+
+	copy_props(impl, props, PW_KEY_NODE_LATENCY);
 
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {
@@ -1279,51 +1483,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		res = -errno;
 		pw_log_error("can't connect: %m");
 		goto error;
-	}
-
-	copy_props(impl, props, PW_KEY_NODE_GROUP);
-	copy_props(impl, props, PW_KEY_NODE_LINK_GROUP);
-	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
-	copy_props(impl, props, PW_KEY_NODE_LATENCY);
-	copy_props(impl, props, SPA_KEY_AUDIO_CHANNELS);
-	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
-	copy_props(impl, props, "resample.prefill");
-
-	if ((str = pw_properties_get(impl->capture_props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(&impl->capture_info, str, strlen(str));
-	if ((str = pw_properties_get(impl->source_props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(&impl->source_info, str, strlen(str));
-	if ((str = pw_properties_get(impl->sink_props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(&impl->sink_info, str, strlen(str));
-	if ((str = pw_properties_get(impl->playback_props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(&impl->playback_info, str, strlen(str));
-
-	if (impl->capture_info.channels != impl->info.channels)
-		impl->capture_info = impl->info;
-	if (impl->source_info.channels != impl->info.channels)
-		impl->source_info = impl->info;
-	if (impl->sink_info.channels != impl->info.channels)
-		impl->sink_info = impl->info;
-	if (impl->playback_info.channels != impl->info.channels)
-		impl->playback_info = impl->info;
-
-	impl->max_buffer_size = pw_properties_get_uint32(props,"buffer.max_size", MAX_BUFSIZE_MS);
-
-	if ((str = pw_properties_get(props, "buffer.play_delay")) != NULL) {
-		int req_num, req_denom;
-		if (sscanf(str, "%u/%u", &req_num, &req_denom) == 2) {
-			if (req_denom != 0) {
-				impl->buffer_delay = (impl->info.rate*req_num)/req_denom;
-			} else {
-				impl->buffer_delay = DELAY_MS * impl->info.rate / 1000;
-				pw_log_warn("Sample rate for buffer.play_delay is 0 using default");
-			}
-		} else {
-			impl->buffer_delay = DELAY_MS * impl->info.rate / 1000;
-			pw_log_warn("Wrong value/format for buffer.play_delay using default");
-		}
-	} else {
-		impl->buffer_delay = DELAY_MS * impl->info.rate / 1000;
 	}
 
 	pw_properties_free(props);

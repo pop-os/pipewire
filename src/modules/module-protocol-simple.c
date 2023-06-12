@@ -1,26 +1,6 @@
-/* PipeWire
- *
- * Copyright © 2021 Wim Taymans <wim.taymans@gmail.com>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* PipeWire */
+/* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
+/* SPDX-License-Identifier: MIT */
 
 #include <string.h>
 #include <stdio.h>
@@ -69,7 +49,7 @@
  *  - `capture.node`: an optional node serial or name to use for capture.
  *  - `playback.node`: an optional node serial or name to use for playback.
  *  - `server.address = []`: an array of server addresses to listen on as
- *                            tcp:<ip>:<port>.
+ *                            tcp:(<ip>:)<port>.
  *
  * ## General options
  *
@@ -139,18 +119,18 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 
 #define MAX_CLIENTS	10
 
-#define MODULE_USAGE	"[ capture=<bool> ] "						\
-			"[ playback=<bool> ] "						\
-			"[ remote.name=<remote> ] "					\
-			"[ node.latency=<num/denom, default:"DEFAULT_LATENCY"> ] "	\
-			"[ node.rate=<1/rate, default:1/"SPA_STRINGIFY(DEFAULT_RATE)"> ] "	\
-			"[ capture.node=<source-target> [ stream.capture.sink=true ]] "	\
-			"[ playback.node=<sink-target> ] "				\
-			"[ audio.rate=<sample-rate, default:"SPA_STRINGIFY(DEFAULT_RATE)"> ] "		\
-			"[ audio.format=<format, default:"DEFAULT_FORMAT"> ] "		\
-			"[ audio.channels=<channels, default: "SPA_STRINGIFY(DEFAULT_CHANNELS)"> ] "	\
-			"[ audio.position=<position, default:"DEFAULT_POSITION"> ] "	\
-			"[ server.address=<[ tcp:[<ip>:]<port>[,...] ], default:"DEFAULT_SERVER">"	\
+#define MODULE_USAGE	"( capture=<bool> ) "						\
+			"( playback=<bool> ) "						\
+			"( remote.name=<remote> ) "					\
+			"( node.latency=<num/denom, default:"DEFAULT_LATENCY"> ) "	\
+			"( node.rate=<1/rate, default:1/"SPA_STRINGIFY(DEFAULT_RATE)"> ) "	\
+			"( capture.node=<source-target> ( stream.capture.sink=true )) "	\
+			"( playback.node=<sink-target> ) "				\
+			"( audio.rate=<sample-rate, default:"SPA_STRINGIFY(DEFAULT_RATE)"> ) "		\
+			"( audio.format=<format, default:"DEFAULT_FORMAT"> ) "		\
+			"( audio.channels=<channels, default: "SPA_STRINGIFY(DEFAULT_CHANNELS)"> ) "	\
+			"( audio.position=<position, default:"DEFAULT_POSITION"> ) "	\
+			"( server.address=<[ tcp:(<ip>:)<port>(,...) ], default:"DEFAULT_SERVER"> )"	\
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -543,7 +523,7 @@ on_connect(void *data, int fd, uint32_t mask)
 	struct pw_properties *props = NULL;
 
 	addrlen = sizeof(addr);
-	client_fd = accept4(fd, &addr, &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
+	client_fd = accept4(fd, (struct sockaddr *) &addr, &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
 	if (client_fd < 0)
 		goto error;
 

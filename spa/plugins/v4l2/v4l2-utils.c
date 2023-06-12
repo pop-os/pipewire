@@ -1,26 +1,7 @@
-/* Spa
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -1158,10 +1139,9 @@ spa_v4l2_enum_controls(struct impl *this, int seq,
 
 	spa_log_debug(this->log, "Control '%s' %d %d", queryctrl.name, prop_id, ctrl_id);
 
-	port->n_controls++;
-
 	switch (queryctrl.type) {
 	case V4L2_CTRL_TYPE_INTEGER:
+		port->controls[port->n_controls].type = SPA_TYPE_Int;
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
 			SPA_PROP_INFO_id,   SPA_POD_Id(prop_id),
@@ -1173,6 +1153,7 @@ spa_v4l2_enum_controls(struct impl *this, int seq,
 			SPA_PROP_INFO_description, SPA_POD_String(queryctrl.name));
 		break;
 	case V4L2_CTRL_TYPE_BOOLEAN:
+		port->controls[port->n_controls].type = SPA_TYPE_Bool;
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
 			SPA_PROP_INFO_id,   SPA_POD_Id(prop_id),
@@ -1184,6 +1165,7 @@ spa_v4l2_enum_controls(struct impl *this, int seq,
 		struct v4l2_querymenu querymenu;
 		struct spa_pod_builder_state state;
 
+		port->controls[port->n_controls].type = SPA_TYPE_Int;
 		spa_pod_builder_push_object(&b, &f[0], SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo);
 		spa_pod_builder_add(&b,
 			SPA_PROP_INFO_id,    SPA_POD_Id(prop_id),
@@ -1224,6 +1206,9 @@ spa_v4l2_enum_controls(struct impl *this, int seq,
 		goto next;
 
 	}
+
+	port->n_controls++;
+
 	if (spa_pod_filter(&b, &result.param, param, filter) < 0)
 		goto next;
 
@@ -1234,6 +1219,35 @@ spa_v4l2_enum_controls(struct impl *this, int seq,
 
       enum_end:
 	res = 0;
+	spa_v4l2_close(dev);
+	return res;
+}
+
+static int
+spa_v4l2_update_controls(struct impl *this)
+{
+	struct port *port = &this->out_ports[0];
+	struct spa_v4l2_device *dev = &port->dev;
+	int res;
+	uint32_t i;
+
+	if ((res = spa_v4l2_open(dev, this->props.device)) < 0)
+		return res;
+
+	for (i = 0; i < port->n_controls; i++) {
+		struct control *c = &port->controls[i];
+		struct v4l2_control control;
+
+		spa_zero(control);
+		control.id = c->ctrl_id;
+		if (xioctl(dev->fd, VIDIOC_G_CTRL, &control) < 0) {
+			res = -errno;
+			goto done;
+		}
+		c->value = control.value;
+	}
+	res = 0;
+done:
 	spa_v4l2_close(dev);
 	return res;
 }
@@ -1308,6 +1322,11 @@ static int mmap_read(struct impl *this)
 	spa_log_trace(this->log, "v4l2 %p: have output %d", this, buf.index);
 
 	if (this->clock) {
+		/* FIXME, we should follow the driver clock and target_ values.
+		 * for now we ignore and use our own. */
+		this->clock->target_rate = port->rate;
+		this->clock->target_duration = 1;
+
 		this->clock->nsec = pts;
 		this->clock->rate = port->rate;
 		this->clock->position = buf.sequence;

@@ -1,26 +1,6 @@
-/* Spa MIDI node
- *
- * Copyright © 2022 Pauli Virtanen
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* Spa MIDI node */
+/* SPDX-FileCopyrightText: Copyright © 2022 Pauli Virtanen */
+/* SPDX-License-Identifier: MIT */
 
 #include <unistd.h>
 #include <stddef.h>
@@ -888,13 +868,20 @@ static void on_timeout(struct spa_source *source)
 	spa_log_trace(this->log, "%p: timer %"PRIu64" %"PRIu64"", this,
 			now_time, now_time - prev_time);
 
-	update_position(this);
+	if (SPA_LIKELY(this->position)) {
+		this->duration = this->position->clock.target_duration;
+		this->rate = this->position->clock.target_rate.denom;
+	} else {
+		this->duration = 1024;
+		this->rate = 48000;
+	}
 
 	this->next_time = now_time + this->duration * SPA_NSEC_PER_SEC / this->rate;
 
 	if (SPA_LIKELY(this->clock)) {
 		this->clock->nsec = now_time;
-		this->clock->position += this->duration;
+		this->clock->rate = this->clock->target_rate;
+		this->clock->position += this->clock->duration;
 		this->clock->duration = this->duration;
 		this->clock->rate_diff = 1.0f;
 		this->clock->next_nsec = this->next_time;
@@ -1123,17 +1110,10 @@ static int do_remove_source(struct spa_loop *loop,
 		void *user_data)
 {
 	struct impl *this = user_data;
-	struct itimerspec ts;
 
 	if (this->timer_source.loop)
 		spa_loop_remove_source(this->data_loop, &this->timer_source);
-
-	ts.it_value.tv_sec = 0;
-	ts.it_value.tv_nsec = 0;
-	ts.it_interval.tv_sec = 0;
-	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(this->data_system, this->timerfd, 0, &ts, NULL);
-
+	set_timeout(this, 0);
 	return 0;
 }
 
@@ -1237,7 +1217,6 @@ static int do_reassign_follower(struct spa_loop *loop,
 		void *user_data)
 {
 	struct impl *this = user_data;
-
 	set_timers(this);
 	return 0;
 }

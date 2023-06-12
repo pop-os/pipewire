@@ -1,26 +1,6 @@
-/* GStreamer
- *
- * Copyright © 2018 Wim Taymans
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+/* GStreamer */
+/* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+/* SPDX-License-Identifier: MIT */
 
 /**
  * SECTION:element-pipewiresink
@@ -142,6 +122,7 @@ gst_pipewire_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
   GstPipeWireSink *pwsink = GST_PIPEWIRE_SINK (bsink);
 
   gst_query_add_allocation_pool (query, GST_BUFFER_POOL_CAST (pwsink->pool), 0, 0, 0);
+  gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
   return TRUE;
 }
 
@@ -502,6 +483,22 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
     d->chunk->offset = mem->offset;
     d->chunk->size = mem->size;
     d->chunk->stride = 0;
+  }
+
+  GstVideoMeta *meta = gst_buffer_get_video_meta (buffer);
+  if (meta) {
+    if (meta->n_planes == b->n_datas) {
+      gsize video_size = 0;
+      for (i = 0; i < meta->n_planes; i++) {
+        struct spa_data *d = &b->datas[i];
+        d->chunk->offset += meta->offset[i] - video_size;
+        d->chunk->stride = meta->stride[i];
+
+        video_size += d->chunk->size;
+      }
+    } else {
+      GST_ERROR ("plane num not matching, meta:%u buffer:%u", meta->n_planes, b->n_datas);
+    }
   }
 
   if ((res = pw_stream_queue_buffer (pwsink->stream, data->b)) < 0) {

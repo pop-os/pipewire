@@ -29,7 +29,7 @@ context.properties = {
     #default.clock.rate          = 48000
     #default.clock.allowed-rates = [ 48000 ]
     #default.clock.quantum       = 1024
-    default.clock.min-quantum   = 16
+    #default.clock.min-quantum   = 32
     #default.clock.max-quantum   = 2048
     #default.clock.quantum-limit = 8192
     #default.video.width         = 640
@@ -44,6 +44,12 @@ context.properties = {
     vm.overrides = {
         default.clock.min-quantum = 1024
     }
+
+    # keys checked below to disable module loading
+    module.x11.bell = true
+    # enables autoloading of access module, when disabled an alternative
+    # access module needs to be loaded.
+    module.access = true
 }
 
 context.spa-libs = {
@@ -68,13 +74,16 @@ context.spa-libs = {
 
 context.modules = [
     #{ name = <module-name>
-    #    [ args  = { <key> = <value> ... } ]
-    #    [ flags = [ [ ifexists ] [ nofail ] ]
+    #    ( args  = { <key> = <value> ... } )
+    #    ( flags = [ ( ifexists ) ( nofail ) ] )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
     # Loads a module with the given parameters.
     # If ifexists is given, the module is ignored when it is not found.
     # If nofail is given, module initialization failures are ignored.
+    # If condition is given, the module is loaded only when the context
+    # properties all match the match rules.
     #
 
     # Uses realtime scheduling to boost the audio thread priorities. This uses
@@ -146,6 +155,7 @@ context.modules = [
             # access.force permission.
             #access.force = flatpak
         }
+        condition = [ { module.access = true } ]
     }
 
     # Makes a factory for wrapping nodes in an adapter with a
@@ -167,17 +177,21 @@ context.modules = [
             #x11.xauthority = null
         }
         flags = [ ifexists nofail ]
+        condition = [ { module.x11.bell = true } ]
     }
 ]
 
 context.objects = [
     #{ factory = <factory-name>
-    #    [ args  = { <key> = <value> ... } ]
-    #    [ flags = [ [ nofail ] ]
+    #    ( args  = { <key> = <value> ... } )
+    #    ( flags = [ ( nofail ) ] )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
     # Creates an object from a PipeWire factory with the given parameters.
     # If nofail is given, errors are ignored (and no object is created).
+    # If condition is given, the object is created only when the context properties
+    # all match the match rules.
     #
     #{ factory = spa-node-factory   args = { factory.name = videotestsrc node.name = videotestsrc Spa:Pod:Object:Param:Props:patternType = 1 } }
     #{ factory = spa-device-factory args = { factory.name = api.jack.device foo=bar } flags = [ nofail ] }
@@ -194,6 +208,8 @@ context.objects = [
             node.name       = Dummy-Driver
             node.group      = pipewire.dummy
             priority.driver = 20000
+            #clock.id       = monotonic # realtime | tai | monotonic-raw | boottime
+            #clock.name     = "clock.system.monotonic"
         }
     }
     { factory = spa-node-factory
@@ -205,6 +221,20 @@ context.objects = [
             node.freewheel  = true
         }
     }
+    # An example clock reading from /dev/ptp0. Another option is to sync the
+    # ptp clock to CLOCK_TAI and then set clock.id = tai.
+    #{ factory = spa-node-factory
+    #    args = {
+    #        factory.name    = support.node.driver
+    #        node.name       = PTP0-Driver
+    #        node.group      = pipewire.ptp0
+    #        priority.driver = 30000
+    #        clock.name      = "clock.system.ptp0"
+    #        #clock.id       = tai
+    #        clock.device    = "/dev/ptp0"
+    #    }
+    #}
+
     # This creates a new Source node. It will have input ports
     # that you can link, to provide audio for this source.
     #{ factory = adapter
@@ -237,23 +267,41 @@ context.objects = [
     #        audio.position         = "FL,FR"
     #    }
     #}
+
+    # Use the metadata factory to create metadata and some default values.
+    #{ factory = metadata
+    #    args = {
+    #        metadata.name = my-metadata
+    #        metadata.values = [
+    #            { key = default.audio.sink   value = { name = somesink } }
+    #            { key = default.audio.source value = { name = somesource } }
+    #        ]
+    #    }
+    #}
 ]
 
 context.exec = [
-    #{ path = <program-name> [ args = "<arguments>" ] }
+    #{   path = <program-name>
+    #    ( args = "<arguments>" )
+    #    ( condition = [ { <key> = <value> ... } ... ] )
+    #}
     #
     # Execute the given program with arguments.
+    # If condition is given, the program is executed only when the context
+    # properties all match the match rules.
     #
     # You can optionally start the session manager here,
     # but it is better to start it as a systemd service.
     # Run the session manager with -h for options.
     #
-    @sm_comment@{ path = "@session_manager_path@" args = "@session_manager_args@" }
+    @sm_comment@{ path = "@session_manager_path@" args = "@session_manager_args@"
+    @sm_comment@  condition = [ { exec.session-manager = null } { exec.session-manager = true } ] }
     #
     # You can optionally start the pulseaudio-server here as well
     # but it is better to start it as a systemd service.
     # It can be interesting to start another daemon here that listens
     # on another address with the -a option (eg. -a tcp:4713).
     #
-    @pulse_comment@{ path = "@pipewire_path@" args = "-c pipewire-pulse.conf" }
+    @pulse_comment@{ path = "@pipewire_path@" args = "-c pipewire-pulse.conf"
+    @pulse_comment@  condition = [ { exec.pipewire-pulse = null } { exec.pipewire-pulse = true } ] }
 ]
