@@ -326,10 +326,13 @@ Description: PipeWire V4L2 plugin
  .
  This package contains the V4L2 plugin.
 
-Package: pipewire-libcamera
+Package: libspa-0.2-libcamera
 Section: video
 Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa ia64 powerpc ppc64 riscv64 sh4 sparc64 x32
 Multi-Arch: same
+Replaces: pipewire-libcamera (<< 0.3.71-3~)
+Breaks: pipewire-libcamera (<< 0.3.71-3~)
+Provides: pipewire-libcamera
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -447,3 +450,15 @@ Description: recommended set of PipeWire packages for a standard audio desktop u
  .
  This metapackage depends on a recommended set of pipewire packages
  for a standard audio desktop use.
+
+Package: pipewire-libcamera
+Section: oldlibs
+Architecture: all
+Depends: libspa-0.2-libcamera,
+         ${misc:Depends}
+Description: transitional package for libspa-0.2-libcamera
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines.
+ .
+ This is a transitional package for libspa-0.2-libcamera.
+ It can safely be removed.
