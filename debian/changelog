@@ -7,6 +7,8 @@ pipewire (0.3.72-1) UNRELEASED; urgency=medium
   * Drop patch included in upstream release:
       - ce71b37b: fixes a bug with buffer_size updates for JACK apps
   * Add libffado-dev in Build-Deps
+  * Install new modules ffado-driver, netjack2-driver and netjack2-manager
+      in libpipewire-0.3-modules.
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:00:07 +0200
 
