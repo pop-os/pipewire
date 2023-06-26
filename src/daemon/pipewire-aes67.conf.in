@@ -18,10 +18,28 @@ context.properties = {
     #default.clock.quantum-limit = 8192
 }
 
-#context.spa-libs = {
-#    audio.convert.* = audioconvert/libspa-audioconvert
-#    support.*       = support/libspa-support
-#}
+context.spa-libs = {
+    support.*       = support/libspa-support
+}
+
+context.objects = [
+    # An example clock reading from /dev/ptp0. Another option is to sync the
+    # ptp clock to CLOCK_TAI and then set clock.id = tai.
+    # If both device and ID are given and available, device takes precedence
+    { factory = spa-node-factory
+        args = {
+            factory.name    = support.node.driver
+            node.name       = PTP0-Driver
+            node.group      = pipewire.ptp0
+            # This driver should only be used for network nodes marked with group
+            priority.driver = 0
+            clock.name      = "clock.system.ptp0"
+            clock.device    = "/dev/ptp0"
+            clock.id        = tai
+            object.export   = true
+        }
+    }
+]
 
 context.modules = [
     { name = libpipewire-module-rt
@@ -35,12 +53,15 @@ context.modules = [
     }
     { name = libpipewire-module-protocol-native }
     { name = libpipewire-module-client-node }
+    { name = libpipewire-module-spa-node-factory }
     { name = libpipewire-module-adapter }
     { name = libpipewire-module-rtp-sap
         args = {
             local.ifname = eth0
             sap.ip = 239.255.255.255
             sap.port = 9875
+            net.ttl = 32
+            net.loop = true
 
             stream.rules = [
                 {
@@ -55,10 +76,54 @@ context.modules = [
                             media.class = "Audio/Source"
                             device.api = aes67
                             sess.latency.msec = 10
+                            node.group = pipewire.ptp0
                         }
                     }
-                }
+                },
+                {
+                    matches = [
+                        {
+                            sess.sap.announce = true
+                        }
+                    ]
+                    actions = {
+                        announce-stream = {}
+                    }
+               }
             ]
         }
-    }
+    },
+    { name = libpipewire-module-rtp-sink
+        args = {
+            local.ifname = eth0
+            destination.ip = 239.69.150.243
+            destination.port = 5004
+            net.mtu = 1280
+            net.ttl = 32
+            net.loop = true
+            sess.min-ptime = 1
+            sess.max-ptime = 1
+            sess.name = "PipeWire RTP stream"
+            sess.media = "audio"
+            sess.ts-refclk = "ptp=traceable"
+            sess.ts-offset = 0
+            sess.ptime = 1
+            sess.latency.msec = 1
+            sess.announce = true
+            audio.format = "S24BE"
+            audio.rate = 48000
+            audio.channels = 2
+            audio.position = [ FL FR ]
+
+            stream.props = {
+                node.name = "rtp-sink"
+                media.class = "Audio/Sink"
+                node.virtual = false
+                device.api = aes67
+                sess.sap.announce = true
+                node.always-process = true
+                node.group = pipewire.ptp0
+            }
+        }
+    },
 ]

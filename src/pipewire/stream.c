@@ -158,6 +158,7 @@ struct stream {
 	unsigned int using_trigger:1;
 	unsigned int trigger:1;
 	int in_set_param;
+	int in_emit_param_changed;
 };
 
 static int get_param_index(uint32_t id)
@@ -268,12 +269,40 @@ static struct param *add_param(struct stream *impl,
 static void clear_params(struct stream *impl, uint32_t id)
 {
 	struct param *p, *t;
+	bool found = false;
+	int i, idx;
 
 	spa_list_for_each_safe(p, t, &impl->param_list, link) {
 		if (id == SPA_ID_INVALID ||
 		    (p->id == id && !(p->flags & PARAM_FLAG_LOCKED))) {
+			found = true;
 			spa_list_remove(&p->link);
 			free(p);
+		}
+	}
+	if (found) {
+		if (id == SPA_ID_INVALID) {
+			impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+			for (i = 0; i < N_NODE_PARAMS; i++) {
+				impl->params[i].flags &= ~SPA_PARAM_INFO_READ;
+				impl->params[i].user++;
+			}
+			impl->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+			for (i = 0; i < N_PORT_PARAMS; i++) {
+				impl->port_params[i].flags &= ~SPA_PARAM_INFO_READ;
+				impl->port_params[i].user++;
+			}
+		} else {
+			if ((idx = get_param_index(id)) != -1) {
+				impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+				impl->params[idx].flags &= ~SPA_PARAM_INFO_READ;
+				impl->params[idx].user++;
+			}
+			if ((idx = get_port_param_index(id)) != -1) {
+				impl->port_info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+				impl->port_params[idx].flags &= ~SPA_PARAM_INFO_READ;
+				impl->port_params[idx].user++;
+			}
 		}
 	}
 }
@@ -424,13 +453,16 @@ do_call_process(struct spa_loop *loop,
 static inline void call_process(struct stream *impl)
 {
 	pw_log_trace_fp("%p: call process rt:%u", impl, impl->process_rt);
-	if (impl->direction == SPA_DIRECTION_OUTPUT && update_requested(impl) <= 0)
+	if (impl->n_buffers == 0 ||
+	    (impl->direction == SPA_DIRECTION_OUTPUT && update_requested(impl) <= 0))
 		return;
-	if (impl->process_rt)
-		spa_callbacks_call(&impl->rt_callbacks, struct pw_stream_events, process, 0);
-	else
+	if (impl->process_rt) {
+		if (impl->rt_callbacks.funcs)
+			spa_callbacks_call_fast(&impl->rt_callbacks, struct pw_stream_events, process, 0);
+	} else {
 		pw_loop_invoke(impl->main_loop,
 			do_call_process, 1, NULL, 0, false, impl);
+	}
 }
 
 static int
@@ -561,16 +593,24 @@ static int impl_enum_params(void *object, int seq, uint32_t id, uint32_t start, 
 	return enum_params(object, false, seq, id, start, num, filter);
 }
 
+static inline void emit_param_changed(struct stream *impl,
+		uint32_t id, const struct spa_pod *param)
+{
+	struct pw_stream *stream = &impl->this;
+	if (impl->in_emit_param_changed++ == 0)
+		pw_stream_emit_param_changed(stream, id, param);
+	impl->in_emit_param_changed--;
+}
+
 static int impl_set_param(void *object, uint32_t id, uint32_t flags, const struct spa_pod *param)
 {
 	struct stream *impl = object;
-	struct pw_stream *stream = &impl->this;
 
 	if (id != SPA_PARAM_Props)
 		return -ENOTSUP;
 
 	if (impl->in_set_param == 0)
-		pw_stream_emit_param_changed(stream, id, param);
+		emit_param_changed(impl, id, param);
 
 	return 0;
 }
@@ -883,7 +923,7 @@ static int impl_port_set_param(void *object,
 		break;
 	}
 
-	pw_stream_emit_param_changed(stream, id, param);
+	emit_param_changed(impl, id, param);
 
 	if (stream->state == PW_STREAM_STATE_ERROR)
 		return stream->error_res;
@@ -996,12 +1036,15 @@ static int impl_node_process_input(void *object)
 		/* push new buffer */
 		pw_log_trace_fp("%p: push %d %p", stream, b->id, io);
 		if (queue_push(impl, &impl->dequeued, b) == 0) {
-			copy_position(impl, impl->dequeued.incount);
 			if (b->busy)
 				ATOMIC_INC(b->busy->count);
-			call_process(impl);
 		}
 	}
+	if (!queue_is_empty(impl, &impl->dequeued)) {
+		copy_position(impl, impl->dequeued.incount);
+		call_process(impl);
+	}
+
 	if (io->status != SPA_STATUS_NEED_DATA || io->buffer_id == SPA_ID_INVALID) {
 		/* pop buffer to recycle */
 		if ((b = queue_pop(impl, &impl->queued))) {
@@ -1342,8 +1385,10 @@ static int node_event_param(void *object, int seq,
 static void node_event_destroy(void *data)
 {
 	struct pw_stream *stream = data;
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	spa_hook_remove(&stream->node_listener);
 	stream->node = NULL;
+	impl->data_loop = NULL;
 }
 
 static void node_event_info(void *data, const struct pw_node_info *info)
@@ -1515,7 +1560,7 @@ stream_new(struct pw_context *context, const char *name,
 	impl->allow_mlock = context->settings.mem_allow_mlock;
 	impl->warn_mlock = context->settings.mem_warn_mlock;
 
-	spa_hook_list_append(&impl->context->driver_listener_list,
+	pw_context_driver_add_listener(impl->context,
 			&impl->context_listener,
 			&context_events, impl);
 	return impl;
@@ -1683,7 +1728,8 @@ void pw_stream_destroy(struct pw_stream *stream)
 	spa_hook_list_clean(&impl->hooks);
 	spa_hook_list_clean(&stream->listener_list);
 
-	spa_hook_remove(&impl->context_listener);
+	pw_context_driver_remove_listener(impl->context,
+			&impl->context_listener);
 
 	if (impl->data.context)
 		pw_context_destroy(impl->data.context);
@@ -1692,10 +1738,22 @@ void pw_stream_destroy(struct pw_stream *stream)
 	free(impl);
 }
 
+static int
+do_remove_callbacks(struct spa_loop *loop,
+                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct stream *impl = user_data;
+	spa_zero(impl->rt_callbacks);
+	return 0;
+}
+
 static void hook_removed(struct spa_hook *hook)
 {
 	struct stream *impl = hook->priv;
-	spa_zero(impl->rt_callbacks);
+	if (impl->data_loop)
+		pw_loop_invoke(impl->data_loop, do_remove_callbacks, 1, NULL, 0, true, impl);
+	else
+		spa_zero(impl->rt_callbacks);
 	hook->priv = NULL;
 	hook->removed = NULL;
 }
@@ -1953,10 +2011,12 @@ pw_stream_connect(struct pw_stream *stream,
 		/* XXX this is deprecated but still used by the portal and its apps */
 		pw_properties_setf(stream->properties, PW_KEY_NODE_TARGET, "%d", target_id);
 
-	if ((flags & PW_STREAM_FLAG_AUTOCONNECT) &&
+	if ((str = getenv("PIPEWIRE_AUTOCONNECT")) != NULL)
+		pw_properties_set(stream->properties,
+				PW_KEY_NODE_AUTOCONNECT, spa_atob(str) ? "true" : "false");
+	else if ((flags & PW_STREAM_FLAG_AUTOCONNECT) &&
 	    pw_properties_get(stream->properties, PW_KEY_NODE_AUTOCONNECT) == NULL) {
-		str = getenv("PIPEWIRE_AUTOCONNECT");
-		pw_properties_set(stream->properties, PW_KEY_NODE_AUTOCONNECT, str ? str : "true");
+		pw_properties_set(stream->properties, PW_KEY_NODE_AUTOCONNECT, "true");
 	}
 	if (flags & PW_STREAM_FLAG_DRIVER)
 		pw_properties_set(stream->properties, PW_KEY_NODE_DRIVER, "true");
@@ -2471,7 +2531,7 @@ int pw_stream_trigger_process(struct pw_stream *stream)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	int res = 0;
 
-	pw_log_trace_fp("%p", impl);
+	pw_log_trace_fp("%p: trigger:%d driving:%d", impl, impl->trigger, impl->driving);
 
 	/* flag to check for old or new behaviour */
 	impl->using_trigger = true;

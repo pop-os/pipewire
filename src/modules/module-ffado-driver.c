@@ -28,29 +28,27 @@
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
 #include <pipewire/private.h>
+#include <pipewire/thread.h>
 
-#include "module-jack-tunnel/weakjack.h"
+#include <libffado/ffado.h>
 
-/** \page page_module_jack_tunnel PipeWire Module: JACK Tunnel
+/** \page page_module_ffado_driver PipeWire Module: FFADO firewire audio driver
  *
- * The jack-tunnel module provides a source or sink that tunnels all audio to
- * a JACK server.
- *
- * This module is usually used together with \ref page_module_jackdbus_detect that will
- * automatically load the tunnel with the right parameters based on dbus
- * information.
+ * The ffado-driver module provides a source or sink using the libffado library for
+ * reading and writing to firewire audio devices.
  *
  * ## Module Options
  *
- * - `jack.library`: the libjack to load, by default libjack.so.0 is searched in
- *			JACK_PATH directories and then some standard library paths.
- *			Can be an absolute path.
- * - `jack.server`: the name of the JACK server to tunnel to.
- * - `jack.client-name`: the name of the JACK client.
- * - `jack.connect`: if jack ports should be connected automatically. Can also be
- *                   placed per stream.
- * - `tunnel.mode`: the tunnel mode, sink|source|duplex, default duplex
- * - `midi.ports`: the number of midi ports. Can also be added to the stream props.
+ * - `driver.mode`: the driver mode, sink|source|duplex, default duplex
+ * - `ffado.devices`: array of devices to open, default hw:0
+ * - `ffado.period-size`: period size,default 1024
+ * - `ffado.period-num`: period number,default 3
+ * - `ffado.sample-rate`: sample-rate, default 48000
+ * - `ffado.slave-mode`: slave mode
+ * - `ffado.snoop-mode`: snoop mode
+ * - `ffado.verbose`: ffado verbose level
+ * - `latency.internal.input`: extra input latency in frames
+ * - `latency.internal.output`: extra output latency in frames
  * - `source.props`: Extra properties for the source filter.
  * - `sink.props`: Extra properties for the sink filter.
  *
@@ -59,7 +57,6 @@
  * Options with well-known behavior.
  *
  * - \ref PW_KEY_REMOTE_NAME
- * - \ref PW_KEY_AUDIO_CHANNELS
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_NODE_NAME
  * - \ref PW_KEY_NODE_DESCRIPTION
@@ -72,16 +69,19 @@
  *
  *\code{.unparsed}
  * context.modules = [
- * {   name = libpipewire-module-jack-tunnel
+ * {   name = libpipewire-module-ffado-driver
  *     args = {
- *         #jack.library     = libjack.so.0
- *         #jack.server      = null
- *         #jack.client-name = PipeWire
- *         #jack.connect     = true
- *         #tunnel.mode      = duplex
- *         #midi.ports       = 0
- *         #audio.channels   = 2
- *         #audio.position   = [ FL FR ]
+ *         #driver.mode       = duplex
+ *         #ffado.devices     = [ hw:0 ]
+ *         #ffado.period-size = 1024
+ *         #ffado.period-num  = 3
+ *         #ffado.sample-rate = 48000
+ *         #ffado.slave-mode  = false
+ *         #ffado.snoop-mode  = false
+ *         #ffado.verbose     = 0
+ *         #latency.internal.input  = 0
+ *         #latency.internal.output = 0
+ *         #audio.position    = [ FL FR ]
  *         source.props = {
  *             # extra sink properties
  *         }
@@ -94,47 +94,51 @@
  *\endcode
  */
 
-#define NAME "jack-tunnel"
+#define NAME "ffado-driver"
 
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define MAX_PORTS	128
 
-#define DEFAULT_CLIENT_NAME	"PipeWire"
-#define DEFAULT_CHANNELS	2
+#define DEFAULT_DEVICES		"[ hw:0 ]"
+#define DEFAULT_PERIOD_SIZE	1024
+#define DEFAULT_PERIOD_NUM	3
+#define DEFAULT_SAMPLE_RATE	48000
+#define DEFAULT_SLAVE_MODE	false
+#define DEFAULT_SNOOP_MODE	false
+#define DEFAULT_VERBOSE		0
+
 #define DEFAULT_POSITION	"[ FL FR ]"
 #define DEFAULT_MIDI_PORTS	1
 
-#define MODULE_USAGE	"( remote.name=<remote> ] "				\
-			"( jack.library=<jack library path> ) "			\
-			"( jack.server=<server name> ) "			\
-			"( jack.client-name=<name of the JACK client> ] "	\
-			"( jack.connect=<bool, autoconnect ports> ] "		\
-			"( tunnel.mode=<sink|source|duplex> ] "			\
-			"( midi.ports=<number of midi ports> ] "		\
-			"( audio.channels=<number of channels> ] "		\
-			"( audio.position=<channel map> ] "			\
+#define MODULE_USAGE	"( remote.name=<remote> ) "				\
+			"( driver.mode=<sink|source|duplex> ) "			\
+			"( ffado.devices=<devices array size, default hw:0> ) "	\
+			"( ffado.period-size=<period size, default 1024> ) "	\
+			"( ffado.period-num=<period num, default 3> ) "		\
+			"( ffado.sample-rate=<sampe rate, default 48000> ) "	\
+			"( ffado.slave-mode=<slave mode, default false> ) "	\
+			"( ffado.snoop-mode=<snoop mode, default false> ) "	\
+			"( ffado.verbose=<verbose level, default 0> ) "		\
+			"( audio.position=<channel map> ) "			\
 			"( source.props=<properties> ) "			\
 			"( sink.props=<properties> ) "
 
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
-	{ PW_KEY_MODULE_DESCRIPTION, "Create a JACK tunnel" },
+	{ PW_KEY_MODULE_DESCRIPTION, "Create an FFADO based driver" },
 	{ PW_KEY_MODULE_USAGE, MODULE_USAGE },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-static struct weakjack jack;
-
 struct port {
-	jack_port_t *jack_port;
-
 	enum spa_direction direction;
 	struct spa_latency_info latency[2];
 	bool latency_changed[2];
 	unsigned int is_midi:1;
+	void *buffer;
 };
 
 struct volume {
@@ -151,19 +155,22 @@ struct stream {
 	struct pw_filter *filter;
 	struct spa_hook listener;
 	struct spa_audio_info_raw info;
-	uint32_t n_midi;
 	uint32_t n_ports;
 	struct port *ports[MAX_PORTS];
 	struct volume volume;
 
 	unsigned int running:1;
-	unsigned int connect:1;
 };
 
 struct impl {
 	struct pw_context *context;
 	struct pw_loop *main_loop;
 	struct spa_system *system;
+	struct spa_thread_utils *utils;
+
+	ffado_device_info_t device_info;
+	ffado_options_t device_options;
+	ffado_device_t *dev;
 
 #define MODE_SINK	(1<<0)
 #define MODE_SOURCE	(1<<1)
@@ -181,20 +188,33 @@ struct impl {
 
 	struct spa_io_position *position;
 
+	uint32_t latency[2];
+
 	struct stream source;
 	struct stream sink;
 
-	uint32_t samplerate;
+	char *devices[FFADO_MAX_SPECSTRINGS];
+	uint32_t n_devices;
+	int32_t sample_rate;
+	int32_t period_size;
+	int32_t n_periods;
+	bool slave_mode;
+	bool snoop_mode;
+	uint32_t verbose;
 
-	jack_client_t *client;
-	jack_nframes_t frame_time;
+	uint32_t input_latency;
+	uint32_t output_latency;
+	uint32_t quantum_limit;
 
 	uint32_t pw_xrun;
-	uint32_t jack_xrun;
+	uint32_t ffado_xrun;
+	uint32_t frame_time;
+
+	pthread_t thread;
 
 	unsigned int do_disconnect:1;
-	unsigned int triggered:1;
 	unsigned int done:1;
+	unsigned int triggered:1;
 	unsigned int new_xrun:1;
 	unsigned int fix_midi:1;
 };
@@ -232,14 +252,12 @@ static inline void fix_midi_event(uint8_t *data, size_t size)
 	}
 }
 
-static void midi_to_jack(struct impl *impl, float *dst, float *src, uint32_t n_samples)
+static void midi_to_ffado(struct impl *impl, float *dst, float *src, uint32_t n_samples)
 {
 	struct spa_pod *pod;
 	struct spa_pod_sequence *seq;
 	struct spa_pod_control *c;
-	int res;
 
-	jack.midi_clear_buffer(dst);
 	if (src == NULL)
 		return;
 
@@ -260,9 +278,6 @@ static void midi_to_jack(struct impl *impl, float *dst, float *src, uint32_t n_s
 			if (impl->fix_midi)
 				fix_midi_event(data, size);
 
-			if ((res = jack.midi_event_write(dst, c->offset, data, size)) < 0)
-				pw_log_warn("midi %p: can't write event: %s", dst,
-						spa_strerror(res));
 			break;
 		}
 		default:
@@ -271,21 +286,17 @@ static void midi_to_jack(struct impl *impl, float *dst, float *src, uint32_t n_s
 	}
 }
 
-static void jack_to_midi(float *dst, float *src, uint32_t size)
+static void ffado_to_midi(float *dst, float *src, uint32_t size)
 {
 	struct spa_pod_builder b = { 0, };
 	uint32_t i, count;
 	struct spa_pod_frame f;
 
-	count = src ? jack.midi_get_event_count(src) : 0;
+	count = src ? 0 : 0;
 
 	spa_pod_builder_init(&b, dst, size);
 	spa_pod_builder_push_sequence(&b, &f, 0);
 	for (i = 0; i < count; i++) {
-		jack_midi_event_t ev;
-		jack.midi_event_get(&ev, src, i);
-		spa_pod_builder_control(&b, ev.time, SPA_CONTROL_Midi);
-		spa_pod_builder_bytes(&b, ev.buffer, ev.size);
 	}
 	spa_pod_builder_pop(&b, &f);
 }
@@ -331,27 +342,24 @@ static void sink_process(void *d, struct spa_io_position *position)
 
 	for (i = 0; i < s->n_ports; i++) {
 		struct port *p = s->ports[i];
-		float *src, *dst;
+		float *src;
 		if (p == NULL)
 			continue;
+
 		src = pw_filter_get_dsp_buffer(p, n_samples);
-
-		if (p->jack_port == NULL)
-			continue;
-
-		dst = jack.port_get_buffer(p->jack_port, n_samples);
-		if (dst == NULL)
+		if (src == NULL)
 			continue;
 
 		if (SPA_UNLIKELY(p->is_midi))
-			midi_to_jack(impl, dst, src, n_samples);
+			midi_to_ffado(impl, p->buffer, src, n_samples);
 		else
-			do_volume(dst, src, &s->volume, i, n_samples);
+			do_volume(p->buffer, src, &s->volume, i, n_samples);
 	}
-	pw_log_trace_fp("done %u %u", impl->frame_time, n_samples);
+	ffado_streaming_transfer_playback_buffers(impl->dev);
+
+	pw_log_trace_fp("done %u", impl->frame_time);
 	if (impl->mode & MODE_SINK) {
 		impl->done = true;
-		jack.cycle_signal(impl->client, 0);
 	}
 }
 
@@ -364,28 +372,27 @@ static void source_process(void *d, struct spa_io_position *position)
 	if (impl->mode == MODE_SOURCE && !impl->triggered) {
 		pw_log_trace_fp("done %u", impl->frame_time);
 		impl->done = true;
-		jack.cycle_signal(impl->client, 0);
 		return;
 	}
 	impl->triggered = false;
 
+	ffado_streaming_transfer_capture_buffers(impl->dev);
+
 	for (i = 0; i < s->n_ports; i++) {
 		struct port *p = s->ports[i];
-		float *src, *dst;
+		float *dst;
 
-		if (p == NULL)
+		if (p == NULL || p->buffer == NULL)
 			continue;
 
 		dst = pw_filter_get_dsp_buffer(p, n_samples);
-		if (dst == NULL || p->jack_port == NULL)
+		if (dst == NULL)
 			continue;
 
-		src = jack.port_get_buffer (p->jack_port, n_samples);
-
 		if (SPA_UNLIKELY(p->is_midi))
-			jack_to_midi(dst, src, n_samples);
+			ffado_to_midi(dst, p->buffer, n_samples);
 		else
-			do_volume(dst, src, &s->volume, i, n_samples);
+			do_volume(dst, p->buffer, &s->volume, i, n_samples);
 	}
 }
 
@@ -418,104 +425,108 @@ static void param_latency_changed(struct stream *s, const struct spa_pod *param,
 		port->latency[direction] = latency;
 		port->latency_changed[direction] = update = true;
 	}
-	if (update)
-		jack.recompute_total_latencies(s->impl->client);
 }
 
 static void make_stream_ports(struct stream *s)
 {
 	struct impl *impl = s->impl;
-	uint32_t i;
 	struct pw_properties *props;
-	const char *str, *prefix, *type;
-	char name[256];
-	const char **audio_ports = NULL, **link_ports = NULL;
-	const char **midi_ports = NULL;
-	unsigned long jack_peer, jack_flags;
+	char name[512];
+	uint8_t buffer[1024];
+	struct spa_pod_builder b;
+	struct spa_latency_info latency;
+	const struct spa_pod *params[2];
+	uint32_t i, n_params = 0;
 	bool is_midi;
 
-	if (s->direction == PW_DIRECTION_INPUT) {
-		/* sink */
-		jack_peer = JackPortIsInput;
-		jack_flags = JackPortIsOutput;
-		prefix = "playback";
-	} else {
-		/* source */
-		jack_peer = JackPortIsOutput;
-		jack_flags = JackPortIsInput;
-		prefix = "capture";
-	}
-
-	if (s->connect) {
-		audio_ports = jack.get_ports(impl->client, NULL, JACK_DEFAULT_AUDIO_TYPE,
-	                                JackPortIsPhysical|jack_peer);
-		midi_ports = jack.get_ports(impl->client, NULL, JACK_DEFAULT_MIDI_TYPE,
-	                                JackPortIsPhysical|jack_peer);
-	}
 	for (i = 0; i < s->n_ports; i++) {
 		struct port *port = s->ports[i];
+		ffado_streaming_stream_type stream_type;
+		char portname[256];
+
 		if (port != NULL) {
 			s->ports[i] = NULL;
-			if (port->jack_port)
-				jack.port_unregister(impl->client, port->jack_port);
+			free(port->buffer);
 			pw_filter_remove_port(port);
 		}
 
-		if (i < s->info.channels) {
-			str = spa_debug_type_find_short_name(spa_type_audio_channel,
-					s->info.position[i]);
-			if (str)
-				snprintf(name, sizeof(name), "%s_%s", prefix, str);
-			else
-				snprintf(name, sizeof(name), "%s_%d", prefix, i);
+		if (s->direction == PW_DIRECTION_INPUT) {
+			ffado_streaming_get_playback_stream_name(impl->dev, i, portname, sizeof(portname));
+			stream_type = ffado_streaming_get_playback_stream_type(impl->dev, i);
+			snprintf(name, sizeof(name), "%s_out", portname);
+		} else {
+			ffado_streaming_get_capture_stream_name(impl->dev, i, portname, sizeof(portname));
+			stream_type = ffado_streaming_get_capture_stream_type(impl->dev, i);
+			snprintf(name, sizeof(name), "%s_in", portname);
+		}
 
+		switch (stream_type) {
+		case ffado_stream_type_audio:
 			props = pw_properties_new(
 					PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-					PW_KEY_AUDIO_CHANNEL, str ? str : "UNK",
 					PW_KEY_PORT_PHYSICAL, "true",
 					PW_KEY_PORT_NAME, name,
 					NULL);
-
-			type = JACK_DEFAULT_AUDIO_TYPE;
-			link_ports = audio_ports;
 			is_midi = false;
-		} else {
-			snprintf(name, sizeof(name), "%s_%d", prefix, i - s->info.channels);
+			break;
+		case ffado_stream_type_midi:
 			props = pw_properties_new(
 					PW_KEY_FORMAT_DSP, "8 bit raw midi",
 					PW_KEY_PORT_NAME, name,
 					PW_KEY_PORT_PHYSICAL, "true",
 					NULL);
 
-			type = JACK_DEFAULT_MIDI_TYPE;
-			link_ports = midi_ports;
 			is_midi = true;
+			break;
+		default:
+			pw_log_info("not registering unknown stream %d %s (type %d)", i,
+					name, stream_type);
+			continue;
+
 		}
+		latency = SPA_LATENCY_INFO(s->direction,
+				.min_quantum = 1,
+				.max_quantum = 1,
+				.min_rate = impl->latency[s->direction],
+				.max_rate = impl->latency[s->direction]);
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		n_params = 0;
+		params[n_params++] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
 
 		port = pw_filter_add_port(s->filter,
                         s->direction,
                         PW_FILTER_PORT_FLAG_MAP_BUFFERS,
                         sizeof(struct port),
-			props, NULL, 0);
-
-		port->is_midi = is_midi;
-		port->jack_port = jack.port_register (impl->client, name, type, jack_flags, 0);
-
-		if (link_ports != NULL && link_ports[i] != NULL) {
-			if (jack_flags & JackPortIsOutput) {
-				if (jack.connect(impl->client, jack.port_name(port->jack_port), link_ports[i]))
-					pw_log_warn("cannot connect ports");
-			} else {
-				if (jack.connect(impl->client, link_ports[i], jack.port_name(port->jack_port)))
-					pw_log_warn("cannot connect ports");
-			}
+			props, params, n_params);
+		if (port == NULL) {
+			pw_log_error("Can't create port: %m");
+			return;
 		}
+
+		port->latency[s->direction] = latency;
+		port->is_midi = is_midi;
+		port->buffer = calloc(sizeof(float), impl->quantum_limit);
+		if (port->buffer == NULL) {
+			pw_log_error("Can't create port buffer: %m");
+			return;
+		}
+		if (s->direction == PW_DIRECTION_INPUT) {
+			if (ffado_streaming_set_playback_stream_buffer(impl->dev, i, port->buffer))
+				pw_log_error("cannot configure port buffer for %s", name);
+
+			if (ffado_streaming_playback_stream_onoff(impl->dev, i, 1))
+				pw_log_error("cannot enable port %s", name);
+		} else {
+			if (ffado_streaming_set_capture_stream_buffer(impl->dev, i, port->buffer))
+				pw_log_error("cannot configure port buffer for %s", name);
+
+			if (ffado_streaming_capture_stream_onoff(impl->dev, i, 1))
+				pw_log_error("cannot enable port %s", name);
+		}
+
 		s->ports[i] = port;
 	}
-	if (audio_ports)
-		jack.free(audio_ports);
-	if (midi_ports)
-		jack.free(midi_ports);
 }
 
 static struct spa_pod *make_props_param(struct spa_pod_builder *b,
@@ -615,7 +626,9 @@ static int make_stream(struct stream *s, const char *name)
 	const struct spa_pod *params[4];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
+	struct spa_latency_info latency;
 
+	spa_zero(latency);
 	n_params = 0;
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 
@@ -653,60 +666,71 @@ static int create_filters(struct impl *impl)
 	int res = 0;
 
 	if (impl->mode & MODE_SINK)
-		res = make_stream(&impl->sink, "JACK Sink");
+		res = make_stream(&impl->sink, "FFADO Sink");
 
 	if (impl->mode & MODE_SOURCE)
-		res = make_stream(&impl->source, "JACK Source");
+		res = make_stream(&impl->source, "FFADO Source");
 
 	return res;
 }
 
-static void *jack_process_thread(void *arg)
+static inline uint64_t get_time_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+static void *ffado_process_thread(void *arg)
 {
 	struct impl *impl = arg;
 	bool source_running, sink_running;
-	jack_nframes_t nframes;
+	uint64_t nsec;
 
 	while (true) {
-		nframes = jack.cycle_wait (impl->client);
+		ffado_wait_response response;
 
+		response = ffado_streaming_wait(impl->dev);
+		nsec = get_time_ns();
+
+		switch (response) {
+		case ffado_wait_ok:
+			break;
+		case ffado_wait_xrun:
+			pw_log_warn("FFADO xrun");
+			break;
+		case ffado_wait_shutdown:
+			pw_log_info("FFADO shutdown");
+			return NULL;
+		case ffado_wait_error:
+		default:
+			pw_log_error("FFADO error");
+			return NULL;
+		}
 		source_running = impl->source.running;
 		sink_running = impl->sink.running;
 
-		impl->frame_time = jack.frame_time(impl->client);
-
-		pw_log_trace_fp("process %d %u %u %p %d", nframes, source_running,
+		pw_log_trace_fp("process %d %u %u %p %d", impl->period_size, source_running,
 				sink_running, impl->position, impl->frame_time);
 
 		if (impl->new_xrun) {
-			pw_log_warn("Xrun JACK:%u PipeWire:%u", impl->jack_xrun, impl->pw_xrun);
+			pw_log_warn("Xrun FFADO:%u PipeWire:%u", impl->ffado_xrun, impl->pw_xrun);
 			impl->new_xrun = false;
 		}
 
 		if (impl->position) {
 			struct spa_io_clock *c = &impl->position->clock;
-			jack_nframes_t current_frames;
-			jack_time_t current_usecs;
-			jack_time_t next_usecs;
-			float period_usecs;
-			jack_position_t pos;
 
-			jack.get_cycle_times(impl->client,
-					&current_frames, &current_usecs,
-					&next_usecs, &period_usecs);
-
-			c->nsec = current_usecs * SPA_NSEC_PER_USEC;
-			c->rate = SPA_FRACTION(1, impl->samplerate);
-			c->position = current_frames;
-			c->duration = nframes;
+			c->nsec = nsec;
+			c->rate = SPA_FRACTION(1, impl->sample_rate);
+			c->position += impl->period_size;
+			c->duration = impl->period_size;
 			c->delay = 0;
 			c->rate_diff = 1.0;
-			c->next_nsec = next_usecs * SPA_NSEC_PER_USEC;
+			c->next_nsec = nsec;
 
 			c->target_rate = c->rate;
 			c->target_duration = c->duration;
-
-			jack.transport_query (impl->client, &pos);
 		}
 		if (impl->mode & MODE_SINK && sink_running) {
 			impl->done = false;
@@ -716,23 +740,9 @@ static void *jack_process_thread(void *arg)
 			impl->done = false;
 			impl->triggered = true;
 			pw_filter_trigger_process(impl->source.filter);
-		} else {
-			pw_log_trace_fp("done %d", nframes);
-			jack.cycle_signal(impl->client, 0);
 		}
 	}
 	return NULL;
-}
-
-static int jack_xrun(void *arg)
-{
-	struct impl *impl = arg;
-	if (impl->done)
-		impl->jack_xrun++;
-	else
-		impl->pw_xrun++;
-	impl->new_xrun = true;
-	return 0;
 }
 
 static int
@@ -749,144 +759,102 @@ void module_schedule_destroy(struct impl *impl)
 	pw_loop_invoke(impl->main_loop, do_schedule_destroy, 1, NULL, 0, false, impl);
 }
 
-static void jack_info_shutdown(jack_status_t code, const char* reason, void *arg)
+static int open_ffado_device(struct impl *impl)
 {
-	struct impl *impl = arg;
-	pw_log_warn("shutdown: %s (%08x)", reason, code);
-	module_schedule_destroy(impl);
-}
-
-static void stream_update_latency(struct stream *s)
-{
-	uint8_t buffer[1024];
-	struct spa_pod_builder b;
-	const struct spa_pod *params[2];
-	uint32_t i, n_params = 0;
-
-	for (i = 0; i < s->n_ports; i++) {
-		struct port *port = s->ports[i];
-		if (port == NULL)
-			continue;
-		spa_pod_builder_init(&b, buffer, sizeof(buffer));
-		n_params = 0;
-		if (port->latency_changed[s->direction]) {
-			params[n_params++] = spa_latency_build(&b,
-				SPA_PARAM_Latency, &port->latency[s->direction]);
-			port->latency_changed[s->direction] = false;
-		}
-		if (s->filter)
-			pw_filter_update_params(s->filter, port, params, n_params);
-	}
-}
-
-static int
-do_update_latency(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct impl *impl = user_data;
-
-	if ((impl->mode & MODE_SINK))
-		stream_update_latency(&impl->sink);
-
-	if ((impl->mode & MODE_SOURCE))
-		stream_update_latency(&impl->source);
-
-	return 0;
-}
-
-static bool stream_handle_latency(struct stream *s, jack_latency_callback_mode_t mode)
-{
+	ffado_streaming_stream_type stream_type;
 	uint32_t i;
-	struct spa_latency_info latency;
-	jack_latency_range_t range;
-	bool update = false;
-	enum spa_direction other = SPA_DIRECTION_REVERSE(s->direction);
-	struct port *port;
 
-	if (mode == JackPlaybackLatency) {
-		for (i = 0; i < s->n_ports; i++) {
-			port = s->ports[i];
-			if (port == NULL || port->jack_port == NULL)
-				continue;
+	spa_zero(impl->device_info);
+	impl->device_info.device_spec_strings = impl->devices;
+	impl->device_info.nb_device_spec_strings = impl->n_devices;
 
-			jack.port_get_latency_range(port->jack_port, mode, &range);
+	spa_zero(impl->device_options);
+	impl->device_options.sample_rate = impl->sample_rate;
+	impl->device_options.period_size = impl->period_size;
+	impl->device_options.nb_buffers = impl->n_periods;
+	impl->device_options.realtime = 1;
+	impl->device_options.packetizer_priority = 88;
+	impl->device_options.verbose = impl->verbose;
+	impl->device_options.slave_mode = impl->slave_mode;
+	impl->device_options.snoop_mode = impl->snoop_mode;
 
-			latency = SPA_LATENCY_INFO(s->direction,
-					.min_rate = range.min,
-					.max_rate = range.max);
-			pw_log_debug("port latency %d %d %d", mode, range.min, range.max);
-
-			if (spa_latency_info_compare(&latency, &port->latency[s->direction])) {
-				port->latency[s->direction] = latency;
-				port->latency_changed[s->direction] = update = true;
-			}
-		}
-	} else if (mode == JackCaptureLatency) {
-		for (i = 0; i < s->n_ports; i++) {
-			port = s->ports[i];
-			if (port == NULL || port->jack_port == NULL)
-				continue;
-			if (port->latency_changed[other]) {
-				range.min = port->latency[other].min_rate;
-				range.max = port->latency[other].max_rate;
-				jack.port_set_latency_range(port->jack_port, mode, &range);
-				port->latency_changed[other] = false;
-			}
-		}
-	}
-	return update;
-}
-
-
-static void jack_latency(jack_latency_callback_mode_t mode, void *arg)
-{
-	struct impl *impl = arg;
-	bool update = false;
-
-	if ((impl->mode & MODE_SINK))
-		update |= stream_handle_latency(&impl->sink, mode);
-
-	if ((impl->mode & MODE_SOURCE))
-		update |= stream_handle_latency(&impl->source, mode);
-
-	if (update)
-		pw_loop_invoke(impl->main_loop, do_update_latency, 0, NULL, 0, false, impl);
-}
-
-static int create_jack_client(struct impl *impl)
-{
-	const char *server_name, *client_name;
-	jack_options_t options = JackNullOption;
-	jack_status_t status;
-
-	server_name = pw_properties_get(impl->props, "jack.server");
-	if (server_name != NULL)
-		options |= JackServerName;
-
-	client_name = pw_properties_get(impl->props, "jack.client-name");
-	if (client_name == NULL)
-		client_name = DEFAULT_CLIENT_NAME;
-
-	impl->client = jack.client_open(client_name, options, &status, server_name);
-	if (impl->client == NULL) {
-		pw_log_error ("jack_client_open() failed 0x%2.0x\n", status);
+	impl->dev = ffado_streaming_init(impl->device_info, impl->device_options);
+	if (impl->dev == NULL) {
+		pw_log_error("can't open FFADO device %s", impl->devices[0]);
 		return -EIO;
 	}
-	jack.on_info_shutdown(impl->client, jack_info_shutdown, impl);
-	jack.set_process_thread(impl->client, jack_process_thread, impl);
-	jack.set_xrun_callback(impl->client, jack_xrun, impl);
-	jack.set_latency_callback(impl->client, jack_latency, impl);
 
-	impl->samplerate = jack.get_sample_rate(impl->client);
-	impl->source.info.rate = impl->samplerate;
-	impl->sink.info.rate = impl->samplerate;
+	if (impl->device_options.realtime) {
+		pw_log_info("Streaming thread running with Realtime scheduling, priority %d",
+				impl->device_options.packetizer_priority);
+	} else {
+		pw_log_info("Streaming thread running without Realtime scheduling");
+	}
+
+	ffado_streaming_set_audio_datatype(impl->dev, ffado_audio_datatype_float);
+
+	impl->sample_rate = impl->device_options.sample_rate;
+	impl->source.info.rate = impl->sample_rate;
+	impl->sink.info.rate = impl->sample_rate;
+
+	impl->source.info.channels = 0;
+	impl->source.n_ports = ffado_streaming_get_nb_capture_streams(impl->dev);
+	for (i = 0; i < impl->source.n_ports; i++) {
+		stream_type = ffado_streaming_get_capture_stream_type(impl->dev, i);
+		switch (stream_type) {
+		case ffado_stream_type_audio:
+			impl->source.info.channels++;
+			break;
+		default:
+			break;
+		}
+	}
+	impl->sink.info.channels = 0;
+	impl->sink.n_ports = ffado_streaming_get_nb_playback_streams(impl->dev);
+	for (i = 0; i < impl->sink.n_ports; i++) {
+		stream_type = ffado_streaming_get_playback_stream_type(impl->dev, i);
+		switch (stream_type) {
+		case ffado_stream_type_audio:
+			impl->sink.info.channels++;
+			break;
+		default:
+			break;
+		}
+	}
+	if (ffado_streaming_prepare(impl->dev)) {
+		pw_log_error("Could not prepare streaming");
+		return -EIO;
+	}
+	return 0;
+}
+
+static int start_ffado_device(struct impl *impl)
+{
+	struct spa_thread *thr;
+
+	if (ffado_streaming_start(impl->dev)) {
+		pw_log_error("Could not start streaming");
+		return -EIO;
+	}
+
+	thr = spa_thread_utils_create(impl->utils, NULL, ffado_process_thread, impl);
+	impl->thread = (pthread_t)thr;
+	if (thr == NULL) {
+		pw_log_error("%p: can't create thread: %m", impl);
+		return -errno;
+	}
+	spa_thread_utils_acquire_rt(impl->utils, thr, -1);
 
 	return 0;
 }
 
-static int start_jack_clients(struct impl *impl)
+static int stop_ffado_device(struct impl *impl)
 {
-	jack.activate(impl->client);
+	if (ffado_streaming_stop(impl->dev)) {
+		pw_log_error("Could not stop streaming");
+	}
+	spa_thread_utils_join(impl->utils, (struct spa_thread*)impl->thread, NULL);
+
 	return 0;
 }
 
@@ -920,9 +888,12 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct impl *impl)
 {
-	if (impl->client) {
-		jack.deactivate(impl->client);
-		jack.client_close(impl->client);
+	uint32_t i;
+
+	if (impl->dev) {
+		stop_ffado_device(impl);
+		ffado_streaming_finish(impl->dev);
+		impl->dev = NULL;
 	}
 	if (impl->source.filter)
 		pw_filter_destroy(impl->source.filter);
@@ -935,6 +906,8 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->source.props);
 	pw_properties_free(impl->props);
 
+	for (i = 0; i < impl->n_devices; i++)
+		free(impl->devices[i]);
 	free(impl);
 }
 
@@ -958,6 +931,22 @@ static uint32_t channel_from_name(const char *name)
 			return spa_type_audio_channel[i].type;
 	}
 	return SPA_AUDIO_CHANNEL_UNKNOWN;
+}
+
+static void parse_devices(struct impl *impl, const char *val, size_t len)
+{
+	struct spa_json it[2];
+	char v[FFADO_MAX_SPECSTRING_LENGTH];
+
+	spa_json_init(&it[0], val, len);
+        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+                spa_json_init(&it[1], val, len);
+
+	impl->n_devices = 0;
+	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
+	    impl->n_devices < FFADO_MAX_SPECSTRINGS) {
+		impl->devices[impl->n_devices++] = strdup(v);
+	}
 }
 
 static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
@@ -1029,14 +1018,29 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 	impl->props = props;
+	str = pw_properties_get(props, "ffado.devices");
+	if (str == NULL)
+		str = DEFAULT_DEVICES;
+	parse_devices(impl, str, strlen(str));
 
-	if ((str = pw_properties_get(props, "jack.library")) == NULL)
-		str = "libjack.so.0";
-
-	if ((res = weakjack_load(&jack, str)) < 0) {
-		pw_log_error( "can't load '%s': %s", str, spa_strerror(res));
-		goto error;
-	}
+	impl->period_size = pw_properties_get_int32(props,
+			"ffado.period-size", DEFAULT_PERIOD_SIZE);
+	impl->n_periods = pw_properties_get_int32(props,
+			"ffado.period-num", DEFAULT_PERIOD_NUM);
+	impl->sample_rate = pw_properties_get_int32(props,
+			"ffado.sample-rate", DEFAULT_SAMPLE_RATE);
+	impl->slave_mode = pw_properties_get_bool(props,
+			"ffado.slave-mode", DEFAULT_SLAVE_MODE);
+	impl->snoop_mode = pw_properties_get_bool(props,
+			"ffado.snoop-mode", DEFAULT_SNOOP_MODE);
+	impl->verbose = pw_properties_get_uint32(props,
+			"ffado.verbose", DEFAULT_VERBOSE);
+	impl->input_latency = pw_properties_get_uint32(props,
+			"latency.internal.input", 0);
+	impl->output_latency = pw_properties_get_uint32(props,
+			"latency.internal.output", 0);
+	impl->quantum_limit = 8192;
+	impl->utils = pw_thread_utils_get();
 
 	impl->sink.props = pw_properties_new(NULL, NULL);
 	impl->source.props = pw_properties_new(NULL, NULL);
@@ -1057,7 +1061,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->sink.direction = PW_DIRECTION_INPUT;
 
 	impl->mode = MODE_DUPLEX;
-	if ((str = pw_properties_get(props, "tunnel.mode")) != NULL) {
+	if ((str = pw_properties_get(props, "driver.mode")) != NULL) {
 		if (spa_streq(str, "source")) {
 			impl->mode = MODE_SOURCE;
 		} else if (spa_streq(str, "sink")) {
@@ -1065,7 +1069,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		} else if (spa_streq(str, "duplex")) {
 			impl->mode = MODE_DUPLEX;
 		} else {
-			pw_log_error("invalid tunnel.mode '%s'", str);
+			pw_log_error("invalid driver.mode '%s'", str);
 			res = -EINVAL;
 			goto error;
 		}
@@ -1074,52 +1078,31 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
-		pw_properties_set(props, PW_KEY_NODE_GROUP, "jack-group");
+		pw_properties_set(props, PW_KEY_NODE_GROUP, "ffado-group");
 	if (pw_properties_get(props, PW_KEY_NODE_ALWAYS_PROCESS) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_ALWAYS_PROCESS, "true");
 
 	pw_properties_set(impl->sink.props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
-	pw_properties_set(impl->sink.props, PW_KEY_PRIORITY_DRIVER, "30001");
-	pw_properties_set(impl->sink.props, PW_KEY_NODE_NAME, "jack_sink");
-	pw_properties_set(impl->sink.props, PW_KEY_NODE_DESCRIPTION, "JACK Sink");
+	pw_properties_set(impl->sink.props, PW_KEY_PRIORITY_DRIVER, "35001");
+	pw_properties_set(impl->sink.props, PW_KEY_NODE_NAME, "ffado_sink");
+	pw_properties_set(impl->sink.props, PW_KEY_NODE_DESCRIPTION, "FFADO Sink");
 
 	pw_properties_set(impl->source.props, PW_KEY_MEDIA_CLASS, "Audio/Source");
-	pw_properties_set(impl->source.props, PW_KEY_PRIORITY_DRIVER, "30000");
-	pw_properties_set(impl->source.props, PW_KEY_NODE_NAME, "jack_source");
-	pw_properties_set(impl->source.props, PW_KEY_NODE_DESCRIPTION, "JACK Source");
+	pw_properties_set(impl->source.props, PW_KEY_PRIORITY_DRIVER, "35000");
+	pw_properties_set(impl->source.props, PW_KEY_NODE_NAME, "ffado_source");
+	pw_properties_set(impl->source.props, PW_KEY_NODE_DESCRIPTION, "FFADO Source");
 
 	if ((str = pw_properties_get(props, "sink.props")) != NULL)
 		pw_properties_update_string(impl->sink.props, str, strlen(str));
 	if ((str = pw_properties_get(props, "source.props")) != NULL)
 		pw_properties_update_string(impl->source.props, str, strlen(str));
 
-	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
-	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_NODE_ALWAYS_PROCESS);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
-	copy_props(impl, props, "jack.connect");
 
 	parse_audio_info(impl->source.props, &impl->source.info);
 	parse_audio_info(impl->sink.props, &impl->sink.info);
-
-	impl->source.n_midi = pw_properties_get_uint32(impl->source.props,
-			"midi.ports", DEFAULT_MIDI_PORTS);
-	impl->sink.n_midi = pw_properties_get_uint32(impl->sink.props,
-			"midi.ports", DEFAULT_MIDI_PORTS);
-
-	impl->source.n_ports = impl->source.n_midi + impl->source.info.channels;
-	impl->sink.n_ports = impl->sink.n_midi + impl->sink.info.channels;
-	if (impl->source.n_ports > MAX_PORTS || impl->sink.n_ports > MAX_PORTS) {
-		pw_log_error("too many ports");
-		res = -EINVAL;
-		goto error;
-	}
-
-	impl->source.connect = pw_properties_get_bool(impl->source.props,
-			"jack.connect", true);
-	impl->sink.connect = pw_properties_get_bool(impl->sink.props,
-			"jack.connect", true);
 
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {
@@ -1144,13 +1127,13 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			&impl->core_listener,
 			&core_events, impl);
 
-	if ((res = create_jack_client(impl)) < 0)
+	if ((res = open_ffado_device(impl)) < 0)
 		goto error;
 
 	if ((res = create_filters(impl)) < 0)
 		goto error;
 
-	if ((res = start_jack_clients(impl)) < 0)
+	if ((res = start_ffado_device(impl)) < 0)
 		goto error;
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);

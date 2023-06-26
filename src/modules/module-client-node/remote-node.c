@@ -40,13 +40,15 @@ struct mix {
 	struct spa_list link;
 	struct pw_impl_port *port;
 	uint32_t mix_id;
+	uint32_t peer_id;
 	struct pw_impl_port_mix mix;
 	struct pw_array buffers;
-	bool active;
 };
 
 struct node_data {
 	struct pw_context *context;
+	struct spa_hook context_listener;
+
 	struct pw_loop *data_loop;
 	struct spa_system *data_system;
 
@@ -91,7 +93,7 @@ static struct link *find_activation(struct spa_list *links, uint32_t node_id)
 	struct link *l;
 
 	spa_list_for_each(l, links, link) {
-		if (l->node_id == node_id)
+		if (l->target.id == node_id)
 			return l;
 	}
 	return NULL;
@@ -138,64 +140,22 @@ static void clean_transport(struct node_data *data)
 	}
 
 	pw_memmap_free(data->activation);
-	data->node->rt.activation = data->node->activation->map->ptr;
+	data->node->rt.target.activation = data->node->activation->map->ptr;
 
 	spa_system_close(data->data_system, data->rtwritefd);
 	data->have_transport = false;
 }
 
-static void mix_init(struct mix *mix, struct pw_impl_port *port, uint32_t mix_id)
+static void mix_init(struct mix *mix, struct pw_impl_port *port,
+		uint32_t mix_id, uint32_t peer_id)
 {
 	pw_log_debug("port %p: mix init %d.%d", port, port->port_id, mix_id);
 	mix->port = port;
 	mix->mix_id = mix_id;
+	mix->peer_id = peer_id;
 	pw_impl_port_init_mix(port, &mix->mix);
-	mix->active = false;
 	pw_array_init(&mix->buffers, 32);
 	pw_array_ensure_size(&mix->buffers, sizeof(struct buffer) * 64);
-}
-
-static int
-do_deactivate_mix(struct spa_loop *loop,
-                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct mix *mix = user_data;
-	spa_list_remove(&mix->mix.rt_link);
-        return 0;
-}
-
-static int
-deactivate_mix(struct node_data *data, struct mix *mix)
-{
-	if (mix->active) {
-		pw_log_debug("node %p: mix %p deactivate", data, mix);
-		pw_loop_invoke(data->data_loop,
-                       do_deactivate_mix, SPA_ID_INVALID, NULL, 0, true, mix);
-		mix->active = false;
-	}
-	return 0;
-}
-
-static int
-do_activate_mix(struct spa_loop *loop,
-                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct mix *mix = user_data;
-
-	spa_list_append(&mix->port->rt.mix_list, &mix->mix.rt_link);
-        return 0;
-}
-
-static int
-activate_mix(struct node_data *data, struct mix *mix)
-{
-	if (!mix->active) {
-		pw_log_debug("node %p: mix %p activate", data, mix);
-		pw_loop_invoke(data->data_loop,
-                       do_activate_mix, SPA_ID_INVALID, NULL, 0, false, mix);
-		mix->active = true;
-	}
-	return 0;
 }
 
 static struct mix *find_mix(struct node_data *data,
@@ -214,14 +174,12 @@ static struct mix *find_mix(struct node_data *data,
 	return NULL;
 }
 
-static struct mix *ensure_mix(struct node_data *data,
-		enum spa_direction direction, uint32_t port_id, uint32_t mix_id)
+static struct mix *create_mix(struct node_data *data,
+		enum spa_direction direction, uint32_t port_id,
+		uint32_t mix_id, uint32_t peer_id)
 {
 	struct mix *mix;
 	struct pw_impl_port *port;
-
-	if ((mix = find_mix(data, direction, port_id, mix_id)))
-		return mix;
 
 	port = pw_impl_node_find_port(data->node, direction, port_id);
 	if (port == NULL)
@@ -234,13 +192,21 @@ static struct mix *ensure_mix(struct node_data *data,
 		mix = spa_list_first(&data->free_mix, struct mix, link);
 		spa_list_remove(&mix->link);
 	}
-
-	mix_init(mix, port, mix_id);
+	mix_init(mix, port, mix_id, peer_id);
 	spa_list_append(&data->mix[direction], &mix->link);
 
 	return mix;
 }
 
+static struct mix *ensure_mix(struct node_data *data,
+		enum spa_direction direction, uint32_t port_id,
+		uint32_t mix_id)
+{
+	struct mix *mix;
+	if ((mix = find_mix(data, direction, port_id, mix_id)))
+		return mix;
+	return create_mix(data, direction, port_id, mix_id, SPA_ID_INVALID);
+}
 
 static int client_node_transport(void *_data,
 			int readfd, int writefd, uint32_t mem_id, uint32_t offset, uint32_t size)
@@ -258,7 +224,10 @@ static int client_node_transport(void *_data,
 		return -errno;
 	}
 
-	node->rt.activation = data->activation->ptr;
+	node->rt.target.activation = data->activation->ptr;
+	node->rt.position = &node->rt.target.activation->position;
+	node->info.id = node->rt.target.activation->position.clock.id;
+	node->rt.target.id = node->info.id;
 
 	pw_log_debug("remote-node %p: fds:%d %d node:%u activation:%p",
 		proxy, readfd, writefd, data->remote_id, data->activation->ptr);
@@ -824,22 +793,12 @@ client_node_port_set_io(void *_data,
 	pw_log_debug("port %p: set io:%s new:%p old:%p", mix->port,
 			spa_debug_type_find_name(spa_type_io, id), ptr, mix->mix.io);
 
-	if (id == SPA_IO_Buffers) {
-		if (ptr == NULL && mix->mix.io)
-			deactivate_mix(data, mix);
-	}
-
 	if ((res = spa_node_port_set_io(mix->port->mix,
 			     direction, mix->mix.port.port_id, id, ptr, size)) < 0) {
 		if (res == -ENOTSUP)
 			res = 0;
 		else
 			goto exit_free;
-	}
-	if (id == SPA_IO_Buffers) {
-		mix->mix.io = ptr;
-		if (ptr)
-			activate_mix(data, mix);
 	}
 exit_free:
 	pw_memmap_free(old);
@@ -878,13 +837,6 @@ client_node_set_activation(void *_data,
 	struct link *link;
 	int res = 0;
 
-	if (data->remote_id == node_id) {
-		pw_log_debug("node %p: our activation %u: %u %u %u", node, node_id,
-				memid, offset, size);
-		spa_system_close(data->data_system, signalfd);
-		return 0;
-	}
-
 	if (memid == SPA_ID_INVALID) {
 		mm = ptr = NULL;
 		size = 0;
@@ -897,7 +849,13 @@ client_node_set_activation(void *_data,
 		}
 		ptr = mm->ptr;
 	}
-	pw_log_debug("node %p: set activation %d %p %u %u", node, node_id, ptr, offset, size);
+	if (data->remote_id == node_id) {
+		pw_log_debug("node %p: our activation %u: %u %p %u %u", node, node_id,
+				memid, ptr, offset, size);
+	} else {
+		pw_log_debug("node %p: set activation %u: %u %p %u %u", node, node_id,
+				memid, ptr, offset, size);
+	}
 
 	if (ptr) {
 		link = calloc(1, sizeof(struct link));
@@ -906,8 +864,8 @@ client_node_set_activation(void *_data,
 			goto error_exit;
 		}
 		link->data = data;
-		link->node_id = node_id;
 		link->map = mm;
+		link->target.id = node_id;
 		link->target.activation = ptr;
 		link->target.system = data->data_system;
 		link->target.fd = signalfd;
@@ -938,6 +896,47 @@ error_exit:
 	return res;
 }
 
+static void clear_mix(struct node_data *data, struct mix *mix)
+{
+	pw_log_debug("port %p: mix clear %d.%d", mix->port, mix->port->port_id, mix->mix_id);
+
+	spa_node_port_set_io(mix->port->mix, mix->mix.port.direction,
+			mix->mix.port.port_id, SPA_IO_Buffers, NULL, 0);
+
+	spa_list_remove(&mix->link);
+
+	clear_buffers(data, mix);
+	pw_array_clear(&mix->buffers);
+
+	spa_list_append(&data->free_mix, &mix->link);
+	pw_impl_port_release_mix(mix->port, &mix->mix);
+}
+
+static int client_node_port_set_mix_info(void *_data,
+		enum spa_direction direction, uint32_t port_id,
+		uint32_t mix_id, uint32_t peer_id, const struct spa_dict *props)
+{
+	struct node_data *data = _data;
+	struct mix *mix;
+
+	pw_log_debug("%p: %d:%d:%d peer:%d", data, direction, port_id, mix_id, peer_id);
+
+	mix = find_mix(data, direction, port_id, mix_id);
+
+	if (peer_id == SPA_ID_INVALID) {
+		if (mix == NULL)
+			return -EINVAL;
+		clear_mix(data, mix);
+	} else {
+		if (mix != NULL)
+			return -EEXIST;
+		mix = create_mix(data, direction, port_id, mix_id, peer_id);
+		if (mix == NULL)
+			return -errno;
+	}
+	return 0;
+}
+
 static const struct pw_client_node_events client_node_events = {
 	PW_VERSION_CLIENT_NODE_EVENTS,
 	.transport = client_node_transport,
@@ -951,6 +950,7 @@ static const struct pw_client_node_events client_node_events = {
 	.port_use_buffers = client_node_port_use_buffers,
 	.port_set_io = client_node_port_set_io,
 	.set_activation = client_node_set_activation,
+	.port_set_mix_info = client_node_port_set_mix_info,
 };
 
 static void do_node_init(struct node_data *data)
@@ -974,21 +974,6 @@ static void do_node_init(struct node_data *data)
 				PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 				PW_CLIENT_NODE_PORT_UPDATE_INFO);
 	}
-}
-
-static void clear_mix(struct node_data *data, struct mix *mix)
-{
-	pw_log_debug("port %p: mix clear %d.%d", mix->port, mix->port->port_id, mix->mix_id);
-
-	deactivate_mix(data, mix);
-
-	spa_list_remove(&mix->link);
-
-	clear_buffers(data, mix);
-	pw_array_clear(&mix->buffers);
-
-	spa_list_append(&data->free_mix, &mix->link);
-	pw_impl_port_release_mix(mix->port, &mix->mix);
 }
 
 static void clean_node(struct node_data *d)
@@ -1127,6 +1112,9 @@ static void client_node_removed(void *_data)
 	spa_hook_remove(&data->proxy_client_node_listener);
 	spa_hook_remove(&data->client_node_listener);
 
+	pw_context_driver_remove_listener(data->context,
+			&data->context_listener);
+
 	if (data->node) {
 		spa_hook_remove(&data->node_listener);
 		pw_impl_node_set_state(data->node, PW_NODE_STATE_SUSPENDED);
@@ -1163,66 +1151,22 @@ static const struct pw_proxy_events proxy_client_node_events = {
 	.bound_props = client_node_bound_props,
 };
 
-static inline uint64_t get_time_ns(struct spa_system *system)
+static void context_complete(void *data, struct pw_impl_node *node)
 {
-	struct timespec ts;
-	spa_system_clock_gettime(system, CLOCK_MONOTONIC, &ts);
-	return SPA_TIMESPEC_TO_NSEC(&ts);
-}
-static int node_ready(void *d, int status)
-{
-	struct node_data *data = d;
-	struct pw_impl_node *node = data->node;
-	struct pw_node_activation *a = node->rt.activation;
-	struct spa_system *data_system = data->data_system;
-	struct pw_impl_port *p;
+	struct node_data *d = data;
+	struct spa_system *data_system = d->data_system;
 
-	pw_log_trace_fp("node %p: ready driver:%d exported:%d status:%d", node,
-			node->driver, node->exported, status);
+	if (node != d->node || !node->driving ||
+	    !SPA_FLAG_IS_SET(node->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_PROFILER))
+		return;
 
-	if (status & SPA_STATUS_HAVE_DATA) {
-		spa_list_for_each(p, &node->rt.output_mix, rt.node_link)
-			spa_node_process_fast(p->mix);
-	}
-
-	a->state[0].status = status;
-	a->signal_time = get_time_ns(data_system);
-
-	if (SPA_UNLIKELY(spa_system_eventfd_write(data_system, data->rtwritefd, 1) < 0))
+	if (SPA_UNLIKELY(spa_system_eventfd_write(data_system, d->rtwritefd, 1) < 0))
 		pw_log_warn("node %p: write failed %m", node);
-
-	return 0;
 }
 
-static int node_reuse_buffer(void *data, uint32_t port_id, uint32_t buffer_id)
-{
-	return 0;
-}
-
-static int node_xrun(void *d, uint64_t trigger, uint64_t delay, struct spa_pod *info)
-{
-	struct node_data *data = d;
-	struct pw_impl_node *node = data->node;
-	struct pw_node_activation *a = node->rt.activation;
-
-	a->xrun_count++;
-	a->xrun_time = trigger;
-	a->xrun_delay = delay;
-	a->max_delay = SPA_MAX(a->max_delay, delay);
-
-	pw_log_debug("node %p: XRun! count:%u time:%"PRIu64" delay:%"PRIu64" max:%"PRIu64,
-			node, a->xrun_count, trigger, delay, a->max_delay);
-
-	pw_context_driver_emit_xrun(data->context, node);
-
-	return 0;
-}
-
-static const struct spa_node_callbacks node_callbacks = {
-	SPA_VERSION_NODE_CALLBACKS,
-	.ready = node_ready,
-	.reuse_buffer = node_reuse_buffer,
-	.xrun = node_xrun
+static const struct pw_context_driver_events context_events = {
+	PW_VERSION_CONTEXT_DRIVER_EVENTS,
+	.complete = context_complete,
 };
 
 static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_free,
@@ -1273,13 +1217,16 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 			&data->proxy_client_node_listener,
 			&proxy_client_node_events, data);
 
-	spa_node_set_callbacks(node->node, &node_callbacks, data);
 	pw_impl_node_add_listener(node, &data->node_listener, &node_events, data);
 
 	pw_client_node_add_listener(data->client_node,
 					  &data->client_node_listener,
 					  &client_node_events,
 					  data);
+	pw_context_driver_add_listener(data->context,
+			&data->context_listener,
+			&context_events, data);
+
 	do_node_init(data);
 
 	return client_node;

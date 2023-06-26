@@ -50,7 +50,7 @@ struct buffer {
 
 struct mix {
 	unsigned int valid:1;
-	uint32_t id;
+	uint32_t mix_id;
 	struct port *port;
 	uint32_t peer_id;
 	uint32_t n_buffers;
@@ -209,10 +209,10 @@ static struct mix *find_mix(struct port *p, uint32_t mix_id)
 	return mix;
 }
 
-static void mix_init(struct mix *mix, struct port *p, uint32_t id)
+static void mix_init(struct mix *mix, struct port *p, uint32_t mix_id)
 {
 	mix->valid = true;
-	mix->id = id;
+	mix->mix_id = mix_id;
 	mix->port = p;
 	mix->n_buffers = 0;
 }
@@ -281,7 +281,7 @@ static void mix_clear(struct impl *impl, struct mix *mix)
 	if (!mix->valid)
 		return;
 	do_port_use_buffers(impl, port->direction, port->id,
-			mix->id, 0, NULL, 0);
+			mix->mix_id, 0, NULL, 0);
 	mix->valid = false;
 }
 
@@ -890,8 +890,8 @@ static int impl_node_process(void *object)
 	 * directly */
 	spa_log_warn(impl->log, "exported node activation");
 	spa_system_clock_gettime(impl->data_system, CLOCK_MONOTONIC, &ts);
-	n->rt.activation->status = PW_NODE_ACTIVATION_TRIGGERED;
-	n->rt.activation->signal_time = SPA_TIMESPEC_TO_NSEC(&ts);
+	n->rt.target.activation->status = PW_NODE_ACTIVATION_TRIGGERED;
+	n->rt.target.activation->signal_time = SPA_TIMESPEC_TO_NSEC(&ts);
 
 	if (SPA_UNLIKELY(spa_system_eventfd_write(n->rt.target.system, n->rt.target.fd, 1) < 0))
 		pw_log_warn("%p: write failed %m", impl);
@@ -1080,8 +1080,6 @@ static void node_on_data_fd_events(struct spa_source *source)
 	if (SPA_LIKELY(source->rmask & SPA_IO_IN)) {
 		uint64_t cmd;
 		struct pw_impl_node *node = impl->this.node;
-		struct pw_node_activation *a = node->rt.activation;
-		int status;
 
 		if (SPA_UNLIKELY(spa_system_eventfd_read(impl->data_system,
 					impl->data_source.fd, &cmd) < 0))
@@ -1090,9 +1088,15 @@ static void node_on_data_fd_events(struct spa_source *source)
 			pw_log_info("(%s-%u) client missed %"PRIu64" wakeups",
 				node->name, node->info.id, cmd - 1);
 
-		status = a->state[0].status;
-		spa_log_trace_fp(impl->log, "%p: got ready %d", impl, status);
-		spa_node_call_ready(&impl->callbacks, status);
+		if (impl->resource && impl->resource->version < 5) {
+			struct pw_node_activation *a = node->rt.target.activation;
+			int status = a->state[0].status;
+			spa_log_trace_fp(impl->log, "%p: got ready %d", impl, status);
+			spa_node_call_ready(&impl->callbacks, status);
+		} else {
+			spa_log_trace_fp(impl->log, "%p: got complete", impl);
+			pw_context_driver_emit_complete(node->context, node);
+		}
 	}
 }
 
@@ -1197,6 +1201,57 @@ static void client_node_resource_pong(void *data, int seq)
 	spa_node_emit_result(&impl->hooks, seq, 0, 0, NULL);
 }
 
+static void node_peer_added(void *data, struct pw_impl_node *peer)
+{
+	struct impl *impl = data;
+	struct pw_memblock *m;
+
+	m = pw_mempool_import_block(impl->client->pool, peer->activation);
+	if (m == NULL) {
+		pw_log_warn("%p: can't ensure mem: %m", impl);
+		return;
+	}
+
+	pw_log_debug("%p: peer %p/%p id:%u added mem_id:%u", impl, peer,
+			impl->this.node, peer->info.id, m->id);
+
+	if (impl->resource == NULL)
+		return;
+
+	pw_client_node_resource_set_activation(impl->resource,
+					  peer->info.id,
+					  peer->source.fd,
+					  m->id,
+					  0,
+					  sizeof(struct pw_node_activation));
+}
+
+static void node_peer_removed(void *data, struct pw_impl_node *peer)
+{
+	struct impl *impl = data;
+	struct pw_memblock *m;
+
+	m = pw_mempool_find_fd(impl->client->pool, peer->activation->fd);
+	if (m == NULL) {
+		pw_log_warn("%p: unknown peer %p fd:%d", impl, peer,
+			peer->source.fd);
+		return;
+	}
+
+	pw_log_debug("%p: peer %p/%p id:%u removed mem_id:%u", impl, peer,
+			impl->this.node, peer->info.id, m->id);
+
+	if (impl->resource != NULL) {
+		pw_client_node_resource_set_activation(impl->resource,
+					  peer->info.id,
+					  -1,
+					  SPA_ID_INVALID,
+					  0,
+					  0);
+	}
+	pw_memblock_unref(m);
+}
+
 void pw_impl_client_node_registered(struct pw_impl_client_node *this, struct pw_global *global)
 {
 	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
@@ -1224,6 +1279,8 @@ void pw_impl_client_node_registered(struct pw_impl_client_node *this, struct pw_
 					  impl->activation->id,
 					  0,
 					  sizeof(struct pw_node_activation));
+
+	node_peer_added(impl, node);
 
 	if (impl->bind_node_id) {
 		pw_global_bind(global, client, PW_PERM_ALL,
@@ -1298,7 +1355,7 @@ static void node_free(void *data)
 		pw_resource_destroy(impl->resource);
 
 	if (impl->activation)
-		pw_memblock_unref(impl->activation);
+		pw_memblock_free(impl->activation);
 
 	pw_array_for_each(area, &impl->io_areas) {
 		if (*area)
@@ -1351,6 +1408,11 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 
 	m->peer_id = mix->peer_id;
 
+	if (impl->resource && impl->resource->version >= 4)
+		pw_client_node_resource_port_set_mix_info(impl->resource,
+					 mix->port.direction, mix->p->port_id,
+					 mix->port.port_id, mix->peer_id, NULL);
+
 	pw_log_debug("%p: init mix id:%d io:%p base:%p", impl,
 			mix->id, mix->io, area->map->ptr);
 
@@ -1372,6 +1434,11 @@ static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
 
 	if ((m = find_mix(port, mix->port.port_id)) == NULL || !m->valid)
 		return -EINVAL;
+
+	if (impl->resource && impl->resource->version >= 4)
+		pw_client_node_resource_port_set_mix_info(impl->resource,
+					 mix->port.direction, mix->p->port_id,
+					 mix->port.port_id, SPA_ID_INVALID, NULL);
 
 	pw_map_remove(&impl->io_map, mix->id);
 	m->valid = false;
@@ -1458,13 +1525,7 @@ static int impl_mix_port_set_io(void *object,
 			mix->io = data;
 		else
 			mix->io = NULL;
-
-		if (mix->io != NULL && impl->resource && impl->resource->version >= 4)
-			pw_client_node_resource_port_set_mix_info(impl->resource,
-						 direction, port->port_id,
-						 mix->port.port_id, mix->peer_id, NULL);
 	}
-
 	return do_port_set_io(impl,
 			      direction, port->port_id, mix->port.port_id,
 			      id, data, size);
@@ -1542,62 +1603,6 @@ static void node_port_removed(void *data, struct pw_impl_port *port)
 
 	p->removed = true;
 	clear_port(impl, p);
-}
-
-static void node_peer_added(void *data, struct pw_impl_node *peer)
-{
-	struct impl *impl = data;
-	struct pw_memblock *m;
-
-	if (peer == impl->this.node)
-		return;
-
-	m = pw_mempool_import_block(impl->client->pool, peer->activation);
-	if (m == NULL) {
-		pw_log_debug("%p: can't ensure mem: %m", impl);
-		return;
-	}
-	pw_log_debug("%p: peer %p id:%u added mem_id:%u", &impl->this, peer,
-			peer->info.id, m->id);
-
-	if (impl->resource == NULL)
-		return;
-
-	pw_client_node_resource_set_activation(impl->resource,
-					  peer->info.id,
-					  peer->source.fd,
-					  m->id,
-					  0,
-					  sizeof(struct pw_node_activation));
-}
-
-static void node_peer_removed(void *data, struct pw_impl_node *peer)
-{
-	struct impl *impl = data;
-	struct pw_memblock *m;
-
-	if (peer == impl->this.node)
-		return;
-
-	m = pw_mempool_find_fd(impl->client->pool, peer->activation->fd);
-	if (m == NULL) {
-		pw_log_warn("%p: unknown peer %p fd:%d", impl, peer,
-			peer->source.fd);
-		return;
-	}
-	pw_log_debug("%p: peer %p %u removed", impl, peer,
-			peer->info.id);
-
-	if (impl->resource != NULL) {
-		pw_client_node_resource_set_activation(impl->resource,
-					  peer->info.id,
-					  -1,
-					  SPA_ID_INVALID,
-					  0,
-					  0);
-	}
-
-	pw_memblock_unref(m);
 }
 
 static void node_driver_changed(void *data, struct pw_impl_node *old, struct pw_impl_node *driver)

@@ -965,8 +965,17 @@ static void combine_input_process(void *d)
 	struct stream *s;
 	bool delay_changed = false;
 
-	if ((in = pw_stream_dequeue_buffer(impl->combine)) == NULL) {
-		pw_log_debug("out of buffers: %m");
+	in = NULL;
+	while (true) {
+		struct pw_buffer *t;
+		if ((t = pw_stream_dequeue_buffer(impl->combine)) == NULL)
+			break;
+		if (in)
+			pw_stream_queue_buffer(impl->combine, in);
+		in = t;
+	}
+	if (in == NULL) {
+		pw_log_debug("%p: out of input buffers: %m", impl);
 		return;
 	}
 
@@ -980,7 +989,7 @@ static void combine_input_process(void *d)
 			delay_changed = true;
 
 		if ((out = pw_stream_dequeue_buffer(s->stream)) == NULL) {
-			pw_log_warn("out of playback buffers: %m");
+			pw_log_warn("%p: out of playback buffers: %m", s);
 			goto do_trigger;
 		}
 
@@ -1033,7 +1042,7 @@ static void combine_output_process(void *d)
 	bool delay_changed = false;
 
 	if ((out = pw_stream_dequeue_buffer(impl->combine)) == NULL) {
-		pw_log_debug("out of buffers: %m");
+		pw_log_debug("%p: out of output buffers: %m", impl);
 		return;
 	}
 
@@ -1046,8 +1055,17 @@ static void combine_output_process(void *d)
 		if (check_stream_delay(s))
 			delay_changed = true;
 
-		if ((in = pw_stream_dequeue_buffer(s->stream)) == NULL) {
-			pw_log_warn("%p: out of capture buffers: %m", s);
+		in = NULL;
+		while (true) {
+			struct pw_buffer *t;
+			if ((t = pw_stream_dequeue_buffer(s->stream)) == NULL)
+				break;
+			if (in)
+				pw_stream_queue_buffer(s->stream, in);
+			in = t;
+		}
+		if (in == NULL) {
+			pw_log_debug("%p: out of input buffers: %m", s);
 			continue;
 		}
 		s->ready = false;
@@ -1357,6 +1375,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, "resample.prefill") == NULL)
 		pw_properties_set(props, "resample.prefill", "true");
+	if (pw_properties_get(props, "resample.disable") == NULL)
+		pw_properties_set(props, "resample.disable", "true");
 
 	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL) {
 		if (impl->mode == MODE_SINK)

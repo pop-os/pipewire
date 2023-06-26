@@ -27,7 +27,6 @@ PW_LOG_TOPIC_EXTERN(log_link);
 struct impl {
 	struct pw_impl_link this;
 
-	unsigned int io_set:1;
 	unsigned int activated:1;
 
 	struct pw_work_queue *work;
@@ -57,7 +56,7 @@ static struct pw_node_peer *pw_node_peer_ref(struct pw_impl_node *onode, struct 
 	struct pw_node_peer *peer;
 
 	spa_list_for_each(peer, &onode->peer_list, link) {
-		if (peer->target.node == inode) {
+		if (peer->target.id == inode->info.id) {
 			pw_log_debug("exiting peer %p from %p to %p", peer, onode, inode);
 			peer->ref++;
 			return peer;
@@ -70,10 +69,8 @@ static struct pw_node_peer *pw_node_peer_ref(struct pw_impl_node *onode, struct 
 	peer->ref = 1;
 	peer->output = onode;
 	peer->active_count = 0;
-	peer->target.node = inode;
-	peer->target.activation = inode->rt.activation;
-	peer->target.system = inode->data_system;
-	peer->target.fd = inode->source.fd;
+	copy_target(&peer->target, &inode->rt.target);
+	peer->target.flags = PW_NODE_TARGET_PEER;
 
 	spa_list_append(&onode->peer_list, &peer->link);
 	pw_log_debug("new peer %p from %p to %p", peer, onode, inode);
@@ -105,8 +102,8 @@ static void pw_node_peer_activate(struct pw_node_peer *peer)
 			peer->target.active = true;
 		}
 	}
-	pw_log_trace("%p: node:%p state:%p pending:%d/%d", peer->output,
-			peer->target.node, state, state->pending, state->required);
+	pw_log_trace("%p: node:%s state:%p pending:%d/%d", peer->output,
+			peer->target.name, state, state->pending, state->required);
 }
 
 static void pw_node_peer_deactivate(struct pw_node_peer *peer)
@@ -122,8 +119,8 @@ static void pw_node_peer_deactivate(struct pw_node_peer *peer)
 			peer->target.active = false;
 		}
 	}
-	pw_log_trace("%p: node:%p state:%p pending:%d/%d", peer->output,
-			peer->target.node, state, state->pending, state->required);
+	pw_log_trace("%p: node:%s state:%p pending:%d/%d", peer->output,
+			peer->target.name, state, state->pending, state->required);
 }
 
 
@@ -160,12 +157,16 @@ static void link_update_state(struct pw_impl_link *link, enum pw_link_state stat
 		     pw_link_state_as_string(state), error);
 
 	if (state == PW_LINK_STATE_ERROR) {
-		pw_log_error("(%s) %s -> error (%s)", link->name,
-				pw_link_state_as_string(old), error);
+		pw_log_error("(%s) %s -> error (%s) (%s-%s)", link->name,
+				pw_link_state_as_string(old), error,
+				pw_impl_port_state_as_string(link->output->state),
+				pw_impl_port_state_as_string(link->input->state));
 	} else {
-		pw_log_info("(%s) %s -> %s", link->name,
+		pw_log_info("(%s) %s -> %s (%s-%s)", link->name,
 				pw_link_state_as_string(old),
-				pw_link_state_as_string(state));
+				pw_link_state_as_string(state),
+				pw_impl_port_state_as_string(link->output->state),
+				pw_impl_port_state_as_string(link->input->state));
 	}
 
 	pw_impl_link_emit_state_changed(link, old, state, error);
@@ -485,7 +486,6 @@ static int port_set_io(struct pw_impl_link *this, struct pw_impl_port *port, uin
 {
 	int res = 0;
 
-	mix->io = data;
 	pw_log_debug("%p: %s port %p %d.%d set io: %d %p %zd", this,
 			pw_direction_as_string(port->direction),
 			port, port->port_id, mix->port.port_id, id, data, size);
@@ -641,15 +641,9 @@ do_activate_link(struct spa_loop *loop,
 		 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct pw_impl_link *this = user_data;
-
 	pw_log_trace("%p: activate", this);
-
-	spa_list_append(&this->output->rt.mix_list, &this->rt.out_mix.rt_link);
-	spa_list_append(&this->input->rt.mix_list, &this->rt.in_mix.rt_link);
-
 	if (this->peer)
 		pw_node_peer_activate(this->peer);
-
 	return 0;
 }
 
@@ -661,20 +655,21 @@ int pw_impl_link_activate(struct pw_impl_link *this)
 	pw_log_debug("%p: activate activated:%d state:%s", this, impl->activated,
 			pw_link_state_as_string(this->info.state));
 
-	if (impl->activated || !this->prepared ||
+	if (this->destroyed || impl->activated || !this->prepared ||
 		!impl->inode->runnable || !impl->onode->runnable)
 		return 0;
 
-	if (!impl->io_set) {
-		if ((res = port_set_io(this, this->output, SPA_IO_Buffers, this->io,
-				sizeof(struct spa_io_buffers), &this->rt.out_mix)) < 0)
-			return res;
+	if ((res = port_set_io(this, this->input, SPA_IO_Buffers, this->io,
+			sizeof(struct spa_io_buffers), &this->rt.in_mix)) < 0)
+		return res;
 
-		if ((res = port_set_io(this, this->input, SPA_IO_Buffers, this->io,
-				sizeof(struct spa_io_buffers), &this->rt.in_mix)) < 0)
-			return res;
-		impl->io_set = true;
+	if ((res = port_set_io(this, this->output, SPA_IO_Buffers, this->io,
+			sizeof(struct spa_io_buffers), &this->rt.out_mix)) < 0) {
+		port_set_io(this, this->input, SPA_IO_Buffers, NULL, 0,
+				&this->rt.in_mix);
+		return res;
 	}
+
 	pw_loop_invoke(this->output->node->data_loop,
 	       do_activate_link, SPA_ID_INVALID, NULL, 0, false, this);
 
@@ -828,7 +823,7 @@ int pw_impl_link_prepare(struct pw_impl_link *this)
 	if (!impl->inode->active || !impl->onode->active)
 		return 0;
 
-	if (this->preparing || this->prepared)
+	if (this->destroyed || this->preparing || this->prepared)
 		return 0;
 
 	this->preparing = true;
@@ -844,15 +839,9 @@ do_deactivate_link(struct spa_loop *loop,
 		   bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
         struct pw_impl_link *this = user_data;
-
-	pw_log_trace("%p: disable %p and %p", this, &this->rt.in_mix, &this->rt.out_mix);
-
-	spa_list_remove(&this->rt.out_mix.rt_link);
-	spa_list_remove(&this->rt.in_mix.rt_link);
-
+	pw_log_trace("%p: disable out %p", this, &this->rt.out_mix);
 	if (this->peer)
 		pw_node_peer_deactivate(this->peer);
-
 	return 0;
 }
 
@@ -873,11 +862,11 @@ int pw_impl_link_deactivate(struct pw_impl_link *this)
 	port_set_io(this, this->input, SPA_IO_Buffers, NULL, 0,
 			&this->rt.in_mix);
 
-	impl->io_set = false;
 	impl->activated = false;
 	pw_log_info("(%s) deactivated", this->name);
-	link_update_state(this, PW_LINK_STATE_PAUSED, 0, NULL);
-
+	link_update_state(this, this->destroyed ?
+			PW_LINK_STATE_INIT : PW_LINK_STATE_PAUSED,
+			0, NULL);
 	return 0;
 }
 
@@ -1306,9 +1295,9 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 		     output_node, output->port_id, this->rt.out_mix.port.port_id,
 		     input_node, input->port_id, this->rt.in_mix.port.port_id);
 
-	this->name = spa_aprintf("%d.%d -> %d.%d",
-			output_node->info.id, output->port_id,
-			input_node->info.id, input->port_id);
+	this->name = spa_aprintf("%d.%d.%d -> %d.%d.%d",
+			output_node->info.id, output->port_id, this->rt.out_mix.port.port_id,
+			input_node->info.id, input->port_id, this->rt.in_mix.port.port_id);
 	pw_log_info("(%s) (%s) -> (%s)", this->name, output_node->name, input_node->name);
 
 	pw_impl_port_emit_link_added(output, this);
@@ -1448,6 +1437,8 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 
 	pw_log_debug("%p: destroy", impl);
 	pw_log_info("(%s) destroy", link->name);
+
+	link->destroyed = true;
 	pw_impl_link_emit_destroy(link);
 
 	pw_impl_link_deactivate(link);

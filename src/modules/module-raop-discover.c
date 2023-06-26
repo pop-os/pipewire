@@ -126,9 +126,6 @@ struct impl {
 
 struct tunnel_info {
 	const char *name;
-	const char *host_name;
-	const char *ip;
-	const char *port;
 };
 
 #define TUNNEL_INFO(...) ((struct tunnel_info){ __VA_ARGS__ })
@@ -151,9 +148,6 @@ static struct tunnel *make_tunnel(struct impl *impl, const struct tunnel_info *i
 		return NULL;
 
 	t->info.name = strdup(info->name);
-	t->info.host_name = strdup(info->host_name);
-	t->info.ip = strdup(info->ip);
-	t->info.port = strdup(info->port);
 	spa_list_append(&impl->tunnel_list, &t->link);
 
 	return t;
@@ -171,7 +165,11 @@ static struct tunnel *find_tunnel(struct impl *impl, const struct tunnel_info *i
 
 static void free_tunnel(struct tunnel *t)
 {
-	pw_impl_module_destroy(t->module);
+	spa_list_remove(&t->link);
+	if (t->module)
+		pw_impl_module_destroy(t->module);
+	free((char *) t->info.name);
+	free(t);
 }
 
 static void impl_free(struct impl *impl)
@@ -284,16 +282,8 @@ static void pw_properties_from_avahi_string(const char *key, const char *value,
 static void submodule_destroy(void *data)
 {
 	struct tunnel *t = data;
-
-	spa_list_remove(&t->link);
 	spa_hook_remove(&t->module_listener);
-
-	free((char *) t->info.name);
-	free((char *) t->info.host_name);
-	free((char *) t->info.ip);
-	free((char *) t->info.port);
-
-	free(t);
+	t->module = NULL;
 }
 
 static const struct pw_impl_module_events submodule_events = {
@@ -304,19 +294,18 @@ static const struct pw_impl_module_events submodule_events = {
 struct match_info {
 	struct impl *impl;
 	struct pw_properties *props;
-	struct tunnel_info *tinfo;
+	struct tunnel *tunnel;
 	bool matched;
 };
 
 static int create_stream(struct impl *impl, struct pw_properties *props,
-		struct tunnel_info *tinfo)
+		struct tunnel *t)
 {
 	FILE *f;
 	char *args;
 	size_t size;
 	int res = 0;
 	struct pw_impl_module *mod;
-	struct tunnel *t;
 
 	if ((f = open_memstream(&args, &size)) == NULL) {
 		res = -errno;
@@ -341,16 +330,7 @@ static int create_stream(struct impl *impl, struct pw_properties *props,
                 goto done;
 	}
 
-	t = make_tunnel(impl, tinfo);
-	if (t == NULL) {
-		res = -errno;
-		pw_log_error("Can't make tunnel: %m");
-		pw_impl_module_destroy(mod);
-		goto done;
-	}
-
 	pw_impl_module_add_listener(mod, &t->module_listener, &submodule_events, t);
-
 	t->module = mod;
 done:
 	return res;
@@ -365,7 +345,7 @@ static int rule_matched(void *data, const char *location, const char *action,
 	i->matched = true;
 	if (spa_streq(action, "create-stream")) {
 		pw_properties_update_string(i->props, str, len);
-		create_stream(i->impl, i->props, i->tinfo);
+		create_stream(i->impl, i->props, i->tunnel);
 	}
 	return res;
 }
@@ -377,10 +357,12 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 {
 	struct impl *impl = userdata;
 	struct tunnel_info tinfo;
-	const char *str, *port_str;
+	struct tunnel *t;
+	const char *str;
 	AvahiStringList *l;
 	struct pw_properties *props = NULL;
 	char at[AVAHI_ADDRESS_STR_MAX];
+	int ipv;
 
 	if (event != AVAHI_RESOLVER_FOUND) {
 		pw_log_error("Resolving of '%s' failed: %s", name,
@@ -388,7 +370,19 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 		goto done;
 	}
 
-	avahi_address_snprint(at, sizeof(at), a);
+	tinfo = TUNNEL_INFO(.name = name);
+
+	t = find_tunnel(impl, &tinfo);
+	if (t == NULL)
+		t = make_tunnel(impl, &tinfo);
+	if (t == NULL) {
+		pw_log_error("Can't make tunnel: %m");
+		goto done;
+	}
+	if (t->module != NULL) {
+		pw_log_info("found duplicate mdns entry - skipping tunnel creation");
+		goto done;
+	}
 
 	props = pw_properties_new(NULL, NULL);
 	if (props == NULL) {
@@ -396,7 +390,10 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 		goto done;
 	}
 
+	avahi_address_snprint(at, sizeof(at), a);
+	ipv = protocol == AVAHI_PROTO_INET ? 4 : 6;
 	pw_properties_setf(props, "raop.ip", "%s", at);
+	pw_properties_setf(props, "raop.ip.version", "%d", ipv);
 	pw_properties_setf(props, "raop.port", "%u", port);
 	pw_properties_setf(props, "raop.name", "%s", name);
 	pw_properties_setf(props, "raop.hostname", "%s", host_name);
@@ -413,20 +410,13 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 		avahi_free(value);
 	}
 
-	port_str = pw_properties_get(props, "raop.port");
-
-	tinfo = TUNNEL_INFO(.name = name,
-			.host_name = host_name,
-			.ip = at,
-			.port = port_str);
-
 	if ((str = pw_properties_get(impl->properties, "stream.rules")) == NULL)
 		str = DEFAULT_CREATE_RULES;
 	if (str != NULL) {
 		struct match_info minfo = {
 			.impl = impl,
 			.props = props,
-			.tinfo = &tinfo,
+			.tunnel = t,
 		};
 		pw_conf_match_rules(str, strlen(str), NAME, &props->dict,
 				rule_matched, &minfo);
@@ -459,7 +449,7 @@ static void browser_cb(AvahiServiceBrowser *b, AvahiIfIndex interface, AvahiProt
 	switch (event) {
 	case AVAHI_BROWSER_NEW:
 		if (t != NULL) {
-			pw_log_debug("found duplicate mdns entry - skipping tunnel creation");
+			pw_log_info("found duplicate mdns entry - skipping tunnel creation");
 			return;
 		}
 		if (!(avahi_service_resolver_new(impl->client,

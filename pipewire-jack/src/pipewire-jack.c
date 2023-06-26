@@ -142,7 +142,6 @@ struct object {
 			uint32_t dst_serial;
 			bool src_ours;
 			bool dst_ours;
-			bool is_complete;
 			struct port *our_input;
 			struct port *our_output;
 		} port_link;
@@ -518,10 +517,13 @@ static void free_object(struct client *c, struct object *o)
 
 }
 
-static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port)
+static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32_t peer_id)
 {
+	pw_log_debug("create %p mix:%d peer:%d", port, mix_id, peer_id);
 	mix->id = mix_id;
+	mix->peer_id = peer_id;
 	mix->port = port;
+	mix->peer_port = NULL;
 	mix->io = NULL;
 	mix->n_buffers = 0;
 	spa_list_init(&mix->queue);
@@ -532,6 +534,17 @@ static struct mix *find_mix_peer(struct client *c, uint32_t peer_id)
 {
 	struct mix *mix;
 	spa_list_for_each(mix, &c->mix, link) {
+		if (mix->peer_id == peer_id)
+			return mix;
+	}
+	return NULL;
+}
+
+static struct mix *find_port_peer(struct port *port, uint32_t peer_id)
+{
+	struct mix *mix;
+	spa_list_for_each(mix, &port->mix, port_link) {
+		pw_log_info("%p %d %d", port, mix->peer_id, peer_id);
 		if (mix->peer_id == peer_id)
 			return mix;
 	}
@@ -549,13 +562,11 @@ static struct mix *find_mix(struct client *c, struct port *port, uint32_t mix_id
 	return NULL;
 }
 
-static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_id)
+static struct mix *create_mix(struct client *c, struct port *port,
+		uint32_t mix_id, uint32_t peer_id)
 {
 	struct mix *mix;
 	uint32_t i;
-
-	if ((mix = find_mix(c, port, mix_id)) != NULL)
-		return mix;
 
 	if (spa_list_is_empty(&c->free_mix)) {
 		mix = calloc(OBJECT_CHUNK, sizeof(struct mix));
@@ -570,9 +581,17 @@ static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_
 
 	spa_list_append(&port->mix, &mix->port_link);
 
-	init_mix(mix, mix_id, port);
+	init_mix(mix, mix_id, port, peer_id);
 
 	return mix;
+}
+
+static struct mix *ensure_mix(struct client *c, struct port *port, uint32_t mix_id)
+{
+	struct mix *mix;
+	if ((mix = find_mix(c, port, mix_id)) != NULL)
+		return mix;
+	return create_mix(c, port, mix_id, SPA_ID_INVALID);
 }
 
 static int clear_buffers(struct client *c, struct mix *mix)
@@ -926,7 +945,7 @@ static void emit_callbacks(struct client *c)
 		notify = SPA_PTROFF(c->notify_buffer, index & NOTIFY_BUFFER_MASK, struct notify);
 
 		o = notify->object;
-		pw_log_debug("%p: dequeue notify index:%08x %p type:%d %p arg1:%d\n", c,
+		pw_log_debug("%p: dequeue notify index:%08x %p type:%d %p arg1:%d", c,
 				index, notify, notify->type, o, notify->arg1);
 
 		switch (notify->type) {
@@ -1025,10 +1044,8 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	int32_t filled;
 	uint32_t index;
 	struct notify *notify;
-	bool emit = false;;
+	bool emit = false;
 
-	if ((type & NOTIFY_ACTIVE_FLAG) && !c->active)
-		return 0;
 	switch (type) {
 	case NOTIFY_TYPE_REGISTRATION:
 		emit = c->registration_callback != NULL && o != NULL;
@@ -1060,8 +1077,19 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	default:
 		break;
 	}
-	if (!emit) {
-		pw_log_debug("%p: skip notify %d", c, type);
+	if (!emit || ((type & NOTIFY_ACTIVE_FLAG) && !c->active)) {
+		switch (type) {
+		case NOTIFY_TYPE_BUFFER_FRAMES:
+			if (!emit)
+				c->buffer_frames = arg1;
+			break;
+		case NOTIFY_TYPE_SAMPLE_RATE:
+			if (!emit)
+				c->sample_rate = arg1;
+			break;
+		}
+		pw_log_debug("%p: skip notify %08x active:%d emit:%d", c, type,
+				c->active, emit);
 		if (o != NULL && arg1 == 0 && o->removing) {
 			o->removing = false;
 			free_object(c, o);
@@ -1080,7 +1108,7 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	notify->object = o;
 	notify->arg1 = arg1;
 	notify->msg = msg;
-	pw_log_debug("%p: queue notify index:%08x %p type:%d %p arg1:%d msg:%s\n", c,
+	pw_log_debug("%p: queue notify index:%08x %p type:%d %p arg1:%d msg:%s", c,
 				index, notify, notify->type, o, notify->arg1, notify->msg);
 	index += sizeof(struct notify);
 	spa_ringbuffer_write_update(&c->notify_ring, index);
@@ -1597,11 +1625,10 @@ static inline int check_sample_rate(struct client *c, struct spa_io_position *po
 	if (SPA_UNLIKELY(sample_rate != c->sample_rate)) {
 		pw_log_info("%p: sample_rate old:%d new:%d cb:%p", c,
 				c->sample_rate, sample_rate, c->srate_callback);
-		if (c->srate_callback != NULL) {
+		if (c->sample_rate != (uint32_t)-1)
 			queue_notify(c, NOTIFY_TYPE_SAMPLE_RATE, NULL, sample_rate, NULL);
-		} else {
+		else
 			c->sample_rate = sample_rate;
-		}
 	}
 	return c->sample_rate == sample_rate;
 }
@@ -2679,13 +2706,6 @@ static int client_node_set_activation(void *data,
 	void *ptr;
 	int res = 0;
 
-	if (c->node_id == node_id) {
-		pw_log_debug("%p: our activation %u: %u %u %u", c, node_id,
-				mem_id, offset, size);
-		close(signalfd);
-		return 0;
-	}
-
 	if (mem_id == SPA_ID_INVALID) {
 		mm = ptr = NULL;
 		size = 0;
@@ -2701,8 +2721,13 @@ static int client_node_set_activation(void *data,
 		ptr = mm->ptr;
 	}
 
-	pw_log_debug("%p: set activation %u: %u %u %u %p", c, node_id,
-			mem_id, offset, size, ptr);
+	if (c->node_id == node_id) {
+		pw_log_debug("%p: our activation %u: %u %u %u %p", c, node_id,
+				mem_id, offset, size, ptr);
+	} else {
+		pw_log_debug("%p: set activation %u: %u %u %u %p", c, node_id,
+				mem_id, offset, size, ptr);
+	}
 
 	if (ptr) {
 		link = calloc(1, sizeof(struct link));
@@ -2751,8 +2776,6 @@ static int client_node_port_set_mix_info(void *data,
 	struct client *c = (struct client *) data;
 	struct port *p = GET_PORT(c, direction, port_id);
 	struct mix *mix;
-	struct object *l;
-	uint32_t src, dst;
 	int res = 0;
 
 	if (p == NULL || !p->valid) {
@@ -2760,40 +2783,21 @@ static int client_node_port_set_mix_info(void *data,
 		goto exit;
 	}
 
-	if ((mix = ensure_mix(c, p, mix_id)) == NULL) {
-		res = -ENOMEM;
-		goto exit;
-	}
-	mix->peer_id = peer_id;
+	mix = find_mix(c, p, mix_id);
 
-	if (direction == SPA_DIRECTION_INPUT) {
-		src = peer_id;
-		dst = p->object->id;
-	} else {
-		src = p->object->id;
-		dst = peer_id;
-	}
-
-	if ((l = find_link(c, src, dst)) != NULL) {
-		if (direction == SPA_DIRECTION_INPUT)
-			mix->peer_port = l->port_link.our_output;
-		else
-			mix->peer_port = l->port_link.our_input;
-
-		pw_log_debug("peer port %p %p %p", mix->peer_port,
-				l->port_link.our_output, l->port_link.our_input);
-
-		if (!l->port_link.is_complete) {
-			l->port_link.is_complete = true;
-			pw_log_info("%p: our link %u/%u -> %u/%u completed", c,
-					l->port_link.src, l->port_link.src_serial,
-					l->port_link.dst, l->port_link.dst_serial);
-			queue_notify(c, NOTIFY_TYPE_CONNECT, l, 1, NULL);
-			queue_notify(c, NOTIFY_TYPE_GRAPH, NULL, 0, NULL);
-			emit_callbacks(c);
+	if (peer_id == SPA_ID_INVALID) {
+		if (mix == NULL) {
+			res = -ENOENT;
+			goto exit;
 		}
+		free_mix(c, mix);
+	} else {
+		if (mix != NULL) {
+			res = -EEXIST;
+			goto exit;
+		}
+		mix = create_mix(c, p, mix_id, peer_id);
 	}
-
 exit:
 	if (res < 0)
 		pw_proxy_error((struct pw_proxy*)c->node, res, spa_strerror(res));
@@ -3351,7 +3355,16 @@ static void registry_event_global(void *data, uint32_t id,
 		if (o->port_link.dst_ours)
 			o->port_link.our_input = p->port.port;
 
-		o->port_link.is_complete = !o->port_link.src_ours && !o->port_link.dst_ours;
+		if (o->port_link.our_input != NULL &&
+		    o->port_link.our_output != NULL) {
+			struct mix *mix;
+			mix = find_port_peer(o->port_link.our_output, o->port_link.dst);
+			if (mix != NULL)
+				mix->peer_port = o->port_link.our_input;
+			mix = find_port_peer(o->port_link.our_input, o->port_link.src);
+			if (mix != NULL)
+				mix->peer_port = o->port_link.our_output;
+		}
 		pw_log_debug("%p: add link %d %u/%u->%u/%u", c, id,
 				o->port_link.src, o->port_link.src_serial,
 				o->port_link.dst, o->port_link.dst_serial);
@@ -3412,14 +3425,11 @@ static void registry_event_global(void *data, uint32_t id,
 		break;
 
 	case INTERFACE_Link:
-		pw_log_info("%p: link %u %u/%u -> %u/%u added complete:%d", c,
+		pw_log_info("%p: link %u %u/%u -> %u/%u added", c,
 				o->id, o->port_link.src, o->port_link.src_serial,
-				o->port_link.dst, o->port_link.dst_serial,
-				o->port_link.is_complete);
-		if (o->port_link.is_complete) {
-			queue_notify(c, NOTIFY_TYPE_CONNECT, o, 1, NULL);
-			queue_notify(c, NOTIFY_TYPE_GRAPH, NULL, 0, NULL);
-		}
+				o->port_link.dst, o->port_link.dst_serial);
+		queue_notify(c, NOTIFY_TYPE_CONNECT, o, 1, NULL);
+		queue_notify(c, NOTIFY_TYPE_GRAPH, NULL, 0, NULL);
 		break;
 	}
 	emit_callbacks(c);
@@ -3467,13 +3477,11 @@ static void registry_event_global_remove(void *data, uint32_t id)
 		queue_notify(c, NOTIFY_TYPE_PORTREGISTRATION, o, 0, NULL);
 		break;
 	case INTERFACE_Link:
-		if (o->port_link.is_complete &&
-		    find_type(c, o->port_link.src, INTERFACE_Port, true) != NULL &&
+		if (find_type(c, o->port_link.src, INTERFACE_Port, true) != NULL &&
 		    find_type(c, o->port_link.dst, INTERFACE_Port, true) != NULL) {
 			pw_log_info("%p: link %u %u/%u -> %u/%u removed", c, o->id,
 					o->port_link.src, o->port_link.src_serial,
 					o->port_link.dst, o->port_link.dst_serial);
-			o->port_link.is_complete = false;
 			queue_notify(c, NOTIFY_TYPE_CONNECT, o, 0, NULL);
 			queue_notify(c, NOTIFY_TYPE_GRAPH, NULL, 0, NULL);
 		} else {
@@ -4539,6 +4547,7 @@ jack_nframes_t jack_get_sample_rate (jack_client_t *client)
 				res = c->position->clock.rate.denom;
 		}
 	}
+	c->sample_rate = res;
 	pw_log_debug("sample_rate: %u", res);
 	return res;
 }

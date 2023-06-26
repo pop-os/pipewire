@@ -423,6 +423,13 @@ struct pw_context_driver_events {
 	void (*complete) (void *data, struct pw_impl_node *node);
 };
 
+void pw_context_driver_add_listener(struct pw_context *context,
+			  struct spa_hook *listener,
+			  const struct pw_context_driver_events *events,
+			  void *data);
+void pw_context_driver_remove_listener(struct pw_context *context,
+			  struct spa_hook *listener);
+
 #define pw_registry_resource(r,m,v,...) pw_resource_call(r, struct pw_registry_events,m,v,##__VA_ARGS__)
 #define pw_registry_resource_global(r,...)        pw_registry_resource(r,global,0,__VA_ARGS__)
 #define pw_registry_resource_global_remove(r,...) pw_registry_resource(r,global_remove,0,__VA_ARGS__)
@@ -584,12 +591,27 @@ static inline void pw_node_activation_state_reset(struct pw_node_activation_stat
 
 struct pw_node_target {
 	struct spa_list link;
+#define PW_NODE_TARGET_NONE	0
+#define PW_NODE_TARGET_PEER	1
+	uint32_t flags;
+	uint32_t id;
+	char name[128];
 	struct pw_impl_node *node;
 	struct pw_node_activation *activation;
 	struct spa_system *system;
 	int fd;
 	unsigned int active:1;
 };
+
+static inline void copy_target(struct pw_node_target *dst, const struct pw_node_target *src)
+{
+	dst->id = src->id;
+	memcpy(dst->name, src->name, sizeof(dst->name));
+	dst->node = src->node;
+	dst->activation = src->activation;
+	dst->system = src->system;
+	dst->fd = src->fd;
+}
 
 struct pw_node_activation {
 #define PW_NODE_ACTIVATION_NOT_TRIGGERED	0
@@ -616,9 +638,13 @@ struct pw_node_activation {
 							 * used when driver segment_owner has this node id */
 
 	/* for drivers, shared with all nodes */
-	uint32_t segment_owner[32];			/* id of owners for each segment info struct.
+	uint32_t segment_owner[16];			/* id of owners for each segment info struct.
 							 * nodes that want to update segment info need to
 							 * CAS their node id in this array. */
+	uint32_t padding[15];
+#define PW_NODE_ACTIVATION_FLAG_NONE		0
+#define PW_NODE_ACTIVATION_FLAG_PROFILER	(1<<0)	/* the profiler is running */
+	uint32_t flags;					/* extra flags */
 	struct spa_io_position position;		/* contains current position and segment info.
 							 * extra info is updated by nodes that have set
 							 * themselves as owner in the segment structs */
@@ -764,7 +790,6 @@ struct pw_impl_node {
 	struct {
 		struct spa_io_clock *clock;	/**< io area of the clock or NULL */
 		struct spa_io_position *position;
-		struct pw_node_activation *activation;
 
 		struct spa_list target_list;		/* list of targets to signal after
 							 * this node */
@@ -781,6 +806,8 @@ struct pw_impl_node {
 	struct spa_fraction target_rate;
 	uint64_t target_quantum;
 
+	uint64_t driver_start;
+
 	void *user_data;                /**< extra user data */
 };
 
@@ -796,6 +823,7 @@ struct pw_impl_port_mix {
 	uint32_t id;
 	uint32_t peer_id;
 	unsigned int have_buffers:1;
+	unsigned int active:1;
 };
 
 struct pw_impl_port_implementation {
@@ -884,8 +912,6 @@ struct pw_impl_port {
 
 	struct {
 		struct spa_io_buffers io;	/**< io area of the port */
-		struct spa_io_clock clock;	/**< io area of the clock */
-		struct spa_list mix_list;
 		struct spa_list node_link;
 	} rt;					/**< data only accessed from the data thread */
 	unsigned int added:1;
@@ -964,6 +990,7 @@ struct pw_impl_link {
 	unsigned int preparing:1;
 	unsigned int prepared:1;
 	unsigned int passive:1;
+	unsigned int destroyed:1;
 };
 
 #define pw_resource_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_resource_events, m, v, ##__VA_ARGS__)
