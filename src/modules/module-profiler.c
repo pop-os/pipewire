@@ -168,7 +168,8 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 	struct impl *impl = data;
 	struct spa_pod_builder b;
 	struct spa_pod_frame f[2];
-	struct pw_node_activation *a = node->rt.activation;
+	uint32_t id = node->info.id;
+	struct pw_node_activation *a = node->rt.target.activation;
 	struct spa_io_position *pos = &a->position;
 	struct pw_node_target *t;
 	int32_t filled;
@@ -205,42 +206,48 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 
 	spa_pod_builder_prop(&b, SPA_PROFILER_driverBlock, 0);
 	spa_pod_builder_add_struct(&b,
-			SPA_POD_Int(node->info.id),
+			SPA_POD_Int(id),
 			SPA_POD_String(node->name),
 			SPA_POD_Long(a->prev_signal_time),
 			SPA_POD_Long(a->signal_time),
 			SPA_POD_Long(a->awake_time),
 			SPA_POD_Long(a->finish_time),
 			SPA_POD_Int(a->status),
-			SPA_POD_Fraction(&node->latency));
+			SPA_POD_Fraction(&node->latency),
+			SPA_POD_Int(a->xrun_count));
 
 	spa_list_for_each(t, &node->rt.target_list, link) {
 		struct pw_impl_node *n = t->node;
 		struct pw_node_activation *na;
 		struct spa_fraction latency;
 
-		if (n == NULL || n == node)
+		if (t->id == id || t->flags & PW_NODE_TARGET_PEER)
 			continue;
 
-		latency = n->latency;
-		if (n->force_quantum != 0)
-			latency.num = n->force_quantum;
-		if (n->force_rate != 0)
-			latency.denom = n->force_rate;
-		else if (n->rate.denom != 0)
-			latency.denom = n->rate.denom;
+		if (n != NULL) {
+			latency = n->latency;
+			if (n->force_quantum != 0)
+				latency.num = n->force_quantum;
+			if (n->force_rate != 0)
+				latency.denom = n->force_rate;
+			else if (n->rate.denom != 0)
+				latency.denom = n->rate.denom;
+		} else {
+			spa_zero(latency);
+		}
 
-		na = n->rt.activation;
+		na = t->activation;
 		spa_pod_builder_prop(&b, SPA_PROFILER_followerBlock, 0);
 		spa_pod_builder_add_struct(&b,
-			SPA_POD_Int(n->info.id),
-			SPA_POD_String(n->name),
+			SPA_POD_Int(t->id),
+			SPA_POD_String(t->name),
 			SPA_POD_Long(a->signal_time),
 			SPA_POD_Long(na->signal_time),
 			SPA_POD_Long(na->awake_time),
 			SPA_POD_Long(na->finish_time),
 			SPA_POD_Int(na->status),
-			SPA_POD_Fraction(&latency));
+			SPA_POD_Fraction(&latency),
+			SPA_POD_Int(na->xrun_count));
 	}
 	spa_pod_builder_pop(&b, &f[0]);
 
@@ -275,19 +282,11 @@ static const struct pw_context_driver_events context_events = {
 	.complete = context_do_profile,
 };
 
-static int do_stop(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct impl *impl = user_data;
-	spa_hook_remove(&impl->context_listener);
-	return 0;
-}
-
 static void stop_listener(struct impl *impl)
 {
 	if (impl->listening) {
-		pw_loop_invoke(impl->data_loop,
-                       do_stop, SPA_ID_INVALID, NULL, 0, true, impl);
+		pw_context_driver_remove_listener(impl->context,
+			&impl->context_listener);
 		impl->listening = false;
 	}
 }
@@ -306,16 +305,6 @@ static const struct pw_resource_events resource_events = {
 	.destroy = resource_destroy,
 };
 
-static int
-do_start(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct impl *impl = user_data;
-	spa_hook_list_append(&impl->context->driver_listener_list,
-			&impl->context_listener,
-			&context_events, impl);
-	return 0;
-}
 static int
 global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
             uint32_t version, uint32_t id)
@@ -340,8 +329,9 @@ global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
 
 	if (++impl->busy == 1) {
 		pw_log_info("%p: starting profiler", impl);
-		pw_loop_invoke(impl->data_loop,
-                       do_start, SPA_ID_INVALID, NULL, 0, false, impl);
+		pw_context_driver_add_listener(impl->context,
+			&impl->context_listener,
+			&context_events, impl);
 		impl->listening = true;
 	}
 	return 0;

@@ -771,6 +771,7 @@ impl_node_port_set_io(void *object,
 		break;
 	case SPA_IO_RateMatch:
 		this->rate_match = data;
+		spa_alsa_update_rate_match(this);
 		break;
 	default:
 		return -ENOENT;
@@ -815,6 +816,11 @@ static int impl_node_process(void *object)
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
 		io->buffer_id = SPA_ID_INVALID;
 
+		spa_alsa_write(this);
+
+		io->status = SPA_STATUS_OK;
+	}
+	else if (!spa_list_is_empty(&this->ready)) {
 		spa_alsa_write(this);
 
 		io->status = SPA_STATUS_OK;

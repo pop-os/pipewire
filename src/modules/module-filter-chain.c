@@ -166,6 +166,9 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * are read-only except for the bq_raw biquad, which can configure default values
  * depending on the graph rate and change those at runtime.
  *
+ * We refer to https://arachnoid.com/BiQuadDesigner/index.html for an explanation of
+ * the controls.
+ *
  * The following labels can be used:
  *
  * - `bq_lowpass` a lowpass filter.
@@ -685,7 +688,16 @@ static void playback_process(void *d)
 	struct graph_port *port;
 	struct spa_data *bd;
 
-	if ((in = pw_stream_dequeue_buffer(impl->capture)) == NULL)
+	in = NULL;
+	while (true) {
+		struct pw_buffer *t;
+		if ((t = pw_stream_dequeue_buffer(impl->capture)) == NULL)
+			break;
+		if (in)
+			pw_stream_queue_buffer(impl->capture, in);
+		in = t;
+	}
+	if (in == NULL)
 		pw_log_debug("%p: out of capture buffers: %m", impl);
 
 	if ((out = pw_stream_dequeue_buffer(impl->playback)) == NULL)
@@ -2454,7 +2466,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	parse_audio_info(impl->capture_props, &impl->capture_info);
 	parse_audio_info(impl->playback_props, &impl->playback_info);
 
-	if (impl->capture_info.rate && !impl->playback_info.rate)
+	if (!impl->capture_info.rate && !impl->playback_info.rate) {
+		if (pw_properties_get(impl->playback_props, "resample.disable") == NULL)
+			pw_properties_set(impl->playback_props, "resample.disable", "true");
+		if (pw_properties_get(impl->capture_props, "resample.disable") == NULL)
+			pw_properties_set(impl->capture_props, "resample.disable", "true");
+	} else if (impl->capture_info.rate && !impl->playback_info.rate)
 		impl->playback_info.rate = impl->capture_info.rate;
 	else if (impl->playback_info.rate && !impl->capture_info.rate)
 		impl->capture_info.rate = !impl->playback_info.rate;

@@ -477,6 +477,11 @@ static cookie_io_functions_t io_funcs = {
 	.write = log_write,
 };
 
+static void silence_error_handler(const char *file, int line,
+		const char *function, int err, const char *fmt, ...)
+{
+}
+
 int spa_alsa_init(struct state *state, const struct spa_dict *info)
 {
 	uint32_t i;
@@ -546,6 +551,57 @@ int spa_alsa_clear(struct state *state)
 	return err;
 }
 
+static int probe_pitch_ctl(struct state *state, const char* device_name)
+{
+	snd_ctl_elem_id_t *id;
+	/* TODO: Add configuration params for the control name and units */
+	const char *elem_name =
+		state->stream == SND_PCM_STREAM_CAPTURE ?
+		"Capture Pitch 1000000" :
+		"Playback Pitch 1000000";
+	int err;
+
+	snd_lib_error_set_handler(silence_error_handler);
+
+	err = snd_ctl_open(&state->ctl, device_name, SND_CTL_NONBLOCK);
+	if (err < 0) {
+		spa_log_info(state->log, "%s could not find ctl device: %s",
+				state->props.device, snd_strerror(err));
+		state->ctl = NULL;
+		goto error;
+	}
+
+	snd_ctl_elem_id_alloca(&id);
+	snd_ctl_elem_id_set_name(id, elem_name);
+	snd_ctl_elem_id_set_interface(id, SND_CTL_ELEM_IFACE_PCM);
+
+	snd_ctl_elem_value_malloc(&state->pitch_elem);
+	snd_ctl_elem_value_set_id(state->pitch_elem, id);
+
+	err = snd_ctl_elem_read(state->ctl, state->pitch_elem);
+	if (err < 0) {
+		spa_log_debug(state->log, "%s: did not find ctl %s: %s",
+				state->props.device, elem_name, snd_strerror(err));
+
+		snd_ctl_elem_value_free(state->pitch_elem);
+		state->pitch_elem = NULL;
+
+		snd_ctl_close(state->ctl);
+		state->ctl = NULL;
+		goto error;
+	}
+
+	snd_ctl_elem_value_set_integer(state->pitch_elem, 0, 1000000);
+	CHECK(snd_ctl_elem_write(state->ctl, state->pitch_elem), "snd_ctl_elem_write");
+	state->last_rate = 1.0;
+
+	spa_log_info(state->log, "%s: found ctl %s", state->props.device, elem_name);
+	err = 0;
+error:
+	snd_lib_error_set_handler(NULL);
+	return err;
+}
+
 int spa_alsa_open(struct state *state, const char *params)
 {
 	int err;
@@ -588,6 +644,8 @@ int spa_alsa_open(struct state *state, const char *params)
 	state->sample_count = 0;
 	state->sample_time = 0;
 
+	probe_pitch_ctl(state, device_name);
+
 	return 0;
 
 error_exit_close:
@@ -621,6 +679,14 @@ int spa_alsa_close(struct state *state)
 
 	state->have_format = false;
 	state->opened = false;
+
+	if (state->pitch_elem) {
+		snd_ctl_elem_value_free(state->pitch_elem);
+		state->pitch_elem = NULL;
+
+		snd_ctl_close(state->ctl);
+		state->ctl = NULL;
+	}
 
 	return err;
 }
@@ -1665,6 +1731,41 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	return match ? 0 : 1;
 }
 
+int spa_alsa_update_rate_match(struct state *state)
+{
+	uint64_t pitch, last_pitch;
+	int err;
+
+	if (!state->pitch_elem)
+		return -ENOENT;
+
+	/* The rate/pitch defines the rate of input to output (if there were a
+	 * resampler, it's the ratio of input samples to output samples). This
+	 * means that to adjust the playback rate, we need to apply the inverse
+	 * of the given rate. */
+	if (state->stream == SND_PCM_STREAM_CAPTURE) {
+		pitch = 1000000 * state->rate_match->rate;
+		last_pitch = 1000000 * state->last_rate;
+	} else {
+		pitch = 1000000 / state->rate_match->rate;
+		last_pitch = 1000000 / state->last_rate;
+	}
+
+	/* The pitch adjustment is limited to 1 ppm */
+	if (pitch == last_pitch)
+		return 0;
+
+	snd_ctl_elem_value_set_integer(state->pitch_elem, 0, pitch);
+	CHECK(snd_ctl_elem_write(state->ctl, state->pitch_elem), "snd_ctl_elem_write");
+
+	spa_log_trace_fp(state->log, "%s %u set rate to %g",
+			state->props.device, state->stream, state->rate_match->rate);
+
+	state->last_rate = state->rate_match->rate;
+
+	return 0;
+}
+
 static int set_swparams(struct state *state)
 {
 	snd_pcm_t *hndl = state->hndl;
@@ -1856,7 +1957,8 @@ recover:
 	return do_start(state);
 }
 
-static int get_avail(struct state *state, uint64_t current_time)
+#if 0
+static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
 {
 	int res, missed;
 	snd_pcm_sframes_t avail;
@@ -1874,19 +1976,21 @@ static int get_avail(struct state *state, uint64_t current_time)
 	} else {
 		state->alsa_recovering = false;
 	}
+	*delay = avail;
 	return avail;
 }
 
-#if 0
-static int get_avail_htimestamp(struct state *state, uint64_t current_time)
+#else
+static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
 {
 	int res, missed;
 	snd_pcm_uframes_t avail;
 	snd_htimestamp_t tstamp;
 	uint64_t then;
 
+	avail = snd_pcm_avail(state->hndl);
 	if ((res = snd_pcm_htimestamp(state->hndl, &avail, &tstamp)) < 0) {
-		if ((res = alsa_recover(state, avail)) < 0)
+		if ((res = alsa_recover(state, res)) < 0)
 			return res;
 		if ((res = snd_pcm_htimestamp(state->hndl, &avail, &tstamp)) < 0) {
 			if ((missed = ratelimit_test(&state->rate_limit, current_time)) >= 0) {
@@ -1898,28 +2002,34 @@ static int get_avail_htimestamp(struct state *state, uint64_t current_time)
 	} else {
 		state->alsa_recovering = false;
 	}
+	*delay = avail;
 
 	if ((then = SPA_TIMESPEC_TO_NSEC(&tstamp)) != 0) {
+		int64_t diff;
+
 		if (then < current_time)
-			avail += (current_time - then) * state->rate / SPA_NSEC_PER_SEC;
+			diff = ((int64_t)(current_time - then)) * state->rate / SPA_NSEC_PER_SEC;
 		else
-			avail -= (then - current_time) * state->rate / SPA_NSEC_PER_SEC;
+			diff = -((int64_t)(then - current_time)) * state->rate / SPA_NSEC_PER_SEC;
+
+		spa_log_trace_fp(state->log, "%"PRIu64" %"PRIu64" %"PRIi64, current_time, then, diff);
+
+		*delay += diff;
 	}
 	return SPA_MIN(avail, state->buffer_frames);
 }
 #endif
 
-static int get_status(struct state *state, uint64_t current_time,
+static int get_status(struct state *state, uint64_t current_time, snd_pcm_uframes_t *avail,
 		snd_pcm_uframes_t *delay, snd_pcm_uframes_t *target)
 {
-	int avail;
+	int res;
+	snd_pcm_uframes_t a, d;
 
-	if ((avail = get_avail(state, current_time)) < 0)
-		return avail;
+	if ((res = get_avail(state, current_time, &d)) < 0)
+		return res;
 
-	avail = SPA_MIN(avail, (int)state->buffer_frames);
-
-	*target = state->threshold + state->headroom;
+	a = SPA_MIN(res, (int)state->buffer_frames);
 
 	if (state->resample && state->rate_match) {
 		state->delay = state->rate_match->delay;
@@ -1928,12 +2038,14 @@ static int get_status(struct state *state, uint64_t current_time,
 		state->delay = 0;
 		state->read_size = state->threshold;
 	}
-
 	if (state->stream == SND_PCM_STREAM_PLAYBACK) {
-		*delay = state->buffer_frames - avail;
+		*avail = state->buffer_frames - a;
+		*delay = state->buffer_frames - SPA_MIN(d, state->buffer_frames);
+		*target = state->threshold + state->headroom;
 	} else {
-		*delay = avail;
-		*target = SPA_MAX(*target, state->read_size + state->headroom);
+		*avail = a;
+		*delay = d;
+		*target = SPA_MAX(state->threshold, state->read_size) + state->headroom;
 	}
 	*target = SPA_CLAMP(*target, state->min_delay, state->max_delay);
 	return 0;
@@ -2004,7 +2116,10 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 		else
 			state->rate_match->rate = 1.0/corr;
 
-		SPA_FLAG_UPDATE(state->rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE, state->matching);
+		if (state->pitch_elem && state->matching)
+			spa_alsa_update_rate_match(state);
+		else
+			SPA_FLAG_UPDATE(state->rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE, state->matching);
 	}
 
 	state->next_time += state->threshold / corr * 1e9 / state->rate;
@@ -2044,7 +2159,7 @@ static int setup_matching(struct state *state)
 	if (spa_streq(state->position->clock.name, state->clock_name))
 		state->matching = false;
 
-	state->resample = ((uint32_t)state->rate != state->rate_denom) || state->matching;
+	state->resample = !state->pitch_elem && (((uint32_t)state->rate != state->rate_denom) || state->matching);
 
 	spa_log_info(state->log, "driver clock:'%s'@%d our clock:'%s'@%d matching:%d resample:%d",
 			state->position->clock.name, state->rate_denom,
@@ -2105,11 +2220,11 @@ int spa_alsa_write(struct state *state)
 
 	if (state->following && state->alsa_started) {
 		uint64_t current_time;
-		snd_pcm_uframes_t delay, target;
+		snd_pcm_uframes_t avail, delay, target;
 
 		current_time = state->position->clock.nsec;
 
-		if (SPA_UNLIKELY((res = get_status(state, current_time, &delay, &target)) < 0))
+		if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0))
 			return res;
 
 		if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, true)) < 0))
@@ -2124,16 +2239,17 @@ int spa_alsa_write(struct state *state)
 				lev = SPA_LOG_LEVEL_INFO;
 
 			if ((missed = ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-				spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u, "
-						"resync (%d missed)", state->props.device, delay,
+				spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
+						"target:%ld thr:%u, resync (%d missed)",
+						state->props.device, avail, delay,
 						target, state->threshold, missed);
 			}
 
-			if (delay > target)
-				snd_pcm_rewind(state->hndl, delay - target);
-			else if (delay < target)
-				spa_alsa_silence(state, target - delay);
-			delay = target;
+			if (avail > target)
+				snd_pcm_rewind(state->hndl, avail - target);
+			else if (avail < target)
+				spa_alsa_silence(state, target - avail);
+			avail = target;
 			state->alsa_sync = false;
 		} else
 			state->alsa_sync_warning = true;
@@ -2344,10 +2460,8 @@ int spa_alsa_read(struct state *state)
 
 		current_time = state->position->clock.nsec;
 
-		if ((res = get_status(state, current_time, &delay, &target)) < 0)
+		if ((res = get_status(state, current_time, &avail, &delay, &target)) < 0)
 			return res;
-
-		avail = delay;
 
 		if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, true)) < 0))
 			return res;
@@ -2366,11 +2480,11 @@ int spa_alsa_read(struct state *state)
 						target, state->threshold, missed);
 			}
 
-			if (delay < target)
-				max_read = target - delay;
-			else if (delay > target)
-				snd_pcm_forward(state->hndl, delay - target);
-			delay = target;
+			if (avail < target)
+				max_read = target - avail;
+			else if (avail > target)
+				snd_pcm_forward(state->hndl, avail - target);
+			avail = target;
 			state->alsa_sync = false;
 		} else
 			state->alsa_sync_warning = true;
@@ -2458,13 +2572,15 @@ int spa_alsa_skip(struct state *state)
 }
 
 
-static int handle_play(struct state *state, uint64_t current_time,
+static int handle_play(struct state *state, uint64_t current_time, snd_pcm_uframes_t avail,
 		snd_pcm_uframes_t delay, snd_pcm_uframes_t target)
 {
+	struct spa_io_buffers *io = state->io;
 	int res;
 
 	if (state->alsa_started && SPA_UNLIKELY(delay > target + state->max_error)) {
-		spa_log_trace(state->log, "%p: early wakeup %lu %lu", state, delay, target);
+		spa_log_trace(state->log, "%p: early wakeup %ld %lu %lu", state,
+				avail, delay, target);
 		if (delay > target * 3)
 			delay = target * 3;
 		state->next_time = current_time + (delay - target) * SPA_NSEC_PER_SEC / state->rate;
@@ -2474,32 +2590,24 @@ static int handle_play(struct state *state, uint64_t current_time,
 	if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, false)) < 0))
 		return res;
 
-	if (spa_list_is_empty(&state->ready)) {
-		struct spa_io_buffers *io = state->io;
+	spa_log_trace_fp(state->log, "%p: %d", state, io->status);
 
-		spa_log_trace_fp(state->log, "%p: %d", state, io->status);
+	update_sources(state, false);
 
-		update_sources(state, false);
-
-		io->status = SPA_STATUS_NEED_DATA;
-		res = spa_node_call_ready(&state->callbacks, SPA_STATUS_NEED_DATA);
-	}
-	else {
-		res = spa_alsa_write(state);
-	}
-	return res;
+	io->status = SPA_STATUS_NEED_DATA;
+	return spa_node_call_ready(&state->callbacks, SPA_STATUS_NEED_DATA);
 }
 
-static int handle_capture(struct state *state, uint64_t current_time,
+static int handle_capture(struct state *state, uint64_t current_time, snd_pcm_uframes_t avail,
 		snd_pcm_uframes_t delay, snd_pcm_uframes_t target)
 {
 	int res;
 	struct spa_io_buffers *io;
 
-	if (SPA_UNLIKELY(delay < state->read_size)) {
-		spa_log_trace(state->log, "%p: early wakeup %ld %ld %d", state, delay, target,
-				state->read_size);
-		state->next_time = current_time + (target - delay) * SPA_NSEC_PER_SEC /
+	if (SPA_UNLIKELY(avail < state->read_size)) {
+		spa_log_trace(state->log, "%p: early wakeup %ld %ld %ld %d", state,
+				delay, avail, target, state->read_size);
+		state->next_time = current_time + (state->read_size - avail) * SPA_NSEC_PER_SEC /
 			state->rate;
 		return -EAGAIN;
 	}
@@ -2544,9 +2652,9 @@ static uint64_t get_time_ns(struct state *state)
 static void alsa_wakeup_event(struct spa_source *source)
 {
 	struct state *state = source->data;
-	snd_pcm_uframes_t delay, target;
+	snd_pcm_uframes_t avail, delay, target;
 	uint64_t expire, current_time;
-	int res;
+	int res, missed;
 
 	if (SPA_UNLIKELY(state->disable_tsched)) {
 		/* ALSA poll fds need to be "demangled" to know whether it's a real wakeup */
@@ -2594,7 +2702,7 @@ static void alsa_wakeup_event(struct spa_source *source)
 		return;
 	}
 
-	if (SPA_UNLIKELY(get_status(state, current_time, &delay, &target) < 0)) {
+	if (SPA_UNLIKELY(get_status(state, current_time, &avail, &delay, &target) < 0)) {
 		spa_log_error(state->log, "get_status error");
 		state->next_time += state->threshold * 1e9 / state->rate;
 		goto done;
@@ -2603,24 +2711,28 @@ static void alsa_wakeup_event(struct spa_source *source)
 #ifndef FASTPATH
 	if (SPA_UNLIKELY(spa_log_level_topic_enabled(state->log, SPA_LOG_TOPIC_DEFAULT, SPA_LOG_LEVEL_TRACE))) {
 		uint64_t nsec = get_time_ns(state);
-		spa_log_trace_fp(state->log, "%p: wakeup %lu %lu %"PRIu64" %"PRIu64" %"PRIi64
-				" %d %"PRIi64, state, delay, target, nsec, nsec,
+		spa_log_trace_fp(state->log, "%p: wakeup %lu %lu %lu %"PRIu64" %"PRIu64" %"PRIi64
+				" %d %"PRIi64, state, avail, delay, target, nsec, nsec,
 				nsec - current_time, state->threshold, state->sample_count);
 	}
 #endif
 
 	if (state->stream == SND_PCM_STREAM_PLAYBACK)
-		handle_play(state, current_time, delay, target);
+		handle_play(state, current_time, avail, delay, target);
 	else
-		handle_capture(state, current_time, delay, target);
+		handle_capture(state, current_time, avail, delay, target);
 
 done:
 	if (!state->disable_tsched &&
 			(state->next_time > current_time + SPA_NSEC_PER_SEC ||
 			 current_time > state->next_time + SPA_NSEC_PER_SEC)) {
-		spa_log_error(state->log, "%s: impossible timeout %lu %lu %"PRIu64" %"PRIu64" %"PRIi64
-				" %d %"PRIi64, state->props.device, delay, target, current_time, state->next_time,
-				state->next_time - current_time, state->threshold, state->sample_count);
+		if ((missed = ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+			spa_log_error(state->log, "%s: impossible timeout %lu %lu %lu %"
+					PRIu64" %"PRIu64" %"PRIi64" %d %"PRIi64" (%d missed)",
+					state->props.device, avail, delay, target,
+					current_time, state->next_time, state->next_time - current_time,
+					state->threshold, state->sample_count, missed);
+		}
 		state->next_time = current_time + state->threshold * 1e9 / state->rate;
 	}
 	set_timeout(state, state->next_time);

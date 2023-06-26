@@ -180,6 +180,7 @@ struct impl {
 	unsigned int do_disconnect:1;
 	unsigned int recalc_delay:1;
 
+	struct spa_audio_info_raw delay_info;
 	float target_delay;
 	struct spa_ringbuffer buffer;
 	uint8_t *buffer_data;
@@ -195,7 +196,7 @@ static void capture_destroy(void *d)
 
 static void recalculate_delay(struct impl *impl)
 {
-	uint32_t target = impl->capture_info.rate * impl->target_delay, cdelay, pdelay;
+	uint32_t target = impl->delay_info.rate * impl->target_delay, cdelay, pdelay;
 	uint32_t delay, w;
 	struct pw_time pwt;
 
@@ -232,11 +233,20 @@ static void playback_process(void *d)
 		impl->recalc_delay = false;
 	}
 
-	if ((in = pw_stream_dequeue_buffer(impl->capture)) == NULL)
-		pw_log_debug("out of capture buffers: %m");
+	in = NULL;
+	while (true) {
+		struct pw_buffer *t;
+		if ((t = pw_stream_dequeue_buffer(impl->capture)) == NULL)
+			break;
+		if (in)
+			pw_stream_queue_buffer(impl->capture, in);
+		in = t;
+	}
+	if (in == NULL)
+		pw_log_debug("%p: out of capture buffers: %m", impl);
 
 	if ((out = pw_stream_dequeue_buffer(impl->playback)) == NULL)
-		pw_log_debug("out of playback buffers: %m");
+		pw_log_debug("%p: out of playback buffers: %m", impl);
 
 	if (in != NULL && out != NULL) {
 		uint32_t outsize = UINT32_MAX;
@@ -347,11 +357,11 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 static void recalculate_buffer(struct impl *impl)
 {
 	if (impl->target_delay > 0.0f) {
-		uint32_t delay = impl->capture_info.rate * impl->target_delay;
+		uint32_t delay = impl->delay_info.rate * impl->target_delay;
 		void *data;
 
 		impl->buffer_size = (delay + (1u<<15)) * 4;
-		data = realloc(impl->buffer_data, impl->buffer_size * impl->capture_info.channels);
+		data = realloc(impl->buffer_data, impl->buffer_size * impl->delay_info.channels);
 		if (data == NULL) {
 			pw_log_warn("can't allocate delay buffer, delay disabled: %m");
 			impl->buffer_size = 0;
@@ -385,7 +395,7 @@ static void capture_param_changed(void *data, uint32_t id, const struct spa_pod 
 		    info.channels > SPA_AUDIO_MAX_CHANNELS)
 			return;
 
-		impl->capture_info = info;
+		impl->delay_info = info;
 		recalculate_buffer(impl);
 		break;
 	}
@@ -695,6 +705,23 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	parse_audio_info(impl->capture_props, &impl->capture_info);
 	parse_audio_info(impl->playback_props, &impl->playback_info);
+
+	if (!impl->capture_info.rate && !impl->playback_info.rate) {
+		if (pw_properties_get(impl->playback_props, "resample.disable") == NULL)
+			pw_properties_set(impl->playback_props, "resample.disable", "true");
+		if (pw_properties_get(impl->capture_props, "resample.disable") == NULL)
+			pw_properties_set(impl->capture_props, "resample.disable", "true");
+	} else if (impl->capture_info.rate && !impl->playback_info.rate)
+		impl->playback_info.rate = impl->capture_info.rate;
+	else if (impl->playback_info.rate && !impl->capture_info.rate)
+		impl->capture_info.rate = !impl->playback_info.rate;
+	else if (impl->capture_info.rate != impl->playback_info.rate) {
+		pw_log_warn("Both capture and playback rate are set, but"
+			" they are different. Using the highest of two. This behaviour"
+			" is deprecated, please use equal rates in the module config");
+		impl->playback_info.rate = impl->capture_info.rate =
+			SPA_MAX(impl->playback_info.rate, impl->capture_info.rate);
+	}
 
 	if (pw_properties_get(impl->capture_props, PW_KEY_MEDIA_NAME) == NULL)
 		pw_properties_setf(impl->capture_props, PW_KEY_MEDIA_NAME, "%s input",

@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.71',
+  version : '0.3.72',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -404,6 +404,9 @@ summary({'OpenSSL (for raop-sink)': openssl_lib.found()}, bool_yn: true)
 lilv_lib = dependency('lilv-0', required: get_option('lv2'))
 summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true)
 cdata.set('HAVE_LILV', lilv_lib.found())
+
+libffado_dep = dependency('libffado', required: get_option('libffado'))
+summary({'ffado': libffado_dep.found()}, bool_yn: true)
 
 check_functions = [
   ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
