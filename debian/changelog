@@ -9,6 +9,7 @@ pipewire (0.3.72-1) UNRELEASED; urgency=medium
   * Add libffado-dev in Build-Deps
   * Install new modules ffado-driver, netjack2-driver and netjack2-manager
       in libpipewire-0.3-modules.
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:00:07 +0200
 
