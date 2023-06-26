@@ -1,7 +1,8 @@
-pipewire (0.3.72-1) UNRELEASED; urgency=medium
+pipewire (0.3.72-1) experimental; urgency=medium
 
   * New upstream release
   * Rename pipewire-libcamera to libspa-0.2-libcamera (Closes: #1030953)
+      pipewire-libcamera is now a transitional package.
   * Improve packages description by mentioning audio functions
       (Closes: #1039018)
   * Drop patch included in upstream release:
@@ -11,7 +12,7 @@ pipewire (0.3.72-1) UNRELEASED; urgency=medium
       in libpipewire-0.3-modules.
   * Update symbols file
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:00:07 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:44:38 +0200
 
 pipewire (0.3.71-2) unstable; urgency=medium
 

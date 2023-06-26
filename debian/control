@@ -331,8 +331,8 @@ Package: libspa-0.2-libcamera
 Section: video
 Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa ia64 powerpc ppc64 riscv64 sh4 sparc64 x32
 Multi-Arch: same
-Replaces: pipewire-libcamera (<< 0.3.71-3~)
-Breaks: pipewire-libcamera (<< 0.3.71-3~)
+Replaces: pipewire-libcamera (<< 0.3.72-1~)
+Breaks: pipewire-libcamera (<< 0.3.72-1~)
 Provides: pipewire-libcamera
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
