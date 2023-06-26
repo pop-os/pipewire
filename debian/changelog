@@ -6,6 +6,7 @@ pipewire (0.3.72-1) UNRELEASED; urgency=medium
       (Closes: #1039018)
   * Drop patch included in upstream release:
       - ce71b37b: fixes a bug with buffer_size updates for JACK apps
+  * Add libffado-dev in Build-Deps
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:00:07 +0200
 
