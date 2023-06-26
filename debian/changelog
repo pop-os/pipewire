@@ -4,6 +4,8 @@ pipewire (0.3.72-1) UNRELEASED; urgency=medium
   * Rename pipewire-libcamera to libspa-0.2-libcamera (Closes: #1030953)
   * Improve packages description by mentioning audio functions
       (Closes: #1039018)
+  * Drop patch included in upstream release:
+      - ce71b37b: fixes a bug with buffer_size updates for JACK apps
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 26 Jun 2023 14:00:07 +0200
 
