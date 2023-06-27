@@ -327,27 +327,6 @@ Description: PipeWire V4L2 plugin
  .
  This package contains the V4L2 plugin.
 
-Package: libspa-0.2-libcamera
-Section: video
-Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa ia64 powerpc ppc64 riscv64 sh4 sparc64 x32
-Multi-Arch: same
-Replaces: pipewire-libcamera (<< 0.3.72-1~)
-Breaks: pipewire-libcamera (<< 0.3.72-1~)
-Provides: pipewire-libcamera
-Depends: pipewire (= ${binary:Version}),
-         ${misc:Depends},
-         ${shlibs:Depends}
-Description: PipeWire libcamera plugin
- PipeWire is a server and user space API to deal with multimedia
- pipelines. This includes:
- .
-  - Making available sources of audio and video (such as from a capture devices
-    or application provided streams) and multiplexing this with clients.
-  - Accessing sources of audio and video for consumption.
-  - Generating graphs for audio and video processing.
- .
- This package contains the libcamera plugin.
-
 Package: pipewire-tests
 Architecture: linux-any
 Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
@@ -414,6 +393,28 @@ Description: libraries for the PipeWire multimedia server - JACK client
  .
  This package contains a plugin to make PipeWire able to connect to a
  JACK server, which will be used for audio playback and recording.
+
+Package: libspa-0.2-libcamera
+Section: video
+Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa ia64 powerpc ppc64 riscv64 sh4 sparc64 x32
+Multi-Arch: same
+Replaces: pipewire-libcamera (<< 0.3.72-1~)
+Breaks: pipewire-libcamera (<< 0.3.72-1~)
+Provides: pipewire-libcamera
+Depends: libspa-0.2-modules (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
+Description: libraries for the PipeWire multimedia server - libcamera plugin
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of audio and video (such as from a capture devices
+    or application provided streams) and multiplexing this with clients.
+  - Accessing sources of audio and video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains a plugin to make camera devices available to the
+ PipeWire server.
 
 Package: pipewire-audio-client-libraries
 Section: oldlibs
