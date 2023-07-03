@@ -5,6 +5,3 @@ include:
 
 reprotest:
   allow_failure: true
-
-variables:
-  RELEASE: 'experimental'
