@@ -1,3 +1,10 @@
+pipewire (0.3.72-2) unstable; urgency=medium
+
+  * Upload to unstable
+  * Improve description of libspa-0.2-libcamera
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 03 Jul 2023 09:59:54 +0200
+
 pipewire (0.3.72-1) experimental; urgency=medium
 
   * New upstream release
