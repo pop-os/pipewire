@@ -446,7 +446,8 @@ do_call_process(struct spa_loop *loop,
 	struct stream *impl = user_data;
 	struct pw_stream *stream = &impl->this;
 	pw_log_trace_fp("%p: do process", stream);
-	pw_stream_emit_process(stream);
+	if (!impl->disconnecting)
+		pw_stream_emit_process(stream);
 	return 0;
 }
 
@@ -1957,7 +1958,7 @@ pw_stream_connect(struct pw_stream *stream,
 	impl->info.flags = SPA_NODE_FLAG_RT;
 	/* if the callback was not marked RT_PROCESS, we will offload
 	 * the process callback in the main thread and we are ASYNC */
-	if (!impl->process_rt)
+	if (!impl->process_rt || SPA_FLAG_IS_SET(flags, PW_STREAM_FLAG_ASYNC))
 		impl->info.flags |= SPA_NODE_FLAG_ASYNC;
 	impl->info.props = &stream->properties->dict;
 	impl->params[NODE_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, 0);

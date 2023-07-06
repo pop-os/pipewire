@@ -208,15 +208,15 @@ static void spa_bt_transport_commit_release_timer(struct spa_bt_transport *trans
 static int device_start_timer(struct spa_bt_device *device);
 static int device_stop_timer(struct spa_bt_device *device);
 
+static void media_codec_switch_free(struct spa_bt_media_codec_switch *sw);
+
 // Working with BlueZ Battery Provider.
 // Developed using https://github.com/dgreid/adhd/commit/655b58f as an example of DBus calls.
 
 // Name of battery, formatted as /org/freedesktop/pipewire/battery/org/bluez/hciX/dev_XX_XX_XX_XX_XX_XX
 static char *battery_get_name(const char *device_path)
 {
-	char *path = malloc(strlen(PIPEWIRE_BATTERY_PROVIDER) + strlen(device_path) + 1);
-	sprintf(path, PIPEWIRE_BATTERY_PROVIDER "%s", device_path);
-	return path;
+	return spa_aprintf(PIPEWIRE_BATTERY_PROVIDER "%s", device_path);
 }
 
 // Unregister virtual battery of device
@@ -1286,10 +1286,6 @@ static struct spa_bt_device *device_create(struct spa_bt_monitor *monitor, const
 
 	return d;
 }
-
-static int device_stop_timer(struct spa_bt_device *device);
-
-static void media_codec_switch_free(struct spa_bt_media_codec_switch *sw);
 
 static void device_clear_sub(struct spa_bt_device *device)
 {
@@ -3269,7 +3265,6 @@ static void transport_set_property_volume(struct spa_bt_transport *transport, ui
 	struct spa_bt_monitor *monitor = transport->monitor;
 	DBusMessage *m;
 	DBusMessageIter it[2];
-	DBusError err;
 	const char *interface = BLUEZ_MEDIA_TRANSPORT_INTERFACE;
 	const char *name = "Volume";
 	int res = 0;
@@ -3297,8 +3292,6 @@ static void transport_set_property_volume(struct spa_bt_transport *transport, ui
 					DBUS_TYPE_UINT16_AS_STRING, &it[1]);
 	dbus_message_iter_append_basic(&it[1], DBUS_TYPE_UINT16, &value);
 	dbus_message_iter_close_container(&it[0], &it[1]);
-
-	dbus_error_init(&err);
 
 	ret = dbus_connection_send_with_reply(monitor->conn, m, &transport->volume_call, -1);
 	dbus_message_unref(m);
@@ -3513,7 +3506,6 @@ static int do_transport_acquire(struct spa_bt_transport *transport)
 {
 	struct spa_bt_monitor *monitor = transport->monitor;
 	DBusMessage *m;
-	DBusError err;
 	dbus_bool_t ret;
 	struct spa_bt_transport *t_linked;
 
@@ -3538,8 +3530,6 @@ static int do_transport_acquire(struct spa_bt_transport *transport)
 					 "Acquire");
 	if (m == NULL)
 		return -ENOMEM;
-
-	dbus_error_init(&err);
 
 	ret = dbus_connection_send_with_reply(monitor->conn, m, &transport->acquire_call, -1);
 	dbus_message_unref(m);

@@ -24,7 +24,7 @@ static void core_event_ping(void *data, uint32_t id, int seq)
 {
 	struct pw_core *this = data;
 	pw_log_debug("%p: object %u ping %u", this, id, seq);
-	pw_core_pong(this->core, id, seq);
+	pw_core_pong(this, id, seq);
 }
 
 static void core_event_done(void *data, uint32_t id, int seq)
@@ -317,11 +317,9 @@ static struct pw_core *core_new(struct pw_context *context,
 
 	pw_properties_add(properties, &context->properties->dict);
 
-	p->proxy.core = p;
 	p->context = context;
 	p->properties = properties;
 	p->pool = pw_mempool_new(NULL);
-	p->core = p;
 	if (user_data_size > 0)
 		p->user_data = SPA_PTROFF(p, sizeof(struct pw_core), void);
 	p->proxy.user_data = p->user_data;
@@ -344,7 +342,7 @@ static struct pw_core *core_new(struct pw_context *context,
 	if (p->conn == NULL)
 		goto error_connection;
 
-	if ((res = pw_proxy_init(&p->proxy, PW_TYPE_INTERFACE_Core, PW_VERSION_CORE)) < 0)
+	if ((res = pw_proxy_init(&p->proxy, p, PW_TYPE_INTERFACE_Core, PW_VERSION_CORE)) < 0)
 		goto error_proxy;
 
 	p->client = (struct pw_client*)pw_proxy_new(&p->proxy,
@@ -478,6 +476,12 @@ struct pw_mempool * pw_core_get_mempool(struct pw_core *core)
 SPA_EXPORT
 int pw_core_disconnect(struct pw_core *core)
 {
+	/*
+	 * the `proxy` member must be the first because the whole pw_core object is
+	 * freed via the free() call in pw_proxy_destroy() -> pw_proxy_unref()
+	 */
+	SPA_STATIC_ASSERT(offsetof(struct pw_core, proxy) == 0, "`proxy` member must be first");
+
 	pw_log_debug("%p: disconnect", core);
 	if (!core->removed)
 		pw_proxy_remove(&core->proxy);
