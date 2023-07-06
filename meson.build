@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.72',
+  version : '0.3.73',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -82,9 +82,9 @@ common_flags = [
   '-Wno-missing-field-initializers',
   '-Wno-unused-parameter',
   '-Wno-pedantic',
-  '-Wold-style-declaration',
   '-Wdeprecated-declarations',
   '-Wunused-result',
+  '-Werror=return-type',
 ]
 
 cc_flags = common_flags + [
@@ -93,6 +93,10 @@ cc_flags = common_flags + [
 # '-DSPA_DEBUG_MEMCPY',
   '-Werror=implicit-function-declaration',
   '-Werror=int-conversion',
+  '-Werror=old-style-declaration',
+  '-Werror=old-style-definition',
+  '-Werror=missing-parameter-type',
+  '-Werror=strict-prototypes',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
 
@@ -295,7 +299,6 @@ summary({'sndfile': sndfile_dep.found()}, bool_yn: true, section: 'pw-cat/pw-pla
 cdata.set('HAVE_SNDFILE', sndfile_dep.found())
 libmysofa_dep = dependency('libmysofa', required : get_option('libmysofa'))
 summary({'libmysofa': libmysofa_dep.found()}, bool_yn: true, section: 'filter-chain')
-cdata.set('HAVE_LIBMYSOFA', libmysofa_dep.found())
 pulseaudio_dep = dependency('libpulse', required : get_option('libpulse'))
 summary({'libpulse': pulseaudio_dep.found()}, bool_yn: true, section: 'Streaming between daemons')
 avahi_dep = dependency('avahi-client', required : get_option('avahi'))
@@ -403,7 +406,6 @@ summary({'OpenSSL (for raop-sink)': openssl_lib.found()}, bool_yn: true)
 
 lilv_lib = dependency('lilv-0', required: get_option('lv2'))
 summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true)
-cdata.set('HAVE_LILV', lilv_lib.found())
 
 libffado_dep = dependency('libffado', required: get_option('libffado'))
 summary({'ffado': libffado_dep.found()}, bool_yn: true)

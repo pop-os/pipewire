@@ -1564,7 +1564,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	int res;
 	struct sample_spec ss, fix_ss;
 	struct channel_map map, fix_map;
-	uint32_t sink_index, syncid, rate = 0;
+	uint32_t sink_index, syncid, ss_rate = 0, rate = 0;
 	const char *sink_name;
 	struct buffer_attr attr = { 0 };
 	bool corked = false,
@@ -1712,7 +1712,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 					n_params++;
 					n_valid_formats++;
 					if (r > rate)
-						rate = r;
+						ss_rate = rate = r;
 				} else {
 					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
 				}
@@ -1724,9 +1724,9 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 		struct sample_spec sfix = ss;
 		struct channel_map mfix = map;
 
-		rate = ss.rate;
-
+		ss_rate = ss.rate;
 		sample_spec_fix(&sfix, &mfix, &fix_ss, &fix_map, &props->dict);
+		rate = sfix.rate;
 
 		if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
@@ -1736,8 +1736,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			n_valid_formats++;
 		} else {
 			pw_log_warn("%p: unsupported format:%s rate:%d channels:%u",
-					impl, format_id2name(ss.format), ss.rate,
-					ss.channels);
+					impl, format_id2name(sfix.format), sfix.rate,
+					sfix.channels);
 		}
 	}
 
@@ -1763,7 +1763,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 
 	if (rate != 0) {
 		struct spa_fraction lat;
-		fix_playback_buffer_attr(stream, &attr, rate, &lat);
+		fix_playback_buffer_attr(stream, &attr, ss_rate, &lat);
 		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", rate);
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%u/%u",
 				lat.num, lat.denom);
@@ -1860,7 +1860,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	struct pw_properties *props = NULL;
 	uint8_t n_formats = 0;
 	struct stream *stream = NULL;
-	uint32_t n_params = 0, n_valid_formats = 0, flags, id, rate = 0;
+	uint32_t n_params = 0, n_valid_formats = 0, flags, id, ss_rate = 0, rate = 0;
 	const struct spa_pod *params[MAX_FORMATS];
 	uint8_t buffer[4096];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
@@ -1966,7 +1966,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 					n_params++;
 					n_valid_formats++;
 					if (r > rate)
-						rate = r;
+						ss_rate = rate = r;
 				} else {
 					log_format_info(impl, SPA_LOG_LEVEL_WARN, &format);
 				}
@@ -1989,9 +1989,9 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		struct sample_spec sfix = ss;
 		struct channel_map mfix = map;
 
-		rate = ss.rate;
-
+		ss_rate = ss.rate;
 		sample_spec_fix(&sfix, &mfix, &fix_ss, &fix_map, &props->dict);
+		rate = sfix.rate;
 
 		if (n_params < MAX_FORMATS &&
 		    (params[n_params] = format_build_param(&b,
@@ -2001,8 +2001,8 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 			n_valid_formats++;
 		} else {
 			pw_log_warn("%p: unsupported format:%s rate:%d channels:%u",
-					impl, format_id2name(ss.format), ss.rate,
-					ss.channels);
+					impl, format_id2name(sfix.format), sfix.rate,
+					sfix.channels);
 		}
 	}
 	if (m->offset != m->length)
@@ -2028,7 +2028,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 
 	if (rate != 0) {
 		struct spa_fraction lat;
-		fix_record_buffer_attr(stream, &attr, rate, &lat);
+		fix_record_buffer_attr(stream, &attr, ss_rate, &lat);
 		pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", rate);
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%u/%u",
 				lat.num, lat.denom);
@@ -3529,10 +3529,11 @@ static int fill_card_info(struct client *client, struct message *m,
 {
 	struct pw_manager *manager = client->manager;
 	struct pw_device_info *info = o->info;
-	const char *str, *drv_name;
+	const char *str, *drv_name, *card_name;
 	uint32_t module_id = SPA_ID_INVALID, n_profiles, n;
 	struct card_info card_info = CARD_INFO_INIT;
 	struct profile_info *profile_info;
+	char name[128];
 
 	if (!pw_manager_object_is_card(o) || info == NULL || info->props == NULL)
 		return -ENOENT;
@@ -3544,9 +3545,17 @@ static int fill_card_info(struct client *client, struct message *m,
 	if (drv_name && spa_streq("bluez5", drv_name))
 		drv_name = "module-bluez5-device.c"; /* blueman needs this */
 
+	card_name = spa_dict_lookup(info->props, PW_KEY_DEVICE_NAME);
+	if (card_name == NULL)
+		card_name = spa_dict_lookup(info->props, "api.alsa.card.name");
+	if (card_name == NULL) {
+		snprintf(name, sizeof(name), "card_%u", o->index);
+		card_name = name;
+	}
+
 	message_put(m,
 		TAG_U32, o->index,			/* card index */
-		TAG_STRING, spa_dict_lookup(info->props, PW_KEY_DEVICE_NAME),
+		TAG_STRING, card_name,
 		TAG_U32, id_to_index(manager, module_id),
 		TAG_STRING, drv_name,
 		TAG_INVALID);

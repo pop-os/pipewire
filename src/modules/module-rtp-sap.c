@@ -28,7 +28,7 @@
 #define ifr_ifindex ifr_index
 #endif
 
-/** \page page_module_rtp_sap PipeWire Module: Announce and create RTP streams
+/** \page page_module_rtp_sap PipeWire Module: SAP Announce and create RTP streams
  *
  * The `rtp-sap` module announces RTP streams that match the rules with the
  * announce-stream action.
@@ -1489,7 +1489,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			}
 		}
 	}
-	if ((res = parse_address(str, port, &impl->src_addr, &impl->src_len)) < 0) {
+	if ((res = parse_address(str, 0, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}

@@ -147,7 +147,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * The mixer plugin has up to 8 input ports labeled "In 1" to "In 8" and each with
  * a gain control labeled "Gain 1" to "Gain 8". There is an output port labeled
- * "Out". Unused input ports will be ignoded and not cause overhead.
+ * "Out". Unused input ports will be ignored and not cause overhead.
  *
  * ### Copy
  *
@@ -518,8 +518,15 @@ static const struct spa_dict_item module_props[] = {
 #define MAX_HNDL 64
 #define MAX_SAMPLES 8192
 
+#define DEFAULT_RATE	48000
+
 static float silence_data[MAX_SAMPLES];
 static float discard_data[MAX_SAMPLES];
+
+struct fc_plugin *load_ladspa_plugin(const struct spa_support *support, uint32_t n_support,
+		struct dsp_ops *dsp, const char *path, const char *config);
+struct fc_plugin *load_builtin_plugin(const struct spa_support *support, uint32_t n_support,
+		struct dsp_ops *dsp, const char *path, const char *config);
 
 struct plugin {
 	struct spa_list link;
@@ -529,6 +536,13 @@ struct plugin {
 
 	struct fc_plugin *plugin;
 	struct spa_list descriptor_list;
+};
+
+struct plugin_func {
+	struct spa_list link;
+	char type[256];
+	fc_plugin_load_func *func;
+	void *hndl;
 };
 
 struct descriptor {
@@ -627,6 +641,8 @@ struct graph {
 
 	uint32_t n_control;
 	struct port **control_port;
+
+	unsigned instantiated:1;
 };
 
 struct impl {
@@ -643,6 +659,7 @@ struct impl {
 	struct dsp_ops dsp;
 
 	struct spa_list plugin_list;
+	struct spa_list plugin_func_list;
 
 	struct pw_properties *capture_props;
 	struct pw_stream *capture;
@@ -653,6 +670,10 @@ struct impl {
 	struct pw_stream *playback;
 	struct spa_hook playback_listener;
 	struct spa_audio_info_raw playback_info;
+
+	struct spa_audio_info_raw info;
+
+	struct spa_io_position *position;
 
 	unsigned int do_disconnect:1;
 
@@ -856,7 +877,7 @@ static struct spa_pod *get_prop_info(struct graph *graph, struct spa_pod_builder
 	struct fc_port *p = &d->ports[port->p];
 	float def, min, max;
 	char name[512];
-	uint32_t rate = impl->rate ? impl->rate : 48000;
+	uint32_t rate = impl->rate ? impl->rate : DEFAULT_RATE;
 
 	if (p->hint & FC_HINT_SAMPLE_RATE) {
 		def = p->def * rate;
@@ -1105,6 +1126,7 @@ static void state_changed(void *data, enum pw_stream_state old,
 {
 	struct impl *impl = data;
 	struct graph *graph = &impl->graph;
+	int res;
 
 	switch (state) {
 	case PW_STREAM_STATE_PAUSED:
@@ -1119,6 +1141,40 @@ static void state_changed(void *data, enum pw_stream_state old,
 	case PW_STREAM_STATE_ERROR:
 		pw_log_info("module %p: error: %s", impl, error);
 		break;
+	case PW_STREAM_STATE_STREAMING:
+	{
+		uint32_t target = impl->info.rate;
+		if (target == 0)
+			target = impl->position ?
+				impl->position->clock.target_rate.denom : DEFAULT_RATE;
+		if (target == 0) {
+			res = -EINVAL;
+			goto error;
+		}
+		if (impl->rate != target) {
+			impl->rate = target;
+			graph_cleanup(graph);
+			if ((res = graph_instantiate(graph)) < 0)
+				goto error;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+	return;
+error:
+	pw_stream_set_error(impl->capture, res, "can't start graph: %s",
+			spa_strerror(res));
+}
+
+static void io_changed(void *data, uint32_t id, void *area, uint32_t size)
+{
+	struct impl *impl = data;
+	switch (id) {
+	case SPA_IO_Position:
+		impl->position = area;
+		break;
 	default:
 		break;
 	}
@@ -1132,22 +1188,19 @@ static void param_changed(void *data, uint32_t id, const struct spa_pod *param)
 
 	switch (id) {
 	case SPA_PARAM_Format:
+	{
+		struct spa_audio_info_raw info;
+		spa_zero(info);
 		if (param == NULL) {
 			graph_cleanup(graph);
+			impl->rate = 0;
 		} else {
-			struct spa_audio_info_raw info;
-			spa_zero(info);
 			if ((res = spa_format_audio_raw_parse(param, &info)) < 0)
 				goto error;
-			if (info.rate == 0) {
-				res = -EINVAL;
-				goto error;
-			}
-			impl->rate = info.rate;
-			if ((res = graph_instantiate(graph)) < 0)
-				goto error;
 		}
+		impl->info = info;
 		break;
+	}
 	case SPA_PARAM_Props:
 		if (param != NULL)
 			param_props_changed(impl, param);
@@ -1167,6 +1220,7 @@ static const struct pw_stream_events in_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = capture_destroy,
 	.process = capture_process,
+	.io_changed = io_changed,
 	.state_changed = state_changed,
 	.param_changed = param_changed
 };
@@ -1182,8 +1236,9 @@ static const struct pw_stream_events out_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = playback_destroy,
 	.process = playback_process,
+	.io_changed = io_changed,
 	.state_changed = state_changed,
-	.param_changed = param_changed
+	.param_changed = param_changed,
 };
 
 static int setup_streams(struct impl *impl)
@@ -1255,7 +1310,8 @@ static int setup_streams(struct impl *impl)
 			PW_ID_ANY,
 			PW_STREAM_FLAG_AUTOCONNECT |
 			PW_STREAM_FLAG_MAP_BUFFERS |
-			PW_STREAM_FLAG_RT_PROCESS,
+			PW_STREAM_FLAG_RT_PROCESS |
+			PW_STREAM_FLAG_ASYNC,
 			params, n_params);
 
 	spa_pod_dynamic_builder_clean(&b);
@@ -1305,12 +1361,92 @@ static void plugin_unref(struct plugin *hndl)
 	free(hndl);
 }
 
+
+static struct plugin_func *add_plugin_func(struct impl *impl, const char *type,
+		fc_plugin_load_func *func, void *hndl)
+{
+	struct plugin_func *pl;
+
+	pl = calloc(1, sizeof(*pl));
+	if (pl == NULL)
+		return NULL;
+
+	snprintf(pl->type, sizeof(pl->type), "%s", type);
+	pl->func = func;
+	pl->hndl = hndl;
+	spa_list_append(&impl->plugin_func_list, &pl->link);
+	return pl;
+}
+
+static void free_plugin_func(struct plugin_func *pl)
+{
+	spa_list_remove(&pl->link);
+	if (pl->hndl)
+		dlclose(pl->hndl);
+	free(pl);
+}
+
+static fc_plugin_load_func *find_plugin_func(struct impl *impl, const char *type)
+{
+	fc_plugin_load_func *func = NULL;
+	void *hndl = NULL;
+	int res;
+	struct plugin_func *pl;
+	char module[PATH_MAX];
+	const char *module_dir;
+	const char *state = NULL, *p;
+	size_t len;
+
+	spa_list_for_each(pl, &impl->plugin_func_list, link) {
+		if (spa_streq(pl->type, type))
+			return pl->func;
+	}
+	module_dir = getenv("PIPEWIRE_MODULE_DIR");
+	if (module_dir == NULL)
+		module_dir = MODULEDIR;
+	pw_log_debug("moduledir set to: %s", module_dir);
+
+	while ((p = pw_split_walk(module_dir, ":", &len, &state))) {
+		if ((res = spa_scnprintf(module, sizeof(module),
+				"%.*s/libpipewire-module-filter-chain-%s.so",
+						(int)len, p, type)) <= 0)
+			continue;
+
+		hndl = dlopen(module, RTLD_NOW | RTLD_LOCAL);
+		if (hndl != NULL)
+			break;
+
+		pw_log_debug("open plugin module %s failed: %s", module, dlerror());
+	}
+	if (hndl == NULL) {
+		errno = ENOENT;
+		return NULL;
+	}
+	func = dlsym(hndl, FC_PLUGIN_LOAD_FUNC);
+	if (func != NULL) {
+		pw_log_info("opened plugin module %s", module);
+		pl = add_plugin_func(impl, type, func, hndl);
+		if (pl == NULL)
+			goto error_close;
+	} else {
+		errno = ENOSYS;
+		pw_log_error("%s is not a filter chain plugin: %m", module);
+		goto error_close;
+	}
+	return func;
+
+error_close:
+	dlclose(hndl);
+	return NULL;
+}
+
 static struct plugin *plugin_load(struct impl *impl, const char *type, const char *path)
 {
 	struct fc_plugin *pl = NULL;
 	struct plugin *hndl;
 	const struct spa_support *support;
 	uint32_t n_support;
+	fc_plugin_load_func *plugin_func;
 
 	spa_list_for_each(hndl, &impl->plugin_list, link) {
 		if (spa_streq(hndl->type, type) &&
@@ -1321,27 +1457,12 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 	}
 	support = pw_context_get_support(impl->context, &n_support);
 
-	if (spa_streq(type, "builtin")) {
-		pl = load_builtin_plugin(support, n_support, &impl->dsp, path, NULL);
-	}
-	else if (spa_streq(type, "sofa")) {
-		pl = load_sofa_plugin(support, n_support, &impl->dsp, path, NULL);
-	}
-	else if (spa_streq(type, "ladspa")) {
-		pl = load_ladspa_plugin(support, n_support, &impl->dsp, path, NULL);
-	}
-	else if (spa_streq(type, "lv2")) {
-#ifdef HAVE_LILV
-		pl = load_lv2_plugin(support, n_support, &impl->dsp, path, NULL);
-#else
-		pw_log_error("filter-chain is compiled without lv2 support");
+	plugin_func = find_plugin_func(impl, type);
+	if (plugin_func == NULL) {
+		pw_log_error("can't load plugin type '%s': %m", type);
 		pl = NULL;
-		errno = ENOTSUP;
-#endif
 	} else {
-		pw_log_error("invalid plugin type '%s'", type);
-		pl = NULL;
-		errno = EINVAL;
+		pl = plugin_func(support, n_support, &impl->dsp, path, NULL);
 	}
 	if (pl == NULL)
 		goto exit;
@@ -1354,7 +1475,7 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 	snprintf(hndl->type, sizeof(hndl->type), "%s", type);
 	snprintf(hndl->path, sizeof(hndl->path), "%s", path);
 
-	pw_log_info("successfully opened '%s'", path);
+	pw_log_info("successfully opened '%s':'%s'", type, path);
 
 	hndl->plugin = pl;
 
@@ -1560,7 +1681,7 @@ static int parse_link(struct graph *graph, struct spa_json *json)
 	char output[256] = "";
 	char input[256] = "";
 	const char *val;
-	struct node *def_node;
+	struct node *def_in_node, *def_out_node;
 	struct port *in_port, *out_port;
 	struct link *link;
 
@@ -1585,16 +1706,25 @@ static int parse_link(struct graph *graph, struct spa_json *json)
 		else if (spa_json_next(json, &val) < 0)
 			break;
 	}
-	def_node = spa_list_first(&graph->node_list, struct node, link);
-	if ((out_port = find_port(def_node, output, FC_PORT_OUTPUT)) == NULL) {
-		pw_log_error("unknown output port %s", output);
+	def_out_node = spa_list_first(&graph->node_list, struct node, link);
+	def_in_node = spa_list_last(&graph->node_list, struct node, link);
+
+	out_port = find_port(def_out_node, output, FC_PORT_OUTPUT);
+	in_port = find_port(def_in_node, input, FC_PORT_INPUT);
+
+	if (out_port == NULL && out_port == NULL) {
+		/* try control ports */
+		out_port = find_port(def_out_node, output, FC_PORT_OUTPUT | FC_PORT_CONTROL);
+		in_port = find_port(def_in_node, input, FC_PORT_INPUT | FC_PORT_CONTROL);
+	}
+	if (in_port == NULL || out_port == NULL) {
+		if (out_port == NULL)
+			pw_log_error("unknown output port %s", output);
+		if (in_port == NULL)
+			pw_log_error("unknown input port %s", input);
 		return -ENOENT;
 	}
-	def_node = spa_list_last(&graph->node_list, struct node, link);
-	if ((in_port = find_port(def_node, input, FC_PORT_INPUT)) == NULL) {
-		pw_log_error("unknown input port %s", input);
-		return -ENOENT;
-	}
+
 	if (in_port->n_links > 0) {
 		pw_log_info("Can't have more than 1 link to %s, use a mixer", input);
 		return -ENOTSUP;
@@ -1776,6 +1906,7 @@ static void node_cleanup(struct node *node)
 	for (i = 0; i < node->n_hndl; i++) {
 		if (node->hndl[i] == NULL)
 			continue;
+		pw_log_info("cleanup %s %d", d->name, i);
 		if (d->deactivate)
 			d->deactivate(node->hndl[i]);
 		d->cleanup(node->hndl[i]);
@@ -1825,6 +1956,9 @@ static void node_free(struct node *node)
 static void graph_cleanup(struct graph *graph)
 {
 	struct node *node;
+	if (!graph->instantiated)
+		return;
+	graph->instantiated = false;
 	spa_list_for_each(node, &graph->node_list, link)
 		node_cleanup(node);
 }
@@ -1840,6 +1974,11 @@ static int graph_instantiate(struct graph *graph)
 	uint32_t i, j;
 	int res;
 
+	if (graph->instantiated)
+		return 0;
+
+	graph->instantiated = true;
+
 	spa_list_for_each(node, &graph->node_list, link) {
 		float *sd = silence_data, *dd = discard_data;
 
@@ -1852,8 +1991,9 @@ static int graph_instantiate(struct graph *graph)
 
 		for (i = 0; i < node->n_hndl; i++) {
 			pw_log_info("instantiate %s %d rate:%lu", d->name, i, impl->rate);
+			errno = EINVAL;
 			if ((node->hndl[i] = d->instantiate(d, impl->rate, i, node->config)) == NULL) {
-				pw_log_error("cannot create plugin instance: %m");
+				pw_log_error("cannot create plugin instance %d rate:%lu: %m", i, impl->rate);
 				res = -errno;
 				goto error;
 			}
@@ -1883,9 +2023,20 @@ static int graph_instantiate(struct graph *graph)
 			for (j = 0; j < desc->n_control; j++) {
 				port = &node->control_port[j];
 				d->connect_port(node->hndl[i], port->p, &port->control_data);
+
+				spa_list_for_each(link, &port->link_list, input_link) {
+					struct port *peer = link->output;
+					pw_log_info("connect control port %s[%d]:%s %p",
+							node->name, i, d->ports[port->p].name,
+							&peer->control_data);
+					d->connect_port(node->hndl[i], port->p, &peer->control_data);
+				}
 			}
 			for (j = 0; j < desc->n_notify; j++) {
 				port = &node->notify_port[j];
+				pw_log_info("connect notify port %s[%d]:%s %p",
+						node->name, i, d->ports[port->p].name,
+						&port->control_data);
 				d->connect_port(node->hndl[i], port->p, &port->control_data);
 			}
 			if (d->activate)
@@ -2301,6 +2452,8 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct impl *impl)
 {
+	struct plugin_func *pl;
+
 	/* disconnect both streams before destroying any of them */
 	if (impl->capture)
 		pw_stream_disconnect(impl->capture);
@@ -2318,6 +2471,8 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->capture_props);
 	pw_properties_free(impl->playback_props);
 	graph_free(&impl->graph);
+	spa_list_consume(pl, &impl->plugin_func_list, link)
+		free_plugin_func(pl);
 	free(impl);
 }
 
@@ -2429,6 +2584,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->graph.impl = impl;
 
 	spa_list_init(&impl->plugin_list);
+	spa_list_init(&impl->plugin_func_list);
+
+	add_plugin_func(impl, "builtin", load_builtin_plugin, NULL);
+	add_plugin_func(impl, "ladspa", load_ladspa_plugin, NULL);
 
 	support = pw_context_get_support(impl->context, &n_support);
 

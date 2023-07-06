@@ -40,6 +40,8 @@ extern "C" {
 #define DEFAULT_CHANNELS	2u
 #define DEFAULT_USE_CHMAP	false
 
+#define MAX_HTIMESTAMP_ERROR	64
+
 struct props {
 	char device[64];
 	char device_name[128];
@@ -185,6 +187,7 @@ struct state {
 	uint32_t start_delay;
 	uint32_t min_delay;
 	uint32_t max_delay;
+	uint32_t htimestamp_error;
 
 	uint32_t duration;
 	unsigned int alsa_started:1;
@@ -201,6 +204,7 @@ struct state {
 	unsigned int is_iec958:1;
 	unsigned int is_hdmi:1;
 	unsigned int multi_rate:1;
+	unsigned int htimestamp:1;
 
 	uint64_t iec958_codecs;
 

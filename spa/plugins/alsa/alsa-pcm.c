@@ -128,6 +128,8 @@ static int alsa_set_param(struct state *state, const char *k, const char *s)
 		state->props.use_chmap = spa_atob(s);
 	} else if (spa_streq(k, "api.alsa.multi-rate")) {
 		state->multi_rate = spa_atob(s);
+	} else if (spa_streq(k, "api.alsa.htimestamp")) {
+		state->htimestamp = spa_atob(s);
 	} else if (spa_streq(k, "latency.internal.rate")) {
 		state->process_latency.rate = atoi(s);
 	} else if (spa_streq(k, "latency.internal.ns")) {
@@ -310,13 +312,21 @@ struct spa_pod *spa_alsa_enum_propinfo(struct state *state,
 	case 14:
 		param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
+			SPA_PROP_INFO_name, SPA_POD_String("api.alsa.htimestamp"),
+			SPA_PROP_INFO_description, SPA_POD_String("Use hires timestamps"),
+			SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(state->htimestamp),
+			SPA_PROP_INFO_params, SPA_POD_Bool(true));
+		break;
+	case 15:
+		param = spa_pod_builder_add_object(b,
+			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
 			SPA_PROP_INFO_name, SPA_POD_String("latency.internal.rate"),
 			SPA_PROP_INFO_description, SPA_POD_String("Internal latency in samples"),
 			SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Int(state->process_latency.rate,
 				0, 65536),
 			SPA_PROP_INFO_params, SPA_POD_Bool(true));
 		break;
-	case 15:
+	case 16:
 		param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
 			SPA_PROP_INFO_name, SPA_POD_String("latency.internal.ns"),
@@ -325,7 +335,7 @@ struct spa_pod *spa_alsa_enum_propinfo(struct state *state,
 				0LL, 2 * SPA_NSEC_PER_SEC),
 			SPA_PROP_INFO_params, SPA_POD_Bool(true));
 		break;
-	case 16:
+	case 17:
 		param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
 			SPA_PROP_INFO_name, SPA_POD_String("clock.name"),
@@ -393,6 +403,9 @@ int spa_alsa_add_prop_params(struct state *state, struct spa_pod_builder *b)
 
 	spa_pod_builder_string(b, "api.alsa.multi-rate");
 	spa_pod_builder_bool(b, state->multi_rate);
+
+	spa_pod_builder_string(b, "api.alsa.htimestamp");
+	spa_pod_builder_bool(b, state->htimestamp);
 
 	spa_pod_builder_string(b, "latency.internal.rate");
 	spa_pod_builder_int(b, state->process_latency.rate);
@@ -490,6 +503,7 @@ int spa_alsa_init(struct state *state, const struct spa_dict *info)
 	snd_config_update_free_global();
 
 	state->multi_rate = true;
+	state->htimestamp = true;
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
@@ -1957,7 +1971,6 @@ recover:
 	return do_start(state);
 }
 
-#if 0
 static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
 {
 	int res, missed;
@@ -1977,48 +1990,50 @@ static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes
 		state->alsa_recovering = false;
 	}
 	*delay = avail;
-	return avail;
-}
 
-#else
-static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
-{
-	int res, missed;
-	snd_pcm_uframes_t avail;
-	snd_htimestamp_t tstamp;
-	uint64_t then;
+	if (state->htimestamp) {
+		snd_pcm_uframes_t havail;
+		snd_htimestamp_t tstamp;
+		uint64_t then;
 
-	avail = snd_pcm_avail(state->hndl);
-	if ((res = snd_pcm_htimestamp(state->hndl, &avail, &tstamp)) < 0) {
-		if ((res = alsa_recover(state, res)) < 0)
-			return res;
-		if ((res = snd_pcm_htimestamp(state->hndl, &avail, &tstamp)) < 0) {
+		if ((res = snd_pcm_htimestamp(state->hndl, &havail, &tstamp)) < 0) {
 			if ((missed = ratelimit_test(&state->rate_limit, current_time)) >= 0) {
 				spa_log_warn(state->log, "%s: (%d missed) snd_pcm_htimestamp error: %s",
 					state->props.device, missed, snd_strerror(res));
 			}
-			avail = state->threshold * 2;
+			return avail;
 		}
-	} else {
-		state->alsa_recovering = false;
+		avail = havail;
+		*delay = havail;
+		if ((then = SPA_TIMESPEC_TO_NSEC(&tstamp)) != 0) {
+			int64_t diff;
+
+			if (then < current_time)
+				diff = ((int64_t)(current_time - then)) * state->rate / SPA_NSEC_PER_SEC;
+			else
+				diff = -((int64_t)(then - current_time)) * state->rate / SPA_NSEC_PER_SEC;
+
+			spa_log_trace_fp(state->log, "%"PRIu64" %"PRIu64" %"PRIi64, current_time, then, diff);
+
+			if (SPA_ABS(diff) < state->threshold * 3) {
+				*delay += SPA_CLAMP(diff, -((int64_t)state->threshold), (int64_t)state->threshold);
+				state->htimestamp_error = 0;
+			} else {
+				if (++state->htimestamp_error > MAX_HTIMESTAMP_ERROR) {
+					spa_log_error(state->log, "%s: wrong htimestamps from driver, disabling",
+						state->props.device);
+					state->htimestamp_error = 0;
+					state->htimestamp = false;
+				}
+				else if ((missed = ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+					spa_log_warn(state->log, "%s: (%d missed) impossible htimestamp diff:%"PRIi64,
+						state->props.device, missed, diff);
+				}
+			}
+		}
 	}
-	*delay = avail;
-
-	if ((then = SPA_TIMESPEC_TO_NSEC(&tstamp)) != 0) {
-		int64_t diff;
-
-		if (then < current_time)
-			diff = ((int64_t)(current_time - then)) * state->rate / SPA_NSEC_PER_SEC;
-		else
-			diff = -((int64_t)(then - current_time)) * state->rate / SPA_NSEC_PER_SEC;
-
-		spa_log_trace_fp(state->log, "%"PRIu64" %"PRIu64" %"PRIi64, current_time, then, diff);
-
-		*delay += diff;
-	}
-	return SPA_MIN(avail, state->buffer_frames);
+	return avail;
 }
-#endif
 
 static int get_status(struct state *state, uint64_t current_time, snd_pcm_uframes_t *avail,
 		snd_pcm_uframes_t *delay, snd_pcm_uframes_t *target)
@@ -2263,6 +2278,7 @@ again:
 		if (SPA_UNLIKELY((res = snd_pcm_mmap_begin(hndl, &my_areas, &offset, &frames)) < 0)) {
 			spa_log_error(state->log, "%s: snd_pcm_mmap_begin error: %s",
 					state->props.device, snd_strerror(res));
+			alsa_recover(state, res);
 			return res;
 		}
 		spa_log_trace_fp(state->log, "%p: begin offset:%ld avail:%ld threshold:%d",
@@ -2500,6 +2516,7 @@ int spa_alsa_read(struct state *state)
 		if ((res = snd_pcm_mmap_begin(hndl, &my_areas, &offset, &to_read)) < 0) {
 			spa_log_error(state->log, "%s: snd_pcm_mmap_begin error: %s",
 					state->props.device, snd_strerror(res));
+			alsa_recover(state, res);
 			return res;
 		}
 		spa_log_trace_fp(state->log, "%p: begin offs:%ld frames:%ld to_read:%ld thres:%d", state,

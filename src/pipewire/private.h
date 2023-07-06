@@ -1066,7 +1066,6 @@ struct pw_core {
 	struct pw_properties *properties;	/**< extra properties */
 
 	struct pw_mempool *pool;		/**< memory pool */
-	struct pw_core *core;			/**< proxy for the core object */
 	struct spa_hook core_listener;
 	struct spa_hook proxy_core_listener;
 
@@ -1229,9 +1228,7 @@ int pw_context_debug_port_params(struct pw_context *context,
 		struct spa_node *node, enum spa_direction direction,
 		uint32_t port_id, uint32_t id, int err, const char *debug, ...);
 
-const struct pw_export_type *pw_context_find_export_type(struct pw_context *context, const char *type);
-
-int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version);
+int pw_proxy_init(struct pw_proxy *proxy, struct pw_core *core, const char *type, uint32_t version);
 
 void pw_proxy_remove(struct pw_proxy *proxy);
 
@@ -1356,7 +1353,7 @@ bool pw_log_is_default(void);
 void pw_log_init(void);
 void pw_log_deinit(void);
 
-void pw_random_init();
+void pw_random_init(void);
 
 void pw_settings_init(struct pw_context *context);
 int pw_settings_expose(struct pw_context *context);

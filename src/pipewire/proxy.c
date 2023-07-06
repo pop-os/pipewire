@@ -21,10 +21,11 @@ struct proxy {
 };
 /** \endcond */
 
-int pw_proxy_init(struct pw_proxy *proxy, const char *type, uint32_t version)
+int pw_proxy_init(struct pw_proxy *proxy, struct pw_core *core, const char *type, uint32_t version)
 {
 	int res;
 
+	proxy->core = core;
 	proxy->refcount = 1;
 	proxy->type = type;
 	proxy->version = version;
@@ -81,9 +82,8 @@ struct pw_proxy *pw_proxy_new(struct pw_proxy *factory,
 		return NULL;
 
 	this = &impl->this;
-	this->core = factory->core;
 
-	if ((res = pw_proxy_init(this, type, version)) < 0)
+	if ((res = pw_proxy_init(this, factory->core, type, version)) < 0)
 		goto error_init;
 
 	if (user_data_size > 0)
@@ -157,12 +157,6 @@ const char *pw_proxy_get_type(struct pw_proxy *proxy, uint32_t *version)
 	if (version)
 		*version = proxy->version;
 	return proxy->type;
-}
-
-SPA_EXPORT
-struct pw_core *pw_proxy_get_core(struct pw_proxy *proxy)
-{
-	return proxy->core;
 }
 
 SPA_EXPORT
