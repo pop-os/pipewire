@@ -1,4 +1,4 @@
-pipewire (0.3.73-0) UNRELEASED; urgency=medium
+pipewire (0.3.73-1) unstable; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release
@@ -9,9 +9,10 @@ pipewire (0.3.73-0) UNRELEASED; urgency=medium
       See commit 54a9b30e.
 
   [ Sebastien Bacher ]
-  * Don't use libffafo in the Ubuntu build for now since the package is in universe
+  * Don't use libffafo in the Ubuntu build for now since the package
+      is in universe
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Jul 2023 12:37:22 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Jul 2023 14:50:07 +0200
 
 pipewire (0.3.72-2) unstable; urgency=medium
 
