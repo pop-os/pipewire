@@ -2,6 +2,8 @@ pipewire (0.3.73-0) UNRELEASED; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release
+  * Install new modules filter-chain-lv2 and filter-chain-sofa
+      in libpipewire-0.3-modules.
 
   [ Sebastien Bacher ]
   * Don't use libffafo in the Ubuntu build for now since the package is in universe

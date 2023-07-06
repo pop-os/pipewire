@@ -8,6 +8,8 @@ usr/lib/*/pipewire-0.3/libpipewire-module-echo-cancel.so
 usr/lib/*/pipewire-0.3/libpipewire-module-fallback-sink.so
 usr/lib/*/pipewire-0.3/libpipewire-module-ffado-driver.so
 usr/lib/*/pipewire-0.3/libpipewire-module-filter-chain.so
+usr/lib/*/pipewire-0.3/libpipewire-module-filter-chain-lv2.so
+usr/lib/*/pipewire-0.3/libpipewire-module-filter-chain-sofa.so
 usr/lib/*/pipewire-0.3/libpipewire-module-jack-tunnel.so
 usr/lib/*/pipewire-0.3/libpipewire-module-jackdbus-detect.so
 usr/lib/*/pipewire-0.3/libpipewire-module-link-factory.so
