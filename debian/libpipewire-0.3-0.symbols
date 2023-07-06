@@ -348,7 +348,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_proxy_error@Base 0.3.1
  pw_proxy_errorf@Base 0.3.1
  pw_proxy_get_bound_id@Base 0.3.1
- pw_proxy_get_core@Base 0.3.1
+#MISSING: 0.3.73-0# pw_proxy_get_core@Base 0.3.1
  pw_proxy_get_id@Base 0.3.1
  pw_proxy_get_marshal@Base 0.3.1
  pw_proxy_get_object_listeners@Base 0.3.1

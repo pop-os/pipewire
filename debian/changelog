@@ -4,6 +4,9 @@ pipewire (0.3.73-0) UNRELEASED; urgency=medium
   * New upstream release
   * Install new modules filter-chain-lv2 and filter-chain-sofa
       in libpipewire-0.3-modules.
+  * Update symbols file, 1 symbol is dropped: pw_proxy_get_core@Base 0.3.1
+      This function is not declared in any header files, nor used by anything.
+      See commit 54a9b30e.
 
   [ Sebastien Bacher ]
   * Don't use libffafo in the Ubuntu build for now since the package is in universe
