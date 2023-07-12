@@ -45,6 +45,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_get_data_loop@Base 0.3.56
  pw_context_get_default_core@Base 0.3.1
  pw_context_get_main_loop@Base 0.3.1
+ pw_context_get_mempool@Base 0.3.74
  pw_context_get_object@Base 0.3.1
  pw_context_get_properties@Base 0.3.1
  pw_context_get_support@Base 0.3.1
@@ -159,6 +160,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_impl_client_get_core_resource@Base 0.3.1
  pw_impl_client_get_global@Base 0.3.1
  pw_impl_client_get_info@Base 0.3.1
+ pw_impl_client_get_mempool@Base 0.3.74
  pw_impl_client_get_properties@Base 0.3.1
  pw_impl_client_get_protocol@Base 0.3.1
  pw_impl_client_get_user_data@Base 0.3.1
