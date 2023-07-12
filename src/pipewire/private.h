@@ -17,6 +17,7 @@ extern "C" {
 #include <spa/support/plugin.h>
 #include <spa/pod/builder.h>
 #include <spa/param/latency-utils.h>
+#include <spa/utils/ratelimit.h>
 #include <spa/utils/result.h>
 #include <spa/utils/type-info.h>
 
@@ -52,29 +53,6 @@ struct settings {
 	uint32_t clock_force_rate;		/* force a clock rate */
 	uint32_t clock_force_quantum;		/* force a quantum */
 };
-
-struct ratelimit {
-	uint64_t interval;
-	uint64_t begin;
-	unsigned burst;
-	unsigned n_printed, n_missed;
-};
-
-static inline bool ratelimit_test(struct ratelimit *r, uint64_t now, enum spa_log_level level)
-{
-	if (r->begin + r->interval < now) {
-		if (r->n_missed)
-			pw_log(level, "%u events suppressed", r->n_missed);
-		r->begin = now;
-		r->n_printed = 0;
-		r->n_missed = 0;
-	} else if (r->n_printed >= r->burst) {
-		r->n_missed++;
-		return false;
-	}
-	r->n_printed++;
-	return true;
-}
 
 #define MAX_PARAMS	32
 
@@ -202,22 +180,6 @@ typedef uint32_t (*pw_permission_func_t) (struct pw_global *global,
 #define pw_impl_client_emit_resource_impl(o,r)		pw_impl_client_emit(o, resource_impl, 0, r)
 #define pw_impl_client_emit_resource_removed(o,r)	pw_impl_client_emit(o, resource_removed, 0, r)
 #define pw_impl_client_emit_busy_changed(o,b)		pw_impl_client_emit(o, busy_changed, 0, b)
-
-enum spa_node0_event {
-	SPA_NODE0_EVENT_START	= SPA_TYPE_VENDOR_PipeWire,
-	SPA_NODE0_EVENT_RequestClockUpdate,
-};
-
-enum spa_node0_command {
-	SPA_NODE0_COMMAND_START	= SPA_TYPE_VENDOR_PipeWire,
-	SPA_NODE0_COMMAND_ClockUpdate,
-};
-
-struct protocol_compat_v2 {
-	/* v2 typemap */
-	struct pw_map types;
-	unsigned int send_types:1;
-};
 
 #define pw_impl_core_emit(s,m,v,...) spa_hook_list_call(&s->listener_list, struct pw_impl_core_events, m, v, ##__VA_ARGS__)
 
@@ -801,7 +763,7 @@ struct pw_impl_node {
 							   driver */
 		struct spa_list driver_link;		/* our link in driver */
 
-		struct ratelimit rate_limit;
+		struct spa_ratelimit rate_limit;
 	} rt;
 	struct spa_fraction target_rate;
 	uint64_t target_quantum;

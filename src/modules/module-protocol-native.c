@@ -23,6 +23,8 @@
 #endif
 
 #include <spa/pod/iter.h>
+#include <spa/pod/parser.h>
+#include <spa/pod/builder.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 
@@ -1465,6 +1467,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_protocol *this;
+	struct pw_impl_core *core = context->core;
 	struct protocol_data *d;
 	const struct pw_properties *props;
 	int res;
@@ -1472,8 +1475,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	PW_LOG_TOPIC_INIT(mod_topic);
 	PW_LOG_TOPIC_INIT(mod_topic_connection);
 
-	if (pw_context_find_protocol(context, PW_TYPE_INFO_PROTOCOL_Native) != NULL)
-		return 0;
+	if (pw_context_find_protocol(context, PW_TYPE_INFO_PROTOCOL_Native) != NULL) {
+		pw_log_error("protocol %s is already loaded", PW_TYPE_INFO_PROTOCOL_Native);
+		return -EEXIST;
+	}
 
 	this = pw_protocol_new(context, PW_TYPE_INFO_PROTOCOL_Native, sizeof(struct protocol_data));
 	if (this == NULL)
@@ -1494,10 +1499,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	d->module = module;
 
 	props = pw_context_get_properties(context);
-	d->local = create_server(this, context->core, &props->dict);
+	d->local = create_server(this, core, &props->dict);
 
 	if (need_server(context, &props->dict)) {
-		if (impl_add_server(this, context->core, &props->dict) == NULL) {
+		if (impl_add_server(this, core, &props->dict) == NULL) {
 			res = -errno;
 			goto error_cleanup;
 		}
