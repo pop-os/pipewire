@@ -39,8 +39,6 @@ struct buffer {
 struct mix {
 	struct spa_list link;
 	struct pw_impl_port *port;
-	uint32_t mix_id;
-	uint32_t peer_id;
 	struct pw_impl_port_mix mix;
 	struct pw_array buffers;
 };
@@ -151,9 +149,10 @@ static void mix_init(struct mix *mix, struct pw_impl_port *port,
 {
 	pw_log_debug("port %p: mix init %d.%d", port, port->port_id, mix_id);
 	mix->port = port;
-	mix->mix_id = mix_id;
-	mix->peer_id = peer_id;
-	pw_impl_port_init_mix(port, &mix->mix);
+	mix->mix.id = mix_id;
+	mix->mix.peer_id = peer_id;
+	if (mix_id != SPA_ID_INVALID)
+		pw_impl_port_init_mix(port, &mix->mix);
 	pw_array_init(&mix->buffers, 32);
 	pw_array_ensure_size(&mix->buffers, sizeof(struct buffer) * 64);
 }
@@ -165,7 +164,7 @@ static struct mix *find_mix(struct node_data *data,
 
 	spa_list_for_each(mix, &data->mix[direction], link) {
 		if (mix->port->port_id == port_id &&
-		    mix->mix_id == mix_id) {
+		    mix->mix.id == mix_id) {
 			pw_log_debug("port %p: found mix %d:%d.%d", mix->port,
 					direction, port_id, mix_id);
 			return mix;
@@ -174,16 +173,10 @@ static struct mix *find_mix(struct node_data *data,
 	return NULL;
 }
 
-static struct mix *create_mix(struct node_data *data,
-		enum spa_direction direction, uint32_t port_id,
+static struct mix *create_mix(struct node_data *data, struct pw_impl_port *port,
 		uint32_t mix_id, uint32_t peer_id)
 {
 	struct mix *mix;
-	struct pw_impl_port *port;
-
-	port = pw_impl_node_find_port(data->node, direction, port_id);
-	if (port == NULL)
-		return NULL;
 
 	if (spa_list_is_empty(&data->free_mix)) {
 		if ((mix = calloc(1, sizeof(*mix))) == NULL)
@@ -193,19 +186,9 @@ static struct mix *create_mix(struct node_data *data,
 		spa_list_remove(&mix->link);
 	}
 	mix_init(mix, port, mix_id, peer_id);
-	spa_list_append(&data->mix[direction], &mix->link);
+	spa_list_append(&data->mix[port->direction], &mix->link);
 
 	return mix;
-}
-
-static struct mix *ensure_mix(struct node_data *data,
-		enum spa_direction direction, uint32_t port_id,
-		uint32_t mix_id)
-{
-	struct mix *mix;
-	if ((mix = find_mix(data, direction, port_id, mix_id)))
-		return mix;
-	return create_mix(data, direction, port_id, mix_id, SPA_ID_INVALID);
 }
 
 static int client_node_transport(void *_data,
@@ -542,7 +525,7 @@ static int clear_buffers(struct node_data *data, struct mix *mix)
 
         pw_log_debug("port %p: clear %zd buffers mix:%d", port,
 			pw_array_get_len(&mix->buffers, struct buffer *),
-			mix->mix_id);
+			mix->mix.id);
 
 	if ((res = pw_impl_port_use_buffers(port, &mix->mix, 0, NULL, 0)) < 0) {
 		pw_log_error("port %p: error clear buffers %s", port, spa_strerror(res));
@@ -614,7 +597,7 @@ client_node_port_use_buffers(void *_data,
 	struct mix *mix;
 	int res, prot;
 
-	mix = ensure_mix(data, direction, port_id, mix_id);
+	mix = find_mix(data, direction, port_id, mix_id);
 	if (mix == NULL) {
 		res = -ENOENT;
 		goto error_exit;
@@ -744,8 +727,10 @@ client_node_port_use_buffers(void *_data,
 error_exit_cleanup:
 	clear_buffers(data, mix);
 error_exit:
-        pw_log_error("port %p: use_buffers: %d %s", mix, res, spa_strerror(res));
-	pw_proxy_errorf(proxy, res, "port_use_buffers error: %s", spa_strerror(res));
+	pw_log_error("port %p: use_buffers(%u:%u:%d): %d %s", mix,
+			direction, port_id, mix_id, res, spa_strerror(res));
+	pw_proxy_errorf(proxy, res, "port_use_buffers(%u:%u:%d) error: %s",
+			direction, port_id, mix_id, spa_strerror(res));
 	return res;
 }
 
@@ -767,7 +752,7 @@ client_node_port_set_io(void *_data,
 	int res = 0;
 	uint32_t tag[5] = { data->remote_id, direction, port_id, mix_id, id };
 
-	mix = ensure_mix(data, direction, port_id, mix_id);
+	mix = find_mix(data, direction, port_id, mix_id);
 	if (mix == NULL) {
 		res = -ENOENT;
 		goto exit;
@@ -874,18 +859,22 @@ client_node_set_activation(void *_data,
 		pw_loop_invoke(data->data_loop,
                        do_activate_link, SPA_ID_INVALID, NULL, 0, false, link);
 
-		pw_log_debug("node %p: link %p: fd:%d id:%u state %p required %d, pending %d",
-				node, link, signalfd,
-				link->target.activation->position.clock.id,
+		pw_log_debug("node %p: add link %p: memid:%u fd:%d id:%u state:%p pending:%d/%d",
+				node, link, memid, signalfd, node_id,
 				&link->target.activation->state[0],
-				link->target.activation->state[0].required,
-				link->target.activation->state[0].pending);
+				link->target.activation->state[0].pending,
+				link->target.activation->state[0].required);
 	} else {
 		link = find_activation(&data->links, node_id);
 		if (link == NULL) {
 			res = -ENOENT;
 			goto error_exit;
 		}
+		pw_log_debug("node %p: remove link %p: id:%u state:%p pending:%d/%d",
+				node, link, node_id,
+				&link->target.activation->state[0],
+				link->target.activation->state[0].pending,
+				link->target.activation->state[0].required);
 		clear_link(data, link);
 	}
 	return res;
@@ -898,7 +887,7 @@ error_exit:
 
 static void clear_mix(struct node_data *data, struct mix *mix)
 {
-	pw_log_debug("port %p: mix clear %d.%d", mix->port, mix->port->port_id, mix->mix_id);
+	pw_log_debug("port %p: mix clear %d.%d", mix->port, mix->port->port_id, mix->mix.id);
 
 	spa_node_port_set_io(mix->port->mix, mix->mix.port.direction,
 			mix->mix.port.port_id, SPA_IO_Buffers, NULL, 0);
@@ -909,7 +898,8 @@ static void clear_mix(struct node_data *data, struct mix *mix)
 	pw_array_clear(&mix->buffers);
 
 	spa_list_append(&data->free_mix, &mix->link);
-	pw_impl_port_release_mix(mix->port, &mix->mix);
+	if (mix->mix.id != SPA_ID_INVALID)
+		pw_impl_port_release_mix(mix->port, &mix->mix);
 }
 
 static int client_node_port_set_mix_info(void *_data,
@@ -928,9 +918,13 @@ static int client_node_port_set_mix_info(void *_data,
 			return -EINVAL;
 		clear_mix(data, mix);
 	} else {
+		struct pw_impl_port *port;
 		if (mix != NULL)
 			return -EEXIST;
-		mix = create_mix(data, direction, port_id, mix_id, peer_id);
+		port = pw_impl_node_find_port(data->node, direction, port_id);
+		if (port == NULL)
+			return -ENOENT;
+		mix = create_mix(data, port, mix_id, peer_id);
 		if (mix == NULL)
 			return -errno;
 	}
@@ -956,6 +950,7 @@ static const struct pw_client_node_events client_node_events = {
 static void do_node_init(struct node_data *data)
 {
 	struct pw_impl_port *port;
+	struct mix *mix;
 
 	pw_log_debug("%p: node %p init", data, data->node);
 	add_node_update(data, PW_CLIENT_NODE_UPDATE_PARAMS |
@@ -965,11 +960,17 @@ static void do_node_init(struct node_data *data)
 				SPA_NODE_CHANGE_MASK_PARAMS);
 
 	spa_list_for_each(port, &data->node->input_ports, link) {
+		mix = create_mix(data, port, SPA_ID_INVALID, SPA_ID_INVALID);
+		if (mix == NULL)
+			pw_log_error("%p: failed to create port mix: %m", data->node);
 		add_port_update(data, port,
 				PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 				PW_CLIENT_NODE_PORT_UPDATE_INFO);
 	}
 	spa_list_for_each(port, &data->node->output_ports, link) {
+		mix = create_mix(data, port, SPA_ID_INVALID, SPA_ID_INVALID);
+		if (mix == NULL)
+			pw_log_error("%p: failed to create port mix: %m", data->node);
 		add_port_update(data, port,
 				PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 				PW_CLIENT_NODE_PORT_UPDATE_INFO);
@@ -1051,6 +1052,21 @@ static void node_port_info_changed(void *data, struct pw_impl_port *port,
 	add_port_update(d, port, change_mask);
 }
 
+static void node_port_added(void *data, struct pw_impl_port *port)
+{
+	struct node_data *d = data;
+	struct mix *mix;
+
+	pw_log_debug("added %p", d);
+
+	if (d->client_node == NULL)
+		return;
+
+	mix = create_mix(d, port, SPA_ID_INVALID, SPA_ID_INVALID);
+	if (mix == NULL)
+		pw_log_error("%p: failed to create port mix: %m", d->node);
+}
+
 static void node_port_removed(void *data, struct pw_impl_port *port)
 {
 	struct node_data *d = data;
@@ -1099,6 +1115,7 @@ static const struct pw_impl_node_events node_events = {
 	.free = node_free,
 	.info_changed = node_info_changed,
 	.port_info_changed = node_port_info_changed,
+	.port_added = node_port_added,
 	.port_removed = node_port_removed,
 	.active_changed = node_active_changed,
 	.event = node_event,
@@ -1175,6 +1192,9 @@ static struct pw_proxy *node_export(struct pw_core *core, void *object, bool do_
 	struct pw_impl_node *node = object;
 	struct pw_proxy *client_node;
 	struct node_data *data;
+
+	if (node->data_loop == NULL)
+		goto error;
 
 	user_data_size = SPA_ROUND_UP_N(user_data_size, __alignof__(struct node_data));
 

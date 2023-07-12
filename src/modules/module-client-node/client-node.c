@@ -86,6 +86,7 @@ struct impl {
 	struct pw_impl_client_node this;
 
 	struct pw_context *context;
+	struct pw_mempool *context_pool;
 
 	struct spa_node node;
 
@@ -98,6 +99,7 @@ struct impl {
 
 	struct pw_resource *resource;
 	struct pw_impl_client *client;
+	struct pw_mempool *client_pool;
 
 	struct spa_source data_source;
 
@@ -217,14 +219,12 @@ static void mix_init(struct mix *mix, struct port *p, uint32_t mix_id)
 	mix->n_buffers = 0;
 }
 
-static struct mix *ensure_mix(struct impl *impl, struct port *p, uint32_t mix_id)
+static struct mix *create_mix(struct impl *impl, struct port *p, uint32_t mix_id)
 {
 	struct mix *mix;
 
-	if ((mix = find_mix(p, mix_id)) == NULL)
+	if ((mix = find_mix(p, mix_id)) == NULL || mix->valid)
 		return NULL;
-	if (mix->valid)
-		return mix;
 	mix_init(mix, p, mix_id);
 	return mix;
 }
@@ -238,7 +238,7 @@ static void clear_data(struct impl *impl, struct spa_data *d)
 		struct pw_memblock *m;
 
 		id = SPA_PTR_TO_UINT32(d->data);
-		m = pw_mempool_find_id(impl->client->pool, id);
+		m = pw_mempool_find_id(impl->client_pool, id);
 		if (m) {
 			pw_log_debug("%p: mem %d", impl, m->id);
 			pw_memblock_unref(m);
@@ -356,11 +356,11 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	if (impl->this.flags & 1)
 		return 0;
 
-	old = pw_mempool_find_tag(impl->client->pool, tag, sizeof(tag));
+	old = pw_mempool_find_tag(impl->client_pool, tag, sizeof(tag));
 
 	if (data) {
-		mm = pw_mempool_import_map(impl->client->pool,
-				impl->context->pool, data, size, tag);
+		mm = pw_mempool_import_map(impl->client_pool,
+				impl->context_pool, data, size, tag);
 		if (mm == NULL)
 			return -errno;
 
@@ -659,11 +659,11 @@ static int do_port_set_io(struct impl *impl,
 	if ((mix = find_mix(port, mix_id)) == NULL || !mix->valid)
 		return -EINVAL;
 
-	old = pw_mempool_find_tag(impl->client->pool, tag, sizeof(tag));
+	old = pw_mempool_find_tag(impl->client_pool, tag, sizeof(tag));
 
 	if (data) {
-		mm = pw_mempool_import_map(impl->client->pool,
-				impl->context->pool, data, size, tag);
+		mm = pw_mempool_import_map(impl->client_pool,
+				impl->context_pool, data, size, tag);
 		if (mm == NULL)
 			return -errno;
 
@@ -726,14 +726,11 @@ do_port_use_buffers(struct impl *impl,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, buffers, n_buffers, flags);
 
+	if (direction == SPA_DIRECTION_OUTPUT)
+		mix_id = SPA_ID_INVALID;
+
 	if ((mix = find_mix(p, mix_id)) == NULL || !mix->valid)
 		return -EINVAL;
-
-	if (direction == SPA_DIRECTION_OUTPUT) {
-		mix_id = SPA_ID_INVALID;
-		if ((mix = find_mix(p, mix_id)) == NULL || !mix->valid)
-			return -EINVAL;
-	}
 
 	clear_buffers(impl, mix);
 
@@ -766,7 +763,7 @@ do_port_use_buffers(struct impl *impl,
 		else
 			return -EINVAL;
 
-		if ((mem = pw_mempool_find_ptr(impl->context->pool, baseptr)) == NULL)
+		if ((mem = pw_mempool_find_ptr(impl->context_pool, baseptr)) == NULL)
 			return -EINVAL;
 
 		endptr = SPA_PTROFF(baseptr, buffers[i]->n_datas * sizeof(struct spa_chunk), void);
@@ -776,7 +773,7 @@ do_port_use_buffers(struct impl *impl,
 		for (j = 0; j < buffers[i]->n_datas; j++) {
 			struct spa_data *d = &buffers[i]->datas[j];
 			if (d->type == SPA_DATA_MemPtr) {
-				if ((m = pw_mempool_find_ptr(impl->context->pool, d->data)) == NULL ||
+				if ((m = pw_mempool_find_ptr(impl->context_pool, d->data)) == NULL ||
 				    m != mem)
 					return -EINVAL;
 				endptr = SPA_MAX(endptr, SPA_PTROFF(d->data, d->maxsize, void));
@@ -785,7 +782,7 @@ do_port_use_buffers(struct impl *impl,
 		if (endptr > SPA_PTROFF(baseptr, mem->size, void))
 			return -EINVAL;
 
-		m = pw_mempool_import_block(impl->client->pool, mem);
+		m = pw_mempool_import_block(impl->client_pool, mem);
 		if (m == NULL)
 			return -errno;
 
@@ -823,7 +820,7 @@ do_port_use_buffers(struct impl *impl,
 					flags |= PW_MEMBLOCK_FLAG_WRITABLE;
 
 				spa_log_debug(impl->log, "mem %d type:%d fd:%d", j, d->type, (int)d->fd);
-				m = pw_mempool_import(impl->client->pool,
+				m = pw_mempool_import(impl->client_pool,
 					flags, d->type, d->fd);
 				if (m == NULL)
 					return -errno;
@@ -1206,14 +1203,14 @@ static void node_peer_added(void *data, struct pw_impl_node *peer)
 	struct impl *impl = data;
 	struct pw_memblock *m;
 
-	m = pw_mempool_import_block(impl->client->pool, peer->activation);
+	m = pw_mempool_import_block(impl->client_pool, peer->activation);
 	if (m == NULL) {
 		pw_log_warn("%p: can't ensure mem: %m", impl);
 		return;
 	}
 
-	pw_log_debug("%p: peer %p/%p id:%u added mem_id:%u", impl, peer,
-			impl->this.node, peer->info.id, m->id);
+	pw_log_debug("%p: peer %p/%p id:%u added mem_id:%u %p %d", impl, peer,
+			impl->this.node, peer->info.id, m->id, m, m->ref);
 
 	if (impl->resource == NULL)
 		return;
@@ -1231,7 +1228,7 @@ static void node_peer_removed(void *data, struct pw_impl_node *peer)
 	struct impl *impl = data;
 	struct pw_memblock *m;
 
-	m = pw_mempool_find_fd(impl->client->pool, peer->activation->fd);
+	m = pw_mempool_find_fd(impl->client_pool, peer->activation->fd);
 	if (m == NULL) {
 		pw_log_warn("%p: unknown peer %p fd:%d", impl, peer,
 			peer->source.fd);
@@ -1261,7 +1258,7 @@ void pw_impl_client_node_registered(struct pw_impl_client_node *this, struct pw_
 
 	pw_log_debug("%p: %d", &impl->node, node_id);
 
-	impl->activation = pw_mempool_import_block(client->pool, node->activation);
+	impl->activation = pw_mempool_import_block(impl->client_pool, node->activation);
 	if (impl->activation == NULL) {
 		pw_log_debug("%p: can't import block: %m", &impl->node);
 		return;
@@ -1295,7 +1292,7 @@ static int add_area(struct impl *impl)
 
 	size = sizeof(struct spa_io_buffers) * AREA_SIZE;
 
-	area = pw_mempool_alloc(impl->context->pool,
+	area = pw_mempool_alloc(impl->context_pool,
 			PW_MEMBLOCK_FLAG_READWRITE |
 			PW_MEMBLOCK_FLAG_MAP |
 			PW_MEMBLOCK_FLAG_SEAL,
@@ -1348,11 +1345,8 @@ static void node_free(void *data)
 
 	spa_hook_remove(&impl->node_listener);
 
-	while ((mm = pw_mempool_find_tag(impl->client->pool, tag, sizeof(uint32_t))) != NULL)
+	while ((mm = pw_mempool_find_tag(impl->client_pool, tag, sizeof(uint32_t))) != NULL)
 		pw_memmap_free(mm);
-
-	if (impl->resource)
-		pw_resource_destroy(impl->resource);
 
 	if (impl->activation)
 		pw_memblock_free(impl->activation);
@@ -1362,6 +1356,9 @@ static void node_free(void *data)
 			pw_memblock_unref(*area);
 	}
 	pw_array_clear(&impl->io_areas);
+
+	if (impl->resource)
+		pw_resource_destroy(impl->resource);
 
 	pw_map_clear(&impl->ports[0]);
 	pw_map_clear(&impl->ports[1]);
@@ -1380,7 +1377,7 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 	uint32_t idx, pos, len;
 	struct pw_memblock *area;
 
-	if ((m = ensure_mix(impl, port, mix->port.port_id)) == NULL)
+	if ((m = create_mix(impl, port, mix->port.port_id)) == NULL)
 		return -ENOMEM;
 
 	mix->id = pw_map_insert_new(&impl->io_map, NULL);
@@ -1573,7 +1570,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
 			&impl_port_mix, p);
-	ensure_mix(impl, p, SPA_ID_INVALID);
+	create_mix(impl, p, SPA_ID_INVALID);
 
 	pw_map_insert_at(&impl->ports[p->direction], p->id, p);
 	return;
@@ -1675,6 +1672,7 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 	this = &impl->this;
 
 	impl->context = context;
+	impl->context_pool = pw_context_get_mempool(context);
 	impl->data_source.fd = -1;
 	pw_log_debug("%p: new", &impl->node);
 
@@ -1682,6 +1680,7 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 	impl_init(impl, NULL, support, n_support);
 	impl->resource = resource;
 	impl->client = client;
+	impl->client_pool = pw_impl_client_get_mempool(client);
 	this->flags = do_register ? 0 : 1;
 
 	pw_map_init(&impl->ports[0], 64, 64);
@@ -1699,6 +1698,11 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 
 	if (this->node == NULL)
 		goto error_no_node;
+
+	if (this->node->data_loop == NULL) {
+		errno = EIO;
+		goto error_no_node;
+	}
 
 	impl->data_loop = this->node->data_loop->loop;
 	impl->data_system = this->node->data_loop->system;

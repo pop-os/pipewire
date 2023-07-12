@@ -10,10 +10,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <spa/utils/result.h>
 #include <spa/utils/defs.h>
+#include <spa/utils/ratelimit.h>
 #include <spa/utils/ringbuffer.h>
-#include <pipewire/map.h>
-#include <pipewire/private.h>
+#include <pipewire/impl.h>
 
 #include "format.h"
 #include "server.h"
@@ -52,7 +53,7 @@ struct impl {
 	struct pw_properties *props;
 	void *dbus_name;
 
-	struct ratelimit rate_limit;
+	struct spa_ratelimit rate_limit;
 
 	struct spa_hook_list hooks;
 	struct spa_list servers;
