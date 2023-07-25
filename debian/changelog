@@ -1,3 +1,13 @@
+pipewire (0.3.75-0) UNRELEASED; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+
+  [ Evangelos Ribeiro Tzaras ]
+  * pipewire-doc: Register documentation with doc-base
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 25 Jul 2023 17:15:04 +0200
+
 pipewire (0.3.74-1) unstable; urgency=medium
 
   * New upstream release
