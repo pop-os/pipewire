@@ -35,6 +35,7 @@
 
 #include "config.h"
 #include "codec-loader.h"
+#include "dbus-helpers.h"
 #include "player.h"
 #include "iso-io.h"
 #include "defs.h"
@@ -225,12 +226,7 @@ static void battery_remove(struct spa_bt_device *device) {
 	DBusMessage *m;
 	const char *interface;
 
-	if (device->battery_pending_call) {
-		spa_log_debug(device->monitor->log, "Cancelling and freeing pending battery provider register call");
-		dbus_pending_call_cancel(device->battery_pending_call);
-		dbus_pending_call_unref(device->battery_pending_call);
-		device->battery_pending_call = NULL;
-	}
+	cancel_and_unref(&device->battery_pending_call);
 
 	if (!device->adapter || !device->adapter->has_battery_provider || !device->has_battery)
 		return;
@@ -355,10 +351,8 @@ static void on_battery_provider_registered(DBusPendingCall *pending_call,
 	DBusMessage *reply;
 	struct spa_bt_device *device = data;
 
-	reply = dbus_pending_call_steal_reply(pending_call);
-	dbus_pending_call_unref(pending_call);
-
-	device->battery_pending_call = NULL;
+	spa_assert(device->battery_pending_call == pending_call);
+	reply = steal_reply_and_unref(&device->battery_pending_call);
 
 	if (dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR) {
 		spa_log_error(device->monitor->log, "Failed to register battery provider. Error: %s", dbus_message_get_error_name(reply));
@@ -422,9 +416,7 @@ static void register_battery_provider(struct spa_bt_device *device)
 		    device->battery_pending_call, on_battery_provider_registered,
 		    device, NULL)) {
 		spa_log_error(device->monitor->log, "Failed to register battery provider");
-		dbus_pending_call_cancel(device->battery_pending_call);
-		dbus_pending_call_unref(device->battery_pending_call);
-		device->battery_pending_call = NULL;
+		cancel_and_unref(&device->battery_pending_call);
 	}
 }
 
@@ -2340,7 +2332,7 @@ const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_b
 		if (j >= size) {
 			const struct media_codec **p;
 			size = size * 2;
-#ifdef HAVE_REALLOCARRRAY
+#ifdef HAVE_REALLOCARRAY
 			p = reallocarray(supported_codecs, size, sizeof(const struct media_codec *));
 #else
 			p = realloc(supported_codecs, size * sizeof(const struct media_codec *));
@@ -2634,17 +2626,8 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 
 	spa_bt_transport_destroy(transport);
 
-	if (transport->acquire_call) {
-		dbus_pending_call_cancel(transport->acquire_call);
-		dbus_pending_call_unref(transport->acquire_call);
-		transport->acquire_call = NULL;
-	}
-
-	if (transport->volume_call) {
-		dbus_pending_call_cancel(transport->volume_call);
-		dbus_pending_call_unref(transport->volume_call);
-		transport->volume_call = NULL;
-	}
+	cancel_and_unref(&transport->acquire_call);
+	cancel_and_unref(&transport->volume_call);
 
 	if (transport->fd >= 0) {
 		spa_bt_player_set_state(transport->device->adapter->dummy_player, SPA_BT_PLAYER_STOPPED);
@@ -2669,6 +2652,7 @@ void spa_bt_transport_free(struct spa_bt_transport *transport)
 
 	spa_list_remove(&transport->bap_transport_linked);
 
+	free(transport->configuration);
 	free(transport->endpoint_path);
 	free(transport->path);
 	free(transport);
@@ -3242,11 +3226,8 @@ static void transport_set_property_volume_reply(DBusPendingCall *pending, void *
 	DBusError err = DBUS_ERROR_INIT;
 	DBusMessage *r;
 
-	r = dbus_pending_call_steal_reply(pending);
-
 	spa_assert(transport->volume_call == pending);
-	dbus_pending_call_unref(pending);
-	transport->volume_call = NULL;
+	r = steal_reply_and_unref(&transport->volume_call);
 
 	if (dbus_set_error_from_message(&err, r)) {
 		spa_log_info(monitor->log, "transport %p: set volume failed for transport %s: %s",
@@ -3270,11 +3251,7 @@ static void transport_set_property_volume(struct spa_bt_transport *transport, ui
 	int res = 0;
 	dbus_bool_t ret;
 
-	if (transport->volume_call) {
-		dbus_pending_call_cancel(transport->volume_call);
-		dbus_pending_call_unref(transport->volume_call);
-		transport->volume_call = NULL;
-	}
+	cancel_and_unref(&transport->volume_call);
 
 	m = dbus_message_new_method_call(BLUEZ_SERVICE,
 					 transport->path,
@@ -3400,11 +3377,8 @@ static void transport_acquire_reply(DBusPendingCall *pending, void *user_data)
 	DBusMessage *r;
 	struct spa_bt_transport *t, *t_linked;
 
-	r = dbus_pending_call_steal_reply(pending);
-
 	spa_assert(transport->acquire_call == pending);
-	dbus_pending_call_unref(pending);
-	transport->acquire_call = NULL;
+	r = steal_reply_and_unref(&transport->acquire_call);
 
 	spa_bt_device_update_last_bluez_action_time(device);
 
@@ -3613,11 +3587,7 @@ static int do_transport_release(struct spa_bt_transport *transport)
 
 	spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_IDLE);
 
-	if (transport->acquire_call) {
-		dbus_pending_call_cancel(transport->acquire_call);
-		dbus_pending_call_unref(transport->acquire_call);
-		transport->acquire_call = NULL;
-	}
+	cancel_and_unref(&transport->acquire_call);
 
 	if (transport->iso_io) {
 		spa_log_debug(monitor->log, "transport %p: remove ISO IO", transport);
@@ -3742,10 +3712,7 @@ static void media_codec_switch_free(struct spa_bt_media_codec_switch *sw)
 
 	media_codec_switch_stop_timer(sw);
 
-	if (sw->pending != NULL) {
-		dbus_pending_call_cancel(sw->pending);
-		dbus_pending_call_unref(sw->pending);
-	}
+	cancel_and_unref(&sw->pending);
 
 	if (sw->device != NULL)
 		spa_list_remove(&sw->device_link);
@@ -3992,11 +3959,8 @@ static void media_codec_switch_reply(DBusPendingCall *pending, void *user_data)
 	struct spa_bt_device *device = sw->device;
 	DBusMessage *r;
 
-	r = dbus_pending_call_steal_reply(pending);
-
 	spa_assert(sw->pending == pending);
-	dbus_pending_call_unref(pending);
-	sw->pending = NULL;
+	r = steal_reply_and_unref(&sw->pending);
 
 	spa_bt_device_update_last_bluez_action_time(device);
 
@@ -4475,9 +4439,7 @@ static void bluez_register_endpoint_legacy_reply(DBusPendingCall *pending, void 
 	struct spa_bt_monitor *monitor = adapter->monitor;
 	DBusMessage *r;
 
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
-
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -4776,9 +4738,7 @@ static void bluez_register_application_a2dp_reply(DBusPendingCall *pending, void
 	DBusMessage *r;
 	bool fallback = true;
 
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
-
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -4809,9 +4769,7 @@ static void bluez_register_application_bap_reply(DBusPendingCall *pending, void 
 	struct spa_bt_monitor *monitor = adapter->monitor;
 	DBusMessage *r;
 
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
-
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -5225,12 +5183,8 @@ static void get_managed_objects_reply(DBusPendingCall *pending, void *user_data)
 	DBusMessage *r;
 	DBusMessageIter it[6];
 
-	spa_assert(pending == monitor->get_managed_objects_call);
-	monitor->get_managed_objects_call = NULL;
-
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
-
+	spa_assert(monitor->get_managed_objects_call == pending);
+	r = steal_reply_and_unref(&monitor->get_managed_objects_call);
 	if (r == NULL)
 		return;
 
@@ -5625,10 +5579,7 @@ static int impl_clear(struct spa_handle *handle)
 		monitor->filters_added = false;
 	}
 
-	if (monitor->get_managed_objects_call) {
-		dbus_pending_call_cancel(monitor->get_managed_objects_call);
-		dbus_pending_call_unref(monitor->get_managed_objects_call);
-	}
+	cancel_and_unref(&monitor->get_managed_objects_call);
 
 	spa_list_consume(t, &monitor->transport_list, link)
 		spa_bt_transport_free(t);

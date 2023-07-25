@@ -7,6 +7,7 @@
 
 #include <ModemManager.h>
 
+#include "dbus-helpers.h"
 #include "modemmanager.h"
 
 #define DBUS_INTERFACE_OBJECTMANAGER "org.freedesktop.DBus.ObjectManager"
@@ -56,8 +57,7 @@ static bool mm_dbus_connection_send_with_reply(struct impl *this, DBusMessage *m
 	ret = dbus_pending_call_set_notify(pending_call, function, user_data, NULL);
 	if (!ret) {
 		spa_log_debug(this->log, "dbus set notify failure");
-		dbus_pending_call_cancel(pending_call);
-		dbus_pending_call_unref(pending_call);
+		cancel_and_unref(&pending_call);
 		goto out;
 	}
 
@@ -125,10 +125,7 @@ static void mm_get_call_properties_reply(DBusPendingCall *pending, void *user_da
 	MMCallState state;
 
 	spa_assert(call->pending == pending);
-	call->pending = NULL;
-
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
+	r = steal_reply_and_unref(&call->pending);
 	if (r == NULL)
 		return;
 
@@ -424,10 +421,7 @@ static void mm_get_managed_objects_reply(DBusPendingCall *pending, void *user_da
 	DBusMessageIter i, array_i;
 
 	spa_assert(this->pending == pending);
-	this->pending = NULL;
-
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
+	r = steal_reply_and_unref(&this->pending);
 	if (r == NULL)
 		return;
 
@@ -455,13 +449,11 @@ finish:
 	dbus_message_unref(r);
 }
 
-static void call_free(struct call *call) {
+static void call_free(struct call *call)
+{
 	spa_list_remove(&call->link);
 
-	if (call->pending != NULL) {
-		dbus_pending_call_cancel(call->pending);
-		dbus_pending_call_unref(call->pending);
-	}
+	cancel_and_unref(&call->pending);
 
 	if (call->number)
 		free(call->number);
@@ -477,10 +469,7 @@ static void mm_clean_voice(struct impl *this)
 	spa_list_consume(call, &this->call_list, link)
 		call_free(call);
 
-	if (this->voice_pending != NULL) {
-		dbus_pending_call_cancel(this->voice_pending);
-		dbus_pending_call_unref(this->voice_pending);
-	}
+	cancel_and_unref(&this->voice_pending);
 
 	if (this->ops->set_call_setup)
 		this->ops->set_call_setup(CIND_CALLSETUP_NONE, this->user_data);
@@ -787,10 +776,7 @@ static void mm_get_call_simple_reply(DBusPendingCall *pending, void *data)
 	free(data);
 
 	spa_assert(call->pending == pending);
-	call->pending = NULL;
-
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
+	r = steal_reply_and_unref(&call->pending);
 	if (r == NULL)
 		return;
 
@@ -820,10 +806,7 @@ static void mm_get_call_create_reply(DBusPendingCall *pending, void *data)
 	free(data);
 
 	spa_assert(this->voice_pending == pending);
-	this->voice_pending = NULL;
-
-	r = dbus_pending_call_steal_reply(pending);
-	dbus_pending_call_unref(pending);
+	r = steal_reply_and_unref(&this->voice_pending);
 	if (r == NULL)
 		return;
 
@@ -1158,10 +1141,7 @@ void mm_unregister(void *data)
 {
 	struct impl *this = data;
 
-	if (this->pending != NULL) {
-		dbus_pending_call_cancel(this->pending);
-		dbus_pending_call_unref(this->pending);
-	}
+	cancel_and_unref(&this->pending);
 
 	mm_clean_voice(this);
 	mm_clean_modem3gpp(this);

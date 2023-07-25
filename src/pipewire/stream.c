@@ -17,7 +17,6 @@
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
-#include <spa/debug/dict.h>
 
 #define PW_ENABLE_DEPRECATED
 
@@ -84,7 +83,6 @@ struct stream {
 	const char *path;
 
 	struct pw_context *context;
-	struct spa_hook context_listener;
 
 	struct pw_loop *main_loop;
 	struct pw_loop *data_loop;
@@ -436,7 +434,7 @@ static inline uint32_t update_requested(struct stream *impl)
 		buffer->this.requested = impl->quantum;
 		res = 1;
 	}
-	pw_log_trace_fp("%p: update buffer:%u size:%"PRIu64, impl, id, buffer->this.requested);
+	pw_log_trace_fp("%p: update buffer:%u req:%"PRIu64, impl, id, buffer->this.requested);
 	return res;
 }
 
@@ -480,6 +478,7 @@ do_call_drained(struct spa_loop *loop,
 
 static void call_drained(struct stream *impl)
 {
+	pw_log_info("%p: drained", impl);
 	pw_loop_invoke(impl->main_loop,
 		do_call_drained, 1, NULL, 0, false, impl);
 }
@@ -621,7 +620,7 @@ static inline void copy_position(struct stream *impl, int64_t queued)
 {
 	struct spa_io_position *p = impl->rt.position;
 
-	SEQ_WRITE(impl->seq);
+	SPA_SEQ_WRITE(impl->seq);
 	if (SPA_LIKELY(p != NULL)) {
 		impl->time.now = p->clock.nsec;
 		impl->time.rate = p->clock.rate;
@@ -636,7 +635,7 @@ static inline void copy_position(struct stream *impl, int64_t queued)
 	}
 	if (SPA_LIKELY(impl->rate_match != NULL))
 		impl->rate_queued = impl->rate_match->delay;
-	SEQ_WRITE(impl->seq);
+	SPA_SEQ_WRITE(impl->seq);
 }
 
 static int impl_send_command(void *object, const struct spa_command *command)
@@ -859,7 +858,7 @@ static void clear_buffers(struct pw_stream *stream)
 
 		while ((b = queue_pop(impl, &impl->dequeued))) {
 			if (b->busy)
-				ATOMIC_DEC(b->busy->count);
+				SPA_ATOMIC_DEC(b->busy->count);
 		}
 	} else
 		clear_queue(impl, &impl->dequeued);
@@ -1039,7 +1038,7 @@ static int impl_node_process_input(void *object)
 		pw_log_trace_fp("%p: push %d %p", stream, b->id, io);
 		if (queue_push(impl, &impl->dequeued, b) == 0) {
 			if (b->busy)
-				ATOMIC_INC(b->busy->count);
+				SPA_ATOMIC_INC(b->busy->count);
 		}
 	}
 	if (!queue_is_empty(impl, &impl->dequeued)) {
@@ -1389,6 +1388,7 @@ static void node_event_destroy(void *data)
 	struct pw_stream *stream = data;
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	spa_hook_remove(&stream->node_listener);
+	pw_impl_node_remove_rt_listener(stream->node, &stream->node_rt_listener);
 	stream->node = NULL;
 	impl->data_loop = NULL;
 }
@@ -1440,11 +1440,9 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
-static void context_drained(void *data, struct pw_impl_node *node)
+static void node_drained(void *data)
 {
 	struct stream *impl = data;
-	if (impl->this.node != node)
-		return;
 	if (impl->draining && impl->drained) {
 		impl->draining = false;
 		if (impl->io != NULL)
@@ -1453,9 +1451,9 @@ static void context_drained(void *data, struct pw_impl_node *node)
 	}
 }
 
-static const struct pw_context_driver_events context_events = {
-	PW_VERSION_CONTEXT_DRIVER_EVENTS,
-	.drained = context_drained,
+static const struct pw_impl_node_rt_events node_rt_events = {
+	PW_VERSION_IMPL_NODE_RT_EVENTS,
+	.drained = node_drained,
 };
 
 struct match {
@@ -1481,7 +1479,6 @@ stream_new(struct pw_context *context, const char *name,
 	struct stream *impl;
 	struct pw_stream *this;
 	const char *str;
-	struct match match;
 	int res;
 
 	ensure_loop(context->main_loop, return NULL);
@@ -1513,28 +1510,6 @@ stream_new(struct pw_context *context, const char *name,
 	spa_hook_list_init(&impl->hooks);
 	this->properties = props;
 
-	pw_context_conf_update_props(context, "stream.properties", props);
-
-	match = MATCH_INIT(this);
-	pw_context_conf_section_match_rules(context, "stream.rules",
-			&this->properties->dict, execute_match, &match);
-
-	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
-		pw_properties_update_string(props, str, strlen(str));
-	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
-		struct spa_fraction q;
-		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
-			pw_properties_setf(props, PW_KEY_NODE_RATE,
-					"1/%u", q.denom);
-			pw_properties_setf(props, PW_KEY_NODE_LATENCY,
-					"%u/%u", q.num, q.denom);
-		}
-	}
-	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
-	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
-		pw_properties_set(props, PW_KEY_NODE_RATE, str);
-
 	if (pw_properties_get(props, PW_KEY_STREAM_IS_LIVE) == NULL)
 		pw_properties_set(props, PW_KEY_STREAM_IS_LIVE, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
@@ -1545,6 +1520,10 @@ stream_new(struct pw_context *context, const char *name,
 			str = name;
 		pw_properties_set(props, PW_KEY_NODE_NAME, str);
 	}
+	if ((pw_properties_get(props, PW_KEY_NODE_WANT_DRIVER) == NULL))
+		pw_properties_set(props, PW_KEY_NODE_WANT_DRIVER, "true");
+
+	pw_context_conf_update_props(context, "stream.properties", props);
 
 	this->name = name ? strdup(name) : NULL;
 	this->node_id = SPA_ID_INVALID;
@@ -1562,9 +1541,6 @@ stream_new(struct pw_context *context, const char *name,
 	impl->allow_mlock = context->settings.mem_allow_mlock;
 	impl->warn_mlock = context->settings.mem_warn_mlock;
 
-	pw_context_driver_add_listener(impl->context,
-			&impl->context_listener,
-			&context_events, impl);
 	return impl;
 
 error_properties:
@@ -1729,9 +1705,6 @@ void pw_stream_destroy(struct pw_stream *stream)
 
 	spa_hook_list_clean(&impl->hooks);
 	spa_hook_list_clean(&stream->listener_list);
-
-	pw_context_driver_remove_listener(impl->context,
-			&impl->context_listener);
 
 	if (impl->data.context)
 		pw_context_destroy(impl->data.context);
@@ -1914,6 +1887,7 @@ pw_stream_connect(struct pw_stream *stream,
 	struct pw_impl_factory *factory;
 	struct pw_properties *props = NULL;
 	const char *str;
+	struct match match;
 	uint32_t i;
 	int res;
 
@@ -2007,24 +1981,13 @@ pw_stream_connect(struct pw_stream *stream,
 	impl->using_trigger = false;
 	stream_set_state(stream, PW_STREAM_STATE_CONNECTING, 0, NULL);
 
-	if ((str = getenv("PIPEWIRE_NODE")) != NULL)
-		pw_properties_set(stream->properties, PW_KEY_TARGET_OBJECT, str);
-	else if (target_id != PW_ID_ANY)
+	if (target_id != PW_ID_ANY)
 		/* XXX this is deprecated but still used by the portal and its apps */
 		pw_properties_setf(stream->properties, PW_KEY_NODE_TARGET, "%d", target_id);
-
-	if ((str = getenv("PIPEWIRE_AUTOCONNECT")) != NULL)
-		pw_properties_set(stream->properties,
-				PW_KEY_NODE_AUTOCONNECT, spa_atob(str) ? "true" : "false");
-	else if ((flags & PW_STREAM_FLAG_AUTOCONNECT) &&
-	    pw_properties_get(stream->properties, PW_KEY_NODE_AUTOCONNECT) == NULL) {
+	if (flags & PW_STREAM_FLAG_AUTOCONNECT)
 		pw_properties_set(stream->properties, PW_KEY_NODE_AUTOCONNECT, "true");
-	}
 	if (flags & PW_STREAM_FLAG_DRIVER)
 		pw_properties_set(stream->properties, PW_KEY_NODE_DRIVER, "true");
-	if ((pw_properties_get(stream->properties, PW_KEY_NODE_WANT_DRIVER) == NULL))
-		pw_properties_set(stream->properties, PW_KEY_NODE_WANT_DRIVER, "true");
-
 	if (flags & PW_STREAM_FLAG_EXCLUSIVE)
 		pw_properties_set(stream->properties, PW_KEY_NODE_EXCLUSIVE, "true");
 	if (flags & PW_STREAM_FLAG_DONT_RECONNECT)
@@ -2033,22 +1996,48 @@ pw_stream_connect(struct pw_stream *stream,
 		pw_properties_set(stream->properties, PW_KEY_NODE_TRIGGER, "true");
 		impl->trigger = true;
 	}
-
-	if ((str = pw_properties_get(stream->properties, "mem.warn-mlock")) != NULL)
-		impl->warn_mlock = pw_properties_parse_bool(str);
-
 	if ((pw_properties_get(stream->properties, PW_KEY_MEDIA_CLASS) == NULL)) {
 		const char *media_type = pw_properties_get(stream->properties, PW_KEY_MEDIA_TYPE);
 		pw_properties_setf(stream->properties, PW_KEY_MEDIA_CLASS, "Stream/%s/%s",
 				direction == PW_DIRECTION_INPUT ? "Input" : "Output",
 				media_type ? media_type : get_media_class(impl));
 	}
-
 	if ((str = pw_properties_get(stream->properties, PW_KEY_FORMAT_DSP)) != NULL)
 		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, str);
 	else if (impl->media_type == SPA_MEDIA_TYPE_application &&
 	    impl->media_subtype == SPA_MEDIA_SUBTYPE_control)
 		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, "8 bit raw midi");
+
+	match = MATCH_INIT(stream);
+	pw_context_conf_section_match_rules(impl->context, "stream.rules",
+			&stream->properties->dict, execute_match, &match);
+
+	if ((str = getenv("PIPEWIRE_NODE")) != NULL)
+		pw_properties_set(stream->properties, PW_KEY_TARGET_OBJECT, str);
+	if ((str = getenv("PIPEWIRE_AUTOCONNECT")) != NULL)
+		pw_properties_set(stream->properties,
+				PW_KEY_NODE_AUTOCONNECT, spa_atob(str) ? "true" : "false");
+
+	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		pw_properties_update_string(stream->properties, str, strlen(str));
+	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
+		struct spa_fraction q;
+		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
+			pw_properties_setf(stream->properties, PW_KEY_NODE_RATE,
+					"1/%u", q.denom);
+			pw_properties_setf(stream->properties, PW_KEY_NODE_LATENCY,
+					"%u/%u", q.num, q.denom);
+		}
+	}
+	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(stream->properties, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(stream->properties, PW_KEY_NODE_RATE, str);
+
+	if ((str = pw_properties_get(stream->properties, "mem.warn-mlock")) != NULL)
+		impl->warn_mlock = pw_properties_parse_bool(str);
+	if ((str = pw_properties_get(stream->properties, "mem.allow-mlock")) != NULL)
+		impl->allow_mlock = pw_properties_parse_bool(str);
 
 	impl->port_info.props = &impl->port_props->dict;
 
@@ -2125,6 +2114,8 @@ pw_stream_connect(struct pw_stream *stream,
 	pw_proxy_add_listener(stream->proxy, &stream->proxy_listener, &proxy_events, stream);
 
 	pw_impl_node_add_listener(stream->node, &stream->node_listener, &node_events, stream);
+	pw_impl_node_add_rt_listener(stream->node, &stream->node_rt_listener,
+			&node_rt_events, stream);
 
 	return 0;
 
@@ -2340,12 +2331,12 @@ int pw_stream_get_time_n(struct pw_stream *stream, struct pw_time *time, size_t 
 	uint32_t buffered, quantum, index;
 
 	do {
-		seq1 = SEQ_READ(impl->seq);
+		seq1 = SPA_SEQ_READ(impl->seq);
 		memcpy(time, &impl->time, SPA_MIN(size, sizeof(struct pw_time)));
 		buffered = impl->rate_queued;
 		quantum = impl->quantum;
-		seq2 = SEQ_READ(impl->seq);
-	} while (!SEQ_READ_SUCCESS(seq1, seq2));
+		seq2 = SPA_SEQ_READ(impl->seq);
+	} while (!SPA_SEQ_READ_SUCCESS(seq1, seq2));
 
 	if (impl->direction == SPA_DIRECTION_INPUT)
 		time->queued = (int64_t)(time->queued - impl->dequeued.outcount);
@@ -2394,11 +2385,12 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream)
 		errno = -res;
 		return NULL;
 	}
-	pw_log_trace_fp("%p: dequeue buffer %d size:%"PRIu64, stream, b->id, b->this.size);
+	pw_log_trace_fp("%p: dequeue buffer %d size:%"PRIu64" req:%"PRIu64,
+			stream, b->id, b->this.size, b->this.requested);
 
 	if (b->busy && impl->direction == SPA_DIRECTION_OUTPUT) {
-		if (ATOMIC_INC(b->busy->count) > 1) {
-			ATOMIC_DEC(b->busy->count);
+		if (SPA_ATOMIC_INC(b->busy->count) > 1) {
+			SPA_ATOMIC_DEC(b->busy->count);
 			queue_push(impl, &impl->dequeued, b);
 			pw_log_trace_fp("%p: buffer busy", stream);
 			errno = EBUSY;
@@ -2416,9 +2408,10 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 	int res;
 
 	if (b->busy)
-		ATOMIC_DEC(b->busy->count);
+		SPA_ATOMIC_DEC(b->busy->count);
 
-	pw_log_trace_fp("%p: queue buffer %d", stream, b->id);
+	pw_log_trace_fp("%p: queue buffer %d size:%"PRIu64, stream, b->id,
+			b->this.size);
 	if ((res = queue_push(impl, &impl->queued, b)) < 0)
 		return res;
 

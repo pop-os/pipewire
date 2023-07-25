@@ -18,6 +18,7 @@
 #include <spa/param/audio/raw.h>
 
 #include "defs.h"
+#include "dbus-helpers.h"
 
 static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.hsphfpd");
 #undef SPA_LOG_TOPIC_DEFAULT
@@ -764,7 +765,6 @@ static void append_audio_agent_object(DBusMessageIter *iter, const char *endpoin
 {
 	const char *interface_name = HSPHFPD_AUDIO_AGENT_INTERFACE;
 	DBusMessageIter object, array, entry, dict, codec, data;
-	char *str = "AgentCodec";
 
 	dbus_message_iter_open_container(iter, DBUS_TYPE_DICT_ENTRY, NULL, &object);
 	dbus_message_iter_append_basic(&object, DBUS_TYPE_OBJECT_PATH, &endpoint);
@@ -777,7 +777,7 @@ static void append_audio_agent_object(DBusMessageIter *iter, const char *endpoin
 	dbus_message_iter_open_container(&entry, DBUS_TYPE_ARRAY, "{sv}", &dict);
 
 	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &codec);
-	dbus_message_iter_append_basic(&codec, DBUS_TYPE_STRING, &str);
+	dbus_message_iter_append_basic(&codec, DBUS_TYPE_STRING, &(const char *) { "AgentCodec" });
 	dbus_message_iter_open_container(&codec, DBUS_TYPE_VARIANT, "s", &data);
 	dbus_message_iter_append_basic(&data, DBUS_TYPE_STRING, &agent_codec);
 	dbus_message_iter_close_container(&codec, &data);
@@ -847,7 +847,7 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 
 	backend->acquire_in_progress = false;
 
-	r = dbus_pending_call_steal_reply(pending);
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -890,7 +890,6 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 
 finish:
 	dbus_message_unref(r);
-	dbus_pending_call_unref(pending);
 
 	if (ret < 0)
 		spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ERROR);
@@ -906,7 +905,6 @@ static int hsphfpd_audio_acquire(void *data, bool optional)
 	const char *air_codec = HSPHFP_AIR_CODEC_CVSD;
 	const char *agent_codec = HSPHFP_AGENT_CODEC_PCM;
 	DBusPendingCall *call;
-	DBusError err;
 
 	spa_log_debug(backend->log, "transport %p: Acquire %s",
 			transport, transport->path);
@@ -926,8 +924,6 @@ static int hsphfpd_audio_acquire(void *data, bool optional)
 	if (m == NULL)
 		return -ENOMEM;
 	dbus_message_append_args(m, DBUS_TYPE_STRING, &air_codec, DBUS_TYPE_STRING, &agent_codec, DBUS_TYPE_INVALID);
-
-	dbus_error_init(&err);
 
 	dbus_connection_send_with_reply(backend->conn, m, &call, -1);
 	dbus_pending_call_set_notify(call, hsphfpd_audio_acquire_reply, transport, NULL);
@@ -1183,7 +1179,7 @@ static void hsphfpd_get_endpoints_reply(DBusPendingCall *pending, void *user_dat
 	DBusMessage *r;
 	DBusMessageIter i, array_i;
 
-	r = dbus_pending_call_steal_reply(pending);
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -1216,7 +1212,6 @@ static void hsphfpd_get_endpoints_reply(DBusPendingCall *pending, void *user_dat
 
 finish:
 	dbus_message_unref(r);
-	dbus_pending_call_unref(pending);
 }
 
 static int backend_hsphfpd_register(void *data)
@@ -1303,9 +1298,6 @@ static DBusHandlerResult hsphfpd_filter_cb(DBusConnection *bus, DBusMessage *m, 
 {
 	const char *sender;
 	struct impl *backend = user_data;
-	DBusError err;
-
-	dbus_error_init(&err);
 
 	sender = dbus_message_get_sender(m);
 

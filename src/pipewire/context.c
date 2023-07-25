@@ -17,6 +17,7 @@
 #include <spa/support/plugin.h>
 #include <spa/support/plugin-loader.h>
 #include <spa/node/utils.h>
+#include <spa/utils/atomic.h>
 #include <spa/utils/names.h>
 #include <spa/utils/string.h>
 #include <spa/debug/types.h>
@@ -476,61 +477,6 @@ void pw_context_add_listener(struct pw_context *context,
 			  void *data)
 {
 	spa_hook_list_append(&context->listener_list, listener, events, data);
-}
-
-struct listener_data {
-	struct spa_hook *listener;
-	const struct pw_context_driver_events *events;
-	void *data;
-};
-
-static int
-do_add_listener(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct pw_context *context = user_data;
-	const struct listener_data *d = data;
-	spa_hook_list_append(&context->driver_listener_list,
-			d->listener, d->events, d->data);
-	return 0;
-}
-
-SPA_EXPORT
-void pw_context_driver_add_listener(struct pw_context *context,
-			  struct spa_hook *listener,
-			  const struct pw_context_driver_events *events,
-			  void *data)
-{
-	struct listener_data d = {
-		.listener = listener,
-		.events = events,
-		.data = data };
-	struct pw_impl_node *n;
-	spa_list_for_each(n, &context->driver_list, driver_link) {
-		SPA_FLAG_SET(n->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_PROFILER);
-	}
-	pw_loop_invoke(context->data_loop,
-                       do_add_listener, SPA_ID_INVALID, &d, sizeof(d), false, context);
-}
-
-static int do_remove_listener(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct spa_hook *listener = user_data;
-	spa_hook_remove(listener);
-	return 0;
-}
-
-SPA_EXPORT
-void pw_context_driver_remove_listener(struct pw_context *context,
-			  struct spa_hook *listener)
-{
-	struct pw_impl_node *n;
-	spa_list_for_each(n, &context->driver_list, driver_link) {
-		SPA_FLAG_CLEAR(n->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_PROFILER);
-	}
-	pw_loop_invoke(context->data_loop,
-                       do_remove_listener, SPA_ID_INVALID, NULL, 0, true, listener);
 }
 
 SPA_EXPORT
@@ -1534,10 +1480,10 @@ again:
 			pw_log_debug("%p: apply duration:%"PRIu64" rate:%u/%u", context,
 					n->target_quantum, n->target_rate.num,
 					n->target_rate.denom);
-			SEQ_WRITE(n->rt.position->clock.target_seq);
+			SPA_SEQ_WRITE(n->rt.position->clock.target_seq);
 			n->rt.position->clock.target_duration = n->target_quantum;
 			n->rt.position->clock.target_rate = n->target_rate;
-			SEQ_WRITE(n->rt.position->clock.target_seq);
+			SPA_SEQ_WRITE(n->rt.position->clock.target_seq);
 
 			if (n->info.state < PW_NODE_STATE_RUNNING) {
 				n->rt.position->clock.duration = n->target_quantum;

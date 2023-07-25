@@ -124,7 +124,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define FRAMES_PER_UDP_PACKET 352
 
 #define RAOP_LATENCY_MIN	11025u
-#define DEFAULT_LATENCY_MS	"1000"
+#define DEFAULT_LATENCY_MS	"1500"
 
 #define DEFAULT_TCP_AUDIO_PORT   6000
 #define DEFAULT_UDP_AUDIO_PORT   6000
@@ -318,7 +318,7 @@ static int send_udp_sync_packet(struct impl *impl,
 		pkt[0] |= htonl(0x10000000);
 	pkt[1] = htonl(rtptime - latency);
 	transmitted = ntp_now();
-	pkt[2] = htonl((transmitted >> 32) & 0x0000ffff);
+	pkt[2] = htonl(transmitted >> 32);
 	pkt[3] = htonl(transmitted & 0xffffffff);
 	pkt[4] = htonl(rtptime);
 
@@ -827,7 +827,7 @@ error:
 
 static int rtsp_send(struct impl *impl, const char *method,
 		const char *content_type, const char *content,
-		int (*reply) (void *data, int status, const struct spa_dict *headers))
+		int (*reply) (void *data, int status, const struct spa_dict *headers, const struct pw_array *content))
 {
 	int res;
 
@@ -838,9 +838,9 @@ static int rtsp_send(struct impl *impl, const char *method,
 	return res;
 }
 
-static int rtsp_flush_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_log_reply_status(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
-	pw_log_info("reply %d", status);
+	pw_log_info("reply status: %d", status);
 	return 0;
 }
 
@@ -857,7 +857,7 @@ static int rtsp_do_flush(struct impl *impl)
 
 	impl->recording = false;
 
-	res = rtsp_send(impl, "FLUSH", NULL, NULL, rtsp_flush_reply);
+	res = rtsp_send(impl, "FLUSH", NULL, NULL, rtsp_log_reply_status);
 
 	pw_properties_set(impl->headers, "Range", NULL);
 	pw_properties_set(impl->headers, "RTP-Info", NULL);
@@ -873,10 +873,10 @@ static int rtsp_send_volume(struct impl *impl)
 	char header[128], volstr[64];
 	snprintf(header, sizeof(header), "volume: %s\r\n",
 			spa_dtoa(volstr, sizeof(volstr), impl->volume));
-	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, NULL);
+	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, rtsp_log_reply_status);
 }
 
-static int rtsp_record_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_record_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	const char *str;
@@ -887,7 +887,7 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	struct spa_latency_info latency;
 	char progress[128];
 
-	pw_log_info("reply %d", status);
+	pw_log_info("record status: %d", status);
 
 	if ((str = spa_dict_lookup(headers, "Audio-Latency")) != NULL) {
 		uint32_t l;
@@ -913,7 +913,7 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	rtsp_send_volume(impl);
 
 	snprintf(progress, sizeof(progress), "progress: %s/%s/%s\r\n", "0", "0", "0");
-	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", progress, NULL);
+	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", progress, rtsp_log_reply_status);
 }
 
 static int rtsp_do_record(struct impl *impl)
@@ -966,7 +966,7 @@ error:
 	pw_loop_update_io(impl->loop, impl->server_source, 0);
 }
 
-static int rtsp_setup_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_setup_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	const char *str, *state = NULL, *s;
@@ -975,7 +975,7 @@ static int rtsp_setup_reply(void *data, int status, const struct spa_dict *heade
 	uint16_t control_port, timing_port;
 	int res;
 
-	pw_log_info("reply %d", status);
+	pw_log_info("setup status: %d", status);
 
 	if ((str = spa_dict_lookup(headers, "Session")) == NULL) {
 		pw_log_error("missing Session header");
@@ -1105,11 +1105,11 @@ error:
 	return -EIO;
 }
 
-static int rtsp_announce_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_announce_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 
-	pw_log_info("reply %d", status);
+	pw_log_info("announce status: %d", status);
 
 	pw_properties_set(impl->headers, "Apple-Challenge", NULL);
 
@@ -1294,11 +1294,11 @@ static int rtsp_do_announce(struct impl *impl)
 	return rtsp_send(impl, "ANNOUNCE", "application/sdp", sdp, rtsp_announce_reply);
 }
 
-static int rtsp_auth_setup_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_auth_setup_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 
-	pw_log_info("reply %d", status);
+	pw_log_info("auth-setup status: %d", status);
 
 	return rtsp_do_announce(impl);
 }
@@ -1315,12 +1315,12 @@ static int rtsp_do_auth_setup(struct impl *impl)
 				       rtsp_auth_setup_reply, impl);
 }
 
-static int rtsp_auth_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_auth_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	int res = 0;
 
-	pw_log_info("auth %d", status);
+	pw_log_info("auth status: %d", status);
 
 	switch (status) {
 	case 200:
@@ -1385,12 +1385,12 @@ static int rtsp_do_auth(struct impl *impl, const struct spa_dict *headers)
 	return rtsp_send(impl, "OPTIONS", NULL, NULL, rtsp_auth_reply);
 }
 
-static int rtsp_options_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_options_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	int res = 0;
 
-	pw_log_info("options %d", status);
+	pw_log_info("options status: %d", status);
 
 	switch (status) {
 	case 401:
@@ -1547,12 +1547,12 @@ static int rtsp_do_connect(struct impl *impl)
 	return pw_rtsp_client_connect(impl->rtsp, hostname, atoi(port), impl->session_id);
 }
 
-static int rtsp_teardown_reply(void *data, int status, const struct spa_dict *headers)
+static int rtsp_teardown_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	const char *str;
 
-	pw_log_info("reply");
+	pw_log_info("teardown status: %d", status);
 
 	connection_cleanup(impl);
 

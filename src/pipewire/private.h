@@ -17,6 +17,7 @@ extern "C" {
 #include <spa/support/plugin.h>
 #include <spa/pod/builder.h>
 #include <spa/param/latency-utils.h>
+#include <spa/utils/atomic.h>
 #include <spa/utils/ratelimit.h>
 #include <spa/utils/result.h>
 #include <spa/utils/type-info.h>
@@ -359,39 +360,6 @@ int pw_loop_check(struct pw_loop *loop);
 	}										\
 })
 
-#define pw_context_driver_emit(c,m,v,...) spa_hook_list_call_simple(&c->driver_listener_list, struct pw_context_driver_events, m, v, ##__VA_ARGS__)
-#define pw_context_driver_emit_start(c,n)	pw_context_driver_emit(c, start, 0, n)
-#define pw_context_driver_emit_xrun(c,n)	pw_context_driver_emit(c, xrun, 0, n)
-#define pw_context_driver_emit_incomplete(c,n)	pw_context_driver_emit(c, incomplete, 0, n)
-#define pw_context_driver_emit_timeout(c,n)	pw_context_driver_emit(c, timeout, 0, n)
-#define pw_context_driver_emit_drained(c,n)	pw_context_driver_emit(c, drained, 0, n)
-#define pw_context_driver_emit_complete(c,n)	pw_context_driver_emit(c, complete, 0, n)
-
-struct pw_context_driver_events {
-#define PW_VERSION_CONTEXT_DRIVER_EVENTS	0
-	uint32_t version;
-
-	/** The driver graph is started */
-	void (*start) (void *data, struct pw_impl_node *node);
-	/** The driver under/overruns */
-	void (*xrun) (void *data, struct pw_impl_node *node);
-	/** The driver could not complete the graph */
-	void (*incomplete) (void *data, struct pw_impl_node *node);
-	/** The driver got a sync timeout */
-	void (*timeout) (void *data, struct pw_impl_node *node);
-	/** a node drained */
-	void (*drained) (void *data, struct pw_impl_node *node);
-	/** The driver completed the graph */
-	void (*complete) (void *data, struct pw_impl_node *node);
-};
-
-void pw_context_driver_add_listener(struct pw_context *context,
-			  struct spa_hook *listener,
-			  const struct pw_context_driver_events *events,
-			  void *data);
-void pw_context_driver_remove_listener(struct pw_context *context,
-			  struct spa_hook *listener);
-
 #define pw_registry_resource(r,m,v,...) pw_resource_call(r, struct pw_registry_events,m,v,##__VA_ARGS__)
 #define pw_registry_resource_global(r,...)        pw_registry_resource(r,global,0,__VA_ARGS__)
 #define pw_registry_resource_global_remove(r,...) pw_registry_resource(r,global_remove,0,__VA_ARGS__)
@@ -403,6 +371,8 @@ void pw_context_driver_remove_listener(struct pw_context *context,
 #define pw_context_emit_check_access(c,cl)	pw_context_emit(c, check_access, 0, cl)
 #define pw_context_emit_global_added(c,g)	pw_context_emit(c, global_added, 0, g)
 #define pw_context_emit_global_removed(c,g)	pw_context_emit(c, global_removed, 0, g)
+#define pw_context_emit_driver_added(c,n)	pw_context_emit(c, driver_added, 1, n)
+#define pw_context_emit_driver_removed(c,n)	pw_context_emit(c, driver_removed, 1, n)
 
 struct pw_context {
 	struct pw_impl_core *core;		/**< core object */
@@ -549,7 +519,7 @@ static inline void pw_node_activation_state_reset(struct pw_node_activation_stat
         state->pending = state->required;
 }
 
-#define pw_node_activation_state_dec(s,c) (__atomic_sub_fetch(&(s)->pending, c, __ATOMIC_SEQ_CST) == 0)
+#define pw_node_activation_state_dec(s) (SPA_ATOMIC_DEC(s->pending) == 0)
 
 struct pw_node_target {
 	struct spa_list link;
@@ -631,25 +601,6 @@ struct pw_node_activation {
 							 * to update wins */
 };
 
-#define ATOMIC_CAS(v,ov,nv)						\
-({									\
-	__typeof__(v) __ov = (ov);					\
-	__atomic_compare_exchange_n(&(v), &__ov, (nv),			\
-			0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);		\
-})
-
-#define ATOMIC_DEC(s)			__atomic_sub_fetch(&(s), 1, __ATOMIC_SEQ_CST)
-#define ATOMIC_INC(s)			__atomic_add_fetch(&(s), 1, __ATOMIC_SEQ_CST)
-#define ATOMIC_LOAD(s)			__atomic_load_n(&(s), __ATOMIC_SEQ_CST)
-#define ATOMIC_STORE(s,v)		__atomic_store_n(&(s), (v), __ATOMIC_SEQ_CST)
-#define ATOMIC_XCHG(s,v)		__atomic_exchange_n(&(s), (v), __ATOMIC_SEQ_CST)
-
-#define SEQ_WRITE(s)			ATOMIC_INC(s)
-#define SEQ_WRITE_SUCCESS(s1,s2)	((s1) + 1 == (s2) && ((s2) & 1) == 0)
-
-#define SEQ_READ(s)			ATOMIC_LOAD(s)
-#define SEQ_READ_SUCCESS(s1,s2)		((s1) == (s2) && ((s2) & 1) == 0)
-
 #define pw_impl_node_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_impl_node_events, m, v, ##__VA_ARGS__)
 #define pw_impl_node_emit_destroy(n)			pw_impl_node_emit(n, destroy, 0)
 #define pw_impl_node_emit_free(n)			pw_impl_node_emit(n, free, 0)
@@ -668,6 +619,14 @@ struct pw_node_activation {
 #define pw_impl_node_emit_driver_changed(n,o,d)		pw_impl_node_emit(n, driver_changed, 0, o, d)
 #define pw_impl_node_emit_peer_added(n,p)		pw_impl_node_emit(n, peer_added, 0, p)
 #define pw_impl_node_emit_peer_removed(n,p)		pw_impl_node_emit(n, peer_removed, 0, p)
+
+#define pw_impl_node_rt_emit(o,m,v,...) spa_hook_list_call(&o->rt_listener_list, struct pw_impl_node_rt_events, m, v, ##__VA_ARGS__)
+#define pw_impl_node_rt_emit_drained(n)			pw_impl_node_rt_emit(n, drained, 0)
+#define pw_impl_node_rt_emit_xrun(n)			pw_impl_node_rt_emit(n, xrun, 0)
+#define pw_impl_node_rt_emit_start(n)			pw_impl_node_rt_emit(n, start, 0)
+#define pw_impl_node_rt_emit_complete(n)		pw_impl_node_rt_emit(n, complete, 0)
+#define pw_impl_node_rt_emit_incomplete(n)		pw_impl_node_rt_emit(n, incomplete, 0)
+#define pw_impl_node_rt_emit_timeout(n)			pw_impl_node_rt_emit(n, timeout, 0)
 
 struct pw_impl_node {
 	struct pw_context *context;		/**< context object */
@@ -737,6 +696,7 @@ struct pw_impl_node {
 	struct pw_map output_port_map;		/**< map from port_id to port */
 
 	struct spa_hook_list listener_list;
+	struct spa_hook_list rt_listener_list;
 
 	struct pw_loop *data_loop;		/**< the data loop for this node */
 	struct spa_system *data_system;
@@ -1085,6 +1045,7 @@ struct pw_stream {
 
 	struct pw_impl_node *node;
 	struct spa_hook node_listener;
+	struct spa_hook node_rt_listener;
 
 	struct spa_list controls;
 };
@@ -1320,8 +1281,6 @@ void pw_random_init(void);
 void pw_settings_init(struct pw_context *context);
 int pw_settings_expose(struct pw_context *context);
 void pw_settings_clean(struct pw_context *context);
-
-pthread_attr_t *pw_thread_fill_attr(const struct spa_dict *props, pthread_attr_t *attr);
 
 /** \endcond */
 
