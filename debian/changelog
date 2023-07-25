@@ -2,6 +2,10 @@ pipewire (0.3.75-0) UNRELEASED; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release
+  * Update symbols file, 2 symbols are dropped:
+      - pw_context_driver_add_listener@Base 0.3.72
+      - pw_context_driver_remove_listener@Base 0.3.72
+      See commit cfd3bcd6.
 
   [ Evangelos Ribeiro Tzaras ]
   * pipewire-doc: Register documentation with doc-base
