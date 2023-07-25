@@ -33,6 +33,7 @@
 #include <libusb.h>
 #endif
 
+#include "dbus-helpers.h"
 #include "modemmanager.h"
 #include "upower.h"
 
@@ -1163,10 +1164,9 @@ next_indicator:
 			return true;
 		}
 	} else if (spa_strstartswith(buf, "AT+VTS=")) {
-		char *dtmf;
+		char dtmf[2];
 		enum cmee_error error;
 
-		dtmf = calloc(1, 2);
 		if (sscanf(buf, "AT+VTS=%1s", dtmf) != 1) {
 			spa_log_debug(backend->log, "Failed to parse AT+VTS: \"%s\"", buf);
 			rfcomm_send_error(rfcomm, CMEE_AG_FAILURE);
@@ -2196,7 +2196,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 {
 	struct impl *backend = userdata;
 	DBusMessage *r;
-	DBusMessageIter it[5];
+	DBusMessageIter it;
 	const char *handler, *path;
 	enum spa_bt_profile profile;
 	struct rfcomm *rfcomm;
@@ -2216,8 +2216,8 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 	}
 
-	dbus_message_iter_init(m, &it[0]);
-	dbus_message_iter_get_basic(&it[0], &path);
+	dbus_message_iter_init(m, &it);
+	dbus_message_iter_get_basic(&it, &path);
 
 	d = spa_bt_device_find(backend->monitor, path);
 	if (d == NULL || d->adapter == NULL) {
@@ -2226,8 +2226,8 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	}
 	spa_bt_device_add_profile(d, profile);
 
-	dbus_message_iter_next(&it[0]);
-	dbus_message_iter_get_basic(&it[0], &fd);
+	dbus_message_iter_next(&it);
+	dbus_message_iter_get_basic(&it, &fd);
 
 	spa_log_debug(backend->log, "NewConnection path=%s, fd=%d, profile %s", path, fd, handler);
 
@@ -2414,7 +2414,7 @@ static void register_profile_reply(DBusPendingCall *pending, void *user_data)
 	struct impl *backend = user_data;
 	DBusMessage *r;
 
-	r = dbus_pending_call_steal_reply(pending);
+	r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
@@ -2432,9 +2432,8 @@ static void register_profile_reply(DBusPendingCall *pending, void *user_data)
 		goto finish;
 	}
 
-      finish:
+finish:
 	dbus_message_unref(r);
-        dbus_pending_call_unref(pending);
 }
 
 static int register_profile(struct impl *backend, const char *profile, const char *uuid)

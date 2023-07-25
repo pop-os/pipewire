@@ -52,10 +52,8 @@ PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define TMP_BUFFER		(16 * 1024)
-#define MAX_BUFFER		(8 * 1024 * 1024)
-#define MIN_FLUSH		(16 * 1024)
-#define DEFAULT_IDLE		5
-#define DEFAULT_INTERVAL	1
+#define DATA_BUFFER		(32 * 1024)
+#define FLUSH_BUFFER		(8 * 1024 * 1024)
 
 int pw_protocol_native_ext_profiler_init(struct pw_context *context);
 
@@ -71,6 +69,21 @@ static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
+struct node {
+	struct spa_list link;
+	struct impl *impl;
+
+	struct pw_impl_node *node;
+	struct spa_hook node_rt_listener;
+
+	int64_t count;
+	struct spa_ringbuffer buffer;
+	uint8_t tmp[TMP_BUFFER];
+	uint8_t data[DATA_BUFFER];
+
+	unsigned enabled:1;
+};
+
 struct impl {
 	struct pw_context *context;
 	struct pw_properties *properties;
@@ -84,18 +97,13 @@ struct impl {
 	struct pw_global *global;
 	struct spa_hook global_listener;
 
-	int64_t count;
+	struct spa_list node_list;
+
 	uint32_t busy;
-	uint32_t empty;
-	struct spa_source *flush_timeout;
-	unsigned int flushing:1;
+	struct spa_source *flush_event;
 	unsigned int listening:1;
 
-	struct spa_ringbuffer buffer;
-	uint8_t tmp[TMP_BUFFER];
-	uint8_t data[MAX_BUFFER];
-
-	uint8_t flush[MAX_BUFFER + sizeof(struct spa_pod_struct)];
+	uint8_t flush[FLUSH_BUFFER + sizeof(struct spa_pod_struct)];
 };
 
 struct resource_data {
@@ -105,69 +113,45 @@ struct resource_data {
 	struct spa_hook resource_listener;
 };
 
-static void start_flush(struct impl *impl)
-{
-	struct timespec value, interval;
-
-	value.tv_sec = 0;
-        value.tv_nsec = 1;
-	interval.tv_sec = DEFAULT_INTERVAL;
-        interval.tv_nsec = 0;
-        pw_loop_update_timer(impl->main_loop,
-			impl->flush_timeout, &value, &interval, false);
-	impl->flushing = true;
-}
-
-static void stop_flush(struct impl *impl)
-{
-	struct timespec value, interval;
-
-	if (!impl->flushing)
-		return;
-
-	value.tv_sec = 0;
-        value.tv_nsec = 0;
-	interval.tv_sec = 0;
-        interval.tv_nsec = 0;
-        pw_loop_update_timer(impl->main_loop,
-			impl->flush_timeout, &value, &interval, false);
-	impl->flushing = false;
-}
-
-static void flush_timeout(void *data, uint64_t expirations)
+static void do_flush_event(void *data, uint64_t count)
 {
 	struct impl *impl = data;
-	int32_t avail;
-	uint32_t idx;
-	struct spa_pod_struct *p;
 	struct pw_resource *resource;
-
-	avail = spa_ringbuffer_get_read_index(&impl->buffer, &idx);
-
-	pw_log_trace("%p avail %d", impl, avail);
-
-	if (avail <= 0) {
-		if (++impl->empty == DEFAULT_IDLE)
-			stop_flush(impl);
-		return;
-	}
-	impl->empty = 0;
+	struct node *n;
+	uint32_t total = 0;
+	struct spa_pod_struct *p;
 
 	p = (struct spa_pod_struct *)impl->flush;
-	*p = SPA_POD_INIT_Struct(avail);
 
-	spa_ringbuffer_read_data(&impl->buffer, impl->data, MAX_BUFFER,
-			idx % MAX_BUFFER,
-			SPA_PTROFF(p, sizeof(struct spa_pod_struct), void), avail);
-	spa_ringbuffer_read_update(&impl->buffer, idx + avail);
+	spa_list_for_each(n, &impl->node_list, link) {
+		int32_t avail;
+		uint32_t idx;
+
+		avail = spa_ringbuffer_get_read_index(&n->buffer, &idx);
+
+		pw_log_trace("%p avail %d", impl, avail);
+
+		if (avail > 0) {
+			spa_ringbuffer_read_data(&n->buffer, n->data, DATA_BUFFER,
+					idx % DATA_BUFFER,
+					SPA_PTROFF(p, sizeof(struct spa_pod_struct) + total, void),
+					avail);
+			spa_ringbuffer_read_update(&n->buffer, idx + avail);
+			total += avail;
+		}
+	}
+
+	*p = SPA_POD_INIT_Struct(total);
 
 	spa_list_for_each(resource, &impl->global->resource_list, link)
 		pw_profiler_resource_profile(resource, &p->pod);
 }
 
-static void context_do_profile(void *data, struct pw_impl_node *node)
+static void context_do_profile(void *data)
 {
-	struct impl *impl = data;
+	struct node *n = data;
+	struct pw_impl_node *node = n->node;
+	struct impl *impl = n->impl;
 	struct spa_pod_builder b;
 	struct spa_pod_frame f[2];
 	uint32_t id = node->info.id;
@@ -180,13 +164,13 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 	if (SPA_FLAG_IS_SET(pos->clock.flags, SPA_IO_CLOCK_FLAG_FREEWHEEL))
 		return;
 
-	spa_pod_builder_init(&b, impl->tmp, sizeof(impl->tmp));
+	spa_pod_builder_init(&b, n->tmp, sizeof(n->tmp));
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Profiler, 0);
 
 	spa_pod_builder_prop(&b, SPA_PROFILER_info, 0);
 	spa_pod_builder_add_struct(&b,
-			SPA_POD_Long(impl->count),
+			SPA_POD_Long(n->count),
 			SPA_POD_Float(a->cpu_load[0]),
 			SPA_POD_Float(a->cpu_load[1]),
 			SPA_POD_Float(a->cpu_load[2]),
@@ -253,42 +237,107 @@ static void context_do_profile(void *data, struct pw_impl_node *node)
 	}
 	spa_pod_builder_pop(&b, &f[0]);
 
-	if (b.state.offset > sizeof(impl->tmp))
+	if (b.state.offset > sizeof(n->tmp))
 		goto done;
 
-	filled = spa_ringbuffer_get_write_index(&impl->buffer, &idx);
-	if (filled < 0 || filled > MAX_BUFFER) {
+	filled = spa_ringbuffer_get_write_index(&n->buffer, &idx);
+	if (filled < 0 || filled > DATA_BUFFER) {
 		pw_log_warn("%p: queue xrun %d", impl, filled);
 		goto done;
 	}
-	avail = MAX_BUFFER - filled;
+	avail = DATA_BUFFER - filled;
 	if (avail < b.state.offset) {
 		pw_log_warn("%p: queue full %d < %d", impl, avail, b.state.offset);
 		goto done;
 	}
-	spa_ringbuffer_write_data(&impl->buffer,
-			impl->data, MAX_BUFFER,
-			idx % MAX_BUFFER,
+	spa_ringbuffer_write_data(&n->buffer,
+			n->data, DATA_BUFFER,
+			idx % DATA_BUFFER,
 			b.data, b.state.offset);
-	spa_ringbuffer_write_update(&impl->buffer, idx + b.state.offset);
+	spa_ringbuffer_write_update(&n->buffer, idx + b.state.offset);
 
-	if (!impl->flushing || filled + b.state.offset > MIN_FLUSH)
-		start_flush(impl);
+	pw_loop_signal_event(impl->main_loop, impl->flush_event);
 done:
-	impl->count++;
+	n->count++;
 }
 
-static const struct pw_context_driver_events context_events = {
-	PW_VERSION_CONTEXT_DRIVER_EVENTS,
-	.incomplete = context_do_profile,
+static struct pw_impl_node_rt_events node_rt_events = {
+	PW_VERSION_IMPL_NODE_RT_EVENTS,
 	.complete = context_do_profile,
+	.incomplete = context_do_profile,
+};
+
+static void enable_node_profiling(struct node *n, bool enabled)
+{
+	if (enabled && !n->enabled) {
+		SPA_FLAG_SET(n->node->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_PROFILER);
+		pw_impl_node_add_rt_listener(n->node, &n->node_rt_listener, &node_rt_events, n);
+	} else if (!enabled && n->enabled) {
+		SPA_FLAG_CLEAR(n->node->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_PROFILER);
+		pw_impl_node_remove_rt_listener(n->node, &n->node_rt_listener);
+	}
+	n->enabled = enabled;
+}
+
+static void enable_profiling(struct impl *impl, bool enabled)
+{
+	struct node *n;
+	spa_list_for_each(n, &impl->node_list, link)
+		enable_node_profiling(n, enabled);
+}
+
+static void context_driver_added(void *data, struct pw_impl_node *node)
+{
+	struct impl *impl = data;
+	struct node *n;
+
+	n = calloc(1, sizeof(*n));
+	if (n == NULL)
+		return;
+
+	n->impl = impl;
+	n->node = node;
+	spa_list_append(&impl->node_list, &n->link);
+	spa_ringbuffer_init(&n->buffer);
+
+	if (impl->busy > 0)
+		enable_node_profiling(n, true);
+}
+
+static struct node *find_node(struct impl *impl, struct pw_impl_node *node)
+{
+	struct node *n;
+	spa_list_for_each(n, &impl->node_list, link) {
+		if (n->node == node)
+			return n;
+	}
+	return NULL;
+}
+
+static void context_driver_removed(void *data, struct pw_impl_node *node)
+{
+	struct impl *impl = data;
+	struct node *n;
+
+	n = find_node(impl, node);
+	if (n == NULL)
+		return;
+
+	enable_node_profiling(n, false);
+	spa_list_remove(&n->link);
+	free(n);
+}
+
+static const struct pw_context_events context_events = {
+	PW_VERSION_CONTEXT_EVENTS,
+	.driver_added = context_driver_added,
+	.driver_removed = context_driver_removed,
 };
 
 static void stop_listener(struct impl *impl)
 {
 	if (impl->listening) {
-		pw_context_driver_remove_listener(impl->context,
-			&impl->context_listener);
+		enable_profiling(impl, false);
 		impl->listening = false;
 	}
 }
@@ -331,9 +380,7 @@ global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
 
 	if (++impl->busy == 1) {
 		pw_log_info("%p: starting profiler", impl);
-		pw_context_driver_add_listener(impl->context,
-			&impl->context_listener,
-			&context_events, impl);
+		enable_profiling(impl, true);
 		impl->listening = true;
 	}
 	return 0;
@@ -346,11 +393,12 @@ static void module_destroy(void *data)
 	if (impl->global != NULL)
 		pw_global_destroy(impl->global);
 
+	spa_hook_remove(&impl->context_listener);
 	spa_hook_remove(&impl->module_listener);
 
 	pw_properties_free(impl->properties);
 
-	pw_loop_destroy_source(impl->main_loop, impl->flush_timeout);
+	pw_loop_destroy_source(impl->main_loop, impl->flush_event);
 
 	free(impl);
 }
@@ -365,7 +413,6 @@ static void global_destroy(void *data)
 	struct impl *impl = data;
 
 	stop_listener(impl);
-	stop_flush(impl);
 
 	spa_hook_remove(&impl->global_listener);
 	impl->global = NULL;
@@ -393,6 +440,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (impl == NULL)
 		return -errno;
 
+	spa_list_init(&impl->node_list);
 	pw_protocol_native_ext_profiler_init(context);
 
 	pw_log_debug("module %p: new %s", impl, args);
@@ -407,8 +455,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->main_loop = pw_context_get_main_loop(impl->context);
 	impl->data_loop = pw_data_loop_get_loop(pw_context_get_data_loop(impl->context));
 
-	spa_ringbuffer_init(&impl->buffer);
-
 	impl->global = pw_global_new(context,
 			PW_TYPE_INTERFACE_Profiler,
 			PW_VERSION_PROFILER,
@@ -422,13 +468,17 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_properties_setf(impl->properties, PW_KEY_OBJECT_SERIAL, "%"PRIu64,
 			pw_global_get_serial(impl->global));
 
-	impl->flush_timeout = pw_loop_add_timer(impl->main_loop, flush_timeout, impl);
+	impl->flush_event = pw_loop_add_event(impl->main_loop, do_flush_event, impl);
 
 	pw_global_update_keys(impl->global, &impl->properties->dict, keys);
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 
 	pw_impl_module_update_properties(module, &SPA_DICT_INIT_ARRAY(module_props));
+
+	pw_context_add_listener(impl->context,
+			&impl->context_listener,
+			&context_events, impl);
 
 	pw_global_register(impl->global);
 
