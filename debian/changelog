@@ -6,6 +6,8 @@ pipewire (0.3.76-0) UNRELEASED; urgency=medium
       - pw_context_driver_add_listener@Base 0.3.72
       - pw_context_driver_remove_listener@Base 0.3.72
       See commit cfd3bcd6.
+  * Install new modules vban-recv and vban-send
+      in libpipewire-0.3-modules.
 
   [ Evangelos Ribeiro Tzaras ]
   * pipewire-doc: Register documentation with doc-base

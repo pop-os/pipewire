@@ -37,4 +37,6 @@ usr/lib/*/pipewire-0.3/libpipewire-module-spa-device-factory.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-device.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-node-factory.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-node.so
+usr/lib/*/pipewire-0.3/libpipewire-module-vban-recv.so
+usr/lib/*/pipewire-0.3/libpipewire-module-vban-send.so
 usr/lib/*/pipewire-0.3/libpipewire-module-zeroconf-discover.so
