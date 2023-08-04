@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdalign.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -103,6 +104,7 @@ struct impl {
 	struct spa_source *flush_event;
 	unsigned int listening:1;
 
+	alignas(max_align_t)
 	uint8_t flush[FLUSH_BUFFER + sizeof(struct spa_pod_struct)];
 };
 
@@ -132,12 +134,14 @@ static void do_flush_event(void *data, uint64_t count)
 		pw_log_trace("%p avail %d", impl, avail);
 
 		if (avail > 0) {
-			spa_ringbuffer_read_data(&n->buffer, n->data, DATA_BUFFER,
-					idx % DATA_BUFFER,
-					SPA_PTROFF(p, sizeof(struct spa_pod_struct) + total, void),
-					avail);
+			if (total + avail < FLUSH_BUFFER) {
+				spa_ringbuffer_read_data(&n->buffer, n->data, DATA_BUFFER,
+						idx % DATA_BUFFER,
+						SPA_PTROFF(p, sizeof(struct spa_pod_struct) + total, void),
+						avail);
+				total += avail;
+			}
 			spa_ringbuffer_read_update(&n->buffer, idx + avail);
-			total += avail;
 		}
 	}
 
@@ -458,6 +462,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->global = pw_global_new(context,
 			PW_TYPE_INTERFACE_Profiler,
 			PW_VERSION_PROFILER,
+			PW_PROFILER_PERM_MASK,
 			pw_properties_copy(props),
 			global_bind, impl);
 	if (impl->global == NULL) {

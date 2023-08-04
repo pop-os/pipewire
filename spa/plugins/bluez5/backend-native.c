@@ -177,16 +177,9 @@ struct rfcomm {
 
 static DBusHandlerResult profile_release(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
-	DBusMessage *r;
-
-	r = dbus_message_new_error(m, BLUEZ_PROFILE_INTERFACE ".Error.NotImplemented",
-                                            "Method not implemented");
-	if (r == NULL)
-		return DBUS_HANDLER_RESULT_NEED_MEMORY;
-	if (!dbus_connection_send(conn, r, NULL))
+	if (!reply_with_error(conn, m, BLUEZ_PROFILE_INTERFACE ".Error.NotImplemented", "Method not implemented"))
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
-	dbus_message_unref(r);
 	return DBUS_HANDLER_RESULT_HANDLED;
 }
 
@@ -1390,12 +1383,11 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
 	struct sockaddr_sco addr;
 	socklen_t len;
 	bdaddr_t src;
-	int sock = -1;
 
-	sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK, BTPROTO_SCO);
+	spa_autoclose int sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK, BTPROTO_SCO);
 	if (sock < 0) {
 		spa_log_error(backend->log, "socket(SEQPACKET, SCO) %s", strerror(errno));
-		goto fail;
+		return -1;
 	}
 
 	str2ba(adapter->address, &src);
@@ -1407,7 +1399,7 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
 
 	if (bind(sock, (struct sockaddr *) &addr, len) < 0) {
 		spa_log_error(backend->log, "bind(): %s", strerror(errno));
-		goto fail;
+		return -1;
 	}
 
 	spa_log_debug(backend->log, "msbc=%d", (int)msbc);
@@ -1418,16 +1410,11 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
 		voice_config.setting = BT_VOICE_TRANSPARENT;
 		if (setsockopt(sock, SOL_BLUETOOTH, BT_VOICE, &voice_config, sizeof(voice_config)) < 0) {
 			spa_log_error(backend->log, "setsockopt(): %s", strerror(errno));
-			goto fail;
+			return -1;
 		}
 	}
 
-	return sock;
-
-fail:
-	if (sock >= 0)
-		close(sock);
-	return -1;
+	return spa_steal_fd(sock);
 }
 
 static int sco_do_connect(struct spa_bt_transport *t)
@@ -1436,11 +1423,7 @@ static int sco_do_connect(struct spa_bt_transport *t)
 	struct spa_bt_device *d = t->device;
 	struct transport_data *td = t->user_data;
 	struct sockaddr_sco addr;
-	socklen_t len;
 	int err;
-	int sock;
-	bdaddr_t dst;
-	int retry = 2;
 
 	spa_log_debug(backend->log, "transport %p: enter sco_do_connect, codec=%u",
 			t, t->codec);
@@ -1450,52 +1433,45 @@ static int sco_do_connect(struct spa_bt_transport *t)
 	if (d->adapter == NULL)
 		return -EIO;
 
-	str2ba(d->address, &dst);
-
-again:
-	sock = sco_create_socket(backend, d->adapter, (t->codec == HFP_AUDIO_CODEC_MSBC));
-	if (sock < 0)
-		return -1;
-
-	len = sizeof(addr);
-	memset(&addr, 0, len);
+	spa_zero(addr);
 	addr.sco_family = AF_BLUETOOTH;
-	bacpy(&addr.sco_bdaddr, &dst);
+	str2ba(d->address, &addr.sco_bdaddr);
 
-	spa_log_debug(backend->log, "transport %p: doing connect", t);
-	err = connect(sock, (struct sockaddr *) &addr, len);
-	if (err < 0 && errno == ECONNABORTED && retry-- > 0) {
-		spa_log_warn(backend->log, "connect(): %s. Remaining retry:%d",
-				strerror(errno), retry);
-		close(sock);
-		goto again;
-	} else if (err < 0 && !(errno == EAGAIN || errno == EINPROGRESS)) {
-		spa_log_error(backend->log, "connect(): %s", strerror(errno));
+	for (int retry = 2;;) {
+		spa_autoclose int sock = sco_create_socket(backend, d->adapter, (t->codec == HFP_AUDIO_CODEC_MSBC));
+		if (sock < 0)
+			return -1;
+
+		spa_log_debug(backend->log, "transport %p: doing connect", t);
+		err = connect(sock, (struct sockaddr *) &addr, sizeof(addr));
+		if (err < 0 && errno == ECONNABORTED && retry-- > 0) {
+			spa_log_warn(backend->log, "connect(): %s. Remaining retry:%d",
+					strerror(errno), retry);
+			continue;
+		} else if (err < 0 && !(errno == EAGAIN || errno == EINPROGRESS)) {
+			spa_log_error(backend->log, "connect(): %s", strerror(errno));
 #ifdef HAVE_BLUEZ_5_BACKEND_HFP_NATIVE
-		if (errno == EOPNOTSUPP && t->codec == HFP_AUDIO_CODEC_MSBC &&
-				td->rfcomm->msbc_supported_by_hfp) {
-			/* Adapter doesn't support msbc. Renegotiate. */
-			d->adapter->msbc_probed = true;
-			d->adapter->has_msbc = false;
-			td->rfcomm->msbc_supported_by_hfp = false;
-			if (t->profile == SPA_BT_PROFILE_HFP_HF) {
-				td->rfcomm->hfp_ag_switching_codec = true;
-				rfcomm_send_reply(td->rfcomm, "+BCS: 1");
-			} else if (t->profile == SPA_BT_PROFILE_HFP_AG) {
-				rfcomm_send_cmd(td->rfcomm, "AT+BAC=1");
+			if (errno == EOPNOTSUPP && t->codec == HFP_AUDIO_CODEC_MSBC &&
+					td->rfcomm->msbc_supported_by_hfp) {
+				/* Adapter doesn't support msbc. Renegotiate. */
+				d->adapter->msbc_probed = true;
+				d->adapter->has_msbc = false;
+				td->rfcomm->msbc_supported_by_hfp = false;
+				if (t->profile == SPA_BT_PROFILE_HFP_HF) {
+					td->rfcomm->hfp_ag_switching_codec = true;
+					rfcomm_send_reply(td->rfcomm, "+BCS: 1");
+				} else if (t->profile == SPA_BT_PROFILE_HFP_AG) {
+					rfcomm_send_cmd(td->rfcomm, "AT+BAC=1");
+				}
 			}
-		}
 #endif
-		goto fail_close;
+			return -1;
+		}
+
+		td->err = -EINPROGRESS;
+
+		return spa_steal_fd(sock);
 	}
-
-	td->err = -EINPROGRESS;
-
-	return sock;
-
-fail_close:
-	close(sock);
-	return -1;
 }
 
 static int rfcomm_ag_sync_volume(struct rfcomm *rfcomm, bool later);
@@ -1726,25 +1702,24 @@ static void sco_listen_event(struct spa_source *source)
 	struct impl *backend = source->data;
 	struct sockaddr_sco addr;
 	socklen_t addrlen;
-	int sock = -1;
 	char local_address[18], remote_address[18];
 	struct rfcomm *rfcomm;
 	struct spa_bt_transport *t = NULL;
 
 	if (source->rmask & (SPA_IO_HUP | SPA_IO_ERR)) {
 		spa_log_error(backend->log, "error listening SCO connection: %s", strerror(errno));
-		goto fail;
+		return;
 	}
 
 	memset(&addr, 0, sizeof(addr));
 	addrlen = sizeof(addr);
 
 	spa_log_debug(backend->log, "doing accept");
-	sock = accept(source->fd, (struct sockaddr *) &addr, &addrlen);
+	spa_autoclose int sock = accept(source->fd, (struct sockaddr *) &addr, &addrlen);
 	if (sock < 0) {
 		if (errno != EAGAIN)
 			spa_log_error(backend->log, "SCO accept(): %s", strerror(errno));
-		goto fail;
+		return;
 	}
 
 	ba2str(&addr.sco_bdaddr, remote_address);
@@ -1754,7 +1729,7 @@ static void sco_listen_event(struct spa_source *source)
 
 	if (getsockname(sock, (struct sockaddr *) &addr, &addrlen) < 0) {
 		spa_log_error(backend->log, "SCO getsockname(): %s", strerror(errno));
-		goto fail;
+		return;
 	}
 
 	ba2str(&addr.sco_bdaddr, local_address);
@@ -1770,19 +1745,19 @@ static void sco_listen_event(struct spa_source *source)
 	if (!t) {
 		spa_log_debug(backend->log, "No transport for adapter %s and remote %s",
 		              local_address, remote_address);
-		goto fail;
+		return;
 	}
 
 	/* The Synchronous Connection shall always be established by the AG, i.e. the remote profile
 	   should be a HSP AG or HFP AG profile */
 	if ((t->profile & SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY) == 0) {
 		spa_log_debug(backend->log, "transport %p: Rejecting incoming audio connection to an AG profile", t);
-		goto fail;
+		return;
 	}
 
 	if (t->fd >= 0) {
 		spa_log_debug(backend->log, "transport %p: Rejecting, audio already connected", t);
-		goto fail;
+		return;
 	}
 
 	spa_log_debug(backend->log, "transport %p: codec=%u", t, t->codec);
@@ -1799,18 +1774,18 @@ static void sco_listen_event(struct spa_source *source)
 			voice_config.setting = BT_VOICE_TRANSPARENT;
 			if (setsockopt(sock, SOL_BLUETOOTH, BT_VOICE, &voice_config, sizeof(voice_config)) < 0) {
 				spa_log_error(backend->log, "transport %p: setsockopt(): %s", t, strerror(errno));
-				goto fail;
+				return;
 			}
 		}
 
 		/* First read from the accepted socket is non-blocking and returns a zero length buffer. */
 		if (read(sock, &buff, 1) == -1) {
 			spa_log_error(backend->log, "transport %p: Couldn't authorize SCO connection: %s", t, strerror(errno));
-			goto fail;
+			return;
 		}
 	}
 
-	t->fd = sock;
+	t->fd = spa_steal_fd(sock);
 
 	sco_start_source(t);
 
@@ -1830,24 +1805,17 @@ static void sco_listen_event(struct spa_source *source)
 	}
 
 	spa_bt_transport_set_state(t, SPA_BT_TRANSPORT_STATE_PENDING);
-	return;
-
-fail:
-	if (sock >= 0)
-		close(sock);
-	return;
 }
 
-static int sco_listen(struct impl *backend)
+static void sco_listen(struct impl *backend)
 {
 	struct sockaddr_sco addr;
-	int sock;
 	uint32_t defer = 1;
 
-	sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, BTPROTO_SCO);
+	spa_autoclose int sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, BTPROTO_SCO);
 	if (sock < 0) {
 		spa_log_error(backend->log, "socket(SEQPACKET, SCO) %m");
-		return -errno;
+		return;
 	}
 
 	/* Bind to local address */
@@ -1857,7 +1825,7 @@ static int sco_listen(struct impl *backend)
 
 	if (bind(sock, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
 		spa_log_error(backend->log, "bind(): %m");
-		goto fail_close;
+		return;
 	}
 
 	if (setsockopt(sock, SOL_BLUETOOTH, BT_DEFER_SETUP, &defer, sizeof(defer)) < 0) {
@@ -1870,21 +1838,17 @@ static int sco_listen(struct impl *backend)
 	spa_log_debug(backend->log, "doing listen");
 	if (listen(sock, 1) < 0) {
 		spa_log_error(backend->log, "listen(): %m");
-		goto fail_close;
+		return;
 	}
 
 	backend->sco.func = sco_listen_event;
 	backend->sco.data = backend;
-	backend->sco.fd = sock;
+	backend->sco.fd = spa_steal_fd(sock);
 	backend->sco.mask = SPA_IO_IN;
 	backend->sco.rmask = 0;
 	spa_loop_add_source(backend->main_loop, &backend->sco);
 
-	return sock;
-
-fail_close:
-	close(sock);
-	return -1;
+	return;
 }
 
 static int rfcomm_ag_set_volume(struct spa_bt_transport *t, int id)
@@ -2195,14 +2159,14 @@ static enum spa_bt_profile path_to_profile(const char *path)
 static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
 	struct impl *backend = userdata;
-	DBusMessage *r;
+	spa_autoptr(DBusMessage) r = NULL;
 	DBusMessageIter it;
 	const char *handler, *path;
 	enum spa_bt_profile profile;
 	struct rfcomm *rfcomm;
 	struct spa_bt_device *d;
 	struct spa_bt_transport *t = NULL;
-	int fd;
+	spa_autoclose int fd = -1;
 
 	if (!dbus_message_has_signature(m, "oha{sv}")) {
 		spa_log_warn(backend->log, "invalid NewConnection() signature");
@@ -2241,7 +2205,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	rfcomm->path = strdup(path);
 	rfcomm->source.func = rfcomm_event;
 	rfcomm->source.data = rfcomm;
-	rfcomm->source.fd = fd;
+	rfcomm->source.fd = spa_steal_fd(fd);
 	rfcomm->source.mask = SPA_IO_IN;
 	rfcomm->source.rmask = 0;
 	/* By default all indicators are enabled */
@@ -2314,7 +2278,6 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 		goto fail_need_memory;
 	if (!dbus_connection_send(conn, r, NULL))
 		goto fail_need_memory;
-	dbus_message_unref(r);
 
 	return DBUS_HANDLER_RESULT_HANDLED;
 
@@ -2327,7 +2290,7 @@ fail_need_memory:
 static DBusHandlerResult profile_request_disconnection(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
 	struct impl *backend = userdata;
-	DBusMessage *r;
+	spa_autoptr(DBusMessage) r = NULL;
 	const char *handler, *path;
 	struct spa_bt_device *d;
 	enum spa_bt_profile profile = SPA_BT_PROFILE_NULL;
@@ -2367,7 +2330,6 @@ static DBusHandlerResult profile_request_disconnection(DBusConnection *conn, DBu
 	if (!dbus_connection_send(conn, r, NULL))
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
-	dbus_message_unref(r);
 	return DBUS_HANDLER_RESULT_HANDLED;
 }
 
@@ -2375,7 +2337,6 @@ static DBusHandlerResult profile_handler(DBusConnection *c, DBusMessage *m, void
 {
 	struct impl *backend = userdata;
 	const char *path, *interface, *member;
-	DBusMessage *r;
 	DBusHandlerResult res;
 
 	path = dbus_message_get_path(m);
@@ -2386,6 +2347,7 @@ static DBusHandlerResult profile_handler(DBusConnection *c, DBusMessage *m, void
 
 	if (dbus_message_is_method_call(m, "org.freedesktop.DBus.Introspectable", "Introspect")) {
 		const char *xml = PROFILE_INTROSPECT_XML;
+		spa_autoptr(DBusMessage) r = NULL;
 
 		if ((r = dbus_message_new_method_return(m)) == NULL)
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
@@ -2394,7 +2356,6 @@ static DBusHandlerResult profile_handler(DBusConnection *c, DBusMessage *m, void
 		if (!dbus_connection_send(backend->conn, r, NULL))
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
-		dbus_message_unref(r);
 		res = DBUS_HANDLER_RESULT_HANDLED;
 	}
 	else if (dbus_message_is_method_call(m, BLUEZ_PROFILE_INTERFACE, "Release"))
@@ -2412,38 +2373,33 @@ static DBusHandlerResult profile_handler(DBusConnection *c, DBusMessage *m, void
 static void register_profile_reply(DBusPendingCall *pending, void *user_data)
 {
 	struct impl *backend = user_data;
-	DBusMessage *r;
 
-	r = steal_reply_and_unref(&pending);
+	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&pending);
 	if (r == NULL)
 		return;
 
 	if (dbus_message_is_error(r, BLUEZ_ERROR_NOT_SUPPORTED)) {
 		spa_log_warn(backend->log, "Register profile not supported");
-		goto finish;
+		return;
 	}
 	if (dbus_message_is_error(r, DBUS_ERROR_UNKNOWN_METHOD)) {
 		spa_log_warn(backend->log, "Error registering profile");
-		goto finish;
+		return;
 	}
 	if (dbus_message_get_type(r) == DBUS_MESSAGE_TYPE_ERROR) {
 		spa_log_error(backend->log, "RegisterProfile() failed: %s",
 				dbus_message_get_error_name(r));
-		goto finish;
+		return;
 	}
-
-finish:
-	dbus_message_unref(r);
 }
 
 static int register_profile(struct impl *backend, const char *profile, const char *uuid)
 {
-	DBusMessage *m;
+	spa_autoptr(DBusMessage) m = NULL;
 	DBusMessageIter it[4];
 	dbus_bool_t autoconnect;
 	dbus_uint16_t version, chan, features;
 	char *str;
-	DBusPendingCall *call;
 
 	if (!(backend->enabled_profiles & spa_bt_profile_from_uuid(uuid)))
 		return -ECANCELED;
@@ -2536,16 +2492,16 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 	}
 	dbus_message_iter_close_container(&it[0], &it[1]);
 
-	dbus_connection_send_with_reply(backend->conn, m, &call, -1);
-	dbus_pending_call_set_notify(call, register_profile_reply, backend, NULL);
-	dbus_message_unref(m);
+	if (!send_with_reply(backend->conn, m, register_profile_reply, backend))
+		return -EIO;
+
 	return 0;
 }
 
 static void unregister_profile(struct impl *backend, const char *profile)
 {
-	DBusMessage *m, *r;
-	DBusError err;
+	spa_autoptr(DBusMessage) m = NULL, r = NULL;
+	spa_auto(DBusError) err = DBUS_ERROR_INIT;
 
 	spa_log_debug(backend->log, "Unregistering Profile %s", profile);
 
@@ -2556,15 +2512,9 @@ static void unregister_profile(struct impl *backend, const char *profile)
 
 	dbus_message_append_args(m, DBUS_TYPE_OBJECT_PATH, &profile, DBUS_TYPE_INVALID);
 
-	dbus_error_init(&err);
-
 	r = dbus_connection_send_with_reply_and_block(backend->conn, m, -1, &err);
-	dbus_message_unref(m);
-	m = NULL;
-
 	if (r == NULL) {
 		spa_log_info(backend->log, "Unregistering Profile %s failed", profile);
-		dbus_error_free(&err);
 		return;
 	}
 
@@ -2572,8 +2522,6 @@ static void unregister_profile(struct impl *backend, const char *profile)
 		spa_log_error(backend->log, "UnregisterProfile() returned error: %s", dbus_message_get_error_name(r));
 		return;
 	}
-
-	dbus_message_unref(r);
 }
 
 static int backend_native_register_profiles(void *data)

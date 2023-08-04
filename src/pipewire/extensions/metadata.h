@@ -21,6 +21,8 @@ extern "C" {
  */
 #define PW_TYPE_INTERFACE_Metadata		PW_TYPE_INFO_INTERFACE_BASE "Metadata"
 
+#define PW_METADATA_PERM_MASK			PW_PERM_RWX
+
 #define PW_VERSION_METADATA			3
 struct pw_metadata;
 
@@ -28,6 +30,7 @@ struct pw_metadata;
 
 #define PW_METADATA_EVENT_PROPERTY		0
 #define PW_METADATA_EVENT_NUM			1
+
 
 /** \ref pw_metadata events */
 struct pw_metadata_events {
@@ -56,12 +59,33 @@ struct pw_metadata_methods {
 			const struct pw_metadata_events *events,
 			void *data);
 
+	/**
+	 * Set a metadata property
+	 *
+	 * Automatically emit property events for the subject and key
+	 * when they are changed.
+	 *
+	 * \param subject the id of the global to associate the metadata
+	 *                with.
+	 * \param key the key of the metadata, NULL clears all metadata for
+	 *                the subject.
+	 * \param type the type of the metadata, this can be blank
+	 * \param value the metadata value. NULL clears the metadata.
+	 *
+	 * This requires X and W permissions on the metadata. It also
+	 * requires M permissions on the subject global.
+	 */
 	int (*set_property) (void *object,
 			uint32_t subject,
 			const char *key,
 			const char *type,
 			const char *value);
 
+	/**
+	 * Clear all metadata
+	 *
+	 * This requires X and W permissions on the metadata.
+	 */
 	int (*clear) (void *object);
 };
 
