@@ -29,6 +29,8 @@ extern "C" {
  */
 #define PW_TYPE_INTERFACE_Node	PW_TYPE_INFO_INTERFACE_BASE "Node"
 
+#define PW_NODE_PERM_MASK	PW_PERM_RWXML
+
 #define PW_VERSION_NODE		3
 struct pw_node;
 
@@ -132,6 +134,8 @@ struct pw_node_methods {
 	 *
 	 * \param ids an array of param ids
 	 * \param n_ids the number of ids in \a ids
+	 *
+	 * This requires X permissions on the node.
 	 */
 	int (*subscribe_params) (void *object, uint32_t *ids, uint32_t n_ids);
 
@@ -146,6 +150,8 @@ struct pw_node_methods {
 	 * \param start the start index or 0 for the first param
 	 * \param num the maximum number of params to retrieve
 	 * \param filter a param filter or NULL
+	 *
+	 * This requires X permissions on the node.
 	 */
 	int (*enum_params) (void *object, int seq, uint32_t id,
 			uint32_t start, uint32_t num,
@@ -157,6 +163,8 @@ struct pw_node_methods {
 	 * \param id the parameter id to set
 	 * \param flags extra parameter flags
 	 * \param param the parameter to set
+	 *
+	 * This requires X and W permissions on the node.
 	 */
 	int (*set_param) (void *object, uint32_t id, uint32_t flags,
 			const struct spa_pod *param);
@@ -165,6 +173,8 @@ struct pw_node_methods {
 	 * Send a command to the node
 	 *
 	 * \param command the command to send
+	 *
+	 * This requires X and W permissions on the node.
 	 */
 	int (*send_command) (void *object, const struct spa_command *command);
 };

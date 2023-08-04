@@ -34,6 +34,8 @@ extern "C" {
 #define PW_TYPE_INTERFACE_Core		PW_TYPE_INFO_INTERFACE_BASE "Core"
 #define PW_TYPE_INTERFACE_Registry	PW_TYPE_INFO_INTERFACE_BASE "Registry"
 
+#define PW_CORE_PERM_MASK		PW_PERM_R|PW_PERM_X|PW_PERM_M
+
 #define PW_VERSION_CORE		4
 struct pw_core;
 #define PW_VERSION_REGISTRY	3
@@ -223,6 +225,8 @@ struct pw_core_methods {
 	 * Start a conversation with the server. This will send
 	 * the core info and will destroy all resources for the client
 	 * (except the core and client resource).
+	 *
+	 * This requires X permissions on the core.
 	 */
 	int (*hello) (void *object, uint32_t version);
 	/**
@@ -235,6 +239,8 @@ struct pw_core_methods {
 	 * methods and the resulting events have been handled.
 	 *
 	 * \param seq the seq number passed to the done event
+	 *
+	 * This requires X permissions on the core.
 	 */
 	int (*sync) (void *object, uint32_t id, int seq);
 	/**
@@ -243,6 +249,8 @@ struct pw_core_methods {
 	 * Reply to the server ping event with the same seq.
 	 *
 	 * \param seq the seq number received in the ping event
+	 *
+	 * This requires X permissions on the core.
 	 */
 	int (*pong) (void *object, uint32_t id, int seq);
 	/**
@@ -257,9 +265,11 @@ struct pw_core_methods {
 	 * This method is usually also emitted on the resource object with
 	 * \a id.
 	 *
-         * \param id object where the error occurred
+         * \param id resource id where the error occurred
          * \param res error code
          * \param message error description
+	 *
+	 * This requires X permissions on the core.
 	 */
 	int (*error) (void *object, uint32_t id, int seq, int res, const char *message);
 	/**
@@ -269,6 +279,8 @@ struct pw_core_methods {
 	 * the global objects available from the PipeWire server
 	 * \param version the client version
 	 * \param user_data_size extra size
+	 *
+	 * This requires X permissions on the core.
 	 */
 	struct pw_registry * (*get_registry) (void *object, uint32_t version,
 			size_t user_data_size);
@@ -281,6 +293,8 @@ struct pw_core_methods {
 	 * \param version the version of the interface
 	 * \param props extra properties
 	 * \param user_data_size extra size
+	 *
+	 * This requires X permissions on the core.
 	 */
 	void * (*create_object) (void *object,
 			       const char *factory_name,
@@ -294,6 +308,8 @@ struct pw_core_methods {
 	 * Destroy the server resource for the given proxy.
 	 *
 	 * \param obj the proxy to destroy
+	 *
+	 * This requires X permissions on the core.
 	 */
 	int (*destroy) (void *object, void *proxy);
 };
@@ -474,7 +490,8 @@ struct pw_registry_methods {
 	 *
 	 * Try to destroy the global object.
 	 *
-	 * \param id the global id to destroy
+	 * \param id the global id to destroy. The client needs X permissions
+	 * on the global.
 	 */
 	int (*destroy) (void *object, uint32_t id);
 };

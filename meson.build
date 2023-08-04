@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.76',
+  version : '0.3.77',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -24,6 +24,15 @@ spaversion = '0.2'
 apiversion = '0.3'
 soversion = 0
 libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
+
+# LADI/jack
+# 3, for PipeWire being the third JACK implementation, after JACK1 and jackdmp/JACK2)
+jack_version_major = 3
+jack_version_minor = pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int()
+# libjack[server] version has 0 for major (for compatibility with other implementations),
+# 3 for minor, and "100*pipewire_version_minor + pipewire_version_micro"
+# as micro version (the minor libpipewire soversion number)
+libjackversion = '@0@.@1@.@2@'.format(soversion, jack_version_major, jack_version_minor)
 
 pipewire_name = 'pipewire-@0@'.format(apiversion)
 spa_name = 'spa-@0@'.format(spaversion)
