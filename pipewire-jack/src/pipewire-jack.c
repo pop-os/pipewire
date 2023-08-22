@@ -171,6 +171,7 @@ struct object {
 	struct spa_hook proxy_listener;
 	struct spa_hook object_listener;
 	int registered;
+	unsigned int visible;
 	unsigned int removing:1;
 	unsigned int removed:1;
 };
@@ -723,7 +724,7 @@ static struct object *find_port_by_name(struct client *c, const char *name)
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.objects, link) {
-		if (o->type != INTERFACE_Port || o->removed)
+		if (o->type != INTERFACE_Port || o->removed || !o->visible)
 			continue;
 		if (spa_streq(o->port.name, name) ||
 		    spa_streq(o->port.alias1, name) ||
@@ -1056,6 +1057,7 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 		break;
 	case NOTIFY_TYPE_PORTREGISTRATION:
 		emit = c->portregistration_callback != NULL && o != NULL;
+		o->visible = arg1;
 		break;
 	case NOTIFY_TYPE_CONNECT:
 		emit = c->connect_callback != NULL && o != NULL;
@@ -3073,11 +3075,18 @@ static void node_info(void *data, const struct pw_node_info *info)
 {
 	struct object *n = data;
 	struct client *c = n->client;
+	const char *str;
 
-	pw_log_info("DSP node %d state change %s", info->id,
-			pw_node_state_as_string(info->state));
+	if (info->change_mask & PW_NODE_CHANGE_MASK_PROPS) {
+		str = spa_dict_lookup(info->props, PW_KEY_NODE_ALWAYS_PROCESS);
+		n->node.is_jack = str ? spa_atob(str) : false;
+	}
 
-	n->node.is_running = (info->state == PW_NODE_STATE_RUNNING);
+	n->node.is_running = !n->node.is_jack || (info->state == PW_NODE_STATE_RUNNING);
+
+	pw_log_debug("DSP node %d %08"PRIx64" jack:%u state change %s running:%d", info->id,
+			info->change_mask, n->node.is_jack,
+			pw_node_state_as_string(info->state), n->node.is_running);
 
 	if (info->change_mask & PW_NODE_CHANGE_MASK_STATE) {
 		struct object *p;
@@ -5989,7 +5998,7 @@ const char ** jack_get_ports (jack_client_t *client,
 	count = 0;
 
 	spa_list_for_each(o, &c->context.objects, link) {
-		if (o->type != INTERFACE_Port || o->removed)
+		if (o->type != INTERFACE_Port || o->removed || !o->visible)
 			continue;
 		pw_log_debug("%p: check port type:%d flags:%08lx name:\"%s\"", c,
 				o->port.type_id, o->port.flags, o->port.name);
