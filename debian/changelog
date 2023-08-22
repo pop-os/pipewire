@@ -1,10 +1,10 @@
-pipewire (0.3.78-0) UNRELEASED; urgency=medium
+pipewire (0.3.78-1) unstable; urgency=medium
 
   * New upstream release
   * Drop pipewire-media-session from Recommends fields
       since it is no longer part of Debian, see #1043405
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 22 Aug 2023 12:17:52 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 22 Aug 2023 13:51:52 +0200
 
 pipewire (0.3.77-1) unstable; urgency=low
 
