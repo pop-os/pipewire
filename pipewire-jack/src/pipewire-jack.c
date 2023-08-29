@@ -86,12 +86,12 @@ struct notify {
 #define NOTIFY_TYPE_REGISTRATION	((1<<4))
 #define NOTIFY_TYPE_PORTREGISTRATION	((2<<4)|NOTIFY_ACTIVE_FLAG)
 #define NOTIFY_TYPE_CONNECT		((3<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_GRAPH		((4<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_BUFFER_FRAMES	((5<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_SAMPLE_RATE		((6<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_FREEWHEEL		((7<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_SHUTDOWN		((8<<4)|NOTIFY_ACTIVE_FLAG)
-#define NOTIFY_TYPE_LATENCY		((9<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_BUFFER_FRAMES	((4<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_SAMPLE_RATE		((5<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_FREEWHEEL		((6<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_SHUTDOWN		((7<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_LATENCY		((8<<4)|NOTIFY_ACTIVE_FLAG)
+#define NOTIFY_TYPE_TOTAL_LATENCY	((9<<4)|NOTIFY_ACTIVE_FLAG)
 	int type;
 	struct object *object;
 	int arg1;
@@ -248,6 +248,8 @@ struct port {
 	struct spa_io_buffers io;
 	struct spa_list mix;
 	struct mix *global_mix;
+
+	struct port *tied;
 
 	unsigned int empty_out:1;
 	unsigned int zeroed:1;
@@ -719,12 +721,20 @@ static bool is_port_default(struct client *c, struct object *o)
 	return false;
 }
 
+static inline bool client_port_visible(struct client *c, struct object *o)
+{
+	if (o->port.port != NULL && o->port.port->client == c)
+		return true;
+	return o->visible;
+}
+
 static struct object *find_port_by_name(struct client *c, const char *name)
 {
 	struct object *o;
 
 	spa_list_for_each(o, &c->context.objects, link) {
-		if (o->type != INTERFACE_Port || o->removed || !o->visible)
+		if (o->type != INTERFACE_Port || o->removed ||
+		    (!client_port_visible(c, o)))
 			continue;
 		if (spa_streq(o->port.name, name) ||
 		    spa_streq(o->port.alias1, name) ||
@@ -901,12 +911,6 @@ jack_get_version_string(void)
 	return name;
 }
 
-static void recompute_latencies(struct client *c)
-{
-	do_callback(c, latency_callback, c->active, JackCaptureLatency, c->latency_arg);
-	do_callback(c, latency_callback, c->active, JackPlaybackLatency, c->latency_arg);
-}
-
 #define freeze_callbacks(c)		\
 ({					\
 	(c)->frozen_callbacks++;	\
@@ -929,7 +933,7 @@ static void emit_callbacks(struct client *c)
 	int32_t avail;
 	uint32_t index;
 	struct notify *notify;
-	bool do_graph = false;
+	bool do_graph = false, do_recompute_capture = false, do_recompute_playback = false;
 
 	if (c->frozen_callbacks != 0 || !c->pending_callbacks)
 		return;
@@ -982,10 +986,7 @@ static void emit_callbacks(struct client *c)
 					c->connect_arg);
 
 			do_graph = true;
-			break;
-		case NOTIFY_TYPE_GRAPH:
-			pw_log_debug("%p: graph", c);
-			do_graph = true;
+			do_recompute_capture = do_recompute_playback = true;
 			break;
 		case NOTIFY_TYPE_BUFFER_FRAMES:
 			pw_log_debug("%p: buffer frames %d", c, notify->arg1);
@@ -993,7 +994,7 @@ static void emit_callbacks(struct client *c)
 				do_callback_expr(c, c->buffer_frames = notify->arg1,
 						bufsize_callback, c->active,
 						notify->arg1, c->bufsize_arg);
-				recompute_latencies(c);
+				do_recompute_capture = do_recompute_playback = true;
 			}
 			break;
 		case NOTIFY_TYPE_SAMPLE_RATE:
@@ -1020,7 +1021,14 @@ static void emit_callbacks(struct client *c)
 			break;
 		case NOTIFY_TYPE_LATENCY:
 			pw_log_debug("%p: latency %d", c, notify->arg1);
-			do_callback(c, latency_callback, c->active, notify->arg1, c->latency_arg);
+			if (notify->arg1 == JackCaptureLatency)
+				do_recompute_capture = true;
+			else if (notify->arg1 == JackPlaybackLatency)
+				do_recompute_playback = true;
+			break;
+		case NOTIFY_TYPE_TOTAL_LATENCY:
+			pw_log_debug("%p: total latency", c);
+			do_recompute_capture = do_recompute_playback = true;
 			break;
 		default:
 			break;
@@ -1036,10 +1044,13 @@ static void emit_callbacks(struct client *c)
 		index += sizeof(struct notify);
 		spa_ringbuffer_read_update(&c->notify_ring, index);
 	}
-	if (do_graph) {
-		recompute_latencies(c);
+	if (do_recompute_capture)
+		do_callback(c, latency_callback, c->active, JackCaptureLatency, c->latency_arg);
+	if (do_recompute_playback)
+		do_callback(c, latency_callback, c->active, JackPlaybackLatency, c->latency_arg);
+	if (do_graph)
 		do_callback(c, graph_callback, c->active, c->graph_arg);
-	}
+
 	thaw_callbacks(c);
 	pw_log_debug("%p: leave", c);
 }
@@ -1050,6 +1061,7 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	uint32_t index;
 	struct notify *notify;
 	bool emit = false;
+	int res = 0;
 
 	switch (type) {
 	case NOTIFY_TYPE_REGISTRATION:
@@ -1061,9 +1073,6 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 		break;
 	case NOTIFY_TYPE_CONNECT:
 		emit = c->connect_callback != NULL && o != NULL;
-		break;
-	case NOTIFY_TYPE_GRAPH:
-		emit = c->graph_callback != NULL || c->latency_callback != NULL;
 		break;
 	case NOTIFY_TYPE_BUFFER_FRAMES:
 		emit = c->bufsize_callback != NULL;
@@ -1078,6 +1087,7 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 		emit = c->info_shutdown_callback != NULL || c->shutdown_callback != NULL;
 		break;
 	case NOTIFY_TYPE_LATENCY:
+	case NOTIFY_TYPE_TOTAL_LATENCY:
 		emit = c->latency_callback != NULL;
 		break;
 	default:
@@ -1086,8 +1096,10 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	if (!emit || ((type & NOTIFY_ACTIVE_FLAG) && !c->active)) {
 		switch (type) {
 		case NOTIFY_TYPE_BUFFER_FRAMES:
-			if (!emit)
+			if (!emit) {
 				c->buffer_frames = arg1;
+				queue_notify(c, NOTIFY_TYPE_TOTAL_LATENCY, NULL, 0, NULL);
+			}
 			break;
 		case NOTIFY_TYPE_SAMPLE_RATE:
 			if (!emit)
@@ -1100,13 +1112,15 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 			o->removing = false;
 			free_object(c, o);
 		}
-		return 0;
+		return res;
 	}
 
+	pthread_mutex_lock(&c->context.lock);
 	filled = spa_ringbuffer_get_write_index(&c->notify_ring, &index);
 	if (filled < 0 || filled + sizeof(struct notify) > NOTIFY_BUFFER_SIZE) {
 		pw_log_warn("%p: notify queue full %d", c, type);
-		return -ENOSPC;
+		res = -ENOSPC;
+		goto done;
 	}
 
 	notify = SPA_PTROFF(c->notify_buffer, index & NOTIFY_BUFFER_MASK, struct notify);
@@ -1120,7 +1134,9 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 	spa_ringbuffer_write_update(&c->notify_ring, index);
 	c->pending_callbacks = true;
 	check_callbacks(c);
-	return 0;
+done:
+	pthread_mutex_unlock(&c->context.lock);
+	return res;
 }
 
 static void on_notify_event(void *data, uint64_t count)
@@ -1421,22 +1437,27 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 
 static inline void process_empty(struct port *p, uint32_t frames)
 {
-	void *ptr;
+	void *ptr, *src = p->emptyptr;
+	struct port *tied = p->tied;
+
+	if (SPA_UNLIKELY(tied != NULL)) {
+		if ((src = tied->get_buffer(tied, frames)) == NULL)
+			src = p->emptyptr;
+	}
 
 	switch (p->object->port.type_id) {
 	case TYPE_ID_AUDIO:
 		ptr = get_buffer_output(p, frames, sizeof(float), NULL);
 		if (SPA_LIKELY(ptr != NULL))
-			memcpy(ptr, p->emptyptr, frames * sizeof(float));
+			memcpy(ptr, src, frames * sizeof(float));
 		break;
 	case TYPE_ID_MIDI:
 	{
 		struct buffer *b;
 		ptr = get_buffer_output(p, MAX_BUFFER_FRAMES, 1, &b);
-		if (SPA_LIKELY(ptr != NULL)) {
-			b->datas[0].chunk->size = convert_from_midi(p->emptyptr,
+		if (SPA_LIKELY(ptr != NULL))
+			b->datas[0].chunk->size = convert_from_midi(src,
 					ptr, MAX_BUFFER_FRAMES * sizeof(float));
-		}
 		break;
 	}
 	default:
@@ -1449,7 +1470,7 @@ static void prepare_output(struct port *p, uint32_t frames)
 {
 	struct mix *mix;
 
-	if (SPA_UNLIKELY(p->empty_out))
+	if (SPA_UNLIKELY(p->empty_out || p->tied))
 		process_empty(p, frames);
 
 	spa_list_for_each(mix, &p->mix, port_link) {
@@ -1464,6 +1485,15 @@ static void complete_process(struct client *c, uint32_t frames)
 	struct mix *mix;
 	union pw_map_item *item;
 
+	pw_array_for_each(item, &c->ports[SPA_DIRECTION_OUTPUT].items) {
+                if (pw_map_item_is_free(item))
+			continue;
+		p = item->data;
+		if (!p->valid)
+			continue;
+		prepare_output(p, frames);
+		p->io.status = SPA_STATUS_NEED_DATA;
+	}
 	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
                 if (pw_map_item_is_free(item))
 			continue;
@@ -1475,15 +1505,6 @@ static void complete_process(struct client *c, uint32_t frames)
 				mix->io->status = SPA_STATUS_NEED_DATA;
 		}
         }
-	pw_array_for_each(item, &c->ports[SPA_DIRECTION_OUTPUT].items) {
-                if (pw_map_item_is_free(item))
-			continue;
-		p = item->data;
-		if (!p->valid)
-			continue;
-		prepare_output(p, frames);
-		p->io.status = SPA_STATUS_NEED_DATA;
-	}
 }
 
 static inline void debug_position(struct client *c, jack_position_t *p)
@@ -5265,15 +5286,32 @@ const char ** jack_port_get_all_connections (const jack_client_t *client,
 SPA_EXPORT
 int jack_port_tie (jack_port_t *src, jack_port_t *dst)
 {
-	pw_log_warn("not implemented %p %p", src, dst);
-	return -ENOTSUP;
+	struct object *s = (struct object *) src;
+	struct object *d = (struct object *) dst;
+	struct port *sp, *dp;
+
+	sp = s->port.port;
+	dp = d->port.port;
+	if (sp == NULL || !sp->valid ||
+	    dp == NULL || !dp->valid ||
+	    sp->client != dp->client)
+		return -EINVAL;
+
+	dp->tied = sp;
+	return 0;
 }
 
 SPA_EXPORT
 int jack_port_untie (jack_port_t *port)
 {
-	pw_log_warn("not implemented %p", port);
-	return -ENOTSUP;
+	struct object *o = (struct object *) port;
+	struct port *p;
+
+	p = o->port.port;
+	if (p == NULL || !p->valid)
+		return -EINVAL;
+	p->tied = NULL;
+	return 0;
 }
 
 SPA_EXPORT
@@ -5860,9 +5898,7 @@ SPA_EXPORT
 int jack_recompute_total_latencies (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
-	queue_notify(c, NOTIFY_TYPE_LATENCY, NULL, JackCaptureLatency, NULL);
-	queue_notify(c, NOTIFY_TYPE_LATENCY, NULL, JackPlaybackLatency, NULL);
-	return 0;
+	return queue_notify(c, NOTIFY_TYPE_TOTAL_LATENCY, NULL, 0, NULL);
 }
 
 static jack_nframes_t port_get_latency (jack_port_t *port)

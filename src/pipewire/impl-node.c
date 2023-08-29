@@ -434,20 +434,27 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 
 static int suspend_node(struct pw_impl_node *this)
 {
-	struct impl *impl = SPA_CONTAINER_OF(this, struct impl, this);
 	int res = 0;
 	struct pw_impl_port *p;
-	bool active = this->active;
 
 	pw_log_debug("%p: suspend node state:%s", this,
 			pw_node_state_as_string(this->info.state));
 
-	if (this->info.state != PW_NODE_STATE_ERROR &&
-	    impl->pending_state != PW_NODE_STATE_IDLE)
+	if (this->info.state > 0 && this->info.state <= PW_NODE_STATE_SUSPENDED)
 		return 0;
 
-	this->active = false;
 	node_deactivate(this);
+
+	pw_log_debug("%p: suspend node driving:%d driver:%d added:%d", this,
+			this->driving, this->driver, this->added);
+
+	res = spa_node_send_command(this->node,
+				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Suspend));
+	if (res == -ENOTSUP)
+		res = spa_node_send_command(this->node,
+				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
+	if (res < 0 && res != -EIO)
+		pw_log_warn("%p: suspend node error %s", this, spa_strerror(res));
 
 	spa_list_for_each(p, &this->input_ports, link) {
 		if ((res = pw_impl_port_set_param(p, SPA_PARAM_Format, 0, NULL)) < 0)
@@ -465,19 +472,7 @@ static int suspend_node(struct pw_impl_node *this)
 		p->state = PW_IMPL_PORT_STATE_CONFIGURE;
 	}
 
-	pw_log_debug("%p: suspend node driving:%d driver:%d added:%d", this,
-			this->driving, this->driver, this->added);
-
-	res = spa_node_send_command(this->node,
-				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Suspend));
-	if (res == -ENOTSUP)
-		res = spa_node_send_command(this->node,
-				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_Pause));
-	if (res < 0 && res != -EIO)
-		pw_log_warn("%p: suspend node error %s", this, spa_strerror(res));
-
 	node_update_state(this, PW_NODE_STATE_SUSPENDED, 0, NULL);
-	this->active = active;
 
 	return res;
 }
@@ -1801,7 +1796,12 @@ static int node_ready(void *data, int status)
 		 * help drivers that don't support this yet */
 		if (SPA_UNLIKELY(node->rt.position->clock.duration != node->rt.position->clock.target_duration ||
 		    node->rt.position->clock.rate.denom != node->rt.position->clock.target_rate.denom)) {
-			pw_log_warn("driver %s did not update duration/rate", node->name);
+			pw_log_warn("driver %s did not update duration/rate (%"PRIu64"/%"PRIu64" %u/%u)",
+					node->name,
+					node->rt.position->clock.duration,
+					node->rt.position->clock.target_duration,
+					node->rt.position->clock.rate.denom,
+					node->rt.position->clock.target_rate.denom);
 			node->rt.position->clock.duration = node->rt.position->clock.target_duration;
 			node->rt.position->clock.rate = node->rt.position->clock.target_rate;
 		}
