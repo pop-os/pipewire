@@ -1,3 +1,10 @@
+pipewire (0.3.79-0) UNRELEASED; urgency=medium
+
+  * New upstream release
+      - Make it easier to add a custom profile in ACP (Closes: #1050293)
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 29 Aug 2023 10:38:31 +0200
+
 pipewire (0.3.78-1) unstable; urgency=medium
 
   * New upstream release
