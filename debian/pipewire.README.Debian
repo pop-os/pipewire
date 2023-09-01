@@ -55,8 +55,8 @@ ALSA.
 pipewire-alsa conflicts with pulseaudio because both try to take control of
 all ALSA devices and redirect all audio streams to them. But, because of their
 respective configs files name:
-- PipeWire:	/etc/alsa/conf.d/99-pipewire-default.conf
-- PulseAudio:	/etc/alsa/conf.d/99-pulse.conf
+- PipeWire:     /etc/alsa/conf.d/99-pipewire-default.conf
+- PulseAudio:   /etc/alsa/conf.d/99-pulse.conf
 which make PulseAudio ordered after PipeWire. PulseAudio will take the
 final control of ALSA clients even when pipewire-alsa is installed. Thus,
 to allow ALSA clients redirecting output to pipewire, pulseaudio package
@@ -88,13 +88,13 @@ Your system has real-time priority limits for a good reason. This allows it
 to remain stable in case a process goes crazy. RTKit allows limited use of
 real-time priority without the risk of locking up the system if a real-time
 task starts spinning.
-Some upstream recommendations for real-time [1] are to increase these limits to
+Some upstream recommendations for real-time [3] are to increase these limits to
 bypass RTKit or to disable most of its safeguards. By following them, your
 system could be blocked if a process goes wrong.
 These performance tweaks are not needed for a normal use of pipewire, instead
 modifying pipewire configuration is enough.
 
-[1] https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/Performance-tuning#rlimits
+[3] https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/Performance-tuning#rlimits
 
 The "pipewire" package creates a system group called "pipewire".
 The upstream recommended priority limits for this group are defined in:
@@ -104,3 +104,45 @@ The upstream recommended priority limits for this group are defined in:
 To enable these limits for your user, add it to the "pipewire" group.
 
 * sudo adduser yourusername pipewire
+
+
+After upgrading pipewire
+------------------------
+
+A system-level upgrade of pipewire will *not* automatically restart
+all pipewire-related user-level services (such as "pipewire-pulse").
+After an upgrade of pipewire, there are three main ways to restart
+services.
+
+1. The least disruptive way to restart services is a command such as
+
+$ systemctl --user restart wireplumber pipewire pipewire-pulse
+
+You may check the output of "pw-dump" to see if you forgot to restart
+some services, e.g.
+
+$ pw-dump |grep -nE "core\.(version|name)|process\.binary"
+
+or you may use "checkrestart" [4] or "needrestart" [5] with
+sudo or as root user.
+
+2. Another way to restart services is by restarting your user session.
+On a desktop computer this typically means exiting your X or Wayland
+session and restarting it. On a mobile phone this typically means
+restarting "phosh" if phosh is your phone shell:
+
+$ sudo systemctl restart phosh
+
+3. The most sure (and most disruptive) way to restart the pipewire
+related services is to reboot your computer.
+
+[4] https://tracker.debian.org/pkg/debian-goodies
+[5] https://tracker.debian.org/pkg/needrestart
+
+
+Other troubleshooting
+---------------------
+
+See the Debian wiki page [6] and the upstream wiki [3].
+
+[6] https://wiki.debian.org/PipeWire
