@@ -12,6 +12,16 @@ else
 DOCS=enabled
 endif
 
+built_binaries := $(shell dh_listpackages)
+
+ifneq ($(filter %-tests,$(built_binaries)),)
+INSTTEST=enabled
+SDL2=enabled
+else
+INSTTEST=disabled
+SDL2=disabled
+endif
+
 ifneq (,$(filter s390x hppa m68k powerpc ppc64 sparc64,$(DEB_HOST_ARCH)))
 BLUEZ5_CODEC_LDAC=disabled
 else
@@ -52,10 +62,11 @@ override_dh_auto_configure:
 		-Dlibmysofa=$(LIBMYSOFA) \
 		-Ddocs=$(DOCS) \
 		-Dffmpeg=disabled \
-		-Dinstalled_tests=enabled \
+		-Dinstalled_tests=$(INSTTEST) \
 		-Dlv2=$(LV2) \
 		-Dman=enabled \
 		-Droc=disabled \
+		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
 		-Dtest=enabled \
 		-Dvideotestsrc=enabled \

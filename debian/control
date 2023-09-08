@@ -29,7 +29,7 @@ Build-Depends: debhelper-compat (= 13),
                libpulse-dev,
                libreadline-dev,
                libsbc-dev,
-               libsdl2-dev,
+               libsdl2-dev <!noinsttest>,
                libsndfile1-dev,
                libssl-dev,
                libsystemd-dev [linux-any],
@@ -328,6 +328,7 @@ Description: PipeWire V4L2 plugin
  This package contains the V4L2 plugin.
 
 Package: pipewire-tests
+Build-Profiles: <!noinsttest>
 Architecture: linux-any
 Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
 Section: misc
