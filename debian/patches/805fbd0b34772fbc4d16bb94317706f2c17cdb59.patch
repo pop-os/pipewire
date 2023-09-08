@@ -1,0 +1,29 @@
+From 805fbd0b34772fbc4d16bb94317706f2c17cdb59 Mon Sep 17 00:00:00 2001
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Wed, 6 Sep 2023 21:32:48 +0200
+Subject: [PATCH] meson: remove -ffast-math
+
+It can cause crashes in some cases and does not seem to cause much
+performance loss on x86.
+
+Fixes #3489
+---
+ spa/plugins/audioconvert/meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/spa/plugins/audioconvert/meson.build b/spa/plugins/audioconvert/meson.build
+index f8e56f1778..93424a98c4 100644
+--- a/spa/plugins/audioconvert/meson.build
++++ b/spa/plugins/audioconvert/meson.build
+@@ -15,7 +15,7 @@ audioconvert_c = static_library('audioconvert_c',
+     'peaks-ops-c.c',
+     'resample-native-c.c',
+     'fmt-ops-c.c' ],
+-  c_args : ['-Ofast', '-ffast-math'],
++  c_args : ['-Ofast'],
+   dependencies : [ spa_dep ],
+   install : false
+   )
+-- 
+GitLab
+

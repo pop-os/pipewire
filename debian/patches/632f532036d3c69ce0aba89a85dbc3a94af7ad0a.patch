@@ -1,0 +1,51 @@
+From 632f532036d3c69ce0aba89a85dbc3a94af7ad0a Mon Sep 17 00:00:00 2001
+From: Wim Taymans <wtaymans@redhat.com>
+Date: Thu, 7 Sep 2023 17:44:30 +0200
+Subject: [PATCH] audioconvert: don't use -Ofast on alpha
+
+I can crash when using denormalized floats.
+
+Fixes #3489
+---
+ spa/plugins/audioconvert/meson.build | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/spa/plugins/audioconvert/meson.build b/spa/plugins/audioconvert/meson.build
+index 93424a98c..dfc1dcc45 100644
+--- a/spa/plugins/audioconvert/meson.build
++++ b/spa/plugins/audioconvert/meson.build
+@@ -7,6 +7,13 @@ audioconvert_sources = [
+ simd_cargs = []
+ simd_dependencies = []
+ 
++opt_flags = []
++if host_machine.cpu_family() != 'alpha'
++  opt_flags += '-Ofast'
++else
++  opt_flags += '-O3'
++endif
++
+ audioconvert_c = static_library('audioconvert_c',
+   [ 'channelmix-ops-c.c',
+     'biquad.c',
+@@ -15,7 +22,7 @@ audioconvert_c = static_library('audioconvert_c',
+     'peaks-ops-c.c',
+     'resample-native-c.c',
+     'fmt-ops-c.c' ],
+-  c_args : ['-Ofast'],
++  c_args : [ opt_flags ],
+   dependencies : [ spa_dep ],
+   install : false
+   )
+@@ -27,7 +34,7 @@ if have_sse
+       'volume-ops-sse.c',
+       'peaks-ops-sse.c',
+       'channelmix-ops-sse.c' ],
+-    c_args : [sse_args, '-Ofast', '-DHAVE_SSE'],
++    c_args : [sse_args, opt_flags, '-DHAVE_SSE'],
+     dependencies : [ spa_dep ],
+     install : false
+     )
+-- 
+GitLab
+
