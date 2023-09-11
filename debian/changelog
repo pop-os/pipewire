@@ -1,3 +1,17 @@
+pipewire (0.3.79-2) unstable; urgency=medium
+
+  [ Boud Roukema ]
+  * pipewire.README.Debian: Include 3 ways of restarting pipewire-related
+      services (Closes: #1050498)
+
+  [ Dylan Aïssi ]
+  * Cherry-pick upstream patches to fix build on alpha (Closes: #1051128)
+  * Add noinsttest build profile (Closes: #1051191)
+  * Use a wildcard in d/libpipewire-0.3-modules.install to facilitate
+      downstream packaging (Closes: #1040330)
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 11 Sep 2023 12:12:58 +0200
+
 pipewire (0.3.79-1) unstable; urgency=medium
 
   * New upstream release
