@@ -1,8 +1,15 @@
-pipewire (0.3.80-0) UNRELEASED; urgency=medium
+pipewire (0.3.80-1) experimental; urgency=medium
 
   * New upstream release
+  * Drop patches included in upstream release
+  * Disable webrtc-audio-processing in Build-Deps:
+      pipewire now requires webrtc-audio-processing >= 1.2 which is not yet
+      available in Debian. Therefore the echo-canceller module is not built
+      anymore, and because this module is used and upstream advised against
+      disabling it, new verions of pipewire will only target experimental until
+      we can re-enable it.
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 14 Sep 2023 14:49:12 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 14 Sep 2023 15:59:17 +0200
 
 pipewire (0.3.79-2) unstable; urgency=medium
 
