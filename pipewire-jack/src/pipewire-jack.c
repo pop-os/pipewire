@@ -247,6 +247,7 @@ struct port {
 
 	struct spa_io_buffers io;
 	struct spa_list mix;
+	uint32_t n_mix;
 	struct mix *global_mix;
 
 	struct port *tied;
@@ -526,6 +527,27 @@ static void free_object(struct client *c, struct object *o)
 
 }
 
+struct io_info {
+	struct mix *mix;
+	void *data;
+};
+
+static int
+do_mix_set_io(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
+{
+	struct io_info *info = user_data;
+	info->mix->io = info->data;
+	return 0;
+}
+
+static inline void mix_set_io(struct mix *mix, void *data)
+{
+	struct io_info info = { .mix = mix, .data = data };
+	pw_data_loop_invoke(mix->port->client->loop,
+		do_mix_set_io, SPA_ID_INVALID, NULL, 0, true, &info);
+}
+
 static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32_t peer_id)
 {
 	pw_log_debug("create %p mix:%d peer:%d", port, mix_id, peer_id);
@@ -538,6 +560,8 @@ static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32
 	spa_list_init(&mix->queue);
 	if (mix_id == SPA_ID_INVALID)
 		port->global_mix = mix;
+	else if (port->n_mix++ == 0 && port->global_mix != NULL)
+		mix_set_io(port->global_mix, &port->io);
 }
 static struct mix *find_mix_peer(struct client *c, uint32_t peer_id)
 {
@@ -618,10 +642,14 @@ static int clear_buffers(struct client *c, struct mix *mix)
 
 static void free_mix(struct client *c, struct mix *mix)
 {
+	struct port *port = mix->port;
+
 	clear_buffers(c, mix);
 	spa_list_remove(&mix->port_link);
 	if (mix->id == SPA_ID_INVALID)
-		mix->port->global_mix = NULL;
+		port->global_mix = NULL;
+	else if (--port->n_mix == 0 && port->global_mix != NULL)
+		mix_set_io(port->global_mix, NULL);
 	spa_list_remove(&mix->link);
 	spa_list_append(&c->free_mix, &mix->link);
 }
@@ -1108,9 +1136,12 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 		}
 		pw_log_debug("%p: skip notify %08x active:%d emit:%d", c, type,
 				c->active, emit);
-		if (o != NULL && arg1 == 0 && o->removing) {
-			o->removing = false;
-			free_object(c, o);
+		if (o != NULL) {
+			o->registered = arg1;
+			if (arg1 == 0 && o->removing) {
+				o->removing = false;
+				free_object(c, o);
+			}
 		}
 		return res;
 	}
@@ -1395,6 +1426,7 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 	void *ptr = NULL;
 	struct buffer *b;
 	struct spa_data *d;
+	struct spa_io_buffers *io;
 
 	if (frames == 0 || !p->valid)
 		return NULL;
@@ -1402,20 +1434,21 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 	if (SPA_UNLIKELY((mix = p->global_mix) == NULL))
 		return NULL;
 
-	pw_log_trace_fp("%p: port %s %d get buffer %d n_buffers:%d",
-			c, p->object->port.name, p->port_id, frames, mix->n_buffers);
+	pw_log_trace_fp("%p: port %s %d get buffer %d n_buffers:%d io:%p",
+			c, p->object->port.name, p->port_id, frames,
+			mix->n_buffers, mix->io);
 
-	if (SPA_UNLIKELY(mix->n_buffers == 0))
+	if (SPA_UNLIKELY((io = mix->io) == NULL))
 		return NULL;
 
-	if (p->io.status == SPA_STATUS_HAVE_DATA &&
-	    p->io.buffer_id < mix->n_buffers) {
-		b = &mix->buffers[p->io.buffer_id];
+	if (io->status == SPA_STATUS_HAVE_DATA &&
+	    io->buffer_id < mix->n_buffers) {
+		b = &mix->buffers[io->buffer_id];
 		d = &b->datas[0];
 	} else {
-		if (p->io.buffer_id < mix->n_buffers) {
-			reuse_buffer(c, mix, p->io.buffer_id);
-			p->io.buffer_id = SPA_ID_INVALID;
+		if (io->buffer_id < mix->n_buffers) {
+			reuse_buffer(c, mix, io->buffer_id);
+			io->buffer_id = SPA_ID_INVALID;
 		}
 		if (SPA_UNLIKELY((b = dequeue_buffer(c, mix)) == NULL)) {
 			pw_log_warn("port %p: out of buffers", p);
@@ -1426,8 +1459,8 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 		d->chunk->size = frames * sizeof(float);
 		d->chunk->stride = stride;
 
-		p->io.status = SPA_STATUS_HAVE_DATA;
-		p->io.buffer_id = b->id;
+		io->status = SPA_STATUS_HAVE_DATA;
+		io->buffer_id = b->id;
 	}
 	ptr = d->data;
 	if (buf)
@@ -1469,14 +1502,19 @@ static inline void process_empty(struct port *p, uint32_t frames)
 static void prepare_output(struct port *p, uint32_t frames)
 {
 	struct mix *mix;
+	struct spa_io_buffers *io;
 
 	if (SPA_UNLIKELY(p->empty_out || p->tied))
 		process_empty(p, frames);
 
+	if (p->global_mix == NULL || (io = p->global_mix->io) == NULL)
+		return;
+
 	spa_list_for_each(mix, &p->mix, port_link) {
 		if (SPA_LIKELY(mix->io != NULL))
-			*mix->io = p->io;
+			*mix->io = *io;
 	}
+	io->status = SPA_STATUS_NEED_DATA;
 }
 
 static void complete_process(struct client *c, uint32_t frames)
@@ -1492,7 +1530,6 @@ static void complete_process(struct client *c, uint32_t frames)
 		if (!p->valid)
 			continue;
 		prepare_output(p, frames);
-		p->io.status = SPA_STATUS_NEED_DATA;
 	}
 	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
                 if (pw_map_item_is_free(item))
@@ -2405,7 +2442,6 @@ static int port_set_latency(struct client *c, struct port *p,
 
 	if (param == NULL)
 		return 0;
-
 	if ((res = spa_latency_parse(param, &info)) < 0)
 		return res;
 
@@ -2685,7 +2721,7 @@ static int client_node_port_set_io(void *data,
 
 	switch (id) {
 	case SPA_IO_Buffers:
-                mix->io = ptr;
+		mix_set_io(mix, ptr);
 		break;
 	default:
 		break;
@@ -2811,6 +2847,9 @@ static int client_node_port_set_mix_info(void *data,
 	}
 
 	mix = find_mix(c, p, mix_id);
+
+	pw_log_debug("%p: port %p mix:%d peer_id:%u info:%p", c, p, mix_id,
+			peer_id, props);
 
 	if (peer_id == SPA_ID_INVALID) {
 		if (mix == NULL) {
@@ -3110,15 +3149,23 @@ static void node_info(void *data, const struct pw_node_info *info)
 			pw_node_state_as_string(info->state), n->node.is_running);
 
 	if (info->change_mask & PW_NODE_CHANGE_MASK_STATE) {
-		struct object *p;
+		struct object *p, *l;
 		spa_list_for_each(p, &c->context.objects, link) {
 			if (p->type != INTERFACE_Port || p->removed ||
 			    p->port.node_id != info->id)
 				continue;
 			if (n->node.is_running)
 				queue_notify(c, NOTIFY_TYPE_PORTREGISTRATION, p, 1, NULL);
-			else
+			else {
+				spa_list_for_each(l, &c->context.objects, link) {
+					if (l->type != INTERFACE_Link || l->removed ||
+					    (l->port_link.src_serial != p->serial &&
+					     l->port_link.dst_serial != p->serial))
+						continue;
+					queue_notify(c, NOTIFY_TYPE_CONNECT, l, 0, NULL);
+				}
 				queue_notify(c, NOTIFY_TYPE_PORTREGISTRATION, p, 0, NULL);
+			}
 		}
 	}
 }
@@ -4141,7 +4188,11 @@ int jack_activate (jack_client_t *client)
 	pw_thread_loop_lock(c->context.loop);
 	freeze_callbacks(c);
 
+	/* reemit buffer_frames */
+	c->buffer_frames = 0;
+
 	pw_data_loop_start(c->loop);
+	c->active = true;
 
 	if ((res = do_activate(c)) < 0)
 		goto done;
@@ -4149,17 +4200,18 @@ int jack_activate (jack_client_t *client)
 	c->activation->pending_new_pos = true;
 	c->activation->pending_sync = true;
 
-	c->active = true;
-
 	spa_list_for_each(o, &c->context.objects, link) {
 		if (o->type != INTERFACE_Port || o->port.port == NULL ||
 		    o->port.port->client != c || !o->port.port->valid)
 			continue;
+		o->registered = 0;
 		queue_notify(c, NOTIFY_TYPE_PORTREGISTRATION, o, 1, NULL);
 	}
 done:
-	if (res < 0)
+	if (res < 0) {
+		c->active = false;
 		pw_data_loop_stop(c->loop);
+	}
 
 	pw_log_debug("%p: activate result:%d", c, res);
 	thaw_callbacks(c);

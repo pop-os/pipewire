@@ -526,6 +526,26 @@ static enum spa_bt_profile get_codec_profile(const struct media_codec *codec,
 	}
 }
 
+static enum spa_bt_profile swap_profile(enum spa_bt_profile profile)
+{
+	switch (profile) {
+	case SPA_BT_PROFILE_A2DP_SOURCE:
+		return SPA_BT_PROFILE_A2DP_SINK;
+	case SPA_BT_PROFILE_A2DP_SINK:
+		return SPA_BT_PROFILE_A2DP_SOURCE;
+	case SPA_BT_PROFILE_BAP_SOURCE:
+		return SPA_BT_PROFILE_BAP_SINK;
+	case SPA_BT_PROFILE_BAP_SINK:
+		return SPA_BT_PROFILE_BAP_SOURCE;
+	case SPA_BT_PROFILE_BAP_BROADCAST_SOURCE:
+		return SPA_BT_PROFILE_BAP_BROADCAST_SINK;
+	case SPA_BT_PROFILE_BAP_BROADCAST_SINK:
+		return SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
+	default:
+		return SPA_BT_PROFILE_NULL;
+	}
+}
+
 static bool endpoint_should_be_registered(struct spa_bt_monitor *monitor,
 					  const struct media_codec *codec,
 					  enum spa_bt_media_direction direction)
@@ -2230,11 +2250,11 @@ static bool device_props_ready(struct spa_bt_device *device)
 	return device->adapter && device->address;
 }
 
-bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const struct media_codec *codec, bool sink)
+bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const struct media_codec *codec, enum spa_bt_profile profile)
 {
 	struct spa_bt_monitor *monitor = device->monitor;
 	struct spa_bt_remote_endpoint *ep;
-	enum spa_bt_profile codec_profile;
+	enum spa_bt_profile codec_target_profile;
 	struct spa_bt_transport *t;
 	const struct { enum spa_bluetooth_audio_codec codec; uint32_t mask; } quirks[] = {
 		{ SPA_BLUETOOTH_AUDIO_CODEC_SBC_XQ, SPA_BT_FEATURE_SBC_XQ },
@@ -2270,17 +2290,14 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 			return false;
 	}
 
-	spa_list_for_each(ep, &device->remote_endpoint_list, device_link) {
-		enum spa_bt_profile profile = spa_bt_profile_from_uuid(ep->uuid);
-		if (codec->bap) {
-			if ((profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK) || (profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE))
-				codec_profile = sink ? SPA_BT_PROFILE_BAP_BROADCAST_SINK : SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
-			else
-				codec_profile = sink ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_BAP_SOURCE;
-		} else
-			codec_profile = sink ? SPA_BT_PROFILE_A2DP_SINK : SPA_BT_PROFILE_A2DP_SOURCE;
+	for (i = 0, codec_target_profile = 0; i < (size_t)SPA_BT_MEDIA_DIRECTION_LAST; ++i)
+		if (codec_has_direction(codec, i))
+			codec_target_profile |= swap_profile(get_codec_profile(codec, i));
 
-		if (profile != codec_profile)
+	spa_list_for_each(ep, &device->remote_endpoint_list, device_link) {
+		enum spa_bt_profile ep_profile = spa_bt_profile_from_uuid(ep->uuid);
+
+		if (!(ep_profile & codec_target_profile & profile))
 			continue;
 
 		if (media_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len,
@@ -2296,15 +2313,7 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 	 * can only know that the currently configured codec is supported.
 	 */
 	spa_list_for_each(t, &device->transport_list, device_link) {
-		if (codec->bap) {
-			if((t->profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK) || (t->profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE))
-				codec_profile = sink ? SPA_BT_PROFILE_BAP_BROADCAST_SINK : SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
-			else
-				codec_profile = sink ? SPA_BT_PROFILE_BAP_SINK : SPA_BT_PROFILE_BAP_SOURCE;
-		} else
-			codec_profile = sink ? SPA_BT_PROFILE_A2DP_SINK : SPA_BT_PROFILE_A2DP_SOURCE;
-
-		if (t->profile != codec_profile)
+		if (!(t->profile & codec_target_profile & profile))
 			continue;
 
 		if (codec == t->media_codec)
@@ -2314,7 +2323,7 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 	return false;
 }
 
-const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_bt_device *device, size_t *count, bool sink)
+const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_bt_device *device, size_t *count)
 {
 	struct spa_bt_monitor *monitor = device->monitor;
 	const struct media_codec * const * const media_codecs = monitor->media_codecs;
@@ -2329,7 +2338,7 @@ const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_b
 
 	j = 0;
 	for (i = 0; media_codecs[i] != NULL; ++i) {
-		if (spa_bt_device_supports_media_codec(device, media_codecs[i], sink)) {
+		if (spa_bt_device_supports_media_codec(device, media_codecs[i], device->connected_profiles)) {
 			supported_codecs[j] = media_codecs[i];
 			++j;
 		}
@@ -2373,10 +2382,17 @@ static struct spa_bt_remote_endpoint *remote_endpoint_find(struct spa_bt_monitor
 	return NULL;
 }
 
-static struct spa_bt_device* create_bcast_device(struct spa_bt_monitor *monitor,
-											const char *object_path)
+static struct spa_bt_device *create_bcast_device(struct spa_bt_monitor *monitor, const char *object_path)
 {	
 	struct spa_bt_device *d;
+	struct spa_bt_adapter *adapter;
+
+	adapter = adapter_find(monitor, object_path);
+	if (adapter == NULL) {
+		spa_log_warn(monitor->log, "unknown adapter %s", object_path);
+		return NULL;
+	}
+
 	d = device_create(monitor, object_path);
 	if (d == NULL) {
 		spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
@@ -2384,22 +2400,12 @@ static struct spa_bt_device* create_bcast_device(struct spa_bt_monitor *monitor,
 		return NULL;
 	}
 
-	d->adapter = adapter_find(monitor, object_path);
-	if (d->adapter == NULL) {
-		spa_log_warn(monitor->log, "unknown adapter %s", d->adapter_path);
-	}
-	d->adapter_path = d->adapter->path;
-	d->alias = strdup("bcast_device");
-	d->name = strdup("bcast_device");
+	d->adapter = adapter;
+	d->adapter_path = strdup(adapter->path);
+	d->alias = strdup(adapter->alias);
+	d->name = strdup(adapter->name);
 	d->address = strdup("00:00:00:00:00:00");
-	
-	spa_bt_device_check_profiles(d, false);
-	d->reconnect_state = BT_DEVICE_RECONNECT_INIT;
-
-	if (!device_props_ready(d))
-	{
-		return NULL;
-	}
+	d->reconnect_state = BT_DEVICE_RECONNECT_STOP;
 
 	device_update_hw_volume_profiles(d);
 
@@ -2439,6 +2445,7 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 			}
 			else if (spa_streq(key, "Device")) {
 				struct spa_bt_device *device;
+
 				device = spa_bt_device_find(monitor, value);
 				if (device == NULL) {
 					/*
@@ -2447,11 +2454,11 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 					* This is done because BlueZ sets the adapter as the device
 					* that is connected to for a broadcast sink endpoint/transport.
 					*/
-					if(spa_streq(remote_endpoint->uuid, SPA_BT_UUID_BAP_BROADCAST_SINK)) {
+					if (spa_streq(remote_endpoint->uuid, SPA_BT_UUID_BAP_BROADCAST_SINK)) {
 						device = create_bcast_device(monitor, value);
-						if(device == NULL) {
+						if (device == NULL)
 							goto next;
-						}
+
 						remote_endpoint->acceptor = true;
 						device_set_connected(device, 1);
 					} else {
@@ -3048,29 +3055,9 @@ static int transport_update_props(struct spa_bt_transport *transport,
 			spa_log_debug(monitor->log, "transport %p: %s=%s", transport, key, value);
 
 			if (spa_streq(key, "UUID")) {
-				switch (spa_bt_profile_from_uuid(value)) {
-				case SPA_BT_PROFILE_A2DP_SOURCE:
-					transport->profile = SPA_BT_PROFILE_A2DP_SINK;
-					break;
-				case SPA_BT_PROFILE_A2DP_SINK:
-					transport->profile = SPA_BT_PROFILE_A2DP_SOURCE;
-					break;
-				case SPA_BT_PROFILE_BAP_SOURCE:
-					transport->profile = SPA_BT_PROFILE_BAP_SINK;
-					break;
-				case SPA_BT_PROFILE_BAP_SINK:
-					transport->profile = SPA_BT_PROFILE_BAP_SOURCE;
-					break;
-				case SPA_BT_PROFILE_BAP_BROADCAST_SOURCE:
-					transport->profile = SPA_BT_PROFILE_BAP_BROADCAST_SINK;
-					break;
-				case SPA_BT_PROFILE_BAP_BROADCAST_SINK:
-					transport->profile = SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
-					break;
-				default:
+				transport->profile = swap_profile(spa_bt_profile_from_uuid(value));
+				if (transport->profile == SPA_BT_PROFILE_NULL)
 					spa_log_warn(monitor->log, "unknown profile %s", value);
-					break;
-				}
 			}
 			else if (spa_streq(key, "State")) {
 				enum spa_bt_transport_state state  = spa_bt_transport_state_from_string(value);
@@ -4154,7 +4141,7 @@ int spa_bt_device_ensure_media_codec(struct spa_bt_device *device, const struct 
 	}
 
 	for (i = 0; codecs[i] != NULL; ++i) {
-		if (spa_bt_device_supports_media_codec(device, codecs[i], true)) {
+		if (spa_bt_device_supports_media_codec(device, codecs[i], device->connected_profiles)) {
 			preferred_codec = codecs[i];
 			break;
 		}

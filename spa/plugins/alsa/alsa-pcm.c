@@ -920,7 +920,7 @@ static int add_rate(struct state *state, uint32_t scale, uint32_t interleave, bo
 		min = max = rate;
 
 	if (rate == 0)
-		rate = state->position ? state->position->clock.rate.denom : DEFAULT_RATE;
+		rate = state->position ? state->position->clock.target_rate.denom : DEFAULT_RATE;
 
 	rate = SPA_CLAMP(rate, min, max);
 
@@ -1349,6 +1349,17 @@ static int enum_dsd_formats(struct state *state, uint32_t index, uint32_t *next,
 	return 1;
 }
 
+/* find smaller power of 2 */
+static uint32_t flp2(uint32_t x)
+{
+	x = x | (x >> 1);
+	x = x | (x >> 2);
+	x = x | (x >> 4);
+	x = x | (x >> 8);
+	x = x | (x >> 16);
+	return x - (x >> 1);
+}
+
 int
 spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 		     const struct spa_pod *filter)
@@ -1426,6 +1437,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	unsigned int periods;
 	bool match = true, planar = false, is_batch;
 	char spdif_params[128] = "";
+	uint32_t default_period, latency;
 
 	spa_log_debug(state->log, "opened:%d format:%d started:%d", state->opened,
 			state->have_format, state->started);
@@ -1651,12 +1663,15 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	period_size = state->default_period_size;
 	is_batch = snd_pcm_hw_params_is_batch(params) && !state->disable_batch;
 
+	default_period = SPA_SCALE32_UP(DEFAULT_PERIOD, state->rate, DEFAULT_RATE);
+	default_period = flp2(2 * default_period - 1);
+
 	/* no period size specified. If we are batch or not using timers,
 	 * use the graph duration as the period */
 	if (period_size == 0 && (is_batch || state->disable_tsched))
-		period_size = state->position ? state->position->clock.target_duration : DEFAULT_PERIOD;
+		period_size = state->position ? state->position->clock.target_duration : default_period;
 	if (period_size == 0)
-		period_size = DEFAULT_PERIOD;
+		period_size = default_period;
 
 	if (!state->disable_tsched) {
 		if (is_batch) {
@@ -1664,7 +1679,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 			 * the period smaller and add one period of headroom. Limit the
 			 * period size to our default so that we don't create too much
 			 * headroom. */
-			period_size = SPA_MIN(period_size, DEFAULT_PERIOD) / 2;
+			period_size = SPA_MIN(period_size, default_period) / 2;
 		} else {
 			/* disable ALSA wakeups */
 			if (snd_pcm_hw_params_can_disable_period_wakeup(params))
@@ -1723,9 +1738,12 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
 	state->start_delay = state->default_start_delay;
 
+	latency = SPA_MAX(state->min_delay, SPA_MIN(state->max_delay, state->headroom));
+	if (state->position != NULL)
+		latency = SPA_SCALE32_UP(latency, state->position->clock.target_rate.denom, state->rate);
+
 	state->latency[state->port_direction].min_rate =
-		state->latency[state->port_direction].max_rate =
-			SPA_MAX(state->min_delay, SPA_MIN(state->max_delay, state->headroom));
+		state->latency[state->port_direction].max_rate = latency;
 
 	spa_log_info(state->log, "%s (%s): format:%s access:%s-%s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd "
@@ -1931,16 +1949,15 @@ static int alsa_recover(struct state *state, int err)
 
 		delay = SPA_TIMEVAL_TO_USEC(&diff);
 		missing = delay * state->rate / SPA_USEC_PER_SEC;
-		if (missing == 0)
-			missing = state->threshold;
+		missing += state->start_delay + state->threshold + state->headroom;
 
 		spa_log_trace(state->log, "%p: xrun of %"PRIu64" usec %"PRIu64,
 				state, delay, missing);
 
-		if (state->clock)
-			state->clock->xrun += missing;
-		state->sample_count += missing;
-
+		if (state->clock) {
+			state->clock->xrun += SPA_SCALE32_UP(missing,
+					state->clock->rate.denom, state->rate);
+		}
 		spa_node_call_xrun(&state->callbacks,
 				SPA_TIMEVAL_TO_USEC(&trigger), delay, NULL);
 		break;
@@ -1977,16 +1994,16 @@ recover:
 
 static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
 {
-	int res, missed;
+	int res, suppressed;
 	snd_pcm_sframes_t avail;
 
 	if (SPA_UNLIKELY((avail = snd_pcm_avail(state->hndl)) < 0)) {
 		if ((res = alsa_recover(state, avail)) < 0)
 			return res;
 		if ((avail = snd_pcm_avail(state->hndl)) < 0) {
-			if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-				spa_log_warn(state->log, "%s: (%d missed) snd_pcm_avail after recover: %s",
-						state->props.device, missed, snd_strerror(avail));
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+				spa_log_warn(state->log, "%s: (%d suppressed) snd_pcm_avail after recover: %s",
+						state->props.device, suppressed, snd_strerror(avail));
 			}
 			avail = state->threshold * 2;
 		}
@@ -2001,9 +2018,9 @@ static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes
 		uint64_t then;
 
 		if ((res = snd_pcm_htimestamp(state->hndl, &havail, &tstamp)) < 0) {
-			if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-				spa_log_warn(state->log, "%s: (%d missed) snd_pcm_htimestamp error: %s",
-					state->props.device, missed, snd_strerror(res));
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+				spa_log_warn(state->log, "%s: (%d suppressed) snd_pcm_htimestamp error: %s",
+					state->props.device, suppressed, snd_strerror(res));
 			}
 			return avail;
 		}
@@ -2029,9 +2046,9 @@ static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes
 					state->htimestamp_error = 0;
 					state->htimestamp = false;
 				}
-				else if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-					spa_log_warn(state->log, "%s: (%d missed) impossible htimestamp diff:%"PRIi64,
-						state->props.device, missed, diff);
+				else if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+					spa_log_warn(state->log, "%s: (%d suppressed) impossible htimestamp diff:%"PRIi64,
+						state->props.device, suppressed, diff);
 				}
 			}
 		}
@@ -2205,8 +2222,15 @@ static inline int check_position_config(struct state *state)
 	if (SPA_UNLIKELY(state->position  == NULL))
 		return 0;
 
-	target_duration = state->position->clock.target_duration;
-	target_rate = state->position->clock.target_rate;
+	if (state->disable_tsched && state->started && !state->following) {
+		target_duration = state->period_frames;
+		target_rate = SPA_FRACTION(1, state->rate);
+		state->position->clock.target_duration = target_duration;
+		state->position->clock.target_rate = target_rate;
+	} else {
+		target_duration = state->position->clock.target_duration;
+		target_rate = state->position->clock.target_rate;
+	}
 
 	if (SPA_UNLIKELY((state->duration != target_duration) ||
 	    (state->rate_denom != target_rate.denom))) {
@@ -2229,7 +2253,7 @@ int spa_alsa_write(struct state *state)
 	const snd_pcm_channel_area_t *my_areas;
 	snd_pcm_uframes_t written, frames, offset, off, to_write, total_written, max_write;
 	snd_pcm_sframes_t commitres;
-	int res, missed;
+	int res, suppressed;
 	size_t frame_size = state->frame_size;
 
 	if ((res = check_position_config(state)) < 0)
@@ -2257,11 +2281,11 @@ int spa_alsa_write(struct state *state)
 			else
 				lev = SPA_LOG_LEVEL_INFO;
 
-			if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
 				spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
-						"target:%ld thr:%u, resync (%d missed)",
+						"target:%ld thr:%u, resync (%d suppressed)",
 						state->props.device, avail, delay,
-						target, state->threshold, missed);
+						target, state->threshold, suppressed);
 			}
 
 			if (avail > target)
@@ -2467,7 +2491,7 @@ int spa_alsa_read(struct state *state)
 	const snd_pcm_channel_area_t *my_areas;
 	snd_pcm_uframes_t read, frames, offset;
 	snd_pcm_sframes_t commitres;
-	int res, missed;
+	int res, suppressed;
 
 	if ((res = check_position_config(state)) < 0)
 		return res;
@@ -2494,10 +2518,10 @@ int spa_alsa_read(struct state *state)
 			else
 				lev = SPA_LOG_LEVEL_INFO;
 
-			if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
 				spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u, "
-						"resync (%d missed)", state->props.device, delay,
-						target, state->threshold, missed);
+						"resync (%d suppressed)", state->props.device, delay,
+						target, state->threshold, suppressed);
 			}
 
 			if (avail < target)
@@ -2676,7 +2700,7 @@ static void alsa_wakeup_event(struct spa_source *source)
 	struct state *state = source->data;
 	snd_pcm_uframes_t avail, delay, target;
 	uint64_t expire, current_time;
-	int res, missed;
+	int res, suppressed;
 
 	if (SPA_UNLIKELY(state->disable_tsched)) {
 		/* ALSA poll fds need to be "demangled" to know whether it's a real wakeup */
@@ -2748,12 +2772,12 @@ done:
 	if (!state->disable_tsched &&
 			(state->next_time > current_time + SPA_NSEC_PER_SEC ||
 			 current_time > state->next_time + SPA_NSEC_PER_SEC)) {
-		if ((missed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
+		if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
 			spa_log_error(state->log, "%s: impossible timeout %lu %lu %lu %"
-					PRIu64" %"PRIu64" %"PRIi64" %d %"PRIi64" (%d missed)",
+					PRIu64" %"PRIu64" %"PRIi64" %d %"PRIi64" (%d suppressed)",
 					state->props.device, avail, delay, target,
 					current_time, state->next_time, state->next_time - current_time,
-					state->threshold, state->sample_count, missed);
+					state->threshold, state->sample_count, suppressed);
 		}
 		state->next_time = current_time + state->threshold * 1e9 / state->rate;
 	}
