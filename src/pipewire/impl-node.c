@@ -1105,9 +1105,9 @@ static void check_states(struct pw_impl_node *driver, uint64_t nsec)
 	struct pw_node_activation *na = driver->rt.target.activation;
 	struct spa_io_clock *cl = &na->position.clock;
 	enum spa_log_level level = SPA_LOG_LEVEL_DEBUG;
-	int missed;
+	int suppressed;
 
-	if ((missed = spa_ratelimit_test(&driver->rt.rate_limit, nsec)) >= 0)
+	if ((suppressed = spa_ratelimit_test(&driver->rt.rate_limit, nsec)) >= 0)
 		level = SPA_LOG_LEVEL_INFO;
 
 	spa_list_for_each(t, &driver->rt.target_list, link) {
@@ -1121,11 +1121,11 @@ static void check_states(struct pw_impl_node *driver, uint64_t nsec)
 		    a->status == PW_NODE_ACTIVATION_AWAKE) {
 			update_xrun_stats(a, nsec / 1000, 0);
 
-			pw_log(level, "(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s (%u missed)",
+			pw_log(level, "(%s-%u) client too slow! rate:%u/%u pos:%"PRIu64" status:%s (%u suppressed)",
 				t->name, t->id,
 				(uint32_t)(cl->rate.num * cl->duration), cl->rate.denom,
 				cl->position, str_status(a->status),
-				missed);
+				suppressed);
 		}
 		pw_log_debug("(%s-%u) state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 				" waiting:%"PRIu64" process:%"PRIu64" status:%s sync:%d",
@@ -1900,11 +1900,11 @@ static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_po
 	struct pw_node_activation *da = this->rt.driver_target.activation;
 	struct spa_system *data_system = this->data_system;
 	uint64_t nsec = get_time_ns(data_system);
-	int missed;
+	int suppressed;
 
 	update_xrun_stats(a, trigger, delay);
 
-	if ((missed = spa_ratelimit_test(&this->rt.rate_limit, nsec)) >= 0) {
+	if ((suppressed = spa_ratelimit_test(&this->rt.rate_limit, nsec)) >= 0) {
 		struct spa_fraction rate;
 		if (da) {
 			struct spa_io_clock *cl = &da->position.clock;
@@ -1914,11 +1914,11 @@ static int node_xrun(void *data, uint64_t trigger, uint64_t delay, struct spa_po
 			rate = SPA_FRACTION(0,0);
 		}
 		pw_log_info("(%s-%d) XRun! rate:%u/%u count:%u time:%"PRIu64
-				" delay:%"PRIu64" max:%"PRIu64" (%d missed)",
+				" delay:%"PRIu64" max:%"PRIu64" (%d suppressed)",
 				this->name, this->info.id,
 				rate.num, rate.denom, a->xrun_count,
 				trigger, delay, a->max_delay,
-				missed);
+				suppressed);
 	}
 
 	pw_impl_node_rt_emit_xrun(this);
@@ -2133,7 +2133,6 @@ struct result_node_params_data {
 			uint32_t id, uint32_t index, uint32_t next,
 			struct spa_pod *param);
 	int seq;
-	uint32_t count;
 	unsigned int cache:1;
 };
 
@@ -2147,11 +2146,8 @@ static void result_node_params(void *data, int seq, int res, uint32_t type, cons
 		const struct spa_result_node_params *r = result;
 		if (d->seq == seq) {
 			d->callback(d->data, seq, r->id, r->index, r->next, r->param);
-			if (d->cache) {
-				if (d->count++ == 0)
-					pw_param_add(&impl->pending_list, seq, r->id, NULL);
+			if (d->cache)
 				pw_param_add(&impl->pending_list, seq, r->id, r->param);
-			}
 		}
 		break;
 	}
@@ -2172,7 +2168,7 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 {
 	int res;
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
-	struct result_node_params_data user_data = { impl, data, callback, seq, 0, false };
+	struct result_node_params_data user_data = { impl, data, callback, seq, false };
 	struct spa_hook listener;
 	struct spa_param_info *pi;
 	static const struct spa_node_events node_events = {
@@ -2225,6 +2221,9 @@ int pw_impl_node_for_each_param(struct pw_impl_node *node,
 	} else {
 		user_data.cache = impl->cache_params &&
 			(filter == NULL && index == 0 && max == UINT32_MAX);
+
+		if (user_data.cache)
+			pw_param_add(&impl->pending_list, seq, param_id, NULL);
 
 		spa_zero(listener);
 		spa_node_add_listener(node->node, &listener, &node_events, &user_data);

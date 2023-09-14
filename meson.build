@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.79',
+  version : '0.3.80',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -49,7 +49,9 @@ pipewire_configdir = pipewire_sysconfdir / 'pipewire'
 pipewire_confdatadir = pipewire_datadir / 'pipewire'
 modules_install_dir = pipewire_libdir / pipewire_name
 
-if host_machine.system() == 'linux'
+cc = meson.get_compiler('c')
+
+if cc.has_header('features.h') and cc.get_define('__GLIBC__', prefix: '#include <features.h>') != ''
   # glibc ld.so interprets ${LIB} in a library loading path with an
   # appropriate value for the current architecture, typically something
   # like lib, lib64 or lib/x86_64-linux-gnu.
@@ -71,8 +73,6 @@ alsadatadir = pipewire_datadir / 'alsa-card-profile' / 'mixer'
 pipewire_headers_dir = pipewire_name / 'pipewire'
 
 pkgconfig = import('pkgconfig')
-
-cc = meson.get_compiler('c')
 
 common_flags = [
   '-fvisibility=hidden',
@@ -375,8 +375,8 @@ summary({'gstreamer-device-provider': gst_dp_found}, bool_yn: true, section: 'Ba
 
 cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', get_option('gstreamer-device-provider').allowed())
 
-webrtc_dep = dependency('webrtc-audio-processing',
-  version : ['>= 0.2', '< 1.0'],
+webrtc_dep = dependency('webrtc-audio-processing-1',
+  version : ['>= 1.2' ],
   required : get_option('echo-cancel-webrtc'))
 summary({'WebRTC Echo Canceling': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 cdata.set('HAVE_WEBRTC', webrtc_dep.found())

@@ -9,6 +9,7 @@
 
 #include <spa/pod/parser.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/tag-utils.h>
 #include <spa/node/utils.h>
 #include <spa/utils/names.h>
 #include <spa/utils/string.h>
@@ -16,6 +17,7 @@
 #include <spa/debug/types.h>
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
+#include <spa/debug/pod.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -444,7 +446,7 @@ static int process_latency_param(void *data, int seq,
 	struct pw_impl_port *this = data;
 	struct spa_latency_info latency;
 
-	if (id != SPA_PARAM_Latency)
+	if (id != SPA_PARAM_Latency || param == NULL)
 		return -EINVAL;
 
 	if (spa_latency_parse(param, &latency) < 0)
@@ -461,6 +463,37 @@ static int process_latency_param(void *data, int seq,
 	this->latency[latency.direction] = latency;
 	if (latency.direction == this->direction)
 		pw_impl_port_emit_latency_changed(this);
+
+	return 0;
+}
+static int process_tag_param(void *data, int seq,
+		uint32_t id, uint32_t index, uint32_t next, struct spa_pod *param)
+{
+	struct pw_impl_port *this = data;
+	struct spa_tag_info info;
+	struct spa_pod *old;
+	void *state = NULL;
+
+	if (id != SPA_PARAM_Tag || param == NULL)
+		return -EINVAL;
+	if (spa_tag_parse(param, &info, &state) < 0)
+		return 0;
+
+	old = this->tag[info.direction];
+
+	if (spa_tag_compare(old, param) == 0)
+		return 0;
+
+	pw_log_debug("port %p: got %s tag %p", this,
+			pw_direction_as_string(info.direction), param);
+	if (param)
+		pw_log_pod(SPA_LOG_LEVEL_DEBUG, param);
+
+	free(old);
+	this->tag[info.direction] = spa_pod_copy(param);
+
+	if (info.direction == this->direction)
+		pw_impl_port_emit_tag_changed(this);
 
 	return 0;
 }
@@ -513,6 +546,13 @@ static void update_info(struct pw_impl_port *port, const struct spa_port_info *i
 				if (port->node != NULL)
 					pw_impl_port_for_each_param(port, 0, id, 0, UINT32_MAX,
 							NULL, process_latency_param, port);
+				break;
+			case SPA_PARAM_Tag:
+				port->have_tag_param =
+					SPA_FLAG_IS_SET(info->params[i].flags, SPA_PARAM_INFO_WRITE);
+				if (port->node != NULL)
+					pw_impl_port_for_each_param(port, 0, id, 0, UINT32_MAX,
+							NULL, process_tag_param, port);
 				break;
 			default:
 				break;
@@ -1061,6 +1101,7 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 
 	pw_impl_port_for_each_param(port, 0, SPA_PARAM_IO, 0, 0, NULL, check_param_io, port);
 	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Latency, 0, 0, NULL, process_latency_param, port);
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Tag, 0, 0, NULL, process_tag_param, port);
 
 	nprops = pw_impl_node_get_properties(node);
 	media_class = pw_properties_get(nprops, PW_KEY_MEDIA_CLASS);
@@ -1310,6 +1351,8 @@ void pw_impl_port_destroy(struct pw_impl_port *port)
 
 	pw_param_clear(&impl->param_list, SPA_ID_INVALID);
 	pw_param_clear(&impl->pending_list, SPA_ID_INVALID);
+	free(port->tag[SPA_DIRECTION_INPUT]);
+	free(port->tag[SPA_DIRECTION_OUTPUT]);
 
 	pw_map_clear(&port->mix_port_map);
 
@@ -1325,7 +1368,6 @@ struct result_port_params_data {
 			uint32_t id, uint32_t index, uint32_t next,
 			struct spa_pod *param);
 	int seq;
-	uint32_t count;
 	unsigned int cache:1;
 };
 
@@ -1339,11 +1381,8 @@ static void result_port_params(void *data, int seq, int res, uint32_t type, cons
 		const struct spa_result_node_params *r = result;
 		if (d->seq == seq) {
 			d->callback(d->data, seq, r->id, r->index, r->next, r->param);
-			if (d->cache) {
-				if (d->count++ == 0)
-					pw_param_add(&impl->pending_list, seq, r->id, NULL);
+			if (d->cache)
 				pw_param_add(&impl->pending_list, seq, r->id, r->param);
-			}
 		}
 		break;
 	}
@@ -1365,7 +1404,7 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 	int res;
 	struct impl *impl = SPA_CONTAINER_OF(port, struct impl, this);
 	struct pw_impl_node *node = port->node;
-	struct result_port_params_data user_data = { impl, data, callback, seq, 0, false };
+	struct result_port_params_data user_data = { impl, data, callback, seq, false };
 	struct spa_hook listener;
 	struct spa_param_info *pi;
 	static const struct spa_node_events node_events = {
@@ -1418,6 +1457,9 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 	} else {
 		user_data.cache = impl->cache_params &&
 			(filter == NULL && index == 0 && max == UINT32_MAX);
+
+		if (user_data.cache)
+			pw_param_add(&impl->pending_list, seq, param_id, NULL);
 
 		spa_zero(listener);
 		spa_node_add_listener(node->node, &listener, &node_events, &user_data);
@@ -1507,6 +1549,7 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 	struct spa_pod_builder b = { 0 };
 	uint8_t buffer[1024];
 	bool changed;
+	int count = 0;
 
 	if (port->destroying)
 		return 0;
@@ -1529,6 +1572,7 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 					latency.min_quantum, latency.max_quantum,
 					latency.min_rate, latency.max_rate,
 					latency.min_ns, latency.max_ns);
+			count++;
 		}
 	} else {
 		spa_list_for_each(l, &port->links, input_link) {
@@ -1544,13 +1588,16 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 					latency.min_quantum, latency.max_quantum,
 					latency.min_rate, latency.max_rate,
 					latency.min_ns, latency.max_ns);
+			count++;
 		}
 	}
 	spa_latency_info_combine_finish(&latency);
 
-	current = &port->latency[latency.direction];
-
-	changed = spa_latency_info_compare(current, &latency) != 0;
+	current = port->have_latency ? &port->latency[latency.direction] : NULL;
+	if (current == NULL)
+		changed = count > 0;
+	else
+		changed = spa_latency_info_compare(current, &latency) != 0;
 
 	pw_log_info("port %d: %s %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64,
 			port->info.id, changed ? "set" : "keep",
@@ -1562,14 +1609,88 @@ int pw_impl_port_recalc_latency(struct pw_impl_port *port)
 	if (!changed)
 		return 0;
 
-	*current = latency;
+	port->latency[latency.direction] = latency;
+	port->have_latency = count > 0;
 
 	if (!port->have_latency_param)
 		return 0;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	param = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+	param = port->have_latency ? spa_latency_build(&b, SPA_PARAM_Latency, &latency) : NULL;
 	return pw_impl_port_set_param(port, SPA_PARAM_Latency, 0, param);
+}
+
+int pw_impl_port_recalc_tag(struct pw_impl_port *port)
+{
+	struct pw_impl_link *l;
+	struct pw_impl_port *other;
+	struct spa_pod *param, *tag, *old;
+	struct spa_pod_dynamic_builder b = { 0 };
+	struct spa_pod_frame f;
+	struct spa_tag_info info;
+	enum spa_direction direction;
+	uint8_t buffer[1024];
+	int count = 0;
+	bool changed;
+
+	if (port->destroying)
+		return 0;
+
+	direction = SPA_DIRECTION_REVERSE(port->direction);
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
+	spa_tag_build_start(&b.b, &f, SPA_PARAM_Tag, direction);
+
+	if (port->direction == PW_DIRECTION_OUTPUT) {
+		spa_list_for_each(l, &port->links, output_link) {
+			other = l->input;
+			tag = other->tag[other->direction];
+			if (tag) {
+				void *state = NULL;
+				while (spa_tag_parse(tag, &info, &state) == 1) {
+					spa_tag_build_add_info(&b.b, info.info);
+					count++;
+				}
+			}
+		}
+	} else {
+		spa_list_for_each(l, &port->links, input_link) {
+			other = l->output;
+			tag = other->tag[other->direction];
+			if (tag) {
+				void *state = NULL;
+				while (spa_tag_parse(tag, &info, &state) == 1) {
+					spa_tag_build_add_info(&b.b, info.info);
+					count++;
+				}
+			}
+		}
+	}
+	param = count == 0 ? NULL : spa_tag_build_end(&b.b, &f);
+
+	old = port->tag[direction];
+
+	changed = spa_tag_compare(old, param);
+
+	pw_log_info("port %d: %p %s %s tag %p",
+			port->info.id, port, changed ? "set" : "keep",
+			pw_direction_as_string(direction), param);
+
+	if (changed) {
+		free(old);
+		port->tag[direction] = param ? spa_pod_copy(param) : NULL;
+		if (param)
+			pw_log_pod(SPA_LOG_LEVEL_INFO, param);
+	}
+	spa_pod_dynamic_builder_clean(&b);
+
+	if (!changed)
+		return 0;
+
+	if (!port->have_tag_param)
+		return 0;
+
+	return pw_impl_port_set_param(port, SPA_PARAM_Tag, 0, port->tag[direction]);
 }
 
 SPA_EXPORT
