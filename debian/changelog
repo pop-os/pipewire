@@ -1,3 +1,11 @@
+pipewire (0.3.80-2) UNRELEASED; urgency=medium
+
+  * Cherry-pick upstream recommended patch:
+      - 1f1c308c: aec: support both webrtc versions
+  * Re-enable webrtc-audio-processing in Build-Deps
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 15 Sep 2023 14:28:19 +0200
+
 pipewire (0.3.80-1) experimental; urgency=medium
 
   * New upstream release
