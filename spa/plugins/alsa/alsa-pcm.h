@@ -82,6 +82,15 @@ struct card {
 	uint32_t rate;
 };
 
+struct rt_state {
+	struct spa_list followers;
+	struct state *driver;
+	struct spa_list driver_link;
+
+	unsigned int sources_added:1;
+	unsigned int following:1;
+};
+
 struct state {
 	struct spa_handle handle;
 	struct spa_node node;
@@ -97,6 +106,7 @@ struct state {
 	struct card *card;
 	snd_pcm_stream_t stream;
 	snd_output_t *output;
+	char name[64];
 
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
@@ -111,7 +121,9 @@ struct state {
 	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
 
-	bool opened;
+	unsigned int opened:1;
+	unsigned int prepared:1;
+	unsigned int started:1;
 	snd_pcm_t *hndl;
 
 	bool have_format;
@@ -127,9 +139,9 @@ struct state {
 	uint32_t allowed_rates[MAX_RATES];
 	uint32_t n_allowed_rates;
 	struct channel_map default_pos;
-	unsigned int disable_mmap;
-	unsigned int disable_batch;
-	unsigned int disable_tsched;
+	unsigned int disable_mmap:1;
+	unsigned int disable_batch:1;
+	unsigned int disable_tsched:1;
 	char clock_name[64];
 	uint32_t quantum_limit;
 
@@ -141,9 +153,9 @@ struct state {
 	size_t frame_size;
 	size_t frame_scale;
 	int blocks;
-	uint32_t rate_denom;
 	uint32_t delay;
 	uint32_t read_size;
+	uint32_t max_read;
 
 	uint64_t port_info_all;
 	struct spa_port_info port_info;
@@ -169,7 +181,6 @@ struct state {
 
 	size_t ready_offset;
 
-	bool started;
 	/* Either a single source for tsched, or a set of pollfds from ALSA */
 	struct spa_source source[MAX_POLL];
 	int timerfd;
@@ -183,7 +194,9 @@ struct state {
 	uint32_t max_delay;
 	uint32_t htimestamp_error;
 
-	uint32_t duration;
+	struct spa_fraction driver_rate;
+	uint32_t driver_duration;
+
 	unsigned int alsa_started:1;
 	unsigned int alsa_sync:1;
 	unsigned int alsa_sync_warning:1;
@@ -200,6 +213,8 @@ struct state {
 	unsigned int multi_rate:1;
 	unsigned int htimestamp:1;
 	unsigned int is_pro:1;
+	unsigned int sources_added:1;
+	unsigned int linked:1;
 
 	uint64_t iec958_codecs;
 
@@ -222,6 +237,14 @@ struct state {
 	snd_ctl_t *ctl;
 	snd_ctl_elem_value_t *pitch_elem;
 	double last_rate;
+
+	struct spa_list link;
+
+	struct spa_list followers;
+	struct state *driver;
+	struct spa_list driver_link;
+
+	struct rt_state rt;
 };
 
 struct spa_pod *spa_alsa_enum_propinfo(struct state *state,
@@ -240,6 +263,7 @@ int spa_alsa_init(struct state *state, const struct spa_dict *info);
 int spa_alsa_clear(struct state *state);
 
 int spa_alsa_open(struct state *state, const char *params);
+int spa_alsa_prepare(struct state *state);
 int spa_alsa_start(struct state *state);
 int spa_alsa_reassign_follower(struct state *state);
 int spa_alsa_pause(struct state *state);

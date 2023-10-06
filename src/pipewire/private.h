@@ -22,7 +22,7 @@ extern "C" {
 #include <spa/utils/result.h>
 #include <spa/utils/type-info.h>
 
-#if defined(__FreeBSD__) || defined(__MidnightBSD__)
+#if defined(__FreeBSD__) || defined(__MidnightBSD__) || defined(__GNU__)
 struct ucred {
 };
 #endif
@@ -673,6 +673,7 @@ struct pw_impl_node {
 	unsigned int suspend_on_idle:1;
 	unsigned int reconfigure:1;
 	unsigned int forced_rate:1;
+	unsigned int forced_quantum:1;
 	unsigned int trigger:1;		/**< has the TRIGGER property and needs an extra
 					  *  trigger to start processing. */
 	unsigned int can_suspend:1;
@@ -731,6 +732,7 @@ struct pw_impl_node {
 	uint64_t target_quantum;
 
 	uint64_t driver_start;
+	uint64_t elapsed;		/* elapsed time in playing */
 
 	void *user_data;                /**< extra user data */
 };

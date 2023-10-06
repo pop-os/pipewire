@@ -1306,9 +1306,10 @@ again:
 		struct spa_fraction latency = SPA_FRACTION(0, 0);
 		struct spa_fraction max_latency = SPA_FRACTION(0, 0);
 		struct spa_fraction rate = SPA_FRACTION(0, 0);
-		uint32_t quantum, target_rate, current_rate;
+		uint32_t target_quantum, target_rate, current_rate, current_quantum;
 		uint64_t quantum_stamp = 0, rate_stamp = 0;
-		bool force_rate, force_quantum, restore_rate = false;
+		bool force_rate, force_quantum, restore_rate = false, restore_quantum = false;
+		bool do_reconfigure = false, was_target_pending;
 		const uint32_t *node_rates;
 		uint32_t node_n_rates, node_def_rate;
 		uint32_t node_max_quantum, node_min_quantum, node_def_quantum, node_rate_quantum;
@@ -1364,10 +1365,10 @@ again:
 			     fraction_compare(&s->max_latency, &max_latency) < 0))
 				max_latency = s->max_latency;
 
-			/* largest rate */
+			/* largest rate, which is in fact the smallest fraction */
 			if (rate.denom == 0 ||
 			    (s->rate.denom > 0 &&
-			     fraction_compare(&s->rate, &rate) > 0))
+			     fraction_compare(&s->rate, &rate) < 0))
 				rate = s->rate;
 
 			if (s->active)
@@ -1385,6 +1386,12 @@ again:
 			 * forced can restore its rate */
 			pw_log_info("(%s-%u) restore rate", n->name, n->info.id);
 			restore_rate = true;
+		}
+		if (n->forced_quantum && !force_quantum && n->runnable) {
+			/* A node that was forced to a quantum but is no longer being
+			 * forced can restore its quantum */
+			pw_log_info("(%s-%u) restore quantum", n->name, n->info.id);
+			restore_quantum = true;
 		}
 
 		if (force_quantum)
@@ -1416,8 +1423,9 @@ again:
 						rate.denom, target_rate);
 		}
 
+		was_target_pending = n->target_pending;
+
 		if (target_rate != current_rate) {
-			bool do_reconfigure = false;
 			/* we doing a rate switch */
 			pw_log_info("(%s-%u) state:%s new rate:%u/(%u)->%u",
 					n->name, n->info.id,
@@ -1427,23 +1435,17 @@ again:
 
 			if (force_rate) {
 				if (settings->clock_rate_update_mode == CLOCK_RATE_UPDATE_MODE_HARD)
-					do_reconfigure = !n->target_pending;
+					do_reconfigure |= !was_target_pending;
 			} else {
 				if (n->info.state >= PW_NODE_STATE_SUSPENDED)
-					do_reconfigure = !n->target_pending;
+					do_reconfigure |= !was_target_pending;
 			}
-			if (do_reconfigure)
-				reconfigure_driver(context, n);
-
 			/* we're setting the pending rate. This will become the new
 			 * current rate in the next iteration of the graph. */
 			n->target_rate = SPA_FRACTION(1, target_rate);
-			n->target_pending = true;
 			n->forced_rate = force_rate;
+			n->target_pending = true;
 			current_rate = target_rate;
-			/* we might be suspended now and the links need to be prepared again */
-			if (do_reconfigure)
-				goto again;
 		}
 
 		if (node_rate_quantum != 0 && current_rate != node_rate_quantum) {
@@ -1460,26 +1462,42 @@ again:
 				node_max_quantum = tmp;
 		}
 
-		quantum = node_def_quantum;
-		if (latency.denom != 0)
-			quantum = (latency.num * current_rate / latency.denom);
-		quantum = SPA_CLAMP(quantum, node_min_quantum, node_max_quantum);
-		quantum = SPA_MIN(quantum, lim_quantum);
+		current_quantum = n->target_quantum;
+		if (!restore_quantum &&
+		   (lock_quantum || n->reconfigure || !running ||
+		    (!force_quantum && (n->info.state > PW_NODE_STATE_IDLE))))
+			target_quantum = current_quantum;
+		else {
+			target_quantum = node_def_quantum;
+			if (latency.denom != 0)
+				target_quantum = (latency.num * current_rate / latency.denom);
+			target_quantum = SPA_CLAMP(target_quantum, node_min_quantum, node_max_quantum);
+			target_quantum = SPA_MIN(target_quantum, lim_quantum);
 
-		if (settings->clock_power_of_two_quantum)
-			quantum = flp2(quantum);
+			if (settings->clock_power_of_two_quantum)
+				target_quantum = flp2(target_quantum);
+		}
 
-		if (running && quantum != n->target_quantum && !lock_quantum) {
+		if (target_quantum != current_quantum) {
 			pw_log_info("(%s-%u) new quantum:%"PRIu64"->%u",
 					n->name, n->info.id,
 					n->target_quantum,
-					quantum);
+					target_quantum);
 			/* this is the new pending quantum */
-			n->target_quantum = quantum;
+			n->target_quantum = target_quantum;
+			n->forced_quantum = force_quantum;
 			n->target_pending = true;
+
+			if (force_quantum)
+				do_reconfigure |= !was_target_pending;
 		}
 
 		if (n->target_pending) {
+			if (do_reconfigure) {
+				reconfigure_driver(context, n);
+				/* we might be suspended now and the links need to be prepared again */
+				goto again;
+			}
 			/* we have a pending change. We place the new values in the
 			 * pending fields so that they are picked up by the driver in
 			 * the next cycle */
@@ -1501,8 +1519,10 @@ again:
 			n->target_rate = n->rt.position->clock.target_rate;
 		}
 
-		pw_log_debug("%p: driver %p running:%d runnable:%d quantum:%u '%s'",
-				context, n, running, n->runnable, quantum, n->name);
+		pw_log_debug("%p: driver %p running:%d runnable:%d quantum:%u rate:%u (%"PRIu64"/%u)'%s'",
+				context, n, running, n->runnable, target_quantum, target_rate,
+				n->rt.position->clock.target_duration,
+				n->rt.position->clock.target_rate.denom, n->name);
 
 		/* first change the node states of the followers to the new target */
 		spa_list_for_each(s, &n->follower_list, follower_link) {

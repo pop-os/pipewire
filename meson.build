@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '0.3.80',
+  version : '0.3.81',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -23,15 +23,15 @@ endif
 spaversion = '0.2'
 apiversion = '0.3'
 soversion = 0
-libversion = '@0@.@1@.0'.format(soversion, pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int())
+libversion_minor = pipewire_version_major.to_int() * 1000 + pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int()
+libversion = '@0@.@1@.0'.format(soversion, libversion_minor)
 
 # LADI/jack
 # 3, for PipeWire being the third JACK implementation, after JACK1 and jackdmp/JACK2)
 jack_version_major = 3
-jack_version_minor = pipewire_version_minor.to_int() * 100 + pipewire_version_micro.to_int()
+jack_version_minor = libversion_minor
 # libjack[server] version has 0 for major (for compatibility with other implementations),
-# 3 for minor, and "100*pipewire_version_minor + pipewire_version_micro"
-# as micro version (the minor libpipewire soversion number)
+# 3 for minor, and "1000*major + 100*minor + micro" as micro version (the minor libpipewire soversion number)
 libjackversion = '@0@.@1@.@2@'.format(soversion, jack_version_major, jack_version_minor)
 
 pipewire_name = 'pipewire-@0@'.format(apiversion)
@@ -377,9 +377,17 @@ cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', get_option('gstreamer-device-provide
 
 webrtc_dep = dependency('webrtc-audio-processing-1',
   version : ['>= 1.2' ],
-  required : get_option('echo-cancel-webrtc'))
-summary({'WebRTC Echo Canceling': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
-cdata.set('HAVE_WEBRTC', webrtc_dep.found())
+  required : false)
+cdata.set('HAVE_WEBRTC1', webrtc_dep.found())
+if webrtc_dep.found()
+  summary({'WebRTC Echo Canceling >= 1.2': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+else
+  webrtc_dep = dependency('webrtc-audio-processing',
+    version : ['>= 0.2', '< 1.0'],
+    required : get_option('echo-cancel-webrtc'))
+  cdata.set('HAVE_WEBRTC', webrtc_dep.found())
+  summary({'WebRTC Echo Canceling < 1.0': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+endif
 
 # On FreeBSD and MidnightBSD, epoll-shim library is required for eventfd() and timerfd()
 epoll_shim_dep = (host_machine.system() == 'freebsd' or host_machine.system() == 'midnightbsd'
@@ -427,6 +435,7 @@ check_functions = [
   ['reallocarray', '#include <stdlib.h>', ['-D_GNU_SOURCE'], []],
   ['sigabbrev_np', '#include <string.h>', ['-D_GNU_SOURCE'], []],
   ['XSetIOErrorExitHandler', '#include <X11/Xlib.h>', [], [x11_dep]],
+  ['malloc_trim', '#include <malloc.h>', [], []],
 ]
 
 foreach f : check_functions

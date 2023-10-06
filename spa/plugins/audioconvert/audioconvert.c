@@ -370,8 +370,9 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 	}
 	spa_list_init(&port->queue);
 
-	spa_log_info(this->log, "%p: add port %d:%d position:%s %d %d %d",
-			this, direction, port_id, port->position, is_dsp, is_monitor, is_control);
+	spa_log_debug(this->log, "%p: add port %d:%d position:%s %d %d %d",
+			this, direction, port_id, port->position, is_dsp,
+			is_monitor, is_control);
 	emit_port_info(this, port, true);
 
 	return 0;
@@ -1266,8 +1267,9 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 	    (info == NULL || memcmp(&dir->format, info, sizeof(*info)) == 0))
 		return 0;
 
-	spa_log_info(this->log, "%p: port config direction:%d monitor:%d control:%d mode:%d %d", this,
-			direction, monitor, control, mode, dir->n_ports);
+	spa_log_debug(this->log, "%p: port config direction:%d monitor:%d "
+			"control:%d mode:%d %d", this, direction, monitor,
+			control, mode, dir->n_ports);
 
 	for (i = 0; i < dir->n_ports; i++) {
 		spa_node_emit_port_info(&this->hooks, direction, i, NULL);
@@ -2443,6 +2445,53 @@ static inline void dequeue_buffer(struct impl *this, struct port *port, struct b
 	SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_QUEUED);
 }
 
+static void free_tmp(struct impl *this)
+{
+	uint32_t i;
+
+	spa_log_debug(this->log, "free tmp %d", this->empty_size);
+
+	free(this->empty);
+	this->empty = NULL;
+	this->empty_size = 0;
+	free(this->scratch);
+	this->scratch = NULL;
+	free(this->tmp[0]);
+	this->tmp[0] = NULL;
+	free(this->tmp[1]);
+	this->tmp[1] = NULL;
+	for (i = 0; i < MAX_PORTS; i++) {
+		this->tmp_datas[0][i] = NULL;
+		this->tmp_datas[1][i] = NULL;
+	}
+}
+
+static int ensure_tmp(struct impl *this, uint32_t maxsize)
+{
+	if (maxsize > this->empty_size) {
+		float *empty, *scratch, *tmp[2];
+
+		spa_log_debug(this->log, "resize tmp %d -> %d", this->empty_size, maxsize);
+
+		if ((empty = realloc(this->empty, maxsize + MAX_ALIGN)) != NULL)
+			this->empty = empty;
+		if ((scratch = realloc(this->scratch, maxsize + MAX_ALIGN)) != NULL)
+			this->scratch = scratch;
+		if ((tmp[0] = realloc(this->tmp[0], (maxsize + MAX_ALIGN) * MAX_PORTS)) != NULL)
+			this->tmp[0] = tmp[0];
+		if ((tmp[1] = realloc(this->tmp[1], (maxsize + MAX_ALIGN) * MAX_PORTS)) != NULL)
+			this->tmp[1] = tmp[1];
+
+		if (empty == NULL || scratch == NULL || tmp[0] == NULL || tmp[1] == NULL) {
+			free_tmp(this);
+			return -ENOMEM;
+		}
+		memset(this->empty, 0, maxsize + MAX_ALIGN);
+		this->empty_size = maxsize;
+	}
+	return 0;
+}
+
 static int
 impl_node_port_use_buffers(void *object,
 			   enum spa_direction direction,
@@ -2454,6 +2503,7 @@ impl_node_port_use_buffers(void *object,
 	struct impl *this = object;
 	struct port *port;
 	uint32_t i, j, maxsize;
+	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -2510,17 +2560,9 @@ impl_node_port_use_buffers(void *object,
 		if (direction == SPA_DIRECTION_OUTPUT)
 			queue_buffer(this, port, i);
 	}
-	if (maxsize > this->empty_size) {
-		this->empty = realloc(this->empty, maxsize + MAX_ALIGN);
-		this->scratch = realloc(this->scratch, maxsize + MAX_ALIGN);
-		this->tmp[0] = realloc(this->tmp[0], (maxsize + MAX_ALIGN) * MAX_PORTS);
-		this->tmp[1] = realloc(this->tmp[1], (maxsize + MAX_ALIGN) * MAX_PORTS);
-		if (this->empty == NULL || this->scratch == NULL ||
-		    this->tmp[0] == NULL || this->tmp[1] == NULL)
-			return -errno;
-		memset(this->empty, 0, maxsize + MAX_ALIGN);
-		this->empty_size = maxsize;
-	}
+	if ((res = ensure_tmp(this, maxsize)) < 0)
+		return res;
+
 	port->n_buffers = n_buffers;
 
 	return 0;
@@ -3248,10 +3290,7 @@ static int impl_clear(struct spa_handle *handle)
 	free_dir(&this->dir[SPA_DIRECTION_INPUT]);
 	free_dir(&this->dir[SPA_DIRECTION_OUTPUT]);
 
-	free(this->empty);
-	free(this->scratch);
-	free(this->tmp[0]);
-	free(this->tmp[1]);
+	free_tmp(this);
 
 	if (this->resample.free)
 		resample_free(&this->resample);

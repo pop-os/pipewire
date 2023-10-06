@@ -373,9 +373,6 @@ static int negotiate_buffers(struct impl *this)
 	struct spa_data *datas;
 	uint64_t follower_flags, conv_flags;
 
-	if (this->target == this->follower)
-		return 0;
-
 	spa_log_debug(this->log, "%p: n_buffers:%d", this, this->n_buffers);
 
 	if (this->n_buffers > 0)
@@ -516,10 +513,9 @@ static int configure_format(struct impl *this, uint32_t flags, const struct spa_
 	this->have_format = format != NULL;
 	if (format == NULL) {
 		this->n_buffers = 0;
-	} else {
+	} else if (this->target != this->follower) {
 		res = negotiate_buffers(this);
 	}
-
 	return res;
 }
 
@@ -555,7 +551,7 @@ static int recalc_latency(struct impl *this, struct spa_node *src, enum spa_dire
 	struct spa_latency_info latency;
 	int res;
 
-	spa_log_info(this->log, "%p: %d:%d", this, direction, port_id);
+	spa_log_debug(this->log, "%p: %d:%d", this, direction, port_id);
 
 	if (this->target == this->follower)
 		return 0;
@@ -625,7 +621,7 @@ static int reconfigure_mode(struct impl *this, bool passthrough,
 	int res = 0;
 	struct spa_hook l;
 
-	spa_log_info(this->log, "%p: passthrough mode %d", this, passthrough);
+	spa_log_debug(this->log, "%p: passthrough mode %d", this, passthrough);
 
 	if (this->passthrough != passthrough) {
 		if (passthrough) {
@@ -846,9 +842,6 @@ static int negotiate_format(struct impl *this)
 	struct spa_pod_builder b = { 0 };
 	int res;
 
-	if (this->target == this->follower)
-		return 0;
-
 	spa_log_debug(this->log, "%p: have_format:%d", this, this->have_format);
 
 	if (this->have_format)
@@ -920,12 +913,12 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Start:
 		spa_log_debug(this->log, "%p: starting %d", this, this->started);
-		if (this->started)
-			return 0;
-		if ((res = negotiate_format(this)) < 0)
-			return res;
-		if ((res = negotiate_buffers(this)) < 0)
-			return res;
+		if (this->target != this->follower) {
+			if (this->started)
+				return 0;
+			if ((res = negotiate_format(this)) < 0)
+				return res;
+		}
 		this->ready = true;
 		this->warned = false;
 		break;
@@ -1043,7 +1036,7 @@ static void follower_convert_port_info(void *data,
 	uint32_t i;
 	int res;
 
-	spa_log_info(this->log, "%p: convert port info %s %p %08"PRIx64, this,
+	spa_log_debug(this->log, "%p: convert port info %s %p %08"PRIx64, this,
 			this->direction == SPA_DIRECTION_INPUT ?
 				"Input" : "Output", info, info->change_mask);
 
