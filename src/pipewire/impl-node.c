@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <time.h>
+#include <malloc.h>
 
 #include <spa/support/system.h>
 #include <spa/pod/parser.h>
@@ -1321,6 +1322,7 @@ static void reset_position(struct pw_impl_node *this, struct spa_io_position *po
 
 	this->target_rate = SPA_FRACTION(1, rate);
 	this->target_quantum = quantum;
+	this->elapsed = 0;
 
 	pos->clock.rate = pos->clock.target_rate = this->target_rate;
 	pos->clock.duration = pos->clock.target_duration = this->target_quantum;
@@ -1744,8 +1746,10 @@ static inline void update_position(struct pw_impl_node *node, int all_ready, uin
 		if (all_ready)
 			a->position.state = SPA_IO_POSITION_STATE_RUNNING;
 	}
-	if (SPA_LIKELY(a->position.state != SPA_IO_POSITION_STATE_RUNNING))
-		a->position.offset += a->position.clock.duration;
+	if (SPA_LIKELY(a->position.state == SPA_IO_POSITION_STATE_RUNNING))
+		node->elapsed += a->position.clock.duration;
+
+	a->position.offset = a->position.clock.position - node->elapsed;
 }
 
 /* Called from the data-loop and it is the starting point for driver nodes.
@@ -2103,6 +2107,11 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 
 	spa_system_close(node->data_system, node->source.fd);
 	free(impl);
+
+#ifdef HAVE_MALLOC_TRIM
+	int res = malloc_trim(0);
+	pw_log_debug("malloc_trim(): %d", res);
+#endif
 }
 
 SPA_EXPORT

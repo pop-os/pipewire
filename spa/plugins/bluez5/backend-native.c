@@ -1915,11 +1915,12 @@ static const struct spa_bt_transport_implementation sco_transport_impl = {
 	.destroy = sco_destroy_cb,
 };
 
-static struct rfcomm *device_find_rfcomm(struct impl *backend, struct spa_bt_device *device)
+static struct rfcomm *device_find_rfcomm(struct impl *backend, struct spa_bt_device *device,
+		enum spa_bt_profile profile)
 {
 	struct rfcomm *rfcomm;
 	spa_list_for_each(rfcomm, &backend->rfcomm_list, link) {
-		if (rfcomm->device == device)
+		if (rfcomm->device == device && (rfcomm->profile & profile))
 			return rfcomm;
 	}
 	return NULL;
@@ -1931,8 +1932,8 @@ static int backend_native_supports_codec(void *data, struct spa_bt_device *devic
 	struct impl *backend = data;
 	struct rfcomm *rfcomm;
 
-	rfcomm = device_find_rfcomm(backend, device);
-	if (rfcomm == NULL || rfcomm->profile != SPA_BT_PROFILE_HFP_HF)
+	rfcomm = device_find_rfcomm(backend, device, SPA_BT_PROFILE_HFP_HF);
+	if (rfcomm == NULL)
 		return -ENOTSUP;
 
 	if (codec == HFP_AUDIO_CODEC_CVSD)
@@ -2097,10 +2098,12 @@ static int backend_native_ensure_codec(void *data, struct spa_bt_device *device,
 	int res;
 
 	res = backend_native_supports_codec(data, device, codec);
-	if (res <= 0)
+	if (res < 0)
+		return res;
+	else if (!res)
 		return -EINVAL;
 
-	rfcomm = device_find_rfcomm(backend, device);
+	rfcomm = device_find_rfcomm(backend, device, SPA_BT_PROFILE_HFP_HF);
 	if (rfcomm == NULL)
 		return -ENOTSUP;
 
@@ -2399,7 +2402,7 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 	DBusMessageIter it[4];
 	dbus_bool_t autoconnect;
 	dbus_uint16_t version, chan, features;
-	char *str;
+	const char *str;
 
 	if (!(backend->enabled_profiles & spa_bt_profile_from_uuid(uuid)))
 		return -ECANCELED;

@@ -44,6 +44,7 @@
 #include <pipewire/i18n.h>
 
 #include "module-raop/rtsp-client.h"
+#include "module-rtp/rtp.h"
 
 /** \page page_module_raop_sink PipeWire Module: AirPlay Sink
  *
@@ -137,8 +138,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #endif
 #define MD5_HASH_LENGTH (2*MD5_DIGEST_LENGTH)
 
-#define DEFAULT_USER_AGENT	"iTunes/11.0.4 (Windows; N)"
-#define DEFAULT_USER_NAME	"iTunes"
+#define DEFAULT_USER_NAME	"PipeWire"
+#define RAOP_AUTH_USER_NAME	"iTunes"
 
 #define MAX_PORT_RETRY	128
 
@@ -147,9 +148,9 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_CHANNELS 2
 #define DEFAULT_POSITION "[ FL FR ]"
 
-#define VOLUME_MAX  0.0
-#define VOLUME_DEF -30.0
-#define VOLUME_MIN -144.0
+#define VOLUME_MAX	0.0
+#define VOLUME_MIN	-30.0
+#define VOLUME_MUTE	-144.0
 
 #define MODULE_USAGE	"( raop.ip=<ip address of host> ) "					\
 			"( raop.port=<remote port> ) "						\
@@ -228,13 +229,14 @@ struct impl {
 
 	unsigned int do_disconnect:1;
 
-	uint8_t key[AES_CHUNK_SIZE]; /* Key for aes-cbc */
-	uint8_t iv[AES_CHUNK_SIZE];  /* Initialization vector for cbc */
+	uint8_t aes_key[AES_CHUNK_SIZE]; /* Key for aes-cbc */
+	uint8_t aes_iv[AES_CHUNK_SIZE];  /* Initialization vector for cbc */
 	EVP_CIPHER_CTX *ctx;
 
 	uint16_t control_port;
 	int control_fd;
 	struct spa_source *control_source;
+	struct spa_source *feedback_timer;
 
 	uint16_t timing_port;
 	int timing_fd;
@@ -247,7 +249,7 @@ struct impl {
 	uint32_t block_size;
 	uint32_t latency;
 
-	uint16_t seq;
+	uint16_t seq, cseq;
 	uint32_t rtptime;
 	uint32_t ssrc;
 	uint32_t sync;
@@ -287,7 +289,7 @@ static inline void bit_writer(uint8_t **p, int *pos, uint8_t data, int len)
 static int aes_encrypt(struct impl *impl, uint8_t *data, int len)
 {
 	int i = len & ~0xf, clen = i;
-	EVP_EncryptInit(impl->ctx, EVP_aes_128_cbc(), impl->key, impl->iv);
+	EVP_EncryptInit(impl->ctx, EVP_aes_128_cbc(), impl->aes_key, impl->aes_iv);
 	EVP_EncryptUpdate(impl->ctx, data, &clen, data, i);
 	return i;
 }
@@ -308,46 +310,104 @@ static inline uint64_t ntp_now(void)
 static int send_udp_sync_packet(struct impl *impl,
 		struct sockaddr *dest_addr, socklen_t addrlen)
 {
-	uint32_t pkt[5];
+	uint32_t out[3];
 	uint32_t rtptime = impl->rtptime;
 	uint32_t latency = impl->latency;
 	uint64_t transmitted;
+	struct rtp_header header;
+	struct iovec iov[2];
+	struct msghdr msg;
+	int res;
 
-	pkt[0] = htonl(0x80d40007);
+	spa_zero(header);
+	header.v = 2;
 	if (impl->first)
-		pkt[0] |= htonl(0x10000000);
-	pkt[1] = htonl(rtptime - latency);
+		header.x = 1;
+	header.m = 1;
+	header.pt = 84;
+	header.sequence_number = htons(impl->cseq);
+	header.timestamp = htonl(rtptime - latency);
+
+	iov[0].iov_base = &header;
+	iov[0].iov_len = 8;
+
 	transmitted = ntp_now();
-	pkt[2] = htonl(transmitted >> 32);
-	pkt[3] = htonl(transmitted & 0xffffffff);
-	pkt[4] = htonl(rtptime);
+	out[0] = htonl(transmitted >> 32);
+	out[1] = htonl(transmitted & 0xffffffff);
+	out[2] = htonl(rtptime);
 
-	pw_log_debug("sync: first:%d latency:%u now:%"PRIx64" rtptime:%u",
-			impl->first, latency, transmitted, rtptime);
+	iov[1].iov_base = out;
+	iov[1].iov_len = sizeof(out);
 
-	return sendto(impl->control_fd, pkt, sizeof(pkt), 0, dest_addr, addrlen);
+	msg.msg_name = dest_addr;
+	msg.msg_namelen = addrlen;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+
+	res = sendmsg(impl->control_fd, &msg, MSG_NOSIGNAL);
+	if (res < 0) {
+		res = -errno;
+		pw_log_warn("error sending control packet: %d", res);
+	}
+
+	impl->cseq = (impl->cseq + 1) & 0xffff;
+
+	pw_log_debug("raop control sync: cseq:%d first:%d latency:%u now:%"PRIx64" rtptime:%u",
+			impl->cseq, impl->first, latency, transmitted, rtptime);
+
+	return res;
 }
 
 static int send_udp_timing_packet(struct impl *impl, uint64_t remote, uint64_t received,
 		struct sockaddr *dest_addr, socklen_t addrlen)
 {
-	uint32_t pkt[8];
+	uint32_t out[6];
 	uint64_t transmitted;
+	struct rtp_header header;
+	struct iovec iov[2];
+	struct msghdr msg;
+	int res;
 
-	pkt[0] = htonl(0x80d30007);
-	pkt[1] = 0x00000000;
-	pkt[2] = htonl(remote >> 32);
-	pkt[3] = htonl(remote & 0xffffffff);
-	pkt[4] = htonl(received >> 32);
-	pkt[5] = htonl(received & 0xffffffff);
+	spa_zero(header);
+	header.v = 2;
+	header.pt = 83;
+	header.m = 1;
+
+	iov[0].iov_base = &header;
+	iov[0].iov_len = 8;
+
+	out[0] = htonl(remote >> 32);
+	out[1] = htonl(remote & 0xffffffff);
+
+	out[2] = htonl(received >> 32);
+	out[3] = htonl(received & 0xffffffff);
 	transmitted = ntp_now();
-	pkt[6] = htonl(transmitted >> 32);
-	pkt[7] = htonl(transmitted & 0xffffffff);
+	out[4] = htonl(transmitted >> 32);
+	out[5] = htonl(transmitted & 0xffffffff);
 
-	pw_log_debug("sync: remote:%"PRIx64" received:%"PRIx64" transmitted:%"PRIx64,
+	iov[1].iov_base = out;
+	iov[1].iov_len = sizeof(out);
+
+	msg.msg_name = dest_addr;
+	msg.msg_namelen = addrlen;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+
+	res = sendmsg(impl->timing_fd, &msg, MSG_NOSIGNAL);
+	if (res < 0) {
+		res = -errno;
+		pw_log_warn("error sending timing packet: %d", res);
+	}
+	pw_log_debug("raop timing sync: remote:%"PRIx64" received:%"PRIx64" transmitted:%"PRIx64,
 			remote, received, transmitted);
 
-	return sendto(impl->timing_fd, pkt, sizeof(pkt), 0, dest_addr, addrlen);
+	return res;
 }
 
 static int write_codec_pcm(void *dst, void *frames, uint32_t n_frames)
@@ -382,8 +442,11 @@ static int write_codec_pcm(void *dst, void *frames, uint32_t n_frames)
 
 static int flush_to_udp_packet(struct impl *impl)
 {
-	const size_t max = 12 + 8 + impl->block_size;
-	uint32_t pkt[max], len, n_frames;
+	const size_t max = 8 + impl->block_size;
+	uint32_t out[max], len, n_frames;
+	struct rtp_header header;
+	struct iovec iov[2];
+	struct msghdr msg;
 	uint8_t *dst;
 	int res;
 
@@ -394,15 +457,21 @@ static int flush_to_udp_packet(struct impl *impl)
 		impl->sync = 0;
 		send_udp_sync_packet(impl, NULL, 0);
 	}
-	pkt[0] = htonl(0x80600000);
+
+	spa_zero(header);
+	header.v = 2;
+	header.pt = 96;
 	if (impl->first)
-		pkt[0] |= htonl((uint32_t)0x80 << 16);
-	pkt[0] |= htonl((uint32_t)impl->seq);
-	pkt[1] = htonl(impl->rtptime);
-	pkt[2] = htonl(impl->ssrc);
+		header.m = 1;
+	header.sequence_number = htons(impl->seq);
+	header.timestamp = htonl(impl->rtptime);
+	header.ssrc = htonl(impl->ssrc);
+
+	iov[0].iov_base = &header;
+	iov[0].iov_len = 12;
 
 	n_frames = impl->filled / impl->frame_size;
-	dst = (uint8_t*)&pkt[3];
+	dst = (uint8_t*)&out[0];
 
 	switch (impl->codec) {
 	case CODEC_PCM:
@@ -417,11 +486,25 @@ static int flush_to_udp_packet(struct impl *impl)
 	if (impl->encryption == CRYPTO_RSA)
 		aes_encrypt(impl, dst, len);
 
+	iov[1].iov_base = out;
+	iov[1].iov_len = len;
+
 	impl->rtptime += n_frames;
 	impl->seq = (impl->seq + 1) & 0xffff;
 
-	pw_log_debug("send %u", len + 12);
-	res = send(impl->server_fd, pkt, len + 12, 0);
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+
+	res = sendmsg(impl->server_fd, &msg, MSG_NOSIGNAL);
+	if (res < 0) {
+		res = -errno;
+		pw_log_warn("error streaming packet: %d", res);
+	}
 
 	impl->first = false;
 
@@ -430,22 +513,34 @@ static int flush_to_udp_packet(struct impl *impl)
 
 static int flush_to_tcp_packet(struct impl *impl)
 {
-	const size_t max = 16 + 8 + impl->block_size;
-	uint32_t pkt[max], len, n_frames;
+	const size_t max = 8 + impl->block_size;
+	uint32_t tcp_pkt[1], out[max], len, n_frames;
+	struct rtp_header header;
+	struct iovec iov[3];
+	struct msghdr msg;
 	uint8_t *dst;
 	int res;
 
 	if (!impl->recording)
 		return 0;
 
-	pkt[0] = htonl(0x24000000);
-	pkt[1] = htonl(0x80e00000);
-	pkt[1] |= htonl((uint32_t)impl->seq);
-	pkt[2] = htonl(impl->rtptime);
-	pkt[3] = htonl(impl->ssrc);
+	tcp_pkt[0] = htonl(0x24000000);
+
+	iov[0].iov_base = &tcp_pkt;
+	iov[0].iov_len = 4;
+
+	spa_zero(header);
+	header.v = 2;
+	header.pt = 96;
+	header.sequence_number = htons(impl->seq);
+	header.timestamp = htonl(impl->rtptime);
+	header.ssrc = htonl(impl->ssrc);
+
+	iov[1].iov_base = &header;
+	iov[1].iov_len = 12;
 
 	n_frames = impl->filled / impl->frame_size;
-	dst = (uint8_t*)&pkt[4];
+	dst = (uint8_t*)&out[0];
 
 	switch (impl->codec) {
 	case CODEC_PCM:
@@ -460,13 +555,27 @@ static int flush_to_tcp_packet(struct impl *impl)
 	if (impl->encryption == CRYPTO_RSA)
 		aes_encrypt(impl, dst, len);
 
-	pkt[0] |= htonl((uint32_t) len + 12);
+	out[0] |= htonl((uint32_t) len + 12);
+
+	iov[2].iov_base = out;
+	iov[2].iov_len = len;
 
 	impl->rtptime += n_frames;
 	impl->seq = (impl->seq + 1) & 0xffff;
 
-	pw_log_debug("send %u", len + 16);
-	res = send(impl->server_fd, pkt, len + 16, 0);
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_iov = iov;
+	msg.msg_iovlen = 2;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = 0;
+
+	res = sendmsg(impl->server_fd, &msg, MSG_NOSIGNAL);
+	if (res < 0) {
+		res = -errno;
+		pw_log_warn("error streaming packet: %d", res);
+	}
 
 	impl->first = false;
 
@@ -783,7 +892,7 @@ static int MD5_hash(char hash[MD5_HASH_LENGTH+1], const char *fmt, ...)
 	return 0;
 }
 
-static int rtsp_add_auth(struct impl *impl, const char *method)
+static int rtsp_add_raop_auth_header(struct impl *impl, const char *method)
 {
 	char auth[1024];
 
@@ -793,7 +902,7 @@ static int rtsp_add_auth(struct impl *impl, const char *method)
 	if (spa_streq(impl->auth_method, "Basic")) {
 		char buf[256];
 		char enc[512];
-		spa_scnprintf(buf, sizeof(buf), "%s:%s", DEFAULT_USER_NAME, impl->password);
+		spa_scnprintf(buf, sizeof(buf), "%s:%s", RAOP_AUTH_USER_NAME, impl->password);
 		base64_encode((uint8_t*)buf, strlen(buf), enc, '=');
 		spa_scnprintf(auth, sizeof(auth), "Basic %s", enc);
 	}
@@ -805,13 +914,13 @@ static int rtsp_add_auth(struct impl *impl, const char *method)
 
 		url = pw_rtsp_client_get_url(impl->rtsp);
 
-		MD5_hash(h1, "%s:%s:%s", DEFAULT_USER_NAME, impl->realm, impl->password);
+		MD5_hash(h1, "%s:%s:%s", RAOP_AUTH_USER_NAME, impl->realm, impl->password);
 		MD5_hash(h2, "%s:%s", method, url);
 		MD5_hash(resp, "%s:%s:%s", h1, impl->nonce, h2);
 
 		spa_scnprintf(auth, sizeof(auth),
 				"username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\"",
-				DEFAULT_USER_NAME, impl->realm, impl->nonce, url, resp);
+				RAOP_AUTH_USER_NAME, impl->realm, impl->nonce, url, resp);
 	}
 	else
 		goto error;
@@ -821,7 +930,7 @@ static int rtsp_add_auth(struct impl *impl, const char *method)
 
 	return 0;
 error:
-	pw_log_error("error adding auth");
+	pw_log_error("error adding raop RSA auth");
 	return -EINVAL;
 }
 
@@ -831,7 +940,7 @@ static int rtsp_send(struct impl *impl, const char *method,
 {
 	int res;
 
-	rtsp_add_auth(impl, method);
+	rtsp_add_raop_auth_header(impl, method);
 
 	res = pw_rtsp_client_send(impl->rtsp, method, &impl->headers->dict,
 			content_type, content, reply, impl);
@@ -872,8 +981,16 @@ static int rtsp_send_volume(struct impl *impl)
 
 	char header[128], volstr[64];
 	snprintf(header, sizeof(header), "volume: %s\r\n",
-			spa_dtoa(volstr, sizeof(volstr), impl->volume));
+			spa_dtoa(volstr, sizeof(volstr), impl->mute ? VOLUME_MUTE : impl->volume));
 	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, rtsp_log_reply_status);
+}
+
+static void rtsp_do_post_feedback(void *data, uint64_t expirations)
+{
+	struct impl *impl = data;
+
+	pw_rtsp_client_url_send(impl->rtsp, "/feedback", "POST", &impl->headers->dict,
+					NULL, NULL, 0, rtsp_log_reply_status, impl);
 }
 
 static int rtsp_record_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
@@ -886,8 +1003,18 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	struct spa_pod_builder b;
 	struct spa_latency_info latency;
 	char progress[128];
+	struct timespec timeout, interval;
 
 	pw_log_info("record status: %d", status);
+
+	timeout.tv_sec = 2;
+	timeout.tv_nsec = 0;
+	interval.tv_sec = 2;
+	interval.tv_nsec = 0;
+
+	if (!impl->feedback_timer)
+		impl->feedback_timer = pw_loop_add_timer(impl->loop, rtsp_do_post_feedback, impl);
+	pw_loop_update_timer(impl->loop, impl->feedback_timer, &timeout, &interval, false);
 
 	if ((str = spa_dict_lookup(headers, "Audio-Latency")) != NULL) {
 		uint32_t l;
@@ -1241,7 +1368,6 @@ static int rtsp_do_announce(struct impl *impl)
 		if (!sdp)
 			return -errno;
 		break;
-
 	case CRYPTO_AUTH_SETUP:
 		sdp = spa_aprintf("v=0\r\n"
 				"o=iTunes %s 0 IN IP%d %s\r\n"
@@ -1260,16 +1386,24 @@ static int rtsp_do_announce(struct impl *impl)
 		break;
 
 	case CRYPTO_RSA:
-		if ((res = pw_getrandom(impl->key, sizeof(impl->key), 0)) < 0 ||
-		    (res = pw_getrandom(impl->iv, sizeof(impl->iv), 0)) < 0)
+	{
+		uint8_t rac[16];
+		char sac[16*4];
+
+		if ((res = pw_getrandom(rac, sizeof(rac), 0)) < 0 ||
+		    (res = pw_getrandom(impl->aes_key, sizeof(impl->aes_key), 0)) < 0 ||
+		    (res = pw_getrandom(impl->aes_iv, sizeof(impl->aes_iv), 0)) < 0)
 			return res;
 
-		rsa_len = rsa_encrypt(impl->key, 16, rsakey);
+		base64_encode(rac, sizeof(rac), sac, '\0');
+		pw_properties_set(impl->headers, "Apple-Challenge", sac);
+
+		rsa_len = rsa_encrypt(impl->aes_key, 16, rsakey);
 		if (rsa_len < 0)
 			return -rsa_len;
 
-	        base64_encode(rsakey, rsa_len, key, '=');
-	        base64_encode(impl->iv, 16, iv, '=');
+		base64_encode(rsakey, rsa_len, key, '=');
+		base64_encode(impl->aes_iv, 16, iv, '=');
 
 		sdp = spa_aprintf("v=0\r\n"
 				"o=iTunes %s 0 IN IP%d %s\r\n"
@@ -1287,6 +1421,7 @@ static int rtsp_do_announce(struct impl *impl)
 		if (!sdp)
 			return -errno;
 		break;
+	}
 	default:
 		return -ENOTSUP;
 	}
@@ -1294,7 +1429,7 @@ static int rtsp_do_announce(struct impl *impl)
 	return rtsp_send(impl, "ANNOUNCE", "application/sdp", sdp, rtsp_announce_reply);
 }
 
-static int rtsp_auth_setup_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
+static int rtsp_post_auth_setup_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 
@@ -1303,7 +1438,7 @@ static int rtsp_auth_setup_reply(void *data, int status, const struct spa_dict *
 	return rtsp_do_announce(impl);
 }
 
-static int rtsp_do_auth_setup(struct impl *impl)
+static int rtsp_do_post_auth_setup(struct impl *impl)
 {
 	static const unsigned char content[33] =
 		"\x01"
@@ -1312,10 +1447,10 @@ static int rtsp_do_auth_setup(struct impl *impl)
 
 	return pw_rtsp_client_url_send(impl->rtsp, "/auth-setup", "POST", &impl->headers->dict,
 				       "application/octet-stream", content, sizeof(content),
-				       rtsp_auth_setup_reply, impl);
+				       rtsp_post_auth_setup_reply, impl);
 }
 
-static int rtsp_auth_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
+static int rtsp_options_auth_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	int res = 0;
@@ -1325,7 +1460,7 @@ static int rtsp_auth_reply(void *data, int status, const struct spa_dict *header
 	switch (status) {
 	case 200:
 		if (impl->encryption == CRYPTO_AUTH_SETUP)
-			res = rtsp_do_auth_setup(impl);
+			res = rtsp_do_post_auth_setup(impl);
 		else
 			res = rtsp_do_announce(impl);
 		break;
@@ -1351,7 +1486,7 @@ static const char *find_attr(char **tokens, const char *key)
 	return NULL;
 }
 
-static int rtsp_do_auth(struct impl *impl, const struct spa_dict *headers)
+static int rtsp_do_options_auth(struct impl *impl, const struct spa_dict *headers)
 {
 	const char *str, *realm, *nonce;
 	int n_tokens;
@@ -1382,7 +1517,7 @@ static int rtsp_do_auth(struct impl *impl, const struct spa_dict *headers)
 		impl->nonce = strdup(nonce);
 	}
 
-	return rtsp_send(impl, "OPTIONS", NULL, NULL, rtsp_auth_reply);
+	return rtsp_send(impl, "OPTIONS", NULL, NULL, rtsp_options_auth_reply);
 }
 
 static int rtsp_options_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
@@ -1394,11 +1529,11 @@ static int rtsp_options_reply(void *data, int status, const struct spa_dict *hea
 
 	switch (status) {
 	case 401:
-		res = rtsp_do_auth(impl, headers);
+		res = rtsp_do_options_auth(impl, headers);
 		break;
 	case 200:
 		if (impl->encryption == CRYPTO_AUTH_SETUP)
-			res = rtsp_do_auth_setup(impl);
+			res = rtsp_do_post_auth_setup(impl);
 		else
 			res = rtsp_do_announce(impl);
 		break;
@@ -1410,27 +1545,24 @@ static void rtsp_connected(void *data)
 {
 	struct impl *impl = data;
 	uint32_t sci[2];
-	uint8_t rac[16];
-	char sac[16*4];
 	int res;
 
 	pw_log_info("connected");
 
 	impl->connected = true;
 
-	if ((res = pw_getrandom(sci, sizeof(sci), 0)) < 0 ||
-	    (res = pw_getrandom(rac, sizeof(rac), 0)) < 0) {
+	if ((res = pw_getrandom(sci, sizeof(sci), 0)) < 0) {
 		pw_log_error("error generating random data: %s", spa_strerror(res));
 		return;
 	}
 
 	pw_properties_setf(impl->headers, "Client-Instance",
-			"%08x%08x", sci[0], sci[1]);
+			"%08X%08X", sci[0], sci[1]);
 
-	base64_encode(rac, sizeof(rac), sac, '\0');
-	pw_properties_set(impl->headers, "Apple-Challenge", sac);
+	pw_properties_setf(impl->headers, "DACP-ID",
+			"%08X%08X", sci[0], sci[1]);
 
-	pw_properties_set(impl->headers, "User-Agent", DEFAULT_USER_AGENT);
+	pw_properties_set(impl->headers, "User-Agent", DEFAULT_USER_NAME "/" PACKAGE_VERSION);
 
 	pw_rtsp_client_send(impl->rtsp, "OPTIONS", &impl->headers->dict,
 			NULL, NULL, rtsp_options_reply, impl);
@@ -1462,6 +1594,10 @@ static void connection_cleanup(struct impl *impl)
 	if (impl->timing_fd >= 0) {
 		close(impl->timing_fd);
 		impl->timing_fd = -1;
+	}
+	if (impl->feedback_timer != NULL) {
+		pw_loop_destroy_source(impl->loop, impl->feedback_timer);
+		impl->feedback_timer = NULL;
 	}
 	free(impl->auth_method);
 	impl->auth_method = NULL;
@@ -1587,10 +1723,13 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 		{
 			bool mute;
 			if (spa_pod_get_bool(&prop->value, &mute) == 0) {
-				impl->mute = mute;
+				if (impl->mute != mute) {
+					impl->mute = mute;
+					rtsp_send_volume(impl);
+				}
                         }
 			spa_pod_builder_prop(&b, SPA_PROP_softMute, 0);
-			spa_pod_builder_bool(&b, impl->mute);
+			spa_pod_builder_bool(&b, false);
 			spa_pod_builder_raw_padded(&b, prop, SPA_POD_PROP_SIZE(prop));
 			break;
 		}
@@ -1608,12 +1747,11 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 					soft_vols[i] = 1.0f;
 				}
 				volume /= n_vols;
-				volume = SPA_CLAMPF(20.0 * log10(volume), VOLUME_MIN, VOLUME_MAX);
+				volume = SPA_CLAMPF(cbrt(volume) * 30 - 30, VOLUME_MIN, VOLUME_MAX);
 				impl->volume = volume;
 
 				rtsp_send_volume(impl);
 			}
-
 			spa_pod_builder_prop(&b, SPA_PROP_softVolumes, 0);
 			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
 					n_vols, soft_vols);

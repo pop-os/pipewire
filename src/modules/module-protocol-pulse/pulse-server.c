@@ -832,42 +832,43 @@ static void manager_added(void *data, struct pw_manager_object *o)
 	}
 
 	if (spa_streq(o->type, PW_TYPE_INTERFACE_Link)) {
-		struct stream *s, *t;
 		struct pw_manager_object *peer = NULL;
 		union pw_map_item *item;
 		pw_array_for_each(item, &client->streams.items) {
 			struct stream *s = item->data;
 			const char *peer_name;
 
-			if (pw_map_item_is_free(item) || s->pending)
+			if (pw_map_item_is_free(item))
 				continue;
-			if (s->peer_index == SPA_ID_INVALID)
+
+			if (!s->pending && s->peer_index == SPA_ID_INVALID)
 				continue;
 
 			peer = find_peer_for_link(manager, o, s->id, s->direction);
-			if (peer == NULL || peer->props == NULL ||
-			    peer->index == s->peer_index)
+			if (peer == NULL)
 				continue;
 
-			s->peer_index = peer->index;
-
-			peer_name = pw_properties_get(peer->props, PW_KEY_NODE_NAME);
-			if (peer_name && s->direction == PW_DIRECTION_INPUT &&
-			    pw_manager_object_is_monitor(peer)) {
-				int len = strlen(peer_name) + 10;
-				char *tmp = alloca(len);
-				snprintf(tmp, len, "%s.monitor", peer_name);
-				peer_name = tmp;
-			}
-			if (peer_name != NULL)
-				stream_send_moved(s, peer->index, peer_name);
-		}
-		spa_list_for_each_safe(s, t, &client->pending_streams, link) {
-			peer = find_peer_for_link(manager, o, s->id, s->direction);
-			if (peer) {
+			if (s->pending) {
 				reply_create_stream(s, peer);
-				spa_list_remove(&s->link);
 				s->pending = false;
+			} else {
+				if (s->peer_index == peer->index)
+					continue;
+				if (peer->props == NULL)
+					continue;
+
+				s->peer_index = peer->index;
+
+				peer_name = pw_properties_get(peer->props, PW_KEY_NODE_NAME);
+				if (peer_name && s->direction == PW_DIRECTION_INPUT &&
+				    pw_manager_object_is_monitor(peer)) {
+					int len = strlen(peer_name) + 10;
+					char *tmp = alloca(len);
+					snprintf(tmp, len, "%s.monitor", peer_name);
+					peer_name = tmp;
+				}
+				if (peer_name != NULL)
+					stream_send_moved(s, peer->index, peer_name);
 			}
 		}
 	}
@@ -1244,7 +1245,6 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 		if (peer) {
 			reply_create_stream(stream, peer);
 		} else {
-			spa_list_append(&stream->client->pending_streams, &stream->link);
 			stream->pending = true;
 		}
 	}
@@ -5483,9 +5483,23 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	const char *str;
 	int res = 0;
 
+	debug_messages = pw_log_topic_enabled(SPA_LOG_LEVEL_INFO, pulse_conn);
+
 	impl = calloc(1, sizeof(*impl) + user_data_size);
 	if (impl == NULL)
-		goto error_exit;
+		goto error_free_props;
+
+	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
+	impl->rate_limit.burst = 1;
+	spa_hook_list_init(&impl->hooks);
+	spa_list_init(&impl->servers);
+	pw_map_init(&impl->samples, 16, 16);
+	pw_map_init(&impl->modules, 16, 16);
+	spa_list_init(&impl->cleanup_clients);
+	spa_list_init(&impl->free_messages);
+
+	impl->loop = pw_context_get_main_loop(context);
+	impl->work_queue = pw_context_get_work_queue(context);
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
@@ -5502,25 +5516,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 			pw_properties_update_string(props, str, strlen(str));
 		pw_properties_set(props, "vm.overrides", NULL);
 	}
-
-	load_defaults(&impl->defs, props);
-
-	debug_messages = pw_log_topic_enabled(SPA_LOG_LEVEL_INFO, pulse_conn);
-
-	impl->context = context;
-	impl->loop = pw_context_get_main_loop(context);
-	impl->props = props;
-
-	impl->work_queue = pw_context_get_work_queue(context);
-
-	spa_hook_list_init(&impl->hooks);
-	spa_list_init(&impl->servers);
-	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
-	impl->rate_limit.burst = 1;
-	pw_map_init(&impl->samples, 16, 16);
-	pw_map_init(&impl->modules, 16, 16);
-	spa_list_init(&impl->cleanup_clients);
-	spa_list_init(&impl->free_messages);
 
 	str = pw_properties_get(props, "server.address");
 	if (str == NULL) {
@@ -5544,8 +5539,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 		pw_log_warn("%p: can't create pid file: %s",
 				impl, spa_strerror(res));
 	}
-	pw_context_add_listener(context, &impl->context_listener,
-			&context_events, impl);
 
 #ifdef HAVE_DBUS
 	str = pw_properties_get(props, "server.dbus-name");
@@ -5554,14 +5547,22 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	if (strlen(str) > 0)
 		impl->dbus_name = dbus_request_name(context, str);
 #endif
+
+	load_defaults(&impl->defs, props);
+	impl->props = spa_steal_ptr(props);
+
+	pw_context_add_listener(context, &impl->context_listener,
+			&context_events, impl);
+	impl->context = context;
+
 	cmd_run(impl);
 
 	return (struct pw_protocol_pulse *) impl;
 
 error_free:
-	free(impl);
+	impl_free(impl);
 
-error_exit:
+error_free_props:
 	pw_properties_free(props);
 
 	if (res < 0)
