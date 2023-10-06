@@ -1,3 +1,10 @@
+pipewire (0.3.81-0) UNRELEASED; urgency=medium
+
+  * New upstream release
+      - Use malloc_trim() when available to release memory (Closes: #1015915)
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 06 Oct 2023 15:03:41 +0200
+
 pipewire (0.3.80-2) unstable; urgency=medium
 
   * Cherry-pick upstream recommended patch:
