@@ -2,6 +2,8 @@ pipewire (0.3.81-0) UNRELEASED; urgency=medium
 
   * New upstream release
       - Use malloc_trim() when available to release memory (Closes: #1015915)
+  * Drop patch included in upstream release:
+      - 1f1c308c: aec: support both webrtc versions
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 06 Oct 2023 15:03:41 +0200
 
