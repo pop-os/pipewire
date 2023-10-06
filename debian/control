@@ -51,7 +51,7 @@ Homepage: https://pipewire.org/
 Rules-Requires-Root: no
 
 Package: libpipewire-0.3-0
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -85,7 +85,7 @@ Description: libraries for the PipeWire multimedia server - common files
 
 Package: libpipewire-0.3-dev
 Section: libdevel
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: libpipewire-0.3-0 (= ${binary:Version}),
          libspa-0.2-dev (= ${binary:Version}),
@@ -103,7 +103,7 @@ Description: libraries for the PipeWire multimedia server - development
  This package contains the development files.
 
 Package: libpipewire-0.3-modules
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Breaks: pipewire (<< 0.3.5)
@@ -122,7 +122,7 @@ Description: libraries for the PipeWire multimedia server - modules
  depend on the pipewire package instead.
 
 Package: libpipewire-0.3-modules-x11
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Breaks: libpipewire-0.3-modules (<< 0.3.63-3~)
@@ -140,7 +140,7 @@ Description: libraries for the PipeWire multimedia server - X11 modules
 
 Package: libspa-0.2-dev
 Section: libdevel
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends}
 Suggests: pipewire-doc
@@ -156,7 +156,7 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
  This package contains the development files for the Simple Plugin API.
 
 Package: libspa-0.2-modules
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Breaks: pipewire (<< 0.3.5)
@@ -196,7 +196,7 @@ Description: libraries for the PipeWire multimedia server - documentation
 
 Package: pipewire
 Section: video
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: libpipewire-0.3-modules (= ${binary:Version}),
          pipewire-bin (= ${binary:Version}),
@@ -218,7 +218,7 @@ Description: audio and video processing engine multimedia server
 
 Package: pipewire-bin
 Section: video
-Architecture: linux-any
+Architecture: any
 Multi-Arch: foreign
 Depends: libpipewire-0.3-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -243,7 +243,7 @@ Description: PipeWire multimedia server - programs
 
 Package: pipewire-pulse
 Section: sound
-Architecture: linux-any
+Architecture: any
 Multi-Arch: foreign
 Replaces: pipewire-bin (<< 0.3.27-2)
 Breaks: pipewire-bin (<< 0.3.27-2)
@@ -266,7 +266,7 @@ Description: PipeWire PulseAudio daemon
 
 Package: pipewire-alsa
 Section: sound
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Replaces: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
@@ -287,7 +287,7 @@ Description: PipeWire ALSA plugin
 
 Package: pipewire-jack
 Section: sound
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Replaces: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
@@ -307,7 +307,7 @@ Description: PipeWire JACK plugin
 
 Package: pipewire-v4l2
 Section: video
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Replaces: pipewire-bin (<< 0.3.54-1),
           libpipewire-0.3-modules (<< 0.3.54-1)
@@ -329,7 +329,7 @@ Description: PipeWire V4L2 plugin
 
 Package: pipewire-tests
 Build-Profiles: <!noinsttest>
-Architecture: linux-any
+Architecture: any
 Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
 Section: misc
 Description: PipeWire multimedia server - tests and examples
@@ -344,7 +344,7 @@ Description: PipeWire multimedia server - tests and examples
  This package contains automated and manual tests and example programs.
 
 Package: gstreamer1.0-pipewire
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
 Description: GStreamer 1.0 plugin for the PipeWire multimedia server
@@ -360,7 +360,7 @@ Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  server available as GStreamer sources and sinks.
 
 Package: libspa-0.2-bluetooth
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -378,7 +378,7 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
  speakers and headsets available to the PipeWire server.
 
 Package: libspa-0.2-jack
-Architecture: linux-any
+Architecture: any
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
