@@ -1332,15 +1332,6 @@ static size_t convert_from_midi(void *midi, void *buffer, size_t size)
 	return b.state.offset;
 }
 
-static inline void fix_midi_event(uint8_t *data, size_t size)
-{
-	/* fixup NoteOn with vel 0 */
-	if (size > 2 && (data[0] & 0xF0) == 0x90 && data[2] == 0x00) {
-		data[0] = 0x80 + (data[0] & 0x0F);
-		data[2] = 0x40;
-	}
-}
-
 static inline int event_sort(struct spa_pod_control *a, struct spa_pod_control *b)
 {
 	if (a->offset < b->offset)
@@ -1371,6 +1362,29 @@ static inline int event_sort(struct spa_pod_control *a, struct spa_pod_control *
 	default:
 		return 0;
 	}
+}
+
+static inline void fix_midi_event(uint8_t *data, size_t size)
+{
+	/* fixup NoteOn with vel 0 */
+	if (size > 2 && (data[0] & 0xF0) == 0x90 && data[2] == 0x00) {
+		data[0] = 0x80 + (data[0] & 0x0F);
+		data[2] = 0x40;
+	}
+}
+
+static inline int midi_event_write(void *port_buffer,
+                      jack_nframes_t time,
+                      const jack_midi_data_t *data,
+                      size_t data_size, bool fix)
+{
+	jack_midi_data_t *retbuf = jack_midi_event_reserve (port_buffer, time, data_size);
+        if (SPA_UNLIKELY(retbuf == NULL))
+                return -ENOBUFS;
+	memcpy (retbuf, data, data_size);
+	if (fix)
+		fix_midi_event(retbuf, data_size);
+	return 0;
 }
 
 static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void *midi, bool fix)
@@ -1405,10 +1419,7 @@ static void convert_to_midi(struct spa_pod_sequence **seq, uint32_t n_seq, void 
 			uint8_t *data = SPA_POD_BODY(&next->value);
 			size_t size = SPA_POD_BODY_SIZE(&next->value);
 
-			if (fix)
-				fix_midi_event(data, size);
-
-			if ((res = jack_midi_event_write(midi, next->offset, data, size)) < 0)
+			if ((res = midi_event_write(midi, next->offset, data, size, fix)) < 0)
 				pw_log_warn("midi %p: can't write event: %s", midi,
 						spa_strerror(res));
 			break;
@@ -3804,10 +3815,10 @@ jack_client_t * jack_client_open (const char *client_name,
 	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL) {
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
-			pw_properties_setf(client->props, PW_KEY_NODE_RATE,
+			pw_properties_setf(client->props, PW_KEY_NODE_FORCE_RATE,
 					"1/%u", q.denom);
-			pw_properties_setf(client->props, PW_KEY_NODE_LATENCY,
-					"%u/%u", q.num, q.denom);
+			pw_properties_setf(client->props, PW_KEY_NODE_FORCE_QUANTUM,
+					"%u", q.num);
 		} else {
 			pw_log_warn("invalid PIPEWIRE_QUANTUM: %s", str);
 		}
@@ -3828,7 +3839,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (pw_properties_get(client->props, PW_KEY_NODE_NAME) == NULL)
 		pw_properties_set(client->props, PW_KEY_NODE_NAME, client_name);
 	if (pw_properties_get(client->props, PW_KEY_NODE_GROUP) == NULL)
-		pw_properties_setf(client->props, PW_KEY_NODE_GROUP, "jack-%d", getpid());
+		pw_properties_setf(client->props, PW_KEY_NODE_GROUP, "group.dsp.0");
 	if (pw_properties_get(client->props, PW_KEY_NODE_DESCRIPTION) == NULL)
 		pw_properties_set(client->props, PW_KEY_NODE_DESCRIPTION, client_name);
 	if (pw_properties_get(client->props, PW_KEY_MEDIA_TYPE) == NULL)
@@ -6924,11 +6935,7 @@ int jack_midi_event_write(void *port_buffer,
                       const jack_midi_data_t *data,
                       size_t data_size)
 {
-	jack_midi_data_t *retbuf = jack_midi_event_reserve (port_buffer, time, data_size);
-        if (SPA_UNLIKELY(retbuf == NULL))
-                return -ENOBUFS;
-	memcpy (retbuf, data, data_size);
-	return 0;
+	return midi_event_write(port_buffer, time, data, data_size, false);
 }
 
 SPA_EXPORT

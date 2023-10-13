@@ -1820,6 +1820,8 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 			PW_STREAM_FLAG_MAP_BUFFERS,
 			params, n_params);
 
+	stream_update_tag_param(stream);
+
 	return 0;
 
 error_errno:
@@ -3215,7 +3217,8 @@ static int do_update_proplist(struct client *client, uint32_t command, uint32_t 
 		if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
 			return -ENOENT;
 
-		pw_stream_update_properties(stream->stream, &props->dict);
+		if (pw_stream_update_properties(stream->stream, &props->dict) > 0)
+			stream_update_tag_param(stream);
 	} else {
 		if (pw_properties_update(client->props, &props->dict) > 0) {
 			client_update_quirks(client);
@@ -5099,12 +5102,12 @@ static int do_send_object_message(struct client *client, uint32_t command, uint3
 {
 	struct impl *impl = client->impl;
 	struct pw_manager *manager = client->manager;
-	const char *object_path = NULL;
-	const char *message = NULL;
-	const char *params = NULL;
-	struct message *reply;
+	const char *object_path = NULL, *message = NULL, *params = NULL;
 	struct pw_manager_object *o;
-	int len = 0;
+	spa_autofree char *response_str = NULL;
+	size_t path_len = 0, response_len = 0;
+	FILE *response;
+	int res = -ENOENT;
 
 	if (message_get(m,
 			TAG_STRING, &object_path,
@@ -5120,36 +5123,42 @@ static int do_send_object_message(struct client *client, uint32_t command, uint3
 	if (object_path == NULL || message == NULL)
 		return -EINVAL;
 
-	len = strlen(object_path);
-	if (len > 0 && object_path[len - 1] == '/')
-		--len;
-
-	spa_autofree char *path = strndup(object_path, len);
+	path_len = strlen(object_path);
+	if (path_len > 0 && object_path[path_len - 1] == '/')
+		--path_len;
+	spa_autofree char *path = strndup(object_path, path_len);
 	if (path == NULL)
 		return -ENOMEM;
 
-	spa_autofree char *response = NULL;
-	int res = -ENOENT;
-
 	spa_list_for_each(o, &manager->object_list, link) {
-		if (o->message_object_path && spa_streq(o->message_object_path, path)) {
-			if (o->message_handler)
-				res = o->message_handler(manager, o, message, params, &response);
-			else
-				res = -ENOSYS;
+		if (spa_streq(o->message_object_path, path))
 			break;
-		}
+	}
+	if (spa_list_is_end(o, &manager->object_list, link))
+		return -ENOENT;
+
+	if (o->message_handler == NULL)
+		return -ENOSYS;
+
+	response = open_memstream(&response_str, &response_len);
+	if (response == NULL)
+		return -errno;
+
+	res = o->message_handler(client, o, message, params, response);
+
+	if (fclose(response))
+		return -errno;
+
+	pw_log_debug("%p: object message response: (%d) '%s'", impl, res, response_str ? response_str : "<null>");
+
+	if (res >= 0) {
+		struct message *reply = reply_new(client, tag);
+
+		message_put(reply, TAG_STRING, response_str, TAG_INVALID);
+		res = client_queue_message(client, reply);
 	}
 
-	if (res < 0)
-		return res;
-
-	pw_log_debug("%p: object message response:'%s'", impl, response ? response : "<null>");
-
-	reply = reply_new(client, tag);
-	message_put(reply, TAG_STRING, response, TAG_INVALID);
-
-	return client_queue_message(client, reply);
+	return res;
 }
 
 static int do_error_access(struct client *client, uint32_t command, uint32_t tag, struct message *m)

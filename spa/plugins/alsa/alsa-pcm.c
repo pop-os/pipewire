@@ -131,6 +131,8 @@ static int alsa_set_param(struct state *state, const char *k, const char *s)
 		state->multi_rate = spa_atob(s);
 	} else if (spa_streq(k, "api.alsa.htimestamp")) {
 		state->htimestamp = spa_atob(s);
+	} else if (spa_streq(k, "api.alsa.auto-link")) {
+		state->auto_link = spa_atob(s);
 	} else if (spa_streq(k, "latency.internal.rate")) {
 		state->process_latency.rate = atoi(s);
 	} else if (spa_streq(k, "latency.internal.ns")) {
@@ -512,7 +514,6 @@ int spa_alsa_init(struct state *state, const struct spa_dict *info)
 
 	state->multi_rate = true;
 	state->htimestamp = false;
-	state->disable_tsched = state->is_pro;
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
@@ -573,6 +574,9 @@ int spa_alsa_clear(struct state *state)
 	if ((err = snd_output_close(state->output)) < 0)
 		spa_log_warn(state->log, "output close failed: %s", snd_strerror(err));
 	fclose(state->log_file);
+
+	free(state->tag[0]);
+	free(state->tag[1]);
 
 	return err;
 }
@@ -1991,7 +1995,7 @@ static int do_prepare(struct state *state)
 
 	CHECK(set_swparams(state), "swparams");
 
-	if ((err = snd_pcm_prepare(state->hndl)) < 0 && err != -EBUSY) {
+	if ((!state->linked) && (err = snd_pcm_prepare(state->hndl)) < 0 && err != -EBUSY) {
 		spa_log_error(state->log, "%s: snd_pcm_prepare error: %s",
 				state->name, snd_strerror(err));
 		return err;
@@ -2398,10 +2402,13 @@ static int alsa_write_sync(struct state *state, uint64_t current_time)
 	if (SPA_UNLIKELY((res = check_position_config(state)) < 0))
 		return res;
 
-	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0))
+	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0)) {
+		spa_log_error(state->log, "get_status error");
+		state->next_time += state->threshold * 1e9 / state->rate;
 		return res;
+	}
 
-	if (SPA_UNLIKELY(!following && delay > target + state->max_error)) {
+	if (SPA_UNLIKELY(!following && state->alsa_started && delay > target + state->max_error)) {
 		spa_log_trace(state->log, "%p: early wakeup %ld %lu %lu", state,
 				avail, delay, target);
 		if (delay > target * 3)
@@ -2412,7 +2419,7 @@ static int alsa_write_sync(struct state *state, uint64_t current_time)
 	if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, following)) < 0))
 		return res;
 
-	if (following && !state->linked) {
+	if (following && state->alsa_started && !state->linked) {
 		if (SPA_UNLIKELY(state->alsa_sync)) {
 			enum spa_log_level lev;
 
@@ -2553,11 +2560,9 @@ again:
 
 int spa_alsa_write(struct state *state)
 {
-	int res = 0;
 	if (state->following && state->rt.driver == NULL) {
 		uint64_t current_time = state->position->clock.nsec;
-		if ((res = alsa_write_sync(state, current_time)) < 0)
-			return res;
+		alsa_write_sync(state, current_time);
 	}
 	return alsa_write_frames(state);
 }
@@ -2656,8 +2661,11 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 	if (SPA_UNLIKELY((res = check_position_config(state)) < 0))
 		return res;
 
-	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0))
+	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0)) {
+		spa_log_error(state->log, "get_status error");
+		state->next_time += state->threshold * 1e9 / state->rate;
 		return res;
+	}
 
 	if (SPA_UNLIKELY(!following && avail < state->read_size)) {
 		spa_log_trace(state->log, "%p: early wakeup %ld %ld %ld %d", state,
@@ -2671,7 +2679,7 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 		return res;
 
 	max_read = state->buffer_frames;
-	if (following) {
+	if (following && !state->linked) {
 		if (state->alsa_sync) {
 			enum spa_log_level lev;
 
@@ -2767,11 +2775,9 @@ static int alsa_read_frames(struct state *state)
 
 int spa_alsa_read(struct state *state)
 {
-	int res;
 	if (state->following && state->rt.driver == NULL) {
 		uint64_t current_time = state->position->clock.nsec;
-		if ((res = alsa_read_sync(state, current_time)) < 0)
-			return res;
+		alsa_read_sync(state, current_time);
 	}
 	return alsa_read_frames(state);
 }
@@ -3019,6 +3025,9 @@ int spa_alsa_prepare(struct state *state)
 	struct state *follower;
 	int err;
 
+	if (!state->opened)
+		return -EIO;
+
 	spa_alsa_pause(state);
 
 	if (state->prepared)
@@ -3034,7 +3043,7 @@ int spa_alsa_prepare(struct state *state)
 	spa_list_for_each(follower, &state->followers, driver_link) {
 		if (follower != state && !follower->matching) {
 			spa_alsa_prepare(follower);
-			if (!follower->linked)
+			if (!follower->linked && state->auto_link)
 				do_link(state, follower);
 		}
 	}
@@ -3051,6 +3060,8 @@ int spa_alsa_start(struct state *state)
 
 	if (state->started)
 		return 0;
+	else if (!state->opened)
+		return -EIO;
 
 	spa_alsa_prepare(state);
 
