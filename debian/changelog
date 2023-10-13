@@ -1,6 +1,9 @@
 pipewire (0.3.82-0) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Update symbols file, 1 symbol is dropped in 0.3.82:
+      - _pw_log_topic_new@Base 0.3.38
+      See commit 57404e44.
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 13 Oct 2023 10:51:57 +0200
 
