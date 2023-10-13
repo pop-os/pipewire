@@ -30,6 +30,7 @@ extern "C" {
 #include <spa/param/param.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/tag-utils.h>
 
 #include "alsa.h"
 
@@ -165,7 +166,8 @@ struct state {
 #define PORT_Format		3
 #define PORT_Buffers		4
 #define PORT_Latency		5
-#define N_PORT_PARAMS		6
+#define PORT_Tag		6
+#define N_PORT_PARAMS		7
 	struct spa_param_info port_params[N_PORT_PARAMS];
 	enum spa_direction port_direction;
 	struct spa_io_buffers *io;
@@ -214,6 +216,7 @@ struct state {
 	unsigned int htimestamp:1;
 	unsigned int is_pro:1;
 	unsigned int sources_added:1;
+	unsigned int auto_link:1;
 	unsigned int linked:1;
 
 	uint64_t iec958_codecs;
@@ -232,6 +235,8 @@ struct state {
 
 	struct spa_latency_info latency[2];
 	struct spa_process_latency_info process_latency;
+
+	struct spa_pod *tag[2];
 
 	/* Rate match via an ALSA ctl */
 	snd_ctl_t *ctl;

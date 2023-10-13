@@ -32,6 +32,7 @@
 							struct rtp_stream_events, m, v, ##__VA_ARGS__)
 #define rtp_stream_emit_destroy(s)		rtp_stream_emit(s, destroy, 0)
 #define rtp_stream_emit_state_changed(s,n,e)	rtp_stream_emit(s, state_changed,0,n,e)
+#define rtp_stream_emit_param_changed(s,i,p)	rtp_stream_emit(s, param_changed,0,i,p)
 #define rtp_stream_emit_send_packet(s,i,l)	rtp_stream_emit(s, send_packet,0,i,l)
 #define rtp_stream_emit_send_feedback(s,seq)	rtp_stream_emit(s, send_feedback,0,seq)
 
@@ -58,6 +59,7 @@ struct impl {
 	unsigned have_ssrc:1;
 	unsigned ignore_ssrc:1;
 	unsigned have_seq:1;
+	unsigned marker_on_first:1;
 	uint32_t ts_offset;
 	uint32_t psamples;
 	uint32_t mtu;
@@ -102,6 +104,7 @@ static const struct format_info audio_format_info[] = {
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ALAW, 1, "PCMA", "audio" },
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_ULAW, 1, "PCMU", "audio" },
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S16_BE, 2, "L16", "audio" },
+	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S16_LE, 2, "L16", "audio" },
 	{ SPA_MEDIA_SUBTYPE_raw, SPA_AUDIO_FORMAT_S24_BE, 3, "L24", "audio" },
 	{ SPA_MEDIA_SUBTYPE_control, 0, 1, "rtp-midi", "audio" },
 	{ SPA_MEDIA_SUBTYPE_opus, 0, 4, "opus", "audio" },
@@ -131,6 +134,8 @@ static int stream_start(struct impl *impl)
 {
 	if (impl->started)
 		return 0;
+
+	impl->first = true;
 
 	rtp_stream_emit_state_changed(impl, true, NULL);
 
@@ -176,10 +181,17 @@ static void on_stream_state_changed(void *d, enum pw_stream_state old,
 	}
 }
 
+static void on_stream_param_changed (void *d, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = d;
+	rtp_stream_emit_param_changed(impl, id, param);
+};
+
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = on_stream_state_changed,
+	.param_changed = on_stream_param_changed,
 	.io_changed = stream_io_changed,
 };
 
@@ -287,6 +299,12 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 		impl->info.media_subtype = SPA_MEDIA_SUBTYPE_raw;
 		impl->payload = 127;
 	}
+	else if (spa_streq(str, "raop")) {
+		impl->info.media_type = SPA_MEDIA_TYPE_audio;
+		impl->info.media_subtype = SPA_MEDIA_SUBTYPE_raw;
+		impl->payload = 0x60;
+		impl->marker_on_first = 1;
+	}
 	else if (spa_streq(str, "midi")) {
 		impl->info.media_type = SPA_MEDIA_TYPE_application;
 		impl->info.media_subtype = SPA_MEDIA_SUBTYPE_control;
@@ -364,6 +382,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 	if (pw_properties_get(props, PW_KEY_NODE_NETWORK) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_NETWORK, "true");
 
+	impl->marker_on_first = pw_properties_get_bool(props, "sess.marker-on-first", false);
 	impl->ignore_ssrc = pw_properties_get_bool(props, "sess.ignore-ssrc", false);
 	impl->direct_timestamp = pw_properties_get_bool(props, "sess.ts-direct", false);
 
@@ -529,4 +548,41 @@ uint64_t rtp_stream_get_time(struct rtp_stream *s, uint64_t *rate)
 	*rate = impl->rate;
 	return pos->clock.position * impl->rate *
 		pos->clock.rate.num / pos->clock.rate.denom;
+}
+
+uint16_t rtp_stream_get_seq(struct rtp_stream *s)
+{
+	struct impl *impl = (struct impl*)s;
+
+	return impl->seq;
+}
+
+void rtp_stream_set_first(struct rtp_stream *s)
+{
+	struct impl *impl = (struct impl*)s;
+
+	impl->first = true;
+}
+
+enum pw_stream_state rtp_stream_get_state(struct rtp_stream *s, const char **error)
+{
+	struct impl *impl = (struct impl*)s;
+
+	return pw_stream_get_state(impl->stream, error);
+}
+
+int rtp_stream_set_param(struct rtp_stream *s, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = (struct impl*)s;
+
+	return pw_stream_set_param(impl->stream, id, param);
+}
+
+int rtp_stream_update_params(struct rtp_stream *s,
+			const struct spa_pod **params,
+			uint32_t n_params)
+{
+	struct impl *impl = (struct impl*)s;
+	
+	return pw_stream_update_params(impl->stream, params, n_params);
 }
