@@ -1,9 +1,10 @@
-pipewire (0.3.83-0) UNRELEASED; urgency=medium
+pipewire (0.3.83-1) unstable; urgency=medium
 
   * New upstream release
   * Disable libcamera-dev from build-deps for hurd-i386
+  * Refresh Don-t-automatically-start-pipewire-for-root-logins.patch
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 20 Oct 2023 15:54:22 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 20 Oct 2023 16:20:29 +0200
 
 pipewire (0.3.82-1) unstable; urgency=medium
 
