@@ -52,8 +52,6 @@
 #define MONITOR_EXT			" Monitor"
 
 #define MAX_MIX				1024
-#define MAX_BUFFER_FRAMES		8192
-
 #define MAX_CLIENT_PORTS		768
 
 #define MAX_ALIGN			16
@@ -255,10 +253,10 @@ struct port {
 	unsigned int empty_out:1;
 	unsigned int zeroed:1;
 
-	float *emptyptr;
-	float empty[MAX_BUFFER_FRAMES + MAX_ALIGN];
-
 	void *(*get_buffer) (struct port *p, jack_nframes_t frames);
+
+	float *emptyptr;
+	float empty[];
 };
 
 struct link {
@@ -275,6 +273,8 @@ struct context {
 	struct pw_loop *l;
 	struct pw_thread_loop *loop;	/* thread_lock protects all below */
 	struct pw_context *context;
+	struct pw_loop *nl;
+	struct pw_thread_loop *notify;
 
 	struct spa_thread_utils *old_thread_utils;
 	struct spa_thread_utils thread_utils;
@@ -433,6 +433,9 @@ struct client {
 	char filter_char;
 	uint32_t max_ports;
 	unsigned int fill_aliases:1;
+	unsigned int writable_input:1;
+
+	uint32_t max_frames;
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
@@ -536,7 +539,7 @@ static int
 do_mix_set_io(struct spa_loop *loop, bool async, uint32_t seq,
 		const void *data, size_t size, void *user_data)
 {
-	struct io_info *info = user_data;
+	const struct io_info *info = data;
 	info->mix->io = info->data;
 	return 0;
 }
@@ -545,7 +548,7 @@ static inline void mix_set_io(struct mix *mix, void *data)
 {
 	struct io_info info = { .mix = mix, .data = data };
 	pw_data_loop_invoke(mix->port->client->loop,
-		do_mix_set_io, SPA_ID_INVALID, NULL, 0, true, &info);
+		do_mix_set_io, SPA_ID_INVALID, &info, sizeof(info), false, NULL);
 }
 
 static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32_t peer_id)
@@ -658,7 +661,7 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 {
 	struct port *p;
 	struct object *o;
-	uint32_t i;
+	uint32_t i, port_size;
 
 	if (c->n_ports >= c->max_ports) {
 		errno = ENOSPC;
@@ -666,11 +669,15 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	}
 
 	if (spa_list_is_empty(&c->free_ports)) {
-		p = calloc(OBJECT_CHUNK, sizeof(struct port));
+		port_size = sizeof(struct port) + (c->max_frames * sizeof(float)) + MAX_ALIGN;
+
+		p = calloc(OBJECT_CHUNK, port_size);
 		if (p == NULL)
 			return NULL;
-		for (i = 0; i < OBJECT_CHUNK; i++)
-			spa_list_append(&c->free_ports, &p[i].link);
+		for (i = 0; i < OBJECT_CHUNK; i++) {
+			struct port *t = SPA_PTROFF(p, port_size * i, struct port);
+			spa_list_append(&c->free_ports, &t->link);
+		}
 	}
 	p = spa_list_first(&c->free_ports, struct port, link);
 	spa_list_remove(&p->link);
@@ -947,7 +954,7 @@ jack_get_version_string(void)
 #define check_callbacks(c)							\
 ({										\
 	if ((c)->frozen_callbacks == 0 && (c)->pending_callbacks)		\
-		pw_loop_signal_event((c)->context.l, (c)->notify_source);	\
+		pw_loop_signal_event((c)->context.nl, (c)->notify_source);	\
  })
 #define thaw_callbacks(c)							\
 ({										\
@@ -955,16 +962,18 @@ jack_get_version_string(void)
 	check_callbacks(c);							\
  })
 
-static void emit_callbacks(struct client *c)
+static void on_notify_event(void *data, uint64_t count)
 {
+	struct client *c = data;
 	struct object *o;
 	int32_t avail;
 	uint32_t index;
 	struct notify *notify;
 	bool do_graph = false, do_recompute_capture = false, do_recompute_playback = false;
 
+	pw_thread_loop_lock(c->context.loop);
 	if (c->frozen_callbacks != 0 || !c->pending_callbacks)
-		return;
+		goto done;
 
 	pw_log_debug("%p: enter active:%u", c, c->active);
 
@@ -1080,7 +1089,9 @@ static void emit_callbacks(struct client *c)
 		do_callback(c, graph_callback, c->active, c->graph_arg);
 
 	thaw_callbacks(c);
+done:
 	pw_log_debug("%p: leave", c);
+	pw_thread_loop_unlock(c->context.loop);
 }
 
 static int queue_notify(struct client *c, int type, struct object *o, int arg1, const char *msg)
@@ -1168,12 +1179,6 @@ static int queue_notify(struct client *c, int type, struct object *o, int arg1, 
 done:
 	pthread_mutex_unlock(&c->context.lock);
 	return res;
-}
-
-static void on_notify_event(void *data, uint64_t count)
-{
-	struct client *c = data;
-	emit_callbacks(c);
 }
 
 static void on_sync_reply(void *data, uint32_t id, int seq)
@@ -1481,6 +1486,7 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 
 static inline void process_empty(struct port *p, uint32_t frames)
 {
+	struct client *c = p->client;
 	void *ptr, *src = p->emptyptr;
 	struct port *tied = p->tied;
 
@@ -1498,10 +1504,10 @@ static inline void process_empty(struct port *p, uint32_t frames)
 	case TYPE_ID_MIDI:
 	{
 		struct buffer *b;
-		ptr = get_buffer_output(p, MAX_BUFFER_FRAMES, 1, &b);
+		ptr = get_buffer_output(p, c->max_frames, 1, &b);
 		if (SPA_LIKELY(ptr != NULL))
 			b->datas[0].chunk->size = convert_from_midi(src,
-					ptr, MAX_BUFFER_FRAMES * sizeof(float));
+					ptr, c->max_frames * sizeof(float));
 		break;
 	}
 	default:
@@ -1513,19 +1519,14 @@ static inline void process_empty(struct port *p, uint32_t frames)
 static void prepare_output(struct port *p, uint32_t frames)
 {
 	struct mix *mix;
-	struct spa_io_buffers *io;
 
 	if (SPA_UNLIKELY(p->empty_out || p->tied))
 		process_empty(p, frames);
 
-	if (p->global_mix == NULL || (io = p->global_mix->io) == NULL)
-		return;
-
 	spa_list_for_each(mix, &p->mix, port_link) {
 		if (SPA_LIKELY(mix->io != NULL))
-			*mix->io = *io;
+			*mix->io = p->io;
 	}
-	io->status = SPA_STATUS_NEED_DATA;
 }
 
 static void complete_process(struct client *c, uint32_t frames)
@@ -1541,6 +1542,7 @@ static void complete_process(struct client *c, uint32_t frames)
 		if (!p->valid)
 			continue;
 		prepare_output(p, frames);
+		p->io.status = SPA_STATUS_NEED_DATA;
 	}
 	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
                 if (pw_map_item_is_free(item))
@@ -2213,10 +2215,10 @@ static int param_buffers(struct client *c, struct port *p,
 	case TYPE_ID_MIDI:
 		*param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 1, MAX_BUFFERS),
+			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_STEP_Int(
-								MAX_BUFFER_FRAMES * sizeof(float),
+								c->max_frames * sizeof(float),
 								sizeof(float),
 								INT32_MAX,
 								sizeof(float)),
@@ -2226,7 +2228,7 @@ static int param_buffers(struct client *c, struct port *p,
 	case TYPE_ID_VIDEO:
 		*param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 1, MAX_BUFFERS),
+			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(
 								320 * 240 * 4 * 4,
@@ -2517,6 +2519,7 @@ static int client_node_port_set_param(void *data,
 
 static inline void *init_buffer(struct port *p)
 {
+	struct client *c = p->client;
 	void *data = p->emptyptr;
 	if (p->zeroed)
 		return data;
@@ -2524,14 +2527,14 @@ static inline void *init_buffer(struct port *p)
 	if (p->object->port.type_id == TYPE_ID_MIDI) {
 		struct midi_buffer *mb = data;
 		mb->magic = MIDI_BUFFER_MAGIC;
-		mb->buffer_size = MAX_BUFFER_FRAMES * sizeof(float);
-		mb->nframes = MAX_BUFFER_FRAMES;
+		mb->buffer_size = c->max_frames * sizeof(float);
+		mb->nframes = c->max_frames;
 		mb->write_pos = 0;
 		mb->event_count = 0;
 		mb->lost_events = 0;
 		pw_log_debug("port %p: init midi buffer size:%d", p, mb->buffer_size);
 	} else
-		memset(data, 0, MAX_BUFFER_FRAMES * sizeof(float));
+		memset(data, 0, c->max_frames * sizeof(float));
 
 	p->zeroed = true;
 	return data;
@@ -2569,12 +2572,14 @@ static int client_node_port_use_buffers(void *data,
 		return -ENOSPC;
 	}
 
-	if (p->object->port.type_id == TYPE_ID_VIDEO && direction == SPA_DIRECTION_INPUT) {
-		fl = PW_MEMMAP_FLAG_READ;
-	} else {
-		/* some apps write to the input buffer so we want everything readwrite */
-		fl = PW_MEMMAP_FLAG_READWRITE;
-	}
+	fl = PW_MEMMAP_FLAG_READ;
+	/* Make the buffer writable when output. Some apps write to the input buffer
+	 * so we want to make them writable as well if the option is selected.
+	 * We can't use a PRIVATE mapping here because then we might not see changes
+	 * in the buffer by other apps (see mmap man page). */
+	if (direction == SPA_DIRECTION_OUTPUT ||
+	    (p->object->port.type_id != TYPE_ID_VIDEO && c->writable_input))
+		fl |= PW_MEMMAP_FLAG_WRITE;
 
 	/* clear previous buffers */
 	clear_buffers(c, mix);
@@ -2684,6 +2689,26 @@ static int client_node_port_use_buffers(void *data,
 	return res;
 }
 
+static int
+do_memmap_free(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct pw_memmap *mm = user_data;
+	pw_log_trace("memmap %p free", mm);
+	pw_memmap_free(mm);
+	return 0;
+}
+
+static int
+do_queue_memmap_free(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	struct pw_memmap *mm = *((struct pw_memmap **)data);
+	pw_loop_invoke(c->context.l, do_memmap_free, 0, NULL, 0, false, mm);
+	return 0;
+}
+
 static int client_node_port_set_io(void *data,
                              enum spa_direction direction,
                              uint32_t port_id,
@@ -2733,6 +2758,12 @@ static int client_node_port_set_io(void *data,
 	switch (id) {
 	case SPA_IO_Buffers:
 		mix_set_io(mix, ptr);
+		if (old != NULL) {
+			old->tag[0] = SPA_ID_INVALID;
+			pw_data_loop_invoke(c->loop,
+				do_queue_memmap_free, SPA_ID_INVALID, &old, sizeof(&old), false, c);
+			old = NULL;
+		}
 		break;
 	default:
 		break;
@@ -3568,7 +3599,6 @@ static void registry_event_global(void *data, uint32_t id,
 			queue_notify(c, NOTIFY_TYPE_CONNECT, o, 1, NULL);
 		break;
 	}
-	emit_callbacks(c);
 
       exit:
 	return;
@@ -3626,7 +3656,6 @@ static void registry_event_global_remove(void *data, uint32_t id)
 		}
 		break;
 	}
-	emit_callbacks(c);
 
 	return;
 }
@@ -3734,6 +3763,8 @@ jack_client_t * jack_client_open (const char *client_name,
 		goto no_props;
 
 	client->context.loop = pw_thread_loop_new(client->name, NULL);
+	if (client->context.loop == NULL)
+		goto no_props;
 	client->context.l = pw_thread_loop_get_loop(client->context.loop);
 	client->context.context = pw_context_new(
 			client->context.l,
@@ -3742,7 +3773,14 @@ jack_client_t * jack_client_open (const char *client_name,
 	if (client->context.context == NULL)
 		goto no_props;
 
-	client->notify_source = pw_loop_add_event(client->context.l,
+	client->context.notify = pw_thread_loop_new(client->name, NULL);
+	if (client->context.notify == NULL)
+		goto no_props;
+	client->context.nl = pw_thread_loop_get_loop(client->context.notify);
+
+	client->max_frames = client->context.context->settings.clock_quantum_limit;
+
+	client->notify_source = pw_loop_add_event(client->context.nl,
 			on_notify_event, client);
 	client->notify_buffer = calloc(1, NOTIFY_BUFFER_SIZE + sizeof(struct notify));
 	spa_ringbuffer_init(&client->notify_ring);
@@ -3896,6 +3934,7 @@ jack_client_t * jack_client_open (const char *client_name,
 	client->global_buffer_size = pw_properties_get_bool(client->props, "jack.global-buffer-size", false);
 	client->max_ports = pw_properties_get_uint32(client->props, "jack.max-client-ports", MAX_CLIENT_PORTS);
 	client->fill_aliases = pw_properties_get_bool(client->props, "jack.fill-aliases", false);
+	client->writable_input = pw_properties_get_bool(client->props, "jack.writable-input", true);
 
 	client->self_connect_mode = SELF_CONNECT_ALLOW;
 	if ((str = pw_properties_get(client->props, "jack.self-connect-mode")) != NULL) {
@@ -3930,6 +3969,8 @@ jack_client_t * jack_client_open (const char *client_name,
 			goto exit_unlock;
 	}
 	pw_thread_loop_unlock(client->context.loop);
+
+	pw_thread_loop_start(client->context.notify);
 
 	pw_log_info("%p: opened", client);
 	return (jack_client_t *)client;
@@ -3988,9 +4029,13 @@ int jack_client_close (jack_client_t *client)
 	clean_transport(c);
 
 	if (c->context.loop) {
-		queue_notify(c, NOTIFY_TYPE_REGISTRATION, c->object, 0, NULL);
 		pw_loop_invoke(c->context.l, NULL, 0, NULL, 0, false, c);
 		pw_thread_loop_stop(c->context.loop);
+	}
+	if (c->context.notify) {
+		queue_notify(c, NOTIFY_TYPE_REGISTRATION, c->object, 0, NULL);
+		pw_loop_invoke(c->context.nl, NULL, 0, NULL, 0, false, c);
+		pw_thread_loop_stop(c->context.notify);
 	}
 
 	if (c->registry) {
@@ -4015,11 +4060,13 @@ int jack_client_close (jack_client_t *client)
 		pw_context_destroy(c->context.context);
 
 	if (c->notify_source)
-		pw_loop_destroy_source(c->context.l, c->notify_source);
+		pw_loop_destroy_source(c->context.nl, c->notify_source);
 	free(c->notify_buffer);
 
 	if (c->context.loop)
 		pw_thread_loop_destroy(c->context.loop);
+	if (c->context.notify)
+		pw_thread_loop_destroy(c->context.notify);
 
 	pw_log_debug("%p: free", client);
 
@@ -5835,13 +5882,15 @@ int jack_port_type_size(void)
 SPA_EXPORT
 size_t jack_port_type_get_buffer_size (jack_client_t *client, const char *port_type)
 {
+	struct client *c = (struct client *) client;
+
 	return_val_if_fail(client != NULL, 0);
 	return_val_if_fail(port_type != NULL, 0);
 
 	if (spa_streq(JACK_DEFAULT_AUDIO_TYPE, port_type))
 		return jack_get_buffer_size(client) * sizeof(float);
 	else if (spa_streq(JACK_DEFAULT_MIDI_TYPE, port_type))
-		return MAX_BUFFER_FRAMES * sizeof(float);
+		return c->max_frames * sizeof(float);
 	else if (spa_streq(JACK_DEFAULT_VIDEO_TYPE, port_type))
 		return 320 * 240 * 4 * sizeof(float);
 	else

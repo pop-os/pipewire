@@ -1480,6 +1480,37 @@ spa_alsa_enum_format(struct state *state, int seq, uint32_t start, uint32_t num,
 	return res;
 }
 
+static void recalc_headroom(struct state *state)
+{
+	uint32_t latency;
+	uint32_t rate = 0;
+
+	if (state->position != NULL)
+		rate = state->position->clock.target_rate.denom;
+
+	state->headroom = state->default_headroom;
+	if (!state->disable_tsched || state->resample) {
+		/* When using timers, we might miss the pointer update for batch
+		 * devices so add some extra headroom. With IRQ, we know the pointers
+		 * are updated when we wake up and we don't need the headroom. */
+		if (state->is_batch)
+			state->headroom += state->period_frames;
+		/* Add 32 extra samples of headroom to handle jitter in capture.
+		 * For IRQ, we don't need this because when we wake up, we have
+		 * exactly enough samples to read or write. */
+		if (state->stream == SND_PCM_STREAM_CAPTURE)
+			state->headroom = SPA_MAX(state->headroom, 32u);
+	}
+	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
+
+	latency = SPA_MAX(state->min_delay, SPA_MIN(state->max_delay, state->headroom));
+	if (rate != 0 && state->rate != 0)
+		latency = SPA_SCALE32_UP(latency, rate, state->rate);
+
+	state->latency[state->port_direction].min_rate =
+		state->latency[state->port_direction].max_rate = latency;
+}
+
 int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_t flags)
 {
 	unsigned int rrate, rchannels, val, rscale = 1;
@@ -1490,14 +1521,15 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	snd_pcm_access_mask_t *amask;
 	snd_pcm_t *hndl;
 	unsigned int periods;
-	bool match = true, planar = false, is_batch;
+	bool match = true, planar = false;
 	char spdif_params[128] = "";
-	uint32_t default_period, latency;
+	uint32_t default_period;
 
 	spa_log_debug(state->log, "opened:%d format:%d started:%d", state->opened,
 			state->have_format, state->started);
 
 	state->use_mmap = !state->disable_mmap;
+	state->force_position = false;
 
 	switch (fmt->media_subtype) {
 	case SPA_MEDIA_SUBTYPE_raw:
@@ -1560,6 +1592,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 				IEC958_AES0_CON_EMPHASIS_NONE | IEC958_AES0_NONAUDIO,
 				IEC958_AES1_CON_ORIGINAL | IEC958_AES1_CON_PCM_CODER,
 				0, aes3);
+		state->force_position = true;
 		break;
 	}
 	case SPA_MEDIA_SUBTYPE_dsd:
@@ -1721,20 +1754,20 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	dir = 0;
 	period_size = state->default_period_size;
-	is_batch = snd_pcm_hw_params_is_batch(params) && !state->disable_batch;
+	state->is_batch = snd_pcm_hw_params_is_batch(params) && !state->disable_batch;
 
 	default_period = SPA_SCALE32_UP(DEFAULT_PERIOD, state->rate, DEFAULT_RATE);
 	default_period = flp2(2 * default_period - 1);
 
 	/* no period size specified. If we are batch or not using timers,
 	 * use the graph duration as the period */
-	if (period_size == 0 && (is_batch || state->disable_tsched))
+	if (period_size == 0 && (state->is_batch || state->disable_tsched))
 		period_size = state->position ? state->position->clock.target_duration : default_period;
 	if (period_size == 0)
 		period_size = default_period;
 
-	if (!state->disable_tsched) {
-		if (is_batch) {
+	if (!state->disable_tsched || state->resample) {
+		if (state->is_batch) {
 			/* batch devices get their hw pointers updated every period. Make
 			 * the period smaller and add one period of headroom. Limit the
 			 * period size to our default so that we don't create too much
@@ -1774,20 +1807,6 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		return -EIO;
 	}
 
-	state->headroom = state->default_headroom;
-	if (!state->disable_tsched) {
-		/* When using timers, we might miss the pointer update for batch
-		 * devices so add some extra headroom. With IRQ, we know the pointers
-		 * are updated when we wake up and we don't need the headroom. */
-		if (is_batch)
-			state->headroom += period_size;
-		/* Add 32 extra samples of headroom to handle jitter in capture.
-		 * For IRQ, we don't need this because when we wake up, we have
-		 * exactly enough samples to read or write. */
-		if (state->stream == SND_PCM_STREAM_CAPTURE)
-			state->headroom = SPA_MAX(state->headroom, 32u);
-	}
-
 	state->max_delay = state->buffer_frames / 2;
 	if (spa_strstartswith(state->props.device, "a52") ||
 	    spa_strstartswith(state->props.device, "dca"))
@@ -1795,15 +1814,9 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 	else
 		state->min_delay = 0;
 
-	state->headroom = SPA_MIN(state->headroom, state->buffer_frames);
 	state->start_delay = state->default_start_delay;
 
-	latency = SPA_MAX(state->min_delay, SPA_MIN(state->max_delay, state->headroom));
-	if (state->position != NULL)
-		latency = SPA_SCALE32_UP(latency, state->position->clock.target_rate.denom, state->rate);
-
-	state->latency[state->port_direction].min_rate =
-		state->latency[state->port_direction].max_rate = latency;
+	recalc_headroom(state);
 
 	spa_log_info(state->log, "%s: format:%s access:%s-%s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd "
@@ -1813,7 +1826,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 			planar ? "planar" : "interleaved",
 			state->rate, state->channels, state->buffer_frames, state->period_frames,
 			periods, state->frame_size, state->headroom, state->start_delay,
-			is_batch, !state->disable_tsched);
+			state->is_batch, !state->disable_tsched);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
@@ -2132,10 +2145,12 @@ recover:
 
 static inline snd_pcm_sframes_t alsa_avail(struct state *state)
 {
-	if (state->disable_tsched)
-		return snd_pcm_avail_update(state->hndl);
+	snd_pcm_sframes_t avail;
+	if (state->disable_tsched && !state->resample)
+		avail = snd_pcm_avail_update(state->hndl);
 	else
-		return snd_pcm_avail(state->hndl);
+		avail = snd_pcm_avail(state->hndl);
+	return avail;
 }
 
 static int get_avail(struct state *state, uint64_t current_time, snd_pcm_uframes_t *delay)
@@ -2337,6 +2352,7 @@ static int setup_matching(struct state *state)
 		state->matching = false;
 
 	state->resample = !state->pitch_elem && (((uint32_t)state->rate != state->driver_rate.denom) || state->matching);
+	recalc_headroom(state);
 
 	spa_log_info(state->log, "driver clock:'%s'@%d our clock:'%s'@%d matching:%d resample:%d",
 			state->position->clock.name, state->driver_rate.denom,
@@ -2364,7 +2380,8 @@ static inline int check_position_config(struct state *state)
 	if (SPA_UNLIKELY((pos = state->position) == NULL))
 		return 0;
 
-	if (state->disable_tsched && state->started && !state->following) {
+	if (state->force_position ||
+	    (state->disable_tsched && state->started && !state->following)) {
 		target_duration = state->period_frames;
 		target_rate = SPA_FRACTION(1, state->rate);
 		pos->clock.target_duration = target_duration;
@@ -2428,18 +2445,20 @@ static int alsa_write_sync(struct state *state, uint64_t current_time)
 			else
 				lev = SPA_LOG_LEVEL_INFO;
 
-			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-				spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
-						"target:%ld thr:%u, resync (%d suppressed)",
-						state->name, avail, delay,
-						target, state->threshold, suppressed);
-			}
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
+				lev = SPA_LOG_LEVEL_DEBUG;
+
+			spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
+					"target:%ld thr:%u, resync (%d suppressed)",
+					state->name, avail, delay,
+					target, state->threshold, suppressed);
 
 			if (avail > target)
 				snd_pcm_rewind(state->hndl, avail - target);
 			else if (avail < target)
 				spa_alsa_silence(state, target - avail);
 			avail = target;
+			spa_dll_init(&state->dll);
 			state->alsa_sync = false;
 		} else
 			state->alsa_sync_warning = true;
@@ -2688,11 +2707,12 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 			else
 				lev = SPA_LOG_LEVEL_INFO;
 
-			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) >= 0) {
-				spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u, "
-						"resync (%d suppressed)", state->name, delay,
-						target, state->threshold, suppressed);
-			}
+			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
+				lev = SPA_LOG_LEVEL_DEBUG;
+
+			spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u "
+					"resample:%d, resync (%d suppressed)", state->name, delay,
+					target, state->threshold, state->resample, suppressed);
 
 			if (avail < target)
 				max_read = target - avail;
@@ -2701,6 +2721,7 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 				avail = target;
 			}
 			state->alsa_sync = false;
+			spa_dll_init(&state->dll);
 		} else
 			state->alsa_sync_warning = true;
 
@@ -2714,7 +2735,7 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 static int alsa_read_frames(struct state *state)
 {
 	snd_pcm_t *hndl = state->hndl;
-	snd_pcm_uframes_t total_read = 0, to_read;
+	snd_pcm_uframes_t total_read = 0, avail;
 	const snd_pcm_channel_area_t *my_areas;
 	snd_pcm_uframes_t read, frames, offset;
 	snd_pcm_sframes_t commitres;
@@ -2723,15 +2744,15 @@ static int alsa_read_frames(struct state *state)
 	frames = state->max_read;
 
 	if (state->use_mmap) {
-		to_read = state->buffer_frames;
-		if ((res = snd_pcm_mmap_begin(hndl, &my_areas, &offset, &to_read)) < 0) {
+		avail = state->buffer_frames;
+		if ((res = snd_pcm_mmap_begin(hndl, &my_areas, &offset, &avail)) < 0) {
 			spa_log_error(state->log, "%s: snd_pcm_mmap_begin error: %s",
 					state->name, snd_strerror(res));
 			alsa_recover(state, res);
 			return res;
 		}
-		spa_log_trace_fp(state->log, "%p: begin offs:%ld frames:%ld to_read:%ld thres:%d", state,
-				offset, frames, to_read, state->threshold);
+		spa_log_trace_fp(state->log, "%p: begin offs:%ld frames:%ld avail:%ld thres:%d", state,
+				offset, frames, avail, state->threshold);
 	} else {
 		my_areas = NULL;
 		offset = 0;
@@ -2758,7 +2779,7 @@ static int alsa_read_frames(struct state *state)
 				lev = SPA_LOG_LEVEL_INFO;
 
 			spa_log_lev(state->log, lev, "%s: snd_pcm_mmap_commit error %lu %lu %lu: %s",
-					state->name, frames, to_read, read, snd_strerror(commitres));
+					state->name, frames, avail, read, snd_strerror(commitres));
 			if (commitres != -EPIPE && commitres != -ESTRPIPE)
 				return res;
 		}
@@ -3042,7 +3063,8 @@ int spa_alsa_prepare(struct state *state)
 
 	spa_list_for_each(follower, &state->followers, driver_link) {
 		if (follower != state && !follower->matching) {
-			spa_alsa_prepare(follower);
+			if (spa_alsa_prepare(follower) < 0)
+				continue;
 			if (!follower->linked && state->auto_link)
 				do_link(state, follower);
 		}
