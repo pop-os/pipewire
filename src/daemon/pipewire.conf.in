@@ -178,7 +178,7 @@ context.modules = [
         condition = [ { module.x11.bell = true } ]
     }
     { name = libpipewire-module-jackdbus-detect
-        args {
+        args = {
             #jack.library     = libjack.so.0
             #jack.server      = null
             #jack.client-name = PipeWire
@@ -214,7 +214,7 @@ context.objects = [
     # If condition is given, the object is created only when the context properties
     # all match the match rules.
     #
-    #{ factory = spa-node-factory   args = { factory.name = videotestsrc node.name = videotestsrc node.description = videotestsrc Spa:Pod:Object:Param:Props:patternType = 1 } }
+    #{ factory = spa-node-factory   args = { factory.name = videotestsrc node.name = videotestsrc node.description = videotestsrc "Spa:Pod:Object:Param:Props:patternType" = 1 } }
     #{ factory = spa-device-factory args = { factory.name = api.jack.device foo=bar } flags = [ nofail ] }
     #{ factory = spa-device-factory args = { factory.name = api.alsa.enum.udev } }
     #{ factory = spa-node-factory   args = { factory.name = api.alsa.seq.bridge node.name = Internal-MIDI-Bridge } }

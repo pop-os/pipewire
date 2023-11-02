@@ -203,8 +203,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - `bq_notch` a notch filter.
  * - `bq_allpass` an allpass filter.
  * - `bq_raw` a raw biquad filter. You need a config section to specify coefficients
- *   		per sample rate. The coefficients of the sample rate closest to the
- *   		graph rate are selected:
+ *		per sample rate. The coefficients of the sample rate closest to the
+ *		graph rate are selected:
  *
  *\code{.unparsed}
  * filter.graph = {
@@ -320,6 +320,73 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * It has an input port "In" and an output port "Out".
  *
+ * ### Clamp
+ *
+ * The clamp plugin can be used to clamp samples between min and max values.
+ *
+ * It has an input port "In" and an output port "Out". It also has a "Control"
+ * and "Notify" port for the control values.
+ *
+ * The final result is clamped to the "Min" and "Max" control values.
+ *
+ * ### Linear
+ *
+ * The linear plugin can be used to apply a linear transformation on samples
+ * or control values.
+ *
+ * It has an input port "In" and an output port "Out". It also has a "Control"
+ * and "Notify" port for the control values.
+ *
+ * The control value "Mult" and "Add" are used to configure the linear transform. Each
+ * sample or control value will be calculated as: new = old * Mult + Add.
+ *
+ * ### Reciprocal
+ *
+ * The recip plugin can be used to calculate the reciprocal (1/x) of samples
+ * or control values.
+ *
+ * It has an input port "In" and an output port "Out". It also has a "Control"
+ * and "Notify" port for the control values.
+ *
+ * ### Exp
+ *
+ * The exp plugin can be used to calculate the exponential (base^x) of samples
+ * or control values.
+ *
+ * It has an input port "In" and an output port "Out". It also has a "Control"
+ * and "Notify" port for the control values.
+ *
+ * The control value "Base" is used to calculate base ^ x for each sample.
+ *
+ * ### Log
+ *
+ * The log plugin can be used to calculate the logarithm of samples
+ * or control values.
+ *
+ * It has an input port "In" and an output port "Out". It also has a "Control"
+ * and "Notify" port for the control values.
+ *
+ * The control value "Base", "M1" and "M2" are used to calculate
+ * out = M2 * log2f(fabsf(in * M1)) / log2f(Base) for each sample.
+ *
+ * ### Multiply
+ *
+ * The mult plugin can be used to multiply samples together.
+ *
+ * It has 8 input ports named "In 1" to "In 8" and an output port "Out".
+ *
+ * All input ports samples are multiplied together into the output. Unused input ports
+ * will be ignored and not cause overhead.
+ *
+ * ### Sine
+ *
+ * The sine plugin generates a sine wave.
+ *
+ * It has an output port "Out" and also a control output port "notify".
+ *
+ * "Freq", "Ampl", "Offset" and "Phase" can be used to control the sine wave
+ * frequence, amplitude, offset and phase.
+ *
  * ## SOFA filter
  *
  * There is an optional builtin SOFA filter available.
@@ -391,7 +458,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - \ref PW_KEY_NODE_LINK_GROUP
  * - \ref PW_KEY_NODE_VIRTUAL
  * - \ref PW_KEY_NODE_NAME: See notes below. If not specified, defaults to
- *   	'filter-chain-<pid>-<module-id>'.
+ *	'filter-chain-<pid>-<module-id>'.
  *
  * Stream only properties:
  *
@@ -2589,6 +2656,10 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		}
 		for (i = 0; i < desc->n_output; i++) {
 			spa_list_for_each(link, &node->output_port[i].link_list, output_link)
+				link->input->node->n_deps--;
+		}
+		for (i = 0; i < desc->n_notify; i++) {
+			spa_list_for_each(link, &node->notify_port[i].link_list, output_link)
 				link->input->node->n_deps--;
 		}
 

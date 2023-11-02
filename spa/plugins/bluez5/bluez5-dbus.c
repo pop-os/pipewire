@@ -38,6 +38,7 @@
 #include "dbus-helpers.h"
 #include "player.h"
 #include "iso-io.h"
+#include "bap-codec-caps.h"
 #include "defs.h"
 
 static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5");
@@ -2017,41 +2018,31 @@ static void device_update_hw_volume_profiles(struct spa_bt_device *device)
 
 static bool device_set_update_leader(struct spa_bt_set_membership *set)
 {
-	struct spa_bt_set_membership *s, *leader;
-	int min_rank = INT_MAX;
-	int leader_rank = INT_MAX;
+	struct spa_bt_set_membership *s, *leader = NULL;
 
-	leader = NULL;
-
+	/* Make minimum rank device the leader, so that device set nodes always
+	 * appear under a specific device.
+	 */
 	spa_bt_for_each_set_member(s, set) {
 		if (!(s->device->connected_profiles & SPA_BT_PROFILE_BAP_DUPLEX))
 			continue;
-		min_rank = SPA_MIN(min_rank, s->rank);
-		if (s->leader) {
-			leader_rank = s->rank;
+
+		if (leader == NULL || s->rank < leader->rank ||
+				(s->rank == leader->rank && s->leader))
 			leader = s;
-		}
 	}
 
-	if (min_rank >= leader_rank && leader)
+	if (leader == NULL || (leader && leader->leader))
 		return false;
 
-	spa_bt_for_each_set_member(s, set) {
-		if (leader == NULL && s->rank == min_rank &&
-				(s->device->connected_profiles & SPA_BT_PROFILE_BAP_DUPLEX)) {
-			s->leader = true;
-			leader = s;
-		} else {
-			s->leader = false;
-		}
-	}
+	spa_bt_for_each_set_member(s, set)
+		s->leader = false;
 
-	if (leader) {
-		struct spa_bt_monitor *monitor = leader->device->monitor;
+	leader->leader = true;
 
-		spa_log_debug(monitor->log, "device set %s: leader is %s",
-				leader->path, leader->device->path);
-	}
+	spa_log_debug(leader->device->monitor->log,
+			"device set %p %s: leader is %s",
+			set, leader->path, leader->device->path);
 
 	return true;
 }
@@ -4684,7 +4675,6 @@ static void append_media_object(DBusMessageIter *iter, const char *endpoint,
 {
 	const char *interface_name = BLUEZ_MEDIA_ENDPOINT_INTERFACE;
 	DBusMessageIter object, array, entry, dict;
-	dbus_bool_t delay_reporting;
 
 	dbus_message_iter_open_container(iter, DBUS_TYPE_DICT_ENTRY, NULL, &object);
 	dbus_message_iter_append_basic(&object, DBUS_TYPE_OBJECT_PATH, &endpoint);
@@ -4699,9 +4689,27 @@ static void append_media_object(DBusMessageIter *iter, const char *endpoint,
 	append_basic_variant_dict_entry(&dict, "UUID", DBUS_TYPE_STRING, "s", &uuid);
 	append_basic_variant_dict_entry(&dict, "Codec", DBUS_TYPE_BYTE, "y", &codec_id);
 	append_basic_array_variant_dict_entry(&dict, "Capabilities", "ay", "y", DBUS_TYPE_BYTE, caps, caps_size);
+
 	if (spa_bt_profile_from_uuid(uuid) & SPA_BT_PROFILE_A2DP_SOURCE) {
-		delay_reporting = TRUE;
+		dbus_bool_t delay_reporting = TRUE;
+
 		append_basic_variant_dict_entry(&dict, "DelayReporting", DBUS_TYPE_BOOLEAN, "b", &delay_reporting);
+	}
+	if (spa_bt_profile_from_uuid(uuid) & (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE)) {
+		dbus_uint32_t locations;
+		dbus_uint16_t supported_context, context;
+
+		locations = BAP_CHANNEL_ALL;
+		if (spa_bt_profile_from_uuid(uuid) & SPA_BT_PROFILE_BAP_SINK) {
+			supported_context = context = BAP_CONTEXT_ALL;
+		} else {
+			supported_context = context = (BAP_CONTEXT_UNSPECIFIED | BAP_CONTEXT_CONVERSATIONAL |
+					BAP_CONTEXT_MEDIA | BAP_CONTEXT_GAME);
+		}
+
+		append_basic_variant_dict_entry(&dict, "Locations", DBUS_TYPE_UINT32, "u", &locations);
+		append_basic_variant_dict_entry(&dict, "Context", DBUS_TYPE_UINT16, "q", &context);
+		append_basic_variant_dict_entry(&dict, "SupportedContext", DBUS_TYPE_UINT16, "q", &supported_context);
 	}
 
 	dbus_message_iter_close_container(&entry, &dict);

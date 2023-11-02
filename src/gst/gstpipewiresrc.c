@@ -892,7 +892,9 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s, target-object %s",
                     pwsrc->path, pwsrc->target_object);
   pwsrc->negotiated = FALSE;
-  enum pw_stream_flags flags = PW_STREAM_FLAG_DONT_RECONNECT;
+  enum pw_stream_flags flags;
+  flags = PW_STREAM_FLAG_DONT_RECONNECT |
+	  PW_STREAM_FLAG_ASYNC;
   if (pwsrc->autoconnect)
     flags |= PW_STREAM_FLAG_AUTOCONNECT;
   pw_stream_connect (pwsrc->stream,
@@ -1186,7 +1188,7 @@ gst_pipewire_src_create (GstPushSrc * psrc, GstBuffer ** buffer)
     if (state == PW_STREAM_STATE_ERROR)
       goto streaming_error;
 
-    if (state != PW_STREAM_STATE_STREAMING)
+    if (state == PW_STREAM_STATE_UNCONNECTED)
       goto streaming_stopped;
 
     if ((caps = pwsrc->caps) != NULL) {
