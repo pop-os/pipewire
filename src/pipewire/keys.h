@@ -90,7 +90,9 @@ extern "C" {
 /* remote keys */
 #define PW_KEY_REMOTE_NAME		"remote.name"		/**< The name of the remote to connect to,
 								  *  default pipewire-0, overwritten by
-								  *  env(PIPEWIRE_REMOTE) */
+								  *  env(PIPEWIRE_REMOTE). May also be
+								  *  a SPA-JSON array of sockets, to be tried
+								  *  in order. */
 #define PW_KEY_REMOTE_INTENTION		"remote.intention"	/**< The intention of the remote connection,
 								  *  "generic", "screencast" */
 
@@ -135,7 +137,8 @@ extern "C" {
 #define PW_KEY_NODE_SESSION		"node.session"		/**< the session id this node is part of */
 #define PW_KEY_NODE_GROUP		"node.group"		/**< the group id this node is part of. Nodes
 								  *  in the same group are always scheduled
-								  *  with the same driver. */
+								  *  with the same driver. Can be an array of
+								  *  group names. */
 #define PW_KEY_NODE_EXCLUSIVE		"node.exclusive"	/**< node wants exclusive access to resources */
 #define PW_KEY_NODE_AUTOCONNECT		"node.autoconnect"	/**< node wants to be automatically connected
 								  *  to a compatible node */
@@ -175,7 +178,8 @@ extern "C" {
 								  *  on output/input/all ports when the value is
 								  *  "out"/"in"/"true" respectively */
 #define PW_KEY_NODE_LINK_GROUP		"node.link-group"	/**< the node is internally linked to
-								  *  nodes with the same link-group */
+								  *  nodes with the same link-group. Can be an
+								  *  array of group names. */
 #define PW_KEY_NODE_NETWORK		"node.network"		/**< the node is on a network */
 #define PW_KEY_NODE_TRIGGER		"node.trigger"		/**< the node is not scheduled automatically
 								  *   based on the dependencies in the graph

@@ -267,12 +267,12 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
 
   port_params[1] = spa_pod_builder_add_object (&b,
       SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-      SPA_PARAM_META_type, SPA_POD_Int(SPA_META_Header),
+      SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
       SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
 
   port_params[2] = spa_pod_builder_add_object (&b,
       SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-      SPA_PARAM_META_type, SPA_POD_Int(SPA_META_VideoCrop),
+      SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
       SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_region)));
 
   pw_thread_loop_lock (sink->core->loop);
@@ -576,9 +576,10 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
     goto start_error;
 
   if (state == PW_STREAM_STATE_UNCONNECTED) {
-    enum pw_stream_flags flags = 0;
+    enum pw_stream_flags flags;
     uint32_t target_id;
 
+    flags = PW_STREAM_FLAG_ASYNC;
     if (pwsink->mode != GST_PIPEWIRE_SINK_MODE_PROVIDE)
       flags |= PW_STREAM_FLAG_AUTOCONNECT;
     else
@@ -676,7 +677,11 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pwsink->pool));
     gst_buffer_pool_config_get_params (config, &caps, &size, &min_buffers, &max_buffers);
 
-    size = (size == 0) ? gst_buffer_get_size (buffer) : size;
+    if (size == 0) {
+      gsize maxsize;
+      gst_buffer_get_sizes (buffer, NULL, &maxsize);
+      size = maxsize;
+    }
 
     gst_buffer_pool_config_set_params (config, caps, size, min_buffers, max_buffers);
     gst_buffer_pool_set_config (GST_BUFFER_POOL_CAST (pwsink->pool), config);
@@ -702,6 +707,7 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     gst_buffer_extract (buffer, 0, info.data, info.maxsize);
     gst_buffer_unmap (b, &info);
     gst_buffer_resize (b, 0, gst_buffer_get_size (buffer));
+    gst_buffer_copy_into(b, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
     buffer = b;
     unref_buffer = TRUE;
 
