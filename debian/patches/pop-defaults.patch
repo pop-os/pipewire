@@ -3,11 +3,11 @@ Index: pipewire/src/daemon/pipewire.conf.in
 --- pipewire.orig/src/daemon/pipewire.conf.in
 +++ pipewire/src/daemon/pipewire.conf.in
 @@ -27,7 +27,7 @@ context.properties = {
- 
+
      ## Properties for the DSP configuration.
      #default.clock.rate          = 48000
 -    #default.clock.allowed-rates = [ 48000 ]
-+    default.clock.allowed-rates = [ 48000 88200 96000 176400 192000 352800 384000 ]
++    default.clock.allowed-rates = [ 44100 48000 88200 96000 176400 192000 352800 384000 ]
      #default.clock.quantum       = 1024
      #default.clock.min-quantum   = 32
      #default.clock.max-quantum   = 2048
@@ -17,5 +17,5 @@ Index: pipewire/src/daemon/pipewire.conf.in
          default.clock.min-quantum = 1024
 +        default.clock.quantum = 2048
      }
- 
+
      # keys checked below to disable module loading
