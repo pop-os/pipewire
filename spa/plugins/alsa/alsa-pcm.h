@@ -92,6 +92,12 @@ struct rt_state {
 	unsigned int following:1;
 };
 
+struct bound_ctl {
+	char name[256];
+	snd_ctl_elem_info_t *info;
+	snd_ctl_elem_value_t *value;
+};
+
 struct state {
 	struct spa_handle handle;
 	struct spa_node node;
@@ -240,10 +246,18 @@ struct state {
 
 	struct spa_pod *tag[2];
 
-	/* Rate match via an ALSA ctl */
+	/* for rate match and bind ctls */
 	snd_ctl_t *ctl;
+
+	/* Rate match via an ALSA ctl */
 	snd_ctl_elem_value_t *pitch_elem;
 	double last_rate;
+
+	/* ALSA ctls exposed as params */
+	unsigned int num_bind_ctls;
+	struct bound_ctl bound_ctls[16];
+	struct spa_source ctl_sources[MAX_POLL];
+	int ctl_n_fds;
 
 	struct spa_list link;
 
@@ -281,6 +295,9 @@ int spa_alsa_read(struct state *state);
 int spa_alsa_skip(struct state *state);
 
 void spa_alsa_recycle_buffer(struct state *state, uint32_t buffer_id);
+
+void spa_alsa_emit_node_info(struct state *state, bool full);
+void spa_alsa_emit_port_info(struct state *state, bool full);
 
 static inline uint32_t spa_alsa_format_from_name(const char *name, size_t len)
 {
