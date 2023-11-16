@@ -1,8 +1,8 @@
-pipewire (0.3.85-0) UNRELEASED; urgency=medium
+pipewire (0.3.85-1) unstable; urgency=medium
 
   * New upstream release
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Nov 2023 11:48:05 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Nov 2023 12:12:15 +0100
 
 pipewire (0.3.84-1) unstable; urgency=medium
 
