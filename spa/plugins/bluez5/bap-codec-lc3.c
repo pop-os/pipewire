@@ -556,11 +556,12 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 			spa_pod_builder_int(b, 8000);
 		spa_pod_builder_int(b, 8000);
 	}
-	if (i == 0)
-		return -EINVAL;
 	if (i > 1)
 		choice->body.type = SPA_CHOICE_Enum;
 	spa_pod_builder_pop(b, &f[1]);
+
+	if (i == 0)
+		return -EINVAL;
 
 	res = channels_to_positions(conf.channels, position);
 	if (res == 0)
@@ -674,6 +675,8 @@ static int codec_get_qos(const struct media_codec *codec,
 	if (endpoint_qos->latency >= 0x0005 && endpoint_qos->latency <= 0x0FA0)
 		/* Values outside the range are RFU */
 		qos->latency = endpoint_qos->latency;
+	if (endpoint_qos->retransmission)
+		qos->retransmission = endpoint_qos->retransmission;
 	if (endpoint_qos->delay_min)
 		qos->delay = SPA_MAX(qos->delay, endpoint_qos->delay_min);
 	if (endpoint_qos->delay_max)

@@ -971,6 +971,11 @@ static DBusHandlerResult endpoint_select_properties(DBusConnection *conn, DBusMe
 			goto error_invalid;
 		}
 
+		spa_log_debug(monitor->log, "select qos: interval:%d framing:%d phy:%d sdu:%d "
+				"rtn:%d latency:%d delay:%d target_latency:%d",
+				qos.interval, qos.framing, qos.phy, qos.sdu, qos.retransmission,
+				qos.latency, (int)qos.delay, qos.target_latency);
+
 		dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
 		dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &entry_key);
 		dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "a{sv}", &variant);
@@ -3465,6 +3470,9 @@ static int transport_create_iso_io(struct spa_bt_transport *transport)
 				SPA_BT_PROFILE_BAP_BROADCAST_SINK | SPA_BT_PROFILE_BAP_BROADCAST_SOURCE)))
 			continue;
 
+		if (t->device->adapter != transport->device->adapter)
+			continue;
+
 		if ((transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK) ||
 			(transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE)) {
 			if (t->bap_big != transport->bap_big)
@@ -3587,10 +3595,10 @@ finish:
 		/* For broadcast there initiator moves the transport state to SPA_BT_TRANSPORT_STATE_ACTIVE */
 		if ((transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK) ||
 			(transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE))	{
-			spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
+			spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ACTIVE);
 		} else {
 			if (!transport->bap_initiator)
-				spa_bt_transport_set_state(transport, SPA_BT_TRANSPORT_STATE_ACTIVE);
+				spa_bt_transport_set_state(t_linked, SPA_BT_TRANSPORT_STATE_ACTIVE);
 		}
 	}
 

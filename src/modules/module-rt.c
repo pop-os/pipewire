@@ -82,6 +82,8 @@
  * - `rlimits.enabled`: enable the use of rtlimits, default true.
  * - `rtportal.enabled`: enable the use of realtime portal, default true
  * - `rtkit.enabled`: enable the use of rtkit, default true
+ * - `uclamp.min`: the minimum utilisation value the scheduler should consider
+ * - `uclamp.max`: the maximum utilisation value the scheduler should consider
 
  * The nice level is by default set to an invalid value so that clients don't
  * automatically have the nice level raised.
@@ -101,6 +103,8 @@
  *         #rlimits.enabled = true
  *         #rtportal.enabled = true
  *         #rtkit.enabled = true
+ *         #uclamp.min = 0
+ *         #uclamp.max = 1024
  *     }
  *     flags = [ ifexists nofail ]
  * }
@@ -131,13 +135,18 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_RT_TIME_SOFT	-1
 #define DEFAULT_RT_TIME_HARD	-1
 
+#define DEFAULT_UCLAMP_MIN      0
+#define DEFAULT_UCLAMP_MAX      1024
+
 #define MODULE_USAGE	"( nice.level=<priority: default "SPA_STRINGIFY(DEFAULT_NICE_LEVEL)"(don't change)> ) "	\
 			"( rt.prio=<priority: default "SPA_STRINGIFY(DEFAULT_RT_PRIO)"> ) "		\
 			"( rt.time.soft=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_SOFT)"> ) "	\
 			"( rt.time.hard=<in usec: default "SPA_STRINGIFY(DEFAULT_RT_TIME_HARD)"> ) "	\
 			"( rlimits.enabled=<default true> ) " \
 			"( rtportal.enabled=<default true> ) " \
-			"( rtkit.enabled=<default true> ) "
+			"( rtkit.enabled=<default true> ) " \
+			"( uclamp.min=<default "SPA_STRINGIFY(DEFAULT_UCLAMP_MIN)"> ) " \
+			"( uclamp.max=<default "SPA_STRINGIFY(DEFAULT_UCLAMP_MAX)"> )"
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -182,6 +191,9 @@ struct impl {
 	int rt_prio;
 	rlim_t rt_time_soft;
 	rlim_t rt_time_hard;
+
+	int uclamp_min;
+	int uclamp_max;
 
 	struct spa_hook module_listener;
 
@@ -537,6 +549,8 @@ static bool check_realtime_privileges(struct impl *impl)
 	int err, old_policy, new_policy, min, max;
 	struct sched_param old_sched_params;
 	struct sched_param new_sched_params;
+	struct rlimit old_rlim;
+	struct rlimit no_rlim = { -1, -1 };
 	int try = 0;
 
 	if (!impl->rlimits_enabled)
@@ -584,11 +598,21 @@ static bool check_realtime_privileges(struct impl *impl)
 		if ((old_policy & PW_SCHED_RESET_ON_FORK) != 0)
 			new_policy |= PW_SCHED_RESET_ON_FORK;
 
+		/* Disable RLIMIT_RTTIME while trying new_policy. */
+		if ((err = getrlimit(RLIMIT_RTTIME, &old_rlim)) < 0)
+			pw_log_debug("getrlimit() failed: %s", spa_strerror(err));
+		if ((err = setrlimit(RLIMIT_RTTIME, &no_rlim)) < 0)
+			pw_log_debug("setrlimit() failed: %s", spa_strerror(err));
+
 		if (pthread_setschedparam(pthread_self(), new_policy, &new_sched_params) == 0) {
 			impl->rt_prio = new_sched_params.sched_priority;
 			pthread_setschedparam(pthread_self(), old_policy, &old_sched_params);
+			if ((err = setrlimit(RLIMIT_RTTIME, &old_rlim)) < 0)
+				pw_log_debug("setrlimit() failed: %s", spa_strerror(err));
 			return true;
 		}
+		if ((err = setrlimit(RLIMIT_RTTIME, &old_rlim)) < 0)
+			pw_log_debug("setrlimit() failed: %s", spa_strerror(err));
 	}
 	pw_log_info("Can't set rt prio to %d: %m (try increasing rlimits)", (int)priority);
 	return false;
@@ -636,18 +660,18 @@ static int set_nice(struct impl *impl, int nice_level, bool warn)
 	return res;
 }
 
-static int set_rlimit(struct impl *impl)
+static int set_rlimit(struct rlimit *rlim)
 {
 	int res = 0;
 
-	if (setrlimit(RLIMIT_RTTIME, &impl->rl) < 0)
+	if (setrlimit(RLIMIT_RTTIME, rlim) < 0)
 		res = -errno;
 
 	if (res < 0)
 		pw_log_debug("setrlimit() failed: %s", spa_strerror(res));
 	else
 		pw_log_debug("rt.time.soft:%"PRIi64" rt.time.hard:%"PRIi64,
-				(int64_t)impl->rl.rlim_cur, (int64_t)impl->rl.rlim_max);
+				(int64_t)rlim->rlim_cur, (int64_t)rlim->rlim_max);
 
 	return res;
 }
@@ -1011,11 +1035,55 @@ static int do_rtkit_setup(struct spa_loop *loop, bool async, uint32_t seq,
 	impl->rl.rlim_cur = SPA_MIN(impl->rl.rlim_cur, impl->rttime_max);
 	impl->rl.rlim_max = SPA_MIN(impl->rl.rlim_max, impl->rttime_max);
 
-	set_rlimit(impl);
+	set_rlimit(&impl->rl);
 
 	return 0;
 }
 #endif /* HAVE_DBUS */
+
+int set_uclamp(int uclamp_min, int uclamp_max, pid_t pid) {
+#ifdef __linux__
+	int ret;
+	struct sched_attr {
+		uint32_t size;
+		uint32_t sched_policy;
+		uint64_t sched_flags;
+		int32_t sched_nice;
+		uint32_t sched_priority;
+		uint64_t sched_runtime;
+		uint64_t sched_deadline;
+		uint64_t sched_period;
+		uint32_t sched_util_min;
+		uint32_t sched_util_max;
+	} attr;
+
+	ret = syscall(SYS_sched_getattr, pid, &attr, sizeof(struct sched_attr), 0);
+	if (ret) {
+		pw_log_warn("Could not retrieve scheduler attributes: %d", -errno);
+		return -errno;
+	}
+
+	/* SCHED_FLAG_KEEP_POLICY |
+	 * SCHED_FLAG_KEEP_PARAMS |
+	 * SCHED_FLAG_UTIL_CLAMP_MIN |
+	 * SCHED_FLAG_UTIL_CLAMP_MAX */
+	attr.sched_flags = 0x8 | 0x10 | 0x20 | 0x40;
+	attr.sched_util_min = uclamp_min;
+	attr.sched_util_max = uclamp_max;
+
+	ret = syscall(SYS_sched_setattr, pid, &attr, 0);
+
+	if (ret) {
+		pw_log_warn("Could not set scheduler attributes: %d", -errno);
+		return -errno;
+	}
+	return 0;
+#else
+	pw_log_warn("Setting UCLAMP values is only supported on Linux");
+	return -EOPNOTSUPP;
+#endif /* __linux__ */
+}
+
 
 SPA_EXPORT
 int pipewire__module_init(struct pw_impl_module *module, const char *args)
@@ -1047,6 +1115,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->rlimits_enabled = pw_properties_get_bool(props, "rlimits.enabled", true);
 	impl->rtportal_enabled = pw_properties_get_bool(props, "rtportal.enabled", true);
 	impl->rtkit_enabled = pw_properties_get_bool(props, "rtkit.enabled", true);
+	impl->uclamp_min = pw_properties_get_int32(props, "uclamp.min", DEFAULT_UCLAMP_MIN);
+	impl->uclamp_max = pw_properties_get_int32(props, "uclamp.max", DEFAULT_UCLAMP_MAX);
 
 	impl->rl.rlim_cur = impl->rt_time_soft;
 	impl->rl.rlim_max = impl->rt_time_hard;
@@ -1086,7 +1156,15 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			use_rtkit = can_use_rtkit;
 	}
 	if (!use_rtkit)
-		set_rlimit(impl);
+		set_rlimit(&impl->rl);
+
+	if (impl->uclamp_max > 1024) {
+		pw_log_warn("uclamp.max out of bounds. Got %d, clamping to 1024.", impl->uclamp_max);
+		impl->uclamp_max = 1024;
+	}
+
+	if (impl->uclamp_min || impl->uclamp_max < 1024)
+		set_uclamp(impl->uclamp_min, impl->uclamp_max, impl->main_pid);
 
 #ifdef HAVE_DBUS
 	impl->use_rtkit = use_rtkit;
