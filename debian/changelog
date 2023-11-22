@@ -1,3 +1,9 @@
+pipewire (0.3.85) jammy; urgency=medium
+
+  * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.85
+
+ -- Michael Murphy <michael@mmurphy.dev>  Wed, 22 Nov 2023 15:48:17 +0100
+
 pipewire (0.3.84) jammy; urgency=medium
 
   * https://gitlab.freedesktop.org/pipewire/pipewire/-/releases/0.3.84
