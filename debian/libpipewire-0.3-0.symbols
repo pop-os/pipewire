@@ -1,7 +1,7 @@
 libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
 * Build-Depends-Package: libpipewire-0.3-dev
  PW_LOG_TOPIC_DEFAULT@Base 0.3.38
-#MISSING: 0.3.82-0# _pw_log_topic_new@Base 0.3.38
+#MISSING: 0.3.82# _pw_log_topic_new@Base 0.3.38
  pw_buffers_clear@Base 0.3.1
  pw_buffers_negotiate@Base 0.3.1
  pw_check_library_version@Base 0.3.75
@@ -34,8 +34,8 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_context_create_node@Base 0.3.1
  pw_context_create_port@Base 0.3.1
  pw_context_destroy@Base 0.3.1
-#MISSING: 0.3.75-0# pw_context_driver_add_listener@Base 0.3.72
-#MISSING: 0.3.75-0# pw_context_driver_remove_listener@Base 0.3.72
+#MISSING: 0.3.75# pw_context_driver_add_listener@Base 0.3.72
+#MISSING: 0.3.75# pw_context_driver_remove_listener@Base 0.3.72
  pw_context_find_export_type@Base 0.3.1
  pw_context_find_factory@Base 0.3.1
  pw_context_find_global@Base 0.3.1
@@ -263,7 +263,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_impl_port_set_param@Base 0.3.1
  pw_impl_port_update_properties@Base 0.3.1
  pw_impl_port_use_buffers@Base 0.3.1
- pw_in_valgrind@Base 0.3.6
+#MISSING: 1.0.0# pw_in_valgrind@Base 0.3.6
  pw_init@Base 0.3.1
  pw_link_info_free@Base 0.3.1
  pw_link_info_merge@Base 0.3.35
@@ -353,7 +353,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
  pw_proxy_error@Base 0.3.1
  pw_proxy_errorf@Base 0.3.1
  pw_proxy_get_bound_id@Base 0.3.1
-#MISSING: 0.3.73-0# pw_proxy_get_core@Base 0.3.1
+#MISSING: 0.3.73# pw_proxy_get_core@Base 0.3.1
  pw_proxy_get_id@Base 0.3.1
  pw_proxy_get_marshal@Base 0.3.1
  pw_proxy_get_object_listeners@Base 0.3.1
