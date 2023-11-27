@@ -7,6 +7,8 @@ pipewire (1.0.0-0) UNRELEASED; urgency=medium
       See commit 2738bb4c.
   * Build ROC modules (Closes: #1002630)
     - Add libroc-dev in Build-Deps
+    - Add libuv1-dev and libspeexdsp-dev in Build-Deps, those are missing
+      dependencies of libroc-dev. Will dropped once libroc-dev is fixed.
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Nov 2023 09:45:23 +0100
 
