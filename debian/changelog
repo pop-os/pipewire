@@ -5,6 +5,8 @@ pipewire (1.0.0-0) UNRELEASED; urgency=medium
   * Update symbols file, 1 symbol is dropped in 1.0.0:
       - pw_in_valgrind@Base 0.3.6
       See commit 2738bb4c.
+  * Build ROC modules (Closes: #1002630)
+    - Add libroc-dev in Build-Deps
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Nov 2023 09:45:23 +0100
 

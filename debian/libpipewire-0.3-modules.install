@@ -22,6 +22,8 @@ usr/lib/*/pipewire-0.3/libpipewire-module-protocol-simple.so
 usr/lib/*/pipewire-0.3/libpipewire-module-pulse-tunnel.so
 usr/lib/*/pipewire-0.3/libpipewire-module-raop-discover.so
 usr/lib/*/pipewire-0.3/libpipewire-module-raop-sink.so
+usr/lib/*/pipewire-0.3/libpipewire-module-roc-sink.so
+usr/lib/*/pipewire-0.3/libpipewire-module-roc-source.so
 usr/lib/*/pipewire-0.3/libpipewire-module-rt.so
 usr/lib/*/pipewire-0.3/libpipewire-module-rtkit.so
 usr/lib/*/pipewire-0.3/libpipewire-module-rtp-sap.so
