@@ -34,7 +34,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 /**
- * \page page_module_filter_chain PipeWire Module: Filter-Chain
+ * \page page_module_filter_chain Filter-Chain
  *
  * The filter-chain allows you to create an arbitrary processing graph
  * from LADSPA, LV2 and builtin filters. This filter can be made into a
@@ -47,6 +47,10 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * Because both ends of the filter-chain are built with streams, the session
  * manager can manage the configuration and connection with the sinks and
  * sources automatically.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-filter-chain`
  *
  * ## Module Options
  *
@@ -2854,6 +2858,9 @@ static void impl_destroy(struct impl *impl)
 	graph_free(&impl->graph);
 	spa_list_consume(pl, &impl->plugin_func_list, link)
 		free_plugin_func(pl);
+
+	free(impl->silence_data);
+	free(impl->discard_data);
 	free(impl);
 }
 
@@ -2974,8 +2981,18 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->quantum_limit = pw_properties_get_uint32(
 			pw_context_get_properties(impl->context),
 			"default.clock.quantum-limit", 8192u);
+
 	impl->silence_data = calloc(impl->quantum_limit, sizeof(float));
+	if (impl->silence_data == NULL) {
+		res = -errno;
+		goto error;
+	}
+
 	impl->discard_data = calloc(impl->quantum_limit, sizeof(float));
+	if (impl->discard_data == NULL) {
+		res = -errno;
+		goto error;
+	}
 
 	cpu_iface = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 	impl->dsp.cpu_flags = cpu_iface ? spa_cpu_get_flags(cpu_iface) : 0;

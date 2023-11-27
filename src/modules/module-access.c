@@ -29,7 +29,7 @@
 
 #include "flatpak-utils.h"
 
-/** \page page_module_access PipeWire Module: Access
+/** \page page_module_access Access
  *
  *
  * The `access` module performs access checks on clients. The access check
@@ -62,6 +62,10 @@
  * other clients (eg. portal or pipewire-pulse), the
  * `pipewire.access.portal.app_id` property is to the Flatpak application ID, if
  * found. In addition, `pipewire.sec.flatpak` is set to `true`.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-access`
  *
  * ## Module Options
  *

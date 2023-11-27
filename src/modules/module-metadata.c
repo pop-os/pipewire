@@ -15,7 +15,11 @@
 #include <pipewire/impl.h>
 #include <pipewire/extensions/metadata.h>
 
-/** \page page_module_metadata PipeWire Module: Metadata
+/** \page page_module_metadata Metadata
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-metadata`
  */
 
 #define NAME "metadata"

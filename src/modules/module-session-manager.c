@@ -7,10 +7,14 @@
 
 #include <pipewire/impl.h>
 
-/** \page page_module_session_manager PipeWire Module: Session Manager
+/** \page page_module_session_manager Session Manager
  *
  * This module implements some usefull objects for implementing a session
  * manager. It is not yet actively used.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-session-manager`
  */
 
 /* client-endpoint.c */

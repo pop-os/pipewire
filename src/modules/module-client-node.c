@@ -16,7 +16,11 @@
 #include "module-client-node/v0/client-node.h"
 #include "module-client-node/client-node.h"
 
-/** \page page_module_client_node PipeWire Module: Client Node
+/** \page page_module_client_node Client Node
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-client-node`
  */
 
 #define NAME "client-node"

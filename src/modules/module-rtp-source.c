@@ -35,13 +35,17 @@
 #define ifr_ifindex ifr_index
 #endif
 
-/** \page page_module_rtp_source PipeWire Module: RTP source
+/** \page page_module_rtp_source RTP source
  *
  * The `rtp-source` module creates a PipeWire source that receives audio
  * and midi RTP packets.
  *
  * This module is usually loaded from the \ref page_module_rtp_sap so that the
  * source.ip and source.port and format parameters matches that of the sender.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-rtp-source`
  *
  * ## Module Options
  *

@@ -40,7 +40,7 @@
 
 #include <pipewire/extensions/profiler.h>
 
-/** \page page_module_echo_cancel PipeWire Module: Echo Cancel
+/** \page page_module_echo_cancel Echo Cancel
  *
  * The `echo-cancel` module performs echo cancellation. The module creates
  * virtual `echo-cancel-capture` source and `echo-cancel-playback` sink
@@ -79,6 +79,10 @@
  *   the signal from the sink stream is removed from the capture stream data.
  *   This data then goes into the application (the conference application) and
  *   does not contain the echo from the other participants anymore.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-echo-cancel`
  *
  * ## Module Options
  *

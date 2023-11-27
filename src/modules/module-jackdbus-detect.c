@@ -25,10 +25,14 @@
 #include "pipewire/module.h"
 #include "pipewire/utils.h"
 
-/** \page page_module_jackdbus_detect PipeWire Module: JACK DBus detect
+/** \page page_module_jackdbus_detect JACK DBus detect
  *
  * Automaticall creates a sink/source when a jackdbus server is started
  * and connect to JACK.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-jackdbus-detect`
  *
  * ## Module Options
  *
