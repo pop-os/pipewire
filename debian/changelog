@@ -1,6 +1,7 @@
 pipewire (1.0.0-0) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Install new manpages in their respective packages
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Nov 2023 09:45:23 +0100
 
