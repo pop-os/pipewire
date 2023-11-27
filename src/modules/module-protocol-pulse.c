@@ -18,7 +18,7 @@
 
 #include "module-protocol-pulse/pulse-server.h"
 
-/** \page page_module_protocol_pulse PipeWire Module: Protocol Pulse
+/** \page page_module_protocol_pulse Protocol Pulse
  *
  * This module implements a complete PulseAudio server on top of
  * PipeWire.  This is only the server implementation, client are expected
@@ -32,6 +32,10 @@
  *
  * The pulse server implements a sample cache that is otherwise not
  * available in PipeWire.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-protocol-pulse`
  *
  * ## Module Options
  *
@@ -86,7 +90,7 @@
  *\endcode
  *
  * The addresses the server listens on when starting. Uncomment the `tcp:4713` entry to also
- * make the server listen on a tcp socket. This is equivalent to loading `module-native-protocol-tcp`.
+ * make the server listen on a tcp socket. This is equivalent to loading `libpipewire-module-native-protocol-tcp`.
  *
  * There is also a slightly more verbose syntax with more options:
  *

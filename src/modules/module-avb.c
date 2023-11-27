@@ -21,7 +21,11 @@
 
 #include "module-avb/avb.h"
 
-/** \page page_module_avb PipeWire Module: AVB
+/** \page page_module_avb AVB
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-avb`
  */
 
 #define NAME "avb"

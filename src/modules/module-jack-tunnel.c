@@ -30,7 +30,7 @@
 
 #include "module-jack-tunnel/weakjack.h"
 
-/** \page page_module_jack_tunnel PipeWire Module: JACK Tunnel
+/** \page page_module_jack_tunnel JACK Tunnel
  *
  * The jack-tunnel module provides a source or sink that tunnels all audio to
  * a JACK server.
@@ -38,6 +38,10 @@
  * This module is usually used together with \ref page_module_jackdbus_detect that will
  * automatically load the tunnel with the right parameters based on dbus
  * information.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-jack-tunnel`
  *
  * ## Module Options
  *

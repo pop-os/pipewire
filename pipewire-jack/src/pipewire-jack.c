@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 #include <regex.h>
 #include <math.h>
+#include <threads.h>
 
 #include <jack/jack.h>
 #include <jack/intclient.h>
@@ -111,7 +112,7 @@ static struct globals globals;
 static bool mlock_warned = false;
 
 #define MIDI_SCRATCH_FRAMES	8192
-static float midi_scratch[MIDI_SCRATCH_FRAMES];
+static thread_local float midi_scratch[MIDI_SCRATCH_FRAMES];
 
 
 #define OBJECT_CHUNK		8
@@ -301,6 +302,15 @@ struct metadata {
 	char default_audio_source[1024];
 };
 
+struct frame_times {
+	uint64_t frames;
+	uint64_t nsec;
+	uint64_t next_nsec;
+	uint32_t buffer_frames;
+	uint32_t sample_rate;
+	double rate_diff;
+};
+
 struct client {
 	char name[JACK_CLIENT_NAME_SIZE+1];
 
@@ -445,6 +455,7 @@ struct client {
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
+	struct frame_times jack_times;
 };
 
 #define return_val_if_fail(expr, val)				\
@@ -845,21 +856,6 @@ static struct object *find_link(struct client *c, uint32_t src, uint32_t dst)
 		}
 	}
 	return NULL;
-}
-
-static struct buffer *dequeue_buffer(struct client *c, struct mix *mix)
-{
-	struct buffer *b;
-
-	if (SPA_UNLIKELY(spa_list_is_empty(&mix->queue)))
-		return NULL;
-
-	b = spa_list_first(&mix->queue, struct buffer, link);
-	spa_list_remove(&b->link);
-	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
-	pw_log_trace_fp("%p: port %p: dequeue buffer %d", c, mix->port, b->id);
-
-	return b;
 }
 
 #if defined (__SSE__)
@@ -1317,7 +1313,7 @@ static void client_remove_source(struct client *c)
 	}
 }
 
-static inline void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
+static inline void queue_buffer(struct client *c, struct mix *mix, uint32_t id)
 {
 	struct buffer *b;
 
@@ -1328,6 +1324,21 @@ static inline void reuse_buffer(struct client *c, struct mix *mix, uint32_t id)
 		spa_list_append(&mix->queue, &b->link);
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
 	}
+}
+
+static inline struct buffer *dequeue_buffer(struct client *c, struct mix *mix)
+{
+	struct buffer *b;
+
+	if (SPA_UNLIKELY(spa_list_is_empty(&mix->queue)))
+		return NULL;
+
+	b = spa_list_first(&mix->queue, struct buffer, link);
+	spa_list_remove(&b->link);
+	SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
+	pw_log_trace_fp("%p: port %p: dequeue buffer %d", c, mix->port, b->id);
+
+	return b;
 }
 
 
@@ -1469,7 +1480,7 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 			c, p->object->port.name, p->port_id, frames,
 			mix->n_buffers, mix->io);
 
-	if (SPA_UNLIKELY((io = mix->io) == NULL))
+	if (SPA_UNLIKELY((io = mix->io) == NULL || mix->n_buffers == 0))
 		return NULL;
 
 	if (io->status == SPA_STATUS_HAVE_DATA &&
@@ -1477,21 +1488,26 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 		b = &mix->buffers[io->buffer_id];
 		d = &b->datas[0];
 	} else {
-		if (io->buffer_id < mix->n_buffers) {
-			reuse_buffer(c, mix, io->buffer_id);
-			io->buffer_id = SPA_ID_INVALID;
-		}
-		if (SPA_UNLIKELY((b = dequeue_buffer(c, mix)) == NULL)) {
-			pw_log_warn("port %p: out of buffers", p);
-			return NULL;
+		if (mix->n_buffers == 1) {
+			b = &mix->buffers[0];
+		} else {
+			if (io->buffer_id < mix->n_buffers)
+				queue_buffer(c, mix, io->buffer_id);
+			b = dequeue_buffer(c, mix);
+
+			if (SPA_UNLIKELY(b == NULL)) {
+				pw_log_warn("port %p: out of buffers %d", p, mix->n_buffers);
+				io->buffer_id = SPA_ID_INVALID;
+				return NULL;
+			}
 		}
 		d = &b->datas[0];
 		d->chunk->offset = 0;
 		d->chunk->size = frames * sizeof(float);
 		d->chunk->stride = stride;
 
-		io->status = SPA_STATUS_HAVE_DATA;
 		io->buffer_id = b->id;
+		io->status = SPA_STATUS_HAVE_DATA;
 	}
 	ptr = d->data;
 	if (buf)
@@ -1520,9 +1536,14 @@ static inline void process_empty(struct port *p, uint32_t frames)
 	{
 		struct buffer *b;
 		ptr = get_buffer_output(p, c->max_frames, 1, &b);
-		if (SPA_LIKELY(ptr != NULL))
+		if (SPA_LIKELY(ptr != NULL)) {
+			/* first build the complete pod in scratch memory, then copy it
+			 * to the target buffer. This makes it possible for multiple threads
+			 * to do this concurrently */
 			b->datas[0].chunk->size = convert_from_midi(src,
-					ptr, c->max_frames * sizeof(float));
+					midi_scratch, MIDI_SCRATCH_FRAMES * sizeof(float));
+			memcpy(ptr, midi_scratch, b->datas[0].chunk->size);
+		}
 		break;
 	}
 	default:
@@ -1578,38 +1599,38 @@ static void complete_process(struct client *c, uint32_t frames)
 
 static inline void debug_position(struct client *c, jack_position_t *p)
 {
-	pw_log_trace("usecs:       %"PRIu64, p->usecs);
-	pw_log_trace("frame_rate:  %u", p->frame_rate);
-	pw_log_trace("frame:       %u", p->frame);
-	pw_log_trace("valid:       %08x", p->valid);
+	pw_log_trace_fp("usecs:       %"PRIu64, p->usecs);
+	pw_log_trace_fp("frame_rate:  %u", p->frame_rate);
+	pw_log_trace_fp("frame:       %u", p->frame);
+	pw_log_trace_fp("valid:       %08x", p->valid);
 
 	if (p->valid & JackPositionBBT) {
-		pw_log_trace("BBT");
-		pw_log_trace(" bar:              %u", p->bar);
-		pw_log_trace(" beat:             %u", p->beat);
-		pw_log_trace(" tick:             %u", p->tick);
-		pw_log_trace(" bar_start_tick:   %f", p->bar_start_tick);
-		pw_log_trace(" beats_per_bar:    %f", p->beats_per_bar);
-		pw_log_trace(" beat_type:        %f", p->beat_type);
-		pw_log_trace(" ticks_per_beat:   %f", p->ticks_per_beat);
-		pw_log_trace(" beats_per_minute: %f", p->beats_per_minute);
+		pw_log_trace_fp("BBT");
+		pw_log_trace_fp(" bar:              %u", p->bar);
+		pw_log_trace_fp(" beat:             %u", p->beat);
+		pw_log_trace_fp(" tick:             %u", p->tick);
+		pw_log_trace_fp(" bar_start_tick:   %f", p->bar_start_tick);
+		pw_log_trace_fp(" beats_per_bar:    %f", p->beats_per_bar);
+		pw_log_trace_fp(" beat_type:        %f", p->beat_type);
+		pw_log_trace_fp(" ticks_per_beat:   %f", p->ticks_per_beat);
+		pw_log_trace_fp(" beats_per_minute: %f", p->beats_per_minute);
 	}
 	if (p->valid & JackPositionTimecode) {
-		pw_log_trace("Timecode:");
-		pw_log_trace(" frame_time:       %f", p->frame_time);
-		pw_log_trace(" next_time:        %f", p->next_time);
+		pw_log_trace_fp("Timecode:");
+		pw_log_trace_fp(" frame_time:       %f", p->frame_time);
+		pw_log_trace_fp(" next_time:        %f", p->next_time);
 	}
 	if (p->valid & JackBBTFrameOffset) {
-		pw_log_trace("BBTFrameOffset:");
-		pw_log_trace(" bbt_offset:       %u", p->bbt_offset);
+		pw_log_trace_fp("BBTFrameOffset:");
+		pw_log_trace_fp(" bbt_offset:       %u", p->bbt_offset);
 	}
 	if (p->valid & JackAudioVideoRatio) {
-		pw_log_trace("AudioVideoRatio:");
-		pw_log_trace(" audio_frames_per_video_frame: %f", p->audio_frames_per_video_frame);
+		pw_log_trace_fp("AudioVideoRatio:");
+		pw_log_trace_fp(" audio_frames_per_video_frame: %f", p->audio_frames_per_video_frame);
 	}
 	if (p->valid & JackVideoFrameOffset) {
-		pw_log_trace("JackVideoFrameOffset:");
-		pw_log_trace(" video_offset:     %u", p->video_offset);
+		pw_log_trace_fp("JackVideoFrameOffset:");
+		pw_log_trace_fp(" video_offset:     %u", p->video_offset);
 	}
 }
 
@@ -1631,7 +1652,8 @@ static inline void jack_to_position(jack_position_t *s, struct pw_node_activatio
 	}
 }
 
-static inline jack_transport_state_t position_to_jack(struct pw_node_activation *a, jack_position_t *d)
+static inline jack_transport_state_t position_to_jack(struct pw_node_activation *a,
+		jack_position_t *d, struct frame_times *t)
 {
 	struct spa_io_position *s = &a->position;
 	jack_transport_state_t state;
@@ -1657,8 +1679,13 @@ static inline jack_transport_state_t position_to_jack(struct pw_node_activation 
 		return state;
 
 	d->unique_1++;
-	d->usecs = s->clock.nsec / SPA_NSEC_PER_USEC;
-	d->frame_rate = s->clock.rate.denom;
+	t->frames = s->clock.position;
+	t->nsec = s->clock.nsec;
+	d->usecs = t->nsec / SPA_NSEC_PER_USEC;
+	t->next_nsec = s->clock.next_nsec;
+	t->rate_diff = s->clock.rate_diff;
+	t->buffer_frames = s->clock.duration;
+	d->frame_rate = t->sample_rate = s->clock.rate.denom;
 
 	if ((int64_t)s->clock.position < s->offset) {
 		d->frame = seg->position;
@@ -1777,7 +1804,7 @@ static inline uint32_t cycle_run(struct client *c)
 		return 0;
 
 	if (SPA_LIKELY(driver)) {
-		c->jack_state = position_to_jack(driver, &c->jack_position);
+		c->jack_state = position_to_jack(driver, &c->jack_position, &c->jack_times);
 
 		if (SPA_UNLIKELY(activation->pending_sync)) {
 			if (c->sync_callback == NULL ||
@@ -2701,7 +2728,7 @@ static int client_node_port_use_buffers(void *data,
 		}
 		SPA_FLAG_SET(b->flags, BUFFER_FLAG_OUT);
 		if (direction == SPA_DIRECTION_OUTPUT)
-			reuse_buffer(c, mix, b->id);
+			queue_buffer(c, mix, b->id);
 
 	}
 	pw_log_debug("%p: have %d buffers", c, n_buffers);
@@ -3049,6 +3076,17 @@ static const char* type_to_string(jack_port_type_id_t type_id)
 		return "other";
 	default:
 		return NULL;
+	}
+}
+static bool type_is_dsp(jack_port_type_id_t type_id)
+{
+	switch(type_id) {
+	case TYPE_ID_AUDIO:
+	case TYPE_ID_MIDI:
+	case TYPE_ID_VIDEO:
+		return true;
+	default:
+		return false;
 	}
 }
 
@@ -3461,8 +3499,9 @@ static void registry_event_global(void *data, uint32_t id,
 				pw_proxy_add_object_listener(o->proxy,
 						&o->object_listener, &port_events, o);
 
-				pw_port_subscribe_params((struct pw_port*)o->proxy,
-						ids, 1);
+				if (type_is_dsp(type_id))
+					pw_port_subscribe_params((struct pw_port*)o->proxy,
+							ids, 1);
 				do_sync = true;
 			}
 			pthread_mutex_lock(&c->context.lock);
@@ -5168,11 +5207,9 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
-	void *ptr = p->emptyptr;
+	void *ptr = midi_scratch;
 	struct spa_pod_sequence *seq[MAX_MIX];
 	uint32_t n_seq = 0;
-
-	jack_midi_clear_buffer(ptr);
 
 	spa_list_for_each(mix, &p->mix, port_link) {
 		struct spa_data *d;
@@ -5199,8 +5236,8 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 		if (n_seq == MAX_MIX)
 			break;
 	}
+	midi_init_buffer(ptr, MIDI_SCRATCH_FRAMES);
 	convert_to_midi(seq, n_seq, ptr, p->client->fix_midi_events);
-
 	return ptr;
 }
 
@@ -5278,7 +5315,7 @@ void * jack_port_get_buffer (jack_port_t *port, jack_nframes_t frames)
 		ptr = p->get_buffer(p, frames);
 	}
 done:
-	pw_log_trace_fp("%p: port %p buffer %p", p->client, p, ptr);
+	pw_log_trace_fp("%p: port %p buffer %p", o->client, p, ptr);
 	return ptr;
 }
 
@@ -6340,20 +6377,32 @@ jack_port_t * jack_port_by_id (jack_client_t *client,
 	return object_to_port(res);
 }
 
+static inline void get_frame_times(struct client *c, struct frame_times *times)
+{
+	jack_unique_t u1;
+	uint32_t count = 0;
+	do {
+		u1 = c->jack_position.unique_1;
+		*times = c->jack_times;
+		if (++count == 10) {
+			pw_log_warn("could not get snapshot %lu %lu", u1, c->jack_position.unique_2);
+			break;
+		}
+	} while (u1 != c->jack_position.unique_2);
+}
+
 SPA_EXPORT
 jack_nframes_t jack_frames_since_cycle_start (const jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
-	struct spa_io_position *pos;
+	struct frame_times times;
 	uint64_t diff;
 
 	return_val_if_fail(c != NULL, 0);
 
-	if (SPA_UNLIKELY((pos = c->rt.position) == NULL))
-		return 0;
-
-	diff = get_time_ns() - pos->clock.nsec;
-	return (jack_nframes_t) floor(((double)c->sample_rate * diff) / SPA_NSEC_PER_SEC);
+	get_frame_times(c, &times);
+	diff = get_time_ns() - times.nsec;
+	return (jack_nframes_t) floor(((double)times.sample_rate * diff) / SPA_NSEC_PER_SEC);
 }
 
 SPA_EXPORT
@@ -6366,14 +6415,13 @@ SPA_EXPORT
 jack_nframes_t jack_last_frame_time (const jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
-	struct spa_io_position *pos;
+	struct frame_times times;
 
 	return_val_if_fail(c != NULL, 0);
 
-	if (SPA_UNLIKELY((pos = c->rt.position) == NULL))
-		return 0;
+	get_frame_times(c, &times);
 
-	return pos->clock.position;
+	return times.frames;
 }
 
 SPA_EXPORT
@@ -6384,17 +6432,20 @@ int jack_get_cycle_times(const jack_client_t *client,
                         float          *period_usecs)
 {
 	struct client *c = (struct client *) client;
-	struct spa_io_position *pos;
+	struct frame_times times;
 
 	return_val_if_fail(c != NULL, -EINVAL);
 
-	if (SPA_UNLIKELY((pos = c->rt.position) == NULL))
-		return -EIO;
+	get_frame_times(c, &times);
 
-	*current_frames = pos->clock.position;
-	*current_usecs = pos->clock.nsec / SPA_NSEC_PER_USEC;
-	*period_usecs = pos->clock.duration * (float)SPA_USEC_PER_SEC / (c->sample_rate * pos->clock.rate_diff);
-	*next_usecs = pos->clock.next_nsec / SPA_NSEC_PER_USEC;
+	*current_frames = times.frames;
+	*current_usecs = times.nsec / SPA_NSEC_PER_USEC;
+	*next_usecs = times.next_nsec / SPA_NSEC_PER_USEC;
+	if (times.sample_rate == 0 || times.rate_diff == 0.0)
+		*period_usecs = (times.next_nsec - times.nsec) / SPA_NSEC_PER_USEC;
+	else
+		*period_usecs = times.buffer_frames *
+			(float)SPA_USEC_PER_SEC / (times.sample_rate * times.rate_diff);
 
 	pw_log_trace("%p: %d %"PRIu64" %"PRIu64" %f", c, *current_frames,
 			*current_usecs, *next_usecs, *period_usecs);
@@ -6405,38 +6456,42 @@ SPA_EXPORT
 jack_time_t jack_frames_to_time(const jack_client_t *client, jack_nframes_t frames)
 {
 	struct client *c = (struct client *) client;
-	struct spa_io_position *pos;
+	struct frame_times times;
 
 	return_val_if_fail(c != NULL, -EINVAL);
 
-	if (SPA_UNLIKELY((pos = c->rt.position) == NULL) || c->buffer_frames == 0)
+	get_frame_times(c, &times);
+
+	if (times.buffer_frames == 0)
 		return 0;
 
-	uint32_t nf = (uint32_t)pos->clock.position;
-	uint64_t w = pos->clock.nsec/SPA_NSEC_PER_USEC;
-	uint64_t nw = pos->clock.next_nsec/SPA_NSEC_PER_USEC;
+	uint32_t nf = (uint32_t)times.frames;
+	uint64_t w = times.nsec/SPA_NSEC_PER_USEC;
+	uint64_t nw = times.next_nsec/SPA_NSEC_PER_USEC;
 	int32_t df = frames - nf;
 	int64_t dp = nw - w;
-	return w + (int64_t)rint((double) df * (double) dp / c->buffer_frames);
+	return w + (int64_t)rint((double) df * (double) dp / times.buffer_frames);
 }
 
 SPA_EXPORT
 jack_nframes_t jack_time_to_frames(const jack_client_t *client, jack_time_t usecs)
 {
 	struct client *c = (struct client *) client;
-	struct spa_io_position *pos;
+	struct frame_times times;
 
 	return_val_if_fail(c != NULL, -EINVAL);
 
-	if (SPA_UNLIKELY((pos = c->rt.position) == NULL))
+	get_frame_times(c, &times);
+
+	if (times.buffer_frames == 0)
 		return 0;
 
-	uint32_t nf = (uint32_t)pos->clock.position;
-	uint64_t w = pos->clock.nsec/SPA_NSEC_PER_USEC;
-	uint64_t nw = pos->clock.next_nsec/SPA_NSEC_PER_USEC;
+	uint32_t nf = (uint32_t)times.frames;
+	uint64_t w = times.nsec/SPA_NSEC_PER_USEC;
+	uint64_t nw = times.next_nsec/SPA_NSEC_PER_USEC;
 	int64_t du = usecs - w;
 	int64_t dp = nw - w;
-	return nf + (int32_t)rint((double)du / (double)dp * c->buffer_frames);
+	return nf + (int32_t)rint((double)du / (double)dp * times.buffer_frames);
 }
 
 SPA_EXPORT
@@ -6609,46 +6664,44 @@ jack_transport_state_t jack_transport_query (const jack_client_t *client,
 					     jack_position_t *pos)
 {
 	struct client *c = (struct client *) client;
-	struct pw_node_activation *a;
-	jack_transport_state_t jack_state = JackTransportStopped;
+	jack_transport_state_t state;
+	jack_unique_t u1;
+	uint32_t count = 0;
 
 	return_val_if_fail(c != NULL, JackTransportStopped);
 
-	if (SPA_LIKELY((a = c->rt.driver_activation) != NULL)) {
-		jack_state = position_to_jack(a, pos);
-	} else if ((a = c->driver_activation) != NULL) {
-		jack_state = position_to_jack(a, pos);
-	} else if (pos != NULL) {
-		memset(pos, 0, sizeof(jack_position_t));
-		pos->frame_rate = jack_get_sample_rate((jack_client_t*)client);
-	}
-	return jack_state;
+	do {
+		u1 = c->jack_position.unique_1;
+		state = c->jack_state;
+		if (pos != NULL)
+			*pos = c->jack_position;
+		if (++count == 10) {
+			pw_log_warn("could not get snapshot %lu %lu", u1, c->jack_position.unique_2);
+			break;
+		}
+	} while (u1 != c->jack_position.unique_2);
+
+	return state;
 }
 
 SPA_EXPORT
 jack_nframes_t jack_get_current_transport_frame (const jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
-	struct pw_node_activation *a;
-	struct spa_io_position *pos;
-	struct spa_io_segment *seg;
-	uint64_t running;
+	jack_transport_state_t state;
+	jack_nframes_t res;
+	jack_position_t pos;
 
 	return_val_if_fail(c != NULL, -EINVAL);
 
-	if (SPA_UNLIKELY((a = c->rt.driver_activation) == NULL))
-		return -EIO;
+	state = jack_transport_query(client, &pos);
+	res = pos.frame;
 
-	pos = &a->position;
-	running = pos->clock.position - pos->offset;
-
-	if (pos->state == SPA_IO_POSITION_STATE_RUNNING) {
-		uint64_t nsecs = get_time_ns() - pos->clock.nsec;
-		running += (uint64_t)floor((((double) c->sample_rate) / SPA_NSEC_PER_SEC) * nsecs);
+	if (state == JackTransportRolling) {
+		float usecs = get_time_ns()/1000 - pos.usecs;
+		res += (jack_nframes_t)floor((((float) pos.frame_rate) / 1000000.0f) * usecs);
 	}
-	seg = &pos->segments[0];
-
-	return (running - seg->start) * seg->rate + seg->position;
+	return res;
 }
 
 SPA_EXPORT

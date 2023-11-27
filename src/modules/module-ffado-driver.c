@@ -31,10 +31,14 @@
 
 #include <libffado/ffado.h>
 
-/** \page page_module_ffado_driver PipeWire Module: FFADO firewire audio driver
+/** \page page_module_ffado_driver FFADO firewire audio driver
  *
  * The ffado-driver module provides a source or sink using the libffado library for
  * reading and writing to firewire audio devices.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-ffado-driver`
  *
  * ## Module Options
  *

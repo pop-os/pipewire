@@ -35,7 +35,7 @@
 #include "module-protocol-pulse/defs.h"
 #include "module-protocol-pulse/format.h"
 
-/** \page page_module_pulse_tunnel PipeWire Module: Pulse Tunnel
+/** \page page_module_pulse_tunnel Pulse Tunnel
  *
  * The pulse-tunnel module provides a source or sink that tunnels all audio to
  * a remote PulseAudio connection.
@@ -46,6 +46,10 @@
  * This module is usually used together with module-zeroconf-discover that will
  * automatically load the tunnel with the right parameters based on zeroconf
  * information.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-pulse-tunnel`
  *
  * ## Module Options
  *

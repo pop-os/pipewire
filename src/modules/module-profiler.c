@@ -22,13 +22,17 @@
 #include <pipewire/impl.h>
 #include <pipewire/extensions/profiler.h>
 
-/** \page page_module_profiler PipeWire Module: Profiler
+/** \page page_module_profiler Profiler
  *
  * The profiler module provides a Profiler interface for applications that
  * can be used to receive profiling information.
  *
  * Use tools like pw-top and pw-profiler to collect profiling information
  * about the pipewire graph.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-profiler`
  *
  * ## Example configuration
  *

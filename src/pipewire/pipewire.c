@@ -149,7 +149,7 @@ unref_plugin(struct plugin *plugin)
 	if (--plugin->ref == 0) {
 		spa_list_remove(&plugin->link);
 		pw_log_debug("unloaded plugin:'%s'", plugin->filename);
-		if (global_support.do_dlclose)
+		if (pw_should_dlclose())
 			dlclose(plugin->hnd);
 		free(plugin->filename);
 		free(plugin);
@@ -785,10 +785,10 @@ const char *pw_get_host_name(void)
 	return hname;
 }
 
-SPA_EXPORT
-bool pw_in_valgrind(void)
+bool
+pw_should_dlclose(void)
 {
-	return global_support.in_valgrind;
+	return global_support.do_dlclose;
 }
 
 SPA_EXPORT

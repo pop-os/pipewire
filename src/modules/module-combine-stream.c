@@ -29,7 +29,7 @@
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
 
-/** \page page_module_combine_stream PipeWire Module: Combine Stream
+/** \page page_module_combine_stream Combine Stream
  *
  * The combine stream can make:
  *
@@ -39,6 +39,10 @@
  * The sources and sink that need to be combined can be selected using generic match
  * rules. This makes it possible to combine static nodes or nodes based on certain
  * properties.
+ *
+ * ## Module Name
+ *
+ * `libpipewire-module-combine-stream`
  *
  * ## Module Options
  *
