@@ -1,4 +1,4 @@
-pipewire (1.0.0-0) UNRELEASED; urgency=medium
+pipewire (1.0.0-1) unstable; urgency=medium
 
   * New upstream release
   * Install new manpages in their respective packages
@@ -10,7 +10,7 @@ pipewire (1.0.0-0) UNRELEASED; urgency=medium
     - Add libuv1-dev and libspeexdsp-dev in Build-Deps, those are missing
       dependencies of libroc-dev. Will dropped once libroc-dev is fixed.
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Nov 2023 09:45:23 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 27 Nov 2023 11:37:05 +0100
 
 pipewire (0.3.85-1) unstable; urgency=medium
 
