@@ -1,8 +1,12 @@
 pipewire (1.0.0-2) UNRELEASED; urgency=medium
 
+  [ Chris ]
   * Set udevrulesdir based on udev.pc content (Closes: #1057233)
 
- -- Chris <zeha@debian.org>  Sat, 02 Dec 2023 02:08:47 +0100
+  [ Dylan Aïssi ]
+  * Add systemd-dev in Build-Deps, required to use udev.pc
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 08 Dec 2023 12:27:08 +0100
 
 pipewire (1.0.0-1) unstable; urgency=medium
 
