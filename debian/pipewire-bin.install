@@ -7,7 +7,6 @@ usr/share/pipewire/pipewire.conf
 usr/share/pipewire/pipewire-aes67.conf
 usr/share/pipewire/pipewire-avb.conf
 usr/share/pipewire/minimal.conf
-lib/udev/rules.d
 usr/bin/pipewire
 usr/bin/pipewire-aes67
 usr/bin/pipewire-avb
