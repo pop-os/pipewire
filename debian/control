@@ -43,8 +43,7 @@ Build-Depends: debhelper-compat (= 13),
                modemmanager-dev,
                pkg-config,
                python3-docutils,
-               systemd [linux-any],
-               systemd-dev [linux-any]
+               systemd [linux-any]
 Build-Conflicts: libfdk-aac-dev
 Standards-Version: 4.6.2
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire

@@ -48,9 +48,10 @@ endif
 ifneq (,$(filter hurd-i386,$(DEB_HOST_ARCH)))
 UDEVRULESDIR=
 else
-UDEVRULESDIR=$(shell pkg-config --variable=udevdir udev)/rules.d
+export UDEVRULESDIR=/usr/lib/udev/rules.d
+# For pre-Trixie releases udev rules should go in:
+# export UDEVRULESDIR=/lib/udev/rules.d
 endif
-
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
@@ -98,10 +99,6 @@ override_dh_auto_test:
 		-- \
 		--timeout-multiplier $(test_timeout_multiplier) \
 		$(NULL)
-
-override_dh_install:
-	dh_install
-	test -n "$(UDEVRULESDIR)" && dh_install -ppipewire-bin $(UDEVRULESDIR)
 
 override_dh_missing:
 	dh_missing --fail-missing
