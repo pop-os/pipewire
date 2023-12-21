@@ -2,6 +2,7 @@ pipewire (1.0.0-2) UNRELEASED; urgency=medium
 
   * Install udev rules in /usr/lib/udev/rules.d (Closes: #1057233)
     Thanks to Chris Hofstaedtler.
+  * Extend hurd-i386 restrictions to hurd-any
 
  -- Dylan Aïssi <daissi@debian.org>  Fri, 08 Dec 2023 12:27:08 +0100
 

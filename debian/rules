@@ -28,7 +28,7 @@ else
 BLUEZ5_CODEC_LDAC=enabled
 endif
 
-ifneq (,$(filter m68k hurd-i386,$(DEB_HOST_ARCH)))
+ifneq (,$(filter m68k hurd-amd64 hurd-i386,$(DEB_HOST_ARCH)))
 LIBCAMERA=disabled
 else
 LIBCAMERA=enabled
@@ -45,7 +45,7 @@ LIBMYSOFA=enabled
 LIBFFADO=enabled
 endif
 
-ifneq (,$(filter hurd-i386,$(DEB_HOST_ARCH)))
+ifneq (,$(filter hurd-amd64 hurd-i386,$(DEB_HOST_ARCH)))
 UDEVRULESDIR=
 else
 export UDEVRULESDIR=/usr/lib/udev/rules.d
