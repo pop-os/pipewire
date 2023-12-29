@@ -1,3 +1,10 @@
+pipewire (1.0.0-3) UNRELEASED; urgency=medium
+
+  * libpipewire-0.3-modules-x11: depend on libcanberra-pulse (Closes: #1059544)
+      module-x11-bell requires the libcanberra PulseAudio backend.
+
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 29 Dec 2023 15:11:54 +0100
+
 pipewire (1.0.0-2) experimental; urgency=medium
 
   * Install udev rules in /usr/lib/udev/rules.d (Closes: #1057233)

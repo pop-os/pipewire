@@ -125,7 +125,9 @@ Description: libraries for the PipeWire multimedia server - modules
 Package: libpipewire-0.3-modules-x11
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         libcanberra-pulse
 Breaks: libpipewire-0.3-modules (<< 0.3.63-3~)
 Replaces: libpipewire-0.3-modules (<< 0.3.63-3~)
 Description: libraries for the PipeWire multimedia server - X11 modules
