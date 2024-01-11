@@ -703,9 +703,7 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 	const snd_seq_real_time_t* queue_time;
 	uint64_t queue_real;
 	double err, corr;
-	uint64_t queue_elapsed;
-
-	corr = 1.0 - (state->dll.z2 + state->dll.z3);
+	uint64_t q1, q2;
 
 	/* take queue time */
 	snd_seq_queue_status_alloca(&status);
@@ -713,25 +711,36 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 	queue_time = snd_seq_queue_status_get_real_time(status);
 	queue_real = SPA_TIMESPEC_TO_NSEC(queue_time);
 
-	if (state->queue_time == 0)
-		queue_elapsed = 0;
-	else
-		queue_elapsed = (queue_real - state->queue_time) / corr;
-
-	state->queue_time = queue_real;
-
-	queue_elapsed = NSEC_TO_CLOCK(&state->rate, queue_elapsed);
-
-	err = ((int64_t)state->threshold - (int64_t) queue_elapsed);
-	err = SPA_CLAMP(err, -64, 64);
-
 	if (state->dll.bw == 0.0) {
 		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold,
 				state->rate.denom);
 		state->next_time = nsec;
 		state->base_time = nsec;
+		state->queue_next = queue_real;
 	}
+
+	/* track our estimated elapsed time against the real elapsed queue time */
+	q1 = NSEC_TO_CLOCK(&state->rate, state->queue_next);
+	q2 = NSEC_TO_CLOCK(&state->rate, queue_real);
+	err = ((int64_t)q1 - (int64_t) q2);
+
+	if (fabs(err) > state->threshold)
+		spa_dll_init(&state->dll);
+
+	err = SPA_CLAMP(err, -64, 64);
 	corr = spa_dll_update(&state->dll, err);
+
+	/* this is our current estimated queue time and rate */
+	state->queue_time = state->queue_next;
+	state->queue_corr = corr;
+
+	/* make a new estimated queue time with the current quantum, if we are following,
+	 * use the rate correction, else we will use the rate correction only for the new
+	 * timeout. */
+	if (state->following)
+		state->queue_next += state->threshold * corr * 1e9 / state->rate.denom;
+	else
+		state->queue_next += state->threshold * 1e9 / state->rate.denom;
 
 	if ((state->next_time - state->base_time) > BW_PERIOD) {
 		state->base_time = state->next_time;
@@ -739,7 +748,6 @@ static int update_time(struct seq_state *state, uint64_t nsec, bool follower)
 				state, follower, corr, state->dll.bw, err,
 				state->dll.z1, state->dll.z2, state->dll.z3);
 	}
-
 	state->next_time += state->threshold / corr * 1e9 / state->rate.denom;
 
 	if (!follower && state->clock) {
@@ -850,8 +858,11 @@ static int set_timers(struct seq_state *state)
 	int res;
 
 	if ((res = spa_system_clock_gettime(state->data_system, CLOCK_MONOTONIC, &now)) < 0)
-	    return res;
+		return res;
 
+	state->queue_time = 0;
+	state->queue_corr = 1.0;
+	spa_dll_init(&state->dll);
 	state->next_time = SPA_TIMESPEC_TO_NSEC(&now);
 	if (state->following) {
 		set_timeout(state, 0);
@@ -898,11 +909,9 @@ int spa_alsa_seq_start(struct seq_state *state)
 	state->source.rmask = 0;
 	spa_loop_add_source(state->data_loop, &state->source);
 
-	state->queue_time = 0;
-	spa_dll_init(&state->dll);
-	set_timers(state);
+	res = set_timers(state);
 
-	return 0;
+	return res;
 }
 
 static int do_reassign_follower(struct spa_loop *loop,
@@ -913,7 +922,10 @@ static int do_reassign_follower(struct spa_loop *loop,
 			    void *user_data)
 {
 	struct seq_state *state = user_data;
-	set_timers(state);
+	int res;
+
+	if ((res = set_timers(state)) < 0)
+		spa_log_error(state->log, "can't set timers: %s", spa_strerror(res));
 	return 0;
 }
 
