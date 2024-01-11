@@ -1,8 +1,10 @@
-pipewire (1.0.1-0) UNRELEASED; urgency=medium
+pipewire (1.0.1-1) unstable; urgency=medium
 
   * New upstream release
+  * Add lintian overrides for groff-message in manpages
+  * Update upstream branch in debian/gbp.conf
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 11 Jan 2024 14:00:27 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 11 Jan 2024 14:59:54 +0100
 
 pipewire (1.0.0-3) unstable; urgency=medium
 
