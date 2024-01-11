@@ -153,6 +153,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define RAOP_STRIDE		(2*DEFAULT_CHANNELS)
 #define RAOP_RATE		44100
 #define RAOP_LATENCY_MS		250
+#define DEFAULT_LATENCY_MS	1500
 
 #define VOLUME_MAX		0.0
 #define VOLUME_MIN		-30.0
@@ -166,6 +167,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"( raop.encryption.type=<encryption, default:none> ) "			\
 			"( raop.audio.codec=PCM ) "						\
 			"( raop.password=<password for auth> ) "				\
+			"( raop.latency.ms=<min latency in ms, default:"SPA_STRINGIFY(DEFAULT_LATENCY_MS)"> ) "	\
 			"( node.latency=<latency as fraction> ) "				\
 			"( node.name=<name of the nodes> ) "					\
 			"( node.description=<description of the nodes> ) "			\
@@ -1848,6 +1850,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->stride = RAOP_STRIDE;
 	impl->mtu = impl->stride * impl->psamples;
 	impl->sync_period = impl->rate / impl->psamples;
+
+	if ((str = pw_properties_get(props, "raop.latency.ms")) == NULL)
+		str = SPA_STRINGIFY(DEFAULT_LATENCY_MS);
+	impl->latency = SPA_MAX(impl->latency, msec_to_samples(impl, atoi(str)));
 
 	if (pw_properties_get(props, PW_KEY_AUDIO_FORMAT) == NULL)
 		pw_properties_setf(props, PW_KEY_AUDIO_FORMAT, "%s", RAOP_FORMAT);
