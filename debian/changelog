@@ -1,3 +1,9 @@
+pipewire (1.0.1-0) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 11 Jan 2024 14:00:27 +0100
+
 pipewire (1.0.0-3) unstable; urgency=medium
 
   * libpipewire-0.3-modules-x11: depend on libcanberra-pulse (Closes: #1059544)
