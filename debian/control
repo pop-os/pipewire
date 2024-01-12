@@ -41,7 +41,7 @@ Build-Depends: debhelper-compat (= 13),
                libxfixes-dev (>= 1:6.0.0),
                meson (>= 0.59.0),
                modemmanager-dev,
-               pkg-config,
+               pkgconf,
                python3-docutils,
                systemd-dev
 Build-Conflicts: libfdk-aac-dev
