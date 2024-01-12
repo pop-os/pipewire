@@ -100,9 +100,6 @@ override_dh_auto_test:
 		--timeout-multiplier $(test_timeout_multiplier) \
 		$(NULL)
 
-override_dh_missing:
-	dh_missing --fail-missing
-
 override_dh_makeshlibs:
 	dh_makeshlibs \
 		--exclude=/usr/lib/$(DEB_HOST_MULTIARCH)/gstreamer-1.0 \
