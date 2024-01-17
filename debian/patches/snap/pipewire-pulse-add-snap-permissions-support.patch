@@ -1,0 +1,255 @@
+From: Sergio Costas Rodriguez <sergio.costas@canonical.com>
+Date: Wed, 22 Nov 2023 11:26:16 +0100
+Subject: pipewire-pulse: add snap permissions support
+
+SNAP containers have two main "audio" security rules:
+
+ * audio-playback: the applications inside the container can
+   send audio samples into a sink
+
+ * audio-record: the applications inside the container can
+   get audio samples from a source
+
+Also, old SNAP containers had the "pulseaudio" rule, which just
+exposed the pulseaudio socket directly, without limits. This
+is similar to the current Flatpak audio permissions.
+
+In the pulseaudio days, a specific pulseaudio module was used
+that checked the permissions given to the application and
+allowed or forbade access to the pulseaudio operations.
+With the change to pipewire, this functionality must be
+implemented in pipewire-pulse to guarantee the sandbox
+security.
+
+This patch adds support for sandboxing permissions in the
+pulseaudio module, and implements support for the SNAP audio
+security model, thus forbiding a SNAP application to record
+audio unless it has permissions to do so.
+
+The current code for pipewire-pulseaudio checks the permissions
+of the snap and adds three properties to each new client:
+
+ * pipewire.snap.id: contains the Snap ID of the client.
+
+ * pipewire.snap.audio.playback: its value is 'true' if the client
+   has permission to play audio, or 'false' if not.
+
+ * pipewire.snap.audio.record: its value is 'true' if the client
+   has permission to record audio, or 'false' if not.
+
+These properties must be processed by wireplumber to add or
+remove access permissions to the corresponding nodes. That
+code is available in a separate patch: https://gitlab.freedesktop.org/pipewire/wireplumber/-/merge_requests/567
+
+(cherry picked from commit d568dcd64f64454289e1f35ed07a11749f95b04e)
+Origin: upstream, after 1.0.1
+---
+ .gitlab-ci.yml                             | 18 +++++++++++-------
+ meson.build                                | 16 ++++++++++++++++
+ meson_options.txt                          |  4 ++++
+ src/modules/meson.build                    |  7 +++++++
+ src/modules/module-protocol-pulse/server.c | 21 +++++++++++++++++++++
+ 5 files changed, 59 insertions(+), 7 deletions(-)
+
+diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml
+index e0fce1c..87b3852 100644
+--- a/.gitlab-ci.yml
++++ b/.gitlab-ci.yml
+@@ -96,6 +96,7 @@ include:
+       debhelper-compat
+       findutils
+       git
++      libapparmor-dev
+       libasound2-dev
+       libavcodec-dev
+       libavfilter-dev
+@@ -107,6 +108,7 @@ include:
+       libgstreamer-plugins-base1.0-dev
+       libsbc-dev
+       libsdl2-dev
++      libsnapd-glib-dev
+       libudev-dev
+       libva-dev
+       libv4l-dev
+@@ -247,7 +249,7 @@ build_on_ubuntu:
+     - .build
+   stage: build
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=[]"
++    MESON_OPTIONS: "-Dsession-managers=[] -Dsnap=enabled"
+ 
+ .build_on_fedora:
+   extends:
+@@ -274,6 +276,7 @@ build_on_fedora:
+         -Dsdl2=enabled
+         -Dsndfile=enabled
+         -Dsession-managers=[]
++        -Dsnap=disabled
+   artifacts:
+     name: pipewire-$CI_COMMIT_SHA
+     when: always
+@@ -289,7 +292,7 @@ build_on_alpine:
+     - .build
+   stage: build
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=[]"
++    MESON_OPTIONS: "-Dsession-managers=[] -Dsnap=disabled"
+ 
+ # build with all auto() options enabled
+ build_all:
+@@ -308,6 +311,7 @@ build_all:
+         -Dsession-managers=[]
+         -Dc_args=['-UFASTPATH']
+         -Dcpp_args=['-UFASTPATH']
++        -Dsnap=disabled
+   parallel:
+     matrix:
+       - CC: [gcc, clang]
+@@ -317,7 +321,7 @@ build_with_no_commandline_options:
+   extends:
+     - .build_on_fedora
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=[]"
++    MESON_OPTIONS: "-Dsession-managers=[] -Dsnap=disabled"
+   parallel:
+     matrix:
+       - CC: [gcc, clang]
+@@ -353,7 +357,7 @@ build_release:
+   extends:
+     - .build_on_fedora
+   variables:
+-    MESON_OPTIONS: "-Dtest=enabled -Dbuildtype=release -Db_ndebug=true -Dsession-managers=[]"
++    MESON_OPTIONS: "-Dtest=enabled -Dbuildtype=release -Db_ndebug=true -Dsession-managers=[] -Dsnap=disabled"
+   parallel:
+     matrix:
+       - CC: [gcc, clang]
+@@ -367,7 +371,7 @@ build_session_managers:
+     - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+     - meson install -C "$BUILD_DIR" --no-rebuild
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=$SESSION_MANAGERS"
++    MESON_OPTIONS: "-Dsession-managers=$SESSION_MANAGERS -Dsnap=disabled"
+   parallel:
+     matrix:
+       - SESSION_MANAGERS: ["[]", "wireplumber", "media-session", "media-session,wireplumber", "wireplumber,media-session" ]
+@@ -384,7 +388,7 @@ build_meson_prerelease:
+     - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+     - meson install -C "$BUILD_DIR" --no-rebuild
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=wireplumber,media-session"
++    MESON_OPTIONS: "-Dsession-managers=wireplumber,media-session -Dsnap=disabled"
+   allow_failure: true
+ 
+ build_meson_exact_release:
+@@ -402,7 +406,7 @@ build_meson_exact_release:
+     - meson compile -C "$BUILD_DIR" $COMPILE_ARGS
+     - meson install -C "$BUILD_DIR" --no-rebuild
+   variables:
+-    MESON_OPTIONS: "-Dsession-managers=[]"
++    MESON_OPTIONS: "-Dsession-managers=[] -Dsnap=disabled"
+ 
+ valgrind:
+   extends:
+diff --git a/meson.build b/meson.build
+index eb76fb9..ccdd998 100644
+--- a/meson.build
++++ b/meson.build
+@@ -430,6 +430,22 @@ summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true)
+ 
+ libffado_dep = dependency('libffado', required: get_option('libffado'))
+ summary({'ffado': libffado_dep.found()}, bool_yn: true)
++glib2_snap_dep = dependency('glib-2.0', required : get_option('snap'))
++gio2_snap_dep = dependency('gio-2.0', required : get_option('snap'))
++apparmor_snap_dep = dependency('libapparmor', required : get_option('snap'))
++if dependency('snapd-glib-2', required: false).found()
++  snap_dep = dependency('snapd-glib-2', required : get_option('snap'))
++else
++  snap_dep = dependency('snapd-glib', required : get_option('snap'))
++endif
++if snap_dep.found() and glib2_snap_dep.found() and gio2_snap_dep.found() and apparmor_snap_dep.found()
++  cdata.set('HAVE_SNAP', 1)
++  snap_deps = [glib2_snap_dep, gio2_snap_dep, snap_dep, apparmor_snap_dep]
++endif
++summary({'GLib-2.0 (Snap support)': glib2_snap_dep.found()}, bool_yn: true, section: 'Misc dependencies')
++summary({'Gio-2.0 (Snap support)': gio2_snap_dep.found()}, bool_yn: true, section: 'Misc dependencies')
++summary({'Apparmor (Snap support)': apparmor_snap_dep.found()}, bool_yn: true, section: 'Misc dependencies')
++summary({'Snapd-glib (Snap support)': snap_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+ 
+ check_functions = [
+   ['gettid', '#include <unistd.h>', ['-D_GNU_SOURCE'], []],
+diff --git a/meson_options.txt b/meson_options.txt
+index a4b0ab5..e0937b4 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -330,3 +330,7 @@ option('libffado',
+        description: 'Enable code that depends on libffado',
+        type: 'feature',
+        value: 'auto')
++option('snap',
++       description : 'Snap support is available.',
++       type : 'feature',
++       value : 'auto')
+diff --git a/src/modules/meson.build b/src/modules/meson.build
+index 1b434b7..0909f24 100644
+--- a/src/modules/meson.build
++++ b/src/modules/meson.build
+@@ -393,6 +393,13 @@ pipewire_module_protocol_pulse_sources = [
+   'module-protocol-pulse/modules/module-zeroconf-discover.c',
+ ]
+ 
++if snap_dep.found() and glib2_snap_dep.found() and gio2_snap_dep.found() and apparmor_snap_dep.found()
++  pipewire_module_protocol_pulse_sources += [
++    'module-protocol-pulse/snap-policy.c',
++  ]
++  pipewire_module_protocol_pulse_deps += snap_deps
++endif
++
+ if dbus_dep.found()
+   pipewire_module_protocol_pulse_sources += [
+     'module-protocol-pulse/dbus-name.c',
+diff --git a/src/modules/module-protocol-pulse/server.c b/src/modules/module-protocol-pulse/server.c
+index 53b1a7e..6ae97b7 100644
+--- a/src/modules/module-protocol-pulse/server.c
++++ b/src/modules/module-protocol-pulse/server.c
+@@ -42,6 +42,9 @@
+ #include "stream.h"
+ #include "utils.h"
+ #include "flatpak-utils.h"
++#ifdef HAVE_SNAP
++#include "snap-policy.h"
++#endif
+ 
+ #define LISTEN_BACKLOG 32
+ #define MAX_CLIENTS 64
+@@ -406,6 +409,9 @@ on_connect(void *data, int fd, uint32_t mask)
+ 
+ 	if (server->addr.ss_family == AF_UNIX) {
+ 		spa_autofree char *app_id = NULL, *devices = NULL;
++#ifdef HAVE_SNAP
++		pw_sandbox_access_t snap_access;
++#endif
+ 
+ #ifdef SO_PRIORITY
+ 		val = 6;
+@@ -444,6 +450,21 @@ on_connect(void *data, int fd, uint32_t mask)
+ 			else
+ 				pw_properties_set(client->props, PW_KEY_MEDIA_CATEGORY, NULL);
+ 		}
++		// check SNAP permissions
++#ifdef HAVE_SNAP
++		snap_access = pw_snap_get_audio_permissions(client, client_fd, &app_id);
++		if ((snap_access & PW_SANDBOX_ACCESS_NOT_A_SANDBOX) == 0) {
++			pw_properties_set(client->props, PW_KEY_SNAP_ID, app_id);
++
++			pw_properties_set(client->props,
++			                  PW_KEY_SNAP_PLAYBACK_ALLOWED,
++			                  (snap_access & PW_SANDBOX_ACCESS_PLAYBACK) ? "true" : "false");
++
++			pw_properties_set(client->props,
++			                  PW_KEY_SNAP_RECORD_ALLOWED,
++			                  (snap_access & PW_SANDBOX_ACCESS_RECORD) ? "true" : "false");
++		}
++#endif
+ 	}
+ 	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
+ 

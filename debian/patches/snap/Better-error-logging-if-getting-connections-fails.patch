@@ -1,0 +1,36 @@
+From: Sergio Costas Rodriguez <sergio.costas@canonical.com>
+Date: Wed, 22 Nov 2023 13:18:53 +0100
+Subject: Better error logging if getting connections fails
+
+(cherry picked from commit 1728b7de598a14b8b2819c6d269f586a4a843501)
+Origin: upstream, after 1.0.1
+---
+ src/modules/module-protocol-pulse/snap-policy.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
+index a6f2e24..14e9827 100644
+--- a/src/modules/module-protocol-pulse/snap-policy.c
++++ b/src/modules/module-protocol-pulse/snap-policy.c
+@@ -148,17 +148,17 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+                                               &plugs,
+                                               NULL,
+                                               NULL,
+-                                              NULL);
++                                              &error);
+     if (retv == FALSE) {
+-        pw_log_warn("Failed to get Snap connections for snap %s\n", snap_id);
++        pw_log_warn("Failed to get Snap connections for snap %s: %s\n", snap_id, error->message);
+         return PW_SANDBOX_ACCESS_NONE;
+     }
+     if (plugs == NULL) {
+-        pw_log_warn("Failed to get Snap connections for snap %s\n", snap_id);
++        pw_log_warn("Failed to get Snap connections for snap %s: %s\n", snap_id, error->message);
+         return PW_SANDBOX_ACCESS_NONE;
+     }
+     if (plugs->pdata == NULL) {
+-        pw_log_warn("Failed to get Snap connections for snap %s\n", snap_id);
++        pw_log_warn("Failed to get Snap connections for snap %s: %s\n", snap_id, error->message);
+         return PW_SANDBOX_ACCESS_NONE;
+     }
+ 

@@ -1,0 +1,30 @@
+From: Sergio Costas Rodriguez <sergio.costas@canonical.com>
+Date: Wed, 22 Nov 2023 13:29:39 +0100
+Subject: Move add_permission definition inside block
+
+(cherry picked from commit 1c9016280c42dc43087700789d30066e9d7a19b9)
+Origin: upstream, after 1.0.1
+---
+ src/modules/module-protocol-pulse/snap-policy.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
+index ebb5f29..b96c599 100644
+--- a/src/modules/module-protocol-pulse/snap-policy.c
++++ b/src/modules/module-protocol-pulse/snap-policy.c
+@@ -53,7 +53,6 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+     g_autoptr(GPtrArray) plugs = NULL;
+     gboolean retv;
+     pw_sandbox_access_t permissions = PW_SANDBOX_ACCESS_NONE;
+-    pw_sandbox_access_t add_permission = PW_SANDBOX_ACCESS_NONE;
+     SnapdPlug **plug = NULL;
+     g_autoptr(GError) error = NULL;
+     int exit_code;
+@@ -161,6 +160,7 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+ 
+     plug = (SnapdPlug **)plugs->pdata;
+     for (guint p = 0; p < plugs->len; p++, plug++) {
++        pw_sandbox_access_t add_permission;
+         const gchar *plug_name = snapd_plug_get_name(*plug);
+         if (g_str_equal("audio-record", plug_name)) {
+             add_permission = PW_SANDBOX_ACCESS_RECORD;

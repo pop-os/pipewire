@@ -1,0 +1,22 @@
+From: Sergio Costas Rodriguez <sergio.costas@canonical.com>
+Date: Wed, 22 Nov 2023 16:47:26 +0100
+Subject: Better meson_options description
+
+(cherry picked from commit 5125d69a6905f3ad86c1b1424d814f5442d9b677)
+Origin: upstream, after 1.0.1
+---
+ meson_options.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson_options.txt b/meson_options.txt
+index e0937b4..6b274dc 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -331,6 +331,6 @@ option('libffado',
+        type: 'feature',
+        value: 'auto')
+ option('snap',
+-       description : 'Snap support is available.',
++       description : 'Enable Snap permissions support.',
+        type : 'feature',
+        value : 'auto')

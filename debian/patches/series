@@ -1,2 +1,18 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 Fix_services.patch
+
+# Upstream patches for snap permissions
+snap/pipewire-pulse-add-snap-permissions-support.patch
+snap/Add-missing-files.patch
+snap/Apply-1-suggestion-s-to-1-file-s.patch
+snap/Apply-1-suggestion-s-to-1-file-s-1.patch
+snap/Use-assert-to-check-client-is-not-NULL.patch
+snap/Apply-1-suggestion-s-to-1-file-s-2.patch
+snap/fix-possible-leak.patch
+snap/Better-error-logging-if-getting-connections-fails.patch
+snap/Move-variable-definition-inside-block.patch
+snap/Move-context-variable-definition-inside-block.patch
+snap/Move-add_permission-definition-inside-block.patch
+snap/Apply-1-suggestion-s-to-1-file-s-3.patch
+snap/Fix-spacing-when-calling-functions.patch
+snap/Better-meson_options-description.patch

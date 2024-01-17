@@ -1,0 +1,23 @@
+From: =?utf-8?q?Barnab=C3=A1s_P=C5=91cze?= <pobrn@protonmail.com>
+Date: Wed, 22 Nov 2023 12:30:32 +0000
+Subject: Apply 1 suggestion(s) to 1 file(s)
+
+(cherry picked from commit b9b5a261998c2634477a71392a0c0c512c6e5974)
+Origin: upstream, after 1.0.1
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index ccdd998..a564b16 100644
+--- a/meson.build
++++ b/meson.build
+@@ -439,7 +439,7 @@ else
+   snap_dep = dependency('snapd-glib', required : get_option('snap'))
+ endif
+ if snap_dep.found() and glib2_snap_dep.found() and gio2_snap_dep.found() and apparmor_snap_dep.found()
+-  cdata.set('HAVE_SNAP', 1)
++  cdata.set('HAVE_SNAP', true)
+   snap_deps = [glib2_snap_dep, gio2_snap_dep, snap_dep, apparmor_snap_dep]
+ endif
+ summary({'GLib-2.0 (Snap support)': glib2_snap_dep.found()}, bool_yn: true, section: 'Misc dependencies')
