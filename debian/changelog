@@ -1,3 +1,14 @@
+pipewire (1.0.1-2) unstable; urgency=medium
+
+  * Switch Build-Deps from systemd to systemd-dev (Closes: #1060598)
+  * Use pkgconf instead of the transitional pkg-config
+  * Bump minimum meson to 0.61.1
+  * Drop 'dh_missing --fail-missing', default since debhelper compat 13
+  * Bump minimum libcamera to 0.2.0
+  * Cherry-pick upstream patches for libcamera0.2 compatibility
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 22 Jan 2024 17:24:44 +0100
+
 pipewire (1.0.1-1) unstable; urgency=medium
 
   * New upstream release
