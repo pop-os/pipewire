@@ -1,0 +1,31 @@
+From: Sergio Costas <sergio.costas@canonical.com>
+Date: Tue, 30 Jan 2024 10:28:27 +0000
+Subject: snap-policy: Manage ENOPROTOOPT error in aa_getpeercon()
+
+Bug-Ubuntu: https://launchpad.net/bugs/2051504
+
+(cherry picked from commit e8fcaa5157506e5def0f45dc135ad97da75237f1)
+Origin: upstream, after 1.0.1
+---
+ src/modules/module-protocol-pulse/snap-policy.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
+index f027f5c..48084b8 100644
+--- a/src/modules/module-protocol-pulse/snap-policy.c
++++ b/src/modules/module-protocol-pulse/snap-policy.c
+@@ -65,7 +65,13 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+ 			// if apparmor isn't enabled, we can safely assume that there are no SNAPs in the system
+ 			return PW_SANDBOX_ACCESS_NOT_A_SANDBOX;
+ 		}
+-		pw_log_warn("snap_get_audio_permissions: failed to get the AppArmor info.");
++		if  (errno == ENOPROTOOPT) {
++			// if fine grained unix mediation isn't available, we can't know if this is a snap or
++			// not, so we have no choice but give full access
++			pw_log_warn("snap_get_audio_permissions: kernel lacks 'fine grained unix mediation'; snap audio permissions won't be honored.");
++			return PW_SANDBOX_ACCESS_NOT_A_SANDBOX;
++		}
++ 		pw_log_warn("snap_get_audio_permissions: failed to get the AppArmor info: %s.", strerror(errno));
+ 		return PW_SANDBOX_ACCESS_NONE;
+ 	}
+ 	if (!g_str_has_prefix(aa_label, SNAP_LABEL_PREFIX)) {
