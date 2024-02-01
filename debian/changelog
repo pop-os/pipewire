@@ -1,10 +1,17 @@
 pipewire (1.0.2-0) UNRELEASED; urgency=medium
 
+  [ Dylan Aïssi ]
   * New upstream release
   * Drop patches included in upstream release:
       - libcamera0.2 compatibility
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 12:10:27 +0100
+  [ Jeremy Bícha ]
+  * Cherry-pick patches from Sergio Costas for snap permissions support.
+    CVE-2022-4964 (LP: #1995707)
+  * Add apparmor and snapd-glib to Build-Depends for snap feature
+  * Cherry-pick a patch to fix LP: #2051504
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 12:46:52 +0100
 
 pipewire (1.0.1-2) unstable; urgency=medium
 
