@@ -1,3 +1,9 @@
+pipewire (1.0.2-0) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 12:10:27 +0100
+
 pipewire (1.0.1-2) unstable; urgency=medium
 
   * Switch Build-Deps from systemd to systemd-dev (Closes: #1060598)
