@@ -1,4 +1,4 @@
-pipewire (1.0.2-0) UNRELEASED; urgency=medium
+pipewire (1.0.2-1) unstable; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release
@@ -11,7 +11,7 @@ pipewire (1.0.2-0) UNRELEASED; urgency=medium
   * Add apparmor and snapd-glib to Build-Depends for snap feature
   * Cherry-pick a patch to fix LP: #2051504
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 12:46:52 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 13:01:35 +0100
 
 pipewire (1.0.1-2) unstable; urgency=medium
 
