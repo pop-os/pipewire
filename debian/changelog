@@ -1,6 +1,8 @@
 pipewire (1.0.2-0) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Drop patches included in upstream release:
+      - libcamera0.2 compatibility
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 01 Feb 2024 12:10:27 +0100
 

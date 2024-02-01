@@ -1,5 +1,2 @@
 Don-t-automatically-start-pipewire-for-root-logins.patch
 Fix_services.patch
-# Upstream patch for libcamera0.2
-fd33d2d3bb6333c7d6e74cbaa806bff2d908f589.patch
-01cb3fa862d36adfded8f02540660b43b9c1584c.patch
