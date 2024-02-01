@@ -71,6 +71,7 @@ struct port {
 	struct impl *impl;
 
 	bool alloc_buffers;
+	bool probed_expbuf;
 	bool have_expbuf;
 
 	bool next_fmtdesc;
@@ -715,7 +716,7 @@ static int impl_node_port_set_param(void *object,
 				    uint32_t id, uint32_t flags,
 				    const struct spa_pod *param)
 {
-	int res;
+	int res = 0;
 	struct impl *this = object;
 	struct port *port;
 
@@ -1020,8 +1021,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = N_PORT_PARAMS;
 
-	port->alloc_buffers = true;
-	port->have_expbuf = true;
+	port->probed_expbuf = false;
 	port->have_query_ext_ctrl = true;
 	port->dev.log = this->log;
 	port->dev.fd = -1;
