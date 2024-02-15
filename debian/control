@@ -282,7 +282,7 @@ Conflicts: pulseaudio
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
-Description: PipeWire ALSA plugin
+Description: PipeWire ALSA plugin, for ALSA applications to output via PipeWire
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -291,7 +291,7 @@ Description: PipeWire ALSA plugin
   - Accessing sources of audio and video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains the ALSA plugin.
+ This package contains a plugin for ALSA applications to output via PipeWire.
 
 Package: pipewire-jack
 Section: sound
@@ -302,7 +302,7 @@ Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
-Description: PipeWire JACK plugin
+Description: PipeWire JACK plugin, for JACK applications to output via PipeWire
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -311,7 +311,7 @@ Description: PipeWire JACK plugin
   - Accessing sources of audio and video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains the JACK plugin.
+ This package contains a plugin for JACK applications to output via PipeWire.
 
 Package: pipewire-v4l2
 Section: video
