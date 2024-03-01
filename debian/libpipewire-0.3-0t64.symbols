@@ -1,4 +1,4 @@
-libpipewire-0.3.so.0 libpipewire-0.3-0 #MINVER#
+libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
 * Build-Depends-Package: libpipewire-0.3-dev
  PW_LOG_TOPIC_DEFAULT@Base 0.3.38
 #MISSING: 0.3.82# _pw_log_topic_new@Base 0.3.38

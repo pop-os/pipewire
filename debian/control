@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.net>
 Uploaders: Jeremy Bicha <jbicha@debian.org>,
            Dylan Aïssi <daissi@debian.org>
-Build-Depends: debhelper-compat (= 13),
+Build-Depends: dpkg-dev (>= 1.22.5), debhelper-compat (= 13),
                doxygen <!nodoc>,
                graphviz <!nodoc>,
                libapparmor-dev [linux-any],
@@ -53,7 +53,10 @@ Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
 Rules-Requires-Root: no
 
-Package: libpipewire-0.3-0
+Package: libpipewire-0.3-0t64
+Provides: ${t64:Provides}
+Replaces: libpipewire-0.3-0
+Breaks: libpipewire-0.3-0 (<< ${source:Version})
 Architecture: any
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
@@ -90,7 +93,7 @@ Package: libpipewire-0.3-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
-Depends: libpipewire-0.3-0 (= ${binary:Version}),
+Depends: libpipewire-0.3-0t64 (= ${binary:Version}),
          libspa-0.2-dev (= ${binary:Version}),
          ${misc:Depends}
 Suggests: pipewire-doc
@@ -279,7 +282,7 @@ Conflicts: pulseaudio
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
-Description: PipeWire ALSA plugin, for ALSA applications to output via PipeWire
+Description: PipeWire ALSA plugin
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -288,7 +291,7 @@ Description: PipeWire ALSA plugin, for ALSA applications to output via PipeWire
   - Accessing sources of audio and video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains a plugin for ALSA applications to output via PipeWire.
+ This package contains the ALSA plugin.
 
 Package: pipewire-jack
 Section: sound
@@ -299,7 +302,7 @@ Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
-Description: PipeWire JACK plugin, for JACK applications to output via PipeWire
+Description: PipeWire JACK plugin
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
  .
@@ -308,7 +311,7 @@ Description: PipeWire JACK plugin, for JACK applications to output via PipeWire
   - Accessing sources of audio and video for consumption.
   - Generating graphs for audio and video processing.
  .
- This package contains a plugin for JACK applications to output via PipeWire.
+ This package contains the JACK plugin.
 
 Package: pipewire-v4l2
 Section: video

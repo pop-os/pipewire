@@ -1,3 +1,10 @@
+pipewire (1.0.3-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Rename libraries for 64-bit time_t transition.  Closes: #1063184
+
+ -- Benjamin Drung <bdrung@debian.org>  Fri, 01 Mar 2024 12:42:26 +0000
+
 pipewire (1.0.3-1) unstable; urgency=medium
 
   * New upstream release
