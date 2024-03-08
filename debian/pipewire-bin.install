@@ -32,6 +32,7 @@ usr/bin/pw-reserve
 usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
+debian/9999-custom.conf.README	/usr/share/alsa-card-profile/mixer/profile-sets/
 usr/share/man/man1/pipewire.*
 usr/share/man/man1/pw-cat.*
 usr/share/man/man1/pw-cli.*
