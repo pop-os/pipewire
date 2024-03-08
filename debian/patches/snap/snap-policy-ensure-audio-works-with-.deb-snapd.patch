@@ -1,0 +1,33 @@
+From: Sergio Costas Rodriguez <sergio.costas@canonical.com>
+Date: Fri, 2 Feb 2024 17:22:21 +0100
+Subject: snap-policy: ensure audio works with .deb snapd
+
+When snapd is installed as a .deb instead of a snap, their slots
+are identified as 'core:XXXX' instead of 'snapd:XXXX'. The
+current code doesn't take this into account, so those users that
+have snapd installed from a .deb package instead of have running
+an updated version in snap form will have problems with audio.
+
+This patch fixes this.
+
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1882
+---
+ src/modules/module-protocol-pulse/snap-policy.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
+index 48084b8..40cbe46 100644
+--- a/src/modules/module-protocol-pulse/snap-policy.c
++++ b/src/modules/module-protocol-pulse/snap-policy.c
+@@ -185,8 +185,9 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+ 		for (guint q = 0; q < slots->len; q++, slot++) {
+ 			const gchar *slot_name = snapd_slot_ref_get_slot(*slot);
+ 			const gchar *snap_name = snapd_slot_ref_get_snap(*slot);
+-			if (g_str_equal(snap_name, "snapd") &&
+-			    g_str_equal(slot_name, plug_name))
++			if ((g_str_equal(snap_name, "snapd") ||
++			     g_str_equal(snap_name, "core")) &&
++			     g_str_equal(slot_name, plug_name))
+ 				permissions |= add_permission;
+ 		}
+ 	}

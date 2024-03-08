@@ -18,3 +18,5 @@ snap/Fix-spacing-when-calling-functions.patch
 snap/Better-meson_options-description.patch
 snap/Replace-spaces-with-tabs.patch
 snap/snap-policy-Manage-ENOPROTOOPT-error-in-aa_getpeercon.patch
+snap/snap-policy-ensure-audio-works-with-.deb-snapd.patch
+snap/snap-policy-fix-memory-leak.patch
