@@ -1,3 +1,15 @@
+pipewire (1.0.4-0) UNRELEASED; urgency=medium
+
+  * New upstream release
+  * Improve description of pw's ALSA and JACK packages (Closes: #1062262)
+  * Install a README next to 9999-custom.conf explaining how to divert
+      it (Closes: #1063898)
+  * Cherry-pick more upstream patches improving snap support:
+      - fed14321: snap-policy: ensure audio works with .deb snapd
+      - 4d3658b2: snap-policy: fix memory leak
+
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Mar 2024 12:06:03 +0100
+
 pipewire (1.0.3-1.1) unstable; urgency=medium
 
   * Non-maintainer upload.
