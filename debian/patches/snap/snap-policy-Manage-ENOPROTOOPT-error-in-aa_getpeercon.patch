@@ -5,7 +5,7 @@ Subject: snap-policy: Manage ENOPROTOOPT error in aa_getpeercon()
 Bug-Ubuntu: https://launchpad.net/bugs/2051504
 
 (cherry picked from commit e8fcaa5157506e5def0f45dc135ad97da75237f1)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1875
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 8 +++++++-

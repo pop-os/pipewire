@@ -5,7 +5,7 @@ Subject: Add missing files
 Accidentally, I forgot to add snap-policy.* files.
 
 (cherry picked from commit 5e20a2d5704586f89f48d7575e63f9dac621b89f)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 193 ++++++++++++++++++++++++

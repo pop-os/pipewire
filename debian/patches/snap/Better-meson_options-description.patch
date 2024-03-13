@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 16:47:26 +0100
 Subject: Better meson_options description
 
 (cherry picked from commit 5125d69a6905f3ad86c1b1424d814f5442d9b677)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  meson_options.txt | 2 +-

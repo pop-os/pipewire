@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 13:24:26 +0100
 Subject: Move variable definition inside block
 
 (cherry picked from commit 18d0e2e850d74c014c6c27d22c736ec40ac9a873)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 6 ++----

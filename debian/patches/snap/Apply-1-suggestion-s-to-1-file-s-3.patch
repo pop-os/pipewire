@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 12:30:32 +0000
 Subject: Apply 1 suggestion(s) to 1 file(s)
 
 (cherry picked from commit b9b5a261998c2634477a71392a0c0c512c6e5974)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  meson.build | 2 +-

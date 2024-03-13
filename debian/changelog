@@ -9,6 +9,7 @@ pipewire (1.0.4-0) UNRELEASED; urgency=medium
       - 4d3658b2: snap-policy: fix memory leak
   * Install new manpages in their respective packages
   * Update symbols file
+  * Update metadata of snap support patches
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Mar 2024 12:06:03 +0100
 

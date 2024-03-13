@@ -7,7 +7,7 @@ calling pw_snap_get_audio_permissions(). This patch fixes
 this.
 
 (cherry picked from commit ae11e61105d53e4dc0860894ccc17b1a8aead7fa)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/server.c | 6 +++---

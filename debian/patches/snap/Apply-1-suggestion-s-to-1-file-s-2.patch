@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 12:05:47 +0000
 Subject: Apply 1 suggestion(s) to 1 file(s)
 
 (cherry picked from commit abc4bd111be6273298aaeb290d8fb613ac7316d9)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 2 +-

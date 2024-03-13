@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 13:43:54 +0100
 Subject: Fix spacing when calling functions
 
 (cherry picked from commit fda4addf1ec3d97c13ed8998a92b7ae5d12f6c68)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 16 ++++++++--------

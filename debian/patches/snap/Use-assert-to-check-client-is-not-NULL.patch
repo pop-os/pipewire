@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 13:03:06 +0100
 Subject: Use assert to check client is not NULL
 
 (cherry picked from commit b054bc25910713df63a1321bc86fe15432821800)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 6 ++----

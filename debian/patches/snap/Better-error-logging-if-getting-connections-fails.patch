@@ -3,7 +3,7 @@ Date: Wed, 22 Nov 2023 13:18:53 +0100
 Subject: Better error logging if getting connections fails
 
 (cherry picked from commit 1728b7de598a14b8b2819c6d269f586a4a843501)
-Origin: upstream, after 1.0.1
+Origin: upstream, >= 1.1.0 (unreleased)
 Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 8 ++++----
