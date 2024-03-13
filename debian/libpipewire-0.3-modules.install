@@ -38,5 +38,3 @@ usr/lib/*/pipewire-0.3/libpipewire-module-spa-node.so
 usr/lib/*/pipewire-0.3/libpipewire-module-vban-recv.so
 usr/lib/*/pipewire-0.3/libpipewire-module-vban-send.so
 usr/lib/*/pipewire-0.3/libpipewire-module-zeroconf-discover.so
-usr/share/man/man7/libpipewire-module*
-usr/share/man/man7/pipewire-pulse-module*

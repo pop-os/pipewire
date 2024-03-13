@@ -8,8 +8,10 @@ export DEB_LDFLAGS_MAINT_APPEND = -Wl,-z,defs
 
 ifneq ($(filter nodoc,$(DEB_BUILD_PROFILES)),)
 DOCS=disabled
+MAN=disabled
 else
 DOCS=enabled
+MAN=enabled
 endif
 
 built_binaries := $(shell dh_listpackages)
@@ -74,7 +76,7 @@ override_dh_auto_configure:
 		-Dffmpeg=disabled \
 		-Dinstalled_tests=$(INSTTEST) \
 		-Dlv2=$(LV2) \
-		-Dman=enabled \
+		-Dman=$(MAN) \
 		-Droc=enabled \
 		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
