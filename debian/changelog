@@ -1,4 +1,4 @@
-pipewire (1.0.4-0) UNRELEASED; urgency=medium
+pipewire (1.0.4-1) unstable; urgency=medium
 
   * New upstream release
   * Improve description of pw's ALSA and JACK packages (Closes: #1062262)
@@ -11,7 +11,7 @@ pipewire (1.0.4-0) UNRELEASED; urgency=medium
   * Update symbols file
   * Update metadata of snap support patches
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Mar 2024 12:06:03 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Mar 2024 14:31:58 +0100
 
 pipewire (1.0.3-1.1) unstable; urgency=medium
 
