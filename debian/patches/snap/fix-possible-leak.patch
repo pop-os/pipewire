@@ -8,6 +8,7 @@ this.
 
 (cherry picked from commit ae11e61105d53e4dc0860894ccc17b1a8aead7fa)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/server.c | 6 +++---
  1 file changed, 3 insertions(+), 3 deletions(-)

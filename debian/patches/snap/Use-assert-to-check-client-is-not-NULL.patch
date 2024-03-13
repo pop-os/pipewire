@@ -4,6 +4,7 @@ Subject: Use assert to check client is not NULL
 
 (cherry picked from commit b054bc25910713df63a1321bc86fe15432821800)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 6 ++----
  1 file changed, 2 insertions(+), 4 deletions(-)

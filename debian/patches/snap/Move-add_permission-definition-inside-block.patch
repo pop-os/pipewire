@@ -4,6 +4,7 @@ Subject: Move add_permission definition inside block
 
 (cherry picked from commit 1c9016280c42dc43087700789d30066e9d7a19b9)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

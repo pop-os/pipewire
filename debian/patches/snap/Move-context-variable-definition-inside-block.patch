@@ -4,6 +4,7 @@ Subject: Move context variable definition inside block
 
 (cherry picked from commit 67b9e9c4e8354a5f2075e41fa0d63f0b9b82d96a)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 3 +--
  1 file changed, 1 insertion(+), 2 deletions(-)

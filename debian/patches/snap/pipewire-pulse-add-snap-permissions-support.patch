@@ -43,6 +43,7 @@ code is available in a separate patch: https://gitlab.freedesktop.org/pipewire/w
 
 (cherry picked from commit d568dcd64f64454289e1f35ed07a11749f95b04e)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  .gitlab-ci.yml                             | 18 +++++++++++-------
  meson.build                                | 16 ++++++++++++++++

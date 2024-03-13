@@ -6,6 +6,7 @@ Bug-Ubuntu: https://launchpad.net/bugs/2051504
 
 (cherry picked from commit e8fcaa5157506e5def0f45dc135ad97da75237f1)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1875
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 8 +++++++-
  1 file changed, 7 insertions(+), 1 deletion(-)

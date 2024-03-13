@@ -4,6 +4,7 @@ Subject: Replace spaces with tabs
 
 (cherry picked from commit 6506bb2f4444be032985cc2874cc3eb94abf78fa)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  src/modules/module-protocol-pulse/snap-policy.c | 322 ++++++++++++------------
  1 file changed, 161 insertions(+), 161 deletions(-)

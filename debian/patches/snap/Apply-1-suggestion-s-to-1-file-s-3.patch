@@ -4,6 +4,7 @@ Subject: Apply 1 suggestion(s) to 1 file(s)
 
 (cherry picked from commit b9b5a261998c2634477a71392a0c0c512c6e5974)
 Origin: upstream, after 1.0.1
+Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/1779
 ---
  meson.build | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
