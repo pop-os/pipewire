@@ -3,10 +3,7 @@
 Manual pages:
 
 - \subpage page_man_pipewire_1
-- \subpage page_man_pipewire_conf_5
 - \subpage page_man_pipewire-pulse_1
-- \subpage page_man_pipewire-pulse_conf_5
-- \subpage page_man_pipewire-pulse-modules_7
 - \subpage page_man_pw-cat_1
 - \subpage page_man_pw-cli_1
 - \subpage page_man_pw-config_1
@@ -19,5 +16,11 @@ Manual pages:
 - \subpage page_man_pw-mididump_1
 - \subpage page_man_pw-mon_1
 - \subpage page_man_pw-profiler_1
+- \subpage page_man_pw-reserve_1
 - \subpage page_man_pw-top_1
-- \subpage page_man_libpipewire-modules_7
+- \subpage page_man_pw-v4l2_1
+- \subpage page_man_spa-acp-tool_1
+- \subpage page_man_spa-inspect_1
+- \subpage page_man_spa-json-dump_1
+- \subpage page_man_spa-monitor_1
+- \subpage page_man_spa-resample_1

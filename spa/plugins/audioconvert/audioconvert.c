@@ -151,6 +151,7 @@ struct port {
 	unsigned int have_latency:1;
 
 	struct spa_audio_info format;
+	unsigned int valid:1;
 	unsigned int have_format:1;
 	unsigned int is_dsp:1;
 	unsigned int is_monitor:1;
@@ -237,6 +238,7 @@ struct impl {
 	unsigned int drained:1;
 	unsigned int rate_adjust:1;
 	unsigned int port_ignore_latency:1;
+	unsigned int monitor_passthrough:1;
 
 	uint32_t scratch_size;
 	uint32_t scratch_ports;
@@ -370,6 +372,7 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 		port->blocks = 1;
 		port->stride = 1;
 	}
+	port->valid = true;
 	spa_list_init(&port->queue);
 
 	spa_log_debug(this->log, "%p: add port %d:%d position:%s %d %d %d",
@@ -377,6 +380,16 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 			is_monitor, is_control);
 	emit_port_info(this, port, true);
 
+	return 0;
+}
+
+static int deinit_port(struct impl *this, enum spa_direction direction, uint32_t port_id)
+{
+	struct port *port = GET_PORT(this, direction, port_id);
+	if (port == NULL || !port->valid)
+		return -ENOENT;
+	port->valid = false;
+	spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 	return 0;
 }
 
@@ -1274,9 +1287,9 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 			control, mode, dir->n_ports);
 
 	for (i = 0; i < dir->n_ports; i++) {
-		spa_node_emit_port_info(&this->hooks, direction, i, NULL);
+		deinit_port(this, direction, i);
 		if (this->monitor && direction == SPA_DIRECTION_INPUT)
-			spa_node_emit_port_info(&this->hooks, SPA_DIRECTION_OUTPUT, i+1, NULL);
+			deinit_port(this, SPA_DIRECTION_OUTPUT, i+1);
 	}
 
 	this->monitor = monitor;
@@ -1934,6 +1947,7 @@ impl_node_add_listener(void *object,
 	struct impl *this = object;
 	uint32_t i;
 	struct spa_hook_list save;
+	struct port *p;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -1942,10 +1956,12 @@ impl_node_add_listener(void *object,
 
 	emit_node_info(this, true);
 	for (i = 0; i < this->dir[SPA_DIRECTION_INPUT].n_ports; i++) {
-		emit_port_info(this, GET_IN_PORT(this, i), true);
+		if ((p = GET_IN_PORT(this, i)) && p->valid)
+			emit_port_info(this, p, true);
 	}
 	for (i = 0; i < this->dir[SPA_DIRECTION_OUTPUT].n_ports; i++) {
-		emit_port_info(this, GET_OUT_PORT(this, i), true);
+		if ((p = GET_OUT_PORT(this, i)) && p->valid)
+			emit_port_info(this, p, true);
 	}
 	spa_hook_list_join(&this->hooks, &save);
 
@@ -2176,8 +2192,6 @@ impl_node_port_enum_params(void *object, int seq,
 		case 0: case 1:
 		{
 			uint32_t idx = result.index;
-			if (port->is_monitor)
-				idx = idx ^ 1;
 			param = spa_latency_build(&b, id, &port->latency[idx]);
 			break;
 		}
@@ -2243,9 +2257,6 @@ static int port_set_latency(void *object,
 			this, direction, port_id, latency);
 
 	port = GET_PORT(this, direction, port_id);
-	if (port->is_monitor)
-		return 0;
-
 	if (latency == NULL) {
 		info = SPA_LATENCY_INFO(other);
 		have_latency = false;
@@ -2267,31 +2278,49 @@ static int port_set_latency(void *object,
 			info.min_rate, info.max_rate,
 			info.min_ns, info.max_ns);
 
-	spa_latency_info_combine_start(&info, other);
-	for (i = 0; i < this->dir[direction].n_ports; i++) {
-		oport = GET_PORT(this, direction, i);
-		if (oport->is_monitor || !oport->have_latency)
-			continue;
-		spa_log_debug(this->log, "%p: combine %d", this, i);
-		spa_latency_info_combine(&info, &oport->latency[other]);
-	}
-	spa_latency_info_combine_finish(&info);
+	if (this->monitor_passthrough) {
+		if (port->is_monitor)
+			oport = GET_PORT(this, other, port_id-1);
+		else if (this->monitor && direction == SPA_DIRECTION_INPUT)
+			oport = GET_PORT(this, other, port_id+1);
+		else
+			return 0;
 
-	spa_log_debug(this->log, "%p: combined %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
-			info.direction == SPA_DIRECTION_INPUT ? "input" : "output",
-			info.min_quantum, info.max_quantum,
-			info.min_rate, info.max_rate,
-			info.min_ns, info.max_ns);
-
-	for (i = 0; i < this->dir[other].n_ports; i++) {
-		oport = GET_PORT(this, other, i);
-
-		spa_log_debug(this->log, "%p: change %d", this, i);
-		if (spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
+		if (oport != NULL &&
+		    spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
 			oport->latency[other] = info;
 			oport->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 			oport->params[IDX_Latency].user++;
 			emit_port_info(this, oport, false);
+		}
+	} else {
+		spa_latency_info_combine_start(&info, other);
+		for (i = 0; i < this->dir[direction].n_ports; i++) {
+			oport = GET_PORT(this, direction, i);
+			if ((oport->is_monitor) || !oport->have_latency)
+				continue;
+			spa_log_debug(this->log, "%p: combine %d", this, i);
+			spa_latency_info_combine(&info, &oport->latency[other]);
+		}
+		spa_latency_info_combine_finish(&info);
+
+		spa_log_debug(this->log, "%p: combined %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
+				info.direction == SPA_DIRECTION_INPUT ? "input" : "output",
+				info.min_quantum, info.max_quantum,
+				info.min_rate, info.max_rate,
+				info.min_ns, info.max_ns);
+
+		for (i = 0; i < this->dir[other].n_ports; i++) {
+			oport = GET_PORT(this, other, i);
+			if (oport->is_monitor)
+				continue;
+			spa_log_debug(this->log, "%p: change %d", this, i);
+			if (spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
+				oport->latency[other] = info;
+				oport->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+				oport->params[IDX_Latency].user++;
+				emit_port_info(this, oport, false);
+			}
 		}
 	}
 	if (emit) {
@@ -2317,7 +2346,7 @@ static int port_set_tag(void *object,
 			this, direction, port_id, tag);
 
 	port = GET_PORT(this, direction, port_id);
-	if (port->is_monitor)
+	if (port->is_monitor && !this->monitor_passthrough)
 		return 0;
 
 	if (tag != NULL) {
@@ -3413,6 +3442,8 @@ impl_init(const struct spa_handle_factory *factory,
 		}
 		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
 			this->port_ignore_latency = spa_atob(s);
+		else if (spa_streq(k, "monitor.passthrough"))
+			this->monitor_passthrough = spa_atob(s);
 		else
 			audioconvert_set_param(this, k, s);
 	}

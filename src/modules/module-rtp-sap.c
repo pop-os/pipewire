@@ -26,6 +26,7 @@
 
 #ifdef __FreeBSD__
 #define ifr_ifindex ifr_index
+#define SO_PASSCRED LOCAL_CREDS_PERSISTENT
 #endif
 
 /** \page page_module_rtp_sap SAP Announce and create RTP streams
@@ -142,6 +143,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_SAP_PORT	9875
 
 #define DEFAULT_SOURCE_IP	"0.0.0.0"
+#define DEFAULT_SOURCE_IP6	"::"
 #define DEFAULT_TTL		1
 #define DEFAULT_LOOP		false
 
@@ -296,11 +298,16 @@ static void clear_sdp_info(struct sdp_info *info)
 	spa_zero(*info);
 }
 
-static void session_touch(struct session *sess)
+static uint64_t get_time_nsec(struct impl *impl)
 {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
-	sess->timestamp = SPA_TIMESPEC_TO_NSEC(&ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+static void session_touch(struct session *sess)
+{
+	sess->timestamp = get_time_nsec(sess->impl);
 }
 
 static void session_free(struct session *sess)
@@ -366,7 +373,7 @@ static int make_send_socket(
 {
 	int af, fd, val, res;
 
-	af = sa->ss_family;
+	af = src->ss_family;
 	if ((fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
 		pw_log_error("socket failed: %m");
 		return -errno;
@@ -609,11 +616,9 @@ static void on_timer_event(void *data, uint64_t expirations)
 {
 	struct impl *impl = data;
 	struct session *sess, *tmp;
-	struct timespec ts;
 	uint64_t timestamp, interval;
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	timestamp = SPA_TIMESPEC_TO_NSEC(&ts);
+	timestamp = get_time_nsec(impl);
 	interval = impl->cleanup_interval * SPA_NSEC_PER_SEC;
 
 	spa_list_for_each_safe(sess, tmp, &impl->sessions, link) {
@@ -1172,7 +1177,7 @@ static int parse_sap(struct impl *impl, void *data, size_t len)
 	if (header->c)
 		return -ENOTSUP;
 
-	offs = header->a ? 12 : 8;
+	offs = header->a ? 20 : 8;
 	offs += header->auth_len * 4;
 	if (len <= offs)
 		return -EINVAL;
@@ -1212,6 +1217,7 @@ static void
 on_sap_io(void *data, int fd, uint32_t mask)
 {
 	struct impl *impl = data;
+	int res;
 
 	if (mask & SPA_IO_IN) {
 		uint8_t buffer[2048];
@@ -1225,7 +1231,8 @@ on_sap_io(void *data, int fd, uint32_t mask)
 			return;
 
 		buffer[len] = 0;
-		parse_sap(impl, buffer, len);
+		if ((res = parse_sap(impl, buffer, len)) < 0)
+			pw_log_warn("error parsing SAP: %s", spa_strerror(res));
 	}
 }
 
@@ -1483,13 +1490,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			"sap.cleanup.sec", DEFAULT_CLEANUP_SEC);
 
 	if ((str = pw_properties_get(props, "source.ip")) == NULL) {
-		str = DEFAULT_SOURCE_IP;
 		if (impl->ifname) {
-			int fd = socket(AF_INET, SOCK_DGRAM, 0);
+			int fd = socket(impl->sap_addr.ss_family, SOCK_DGRAM, 0);
 			if (fd >= 0) {
 				struct ifreq req;
 				spa_zero(req);
-				req.ifr_addr.sa_family = AF_INET;
+				req.ifr_addr.sa_family = impl->sap_addr.ss_family;
 				snprintf(req.ifr_name, sizeof(req.ifr_name), "%s", impl->ifname);
 				res = ioctl(fd, SIOCGIFADDR, &req);
 				if (res < 0)
@@ -1499,13 +1505,15 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 						addr, sizeof(addr));
 				if (str == NULL) {
 					pw_log_warn("can't parse interface ip: %m");
-					str = DEFAULT_SOURCE_IP;
 				} else {
 					pw_log_info("interface %s IP: %s", impl->ifname, str);
 				}
 				close(fd);
 			}
 		}
+		if (str == NULL)
+			str = impl->sap_addr.ss_family == AF_INET ?
+				DEFAULT_SOURCE_IP : DEFAULT_SOURCE_IP6;
 	}
 	if ((res = parse_address(str, 0, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));

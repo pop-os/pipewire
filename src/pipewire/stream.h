@@ -229,9 +229,8 @@ struct pw_stream_control {
  * to the current time like this:
  *
  *\code{.c}
- *    struct timespec ts;
- *    clock_gettime(CLOCK_MONOTONIC, &ts);
- *    int64_t diff = SPA_TIMESPEC_TO_NSEC(&ts) - pw_time.now;
+ *    uint64_t now = pw_stream_get_nsec(stream);
+ *    int64_t diff = now - pw_time.now;
  *    int64_t elapsed = (pw_time.rate.denom * diff) / (pw_time.rate.num * SPA_NSEC_PER_SEC);
  *\endcode
  *
@@ -371,7 +370,8 @@ enum pw_stream_flags {
 	PW_STREAM_FLAG_INACTIVE		= (1 << 1),	/**< start the stream inactive,
 							  *  pw_stream_set_active() needs to be
 							  *  called explicitly */
-	PW_STREAM_FLAG_MAP_BUFFERS	= (1 << 2),	/**< mmap the buffers except DmaBuf */
+	PW_STREAM_FLAG_MAP_BUFFERS	= (1 << 2),	/**< mmap the buffers except DmaBuf that is not
+							  *  explicitly marked as mappable. */
 	PW_STREAM_FLAG_DRIVER		= (1 << 3),	/**< be a driver */
 	PW_STREAM_FLAG_RT_PROCESS	= (1 << 4),	/**< call process from the realtime
 							  *  thread. You MUST use RT safe functions
@@ -495,6 +495,10 @@ int pw_stream_set_control(struct pw_stream *stream, uint32_t id, uint32_t n_valu
 
 /** Query the time on the stream */
 int pw_stream_get_time_n(struct pw_stream *stream, struct pw_time *time, size_t size);
+
+/** Get the current time in nanoseconds. This value can be compared with
+ * the pw_time_now value. Since 1.0.4 */
+uint64_t pw_stream_get_nsec(struct pw_stream *stream);
 
 /** Query the time on the stream, deprecated since 0.3.50,
  * use pw_stream_get_time_n() to get the fields added since 0.3.50. */

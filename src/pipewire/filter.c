@@ -1662,7 +1662,7 @@ pw_filter_connect(struct pw_filter *filter,
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
 			pw_properties_setf(filter->properties, PW_KEY_NODE_FORCE_RATE,
-					"1/%u", q.denom);
+					"%u", q.denom);
 			pw_properties_setf(filter->properties, PW_KEY_NODE_FORCE_QUANTUM,
 					"%u", q.num);
 		}
@@ -1991,6 +1991,14 @@ int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time)
 			time->now, time->delay, time->ticks,
 			time->rate.num, time->rate.denom);
 	return 0;
+}
+
+SPA_EXPORT
+uint64_t pw_filter_get_nsec(struct pw_filter *filter)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
 }
 
 SPA_EXPORT

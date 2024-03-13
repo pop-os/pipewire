@@ -45,7 +45,7 @@
  * with mlockall() on many systems */
 #define THREAD_STACK 524288
 
-#define DEFAULT_RT_MAX	88
+#define DEFAULT_RT_MAX	RTPRIO_CLIENT
 
 #define JACK_CLIENT_NAME_SIZE		256
 #define JACK_PORT_NAME_SIZE		256
@@ -566,7 +566,15 @@ do_mix_set_io(struct spa_loop *loop, bool async, uint32_t seq,
 		const void *data, size_t size, void *user_data)
 {
 	const struct io_info *info = data;
+	struct port *port = info->mix->port;
 	info->mix->io = info->data;
+	if (info->mix->io) {
+		if (port->n_mix++ == 0 && port->global_mix != NULL)
+			port->global_mix->io = &port->io;
+	} else {
+		if (--port->n_mix == 0 && port->global_mix != NULL)
+			port->global_mix->io = NULL;
+	}
 	return 0;
 }
 
@@ -587,10 +595,11 @@ static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32
 	mix->io = NULL;
 	mix->n_buffers = 0;
 	spa_list_init(&mix->queue);
-	if (mix_id == SPA_ID_INVALID)
+	if (mix_id == SPA_ID_INVALID) {
 		port->global_mix = mix;
-	else if (port->n_mix++ == 0 && port->global_mix != NULL)
-		mix_set_io(port->global_mix, &port->io);
+		if (port->n_mix > 0)
+			mix_set_io(port->global_mix, &port->io);
+	}
 }
 static struct mix *find_mix_peer(struct client *c, uint32_t peer_id)
 {
@@ -677,8 +686,6 @@ static void free_mix(struct client *c, struct mix *mix)
 	spa_list_remove(&mix->port_link);
 	if (mix->id == SPA_ID_INVALID)
 		port->global_mix = NULL;
-	else if (--port->n_mix == 0 && port->global_mix != NULL)
-		mix_set_io(port->global_mix, NULL);
 	spa_list_remove(&mix->link);
 	spa_list_append(&c->free_mix, &mix->link);
 }
@@ -1508,7 +1515,7 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 		}
 		d = &b->datas[0];
 		d->chunk->offset = 0;
-		d->chunk->size = frames * sizeof(float);
+		d->chunk->size = c->buffer_frames * sizeof(float);
 		d->chunk->stride = stride;
 
 		io->buffer_id = b->id;
@@ -2750,9 +2757,11 @@ static int
 do_memmap_free(struct spa_loop *loop,
                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
-	struct pw_memmap *mm = user_data;
+	struct client *c = user_data;
+	struct pw_memmap *mm = *((struct pw_memmap **)data);
 	pw_log_trace("memmap %p free", mm);
 	pw_memmap_free(mm);
+	pw_core_set_paused(c->core, false);
 	return 0;
 }
 
@@ -2761,8 +2770,7 @@ do_queue_memmap_free(struct spa_loop *loop,
                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct client *c = user_data;
-	struct pw_memmap *mm = *((struct pw_memmap **)data);
-	pw_loop_invoke(c->context.l, do_memmap_free, 0, NULL, 0, false, mm);
+	pw_loop_invoke(c->context.l, do_memmap_free, 0, data, size, false, c);
 	return 0;
 }
 
@@ -2817,6 +2825,7 @@ static int client_node_port_set_io(void *data,
 		mix_set_io(mix, ptr);
 		if (old != NULL) {
 			old->tag[0] = SPA_ID_INVALID;
+			pw_core_set_paused(c->core, true);
 			pw_data_loop_invoke(c->loop,
 				do_queue_memmap_free, SPA_ID_INVALID, &old, sizeof(&old), false, c);
 			old = NULL;
@@ -3940,7 +3949,7 @@ jack_client_t * jack_client_open (const char *client_name,
 		struct spa_fraction q;
 		if (sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
 			pw_properties_setf(client->props, PW_KEY_NODE_FORCE_RATE,
-					"1/%u", q.denom);
+					"%u", q.denom);
 			pw_properties_setf(client->props, PW_KEY_NODE_FORCE_QUANTUM,
 					"%u", q.num);
 		} else {
@@ -5223,7 +5232,8 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 {
 	struct mix *mix;
-	void *ptr = midi_scratch;
+	void *ptr = p->emptyptr;
+	struct midi_buffer *mb = (struct midi_buffer*)midi_scratch;
 	struct spa_pod_sequence *seq[MAX_MIX];
 	uint32_t n_seq = 0;
 
@@ -5252,8 +5262,17 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 		if (n_seq == MAX_MIX)
 			break;
 	}
-	midi_init_buffer(ptr, MIDI_SCRATCH_FRAMES);
-	convert_to_midi(seq, n_seq, ptr, p->client->fix_midi_events);
+	midi_init_buffer(mb, MIDI_SCRATCH_FRAMES);
+	/* first convert to a thread local scratch buffer, then memcpy into
+	 * the per port buffer. This makes it possible to call this function concurrently
+	 * but also have different pointers per port */
+	convert_to_midi(seq, n_seq, mb, p->client->fix_midi_events);
+	memcpy(ptr, mb, sizeof(struct midi_buffer) + (mb->event_count
+                              * sizeof(struct midi_event)));
+	if (mb->write_pos) {
+		size_t offs = mb->buffer_size - 1 - mb->write_pos;
+		memcpy(ptr, SPA_PTROFF(mb, offs, void), mb->write_pos);
+	}
 	return ptr;
 }
 
