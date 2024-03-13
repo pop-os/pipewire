@@ -51,7 +51,9 @@ static int metadata_property(void *data,
 	struct impl *impl = d->impl;
 
 	if (impl->pending == 0 || d->pong_seq != 0) {
-		if (pw_impl_client_check_permissions(client, subject, PW_PERM_R) >= 0)
+		int res = pw_impl_client_check_permissions(client, subject, PW_PERM_R);
+		if (res >= 0 ||
+		    (res == -ENOENT && key == NULL && type == NULL && value == NULL))
 			pw_metadata_resource_property(d->resource, subject, key, type, value);
 	}
 	return 0;
@@ -208,6 +210,8 @@ static const struct pw_global_events global_events = {
 static void context_global_removed(void *data, struct pw_global *global)
 {
 	struct impl *impl = data;
+	pw_log_trace("Clearing properties for global %u in %u",
+				 pw_global_get_id(global), pw_global_get_id(impl->global));
 	pw_metadata_set_property(impl->metadata,
 			pw_global_get_id(global), NULL, NULL, NULL);
 }

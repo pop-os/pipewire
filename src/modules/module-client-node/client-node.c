@@ -53,6 +53,7 @@ struct mix {
 	struct port *port;
 	uint32_t peer_id;
 	uint32_t n_buffers;
+	uint32_t impl_mix_id;
 	struct buffer buffers[MAX_BUFFERS];
 };
 
@@ -228,24 +229,13 @@ static struct mix *create_mix(struct port *p, uint32_t mix_id)
 	mix->mix_id = mix_id;
 	mix->port = p;
 	mix->n_buffers = 0;
+	mix->impl_mix_id = SPA_ID_INVALID;
 	return mix;
 
 fail:
 	free(mix);
 	errno = -res;
 	return NULL;
-}
-
-static void free_mix(struct port *p, struct mix *mix)
-{
-	if (mix == NULL)
-		return;
-
-	/* never realloc so it's safe to call from pw_map_foreach */
-	if (mix->mix_id < pw_map_get_size(&p->mix))
-		pw_map_insert_at(&p->mix, mix->mix_id, NULL);
-
-	free(mix);
 }
 
 static void clear_data(struct impl *impl, struct spa_data *d)
@@ -293,6 +283,27 @@ static int clear_buffers(struct impl *impl, struct mix *mix)
 	}
 	mix->n_buffers = 0;
 	return 0;
+}
+
+static void free_mix(struct port *p, struct mix *mix)
+{
+	struct impl *impl = p->impl;
+
+	if (mix == NULL)
+		return;
+
+	if (mix->n_buffers) {
+		/* this shouldn't happen */
+		spa_log_warn(impl->log, "%p: mix port-id:%u freeing leaked buffers", impl, mix->mix_id - 1u);
+	}
+
+	clear_buffers(impl, mix);
+
+	/* never realloc so it's safe to call from pw_map_foreach */
+	if (mix->mix_id < pw_map_get_size(&p->mix))
+		pw_map_insert_at(&p->mix, mix->mix_id, NULL);
+
+	free(mix);
 }
 
 static void mix_clear(struct impl *impl, struct mix *mix)
@@ -1437,6 +1448,7 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 	*mix->io = SPA_IO_BUFFERS_INIT;
 
 	m->peer_id = mix->peer_id;
+	m->impl_mix_id = mix->id;
 
 	if (impl->resource && impl->resource->version >= 4)
 		pw_client_node_resource_port_set_mix_info(impl->resource,
@@ -1462,7 +1474,7 @@ static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
 	pw_log_debug("%p: remove mix id:%d io:%p",
 			impl, mix->id, mix->io);
 
-	if ((m = find_mix(port, mix->port.port_id)) == NULL)
+	if (!pw_map_has_item(&impl->io_map, mix->id))
 		return -EINVAL;
 
 	if (impl->resource && impl->resource->version >= 4)
@@ -1471,7 +1483,13 @@ static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
 					 mix->port.port_id, SPA_ID_INVALID, NULL);
 
 	pw_map_remove(&impl->io_map, mix->id);
-	free_mix(port, m);
+
+	m = find_mix(port, mix->port.port_id);
+	if (m && m->impl_mix_id == mix->id)
+		free_mix(port, m);
+	else
+		pw_log_debug("%p: already cleared mix id:%d port-id:%d",
+				impl, mix->id, mix->port.port_id);
 
 	return 0;
 }

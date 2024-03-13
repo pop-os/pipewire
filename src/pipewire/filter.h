@@ -120,7 +120,8 @@ enum pw_filter_flags {
 
 enum pw_filter_port_flags {
 	PW_FILTER_PORT_FLAG_NONE		= 0,		/**< no flags */
-	PW_FILTER_PORT_FLAG_MAP_BUFFERS		= (1 << 0),	/**< mmap the buffers except DmaBuf */
+	PW_FILTER_PORT_FLAG_MAP_BUFFERS		= (1 << 0),	/**< mmap the buffers except DmaBuf that is not
+								  *  explicitly marked as mappable. */
 	PW_FILTER_PORT_FLAG_ALLOC_BUFFERS	= (1 << 1),	/**< the application will allocate buffer
 								  *  memory. In the add_buffer event, the
 								  *  data of the buffer should be set */
@@ -213,6 +214,10 @@ pw_filter_update_params(struct pw_filter *filter,	/**< a \ref pw_filter */
  * process() method for timing information. */
 SPA_DEPRECATED
 int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time);
+
+/** Get the current time in nanoseconds. This value can be compared with
+ * the nsec value in the spa_io_position. Since 1.0.4 */
+uint64_t pw_filter_get_nsec(struct pw_filter *filter);
 
 /** Get a buffer that can be filled for output ports or consumed
  * for input ports.  */

@@ -402,8 +402,8 @@ gst_pipewire_src_class_init (GstPipeWireSrcClass * klass)
   gstelement_class->send_event = gst_pipewire_src_send_event;
 
   gst_element_class_set_static_metadata (gstelement_class,
-      "PipeWire source", "Source/Video",
-      "Uses PipeWire to create video", "Wim Taymans <wim.taymans@gmail.com>");
+      "PipeWire source", "Source/Audio/Video",
+      "Uses PipeWire to create audio/video", "Wim Taymans <wim.taymans@gmail.com>");
 
   gst_element_class_add_pad_template (gstelement_class,
       gst_static_pad_template_get (&gst_pipewire_src_template));
@@ -793,9 +793,13 @@ wait_started (GstPipeWireSrc *this)
     if (this->started)
       break;
 
-    if (pw_thread_loop_timed_wait_full (this->core->loop, &abstime) < 0) {
-      state = PW_STREAM_STATE_ERROR;
-      break;
+    if (this->autoconnect) {
+      if (pw_thread_loop_timed_wait_full (this->core->loop, &abstime) < 0) {
+        state = PW_STREAM_STATE_ERROR;
+        break;
+      }
+    } else {
+      pw_thread_loop_wait (this->core->loop);
     }
 
     prev_state = state;
@@ -923,8 +927,12 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
     if (pwsrc->negotiated)
       break;
 
-    if (pw_thread_loop_timed_wait_full (pwsrc->core->loop, &abstime) < 0)
+    if (pwsrc->autoconnect) {
+      if (pw_thread_loop_timed_wait_full (pwsrc->core->loop, &abstime) < 0)
         goto connect_error;
+    } else {
+      pw_thread_loop_wait (pwsrc->core->loop);
+    }
   }
   caps = pwsrc->caps;
   pwsrc->caps = NULL;

@@ -200,7 +200,6 @@ static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delay
 	snd_pcm_pipewire_t *pw = io->private_data;
 	uintptr_t seq1, seq2;
 	int64_t elapsed = 0, delay, now, avail;
-	struct timespec ts;
 	int64_t diff;
 
 	do {
@@ -218,8 +217,7 @@ static int snd_pcm_pipewire_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delay
 
 	if (now != 0 && (io->state == SND_PCM_STATE_RUNNING ||
 	    io->state == SND_PCM_STATE_DRAINING)) {
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		diff = SPA_TIMESPEC_TO_NSEC(&ts) - now;
+		diff = pw_stream_get_nsec(pw->stream) - now;
 		elapsed = (io->rate * diff) / SPA_NSEC_PER_SEC;
 
 		if (io->stream == SND_PCM_STREAM_PLAYBACK)
@@ -1253,6 +1251,10 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp,
 	pw_thread_loop_unlock(pw->main_loop);
 
 	pw->fd = spa_system_eventfd_create(pw->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	if (pw->fd < 0) {
+		err = pw->fd;
+		goto error;
+	}
 
 	pw->io.version = SND_PCM_IOPLUG_VERSION;
 	pw->io.name = "ALSA <-> PipeWire PCM I/O Plugin";

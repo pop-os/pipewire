@@ -162,6 +162,7 @@ no_config:
 static int get_config_dir(char *path, size_t size, const char *prefix, const char *name, int *level)
 {
 	int res;
+	bool no_config;
 
 	if (prefix == NULL) {
 		prefix = name;
@@ -173,7 +174,8 @@ static int get_config_dir(char *path, size_t size, const char *prefix, const cha
 		return -ENOENT;
 	}
 
-	if (pw_check_option("no-config", "true"))
+	no_config = pw_check_option("no-config", "true");
+	if (no_config)
 		goto no_config;
 
 	if ((res = get_envconf_path(path, size, prefix, name)) != 0) {
@@ -183,9 +185,12 @@ static int get_config_dir(char *path, size_t size, const char *prefix, const cha
 	}
 
 	if (*level == 0) {
+no_config:
 		(*level)++;
-		if ((res = get_homeconf_path(path, size, prefix, name)) != 0)
+		if ((res = get_confdata_path(path, size, prefix, name)) != 0)
 			return res;
+		if (no_config)
+			return 0;
 	}
 	if (*level == 1) {
 		(*level)++;
@@ -193,9 +198,8 @@ static int get_config_dir(char *path, size_t size, const char *prefix, const cha
 			return res;
 	}
 	if (*level == 2) {
-no_config:
 		(*level)++;
-		if ((res = get_confdata_path(path, size, prefix, name)) != 0)
+		if ((res = get_homeconf_path(path, size, prefix, name)) != 0)
 			return res;
 	}
 	return 0;
@@ -1221,16 +1225,16 @@ int pw_context_parse_conf_section(struct pw_context *context,
 	int res;
 
 	if (spa_streq(section, "context.spa-libs"))
-		res = pw_context_conf_section_for_each(context, section,
+		res = pw_conf_section_for_each(&conf->dict, section,
 				parse_spa_libs, &data);
 	else if (spa_streq(section, "context.modules"))
-		res = pw_context_conf_section_for_each(context, section,
+		res = pw_conf_section_for_each(&conf->dict, section,
 				parse_modules, &data);
 	else if (spa_streq(section, "context.objects"))
-		res = pw_context_conf_section_for_each(context, section,
+		res = pw_conf_section_for_each(&conf->dict, section,
 				parse_objects, &data);
 	else if (spa_streq(section, "context.exec"))
-		res = pw_context_conf_section_for_each(context, section,
+		res = pw_conf_section_for_each(&conf->dict, section,
 				parse_exec, &data);
 	else
 		res = -EINVAL;
