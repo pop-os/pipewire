@@ -110,6 +110,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_filter_get_dsp_buffer@Base 0.3.1
  pw_filter_get_name@Base 0.3.1
  pw_filter_get_node_id@Base 0.3.1
+ pw_filter_get_nsec@Base 1.0.4
  pw_filter_get_properties@Base 0.3.1
  pw_filter_get_state@Base 0.3.1
  pw_filter_get_time@Base 0.3.1
@@ -404,6 +405,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_stream_get_core@Base 0.3.1
  pw_stream_get_name@Base 0.3.1
  pw_stream_get_node_id@Base 0.3.1
+ pw_stream_get_nsec@Base 1.0.4
  pw_stream_get_properties@Base 0.3.1
  pw_stream_get_state@Base 0.3.1
  pw_stream_get_time@Base 0.3.1

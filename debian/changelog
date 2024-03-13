@@ -8,6 +8,7 @@ pipewire (1.0.4-0) UNRELEASED; urgency=medium
       - fed14321: snap-policy: ensure audio works with .deb snapd
       - 4d3658b2: snap-policy: fix memory leak
   * Install new manpages in their respective packages
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 13 Mar 2024 12:06:03 +0100
 
