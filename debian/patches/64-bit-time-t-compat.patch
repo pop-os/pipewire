@@ -1,0 +1,22 @@
+Description: 64-bit time_t compatibility for v4l2 module
+ The v4l2 build unsets _FILE_OFFSET_BITS, which is not allowed when setting
+ _TIME_BITS=64.  Having verified that nothing in this module is sensitive to
+ 64-bit time_t (none of the functions it intercepts handle time), we also
+ unset _TIME_BITS to allow this to build as before.
+Author: Steve Langasek <steve.langasek@canonical.com>
+Forwarded: no
+Last-Update: 2024-03-13
+Bug-Debian: https://bugs.debian.org/1066839
+
+Index: pipewire-1.0.3/pipewire-v4l2/src/meson.build
+===================================================================
+--- pipewire-1.0.3.orig/pipewire-v4l2/src/meson.build
++++ pipewire-1.0.3/pipewire-v4l2/src/meson.build
+@@ -12,6 +12,7 @@
+   '-U_FILE_OFFSET_BITS',
+   '-D_FILE_OFFSET_BITS=32',
+   '-D_LARGEFILE64_SOURCE',
++  '-U_TIME_BITS',
+   '-fvisibility=hidden',
+ ]
+ 
