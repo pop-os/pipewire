@@ -1,3 +1,13 @@
+pipewire (1.0.4-2) unstable; urgency=medium
+
+  [ Jeremy Bícha ]
+  * Use dh_installman to install manpages
+
+  [ Steve Langasek ]
+  * Add patch for 64-bit time_t compatibility (Closes: #1066839)
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 14 Mar 2024 10:12:07 +0100
+
 pipewire (1.0.4-1) unstable; urgency=medium
 
   * New upstream release
