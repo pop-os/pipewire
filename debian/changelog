@@ -1,3 +1,9 @@
+pipewire (1.0.4-3) UNRELEASED; urgency=medium
+
+  * s/libpipewire-0.3-0/libpipewire-0.3-0t64/ in the shlibs.local files.
+
+ -- Michael Hudson-Doyle <michael.hudson@ubuntu.com>  Fri, 22 Mar 2024 18:03:57 +1300
+
 pipewire (1.0.4-2) unstable; urgency=medium
 
   [ Jeremy Bícha ]
