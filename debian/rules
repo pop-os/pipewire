@@ -48,13 +48,17 @@ LIBFFADO=enabled
 endif
 
 ifneq (,$(filter hurd-amd64 hurd-i386,$(DEB_HOST_ARCH)))
-SNAP=disabled
 UDEVRULESDIR=
 else
 export UDEVRULESDIR=/usr/lib/udev/rules.d
-SNAP=enabled
 # For pre-Trixie releases udev rules should go in:
 # export UDEVRULESDIR=/lib/udev/rules.d
+endif
+
+ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
+SNAP=enabled
+else
+SNAP=disabled
 endif
 
 override_dh_auto_configure:
