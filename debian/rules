@@ -61,6 +61,10 @@ else
 SNAP=disabled
 endif
 
+ifeq ($(DEB_HOST_ARCH_BITS)$(filter i386,$(DEB_HOST_ARCH_CPU)),32)
+LIBFFADO=disabled
+endif
+
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-Daudiotestsrc=enabled \
