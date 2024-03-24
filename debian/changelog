@@ -1,8 +1,24 @@
-pipewire (1.0.4-3) UNRELEASED; urgency=medium
+pipewire (1.0.4-3) unstable; urgency=medium
 
-  * s/libpipewire-0.3-0/libpipewire-0.3-0t64/ in the shlibs.local files.
+  * Team upload
 
- -- Michael Hudson-Doyle <michael.hudson@ubuntu.com>  Fri, 22 Mar 2024 18:03:57 +1300
+  [ Michael Hudson-Doyle ]
+  * s/libpipewire-0.3-0/libpipewire-0.3-0t64/ in the shlibs.local files
+
+  [ Simon McVittie ]
+  * Only build Snap integration on supported architectures.
+    According to Snap documentation, only these architectures are
+    supported, so enabling the others is unlikely to be particularly
+    useful. Reducing the architecture list reduces the impact of any
+    non-portability in snapd-glib.
+  * Temporarily disable Snap integration on 32-bit non-x86.
+    snapd-glib has not yet been rebuilt for the 64-bit time_t transition.
+    This change should be reverted after snapd-glib is rebuilt.
+  * Temporarily disable libffado integration on 32-bit non-x86.
+    Same reasoning as for snapd-glib, above.
+    (Closes: #1067558)
+
+ -- Simon McVittie <smcv@debian.org>  Sun, 24 Mar 2024 17:06:55 +0000
 
 pipewire (1.0.4-2) unstable; urgency=medium
 
