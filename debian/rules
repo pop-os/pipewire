@@ -55,7 +55,7 @@ export UDEVRULESDIR=/usr/lib/udev/rules.d
 # export UDEVRULESDIR=/lib/udev/rules.d
 endif
 
-ifneq (,$(filter amd64 arm64 i386 ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
+ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
 SNAP=enabled
 else
 SNAP=disabled
