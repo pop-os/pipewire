@@ -9,11 +9,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  src/modules/module-protocol-pulse/snap-policy.c | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-index 70bf984..8cf2762 100644
 --- a/src/modules/module-protocol-pulse/snap-policy.c
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
-@@ -90,7 +90,7 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -90,7 +90,7 @@
      *app_id = snap_id;
  
      // it's a "classic" or a "devmode" confinement snap, so we give it full access

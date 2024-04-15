@@ -11,11 +11,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/187
  src/modules/module-protocol-pulse/snap-policy.c | 8 +++++++-
  1 file changed, 7 insertions(+), 1 deletion(-)
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-index f027f5c..48084b8 100644
 --- a/src/modules/module-protocol-pulse/snap-policy.c
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
-@@ -65,7 +65,13 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -65,7 +65,13 @@
  			// if apparmor isn't enabled, we can safely assume that there are no SNAPs in the system
  			return PW_SANDBOX_ACCESS_NOT_A_SANDBOX;
  		}

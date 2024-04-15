@@ -14,9 +14,6 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  create mode 100644 src/modules/module-protocol-pulse/snap-policy.c
  create mode 100644 src/modules/module-protocol-pulse/snap-policy.h
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-new file mode 100644
-index 0000000..70bf984
 --- /dev/null
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
 @@ -0,0 +1,193 @@
@@ -213,9 +210,6 @@ index 0000000..70bf984
 +
 +    return permissions;
 +}
-diff --git a/src/modules/module-protocol-pulse/snap-policy.h b/src/modules/module-protocol-pulse/snap-policy.h
-new file mode 100644
-index 0000000..0c152d3
 --- /dev/null
 +++ b/src/modules/module-protocol-pulse/snap-policy.h
 @@ -0,0 +1,22 @@

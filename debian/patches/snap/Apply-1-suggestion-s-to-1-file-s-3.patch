@@ -9,11 +9,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  meson.build | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
-diff --git a/meson.build b/meson.build
-index ccdd998..a564b16 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -439,7 +439,7 @@ else
+@@ -441,7 +441,7 @@
    snap_dep = dependency('snapd-glib', required : get_option('snap'))
  endif
  if snap_dep.found() and glib2_snap_dep.found() and gio2_snap_dep.found() and apparmor_snap_dep.found()

@@ -10,11 +10,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/188
  src/modules/module-protocol-pulse/snap-policy.c | 1 +
  1 file changed, 1 insertion(+)
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-index 40cbe46..57f0dca 100644
 --- a/src/modules/module-protocol-pulse/snap-policy.c
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
-@@ -83,6 +83,7 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -83,6 +83,7 @@
  	snap_id = g_strdup(aa_label + strlen(SNAP_LABEL_PREFIX));
  	separator = strchr(snap_id, '.');
  	if (separator == NULL) {

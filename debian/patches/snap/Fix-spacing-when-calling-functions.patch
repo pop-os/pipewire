@@ -9,11 +9,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  src/modules/module-protocol-pulse/snap-policy.c | 16 ++++++++--------
  1 file changed, 8 insertions(+), 8 deletions(-)
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-index b96c599..e1dd0d5 100644
 --- a/src/modules/module-protocol-pulse/snap-policy.c
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
-@@ -106,15 +106,15 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -106,15 +106,15 @@
          // give to it full access.
          if (check_is_same_snap(aacon, aa_label))
              return PW_SANDBOX_ACCESS_ALL;
@@ -32,7 +30,7 @@ index b96c599..e1dd0d5 100644
              pw_log_warn("snap_get_audio_permissions: error summoning snapctl2 for pulseaudio interface: %s", error->message);
              return PW_SANDBOX_ACCESS_NONE;
          }
-@@ -125,7 +125,7 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -125,7 +125,7 @@
              return PW_SANDBOX_ACCESS_ALL;
          }
          char *snapctl_command2[] = { "is-connected", "--apparmor-label", aa_label, "audio-record", NULL };
@@ -41,7 +39,7 @@ index b96c599..e1dd0d5 100644
              pw_log_warn("snap_get_audio_permissions: error summoning snapctl2 for audio-record interface: %s", error->message);
              return PW_SANDBOX_ACCESS_NONE;
          }
-@@ -177,10 +177,10 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+@@ -177,10 +177,10 @@
          SnapdSlotRef **slot = (SnapdSlotRef**) slots->pdata;
  
          for (guint q = 0; q < slots->len; q++, slot++) {

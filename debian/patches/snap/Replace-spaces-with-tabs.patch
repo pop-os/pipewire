@@ -9,8 +9,6 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  src/modules/module-protocol-pulse/snap-policy.c | 322 ++++++++++++------------
  1 file changed, 161 insertions(+), 161 deletions(-)
 
-diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
-index e1dd0d5..f027f5c 100644
 --- a/src/modules/module-protocol-pulse/snap-policy.c
 +++ b/src/modules/module-protocol-pulse/snap-policy.c
 @@ -18,172 +18,172 @@
@@ -201,8 +199,6 @@ index e1dd0d5..f027f5c 100644
 -                    permissions |= add_permission;
 -        }
 -    }
--
--    return permissions;
 +	g_autofree gchar* aa_label = NULL;
 +	gchar* snap_id = NULL;
 +	gchar* snap_confinement = NULL;
@@ -344,6 +340,7 @@ index e1dd0d5..f027f5c 100644
 +				permissions |= add_permission;
 +		}
 +	}
-+
+ 
+-    return permissions;
 +	return permissions;
  }

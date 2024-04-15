@@ -9,11 +9,9 @@ Forwarded: https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/177
  meson_options.txt | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)
 
-diff --git a/meson_options.txt b/meson_options.txt
-index e0937b4..6b274dc 100644
 --- a/meson_options.txt
 +++ b/meson_options.txt
-@@ -331,6 +331,6 @@ option('libffado',
+@@ -343,7 +343,7 @@
         type: 'feature',
         value: 'auto')
  option('snap',
@@ -21,3 +19,4 @@ index e0937b4..6b274dc 100644
 +       description : 'Enable Snap permissions support.',
         type : 'feature',
         value : 'auto')
+ option('doc-prefix-value',
