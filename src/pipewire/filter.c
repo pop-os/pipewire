@@ -779,9 +779,12 @@ static void clear_buffers(struct port *port)
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->this.buffer->n_datas; j++) {
 				struct spa_data *d = &b->this.buffer->datas[j];
-				pw_log_debug("%p: clear buffer %d mem",
-						impl, b->id);
-				unmap_data(impl, d);
+				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE) ||
+				    (mappable_dataTypes & (1<<d->type)) > 0) {
+					pw_log_debug("%p: clear buffer %d mem",
+							impl, b->id);
+					unmap_data(impl, d);
+				}
 			}
 		}
 	}
@@ -944,7 +947,8 @@ static int impl_port_use_buffers(void *object,
 		if (SPA_FLAG_IS_SET(impl_flags, PW_FILTER_PORT_FLAG_MAP_BUFFERS)) {
 			for (j = 0; j < buffers[i]->n_datas; j++) {
 				struct spa_data *d = &buffers[i]->datas[j];
-				if ((mappable_dataTypes & (1<<d->type)) > 0) {
+				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE) ||
+				    (mappable_dataTypes & (1<<d->type)) > 0) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
@@ -1254,10 +1258,12 @@ filter_new(struct pw_context *context, const char *name,
 	spa_hook_list_init(&impl->hooks);
 	this->properties = props;
 
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL && extra) {
-		str = pw_properties_get(extra, PW_KEY_APP_NAME);
-		if (str == NULL)
-			str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
+	if ((str = pw_properties_get(props, PW_KEY_NODE_NAME)) == NULL) {
+		if (extra) {
+			str = pw_properties_get(extra, PW_KEY_APP_NAME);
+			if (str == NULL)
+				str = pw_properties_get(extra, PW_KEY_APP_PROCESS_BINARY);
+		}
 		if (str == NULL)
 			str = name;
 		pw_properties_set(props, PW_KEY_NODE_NAME, str);

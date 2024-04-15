@@ -386,9 +386,8 @@ enum_filter_format(uint32_t media_type, int32_t media_subtype,
 				return -ENOENT;
 
 			val = spa_pod_get_values(&p->value, &n_values, &choice);
-
-			if (val->type != SPA_TYPE_Id)
-				return -EINVAL;
+			if (val->type != SPA_TYPE_Id || n_values == 0)
+				return SPA_VIDEO_FORMAT_UNKNOWN;
 
 			values = SPA_POD_BODY(val);
 
@@ -614,7 +613,7 @@ do_enum_fmt:
 				goto do_frmsize;
 
 			val = spa_pod_get_values(&p->value, &n_vals, &choice);
-			if (val->type != SPA_TYPE_Rectangle)
+			if (val->type != SPA_TYPE_Rectangle || n_vals == 0)
 				goto enum_end;
 
 			if (choice == SPA_CHOICE_None) {
@@ -652,7 +651,7 @@ do_enum_fmt:
 				goto have_size;
 
 			val = spa_pod_get_values(&p->value, &n_values, &choice);
-			if (val->type != SPA_TYPE_Rectangle)
+			if (val->type != SPA_TYPE_Rectangle || n_values == 0)
 				goto have_size;
 
 			values = SPA_POD_BODY_CONST(val);
@@ -772,8 +771,7 @@ do_enum_fmt:
 				goto have_framerate;
 
 			val = spa_pod_get_values(&p->value, &n_values, &choice);
-
-			if (val->type != SPA_TYPE_Fraction)
+			if (val->type != SPA_TYPE_Fraction || n_values == 0)
 				goto enum_end;
 
 			values = SPA_POD_BODY(val);
@@ -1012,10 +1010,6 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 	dev->have_format = true;
 	size->width = fmt.fmt.pix.width;
 	size->height = fmt.fmt.pix.height;
-	port->rate.denom = framerate->num = streamparm.parm.capture.timeperframe.denominator;
-	port->rate.num = framerate->denom = streamparm.parm.capture.timeperframe.numerator;
-
-	probe_expbuf(this);
 
 	port->fmt = fmt;
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_FLAGS | SPA_PORT_CHANGE_MASK_RATE;
@@ -1023,7 +1017,10 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 		SPA_PORT_FLAG_LIVE |
 		SPA_PORT_FLAG_PHYSICAL |
 		SPA_PORT_FLAG_TERMINAL;
-	port->info.rate = SPA_FRACTION(port->rate.num, port->rate.denom);
+	port->info.rate.num = streamparm.parm.capture.timeperframe.numerator;
+	port->info.rate.denom = streamparm.parm.capture.timeperframe.denominator;
+
+	probe_expbuf(this);
 
 	return match ? 0 : 1;
 }
@@ -1370,22 +1367,27 @@ static int mmap_read(struct impl *this)
 	if (xioctl(dev->fd, VIDIOC_DQBUF, &buf) < 0)
 		return -errno;
 
+	/* Drop the first frame in order to work around common firmware
+	 * timestamp issues */
+	if (buf.sequence == 0)
+		return 0;
+
 	pts = SPA_TIMEVAL_TO_NSEC(&buf.timestamp);
 	spa_log_trace(this->log, "v4l2 %p: have output %d", this, buf.index);
 
 	if (this->clock) {
 		/* FIXME, we should follow the driver clock and target_ values.
 		 * for now we ignore and use our own. */
-		this->clock->target_rate = port->rate;
+		this->clock->target_rate = port->info.rate;
 		this->clock->target_duration = 1;
 
 		this->clock->nsec = pts;
-		this->clock->rate = port->rate;
+		this->clock->rate = port->info.rate;
 		this->clock->position = buf.sequence;
 		this->clock->duration = 1;
 		this->clock->delay = 0;
 		this->clock->rate_diff = 1.0;
-		this->clock->next_nsec = pts + 1000000000LL / port->rate.denom;
+		this->clock->next_nsec = pts + port->info.rate.num * SPA_NSEC_PER_SEC / port->info.rate.denom;
 	}
 
 	b = &port->buffers[buf.index];

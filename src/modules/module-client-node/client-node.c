@@ -692,14 +692,18 @@ static int do_port_set_io(struct impl *impl,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, data, size);
 
-	port = GET_PORT(impl, direction, port_id);
-	if (port == NULL)
-		return data == NULL ? 0 : -EINVAL;
-
-	if ((mix = find_mix(port, mix_id)) == NULL)
-		return -EINVAL;
-
 	old = pw_mempool_find_tag(impl->client_pool, tag, sizeof(tag));
+
+	port = GET_PORT(impl, direction, port_id);
+	if (port == NULL) {
+		pw_memmap_free(old);
+		return data == NULL ? 0 : -EINVAL;
+	}
+
+	if ((mix = find_mix(port, mix_id)) == NULL) {
+		pw_memmap_free(old);
+		return -EINVAL;
+	}
 
 	if (data) {
 		mm = pw_mempool_import_map(impl->client_pool,
@@ -1511,7 +1515,7 @@ impl_mix_port_enum_params(void *object, int seq,
 	if (port->direction != direction)
 		return -ENOTSUP;
 
-	return impl_node_port_enum_params(&port->impl->node, seq, direction, port->id,
+	return impl_node_port_enum_params(port->impl, seq, direction, port->id,
 			id, start, num, filter);
 }
 
@@ -1583,7 +1587,7 @@ static int
 impl_mix_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
 {
 	struct port *p = object;
-	return impl_node_port_reuse_buffer(&p->impl->node, p->id, buffer_id);
+	return impl_node_port_reuse_buffer(p->impl, p->id, buffer_id);
 }
 
 static int impl_mix_process(void *object)
