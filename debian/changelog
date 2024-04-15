@@ -1,7 +1,7 @@
 pipewire (1.0.5-0) UNRELEASED; urgency=medium
 
   [ Dylan Aïssi ]
-  * New upstream release
+  * New upstream release (Closes: #1069033, LP: #2061381)
   * Refresh patches
   * Drop patch included in upstream release:
       - 64-bit-time-t-compat.patch
