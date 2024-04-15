@@ -1,3 +1,14 @@
+pipewire (1.0.5-0) UNRELEASED; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+
+  [ Jeremy Bícha ]
+  * Revert "Temporarily disable Snap integration on 32-bit non-x86"
+  * Revert "Temporarily disable libffado integration on 32-bit non-x86"
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 15 Apr 2024 18:08:39 +0200
+
 pipewire (1.0.4-3) unstable; urgency=medium
 
   * Team upload
