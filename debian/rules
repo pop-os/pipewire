@@ -41,10 +41,16 @@ ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
 LV2=disabled
 LIBMYSOFA=disabled
 LIBFFADO=disabled
+ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
+SNAP=enabled
+else
+SNAP=disabled
+endif
 else
 LV2=enabled
 LIBMYSOFA=enabled
 LIBFFADO=enabled
+SNAP=disabled
 endif
 
 ifneq (,$(filter hurd-amd64 hurd-i386,$(DEB_HOST_ARCH)))
@@ -53,12 +59,6 @@ else
 export UDEVRULESDIR=/usr/lib/udev/rules.d
 # For pre-Trixie releases udev rules should go in:
 # export UDEVRULESDIR=/lib/udev/rules.d
-endif
-
-ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
-SNAP=enabled
-else
-SNAP=disabled
 endif
 
 override_dh_auto_configure:
