@@ -25,6 +25,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
 #include <spa/param/latency-utils.h>
+#include <spa/param/tag-utils.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -304,13 +305,12 @@ struct stream {
 
 	struct spa_audio_info_raw info;
 	uint32_t remap[SPA_AUDIO_MAX_CHANNELS];
-	uint32_t rate;
 
 	void *delaybuf;
 	struct ringbuffer delay[SPA_AUDIO_MAX_CHANNELS];
 
-	int64_t delay_nsec;		/* for main loop */
-	int64_t data_delay_nsec;	/* for data loop */
+	int64_t delay_samples;		/* for main loop */
+	int64_t data_delay_samples;	/* for data loop */
 
 	unsigned int ready:1;
 	unsigned int added:1;
@@ -440,11 +440,10 @@ static int64_t get_stream_delay(struct stream *s)
 {
 	struct pw_time t;
 
-	if (pw_stream_get_time_n(s->stream, &t, sizeof(t)) < 0 ||
-			t.rate.denom == 0)
+	if (pw_stream_get_time_n(s->stream, &t, sizeof(t)) < 0)
 		return INT64_MIN;
 
-	return t.delay * SPA_NSEC_PER_SEC * t.rate.num / t.rate.denom;
+	return t.delay;  /* samples at graph rate */
 }
 
 static void update_latency(struct impl *impl)
@@ -557,20 +556,19 @@ static void update_delay(struct impl *impl)
 	spa_list_for_each(s, &impl->streams, link) {
 		int64_t delay = get_stream_delay(s);
 
-		if (delay != s->delay_nsec && delay != INT64_MIN)
-			pw_log_debug("stream %d delay:%"PRIi64" ns", s->id, delay);
+		if (delay != s->delay_samples && delay != INT64_MIN)
+			pw_log_debug("stream %d delay:%"PRIi64" samples", s->id, delay);
 
 		max_delay = SPA_MAX(max_delay, delay);
-		s->delay_nsec = delay;
+		s->delay_samples = delay;
 	}
 
 	spa_list_for_each(s, &impl->streams, link) {
 		uint32_t size = 0;
 
-		if (s->delay_nsec != INT64_MIN) {
-			int64_t delay = max_delay - s->delay_nsec;
-			size = delay * s->rate / SPA_NSEC_PER_SEC;
-			size *= sizeof(float);
+		if (s->delay_samples != INT64_MIN) {
+			int64_t delay = max_delay - s->delay_samples;
+			size = delay * sizeof(float);
 		}
 
 		resize_delay(s, size);
@@ -619,6 +617,27 @@ static int do_add_stream(struct spa_loop *loop, bool async, uint32_t seq,
 		s->added = true;
 	}
 	return 0;
+}
+
+static void param_tag_changed(struct impl *impl, const struct spa_pod *param)
+{
+	if (param == NULL)
+		return;
+
+	pw_log_debug("tag update");
+	struct stream *s;
+	struct spa_tag_info tag;
+	const struct spa_pod *params[1] = { param };
+	void *state = NULL;
+
+	if (spa_tag_parse(param, &tag, &state) < 0)
+		return;
+	spa_list_for_each(s, &impl->streams, link) {
+		if (s->stream == NULL)
+			continue;
+		pw_log_debug("updating stream %d", s->id);
+		pw_stream_update_params(s->stream, params, 1);
+	}
 }
 
 static int do_remove_stream(struct spa_loop *loop, bool async, uint32_t seq,
@@ -707,22 +726,9 @@ static void stream_param_changed(void *d, uint32_t id, const struct spa_pod *par
 {
 	struct stream *s = d;
 	struct spa_latency_info latency;
-	struct spa_audio_info format = { 0 };
 
 	switch (id) {
 	case SPA_PARAM_Format:
-		if (!param) {
-			s->rate = 0;
-		} else {
-			if (spa_format_parse(param, &format.media_type, &format.media_subtype) < 0)
-				break;
-			if (format.media_type != SPA_MEDIA_TYPE_audio ||
-					format.media_subtype != SPA_MEDIA_SUBTYPE_raw)
-				break;
-			if (spa_format_audio_raw_parse(param, &format.info.raw) < 0)
-				break;
-			s->rate = format.info.raw.rate;
-		}
 		update_delay(s->impl);
 		break;
 	case SPA_PARAM_Latency:
@@ -734,6 +740,7 @@ static void stream_param_changed(void *d, uint32_t id, const struct spa_pod *par
 			s->latency = latency;
 		}
 		update_latency(s->impl);
+		update_delay(s->impl);
 		break;
 	default:
 		break;
@@ -1074,10 +1081,10 @@ static bool check_stream_delay(struct stream *s)
 		return false;
 
 	delay = get_stream_delay(s);
-	if (delay == INT64_MIN || delay == s->data_delay_nsec)
+	if (delay == INT64_MIN || delay == s->data_delay_samples)
 		return false;
 
-	s->data_delay_nsec = delay;
+	s->data_delay_samples = delay;
 	return true;
 }
 
@@ -1260,6 +1267,10 @@ static void combine_param_changed(void *d, uint32_t id, const struct spa_pod *pa
 		pw_stream_update_params(impl->combine, &p, 1);
 
 		update_latency(impl);
+		break;
+	}
+	case SPA_PARAM_Tag: {
+		param_tag_changed(impl, param);
 		break;
 	}
 	default:
@@ -1542,6 +1553,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(props, impl->combine_props, PW_KEY_NODE_VIRTUAL);
 	copy_props(props, impl->combine_props, PW_KEY_MEDIA_CLASS);
 	copy_props(props, impl->combine_props, "resample.prefill");
+	copy_props(props, impl->combine_props, "resample.disable");
 
 	parse_audio_info(impl->combine_props, &impl->info);
 
@@ -1549,6 +1561,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(props, impl->stream_props, PW_KEY_NODE_VIRTUAL);
 	copy_props(props, impl->stream_props, PW_KEY_NODE_LINK_GROUP);
 	copy_props(props, impl->stream_props, "resample.prefill");
+	copy_props(props, impl->stream_props, "resample.disable");
 
 	if (pw_properties_get(impl->stream_props, PW_KEY_MEDIA_ROLE) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_ROLE, "filter");

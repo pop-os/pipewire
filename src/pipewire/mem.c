@@ -382,7 +382,7 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 		(int64_t) sb.st_size);
 
 	if (!valid) {
-		errno = -EINVAL;
+		errno = EINVAL;
 		return NULL;
 	}
 
@@ -611,7 +611,7 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	struct memblock *b;
 
 	if (fd < 0) {
-		pw_log_error("%p: cannot import invalid fd", pool);
+		pw_log_error("%p: cannot import invalid fd:%d", pool, fd);
 		errno = EINVAL;
 		return NULL;
 	}
