@@ -1,3 +1,4 @@
 version=4
-https://gitlab.freedesktop.org/pipewire/pipewire/tags?sort=updated_desc \
- archive/@ANY_VERSION@/pipewire-\d\S*@ARCHIVE_EXT@
+opts="searchmode=plain" \
+ https://gitlab.freedesktop.org/pipewire/@PACKAGE@/tags?sort=updated_desc \
+ -/archive/v?\d[\d.]+/@PACKAGE@-@ANY_VERSION@@ARCHIVE_EXT@
