@@ -1,4 +1,4 @@
-pipewire (1.0.6-0) UNRELEASED; urgency=medium
+pipewire (1.0.6-1) unstable; urgency=medium
 
   * New upstream release
   * Standards-Version: 4.7.0 (no changes required)
@@ -10,7 +10,7 @@ pipewire (1.0.6-0) UNRELEASED; urgency=medium
     warnings messages.
   * Fix debian/watch
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 10 May 2024 09:21:45 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 10 May 2024 10:15:23 +0200
 
 pipewire (1.0.5-1) unstable; urgency=medium
 
