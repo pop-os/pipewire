@@ -53,7 +53,7 @@ struct props {
 };
 
 #define FILL_FRAMES 4
-#define MIN_BUFFERS 2
+#define MIN_BUFFERS 3
 #define MAX_BUFFERS 32
 #define BUFFER_SIZE	(8192*8)
 #define RATE_CTL_DIFF_MAX 0.005
@@ -888,7 +888,7 @@ again:
 			 */
 #if 1
 			this->next_flush_time += SPA_MIN(packet_time,
-					duration_ns * (port->n_buffers - 1));
+					duration_ns * (SPA_MAX(port->n_buffers, 2u) - 2));
 #endif
 		} else {
 			if (this->next_flush_time == 0)
@@ -1330,6 +1330,9 @@ static int do_remove_transport_source(struct spa_loop *loop,
 
 	if (this->transport->iso_io)
 		spa_bt_iso_io_set_cb(this->transport->iso_io, NULL, NULL);
+
+	/* Drop queued data */
+	drop_frames(this, UINT32_MAX);
 
 	return 0;
 }
