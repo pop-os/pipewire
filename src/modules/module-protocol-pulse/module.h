@@ -13,6 +13,9 @@
 
 struct module;
 struct pw_properties;
+struct client;
+struct message;
+struct extension;
 
 struct module_info {
 	const char *name;
@@ -23,6 +26,7 @@ struct module_info {
 	int (*load) (struct module *module);
 	int (*unload) (struct module *module);
 
+	const struct extension *extension;
 	const char* const *valid_args;
 	const struct spa_dict *properties;
 	size_t data_size;
@@ -58,11 +62,15 @@ struct module {
 #define module_emit_loaded(m,r) spa_hook_list_call(&m->listener_list, struct module_events, loaded, 0, r)
 #define module_emit_destroy(m) spa_hook_list_call(&(m)->listener_list, struct module_events, destroy, 0)
 
+const struct module_info *module_info_find(struct impl *impl, const char *name);
+
 struct module *module_create(struct impl *impl, const char *name, const char *args);
 void module_free(struct module *module);
 int module_load(struct module *module);
 int module_unload(struct module *module);
 void module_schedule_unload(struct module *module);
+
+struct module *module_lookup(struct impl *impl, uint32_t index, const char *name);
 
 void module_add_listener(struct module *module,
 			 struct spa_hook *listener,

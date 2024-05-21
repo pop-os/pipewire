@@ -11,7 +11,7 @@ static void rtp_audio_process_playback(void *data)
 	int32_t avail;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
-		pw_log_debug("Out of stream buffers: %m");
+		pw_log_info("Out of stream buffers: %m");
 		return;
 	}
 	d = buf->buffer->datas;
@@ -68,7 +68,7 @@ static void rtp_audio_process_playback(void *data)
 
 			corr = spa_dll_update(&impl->dll, error);
 
-			pw_log_debug("avail:%u target:%u error:%f corr:%f", avail,
+			pw_log_trace("avail:%u target:%u error:%f corr:%f", avail,
 					target_buffer, error, corr);
 
 			if (impl->io_rate_match) {
@@ -165,7 +165,7 @@ static int rtp_audio_receive(struct impl *impl, uint8_t *buffer, ssize_t len)
 				BUFFER_SIZE / stride);
 		impl->have_sync = false;
 	} else {
-		pw_log_debug("got samples:%u", samples);
+		pw_log_trace("got samples:%u", samples);
 		spa_ringbuffer_write_data(&impl->ring,
 				impl->buffer,
 				BUFFER_SIZE,
@@ -181,7 +181,7 @@ short_packet:
 	return -EINVAL;
 invalid_version:
 	pw_log_warn("invalid RTP version");
-	spa_debug_mem(0, buffer, len);
+	spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_INFO, 0, buffer, len);
 	return -EPROTO;
 invalid_len:
 	pw_log_warn("invalid RTP length");
@@ -190,6 +190,18 @@ unexpected_ssrc:
 	pw_log_warn("unexpected SSRC (expected %u != %u)",
 		impl->ssrc, hdr->ssrc);
 	return -EINVAL;
+}
+
+static void set_timer(struct impl *impl, uint64_t time, uint64_t itime)
+{
+	struct itimerspec ts;
+	ts.it_value.tv_sec = time / SPA_NSEC_PER_SEC;
+	ts.it_value.tv_nsec = time % SPA_NSEC_PER_SEC;
+	ts.it_interval.tv_sec = itime / SPA_NSEC_PER_SEC;
+	ts.it_interval.tv_nsec = itime % SPA_NSEC_PER_SEC;
+	spa_system_timerfd_settime(impl->data_loop->system,
+			impl->timer->fd, SPA_FD_TIMER_ABSTIME, &ts, NULL);
+	impl->timer_running = time != 0 && itime != 0;
 }
 
 static inline void
@@ -202,7 +214,7 @@ set_iovec(struct spa_ringbuffer *rbuf, void *buffer, uint32_t size,
 	iov[1].iov_base = buffer;
 }
 
-static void rtp_audio_flush_packets(struct impl *impl)
+static void rtp_audio_flush_packets(struct impl *impl, uint32_t num_packets)
 {
 	int32_t avail, tosend;
 	uint32_t stride, timestamp;
@@ -211,9 +223,16 @@ static void rtp_audio_flush_packets(struct impl *impl)
 
 	avail = spa_ringbuffer_get_read_index(&impl->ring, &timestamp);
 	tosend = impl->psamples;
-
 	if (avail < tosend)
-		return;
+		if (impl->started)
+			goto done;
+		else {
+			/* send last packet before emitting state_changed */
+			tosend = avail;
+			num_packets = 1;
+		}
+	else
+		num_packets = SPA_MIN(num_packets, (uint32_t)(avail / tosend));
 
 	stride = impl->stride;
 
@@ -225,7 +244,7 @@ static void rtp_audio_flush_packets(struct impl *impl)
 	iov[0].iov_base = &header;
 	iov[0].iov_len = sizeof(header);
 
-	while (avail >= tosend) {
+	while (num_packets > 0) {
 		if (impl->marker_on_first && impl->first)
 			header.m = 1;
 		else
@@ -238,7 +257,8 @@ static void rtp_audio_flush_packets(struct impl *impl)
 			(timestamp * stride) & BUFFER_MASK,
 			&iov[1], tosend * stride);
 
-		pw_log_trace("sending %d avail:%d ts_offset:%d timestamp:%d", tosend, avail, impl->ts_offset, timestamp);
+		pw_log_trace("sending %d packet:%d ts_offset:%d timestamp:%d",
+				tosend, num_packets, impl->ts_offset, timestamp);
 
 		rtp_stream_emit_send_packet(impl, iov, 3);
 
@@ -246,8 +266,30 @@ static void rtp_audio_flush_packets(struct impl *impl)
 		impl->first = false;
 		timestamp += tosend;
 		avail -= tosend;
+		num_packets--;
 	}
 	spa_ringbuffer_read_update(&impl->ring, timestamp);
+done:
+	if (impl->timer_running) {
+		if (impl->started) {
+			if (avail < tosend) {
+				set_timer(impl, 0, 0);
+			}
+		} else if (avail <= 0) {
+			bool started = false;
+
+			/* the stream has been stopped and all packets have been sent */
+			set_timer(impl, 0, 0);
+			pw_loop_invoke(impl->main_loop, do_emit_state_changed, SPA_ID_INVALID, &started, sizeof started, false, impl);
+		}
+	}
+}
+
+static void rtp_audio_flush_timeout(struct impl *impl, uint64_t expirations)
+{
+	if (expirations > 1)
+		pw_log_warn("missing timeout %"PRIu64, expirations);
+	rtp_audio_flush_packets(impl, expirations);
 }
 
 static void rtp_audio_process_capture(void *data)
@@ -257,9 +299,12 @@ static void rtp_audio_process_capture(void *data)
 	struct spa_data *d;
 	uint32_t offs, size, timestamp, expected_timestamp, stride;
 	int32_t filled, wanted;
+	uint32_t pending, num_queued;
+	struct spa_io_position *pos;
+	uint64_t next_nsec, quantum;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
-		pw_log_debug("Out of stream buffers: %m");
+		pw_log_info("Out of stream buffers: %m");
 		return;
 	}
 	d = buf->buffer->datas;
@@ -271,11 +316,17 @@ static void rtp_audio_process_capture(void *data)
 
 	filled = spa_ringbuffer_get_write_index(&impl->ring, &expected_timestamp);
 
-	if (SPA_LIKELY(impl->io_position)) {
-		uint32_t rate = impl->io_position->clock.rate.denom;
-		timestamp = impl->io_position->clock.position * impl->rate / rate;
-	} else
+	pos = impl->io_position;
+	if (SPA_LIKELY(pos)) {
+		uint32_t rate = pos->clock.rate.denom;
+		timestamp = pos->clock.position * impl->rate / rate;
+		next_nsec = pos->clock.next_nsec;
+		quantum = pos->clock.duration * SPA_NSEC_PER_SEC / (rate * pos->clock.rate_diff);
+	} else {
 		timestamp = expected_timestamp;
+		next_nsec = 0;
+		quantum = 0;
+	}
 
 	if (!impl->have_sync) {
 		pw_log_info("sync to timestamp:%u seq:%u ts_offset:%u SSRC:%u",
@@ -284,6 +335,7 @@ static void rtp_audio_process_capture(void *data)
 		memset(impl->buffer, 0, BUFFER_SIZE);
 		impl->have_sync = true;
 		expected_timestamp = timestamp;
+		filled = 0;
 	} else {
 		if (SPA_ABS((int32_t)expected_timestamp - (int32_t)timestamp) > 32) {
 			pw_log_warn("expected %u != timestamp %u", expected_timestamp, timestamp);
@@ -291,6 +343,7 @@ static void rtp_audio_process_capture(void *data)
 		} else if (filled + wanted > (int32_t)(BUFFER_SIZE / stride)) {
 			pw_log_warn("overrun %u + %u > %u", filled, wanted, BUFFER_SIZE / stride);
 			impl->have_sync = false;
+			filled = 0;
 		}
 	}
 
@@ -304,7 +357,22 @@ static void rtp_audio_process_capture(void *data)
 
 	pw_stream_queue_buffer(impl->stream, buf);
 
-	rtp_audio_flush_packets(impl);
+	pending = filled / impl->psamples;
+	num_queued = (filled + wanted) / impl->psamples;
+
+	if (num_queued > 0) {
+		/* flush all previous packets plus new one right away */
+		rtp_audio_flush_packets(impl, pending + 1);
+		num_queued -= SPA_MIN(num_queued, pending + 1);
+
+		if (num_queued > 0) {
+			/* schedule timer for remaining */
+			int64_t interval = quantum / (num_queued + 1);
+			uint64_t time = next_nsec - num_queued * interval;
+			pw_log_trace("%u %u %"PRIu64" %"PRIu64, pending, num_queued, time, interval);
+			set_timer(impl, time, interval);
+		}
+	}
 }
 
 static int rtp_audio_init(struct impl *impl, enum spa_direction direction)
@@ -314,5 +382,6 @@ static int rtp_audio_init(struct impl *impl, enum spa_direction direction)
 	else
 		impl->stream_events.process = rtp_audio_process_playback;
 	impl->receive_rtp = rtp_audio_receive;
+	impl->flush_timeout = rtp_audio_flush_timeout;
 	return 0;
 }

@@ -13,6 +13,7 @@
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
+#include <spa/utils/json.h>
 #include <spa/buffer/alloc.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/filter.h>
@@ -27,7 +28,7 @@
 
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.audioadapter");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioadapter");
 
 #define DEFAULT_ALIGN	16
 
@@ -88,14 +89,16 @@ struct impl {
 
 	unsigned int add_listener:1;
 	unsigned int have_format:1;
+	unsigned int recheck_format:1;
 	unsigned int started:1;
-	unsigned int warned:1;
 	unsigned int ready:1;
-	unsigned int driver:1;
 	unsigned int async:1;
 	unsigned int passthrough:1;
 	unsigned int follower_removing:1;
 	unsigned int in_recalc;
+
+	unsigned int warned:1;
+	unsigned int driver:1;
 };
 
 /** \endcond */
@@ -300,6 +303,18 @@ static void emit_node_info(struct impl *this, bool full)
 	if (full)
 		this->info.change_mask = this->info_all;
 	if (this->info.change_mask) {
+		struct spa_dict_item *items;
+		uint32_t n_items = 0;
+
+		if (this->info.props)
+			n_items = this->info.props->n_items;
+		items = alloca((n_items + 2) * sizeof(struct spa_dict_item));
+		for (i = 0; i < n_items; i++)
+			items[i] = this->info.props->items[i];
+		items[n_items++] = SPA_DICT_ITEM_INIT("adapter.auto-port-config", NULL);
+		items[n_items++] = SPA_DICT_ITEM_INIT("audio.adapt.follower", NULL);
+		this->info.props = &SPA_DICT_INIT(items, n_items);
+
 		if (this->info.change_mask & SPA_NODE_CHANGE_MASK_PARAMS) {
 			for (i = 0; i < this->info.n_params; i++) {
 				if (this->params[i].user > 0) {
@@ -312,6 +327,7 @@ static void emit_node_info(struct impl *this, bool full)
 		}
 		spa_node_emit_info(&this->hooks, &this->info);
 		this->info.change_mask = old;
+		spa_zero(this->info.props);
 	}
 }
 
@@ -471,6 +487,13 @@ static int negotiate_buffers(struct impl *this)
 	return 0;
 }
 
+static void clear_buffers(struct impl *this)
+{
+	free(this->buffers);
+	this->buffers = NULL;
+	this->n_buffers = 0;
+}
+
 static int configure_format(struct impl *this, uint32_t flags, const struct spa_pod *format)
 {
 	uint8_t buffer[4096];
@@ -514,11 +537,11 @@ static int configure_format(struct impl *this, uint32_t flags, const struct spa_
 	}
 
 	this->have_format = format != NULL;
-	if (format == NULL) {
-		this->n_buffers = 0;
-	} else if (this->target != this->follower) {
+	clear_buffers(this);
+
+	if (format != NULL && this->target != this->follower)
 		res = negotiate_buffers(this);
-	}
+
 	return res;
 }
 
@@ -845,10 +868,13 @@ static int negotiate_format(struct impl *this)
 	struct spa_pod_builder b = { 0 };
 	int res;
 
-	spa_log_debug(this->log, "%p: have_format:%d", this, this->have_format);
+	spa_log_debug(this->log, "%p: have_format:%d recheck:%d", this, this->have_format,
+			this->recheck_format);
 
-	if (this->have_format)
+	if (this->have_format && !this->recheck_format)
 		return 0;
+
+	this->recheck_format = false;
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
 
@@ -926,15 +952,9 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		this->warned = false;
 		break;
 	case SPA_NODE_COMMAND_Suspend:
-		this->started = false;
-		this->ready = false;
-		this->warned = false;
 		spa_log_debug(this->log, "%p: suspending", this);
 		break;
 	case SPA_NODE_COMMAND_Pause:
-		this->started = false;
-		this->ready = false;
-		this->warned = false;
 		spa_log_debug(this->log, "%p: pausing", this);
 		break;
 	case SPA_NODE_COMMAND_Flush:
@@ -971,9 +991,15 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		break;
 	case SPA_NODE_COMMAND_Suspend:
 		configure_format(this, 0, NULL);
+		this->started = false;
+		this->warned = false;
+		this->ready = false;
 		spa_log_debug(this->log, "%p: suspended", this);
 		break;
 	case SPA_NODE_COMMAND_Pause:
+		this->started = false;
+		this->warned = false;
+		this->ready = false;
 		spa_log_debug(this->log, "%p: paused", this);
 		break;
 	case SPA_NODE_COMMAND_Flush:
@@ -1038,6 +1064,9 @@ static void follower_convert_port_info(void *data,
 	struct impl *this = data;
 	uint32_t i;
 	int res;
+
+	if (info == NULL)
+		return;
 
 	spa_log_debug(this->log, "%p: convert port info %s %p %08"PRIx64, this,
 			this->direction == SPA_DIRECTION_INPUT ?
@@ -1216,6 +1245,9 @@ static void follower_port_info(void *data,
 	uint32_t i;
 	int res;
 
+	if (info == NULL)
+		return;
+
 	if (this->follower_removing) {
 	      spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 	      return;
@@ -1278,6 +1310,7 @@ static void follower_port_info(void *data,
 			if (idx == IDX_EnumFormat) {
 				spa_log_debug(this->log, "new formats");
 				/* we will renegotiate when restarting */
+				this->recheck_format = true;
 			}
 
 			this->params[idx].user++;
@@ -1571,7 +1604,7 @@ static int impl_node_process(void *object)
 	struct impl *this = object;
 	int status = 0, fstatus, retry = 8;
 
-	if (!this->started) {
+	if (!this->ready) {
 		if (!this->warned)
 			spa_log_warn(this->log, "%p: scheduling stopped node", this);
 		this->warned = true;
@@ -1631,11 +1664,7 @@ static int impl_node_process(void *object)
 				break;
 
 			done = (status & (SPA_STATUS_HAVE_DATA | SPA_STATUS_DRAINED));
-
-			/* when not async, we can return the data when we are done.
-			 * In async mode we might first need to wake up the follower
-			 * to asynchronously provide more data for the next round. */
-			if (!this->async && done)
+			if (done)
 				break;
 
 			if (status & SPA_STATUS_NEED_DATA) {
@@ -1651,10 +1680,6 @@ static int impl_node_process(void *object)
 				if ((fstatus & (SPA_STATUS_HAVE_DATA | SPA_STATUS_DRAINED)) == 0)
 					break;
 			}
-			/* converter produced something or is drained and we
-			 * scheduled the follower above, we can stop now*/
-			if (done)
-				break;
 		}
 		if (!done)
 			spa_node_call_xrun(&this->callbacks, 0, 0, NULL);
@@ -1688,6 +1713,115 @@ static const struct spa_node_methods impl_node = {
 	.process = impl_node_process,
 };
 
+static int do_auto_port_config(struct impl *this, const char *str)
+{
+	uint32_t state = 0, i;
+	uint8_t buffer[4096];
+	struct spa_pod_builder b;
+#define POSITION_PRESERVE 0
+#define POSITION_AUX 1
+#define POSITION_UNKNOWN 2
+	int res, position = POSITION_PRESERVE;
+	struct spa_pod *param;
+	uint32_t media_type, media_subtype;
+	bool have_format = false, monitor = false, control = false;
+	struct spa_audio_info format = { 0, };
+	enum spa_param_port_config_mode mode = SPA_PARAM_PORT_CONFIG_MODE_none;
+	struct spa_json it[2];
+	char key[1024], val[256];
+
+	spa_json_init(&it[0], str, strlen(str));
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		return -EINVAL;
+
+	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
+		if (spa_json_get_string(&it[1], val, sizeof(val)) <= 0)
+			break;
+
+		if (spa_streq(key, "mode")) {
+			mode = spa_debug_type_find_type_short(spa_type_param_port_config_mode, val);
+			if (mode == SPA_ID_INVALID)
+				mode = SPA_PARAM_PORT_CONFIG_MODE_none;
+		} else if (spa_streq(key, "monitor")) {
+			monitor = spa_atob(val);
+		} else if (spa_streq(key, "control")) {
+			control = spa_atob(val);
+		} else if (spa_streq(key, "position")) {
+			if (spa_streq(val, "unknown"))
+				position = POSITION_UNKNOWN;
+			else if (spa_streq(val, "aux"))
+				position = POSITION_AUX;
+			else
+				position = POSITION_PRESERVE;
+		}
+        }
+
+	while (true) {
+		struct spa_audio_info info = { 0, };
+		struct spa_pod *position = NULL;
+		uint32_t n_position = 0;
+
+		spa_pod_builder_init(&b, buffer, sizeof(buffer));
+		if ((res = spa_node_port_enum_params_sync(this->follower,
+					this->direction, 0,
+					SPA_PARAM_EnumFormat, &state,
+					NULL, &param, &b)) != 1)
+			break;
+
+		if ((res = spa_format_parse(param, &media_type, &media_subtype)) < 0)
+			continue;
+
+		if (media_type != SPA_MEDIA_TYPE_audio ||
+		    media_subtype != SPA_MEDIA_SUBTYPE_raw)
+			continue;
+
+		spa_pod_object_fixate((struct spa_pod_object*)param);
+
+		if (spa_pod_parse_object(param,
+				SPA_TYPE_OBJECT_Format, NULL,
+				SPA_FORMAT_AUDIO_format,        SPA_POD_Id(&info.info.raw.format),
+				SPA_FORMAT_AUDIO_rate,          SPA_POD_Int(&info.info.raw.rate),
+				SPA_FORMAT_AUDIO_channels,      SPA_POD_Int(&info.info.raw.channels),
+				SPA_FORMAT_AUDIO_position,      SPA_POD_OPT_Pod(&position)) < 0)
+			continue;
+
+		if (position != NULL)
+			n_position = spa_pod_copy_array(position, SPA_TYPE_Id,
+					info.info.raw.position, SPA_AUDIO_MAX_CHANNELS);
+		if (n_position == 0 || n_position != info.info.raw.channels)
+			SPA_FLAG_SET(info.info.raw.flags, SPA_AUDIO_FLAG_UNPOSITIONED);
+
+		if (format.info.raw.channels >= info.info.raw.channels)
+			continue;
+
+		format = info;
+		have_format = true;
+	}
+	if (!have_format)
+		return -ENOENT;
+
+	if (position == POSITION_AUX) {
+		for (i = 0; i < format.info.raw.channels; i++)
+			format.info.raw.position[i] = SPA_AUDIO_CHANNEL_START_Aux + i;
+	} else if (position == POSITION_UNKNOWN) {
+		for (i = 0; i < format.info.raw.channels; i++)
+			format.info.raw.position[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
+	}
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	param = spa_format_audio_raw_build(&b, SPA_PARAM_Format, &format.info.raw);
+	param = spa_pod_builder_add_object(&b,
+		SPA_TYPE_OBJECT_ParamPortConfig, SPA_PARAM_PortConfig,
+		SPA_PARAM_PORT_CONFIG_direction, SPA_POD_Id(this->direction),
+		SPA_PARAM_PORT_CONFIG_mode,      SPA_POD_Id(mode),
+		SPA_PARAM_PORT_CONFIG_monitor,   SPA_POD_Bool(monitor),
+		SPA_PARAM_PORT_CONFIG_control,   SPA_POD_Bool(control),
+		SPA_PARAM_PORT_CONFIG_format,    SPA_POD_Pod(param));
+	impl_node_set_param(this, SPA_PARAM_PortConfig, 0, param);
+
+	return 0;
+}
+
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
 	struct impl *this;
@@ -1718,10 +1852,7 @@ static int impl_clear(struct spa_handle *handle)
 
 	spa_handle_clear(this->hnd_convert);
 
-	if (this->buffers)
-		free(this->buffers);
-	this->buffers = NULL;
-
+	clear_buffers(this);
 	return 0;
 }
 
@@ -1793,6 +1924,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->target = this->convert;
 
 	this->info_all = SPA_NODE_CHANGE_MASK_FLAGS |
+		SPA_NODE_CHANGE_MASK_PROPS |
 		SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info = SPA_NODE_INFO_INIT();
 	this->info.flags = SPA_NODE_FLAG_RT |
@@ -1816,7 +1948,10 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_node_add_listener(this->convert,
 			&this->convert_listener, &convert_node_events, this);
 
-	configure_convert(this, SPA_PARAM_PORT_CONFIG_MODE_dsp);
+	if (info && (str = spa_dict_lookup(info, "adapter.auto-port-config")) != NULL)
+		do_auto_port_config(this, str);
+	else
+		configure_convert(this, SPA_PARAM_PORT_CONFIG_MODE_dsp);
 
 	link_io(this);
 

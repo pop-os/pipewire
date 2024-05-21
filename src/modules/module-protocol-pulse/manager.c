@@ -168,6 +168,12 @@ static void object_update_params(struct object *o)
 		}
 	}
 }
+static void object_reset_params(struct object *o)
+{
+	uint32_t i;
+	for (i = 0; i < o->this.n_params; i++)
+		o->this.params[i].user = 0;
+}
 
 static void object_data_free(struct object_data *d)
 {
@@ -290,6 +296,7 @@ static void device_event_info(void *data, const struct pw_device_info *info)
 {
 	struct object *o = data;
 	uint32_t i, changed = 0;
+	bool enumerate = false;
 
 	pw_log_debug("object %p: id:%d change-mask:%08"PRIx64, o, o->this.id, info->change_mask);
 
@@ -310,7 +317,6 @@ static void device_event_info(void *data, const struct pw_device_info *info)
 
 			if (info->params[i].user == 0)
 				continue;
-			info->params[i].user = 0;
 
 			switch (id) {
 			case SPA_PARAM_EnumProfile:
@@ -321,6 +327,9 @@ static void device_event_info(void *data, const struct pw_device_info *info)
 			default:
 				break;
 			}
+
+			enumerate = true;
+
 			add_param(&o->pending_list, info->params[i].seq, id, NULL);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
@@ -331,7 +340,7 @@ static void device_event_info(void *data, const struct pw_device_info *info)
 				info->params[i].seq = res;
 		}
 	}
-	if (changed) {
+	if (changed || enumerate) {
 		o->changed += changed;
 		core_sync(o->manager);
 	}
@@ -369,7 +378,8 @@ static void device_event_param(void *data, int seq,
 	if (p == NULL)
 		return;
 
-	if (id == SPA_PARAM_Route && !has_param(&o->this.param_list, p)) {
+	if ((id == SPA_PARAM_Route || id == SPA_PARAM_EnumRoute) &&
+	    !has_param(&o->this.param_list, p)) {
 		uint32_t idx, device;
 		if (spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
@@ -410,6 +420,7 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 {
 	struct object *o = data;
 	uint32_t i, changed = 0;
+	bool enumerate = false;
 
 	pw_log_debug("object %p: id:%d change-mask:%08"PRIx64, o, o->this.id, info->change_mask);
 
@@ -433,7 +444,6 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 
 			if (info->params[i].user == 0)
 				continue;
-			info->params[i].user = 0;
 
 			switch (id) {
 			case SPA_PARAM_Props:
@@ -449,6 +459,9 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 			default:
 				break;
 			}
+
+			enumerate = true;
+
 			add_param(&o->pending_list, info->params[i].seq, id, NULL);
 			if (!(info->params[i].flags & SPA_PARAM_INFO_READ))
 				continue;
@@ -459,7 +472,7 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 				info->params[i].seq = res;
 		}
 	}
-	if (changed) {
+	if (changed || enumerate) {
 		o->changed += changed;
 		core_sync(o->manager);
 	}
@@ -698,6 +711,7 @@ static void on_core_done(void *data, uint32_t id, int seq)
 				manager_emit_updated(m, &o->this);
 				o->changed = 0;
 			}
+			object_reset_params(o);
 		}
 	}
 }

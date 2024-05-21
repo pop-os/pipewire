@@ -29,6 +29,7 @@
 
 #include <gst/video/video.h>
 
+#include "gstpipewireclock.h"
 #include "gstpipewireformat.h"
 
 GST_DEBUG_CATEGORY_STATIC (pipewire_sink_debug);
@@ -98,6 +99,33 @@ static GstFlowReturn gst_pipewire_sink_render (GstBaseSink * psink,
 static gboolean gst_pipewire_sink_start (GstBaseSink * basesink);
 static gboolean gst_pipewire_sink_stop (GstBaseSink * basesink);
 
+static GstClock *
+gst_pipewire_sink_provide_clock (GstElement * elem)
+{
+  GstPipeWireSink *pwsink = GST_PIPEWIRE_SINK (elem);
+  GstClock *clock;
+
+  GST_OBJECT_LOCK (pwsink);
+  if (!GST_OBJECT_FLAG_IS_SET (pwsink, GST_ELEMENT_FLAG_PROVIDE_CLOCK))
+    goto clock_disabled;
+
+  if (pwsink->clock)
+    clock = GST_CLOCK_CAST (gst_object_ref (pwsink->clock));
+  else
+    clock = NULL;
+  GST_OBJECT_UNLOCK (pwsink);
+
+  return clock;
+
+  /* ERRORS */
+clock_disabled:
+  {
+    GST_DEBUG_OBJECT (pwsink, "clock provide disabled");
+    GST_OBJECT_UNLOCK (pwsink);
+    return NULL;
+  }
+}
+
 static void
 gst_pipewire_sink_finalize (GObject * object)
 {
@@ -109,6 +137,8 @@ gst_pipewire_sink_finalize (GObject * object)
     gst_structure_free (pwsink->stream_properties);
   if (pwsink->client_properties)
     gst_structure_free (pwsink->client_properties);
+  if (pwsink->clock)
+    gst_object_unref (pwsink->clock);
   g_free (pwsink->path);
   g_free (pwsink->target_object);
   g_free (pwsink->client_name);
@@ -206,11 +236,12 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
                                                       G_PARAM_READWRITE |
                                                       G_PARAM_STATIC_STRINGS));
 
+  gstelement_class->provide_clock = gst_pipewire_sink_provide_clock;
   gstelement_class->change_state = gst_pipewire_sink_change_state;
 
   gst_element_class_set_static_metadata (gstelement_class,
-      "PipeWire sink", "Sink/Video",
-      "Send video to PipeWire", "Wim Taymans <wim.taymans@gmail.com>");
+      "PipeWire sink", "Sink/Audio/Video",
+      "Send audio/video to PipeWire", "Wim Taymans <wim.taymans@gmail.com>");
 
   gst_element_class_add_pad_template (gstelement_class,
       gst_static_pad_template_get (&gst_pipewire_sink_template));
@@ -244,24 +275,19 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
 
   spa_pod_builder_init (&b, buffer, sizeof (buffer));
   spa_pod_builder_push_object (&b, &f, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers);
-  if (size == 0)
-    spa_pod_builder_add (&b,
-        SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
-        0);
-  else
-    spa_pod_builder_add (&b,
-        SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(size, size, INT32_MAX),
-        0);
+  spa_pod_builder_add (&b,
+      SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(size, size, INT32_MAX),
+      0);
 
   spa_pod_builder_add (&b,
       SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
       SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(
-	      SPA_MAX(MIN_BUFFERS, min_buffers),
-	      SPA_MAX(MIN_BUFFERS, min_buffers),
-	      max_buffers ? max_buffers : INT32_MAX),
+              SPA_MAX(MIN_BUFFERS, min_buffers),
+              SPA_MAX(MIN_BUFFERS, min_buffers),
+              max_buffers ? max_buffers : INT32_MAX),
       SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
-						(1<<SPA_DATA_MemFd) |
-						(1<<SPA_DATA_MemPtr)),
+                                                (1<<SPA_DATA_MemFd) |
+                                                (1<<SPA_DATA_MemPtr)),
       0);
   port_params[0] = spa_pod_builder_pop (&b, &f);
 
@@ -287,6 +313,8 @@ gst_pipewire_sink_init (GstPipeWireSink * sink)
   sink->client_name = g_strdup(pw_get_client_name());
   sink->mode = DEFAULT_PROP_MODE;
   sink->fd = -1;
+
+  GST_OBJECT_FLAG_SET (sink, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 
   g_signal_connect (sink->pool, "activated", G_CALLBACK (pool_activated), sink);
 }
@@ -466,7 +494,10 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
   if (data->header) {
     data->header->seq = GST_BUFFER_OFFSET (buffer);
     data->header->pts = GST_BUFFER_PTS (buffer);
-    data->header->dts_offset = GST_BUFFER_DTS (buffer);
+    if (GST_BUFFER_DTS(buffer) != GST_CLOCK_TIME_NONE)
+      data->header->dts_offset = GST_BUFFER_DTS (buffer) - GST_BUFFER_PTS (buffer);
+    else
+      data->header->dts_offset = 0;
   }
   if (data->crop) {
     GstVideoCropMeta *meta = gst_buffer_get_video_crop_meta (buffer);
@@ -550,7 +581,7 @@ on_param_changed (void *data, uint32_t id, const struct spa_pod *param)
   GstPipeWireSink *pwsink = data;
 
   if (param == NULL || id != SPA_PARAM_Format)
-          return;
+    return;
 
   if (gst_buffer_pool_is_active (GST_BUFFER_POOL_CAST (pwsink->pool)))
     pool_activated (pwsink->pool, pwsink);
@@ -560,19 +591,25 @@ static gboolean
 gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 {
   GstPipeWireSink *pwsink;
-  GPtrArray *possible;
+  g_autoptr(GPtrArray) possible = NULL;
   enum pw_stream_state state;
   const char *error = NULL;
   gboolean res = FALSE;
-  GstStructure *config;
+  GstStructure *config, *s;
   guint size;
   guint min_buffers;
   guint max_buffers;
   struct timespec abstime;
+  gint rate;
 
   pwsink = GST_PIPEWIRE_SINK (bsink);
 
-  possible = gst_caps_to_format_all (caps, SPA_PARAM_EnumFormat);
+  s = gst_caps_get_structure (caps, 0);
+  rate = 0;
+  if (gst_structure_has_name (s, "audio/x-raw"))
+    gst_structure_get_int (s, "rate", &rate);
+
+  possible = gst_caps_to_format_all (caps);
 
   pw_thread_loop_lock (pwsink->core->loop);
   state = pw_stream_get_state (pwsink->stream, &error);
@@ -583,6 +620,9 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   if (state == PW_STREAM_STATE_UNCONNECTED) {
     enum pw_stream_flags flags;
     uint32_t target_id;
+    struct spa_dict_item items[3];
+    uint32_t n_items = 0;
+    char buf[64];
 
     flags = PW_STREAM_FLAG_ASYNC;
     if (pwsink->mode != GST_PIPEWIRE_SINK_MODE_PROVIDE)
@@ -593,25 +633,24 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
     target_id = pwsink->path ? (uint32_t)atoi(pwsink->path) : PW_ID_ANY;
 
     if (pwsink->target_object) {
-      struct spa_dict_item items[2] = {
-        SPA_DICT_ITEM_INIT(PW_KEY_TARGET_OBJECT, pwsink->target_object),
-	/* XXX deprecated but the portal and some example apps only
-	 * provide the object id */
-        SPA_DICT_ITEM_INIT(PW_KEY_NODE_TARGET, NULL),
-      };
-      struct spa_dict dict = SPA_DICT_INIT_ARRAY(items);
       uint64_t serial;
 
-      /* If target.object is a name, set it also to node.target */
-      if (spa_atou64(pwsink->target_object, &serial, 0)) {
-        dict.n_items = 1;
-      } else {
-        target_id = PW_ID_ANY;
-        items[1].value = pwsink->target_object;
-      }
+      items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_TARGET_OBJECT, pwsink->target_object);
 
-      pw_stream_update_properties (pwsink->stream, &dict);
+      /* If target.object is a name, set it also to node.target */
+      if (!spa_atou64(pwsink->target_object, &serial, 0)) {
+        target_id = PW_ID_ANY;
+        /* XXX deprecated but the portal and some example apps only
+         * provide the object id */
+        items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_TARGET, pwsink->target_object);
+      }
     }
+    if (rate != 0) {
+      snprintf(buf, sizeof(buf), "1/%u", rate);
+      items[n_items++] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_RATE, buf);
+    }
+    if (n_items > 0)
+	    pw_stream_update_properties (pwsink->stream, &SPA_DICT_INIT(items, n_items));
 
     pw_stream_connect (pwsink->stream,
                           PW_DIRECTION_OUTPUT,
@@ -640,6 +679,8 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   }
   res = TRUE;
 
+  gst_pipewire_clock_reset (GST_PIPEWIRE_CLOCK (pwsink->clock), 0);
+
   config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pwsink->pool));
   gst_buffer_pool_config_get_params (config, NULL, &size, &min_buffers, &max_buffers);
   gst_buffer_pool_config_set_params (config, caps, size, min_buffers, max_buffers);
@@ -655,7 +696,6 @@ start_error:
   {
     GST_ERROR ("could not start stream: %s", error);
     pw_thread_loop_unlock (pwsink->core->loop);
-    g_ptr_array_unref (possible);
     return FALSE;
   }
 }
@@ -798,6 +838,7 @@ gst_pipewire_sink_start (GstBaseSink * basesink)
                          &stream_events,
                          pwsink);
 
+  pwsink->clock = gst_pipewire_clock_new (pwsink->stream, pwsink->last_time);
   pw_thread_loop_unlock (pwsink->core->loop);
 
   return TRUE;
@@ -863,6 +904,18 @@ connect_error:
 static gboolean
 gst_pipewire_sink_close (GstPipeWireSink * pwsink)
 {
+  pwsink->last_time = gst_clock_get_time (pwsink->clock);
+
+  GST_DEBUG_OBJECT (pwsink, "close");
+
+  gst_element_post_message (GST_ELEMENT (pwsink),
+    gst_message_new_clock_lost (GST_OBJECT_CAST (pwsink), pwsink->clock));
+
+  GST_OBJECT_LOCK (pwsink);
+  GST_PIPEWIRE_CLOCK (pwsink->clock)->stream = NULL;
+  g_clear_object (&pwsink->clock);
+  GST_OBJECT_UNLOCK (pwsink);
+
   pw_thread_loop_lock (pwsink->core->loop);
   if (pwsink->stream) {
     pw_stream_destroy (pwsink->stream);

@@ -7,11 +7,6 @@
 #include "config.h"
 
 #include <stddef.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-
-#include <sys/ioctl.h>
 
 #include <spa/support/plugin.h>
 #include <spa/support/log.h>
@@ -61,12 +56,10 @@ struct impl {
 static const libcamera::Span<const int64_t> cameraDevice(
 			const Camera *camera)
 {
-#ifdef HAVE_LIBCAMERA_SYSTEM_DEVICES
 	const ControlList &props = camera->properties();
 
 	if (auto devices = props.get(properties::SystemDevices))
 		return devices.value();
-#endif
 
 	return {};
 }
@@ -99,6 +92,26 @@ static const char *cameraLoc(const Camera *camera)
 	return nullptr;
 }
 
+static const char *cameraRot(const Camera *camera)
+{
+	const ControlList &props = camera->properties();
+
+	if (auto rotation = props.get(properties::Rotation)) {
+		switch (rotation.value()) {
+		case 90:
+			return "90";
+		case 180:
+			return "180";
+		case 270:
+			return "270";
+		default:
+			return "0";
+		}
+	}
+
+	return nullptr;
+}
+
 static int emit_info(struct impl *impl, bool full)
 {
 	struct spa_dict_item items[10];
@@ -122,6 +135,8 @@ static int emit_info(struct impl *impl, bool full)
 
 	if (auto location = cameraLoc(impl->camera.get()))
 		ADD_ITEM(SPA_KEY_API_LIBCAMERA_LOCATION, location);
+	if (auto rotation = cameraRot(impl->camera.get()))
+		ADD_ITEM(SPA_KEY_API_LIBCAMERA_ROTATION, rotation);
 
 	const auto model = cameraModel(impl->camera.get());
 	ADD_ITEM(SPA_KEY_DEVICE_PRODUCT_NAME, model.c_str());
@@ -135,10 +150,12 @@ static int emit_info(struct impl *impl, bool full)
 	if (!device_numbers.empty()) {
 		spa_strbuf_init(&buf, devices_str, sizeof(devices_str));
 
-		/* created a space separated string of all the device numbers */
-		for (int64_t device_number : device_numbers)
+		/* encode device numbers into a json array */
+		spa_strbuf_append(&buf, "[ ");
+		for(int64_t device_number : device_numbers)
 			spa_strbuf_append(&buf, "%" PRId64 " ", device_number);
 
+		spa_strbuf_append(&buf, "]");
 		ADD_ITEM(SPA_KEY_DEVICE_DEVIDS, devices_str);
 	}
 
@@ -217,7 +234,7 @@ static int impl_set_param(void *object,
 }
 
 static const struct spa_device_methods impl_device = {
-	SPA_VERSION_DEVICE_METHODS,
+	.version = SPA_VERSION_DEVICE_METHODS,
 	.add_listener = impl_add_listener,
 	.sync = impl_sync,
 	.enum_params = impl_enum_params,

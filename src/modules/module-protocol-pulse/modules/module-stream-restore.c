@@ -1,8 +1,59 @@
 /* PipeWire */
-/* SPDX-FileCopyrightText: Copyright © 2020 Wim Taymans */
+/* SPDX-FileCopyrightText: Copyright © 2024 Wim Taymans <wim.taymans@gmail.com> */
 /* SPDX-License-Identifier: MIT */
 
+#include <pipewire/pipewire.h>
+
+#include "../module.h"
+#include "../commands.h"
+
+/** \page page_pulse_module_stream_restore Stream restore extension
+ *
+ * ## Module Name
+ *
+ * `module-stream-restore`
+ *
+ * ## Module Options
+ *
+ * @pulse_module_options@
+ */
+
+static const char *const pulse_module_options =
+	"restore_device=<Save/restore sinks/sources?> "
+	"restore_volume=<Save/restore volumes?> "
+	"restore_muted=<Save/restore muted states?> "
+	"on_hotplug=<This argument is obsolete, please remove it from configuration> "
+	"on_rescue=<This argument is obsolete, please remove it from configuration> "
+	"fallback_table=<filename>";
+
+#define NAME "stream-restore"
+
+PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+#define PW_LOG_TOPIC_DEFAULT mod_topic
+
+struct module_stream_restore_data {
+	struct module *module;
+
+	struct spa_list subscribed;
+};
+
+static const struct spa_dict_item module_stream_restore_info[] = {
+	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
+	{ PW_KEY_MODULE_DESCRIPTION, "Automatically restore the volume/mute/device state of streams" },
+	{ PW_KEY_MODULE_USAGE, pulse_module_options },
+	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
+};
+
 #define EXT_STREAM_RESTORE_VERSION	1
+
+enum {
+    SUBCOMMAND_TEST,
+    SUBCOMMAND_READ,
+    SUBCOMMAND_WRITE,
+    SUBCOMMAND_DELETE,
+    SUBCOMMAND_SUBSCRIBE,
+    SUBCOMMAND_EVENT
+};
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -26,13 +77,12 @@
 #include "../remap.h"
 #include "../reply.h"
 #include "../volume.h"
-#include "registry.h"
 
 PW_LOG_TOPIC_EXTERN(pulse_ext_stream_restore);
 #undef PW_LOG_TOPIC_DEFAULT
 #define PW_LOG_TOPIC_DEFAULT pulse_ext_stream_restore
 
-static int do_extension_stream_restore_test(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+static int do_extension_stream_restore_test(struct module *module, struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	struct message *reply;
 
@@ -119,7 +169,7 @@ static int key_to_name(const char *key, char *name, size_t maxlen)
 
 }
 
-static int do_extension_stream_restore_read(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+static int do_extension_stream_restore_read(struct module *module, struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	struct message *reply;
 	const struct spa_dict_item *item;
@@ -194,7 +244,7 @@ static int do_extension_stream_restore_read(struct client *client, uint32_t comm
 	return client_queue_message(client, reply);
 }
 
-static int do_extension_stream_restore_write(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+static int do_extension_stream_restore_write(struct module *module, struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	int res;
 	uint32_t mode;
@@ -269,42 +319,149 @@ static int do_extension_stream_restore_write(struct client *client, uint32_t com
 	return reply_simple_ack(client, tag);
 }
 
-static int do_extension_stream_restore_delete(struct client *client, uint32_t command, uint32_t tag, struct message *m)
+static int do_extension_stream_restore_delete(struct module *module, struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
 	return reply_simple_ack(client, tag);
 }
 
-static int do_extension_stream_restore_subscribe(struct client *client, uint32_t command, uint32_t tag, struct message *m)
-{
-	return reply_simple_ack(client, tag);
-}
+struct subscribe {
+	struct spa_list link;
+	struct module_stream_restore_data *data;
 
-static const struct extension_sub ext_stream_restore[] = {
-	{ "TEST", 0, do_extension_stream_restore_test, },
-	{ "READ", 1, do_extension_stream_restore_read, },
-	{ "WRITE", 2, do_extension_stream_restore_write, },
-	{ "DELETE", 3, do_extension_stream_restore_delete, },
-	{ "SUBSCRIBE", 4, do_extension_stream_restore_subscribe, },
-	{ "EVENT", 5, },
+	struct client *client;
+	struct spa_hook listener;
 };
 
-int do_extension_stream_restore(struct client *client, uint32_t tag, struct message *m)
+static void remove_subscribe(struct subscribe *s)
 {
-	uint32_t command;
+	spa_list_remove(&s->link);
+	spa_hook_remove(&s->listener);
+	free(s);
+}
+
+static void module_client_disconnect(void *data)
+{
+	struct subscribe *s = data;
+	remove_subscribe(s);
+}
+
+static void module_client_routes_changed(void *data)
+{
+	struct subscribe *s = data;
+	struct client *client = s->client;
+	struct message *msg = message_alloc(client->impl, -1, 0);
+
+	pw_log_info("[%s] EVENT index:%u name:%s", client->name,
+			s->data->module->index, s->data->module->info->name);
+
+	message_put(msg,
+		TAG_U32, COMMAND_EXTENSION,
+		TAG_U32, 0,
+		TAG_U32, s->data->module->index,
+		TAG_STRING, s->data->module->info->name,
+		TAG_U32, SUBCOMMAND_EVENT,
+		TAG_INVALID);
+
+	client_queue_message(client, msg);
+}
+
+static const struct client_events module_client_events = {
+	VERSION_CLIENT_EVENTS,
+	.disconnect = module_client_disconnect,
+	.routes_changed = module_client_routes_changed,
+};
+
+static struct subscribe *add_subscribe(struct module_stream_restore_data *data, struct client *c)
+{
+	struct subscribe *s;
+	s = calloc(1, sizeof(*s));
+	if (s == NULL)
+		return NULL;
+	s->data = data;
+	s->client = c;
+	client_add_listener(c, &s->listener, &module_client_events, s);
+	spa_list_append(&data->subscribed, &s->link);
+	return s;
+}
+
+static struct subscribe *find_subscribe(struct module_stream_restore_data *data, struct client *c)
+{
+	struct subscribe *s;
+	spa_list_for_each(s, &data->subscribed, link) {
+		if (s->client == c)
+			return s;
+	}
+	return NULL;
+}
+
+static int do_extension_stream_restore_subscribe(struct module *module, struct client *client, uint32_t command, uint32_t tag, struct message *m)
+{
+	struct module_stream_restore_data * const d = module->user_data;
 	int res;
+	bool enabled;
+	struct subscribe *s;
 
 	if ((res = message_get(m,
-			TAG_U32, &command,
+			TAG_BOOLEAN, &enabled,
 			TAG_INVALID)) < 0)
 		return -EPROTO;
 
-	if (command >= SPA_N_ELEMENTS(ext_stream_restore))
-		return -ENOTSUP;
-	if (ext_stream_restore[command].process == NULL)
-		return -EPROTO;
-
-	pw_log_info("client %p [%s]: EXT_STREAM_RESTORE_%s tag:%u",
-		    client, client->name, ext_stream_restore[command].name, tag);
-
-	return ext_stream_restore[command].process(client, command, tag, m);
+	s = find_subscribe(d, client);
+	if (enabled) {
+		if (s == NULL)
+			s = add_subscribe(d, client);
+		if (s == NULL)
+			return -errno;
+	} else {
+		if (s != NULL)
+			remove_subscribe(s);
+	}
+	return reply_simple_ack(client, tag);
 }
+
+static const struct extension module_stream_restore_extension[] = {
+	{ "TEST", SUBCOMMAND_TEST, do_extension_stream_restore_test, },
+	{ "READ", SUBCOMMAND_READ, do_extension_stream_restore_read, },
+	{ "WRITE", SUBCOMMAND_WRITE, do_extension_stream_restore_write, },
+	{ "DELETE", SUBCOMMAND_DELETE, do_extension_stream_restore_delete, },
+	{ "SUBSCRIBE", SUBCOMMAND_SUBSCRIBE, do_extension_stream_restore_subscribe, },
+	{ "EVENT", SUBCOMMAND_EVENT, },
+	{ NULL, },
+};
+
+static int module_stream_restore_prepare(struct module * const module)
+{
+	PW_LOG_TOPIC_INIT(mod_topic);
+
+	struct module_stream_restore_data * const data = module->user_data;
+	data->module = module;
+
+	return 0;
+}
+
+static int module_stream_restore_load(struct module *module)
+{
+	struct module_stream_restore_data * const data = module->user_data;
+	spa_list_init(&data->subscribed);
+	return 0;
+}
+static int module_stream_restore_unload(struct module *module)
+{
+	struct module_stream_restore_data * const data = module->user_data;
+	struct subscribe *s;
+
+	spa_list_consume(s, &data->subscribed, link)
+		remove_subscribe(s);
+	return 0;
+}
+
+DEFINE_MODULE_INFO(module_stream_restore) = {
+	.name = "module-stream-restore",
+	.load_once = true,
+	.prepare = module_stream_restore_prepare,
+	.load = module_stream_restore_load,
+	.unload = module_stream_restore_unload,
+	.extension = module_stream_restore_extension,
+	.properties = &SPA_DICT_INIT_ARRAY(module_stream_restore_info),
+	.data_size = sizeof(struct module_stream_restore_data),
+};

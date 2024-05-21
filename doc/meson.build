@@ -7,13 +7,34 @@ doxyfile_conf.set('top_srcdir', meson.project_source_root())
 doxyfile_conf.set('top_builddir', meson.project_build_root())
 doxyfile_conf.set('output_directory', meson.current_build_dir())
 
+doc_prefix_value = get_option('doc-prefix-value')
+doc_sysconfdir_value = get_option('doc-sysconfdir-value')
+
+if doc_prefix_value == '' and doc_sysconfdir_value == ''
+   doc_spa_plugindir = spa_plugindir
+   doc_pipewire_configdir = pipewire_configdir
+   doc_pipewire_confdatadir = pipewire_confdatadir
+else
+   if doc_prefix_value == ''
+     doc_prefix_value = get_option('prefix')
+   endif
+   if doc_sysconfdir_value == ''
+     doc_sysconfdir_value = get_option('sysconfdir')
+   endif
+   doc_spa_plugindir = doc_prefix_value / get_option('libdir') / spa_name
+   doc_pipewire_configdir = doc_prefix_value / doc_sysconfdir_value / 'pipewire'
+   doc_pipewire_confdatadir = doc_prefix_value / get_option('datadir') / 'pipewire'
+endif
+
 doxygen_env = environment()
 doxygen_env.set('PACKAGE_NAME', meson.project_name())
 doxygen_env.set('PACKAGE_VERSION', meson.project_version())
 doxygen_env.set('PACKAGE_URL', 'https://pipewire.org')
 doxygen_env.set('PACKAGE_BUGREPORT', 'https://gitlab.freedesktop.org/pipewire/pipewire/issues')
-doxygen_env.set('PIPEWIRE_CONFIG_DIR', pipewire_configdir)
-doxygen_env.set('PIPEWIRE_CONFDATADIR', pipewire_confdatadir)
+doxygen_env.set('PIPEWIRE_CONFIG_DIR', doc_pipewire_configdir)
+doxygen_env.set('PIPEWIRE_CONFDATADIR', doc_pipewire_confdatadir)
+doxygen_env.set('SPA_PLUGINDIR', doc_spa_plugindir)
+doxygen_env.set('BUILD_DIR', meson.current_build_dir())
 
 dot_found = find_program('dot', required: false).found()
 summary({'dot (used with doxygen)': dot_found}, bool_yn: true, section: 'Optional programs')
@@ -32,6 +53,7 @@ extra_docs = [
   'dox/modules.dox',
   'dox/pulse-modules.dox',
   'dox/programs/index.md',
+  'dox/config/index.md',
   'dox/internals/index.dox',
   'dox/internals/design.dox',
   'dox/internals/access.dox',
@@ -62,15 +84,20 @@ extra_docs = [
 ]
 
 manpage_docs = [
-  'dox/programs/libpipewire-modules.7.md',
-  'dox/programs/pipewire-pulse-modules.7.md',
+  'dox/config/pipewire-pulse.conf.5.md',
+  'dox/config/pipewire.conf.5.md',
+  'dox/config/pipewire-client.conf.5.md',
+  'dox/config/pipewire-jack.conf.5.md',
+  'dox/config/pipewire-devices.7.md',
+  'dox/config/pipewire-filter-chain.conf.5.md',
+  'dox/config/pipewire-pulse-modules.7.md',
+  'dox/config/libpipewire-modules.7.md',
   'dox/programs/pipewire-pulse.1.md',
-  'dox/programs/pipewire-pulse.conf.5.md',
   'dox/programs/pipewire.1.md',
-  'dox/programs/pipewire.conf.5.md',
   'dox/programs/pw-cat.1.md',
   'dox/programs/pw-cli.1.md',
   'dox/programs/pw-config.1.md',
+  'dox/programs/pw-container.1.md',
   'dox/programs/pw-dot.1.md',
   'dox/programs/pw-dump.1.md',
   'dox/programs/pw-jack.1.md',
@@ -80,7 +107,14 @@ manpage_docs = [
   'dox/programs/pw-mididump.1.md',
   'dox/programs/pw-mon.1.md',
   'dox/programs/pw-profiler.1.md',
+  'dox/programs/pw-reserve.1.md',
   'dox/programs/pw-top.1.md',
+  'dox/programs/pw-v4l2.1.md',
+  'dox/programs/spa-acp-tool.1.md',
+  'dox/programs/spa-inspect.1.md',
+  'dox/programs/spa-json-dump.1.md',
+  'dox/programs/spa-monitor.1.md',
+  'dox/programs/spa-resample.1.md',
 ]
 
 manpages = []
@@ -136,11 +170,17 @@ example_files = [
   'tutorial5.c',
   'tutorial6.c',
 ]
+example_dep_files = []
+foreach h : example_files
+  example_dep_files += ['examples/' + h]
+endforeach
 foreach h : examples
   example_files += [h + '.c']
+  example_dep_files += ['../src/examples/' + h + '.c']
 endforeach
 foreach h : spa_examples
   example_files += ['spa/examples/' + h + '.c']
+  example_dep_files += ['../spa/examples/' + h + '.c']
 endforeach
 
 example_doxygen = []
@@ -187,6 +227,7 @@ doxygen_env.set('PIPEWIRE_PULSE_MODULES', '<ul><li>' + '</li><li>'.join(pulse_mo
 doxygen_layout = meson.project_source_root() / 'doc' / 'DoxygenLayout.xml'
 doxygen_filter_c = meson.project_source_root() / 'doc' / 'input-filter.py'
 doxygen_filter_h = meson.project_source_root() / 'doc' / 'input-filter-h.sh'
+doxygen_filter_md = meson.project_source_root() / 'doc' / 'input-filter-md.py'
 
 doxyfile_conf.set('inputs', ' '.join(inputs + input_dirs))
 doxyfile_conf.set('cssfiles', ' '.join(cssfiles))
@@ -194,6 +235,7 @@ doxyfile_conf.set('layout', doxygen_layout)
 doxyfile_conf.set('path_prefixes', ' '.join(path_prefixes))
 doxyfile_conf.set('c_input_filter', doxygen_filter_c)
 doxyfile_conf.set('h_input_filter', doxygen_filter_h)
+doxyfile_conf.set('md_input_filter', doxygen_filter_md)
 
 doxyfile = configure_file(input: 'Doxyfile.in',
                           output: 'Doxyfile',
@@ -204,8 +246,16 @@ if docdir == ''
   docdir = pipewire_datadir / 'doc' / meson.project_name()
 endif
 
+index_json = custom_target('index.json',
+  command: [ doxygen_filter_md, '--index', '@INPUT@' ],
+  input: extra_docs + manpage_docs,
+  output: 'index.json',
+  env: doxygen_env
+)
+
 html_target = custom_target('pipewire-docs',
-                            input: [ doxyfile, doxygen_layout, examples_dox, doxygen_filter_c, doxygen_filter_h ] + inputs + cssfiles,
+                            input: [ doxyfile, doxygen_layout, example_dep_files, examples_dox,
+                                     doxygen_filter_c, doxygen_filter_h, index_json ] + inputs + cssfiles,
                             output: [ 'html' ],
                             command: [ doxygen, doxyfile ],
                             env: doxygen_env,

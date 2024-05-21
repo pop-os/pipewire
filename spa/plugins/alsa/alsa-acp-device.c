@@ -130,12 +130,12 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	struct spa_dict_item *items;
 	const struct acp_dict_item *it;
 	uint32_t n_items, i;
-	char device_name[128], path[180], channels[16], ch[12], routes[16];
-	char card_index[16], *p;
+	char device_name[128], path[210], channels[16], ch[12], routes[16];
+	char card_index[16], card_name[64], *p;
 	char positions[SPA_AUDIO_MAX_CHANNELS * 12];
 	struct spa_device_object_info info;
 	struct acp_card *card = this->card;
-	const char *stream, *devstr;
+	const char *stream, *devstr, *card_id;
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 	info.type = SPA_TYPE_INTERFACE_Node;
@@ -154,6 +154,8 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	n_items = 0;
 
 	snprintf(card_index, sizeof(card_index), "%d", card->index);
+	card_id = acp_dict_lookup(&card->props, "alsa.id");
+	snprintf(card_name, sizeof(card_name), "%s", card_id ? card_id : card_index);
 
 	devstr = dev->device_strings[0];
 	p = strstr(devstr, "%f");
@@ -164,7 +166,8 @@ static int emit_node(struct impl *this, struct acp_device *dev)
 	} else {
 		snprintf(device_name, sizeof(device_name), "%s", devstr);
 	}
-	snprintf(path, sizeof(path), "alsa:pcm:%s:%s:%s", card_index, device_name, stream);
+
+	snprintf(path, sizeof(path), "alsa:acp:%s:%d:%s", card_name, dev->index, stream);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH, path);
 	items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_PATH, device_name);
 	if (dev->flags & ACP_DEVICE_UCM_DEVICE)
@@ -204,6 +207,7 @@ static int emit_info(struct impl *this, bool full)
 	struct acp_card *card = this->card;
 	char path[128];
 	uint64_t old = full ? this->info.change_mask : 0;
+	const char *card_id;
 
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -211,11 +215,16 @@ static int emit_info(struct impl *this, bool full)
 		n_items = card->props.n_items + 4;
 		items = alloca(n_items * sizeof(*items));
 
+		card_id = acp_dict_lookup(&card->props, "alsa.id");
+
 		n_items = 0;
 #define ADD_ITEM(key, value) items[n_items++] = SPA_DICT_ITEM_INIT(key, value)
-		snprintf(path, sizeof(path), "alsa:pcm:%d", card->index);
+		if (card_id)
+			snprintf(path, sizeof(path), "alsa:acp:%s", card_id);
+		else
+			snprintf(path, sizeof(path), "alsa:acp:%d", card->index);
 		ADD_ITEM(SPA_KEY_OBJECT_PATH, path);
-		ADD_ITEM(SPA_KEY_DEVICE_API, "alsa:pcm");
+		ADD_ITEM(SPA_KEY_DEVICE_API, "alsa:acp");
 		ADD_ITEM(SPA_KEY_MEDIA_CLASS, "Audio/Device");
 		ADD_ITEM(SPA_KEY_API_ALSA_PATH,	(char *)this->props.device);
 		acp_dict_for_each(it, &card->props)
@@ -516,14 +525,17 @@ static int impl_enum_params(void *object, int seq,
 			return 0;
 
 		pr = card->profiles[result.index];
+		if (SPA_FLAG_IS_SET(pr->flags, ACP_PROFILE_HIDDEN))
+			goto next;
 		param = build_profile(&b.b, id, pr, false);
 		break;
 
 	case SPA_PARAM_Profile:
 		if (result.index > 0 || card->active_profile_index >= card->n_profiles)
 			return 0;
-
 		pr = card->profiles[card->active_profile_index];
+		if (SPA_FLAG_IS_SET(pr->flags, ACP_PROFILE_HIDDEN))
+			goto next;
 		param = build_profile(&b.b, id, pr, true);
 		break;
 
@@ -532,6 +544,8 @@ static int impl_enum_params(void *object, int seq,
 			return 0;
 
 		p = card->ports[result.index];
+		if (SPA_FLAG_IS_SET(p->flags, ACP_PORT_HIDDEN))
+			goto next;
 		param = build_route(&b.b, id, p, NULL, SPA_ID_INVALID);
 		break;
 
@@ -541,6 +555,8 @@ static int impl_enum_params(void *object, int seq,
 				return 0;
 
 			dev = card->devices[result.index];
+			if (SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_HIDDEN))
+				goto next;
 			if (SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_ACTIVE) &&
 			    (p = find_port_for_device(card, dev)) != NULL)
 				break;
@@ -548,6 +564,8 @@ static int impl_enum_params(void *object, int seq,
 			result.index++;
 		}
 		result.next = result.index + 1;
+		if (SPA_FLAG_IS_SET(p->flags, ACP_PORT_HIDDEN))
+			goto next;
 		param = build_route(&b.b, id, p, dev, card->active_profile_index);
 		if (param == NULL)
 			return -errno;
@@ -699,6 +717,26 @@ static int apply_device_props(struct impl *this, struct acp_device *dev, struct 
 	return changed;
 }
 
+static uint32_t find_profile_by_name(struct acp_card *card, const char *name)
+{
+	uint32_t i;
+	for (i = 0; i < card->n_profiles; i++) {
+		if (spa_streq(card->profiles[i]->name, name))
+			return i;
+	}
+	return SPA_ID_INVALID;
+}
+
+static uint32_t find_route_by_name(struct acp_card *card, const char *name)
+{
+	uint32_t i;
+	for (i = 0; i < card->n_ports; i++) {
+		if (spa_streq(card->ports[i]->name, name))
+			return i;
+	}
+	return SPA_ID_INVALID;
+}
+
 static int impl_set_param(void *object,
 			  uint32_t id, uint32_t flags,
 			  const struct spa_pod *param)
@@ -711,7 +749,8 @@ static int impl_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
-		uint32_t idx;
+		uint32_t idx = SPA_ID_INVALID;
+		const char *name = NULL;
 		bool save = false;
 
 		if (param == NULL) {
@@ -719,20 +758,31 @@ static int impl_set_param(void *object,
 			save = true;
 		} else if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx),
+				SPA_PARAM_PROFILE_index, SPA_POD_OPT_Int(&idx),
+				SPA_PARAM_PROFILE_name, SPA_POD_OPT_String(&name),
 				SPA_PARAM_PROFILE_save, SPA_POD_OPT_Bool(&save))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_log_pod(this->log, SPA_LOG_LEVEL_DEBUG, 0, NULL, param);
 			return res;
 		}
-
+		if (idx == SPA_ID_INVALID && name == NULL) {
+			spa_log_warn(this->log, "profile needs name or index");
+			return -EINVAL;
+		}
+		if (idx == SPA_ID_INVALID)
+			idx = find_profile_by_name(this->card, name);
+		if (idx == SPA_ID_INVALID) {
+			spa_log_warn(this->log, "unknown profile %s", name);
+			return -EINVAL;
+		}
 		acp_card_set_profile(this->card, idx, save ? ACP_PROFILE_SAVE : 0);
 		emit_info(this, false);
 		break;
 	}
 	case SPA_PARAM_Route:
 	{
-		uint32_t idx, device;
+		uint32_t idx = SPA_ID_INVALID, device;
+		const char *name = NULL;
 		struct spa_pod *props = NULL;
 		struct acp_device *dev;
 		bool save = false;
@@ -742,7 +792,8 @@ static int impl_set_param(void *object,
 
 		if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamRoute, NULL,
-				SPA_PARAM_ROUTE_index, SPA_POD_Int(&idx),
+				SPA_PARAM_ROUTE_index, SPA_POD_OPT_Int(&idx),
+				SPA_PARAM_ROUTE_name, SPA_POD_OPT_String(&name),
 				SPA_PARAM_ROUTE_device, SPA_POD_Int(&device),
 				SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props),
 				SPA_PARAM_ROUTE_save, SPA_POD_OPT_Bool(&save))) < 0) {
@@ -752,8 +803,18 @@ static int impl_set_param(void *object,
 		}
 		if (device >= this->card->n_devices)
 			return -EINVAL;
+		if (idx == SPA_ID_INVALID && name == NULL)
+			return -EINVAL;
 
 		dev = this->card->devices[device];
+		if (SPA_FLAG_IS_SET(dev->flags, ACP_DEVICE_HIDDEN))
+			return -EINVAL;
+
+		if (idx == SPA_ID_INVALID)
+			idx = find_route_by_name(this->card, name);
+		if (idx == SPA_ID_INVALID)
+			return -EINVAL;
+
 		acp_device_set_port(dev, idx, save ? ACP_PORT_SAVE : 0);
 		if (props)
 			apply_device_props(this, dev, props);

@@ -23,6 +23,7 @@
 #include <spa/param/tag-utils.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
+#include <spa/debug/log.h>
 
 #include <pipewire/utils.h>
 #include <pipewire/impl.h>
@@ -461,13 +462,13 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - \ref PW_KEY_NODE_GROUP
  * - \ref PW_KEY_NODE_LINK_GROUP
  * - \ref PW_KEY_NODE_VIRTUAL
- * - \ref PW_KEY_NODE_NAME: See notes below. If not specified, defaults to
- *	'filter-chain-<pid>-<module-id>'.
+ * - \ref PW_KEY_NODE_NAME : See notes below. If not specified, defaults to
+ *	'filter-chain-PID-MODULEID'.
  *
  * Stream only properties:
  *
  * - \ref PW_KEY_MEDIA_CLASS
- * - \ref PW_KEY_NODE_NAME:  if not given per stream, the global node.name will be
+ * - \ref PW_KEY_NODE_NAME :  if not given per stream, the global node.name will be
  *         prefixed with 'input.' and 'output.' to generate a capture and playback
  *         stream node.name respectively.
  *
@@ -512,8 +513,6 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * This example uses the ladpsa surround encoder to encode a 5.1 signal
  * to a stereo Dolby Surround signal.
- *
- *\code{.unparsed}
  *
  *\code{.unparsed}
  * context.modules = [
@@ -1874,24 +1873,35 @@ exit:
  */
 static int parse_config(struct node *node, struct spa_json *config)
 {
-	const char *val;
-	int len;
+	const char *val, *s = config->cur;
+	int res = 0, len;
+	struct spa_error_location loc;
 
-	if ((len = spa_json_next(config, &val)) <= 0)
-		return len;
-
+	if ((len = spa_json_next(config, &val)) <= 0) {
+		res = -EINVAL;
+		goto done;
+	}
 	if (spa_json_is_null(val, len))
-		return 0;
+		goto done;
 
-	if (spa_json_is_container(val, len))
+	if (spa_json_is_container(val, len)) {
 		len = spa_json_container_len(config, val, len);
-
-	if ((node->config = malloc(len+1)) == NULL)
-		return -errno;
+		if (len == 0) {
+			res = -EINVAL;
+			goto done;
+		}
+	}
+	if ((node->config = malloc(len+1)) == NULL) {
+		res = -errno;
+		goto done;
+	}
 
 	spa_json_parse_stringn(val, len, node->config, len+1);
-
-	return 0;
+done:
+	if (spa_json_get_error(config, s, &loc))
+		spa_debug_log_error_location(pw_log_get(), SPA_LOG_LEVEL_WARN,
+				&loc, "error: %s", loc.reason);
+	return res;
 }
 
 /**
@@ -1955,8 +1965,11 @@ static int parse_link(struct graph *graph, struct spa_json *json)
 				return -EINVAL;
 			}
 		}
-		else if (spa_json_next(json, &val) < 0)
-			break;
+		else {
+			pw_log_error("unexpected link key '%s'", key);
+			if (spa_json_next(json, &val) < 0)
+				break;
+		}
 	}
 	def_out_node = spa_list_first(&graph->node_list, struct node, link);
 	def_in_node = spa_list_last(&graph->node_list, struct node, link);
@@ -2066,8 +2079,11 @@ static int parse_volume(struct graph *graph, struct spa_json *json, bool capture
 				return -EINVAL;
 			}
 		}
-		else if (spa_json_next(json, &val) < 0)
-			break;
+		else {
+			pw_log_error("unexpected volume key '%s'", key);
+			if (spa_json_next(json, &val) < 0)
+				break;
+		}
 	}
 	if (capture)
 		def_control = spa_list_first(&graph->node_list, struct node, link);
@@ -2162,12 +2178,18 @@ static int load_node(struct graph *graph, struct spa_json *json)
 			have_config = true;
 			if (spa_json_next(json, &val) < 0)
 				break;
-		} else if (spa_json_next(json, &val) < 0)
-			break;
+		} else {
+			pw_log_warn("unexpected node key '%s'", key);
+			if (spa_json_next(json, &val) < 0)
+				break;
+		}
 	}
-
 	if (spa_streq(type, "builtin"))
 		snprintf(plugin, sizeof(plugin), "%s", "builtin");
+	else if (spa_streq(type, "")) {
+		pw_log_error("missing plugin type");
+		return -EINVAL;
+	}
 
 	pw_log_info("loading type:%s plugin:%s label:%s", type, plugin, label);
 
@@ -2756,8 +2778,11 @@ static int load_graph(struct graph *graph, struct pw_properties *props)
 				return -EINVAL;
 			}
 			ppvolumes = &pvolumes;
-		} else if (spa_json_next(&it[1], &val) < 0)
-			break;
+		} else {
+			pw_log_warn("unexpected graph key '%s'", key);
+			if (spa_json_next(&it[1], &val) < 0)
+				break;
+		}
 	}
 	if (pnodes == NULL) {
 		pw_log_error("filter.graph is missing a nodes array");
@@ -2995,8 +3020,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 
 	cpu_iface = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
-	impl->dsp.cpu_flags = cpu_iface ? spa_cpu_get_flags(cpu_iface) : 0;
-	dsp_ops_init(&impl->dsp);
+	dsp_ops_init(&impl->dsp, cpu_iface ? spa_cpu_get_flags(cpu_iface) : 0);
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_GROUP, "filter-chain-%u-%u", pid, id);

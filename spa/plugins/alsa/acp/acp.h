@@ -15,6 +15,7 @@ extern "C" {
 #include <stdarg.h>
 #include <stdint.h>
 #include <poll.h>
+#include <string.h>
 
 #ifdef __GNUC__
 #define ACP_PRINTF_FUNC(fmt, arg1) __attribute__((format(printf, fmt, arg1)))
@@ -103,6 +104,15 @@ struct acp_format {
 	     (item) < &(dict)->items[(dict)->n_items];		\
 	     (item)++)
 
+static inline const char *acp_dict_lookup(const struct acp_dict *dict, const char *key)
+{
+	const struct acp_dict_item *it;
+	acp_dict_for_each(it, dict)
+		if (strcmp(key, it->key) == 0)
+			return it->value;
+	return NULL;
+}
+
 enum acp_direction {
 	ACP_DIRECTION_PLAYBACK = 1,
 	ACP_DIRECTION_CAPTURE = 2
@@ -167,6 +177,7 @@ struct acp_port {
 	uint32_t index;			/**< unique index for this port */
 #define ACP_PORT_ACTIVE		(1<<0)
 #define ACP_PORT_SAVE		(1<<1)	/* if the port needs saving */
+#define ACP_PORT_HIDDEN		(1<<2)
 	uint32_t flags;			/**< extra port flags */
 
 	const char *name;		/**< Name of this port */
@@ -190,6 +201,7 @@ struct acp_device {
 #define ACP_DEVICE_HW_MUTE	(1<<2)
 #define ACP_DEVICE_UCM_DEVICE	(1<<3)
 #define ACP_DEVICE_IEC958	(1<<4)
+#define ACP_DEVICE_HIDDEN	(1<<5)
 	uint32_t flags;
 
 	const char *name;
@@ -218,6 +230,7 @@ struct acp_card_profile {
 #define ACP_PROFILE_OFF		(1<<1)		/* the Off profile */
 #define ACP_PROFILE_SAVE	(1<<2)		/* if the profile needs saving */
 #define ACP_PROFILE_PRO		(1<<3)		/* the Pro profile */
+#define ACP_PROFILE_HIDDEN	(1<<4)		/* don't show the profile */
 	uint32_t flags;
 
 	const char *name;

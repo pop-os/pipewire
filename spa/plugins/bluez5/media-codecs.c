@@ -61,6 +61,18 @@ int media_codec_select_config(const struct media_codec_config configs[], size_t 
 	return res;
 }
 
+int media_codec_get_config(const struct media_codec_config configs[], size_t n,
+		uint32_t conf)
+{
+	size_t i;
+
+	for (i = 0; i < n; ++i)
+		if (configs[i].config == conf)
+			return configs[i].value;
+
+	return -EINVAL;
+}
+
 bool media_codec_check_caps(const struct media_codec *codec, unsigned int codec_id,
 			   const void *caps, size_t caps_size,
 			   const struct media_codec_audio_info *info,
@@ -174,6 +186,8 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 
 	return 1;
 }
+
+SPA_LOG_TOPIC_ENUM_DEFINE_REGISTERED;
 
 static const struct spa_dict_item handle_info_items[] = {
         { SPA_KEY_FACTORY_DESCRIPTION, "Bluetooth codec plugin" },

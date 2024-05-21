@@ -134,7 +134,8 @@ static inline uint32_t calc_gcd(uint32_t a, uint32_t b)
 static void impl_native_update_rate(struct resample *r, double rate)
 {
 	struct native_data *data = r->data;
-	uint32_t in_rate, out_rate, phase, gcd, old_out_rate;
+	uint32_t in_rate, out_rate, gcd, old_out_rate;
+	float phase;
 
 	if (SPA_LIKELY(data->rate == rate))
 		return;
@@ -149,14 +150,14 @@ static void impl_native_update_rate(struct resample *r, double rate)
 	out_rate /= gcd;
 
 	data->rate = rate;
-	data->phase = phase * out_rate / old_out_rate;
+	data->phase = phase * out_rate / (float)old_out_rate;
 	data->in_rate = in_rate;
 	data->out_rate = out_rate;
 
 	data->inc = data->in_rate / data->out_rate;
 	data->frac = data->in_rate % data->out_rate;
 
-	if (data->in_rate == data->out_rate) {
+	if (data->in_rate == data->out_rate && rate == 1.0) {
 		data->func = data->info->process_copy;
 		r->func_name = data->info->copy_name;
 	}
@@ -169,7 +170,7 @@ static void impl_native_update_rate(struct resample *r, double rate)
 		r->func_name = data->info->inter_name;
 	}
 
-	spa_log_trace_fp(r->log, "native %p: rate:%f in:%d out:%d gcd:%d phase:%d inc:%d frac:%d", r,
+	spa_log_trace_fp(r->log, "native %p: rate:%f in:%d out:%d gcd:%d phase:%f inc:%d frac:%d", r,
 			rate, r->i_rate, r->o_rate, gcd, data->phase, data->inc, data->frac);
 
 }
@@ -185,6 +186,20 @@ static uint32_t impl_native_in_len(struct resample *r, uint32_t out_len)
 	spa_log_trace_fp(r->log, "native %p: hist:%d %d->%d", r, data->hist, out_len, in_len);
 
 	return in_len;
+}
+
+static uint32_t impl_native_out_len(struct resample *r, uint32_t in_len)
+{
+	struct native_data *data = r->data;
+	uint32_t out_len;
+
+	in_len = in_len - SPA_MIN(in_len, (data->n_taps - data->hist) + 1);
+	out_len = in_len * data->out_rate - data->phase;
+	out_len = (out_len + data->in_rate - 1) / data->in_rate;
+
+	spa_log_trace_fp(r->log, "native %p: hist:%d %d->%d", r, data->hist, in_len, out_len);
+
+	return out_len;
 }
 
 static void impl_native_process(struct resample *r,
@@ -309,6 +324,7 @@ int resample_native_init(struct resample *r)
 	r->free = impl_native_free;
 	r->update_rate = impl_native_update_rate;
 	r->in_len = impl_native_in_len;
+	r->out_len = impl_native_out_len;
 	r->process = impl_native_process;
 	r->reset = impl_native_reset;
 	r->delay = impl_native_delay;

@@ -31,7 +31,8 @@ PW_LOG_TOPIC_EXTERN(mod_topic);
 #define MAX_BUFFERS	64
 #define MAX_METAS	16u
 #define MAX_DATAS	64u
-#define AREA_SIZE	(4096u / sizeof(struct spa_io_buffers))
+#define AREA_SLOT	(sizeof(struct spa_io_async_buffers))
+#define AREA_SIZE	(4096u / AREA_SLOT)
 #define MAX_AREAS	32
 
 #define CHECK_FREE_PORT(impl,d,p)	(p <= pw_map_get_size(&impl->ports[d]) && !CHECK_PORT(impl,d,p))
@@ -53,6 +54,7 @@ struct mix {
 	struct port *port;
 	uint32_t peer_id;
 	uint32_t n_buffers;
+	uint32_t impl_mix_id;
 	struct buffer buffers[MAX_BUFFERS];
 };
 
@@ -69,6 +71,7 @@ struct port {
 	uint32_t id;
 
 	struct spa_node mix_node;
+	struct spa_hook_list mix_hooks;
 
 	struct spa_port_info info;
 	struct pw_properties *properties;
@@ -228,24 +231,13 @@ static struct mix *create_mix(struct port *p, uint32_t mix_id)
 	mix->mix_id = mix_id;
 	mix->port = p;
 	mix->n_buffers = 0;
+	mix->impl_mix_id = SPA_ID_INVALID;
 	return mix;
 
 fail:
 	free(mix);
 	errno = -res;
 	return NULL;
-}
-
-static void free_mix(struct port *p, struct mix *mix)
-{
-	if (mix == NULL)
-		return;
-
-	/* never realloc so it's safe to call from pw_map_foreach */
-	if (mix->mix_id < pw_map_get_size(&p->mix))
-		pw_map_insert_at(&p->mix, mix->mix_id, NULL);
-
-	free(mix);
 }
 
 static void clear_data(struct impl *impl, struct spa_data *d)
@@ -293,6 +285,27 @@ static int clear_buffers(struct impl *impl, struct mix *mix)
 	}
 	mix->n_buffers = 0;
 	return 0;
+}
+
+static void free_mix(struct port *p, struct mix *mix)
+{
+	struct impl *impl = p->impl;
+
+	if (mix == NULL)
+		return;
+
+	if (mix->n_buffers) {
+		/* this shouldn't happen */
+		spa_log_warn(impl->log, "%p: mix port-id:%u freeing leaked buffers", impl, mix->mix_id - 1u);
+	}
+
+	clear_buffers(impl, mix);
+
+	/* never realloc so it's safe to call from pw_map_foreach */
+	if (mix->mix_id < pw_map_get_size(&p->mix))
+		pw_map_insert_at(&p->mix, mix->mix_id, NULL);
+
+	free(mix);
 }
 
 static void mix_clear(struct impl *impl, struct mix *mix)
@@ -572,12 +585,11 @@ impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_
 }
 
 static int
-impl_node_port_enum_params(void *object, int seq,
+node_port_enum_params(struct impl *impl, int seq,
 			   enum spa_direction direction, uint32_t port_id,
 			   uint32_t id, uint32_t start, uint32_t num,
-			   const struct spa_pod *filter)
+			   const struct spa_pod *filter, struct spa_hook_list *hooks)
 {
-	struct impl *impl = object;
 	struct port *port;
 	uint8_t buffer[1024];
 	struct spa_pod_dynamic_builder b;
@@ -617,7 +629,7 @@ impl_node_port_enum_params(void *object, int seq,
 		spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 		if (spa_pod_filter(&b.b, &result.param, param, filter) == 0) {
 			pw_log_debug("%p: %d param %u", impl, seq, result.index);
-			spa_node_emit_result(&impl->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+			spa_node_emit_result(hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
 			count++;
 		}
 		spa_pod_dynamic_builder_clean(&b);
@@ -626,6 +638,17 @@ impl_node_port_enum_params(void *object, int seq,
 			break;
 	}
 	return found ? 0 : -ENOENT;
+}
+
+static int
+impl_node_port_enum_params(void *object, int seq,
+			   enum spa_direction direction, uint32_t port_id,
+			   uint32_t id, uint32_t start, uint32_t num,
+			   const struct spa_pod *filter)
+{
+	struct impl *impl = object;
+	return node_port_enum_params(impl, seq, direction, port_id, id,
+			start, num, filter, &impl->hooks);
 }
 
 static int clear_buffers_cb(void *item, void *data)
@@ -681,14 +704,18 @@ static int do_port_set_io(struct impl *impl,
 			direction == SPA_DIRECTION_INPUT ? "input" : "output",
 			port_id, mix_id, data, size);
 
-	port = GET_PORT(impl, direction, port_id);
-	if (port == NULL)
-		return data == NULL ? 0 : -EINVAL;
-
-	if ((mix = find_mix(port, mix_id)) == NULL)
-		return -EINVAL;
-
 	old = pw_mempool_find_tag(impl->client_pool, tag, sizeof(tag));
+
+	port = GET_PORT(impl, direction, port_id);
+	if (port == NULL) {
+		pw_memmap_free(old);
+		return data == NULL ? 0 : -EINVAL;
+	}
+
+	if ((mix = find_mix(port, mix_id)) == NULL) {
+		pw_memmap_free(old);
+		return -EINVAL;
+	}
 
 	if (data) {
 		mm = pw_mempool_import_map(impl->client_pool,
@@ -840,9 +867,12 @@ do_port_use_buffers(struct impl *impl,
 			switch (d->type) {
 			case SPA_DATA_DmaBuf:
 			case SPA_DATA_MemFd:
+			case SPA_DATA_SyncObj:
 			{
 				uint32_t flags = PW_MEMBLOCK_FLAG_DONT_CLOSE;
 
+				if (!(d->flags & SPA_DATA_FLAG_MAPPABLE))
+					flags |= PW_MEMBLOCK_FLAG_UNMAPPABLE;
 				if (d->flags & SPA_DATA_FLAG_READABLE)
 					flags |= PW_MEMBLOCK_FLAG_READABLE;
 				if (d->flags & SPA_DATA_FLAG_WRITABLE)
@@ -1069,16 +1099,27 @@ static int client_node_port_buffers(void *data,
 		for (j = 0; j < b->buffer.n_datas; j++) {
 			struct spa_chunk *oldchunk = oldbuf->datas[j].chunk;
 			struct spa_data *d = &newbuf->datas[j];
+			uint32_t flags = d->flags;
+
+			if (d->type == SPA_DATA_MemFd &&
+			    !SPA_FLAG_IS_SET(flags, SPA_DATA_FLAG_MAPPABLE)) {
+				spa_log_debug(impl->log, "buffer:%d data:%d has non mappable MemFd, "
+						"fixing to ensure backwards compatibility.",
+						i, j);
+				flags |= SPA_DATA_FLAG_MAPPABLE;
+			}
 
 			/* overwrite everything except the chunk */
 			oldbuf->datas[j] = *d;
+			oldbuf->datas[j].flags = flags;
 			oldbuf->datas[j].chunk = oldchunk;
 
 			b->datas[j].type = d->type;
+			b->datas[j].flags = flags;
 			b->datas[j].fd = d->fd;
 
 			spa_log_debug(impl->log, " data %d type:%d fl:%08x fd:%d, offs:%d max:%d",
-					j, d->type, d->flags, (int) d->fd, d->mapoffset,
+					j, d->type, flags, (int) d->fd, d->mapoffset,
 					d->maxsize);
 		}
 	}
@@ -1151,12 +1192,8 @@ static const struct spa_node_methods impl_node = {
 
 static int
 impl_init(struct impl *impl,
-	  struct spa_dict *info,
-	  const struct spa_support *support,
-	  uint32_t n_support)
+	  struct spa_dict *info)
 {
-	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
-
 	impl->node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
@@ -1323,12 +1360,12 @@ static int add_area(struct impl *impl)
 	size_t size;
 	struct pw_memblock *area;
 
-	size = sizeof(struct spa_io_buffers) * AREA_SIZE;
+	size = AREA_SLOT * AREA_SIZE;
 
 	area = pw_mempool_alloc(impl->context_pool,
 			PW_MEMBLOCK_FLAG_READWRITE |
-			PW_MEMBLOCK_FLAG_MAP |
-			PW_MEMBLOCK_FLAG_SEAL,
+			PW_MEMBLOCK_FLAG_SEAL |
+			PW_MEMBLOCK_FLAG_MAP,
 			SPA_DATA_MemFd, size);
 	if (area == NULL)
                 return -errno;
@@ -1409,6 +1446,7 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 	struct mix *m;
 	uint32_t idx, pos, len;
 	struct pw_memblock *area;
+	struct spa_io_async_buffers *ab;
 
 	if ((m = create_mix(port, mix->port.port_id)) == NULL)
 		return -ENOMEM;
@@ -1432,19 +1470,23 @@ static int port_init_mix(void *data, struct pw_impl_port_mix *mix)
 	}
 	area = *pw_array_get_unchecked(&impl->io_areas, idx, struct pw_memblock*);
 
-	mix->io = SPA_PTROFF(area->map->ptr,
-			pos * sizeof(struct spa_io_buffers), void);
-	*mix->io = SPA_IO_BUFFERS_INIT;
+	ab = SPA_PTROFF(area->map->ptr, pos * AREA_SLOT, void);
+	mix->io_data = ab;
+	mix->io[0] = &ab->buffers[0];
+	mix->io[1] = &ab->buffers[1];
+	*mix->io[0] = SPA_IO_BUFFERS_INIT;
+	*mix->io[1] = SPA_IO_BUFFERS_INIT;
 
 	m->peer_id = mix->peer_id;
+	m->impl_mix_id = mix->id;
 
 	if (impl->resource && impl->resource->version >= 4)
 		pw_client_node_resource_port_set_mix_info(impl->resource,
 					 mix->port.direction, mix->p->port_id,
 					 mix->port.port_id, mix->peer_id, NULL);
 
-	pw_log_debug("%p: init mix id:%d io:%p base:%p", impl,
-			mix->id, mix->io, area->map->ptr);
+	pw_log_debug("%p: init mix id:%d io:%p/%p base:%p", impl,
+			mix->id, mix->io[0], mix->io[1], area->map->ptr);
 
 	return 0;
 no_mem:
@@ -1462,7 +1504,7 @@ static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
 	pw_log_debug("%p: remove mix id:%d io:%p",
 			impl, mix->id, mix->io);
 
-	if ((m = find_mix(port, mix->port.port_id)) == NULL)
+	if (!pw_map_has_item(&impl->io_map, mix->id))
 		return -EINVAL;
 
 	if (impl->resource && impl->resource->version >= 4)
@@ -1471,7 +1513,13 @@ static int port_release_mix(void *data, struct pw_impl_port_mix *mix)
 					 mix->port.port_id, SPA_ID_INVALID, NULL);
 
 	pw_map_remove(&impl->io_map, mix->id);
-	free_mix(port, m);
+
+	m = find_mix(port, mix->port.port_id);
+	if (m && m->impl_mix_id == mix->id)
+		free_mix(port, m);
+	else
+		pw_log_debug("%p: already cleared mix id:%d port-id:%d",
+				impl, mix->id, mix->port.port_id);
 
 	return 0;
 }
@@ -1483,18 +1531,27 @@ static const struct pw_impl_port_implementation port_impl = {
 };
 
 static int
+impl_mix_add_listener(void *object, struct spa_hook *listener,
+		const struct spa_node_events *events, void *data)
+{
+	struct port *port = object;
+	spa_hook_list_append(&port->mix_hooks, listener, events, data);
+	return 0;
+}
+
+static int
 impl_mix_port_enum_params(void *object, int seq,
-			   enum spa_direction direction, uint32_t port_id,
-			   uint32_t id, uint32_t start, uint32_t num,
-			   const struct spa_pod *filter)
+		enum spa_direction direction, uint32_t port_id,
+		uint32_t id, uint32_t start, uint32_t num,
+		const struct spa_pod *filter)
 {
 	struct port *port = object;
 
 	if (port->direction != direction)
 		return -ENOTSUP;
 
-	return impl_node_port_enum_params(&port->impl->node, seq, direction, port->id,
-			id, start, num, filter);
+	return node_port_enum_params(port->impl, seq, direction, port->id,
+			id, start, num, filter, &port->mix_hooks);
 }
 
 static int
@@ -1550,11 +1607,24 @@ static int impl_mix_port_set_io(void *object,
 	if (mix == NULL)
 		return -EINVAL;
 
-	if (id == SPA_IO_Buffers) {
+	switch (id) {
+	case SPA_IO_Buffers:
 		if (data && size >= sizeof(struct spa_io_buffers))
-			mix->io = data;
+			mix->io[0] = mix->io[1] = data;
 		else
-			mix->io = NULL;
+			mix->io[0] = mix->io[1] = NULL;
+		break;
+	case SPA_IO_AsyncBuffers:
+		if (data && size >= sizeof(struct spa_io_async_buffers)) {
+			struct spa_io_async_buffers *ab = data;
+			mix->io[0] = &ab->buffers[0];
+			mix->io[1] = &ab->buffers[1];
+		}
+		else
+			mix->io[0] = mix->io[1] = NULL;
+		break;
+	default:
+		break;
 	}
 	return do_port_set_io(impl,
 			      direction, port->port_id, mix->port.port_id,
@@ -1565,7 +1635,7 @@ static int
 impl_mix_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
 {
 	struct port *p = object;
-	return impl_node_port_reuse_buffer(&p->impl->node, p->id, buffer_id);
+	return impl_node_port_reuse_buffer(p->impl, p->id, buffer_id);
 }
 
 static int impl_mix_process(void *object)
@@ -1575,6 +1645,7 @@ static int impl_mix_process(void *object)
 
 static const struct spa_node_methods impl_port_mix = {
 	SPA_VERSION_NODE_METHODS,
+	.add_listener = impl_mix_add_listener,
 	.port_enum_params = impl_mix_port_enum_params,
 	.port_set_param = impl_mix_port_set_param,
 	.add_port = impl_mix_add_port,
@@ -1599,6 +1670,7 @@ static void node_port_init(void *data, struct pw_impl_port *port)
 	p->id = port->port_id;
 	p->impl = impl;
 	pw_map_init(&p->mix, 2, 2);
+	spa_hook_list_init(&p->mix_hooks);
 	p->mix_node.iface = SPA_INTERFACE_INIT(
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
@@ -1683,8 +1755,6 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 	struct pw_impl_client_node *this;
 	struct pw_impl_client *client = pw_resource_get_client(resource);
 	struct pw_context *context = pw_impl_client_get_context(client);
-	const struct spa_support *support;
-	uint32_t n_support;
 	int res;
 
 	impl = calloc(1, sizeof(struct impl));
@@ -1709,8 +1779,8 @@ struct pw_impl_client_node *pw_impl_client_node_new(struct pw_resource *resource
 	impl->data_source.fd = -1;
 	pw_log_debug("%p: new", &impl->node);
 
-	support = pw_context_get_support(impl->context, &n_support);
-	impl_init(impl, NULL, support, n_support);
+	impl_init(impl, NULL);
+	impl->log = pw_log_get();
 	impl->resource = resource;
 	impl->client = client;
 	impl->client_pool = pw_impl_client_get_mempool(client);

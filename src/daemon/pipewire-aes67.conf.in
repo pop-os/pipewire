@@ -34,11 +34,15 @@ context.objects = [
             node.name       = PTP0-Driver
             node.group      = pipewire.ptp0
             # This driver should only be used for network nodes marked with group
-            priority.driver = 0
+            priority.driver = 100000
             clock.name      = "clock.system.ptp0"
+            ### Please select the PTP hardware clock here
+            # Interface name is the preferred method of specifying the PHC
+            clock.interface = "eth0"
+            #clock.device    = "/dev/ptp0"
             #clock.id        = tai
-            clock.device    = "/dev/ptp0"
-            #clock.interface = "eth0"
+            # Lower this in case of periodic out-of-sync
+            resync.ms       = 1.5
             object.export   = true
         }
     }
@@ -48,7 +52,7 @@ context.modules = [
     { name = libpipewire-module-rt
         args = {
             nice.level   = -11
-            #rt.prio      = 88
+            #rt.prio      = @rtprio_client@
             #rt.time.soft = -1
             #rt.time.hard = -1
         }
@@ -60,11 +64,15 @@ context.modules = [
     { name = libpipewire-module-adapter }
     { name = libpipewire-module-rtp-sap
         args = {
+            ### Please select the interface here
             local.ifname = eth0
             sap.ip = 239.255.255.255
             sap.port = 9875
             net.ttl = 32
-            net.loop = true
+            net.loop = false
+            # If you use another PTPv2 daemon supporting management
+            # messages over a UNIX socket, specify its path here
+            ptp.management-socket = "/var/run/ptp4lro"
 
             stream.rules = [
                 {
@@ -78,7 +86,8 @@ context.modules = [
                             node.virtual = false
                             media.class = "Audio/Source"
                             device.api = aes67
-                            sess.latency.msec = 10
+                            # You can adjust the latency buffering here. Use integer values only
+                            sess.latency.msec = 3
                             node.group = pipewire.ptp0
                         }
                     }
@@ -98,27 +107,37 @@ context.modules = [
     },
     { name = libpipewire-module-rtp-sink
         args = {
+            ### Please select the interface here
             local.ifname = eth0
+            ### If you want to create multiple output streams, please copy the whole
+            ### module-rtp-sink block, but change this multicast IP to another unused
+            ### one keeping 239.69.x.x range unless you know you need another one
             destination.ip = 239.69.150.243
             destination.port = 5004
             net.mtu = 1280
             net.ttl = 32
-            net.loop = true
+            net.loop = false
+            # These should typically be equal
+            # You can customize packet length, but 1 ms should work for every device
+            # Consult receiver documentation to ensure it supports the value you set
             sess.min-ptime = 1
             sess.max-ptime = 1
+            ### Please change this, especially if you create multiple sinks
             sess.name = "PipeWire RTP stream"
             sess.media = "audio"
+            # This property is used if you aren't using ptp4l 4
             sess.ts-refclk = "ptp=traceable"
             sess.ts-offset = 0
-            sess.ptime = 1
-            sess.latency.msec = 1
-            sess.announce = true
+            # You can adjust the latency buffering here. Use integer values only
+            sess.latency.msec = 3
             audio.format = "S24BE"
             audio.rate = 48000
             audio.channels = 2
-            audio.position = [ FL FR ]
+            # These channel names will be visible both to applications and AES67 receivers
+            node.channel-names = ["CH1", "CH2"]
 
             stream.props = {
+                ### Please change the sink name, this is necessary when you create multiple sinks
                 node.name = "rtp-sink"
                 media.class = "Audio/Sink"
                 node.virtual = false
@@ -126,6 +145,8 @@ context.modules = [
                 sess.sap.announce = true
                 node.always-process = true
                 node.group = pipewire.ptp0
+                rtp.ntp = 0
+                rtp.fetch-ts-refclk = true
             }
         }
     },

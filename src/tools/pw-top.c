@@ -29,6 +29,7 @@ struct driver {
 	float cpu_load[3];
 	struct spa_io_clock clock;
 	uint32_t xrun_count;
+	uint32_t transport_state;
 };
 
 struct measurement {
@@ -130,7 +131,8 @@ static int process_clock(struct data *d, const struct spa_pod *pod, struct drive
 			SPA_POD_Long(&info->clock.duration),
 			SPA_POD_Long(&info->clock.delay),
 			SPA_POD_Double(&info->clock.rate_diff),
-			SPA_POD_Long(&info->clock.next_nsec));
+			SPA_POD_Long(&info->clock.next_nsec),
+			SPA_POD_OPT_Int(&info->transport_state));
 }
 
 static struct node *find_node(struct data *d, uint32_t id)
@@ -165,6 +167,32 @@ static const struct pw_proxy_events proxy_events = {
 
 static void do_refresh(struct data *d, bool force_refresh);
 
+static const char *find_node_name(const struct spa_dict *props)
+{
+	static const char * const name_keys[] = {
+		PW_KEY_NODE_NAME,
+		PW_KEY_NODE_DESCRIPTION,
+		PW_KEY_APP_NAME,
+		PW_KEY_MEDIA_NAME,
+	};
+
+	SPA_FOR_EACH_ELEMENT_VAR(name_keys, key) {
+		const char *name = spa_dict_lookup(props, *key);
+		if (name)
+			return name;
+	}
+
+	return NULL;
+}
+
+static void set_node_name(struct node *n, const char *name)
+{
+	if (name)
+		snprintf(n->name, sizeof(n->name), "%s", name);
+	else
+		snprintf(n->name, sizeof(n->name), "%u", n->id);
+}
+
 static void node_info(void *data, const struct pw_node_info *info)
 {
 	struct node *n = data;
@@ -173,6 +201,9 @@ static void node_info(void *data, const struct pw_node_info *info)
 		n->state = info->state;
 		do_refresh(n->data, !n->data->batch_mode);
 	}
+
+	if (info->change_mask & PW_NODE_CHANGE_MASK_PROPS)
+		set_node_name(n, find_node_name(info->props));
 }
 
 static void node_param(void *data, int seq,
@@ -294,13 +325,10 @@ static struct node *add_node(struct data *d, uint32_t id, const char *name)
 	if ((n = calloc(1, sizeof(*n))) == NULL)
 		return NULL;
 
-	if (name)
-		strncpy(n->name, name, MAX_NAME);
-	else
-		snprintf(n->name, sizeof(n->name), "%u", id);
 	n->data = d;
 	n->id = id;
 	n->driver = n;
+
 	n->proxy = pw_registry_bind(d->registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0);
 	if (n->proxy) {
 		uint32_t ids[1] = { SPA_PARAM_Format };
@@ -317,6 +345,8 @@ static struct node *add_node(struct data *d, uint32_t id, const char *name)
 	d->n_nodes++;
 	if (!d->batch_mode)
 		d->pending_refresh = true;
+
+	set_node_name(n, name);
 
 	return n;
 }
@@ -420,14 +450,16 @@ static const char *print_perc(char *buf, bool active, size_t len, uint64_t val, 
 		snprintf(buf, len, " --- ");
 	} else if (val == (uint64_t)-2) {
 		snprintf(buf, len, " +++ ");
+	} else if (quantum == 0.0f) {
+		snprintf(buf, len, " ??? ");
 	} else {
 		float frac = val / 1000000000.f;
-		snprintf(buf, len, "%5.2f", quantum == 0.0f ? 0.0f : frac/quantum);
+		snprintf(buf, len, "%5.2f", frac/quantum);
 	}
 	return buf;
 }
 
-static const char *state_as_string(enum pw_node_state state)
+static const char *state_as_string(enum pw_node_state state, uint32_t transport)
 {
 	switch (state) {
 	case PW_NODE_STATE_ERROR:
@@ -439,7 +471,14 @@ static const char *state_as_string(enum pw_node_state state)
 	case PW_NODE_STATE_IDLE:
 		return "I";
 	case PW_NODE_STATE_RUNNING:
-		return "R";
+		switch (transport) {
+		case SPA_IO_POSITION_STATE_STARTING:
+			return "t";
+		case SPA_IO_POSITION_STATE_RUNNING:
+			return "T";
+		default:
+			return "R";
+		}
 	}
 	return "!";
 }
@@ -467,7 +506,7 @@ static void print_node(struct data *d, struct driver *i, struct node *n, int y)
 	if (i->clock.rate.denom)
 		quantum = (float)i->clock.duration * i->clock.rate.num / (float)i->clock.rate.denom;
 	else
-		quantum = 0.0;
+		quantum = 0.0f;
 
 	if (n->measurement.awake >= n->measurement.signal)
 		waiting = n->measurement.awake - n->measurement.signal;
@@ -484,7 +523,7 @@ static void print_node(struct data *d, struct driver *i, struct node *n, int y)
 		busy = -1;
 
 	print_mode_dependent(d, y, 0, "%s %4.1u %6.1u %6.1u %s %s %s %s  %3.1u %16.16s %s%s",
-			state_as_string(n->state),
+			state_as_string(n->state, i->transport_state),
 			n->id,
 			frac.num, frac.denom,
 			print_time(buf1, active, 64, waiting),
@@ -540,7 +579,7 @@ static void do_refresh(struct data *d, bool force_refresh)
 				continue;
 
 			print_node(d, &n->info, f, y++);
-			if(y > LINES)
+			if(!d->batch_mode && y > LINES)
 				break;
 
 		}
@@ -572,7 +611,7 @@ static void do_timeout(void *data, uint64_t expirations)
 
 static void profiler_profile(void *data, const struct spa_pod *pod)
 {
-        struct data *d = data;
+	struct data *d = data;
 	struct spa_pod *o;
 	struct spa_pod_prop *p;
 	struct point point;
@@ -612,7 +651,7 @@ static void profiler_profile(void *data, const struct spa_pod *pod)
 
 static const struct pw_profiler_events profiler_events = {
 	PW_VERSION_PROFILER_EVENTS,
-        .profile = profiler_profile,
+	.profile = profiler_profile,
 };
 
 static void registry_event_global(void *data, uint32_t id,
@@ -623,16 +662,8 @@ static void registry_event_global(void *data, uint32_t id,
 	struct pw_proxy *proxy;
 
 	if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
-		const char *str;
-
-		if ((str = spa_dict_lookup(props, PW_KEY_NODE_NAME)) == NULL &&
-			(str = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION)) == NULL) {
-				str = spa_dict_lookup(props, PW_KEY_APP_NAME);
-		}
-
-		if (add_node(d, id, str) == NULL) {
+		if (add_node(d, id, find_node_name(props)) == NULL)
 			pw_log_warn("can add node %u: %m", id);
-		}
 	} else if (spa_streq(type, PW_TYPE_INTERFACE_Profiler)) {
 		if (d->profiler != NULL) {
 			printf("Ignoring profiler %d: already attached\n", id);
@@ -719,7 +750,7 @@ static void do_quit(void *data, int signal_number)
 
 static void show_help(const char *name, bool error)
 {
-        fprintf(error ? stderr : stdout, "Usage:\n%s [options]\n\n"
+	fprintf(error ? stderr : stdout, "Usage:\n%s [options]\n\n"
 		"Options:\n"
 		"  -b, --batch-mode		         run in non-interactive batch mode\n"
 		"  -n, --iterations = NUMBER             exit after NUMBER batch iterations\n"

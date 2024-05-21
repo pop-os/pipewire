@@ -784,6 +784,7 @@ static float *create_dirac(const char *filename, float gain, int delay, int offs
 static float *resample_buffer(float *samples, int *n_samples,
 		unsigned long in_rate, unsigned long out_rate, uint32_t quality)
 {
+#ifdef HAVE_SPA_PLUGINS
 	uint32_t in_len, out_len, total_out = 0;
 	int out_n_samples;
 	float *out_samples, *out_buf, *in_buf;
@@ -849,6 +850,12 @@ error:
 	free(samples);
 	free(out_samples);
 	return NULL;
+#else
+	pw_log_error("compiled without spa-plugins support, can't resample");
+	float *out_samples = calloc(*n_samples, sizeof(float));
+	memcpy(out_samples, samples, *n_samples * sizeof(float));
+	return out_samples;
+#endif
 }
 
 static void * convolver_instantiate(const struct fc_descriptor * Descriptor,
@@ -856,7 +863,7 @@ static void * convolver_instantiate(const struct fc_descriptor * Descriptor,
 {
 	struct convolver_impl *impl;
 	float *samples;
-	int offset = 0, length = 0, channel = index, n_samples, len;
+	int offset = 0, length = 0, channel = index, n_samples = 0, len;
 	uint32_t i = 0;
 	struct spa_json it[3];
 	const char *val;
@@ -979,14 +986,15 @@ static void * convolver_instantiate(const struct fc_descriptor * Descriptor,
 			samples = resample_buffer(samples, &n_samples,
 					rate, SampleRate, resample_quality);
 	}
-	if (samples == NULL) {
-		errno = ENOENT;
-		return NULL;
-	}
 
 	for (i = 0; i < MAX_RATES; i++)
 		if (filenames[i])
 			free(filenames[i]);
+
+	if (samples == NULL) {
+		errno = ENOENT;
+		return NULL;
+	}
 
 	if (blocksize <= 0)
 		blocksize = SPA_CLAMP(n_samples, 64, 256);

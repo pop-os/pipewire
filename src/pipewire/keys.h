@@ -40,6 +40,12 @@ extern "C" {
 
 #define PW_KEY_SEC_SOCKET		"pipewire.sec.socket"	/**< client socket name, set by protocol */
 
+#define PW_KEY_SEC_ENGINE		"pipewire.sec.engine"	/**< client secure context engine, set by protocol.
+								  *  This can also be set by a client when making a
+								  *  new security context. */
+#define PW_KEY_SEC_APP_ID		"pipewire.sec.app-id"	/**< client secure application id */
+#define PW_KEY_SEC_INSTANCE_ID		"pipewire.sec.instance-id"	/**< client secure instance id */
+
 #define PW_KEY_LIBRARY_NAME_SYSTEM	"library.name.system"	/**< name of the system library to use */
 #define PW_KEY_LIBRARY_NAME_LOOP	"library.name.loop"	/**< name of the loop library to use */
 #define PW_KEY_LIBRARY_NAME_DBUS	"library.name.dbus"	/**< name of the dbus library to use */
@@ -62,6 +68,15 @@ extern "C" {
 #define PW_KEY_CONFIG_NAME		"config.name"		/**< a config file name */
 #define PW_KEY_CONFIG_OVERRIDE_PREFIX	"config.override.prefix"	/**< a config override prefix directory */
 #define PW_KEY_CONFIG_OVERRIDE_NAME	"config.override.name"	/**< a config override file name */
+
+/* loop */
+#define PW_KEY_LOOP_NAME		"loop.name"		/**< the name of a loop */
+#define PW_KEY_LOOP_CLASS		"loop.class"		/**< the classes this loop handles, array of strings */
+#define PW_KEY_LOOP_RT_PRIO		"loop.rt-prio"		/**< realtime priority of the loop */
+#define PW_KEY_LOOP_CANCEL		"loop.cancel"		/**< if the loop can be canceled */
+#define PW_KEY_LOOP_RETRY_TIMEOUT	"loop.retry-timeout"	/**< when the loop invoke queue is full, the timeout
+								  *  in microseconds before retrying.
+								  *  default = 1 second, 0 = disable */
 
 /* context */
 #define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules, deprecated */
@@ -139,6 +154,12 @@ extern "C" {
 								  *  in the same group are always scheduled
 								  *  with the same driver. Can be an array of
 								  *  group names. */
+#define PW_KEY_NODE_SYNC_GROUP		"node.sync-group"	/**< the sync group this node is part of. Nodes
+								  *  in the same sync group are always scheduled
+								  *  together with the same driver when the sync
+								  *  is active. Can be an array of sync names. */
+#define PW_KEY_NODE_SYNC		"node.sync"		/**< if the sync-group is active or not */
+#define PW_KEY_NODE_TRANSPORT		"node.transport"	/**< if the transport is active or not */
 #define PW_KEY_NODE_EXCLUSIVE		"node.exclusive"	/**< node wants exclusive access to resources */
 #define PW_KEY_NODE_AUTOCONNECT		"node.autoconnect"	/**< node wants to be automatically connected
 								  *  to a compatible node */
@@ -170,6 +191,11 @@ extern "C" {
 #define PW_KEY_NODE_CACHE_PARAMS	"node.cache-params"	/**< cache the node params */
 #define PW_KEY_NODE_TRANSPORT_SYNC	"node.transport.sync"	/**< the node handles transport sync */
 #define PW_KEY_NODE_DRIVER		"node.driver"		/**< node can drive the graph */
+#define PW_KEY_NODE_DRIVER_ID		"node.driver-id"	/**< the node id of the node assigned as driver
+								  *   for this node */
+#define PW_KEY_NODE_ASYNC		"node.async"		/**< the node wants async scheduling */
+#define PW_KEY_NODE_LOOP_NAME		"node.loop.name"	/**< the loop name fnmatch pattern to run in */
+#define PW_KEY_NODE_LOOP_CLASS		"node.loop.class"	/**< the loop class fnmatch pattern to run in */
 #define PW_KEY_NODE_STREAM		"node.stream"		/**< node is a stream, the server side should
 								  *  add a converter */
 #define PW_KEY_NODE_VIRTUAL		"node.virtual"		/**< the node is some sort of virtual
@@ -218,6 +244,7 @@ extern "C" {
 #define PW_KEY_LINK_FEEDBACK		"link.feedback"		/**< indicate that a link is a feedback
 								  *  link and the target will receive data
 								  *  in the next cycle */
+#define PW_KEY_LINK_ASYNC		"link.async"		/**< the link is using async io */
 
 /** device properties */
 #define PW_KEY_DEVICE_ID		"device.id"		/**< device id */
@@ -268,6 +295,7 @@ extern "C" {
 #define PW_KEY_MODULE_USAGE		"module.usage"		/**< a human readable usage description of
 								  *  the module's arguments. */
 #define PW_KEY_MODULE_VERSION		"module.version"	/**< a version string for the module. */
+#define PW_KEY_MODULE_DEPRECATED	"module.deprecated"	/**< the module is deprecated with this message */
 
 /** Factory properties */
 #define PW_KEY_FACTORY_ID		"factory.id"		/**< the factory id */
@@ -303,6 +331,7 @@ extern "C" {
 #define PW_KEY_MEDIA_NAME		"media.name"		/**< media name. Ex: "Pink Floyd: Time" */
 #define PW_KEY_MEDIA_TITLE		"media.title"		/**< title. Ex: "Time" */
 #define PW_KEY_MEDIA_ARTIST		"media.artist"		/**< artist. Ex: "Pink Floyd" */
+#define PW_KEY_MEDIA_ALBUM		"media.album"		/**< album. Ex: "Dark Side of the Moon" */
 #define PW_KEY_MEDIA_COPYRIGHT		"media.copyright"	/**< copyright string */
 #define PW_KEY_MEDIA_SOFTWARE		"media.software"	/**< generator software */
 #define PW_KEY_MEDIA_LANGUAGE		"media.language"	/**< language in POSIX format. Ex: en_GB */

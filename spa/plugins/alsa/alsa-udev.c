@@ -31,9 +31,10 @@
 
 #define MAX_CARDS	64
 
-#define ACTION_ADD	0
-#define ACTION_REMOVE	1
-#define ACTION_DISABLE	2
+enum action {
+	ACTION_CHANGE,
+	ACTION_REMOVE,
+};
 
 /* Used for unavailable devices in the card structure. */
 #define ID_DEVICE_NOT_SUPPORTED 0
@@ -92,6 +93,7 @@ struct impl {
 	struct spa_source source;
 	struct spa_source notify;
 	unsigned int use_acp:1;
+	unsigned int expose_busy:1;
 };
 
 static int impl_udev_open(struct impl *this)
@@ -381,6 +383,8 @@ static int check_pcm_device_availability(struct impl *this, struct card *card,
 	 */
 
 	res = 0;
+	if (this->expose_busy)
+		return res;
 
 	spa_scnprintf(path, sizeof(path), "/proc/asound/card%u", card->card_nr);
 
@@ -715,57 +719,48 @@ static bool check_access(struct impl *this, struct card *card)
 	return card->accessible;
 }
 
-static void process_card(struct impl *this, uint32_t action, struct udev_device *udev_device)
+static void process_card(struct impl *this, enum action action, struct card *card)
 {
-	unsigned int card_nr;
-	struct card *card;
-	bool emitted;
-	int res;
-
-	if ((card_nr = get_card_nr(this, udev_device)) == SPA_ID_INVALID)
-		return;
-
-	card = find_card(this, card_nr);
-	if (card && card->ignored)
+	if (card->ignored)
 		return;
 
 	switch (action) {
-	case ACTION_ADD:
-		if (card == NULL)
-			card = add_card(this, card_nr, udev_device);
-		if (card == NULL)
-			return;
-		if (!check_access(this, card))
-			return;
-		res = emit_added_object_info(this, card);
-		if (res < 0) {
-			if (card->ignored)
-				spa_log_info(this->log, "ALSA card %u unavailable (%s): it is ignored",
-						card->card_nr, spa_strerror(res));
-			else if (!card->unavailable)
-				spa_log_info(this->log, "ALSA card %u unavailable (%s): wait for it",
-						card->card_nr, spa_strerror(res));
-			else
-				spa_log_debug(this->log, "ALSA card %u still unavailable (%s)",
-						card->card_nr, spa_strerror(res));
-			card->unavailable = true;
-		} else {
-			if (card->unavailable)
-				spa_log_info(this->log, "ALSA card %u now available",
-						card->card_nr);
-			card->unavailable = false;
+	case ACTION_CHANGE: {
+		check_access(this, card);
+		if (card->accessible && !card->emitted) {
+			int res = emit_added_object_info(this, card);
+			if (res < 0) {
+				if (card->ignored)
+					spa_log_info(this->log, "ALSA card %u unavailable (%s): it is ignored",
+							card->card_nr, spa_strerror(res));
+				else if (!card->unavailable)
+					spa_log_info(this->log, "ALSA card %u unavailable (%s): wait for it",
+							card->card_nr, spa_strerror(res));
+				else
+					spa_log_debug(this->log, "ALSA card %u still unavailable (%s)",
+							card->card_nr, spa_strerror(res));
+				card->unavailable = true;
+			} else {
+				if (card->unavailable)
+					spa_log_info(this->log, "ALSA card %u now available",
+							card->card_nr);
+				card->unavailable = false;
+			}
+		} else if (!card->accessible && card->emitted) {
+			card->emitted = false;
+
+			if (card->pcm_device_id != ID_DEVICE_NOT_SUPPORTED)
+				spa_device_emit_object_info(&this->hooks, card->pcm_device_id, NULL);
+			if (card->compress_offload_device_id != ID_DEVICE_NOT_SUPPORTED)
+				spa_device_emit_object_info(&this->hooks, card->compress_offload_device_id, NULL);
 		}
 		break;
-
+	}
 	case ACTION_REMOVE: {
-		uint32_t pcm_device_id, compress_offload_device_id;
+		uint32_t pcm_device_id = card->pcm_device_id;
+		uint32_t compress_offload_device_id = card->compress_offload_device_id;
+		bool emitted = card->emitted;
 
-		if (card == NULL)
-			return;
-
-		emitted = card->emitted;
-		pcm_device_id = card->pcm_device_id;
-		compress_offload_device_id = card->compress_offload_device_id;
 		remove_card(this, card);
 
 		if (emitted) {
@@ -776,25 +771,25 @@ static void process_card(struct impl *this, uint32_t action, struct udev_device 
 		}
 		break;
 	}
-
-	case ACTION_DISABLE:
-		if (card == NULL)
-			return;
-		if (card->emitted) {
-			uint32_t pcm_device_id, compress_offload_device_id;
-
-			pcm_device_id = card->pcm_device_id;
-			compress_offload_device_id = card->compress_offload_device_id;
-
-			card->emitted = false;
-
-			if (pcm_device_id != ID_DEVICE_NOT_SUPPORTED)
-				spa_device_emit_object_info(&this->hooks, pcm_device_id, NULL);
-			if (compress_offload_device_id != ID_DEVICE_NOT_SUPPORTED)
-				spa_device_emit_object_info(&this->hooks, compress_offload_device_id, NULL);
-		}
-		break;
 	}
+}
+
+static void process_udev_device(struct impl *this, enum action action, struct udev_device *udev_device)
+{
+	unsigned int card_nr;
+	struct card *card;
+
+	if ((card_nr = get_card_nr(this, udev_device)) == SPA_ID_INVALID)
+		return;
+
+	card = find_card(this, card_nr);
+	if (action == ACTION_CHANGE && !card)
+		card = add_card(this, card_nr, udev_device);
+
+	if (!card)
+		return;
+
+	process_card(this, action, card);
 }
 
 static int stop_inotify(struct impl *this)
@@ -823,8 +818,6 @@ static void impl_on_notify_events(struct spa_source *source)
 		void *p, *e;
 
 		len = read(source->fd, &buf, sizeof(buf));
-		if (len < 0 && errno != EAGAIN)
-			break;
 		if (len <= 0)
 			break;
 
@@ -842,21 +835,16 @@ static void impl_on_notify_events(struct spa_source *source)
 
 			/* card becomes accessible or not busy */
 			if ((event->mask & (IN_ATTRIB | IN_CLOSE_WRITE))) {
-				bool access;
 				if (sscanf(event->name, "controlC%u", &card_nr) != 1 &&
 				    sscanf(event->name, "pcmC%uD", &card_nr) != 1)
 					continue;
 				if ((card = find_card(this, card_nr)) == NULL)
 					continue;
 
-				access = check_access(this, card);
-				if (access && !card->emitted)
-					process_card(this, ACTION_ADD, card->udev_device);
-				else if (!access && card->emitted)
-					process_card(this, ACTION_DISABLE, card->udev_device);
+				process_card(this, ACTION_CHANGE, card);
 			}
 			/* /dev/snd/ might have been removed */
-			if ((event->mask & (IN_DELETE_SELF | IN_MOVE_SELF)))
+			if ((event->mask & (IN_IGNORED | IN_MOVE_SELF)))
 				deleted = true;
 		}
 	}
@@ -875,7 +863,7 @@ static int start_inotify(struct impl *this)
 		return -errno;
 
 	res = inotify_add_watch(notify_fd, "/dev/snd",
-			IN_ATTRIB | IN_CLOSE_WRITE | IN_DELETE_SELF | IN_MOVE_SELF);
+			IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVE_SELF);
 	if (res < 0) {
 		res = -errno;
 		close(notify_fd);
@@ -915,10 +903,10 @@ static void impl_on_fd_events(struct spa_source *source)
 
 	start_inotify(this);
 
-	if (spa_streq(action, "change")) {
-		process_card(this, ACTION_ADD, udev_device);
+	if (spa_streq(action, "add") || spa_streq(action, "change")) {
+		process_udev_device(this, ACTION_CHANGE, udev_device);
 	} else if (spa_streq(action, "remove")) {
-		process_card(this, ACTION_REMOVE, udev_device);
+		process_udev_device(this, ACTION_REMOVE, udev_device);
 	}
 	udev_device_unref(udev_device);
 }
@@ -989,7 +977,7 @@ static int enum_cards(struct impl *this)
 		if (udev_device == NULL)
 			continue;
 
-		process_card(this, ACTION_ADD, udev_device);
+		process_udev_device(this, ACTION_CHANGE, udev_device);
 
 		udev_device_unref(udev_device);
 	}
@@ -1141,6 +1129,8 @@ impl_init(const struct spa_handle_factory *factory,
 	if (info) {
 		if ((str = spa_dict_lookup(info, "alsa.use-acp")) != NULL)
 			this->use_acp = spa_atob(str);
+		else if ((str = spa_dict_lookup(info, "alsa.udev.expose-busy")) != NULL)
+			this->expose_busy = spa_atob(str);
 	}
 
 	return 0;

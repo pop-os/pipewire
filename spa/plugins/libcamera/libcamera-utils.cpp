@@ -165,16 +165,16 @@ static const struct format_info format_info[] = {
 	/* RGB formats */
 	MAKE_FMT(formats::RGB565, RGB16, video, raw),
 	MAKE_FMT(formats::RGB565_BE, RGB16, video, raw),
-	MAKE_FMT(formats::RGB888, RGB, video, raw),
-	MAKE_FMT(formats::BGR888, BGR, video, raw),
-	MAKE_FMT(formats::XRGB8888, xRGB, video, raw),
-	MAKE_FMT(formats::XBGR8888, xBGR, video, raw),
-	MAKE_FMT(formats::RGBX8888, RGBx, video, raw),
-	MAKE_FMT(formats::BGRX8888, BGRx, video, raw),
-	MAKE_FMT(formats::ARGB8888, ARGB, video, raw),
-	MAKE_FMT(formats::ABGR8888, ABGR, video, raw),
-	MAKE_FMT(formats::RGBA8888, RGBA, video, raw),
-	MAKE_FMT(formats::BGRA8888, BGRA, video, raw),
+	MAKE_FMT(formats::RGB888, BGR, video, raw),
+	MAKE_FMT(formats::BGR888, RGB, video, raw),
+	MAKE_FMT(formats::XRGB8888, BGRx, video, raw),
+	MAKE_FMT(formats::XBGR8888, RGBx, video, raw),
+	MAKE_FMT(formats::RGBX8888, xBGR, video, raw),
+	MAKE_FMT(formats::BGRX8888, xRGB, video, raw),
+	MAKE_FMT(formats::ARGB8888, BGRA, video, raw),
+	MAKE_FMT(formats::ABGR8888, RGBA, video, raw),
+	MAKE_FMT(formats::RGBA8888, ABGR, video, raw),
+	MAKE_FMT(formats::BGRA8888, ARGB, video, raw),
 
 	MAKE_FMT(formats::YUYV, YUY2, video, raw),
 	MAKE_FMT(formats::YVYU, YVYU, video, raw),
@@ -716,25 +716,23 @@ static int spa_libcamera_use_buffers(struct impl *impl, struct port *port,
 }
 
 static const struct {
-	Transform libcamera_transform;
-	uint32_t spa_transform_value;
-} transform_map[] = {
-	{ Transform::Identity, SPA_META_TRANSFORMATION_None },
-	{ Transform::Rot0, SPA_META_TRANSFORMATION_None },
-	{ Transform::HFlip, SPA_META_TRANSFORMATION_Flipped },
-	{ Transform::VFlip, SPA_META_TRANSFORMATION_Flipped180 },
-	{ Transform::HVFlip, SPA_META_TRANSFORMATION_180 },
-	{ Transform::Rot180, SPA_META_TRANSFORMATION_180 },
-	{ Transform::Transpose, SPA_META_TRANSFORMATION_Flipped90 },
-	{ Transform::Rot90, SPA_META_TRANSFORMATION_90 },
-	{ Transform::Rot270, SPA_META_TRANSFORMATION_270 },
-	{ Transform::Rot180Transpose, SPA_META_TRANSFORMATION_Flipped270 },
+	Orientation libcamera_orientation; /* clockwise rotation then horizontal mirroring */
+	uint32_t spa_transform_value; /* horizontal mirroring then counter-clockwise rotation */
+} orientation_map[] = {
+	{ Orientation::Rotate0, SPA_META_TRANSFORMATION_None },
+	{ Orientation::Rotate0Mirror, SPA_META_TRANSFORMATION_Flipped },
+	{ Orientation::Rotate90, SPA_META_TRANSFORMATION_270 },
+	{ Orientation::Rotate90Mirror, SPA_META_TRANSFORMATION_Flipped90 },
+	{ Orientation::Rotate180, SPA_META_TRANSFORMATION_180 },
+	{ Orientation::Rotate180Mirror, SPA_META_TRANSFORMATION_Flipped180 },
+	{ Orientation::Rotate270, SPA_META_TRANSFORMATION_90 },
+	{ Orientation::Rotate270Mirror, SPA_META_TRANSFORMATION_Flipped270 },
 };
 
-static uint32_t libcamera_transform_to_spa_transform_value(Transform transform)
+static uint32_t libcamera_orientation_to_spa_transform_value(Orientation orientation)
 {
-	for (const auto& t : transform_map) {
-		if (t.libcamera_transform == transform)
+	for (const auto& t : orientation_map) {
+		if (t.libcamera_orientation == orientation)
 			return t.spa_transform_value;
 	}
 	return SPA_META_TRANSFORMATION_None;
@@ -765,7 +763,7 @@ mmap_init(struct impl *impl, struct port *port,
 		} else if (d[0].type & (1u << SPA_DATA_MemPtr)) {
 			port->memtype = SPA_DATA_MemPtr;
 		} else {
-			spa_log_error(impl->log, "v4l2: can't use buffers of type %d", d[0].type);
+			spa_log_error(impl->log, "can't use buffers of type %d", d[0].type);
 			return -EINVAL;
 		}
 	}
@@ -788,9 +786,9 @@ mmap_init(struct impl *impl, struct port *port,
 			buffers[i], SPA_META_VideoTransform, sizeof(*b->videotransform));
 		if (b->videotransform) {
 			b->videotransform->transform =
-				libcamera_transform_to_spa_transform_value(impl->config->transform);
-			spa_log_debug(impl->log, "Setting videotransform for buffer %d to %u (from %s)",
-				i, b->videotransform->transform, transformToString(impl->config->transform));
+				libcamera_orientation_to_spa_transform_value(impl->config->orientation);
+			spa_log_debug(impl->log, "Setting videotransform for buffer %u to %u",
+				i, b->videotransform->transform);
 
 		}
 
@@ -807,6 +805,7 @@ mmap_init(struct impl *impl, struct port *port,
 
 			if (port->memtype == SPA_DATA_DmaBuf ||
 			    port->memtype == SPA_DATA_MemFd) {
+				d[j].flags |= SPA_DATA_FLAG_MAPPABLE;
 				d[j].fd = bufs[i]->planes()[j].fd.get();
 				spa_log_debug(impl->log, "Got fd = %ld for buffer: #%d", d[j].fd, i);
 				d[j].data = NULL;

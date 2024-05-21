@@ -26,6 +26,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/debug/types.h>
+#include <spa/debug/file.h>
 
 #include <pipewire/cleanup.h>
 #include <pipewire/pipewire.h>
@@ -845,7 +846,8 @@ static void on_process(void *userdata)
 		bool null_frame = false;
 
 		n_frames = d->maxsize / data->stride;
-		n_frames = SPA_MIN(n_frames, (int)b->requested);
+		if (b->requested)
+			n_frames = SPA_MIN(n_frames, (int)b->requested);
 
 		/* Note that when playing encoded audio, the encoded_playback_fill()
 		 * fill callback actually returns number of bytes, not frames, since
@@ -931,11 +933,11 @@ static void do_print_delay(void *userdata, uint64_t expirations)
 	pw_stream_get_time_n(data->stream, &time, sizeof(time));
 	printf("stream time: now:%"PRIi64" rate:%u/%u ticks:%"PRIu64
 			" delay:%"PRIi64" queued:%"PRIu64
-			" buffered:%"PRIi64" buffers:%u avail:%u\n",
+			" buffered:%"PRIi64" buffers:%u avail:%u size:%"PRIu64"\n",
 		time.now,
 		time.rate.num, time.rate.denom,
 		time.ticks, time.delay, time.queued, time.buffered,
-		time.queued_buffers, time.avail_buffers);
+		time.queued_buffers, time.avail_buffers, time.size);
 }
 
 enum {
@@ -986,21 +988,21 @@ static void show_usage(const char *name, bool is_error)
 
 	fp = is_error ? stderr : stdout;
 
-        fprintf(fp,
+	fprintf(fp,
 	   _("%s [options] [<file>|-]\n"
-             "  -h, --help                            Show this help\n"
-             "      --version                         Show version\n"
-             "  -v, --verbose                         Enable verbose operations\n"
+	     "  -h, --help                            Show this help\n"
+	     "      --version                         Show version\n"
+	     "  -v, --verbose                         Enable verbose operations\n"
 	     "\n"), name);
 
 	fprintf(fp,
-           _("  -R, --remote                          Remote daemon name\n"
-             "      --media-type                      Set media type (default %s)\n"
-             "      --media-category                  Set media category (default %s)\n"
-             "      --media-role                      Set media role (default %s)\n"
-             "      --target                          Set node target serial or name (default %s)\n"
+	   _("  -R, --remote                          Remote daemon name\n"
+	     "      --media-type                      Set media type (default %s)\n"
+	     "      --media-category                  Set media category (default %s)\n"
+	     "      --media-role                      Set media role (default %s)\n"
+	     "      --target                          Set node target serial or name (default %s)\n"
 	     "                                          0 means don't link\n"
-             "      --latency                         Set node latency (default %s)\n"
+	     "      --latency                         Set node latency (default %s)\n"
 	     "                                          Xunit (unit = s, ms, us, ns)\n"
 	     "                                          or direct samples (256)\n"
 	     "                                          the rate is the one of the source file\n"
@@ -1012,12 +1014,12 @@ static void show_usage(const char *name, bool is_error)
 	     DEFAULT_TARGET, DEFAULT_LATENCY_PLAY);
 
 	fprintf(fp,
-           _("      --rate                            Sample rate (req. for rec) (default %u)\n"
-             "      --channels                        Number of channels (req. for rec) (default %u)\n"
-             "      --channel-map                     Channel map\n"
+	   _("      --rate                            Sample rate (req. for rec) (default %u)\n"
+	     "      --channels                        Number of channels (req. for rec) (default %u)\n"
+	     "      --channel-map                     Channel map\n"
 	     "                                            one of: \"stereo\", \"surround-51\",... or\n"
 	     "                                            comma separated list of channel names: eg. \"FL,FR\"\n"
-             "      --format                          Sample format %s (req. for rec) (default %s)\n"
+	     "      --format                          Sample format %s (req. for rec) (default %s)\n"
 	     "      --volume                          Stream volume 0-1.0 (default %.3f)\n"
 	     "  -q  --quality                         Resampler quality (0 - 15) (default %d)\n"
 	     "\n"),
@@ -1051,7 +1053,7 @@ static int midi_play(struct data *d, void *src, unsigned int n_frames, bool *nul
 	spa_zero(b);
 	spa_pod_builder_init(&b, src, n_frames);
 
-        spa_pod_builder_push_sequence(&b, &f, 0);
+	spa_pod_builder_push_sequence(&b, &f, 0);
 
 	first_frame = d->clock_time;
 	last_frame = first_frame + d->position->clock.duration;
@@ -1263,6 +1265,7 @@ static int fill_properties(struct data *data)
 		[SF_STR_COPYRIGHT] = PW_KEY_MEDIA_COPYRIGHT,
 		[SF_STR_SOFTWARE] = PW_KEY_MEDIA_SOFTWARE,
 		[SF_STR_ARTIST] = PW_KEY_MEDIA_ARTIST,
+		[SF_STR_ALBUM] = PW_KEY_MEDIA_ALBUM,
 		[SF_STR_COMMENT] = PW_KEY_MEDIA_COMMENT,
 		[SF_STR_DATE] = PW_KEY_MEDIA_DATE
 	};
@@ -1607,6 +1610,7 @@ int main(int argc, char *argv[])
 	const char *prog;
 	int exit_code = EXIT_FAILURE, c, ret;
 	enum pw_stream_flags flags = 0;
+	struct spa_error_location loc;
 
 	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
@@ -1728,7 +1732,12 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'P':
-			pw_properties_update_string(data.props, optarg, strlen(optarg));
+			if (pw_properties_update_string_checked(data.props, optarg, strlen(optarg), &loc) < 0) {
+				spa_debug_file_error_location(stderr, &loc,
+						"error: syntax error in --properties: %s",
+						loc.reason);
+				goto error_usage;
+			}
 			break;
 
 		case OPT_TARGET:

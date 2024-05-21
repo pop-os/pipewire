@@ -187,7 +187,6 @@ struct impl {
 
 	unsigned int do_disconnect:1;
 	unsigned int driving:1;
-	unsigned int have_sync:1;
 	unsigned int may_pause:1;
 	unsigned int paused:1;
 
@@ -203,6 +202,8 @@ struct impl {
 	float corr;
 
 	uint64_t next_time;
+	unsigned int have_sync:1;
+	unsigned int underrun:1;
 };
 
 static uint64_t get_time_ns(struct impl *impl)
@@ -407,9 +408,16 @@ static void capture_stream_process(void *data)
 	if (avail < (int32_t)size) {
 		memset(bd->data, 0, size);
 		if (avail >= 0) {
-			pw_log_warn("underrun %d < %u", avail, size);
+			if (!impl->underrun) {
+				pw_log_warn("underrun %d < %u", avail, size);
+				impl->underrun = true;
+			}
 			pause_stream(impl, true);
 		}
+		impl->have_sync = false;
+	}
+	if (avail > (int32_t)(impl->target_buffer * 3)) {
+		pw_log_warn("resync %d > %u", avail, (int32_t)(impl->target_buffer * 3));
 		impl->have_sync = false;
 	}
 	if (avail > (int32_t)RINGBUFFER_SIZE) {
@@ -429,6 +437,7 @@ static void capture_stream_process(void *data)
 
 		index += avail;
 		spa_ringbuffer_read_update(&impl->ring, index);
+		impl->underrun = false;
 	}
 	bd->chunk->offset = 0;
 	bd->chunk->size = size;
@@ -722,6 +731,8 @@ static void impl_destroy(struct impl *impl)
 	if (impl->fd >= 0)
 		close(impl->fd);
 
+	pw_context_release_loop(impl->context, impl->data_loop);
+
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
@@ -848,7 +859,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct pw_properties *props = NULL;
 	struct impl *impl;
 	const char *str, *media_class = NULL;
-	struct pw_data_loop *data_loop;
 	int res;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
@@ -882,8 +892,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->main_loop = pw_context_get_main_loop(context);
-	data_loop = pw_context_get_data_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(data_loop);
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
 
 	if ((str = pw_properties_get(props, "tunnel.mode")) == NULL)
 		str = "playback";
@@ -914,6 +923,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "tunnel.may-pause")) != NULL)
 		impl->may_pause = spa_atob(str);
 
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
@@ -922,6 +932,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(impl->stream_props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
@@ -947,7 +958,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (impl->info.rate != 0 &&
 	    pw_properties_get(props, PW_KEY_NODE_RATE) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_RATE,
-				"1/%u", impl->info.rate),
+				"1/%u", impl->info.rate);
 
 	copy_props(impl, props, PW_KEY_NODE_RATE);
 

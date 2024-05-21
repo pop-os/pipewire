@@ -90,9 +90,7 @@ static void on_process(void *userdata)
 
 	if ((h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(*h)))) {
 #if 0
-		struct timespec now;
-		clock_gettime(CLOCK_MONOTONIC, &now);
-		h->pts = SPA_TIMESPEC_TO_NSEC(&now);
+		h->pts = pw_stream_get_nsec(data->stream));
 #else
 		h->pts = -1;
 #endif
@@ -225,7 +223,7 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 
 	/* create the memfd on the buffer, set the type and flags */
 	d[0].type = SPA_DATA_MemFd;
-	d[0].flags = SPA_DATA_FLAG_READWRITE;
+	d[0].flags = SPA_DATA_FLAG_READWRITE | SPA_DATA_FLAG_MAPPABLE;
 #ifdef HAVE_MEMFD_CREATE
 	d[0].fd = memfd_create("video-src-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 #else

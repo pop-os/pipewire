@@ -26,6 +26,7 @@
 #include <openssl/engine.h>
 #include <openssl/aes.h>
 #include <openssl/md5.h>
+#include <openssl/evp.h>
 
 #include "config.h"
 
@@ -42,6 +43,8 @@
 #include <pipewire/cleanup.h>
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
+
+#include "network-utils.h"
 
 #include "module-raop/rtsp-client.h"
 #include "module-rtp/rtp.h"
@@ -123,7 +126,7 @@
 
 #define NAME "raop-sink"
 
-PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define BUFFER_SIZE		(1u<<22)
@@ -153,6 +156,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define RAOP_STRIDE		(2*DEFAULT_CHANNELS)
 #define RAOP_RATE		44100
 #define RAOP_LATENCY_MS		250
+#define DEFAULT_LATENCY_MS	1500
 
 #define VOLUME_MAX		0.0
 #define VOLUME_MIN		-30.0
@@ -166,6 +170,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"( raop.encryption.type=<encryption, default:none> ) "			\
 			"( raop.audio.codec=PCM ) "						\
 			"( raop.password=<password for auth> ) "				\
+			"( raop.latency.ms=<min latency in ms, default:"SPA_STRINGIFY(DEFAULT_LATENCY_MS)"> ) "	\
 			"( node.latency=<latency as fraction> ) "				\
 			"( node.name=<name of the nodes> ) "					\
 			"( node.description=<description of the nodes> ) "			\
@@ -584,38 +589,25 @@ error:
 static int connect_socket(struct impl *impl, int type, int fd, uint16_t port)
 {
 	const char *host;
-	struct sockaddr_in sa4;
-	struct sockaddr_in6 sa6;
-	struct sockaddr *sa;
-	size_t salen;
-	int res, af;
+	struct sockaddr_storage addr;
+	socklen_t len = 0;
+	int res;
 
 	host = pw_properties_get(impl->props, "raop.ip");
 	if (host == NULL)
 		return -EINVAL;
 
-	if (inet_pton(AF_INET, host, &sa4.sin_addr) > 0) {
-		sa4.sin_family = af = AF_INET;
-		sa4.sin_port = htons(port);
-		sa = (struct sockaddr *) &sa4;
-		salen = sizeof(sa4);
-	} else if (inet_pton(AF_INET6, host, &sa6.sin6_addr) > 0) {
-		sa6.sin6_family = af = AF_INET6;
-		sa6.sin6_port = htons(port);
-		sa = (struct sockaddr *) &sa6;
-		salen = sizeof(sa6);
-	} else {
-		pw_log_error("Invalid host '%s'", host);
+	if ((res = pw_net_parse_address(host, port, &addr, &len)) < 0) {
+		pw_log_error("Invalid host '%s' port:%d", host, port);
 		return -EINVAL;
 	}
-
 	if (fd < 0 &&
-	    (fd = socket(af, type | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
+	    (fd = socket(addr.ss_family, type | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
 		pw_log_error("socket failed: %m");
 		return -errno;
 	}
 
-	res = connect(fd, sa, salen);
+	res = connect(fd, (struct sockaddr*)&addr, len);
 	if (res < 0 && errno != EINPROGRESS) {
 		res = -errno;
 		pw_log_error("connect failed: %m");
@@ -878,6 +870,13 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	struct timespec timeout, interval;
 
 	pw_log_info("record status: %d", status);
+	switch (status) {
+	case 200:
+		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
+	}
 
 	timeout.tv_sec = 2;
 	timeout.tv_nsec = 0;
@@ -969,6 +968,7 @@ on_server_source_io(void *data, int fd, uint32_t mask)
 	return;
 error:
 	pw_loop_update_io(impl->loop, impl->server_source, 0);
+	pw_impl_module_schedule_destroy(impl->module);
 }
 
 static int rtsp_setup_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
@@ -980,6 +980,13 @@ static int rtsp_setup_reply(void *data, int status, const struct spa_dict *heade
 	uint16_t control_port, timing_port;
 
 	pw_log_info("setup status: %d", status);
+	switch (status) {
+	case 200:
+		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
+	}
 
 	if ((str = spa_dict_lookup(headers, "Session")) == NULL) {
 		pw_log_error("missing Session header");
@@ -1108,6 +1115,13 @@ static int rtsp_announce_reply(void *data, int status, const struct spa_dict *he
 	struct impl *impl = data;
 
 	pw_log_info("announce status: %d", status);
+	switch (status) {
+	case 200:
+		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
+	}
 
 	pw_properties_set(impl->headers, "Apple-Challenge", NULL);
 
@@ -1300,6 +1314,13 @@ static int rtsp_post_auth_setup_reply(void *data, int status, const struct spa_d
 	struct impl *impl = data;
 
 	pw_log_info("auth-setup status: %d", status);
+	switch (status) {
+	case 200:
+		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
+	}
 
 	return rtsp_do_announce(impl);
 }
@@ -1330,6 +1351,9 @@ static int rtsp_options_auth_reply(void *data, int status, const struct spa_dict
 		else
 			res = rtsp_do_announce(impl);
 		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
 	}
 	return res;
 }
@@ -1403,6 +1427,9 @@ static int rtsp_options_reply(void *data, int status, const struct spa_dict *hea
 		else
 			res = rtsp_do_announce(impl);
 		break;
+	default:
+		pw_impl_module_schedule_destroy(impl->module);
+		return 0;
 	}
 	return res;
 }
@@ -1519,8 +1546,6 @@ static void stream_state_changed(void *data, bool started, const char *error)
 		pw_impl_module_schedule_destroy(impl->module);
 		return;
 	}
-	if (started)
-		rtsp_do_record(impl);
 }
 
 static int rtsp_do_connect(struct impl *impl)
@@ -1848,6 +1873,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->stride = RAOP_STRIDE;
 	impl->mtu = impl->stride * impl->psamples;
 	impl->sync_period = impl->rate / impl->psamples;
+
+	if ((str = pw_properties_get(props, "raop.latency.ms")) == NULL)
+		str = SPA_STRINGIFY(DEFAULT_LATENCY_MS);
+	impl->latency = SPA_MAX(impl->latency, msec_to_samples(impl, atoi(str)));
 
 	if (pw_properties_get(props, PW_KEY_AUDIO_FORMAT) == NULL)
 		pw_properties_setf(props, PW_KEY_AUDIO_FORMAT, "%s", RAOP_FORMAT);

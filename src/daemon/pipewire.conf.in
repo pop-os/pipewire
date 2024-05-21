@@ -22,6 +22,20 @@ context.properties = {
     #log.level                             = 2
     #cpu.zero.denormals                    = false
 
+    #loop.rt-prio = -1            # -1 = use module-rt prio, 0 disable rt
+    #loop.class = data.rt
+    #thread.affinity = [ 0 1 ]    # optional array of CPUs
+    #context.num-data-loops = 1   # -1 = num-cpus, 0 = no data loops
+    #
+    #context.data-loops = [
+    #    {   loop.rt-prio = -1
+    #        loop.class = [ data.rt audio.rt ]
+    #        #library.name.system = support/libspa-support
+    #        thread.name = data-loop.0
+    #        #thread.affinity = [ 0 1 ]    # optional array of CPUs
+    #    }
+    #]
+
     core.daemon = true              # listening for socket connections
     core.name   = pipewire-0        # core name and socket name
 
@@ -32,6 +46,7 @@ context.properties = {
     #default.clock.min-quantum   = 32
     #default.clock.max-quantum   = 2048
     #default.clock.quantum-limit = 8192
+    #default.clock.quantum-floor = 4
     #default.video.width         = 640
     #default.video.height        = 480
     #default.video.rate.num      = 25
@@ -39,11 +54,6 @@ context.properties = {
     #
     #settings.check-quantum      = false
     #settings.check-rate         = false
-    #
-    # These overrides are only applied when running in a vm.
-    vm.overrides = {
-        default.clock.min-quantum = 1024
-    }
 
     # keys checked below to disable module loading
     module.x11.bell = true
@@ -53,6 +63,17 @@ context.properties = {
     # enables autoloading of module-jackdbus-detect
     module.jackdbus-detect = true
 }
+
+context.properties.rules = [
+    {   matches = [ { cpu.vm.name = !null } ]
+        actions = {
+            update-props = {
+                # These overrides are only applied when running in a vm.
+                default.clock.min-quantum = 1024
+	    }
+        }
+    }
+]
 
 context.spa-libs = {
     #<factory-name regex> = <library-name>
@@ -70,6 +91,7 @@ context.spa-libs = {
     api.vulkan.*    = vulkan/libspa-vulkan
     api.jack.*      = jack/libspa-jack
     support.*       = support/libspa-support
+    video.convert.* = videoconvert/libspa-videoconvert
     #videotestsrc   = videotestsrc/libspa-videotestsrc
     #audiotestsrc   = audiotestsrc/libspa-audiotestsrc
 }
@@ -95,7 +117,7 @@ context.modules = [
     { name = libpipewire-module-rt
         args = {
             nice.level    = -11
-            #rt.prio      = 88
+            rt.prio       = @rtprio_server@
             #rt.time.soft = -1
             #rt.time.hard = -1
             #uclamp.min = 0
@@ -172,7 +194,7 @@ context.modules = [
     # Use libcanberra to play X11 Bell
     { name = libpipewire-module-x11-bell
         args = {
-            #sink.name = "@DEFAULT_SINK@"
+            #sink.name = "\@DEFAULT_SINK\@"
             #sample.name = "bell-window-system"
             #x11.display = null
             #x11.xauthority = null
@@ -224,13 +246,14 @@ context.objects = [
     #{ factory = adapter            args = { factory.name = audiotestsrc node.name = my-test node.description = audiotestsrc } }
     #{ factory = spa-node-factory   args = { factory.name = api.vulkan.compute.source node.name = my-compute-source } }
 
-    # A default dummy driver. This handles nodes marked with the "node.always-driver"
+    # A default dummy driver. This handles nodes marked with the "node.always-process"
     # property when no other driver is currently active. JACK clients need this.
     { factory = spa-node-factory
         args = {
             factory.name    = support.node.driver
             node.name       = Dummy-Driver
             node.group      = pipewire.dummy
+            node.sync-group  = sync.dummy
             priority.driver = 20000
             #clock.id       = monotonic # realtime | tai | monotonic-raw | boottime
             #clock.name     = "clock.system.monotonic"
@@ -242,7 +265,9 @@ context.objects = [
             node.name       = Freewheel-Driver
             priority.driver = 19000
             node.group      = pipewire.freewheel
+            node.sync-group  = sync.dummy
             node.freewheel  = true
+            #freewheel.wait = 10
         }
     }
 
@@ -255,6 +280,7 @@ context.objects = [
     #        node.description = "Microphone"
     #        media.class      = "Audio/Source/Virtual"
     #        audio.position   = "FL,FR"
+    #        monitor.passthrough = true
     #    }
     #}
 
@@ -293,7 +319,7 @@ context.objects = [
 
 context.exec = [
     #{   path = <program-name>
-    #    ( args = "<arguments>" )
+    #    ( args = "<arguments>" | [ <arg1> <arg2> ... ] )
     #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
@@ -313,6 +339,6 @@ context.exec = [
     # It can be interesting to start another daemon here that listens
     # on another address with the -a option (eg. -a tcp:4713).
     #
-    @pulse_comment@{ path = "@pipewire_path@" args = "-c pipewire-pulse.conf"
+    @pulse_comment@{ path = "@pipewire_path@" args = [ "-c" "pipewire-pulse.conf" ]
     @pulse_comment@  condition = [ { exec.pipewire-pulse = null } { exec.pipewire-pulse = true } ] }
 ]

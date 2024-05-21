@@ -71,9 +71,6 @@ struct node_data {
 	struct spa_hook proxy_client_node_listener;
 
 	struct spa_list links;
-
-	struct spa_io_clock *clock;
-	struct spa_io_position *position;
 };
 
 struct link {
@@ -122,6 +119,7 @@ static void clean_transport(struct node_data *data)
 {
 	struct link *l;
 	uint32_t tag[5] = { data->remote_id, };
+	struct pw_impl_node *node = data->node;
 	struct pw_memmap *mm;
 
 	if (!data->have_transport)
@@ -132,13 +130,13 @@ static void clean_transport(struct node_data *data)
 
 	while ((mm = pw_mempool_find_tag(data->pool, tag, sizeof(uint32_t))) != NULL) {
 		if (mm->tag[1] == SPA_ID_INVALID)
-			spa_node_set_io(data->node->node, mm->tag[2], NULL, 0);
+			spa_node_set_io(node->node, mm->tag[2], NULL, 0);
 
 		pw_memmap_free(mm);
 	}
 
 	pw_memmap_free(data->activation);
-	data->node->rt.target.activation = data->node->activation->map->ptr;
+	node->rt.target.activation = node->activation->map->ptr;
 
 	spa_system_close(data->data_system, data->rtwritefd);
 	data->have_transport = false;
@@ -208,16 +206,20 @@ static int client_node_transport(void *_data,
 	}
 
 	node->rt.target.activation = data->activation->ptr;
-	node->rt.position = &node->rt.target.activation->position;
-	node->info.id = node->rt.target.activation->position.clock.id;
-	node->rt.target.id = node->info.id;
+
+	pw_impl_node_set_io(node, SPA_IO_Clock,
+			&node->rt.target.activation->position.clock,
+			sizeof(struct spa_io_clock));
+	pw_impl_node_set_io(node, SPA_IO_Position,
+			&node->rt.target.activation->position,
+			sizeof(struct spa_io_position));
 
 	pw_log_debug("remote-node %p: fds:%d %d node:%u activation:%p",
 		proxy, readfd, writefd, data->remote_id, data->activation->ptr);
 
 	data->rtwritefd = writefd;
-	spa_system_close(data->data_system, node->source.fd);
-	node->source.fd = readfd;
+	spa_system_close(node->rt.target.system, node->source.fd);
+	node->rt.target.fd = node->source.fd = readfd;
 
 	data->have_transport = true;
 
@@ -313,11 +315,25 @@ static int add_port_update(struct node_data *data, struct pw_impl_port *port, ui
 				continue;
 
 			for (idx = 0;;) {
+				struct spa_node *qnode;
+				uint32_t qport;
+
 				spa_pod_dynamic_builder_init(&b, buf, sizeof(buf), 4096);
 
-	                        res = spa_node_port_enum_params_sync(port->node->node,
-							port->direction, port->port_id,
-							id, &idx, NULL, &param, &b.b);
+				switch (id) {
+				case SPA_PARAM_IO:
+					qnode = port->mix;
+					qport = SPA_ID_INVALID;
+					break;
+				default:
+					qnode = port->node->node;
+					qport = port->port_id;
+					break;
+				}
+				res = spa_node_port_enum_params_sync(qnode,
+						port->direction, qport,
+						id, &idx, NULL, &param, &b.b);
+
 				if (res == 1) {
 					void *p;
 					p = pw_reallocarray(params, n_params + 1, sizeof(struct spa_pod*));
@@ -397,6 +413,7 @@ client_node_set_io(void *_data,
 		   uint32_t size)
 {
 	struct node_data *data = _data;
+	struct pw_impl_node *node = data->node;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	struct pw_memmap *old, *mm;
 	void *ptr;
@@ -422,18 +439,7 @@ client_node_set_io(void *_data,
 	pw_log_debug("node %p: set io %s %p", proxy,
 			spa_debug_type_find_name(spa_type_io, id), ptr);
 
-	switch(id) {
-	case SPA_IO_Clock:
-		data->clock = size >= sizeof(*data->clock) ? ptr : NULL;
-		break;
-	case SPA_IO_Position:
-		data->position = size >= sizeof(*data->position) ? ptr : NULL;
-		break;
-	}
-	data->node->driving = data->clock && data->position &&
-		data->position->clock.id == data->clock->id;
-
-	res =  spa_node_set_io(data->node->node, id, ptr, size);
+	res =  pw_impl_node_set_io(node, id, ptr, size);
 
 	pw_memmap_free(old);
 exit:
@@ -455,6 +461,7 @@ static int client_node_event(void *data, const struct spa_event *event)
 static int client_node_command(void *_data, const struct spa_command *command)
 {
 	struct node_data *data = _data;
+	struct pw_impl_node *node = data->node;
 	struct pw_proxy *proxy = (struct pw_proxy*)data->client_node;
 	int res;
 	uint32_t id = SPA_NODE_COMMAND_ID(command);
@@ -464,27 +471,27 @@ static int client_node_command(void *_data, const struct spa_command *command)
 
 	switch (id) {
 	case SPA_NODE_COMMAND_Pause:
-		if ((res = pw_impl_node_set_state(data->node, PW_NODE_STATE_IDLE)) < 0) {
+		if ((res = pw_impl_node_set_state(node, PW_NODE_STATE_IDLE)) < 0) {
 			pw_log_warn("node %p: pause failed", proxy);
 			pw_proxy_error(proxy, res, "pause failed");
 		}
 
 		break;
 	case SPA_NODE_COMMAND_Start:
-		if ((res = pw_impl_node_set_state(data->node, PW_NODE_STATE_RUNNING)) < 0) {
+		if ((res = pw_impl_node_set_state(node, PW_NODE_STATE_RUNNING)) < 0) {
 			pw_log_warn("node %p: start failed", proxy);
 			pw_proxy_error(proxy, res, "start failed");
 		}
 		break;
 
 	case SPA_NODE_COMMAND_Suspend:
-		if ((res = pw_impl_node_set_state(data->node, PW_NODE_STATE_SUSPENDED)) < 0) {
+		if ((res = pw_impl_node_set_state(node, PW_NODE_STATE_SUSPENDED)) < 0) {
 			pw_log_warn("node %p: suspend failed", proxy);
 			pw_proxy_error(proxy, res, "suspend failed");
 		}
 		break;
 	case SPA_NODE_COMMAND_RequestProcess:
-		res = pw_impl_node_send_command(data->node, command);
+		res = pw_impl_node_send_command(node, command);
 		break;
 	default:
 		pw_log_warn("unhandled node command %d (%s)", id,
@@ -524,7 +531,7 @@ static int clear_buffers(struct node_data *data, struct mix *mix)
 	int res;
 
         pw_log_debug("port %p: clear %zd buffers mix:%d", port,
-			pw_array_get_len(&mix->buffers, struct buffer *),
+			pw_array_get_len(&mix->buffers, struct buffer),
 			mix->mix.id);
 
 	if ((res = pw_impl_port_use_buffers(port, &mix->mix, 0, NULL, 0)) < 0) {
@@ -698,14 +705,14 @@ client_node_port_use_buffers(void *_data,
 				d->type = bm->type;
 				d->data = NULL;
 
-				pw_log_debug(" data %d %u -> fd %d maxsize %d",
-						j, bm->id, bm->fd, d->maxsize);
+				pw_log_debug(" data %d %u -> fd %d maxsize %d flags:%08x",
+						j, bm->id, bm->fd, d->maxsize, d->flags);
 			} else if (d->type == SPA_DATA_MemPtr) {
 				int offs = SPA_PTR_TO_INT(d->data);
 				d->data = SPA_PTROFF(mm->ptr, offs, void);
 				d->fd = -1;
-				pw_log_debug(" data %d id:%u -> mem:%p offs:%d maxsize:%d",
-						j, bid->id, d->data, offs, d->maxsize);
+				pw_log_debug(" data %d id:%u -> mem:%p offs:%d maxsize:%d flags:%08x",
+						j, bid->id, d->data, offs, d->maxsize, d->flags);
 			} else {
 				pw_log_warn("unknown buffer data type %d", d->type);
 			}
@@ -950,28 +957,29 @@ static const struct pw_client_node_events client_node_events = {
 
 static void do_node_init(struct node_data *data)
 {
+	struct pw_impl_node *node = data->node;
 	struct pw_impl_port *port;
 	struct mix *mix;
 
-	pw_log_debug("%p: node %p init", data, data->node);
+	pw_log_debug("%p: node %p init", data, node);
 	add_node_update(data, PW_CLIENT_NODE_UPDATE_PARAMS |
 				PW_CLIENT_NODE_UPDATE_INFO,
 				SPA_NODE_CHANGE_MASK_FLAGS |
 				SPA_NODE_CHANGE_MASK_PROPS |
 				SPA_NODE_CHANGE_MASK_PARAMS);
 
-	spa_list_for_each(port, &data->node->input_ports, link) {
+	spa_list_for_each(port, &node->input_ports, link) {
 		mix = create_mix(data, port, SPA_ID_INVALID, SPA_ID_INVALID);
 		if (mix == NULL)
-			pw_log_error("%p: failed to create port mix: %m", data->node);
+			pw_log_error("%p: failed to create port mix: %m", node);
 		add_port_update(data, port,
 				PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 				PW_CLIENT_NODE_PORT_UPDATE_INFO);
 	}
-	spa_list_for_each(port, &data->node->output_ports, link) {
+	spa_list_for_each(port, &node->output_ports, link) {
 		mix = create_mix(data, port, SPA_ID_INVALID, SPA_ID_INVALID);
 		if (mix == NULL)
-			pw_log_error("%p: failed to create port mix: %m", data->node);
+			pw_log_error("%p: failed to create port mix: %m", node);
 		add_port_update(data, port,
 				PW_CLIENT_NODE_PORT_UPDATE_PARAMS |
 				PW_CLIENT_NODE_PORT_UPDATE_INFO);
@@ -1125,21 +1133,22 @@ static const struct pw_impl_node_events node_events = {
 static void client_node_removed(void *_data)
 {
 	struct node_data *data = _data;
+	struct pw_impl_node *node = data->node;
 	pw_log_debug("%p: removed", data);
 
 	spa_hook_remove(&data->proxy_client_node_listener);
 	spa_hook_remove(&data->client_node_listener);
 
-	if (data->node) {
+	if (node) {
 		spa_hook_remove(&data->node_listener);
-		pw_impl_node_remove_rt_listener(data->node,
+		pw_impl_node_remove_rt_listener(node,
 				&data->node_rt_listener);
-		pw_impl_node_set_state(data->node, PW_NODE_STATE_SUSPENDED);
+		pw_impl_node_set_state(node, PW_NODE_STATE_SUSPENDED);
 
 		clean_node(data);
 
 		if (data->do_free)
-			pw_impl_node_destroy(data->node);
+			pw_impl_node_destroy(node);
 	}
 	data->client_node = NULL;
 }

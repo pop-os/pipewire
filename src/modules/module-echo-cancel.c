@@ -249,6 +249,7 @@ static inline void aec_run(struct impl *impl, const float *rec[], const float *p
 {
 	spa_audio_aec_run(impl->aec, rec, play, out, n_samples);
 
+#ifdef HAVE_SPA_PLUGINS
 	if (SPA_UNLIKELY(impl->wav_path[0])) {
 		if (impl->wav_file == NULL) {
 			struct wav_file_info info;
@@ -287,6 +288,7 @@ static inline void aec_run(struct impl *impl, const float *rec[], const float *p
 		wav_file_close(impl->wav_file);
 		impl->wav_file = NULL;
 	}
+#endif
 }
 
 static void process(struct impl *impl)
@@ -524,17 +526,38 @@ static void capture_state_changed(void *data, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
 	struct impl *impl = data;
+	int res;
+
 	switch (state) {
 	case PW_STREAM_STATE_PAUSED:
 		pw_stream_flush(impl->source, false);
 		pw_stream_flush(impl->capture, false);
+
+		if (old == PW_STREAM_STATE_STREAMING) {
+			if (pw_stream_get_state(impl->sink, NULL) != PW_STREAM_STATE_STREAMING) {
+				pw_log_debug("%p: deactivate %s", impl, impl->aec->name);
+				res = spa_audio_aec_deactivate(impl->aec);
+				if (res < 0 && res != -EOPNOTSUPP) {
+					pw_log_error("aec plugin %s deactivate failed: %s", impl->aec->name, spa_strerror(res));
+				}
+			}
+		}
+		break;
+	case PW_STREAM_STATE_STREAMING:
+		if (pw_stream_get_state(impl->sink, NULL) == PW_STREAM_STATE_STREAMING) {
+			pw_log_debug("%p: activate %s", impl, impl->aec->name);
+			res = spa_audio_aec_activate(impl->aec);
+			if (res < 0 && res != -EOPNOTSUPP) {
+				pw_log_error("aec plugin %s activate failed: %s", impl->aec->name, spa_strerror(res));
+			}
+		}
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
-		pw_log_info("%p: input unconnected", impl);
+		pw_log_info("%p: capture unconnected", impl);
 		pw_impl_module_schedule_destroy(impl->module);
 		break;
 	case PW_STREAM_STATE_ERROR:
-		pw_log_info("%p: input error: %s", impl, error);
+		pw_log_info("%p: capture error: %s", impl, error);
 		break;
 	default:
 		break;
@@ -545,34 +568,18 @@ static void source_state_changed(void *data, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
 	struct impl *impl = data;
-	int res;
 
 	switch (state) {
 	case PW_STREAM_STATE_PAUSED:
 		pw_stream_flush(impl->source, false);
 		pw_stream_flush(impl->capture, false);
-
-		if (old == PW_STREAM_STATE_STREAMING) {
-			pw_log_debug("%p: deactivate %s", impl, impl->aec->name);
-			res = spa_audio_aec_deactivate(impl->aec);
-			if (res < 0 && res != -EOPNOTSUPP) {
-				pw_log_error("aec plugin %s deactivate failed: %s", impl->aec->name, spa_strerror(res));
-			}
-		}
-		break;
-	case PW_STREAM_STATE_STREAMING:
-		pw_log_debug("%p: activate %s", impl, impl->aec->name);
-		res = spa_audio_aec_activate(impl->aec);
-		if (res < 0 && res != -EOPNOTSUPP) {
-			pw_log_error("aec plugin %s activate failed: %s", impl->aec->name, spa_strerror(res));
-		}
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
-		pw_log_info("%p: input unconnected", impl);
+		pw_log_info("%p: source unconnected", impl);
 		pw_impl_module_schedule_destroy(impl->module);
 		break;
 	case PW_STREAM_STATE_ERROR:
-		pw_log_info("%p: input error: %s", impl, error);
+		pw_log_info("%p: source error: %s", impl, error);
 		break;
 	default:
 		break;
@@ -677,10 +684,34 @@ static int set_params(struct impl* impl, const struct spa_pod *params)
 	return 1;
 }
 
+static void props_changed(struct impl* impl, const struct spa_pod *param)
+{
+	uint8_t buffer[1024];
+	struct spa_pod_dynamic_builder b;
+	const struct spa_pod* params[1];
+	const struct spa_pod_prop* prop;
+	struct spa_pod_object* obj = (struct spa_pod_object*)param;
+
+	if (param == NULL)
+		return;
+
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		if (prop->key == SPA_PROP_params)
+			set_params(impl, &prop->value);
+	}
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
+	params[0] = get_props_param(impl, &b.b);
+	if (params[0]) {
+		pw_stream_update_params(impl->capture, params, 1);
+		if (impl->playback != NULL)
+			pw_stream_update_params(impl->playback, params, 1);
+	}
+	spa_pod_dynamic_builder_clean(&b);
+}
+
 static void input_param_changed(void *data, uint32_t id, const struct spa_pod* param)
 {
-	struct spa_pod_object* obj = (struct spa_pod_object*)param;
-	const struct spa_pod_prop* prop;
 	struct impl* impl = data;
 
 	switch (id) {
@@ -692,27 +723,7 @@ static void input_param_changed(void *data, uint32_t id, const struct spa_pod* p
 		input_param_latency_changed(impl, param);
 		break;
 	case SPA_PARAM_Props:
-		if (param != NULL) {
-			uint8_t buffer[1024];
-			struct spa_pod_dynamic_builder b;
-			const struct spa_pod* params[1];
-
-			SPA_POD_OBJECT_FOREACH(obj, prop) {
-				if (prop->key == SPA_PROP_params)
-					set_params(impl, &prop->value);
-			}
-
-			spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
-			params[0] = get_props_param(impl, &b.b);
-			if (params[0]) {
-				pw_stream_update_params(impl->capture, params, 1);
-				if (impl->playback != NULL)
-					pw_stream_update_params(impl->playback, params, 1);
-			}
-			spa_pod_dynamic_builder_clean(&b);
-		} else {
-			pw_log_warn("param is null");
-		}
+		props_changed(impl, param);
 		break;
 	}
 }
@@ -739,7 +750,7 @@ static const struct pw_stream_events source_events = {
 	.param_changed = input_param_changed
 };
 
-static void output_state_changed(void *data, enum pw_stream_state old,
+static void playback_state_changed(void *data, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
 	struct impl *impl = data;
@@ -753,11 +764,55 @@ static void output_state_changed(void *data, enum pw_stream_state old,
 		}
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
-		pw_log_info("%p: output unconnected", impl);
+		pw_log_info("%p: playback unconnected", impl);
 		pw_impl_module_schedule_destroy(impl->module);
 		break;
 	case PW_STREAM_STATE_ERROR:
-		pw_log_info("%p: output error: %s", impl, error);
+		pw_log_info("%p: playback error: %s", impl, error);
+		break;
+	default:
+		break;
+	}
+}
+
+static void sink_state_changed(void *data, enum pw_stream_state old,
+		enum pw_stream_state state, const char *error)
+{
+	struct impl *impl = data;
+	int res;
+
+	switch (state) {
+	case PW_STREAM_STATE_PAUSED:
+		pw_stream_flush(impl->sink, false);
+		if (impl->playback != NULL)
+			pw_stream_flush(impl->playback, false);
+		if (old == PW_STREAM_STATE_STREAMING) {
+			impl->current_delay = 0;
+
+			if (pw_stream_get_state(impl->capture, NULL) != PW_STREAM_STATE_STREAMING) {
+				pw_log_debug("%p: deactivate %s", impl, impl->aec->name);
+				res = spa_audio_aec_deactivate(impl->aec);
+				if (res < 0 && res != -EOPNOTSUPP) {
+					pw_log_error("aec plugin %s deactivate failed: %s", impl->aec->name, spa_strerror(res));
+				}
+			}
+		}
+		break;
+	case PW_STREAM_STATE_STREAMING:
+		if (pw_stream_get_state(impl->capture, NULL) == PW_STREAM_STATE_STREAMING) {
+			pw_log_debug("%p: activate %s", impl, impl->aec->name);
+			res = spa_audio_aec_activate(impl->aec);
+			if (res < 0 && res != -EOPNOTSUPP) {
+				pw_log_error("aec plugin %s activate failed: %s", impl->aec->name, spa_strerror(res));
+			}
+		}
+		break;
+	case PW_STREAM_STATE_UNCONNECTED:
+		pw_log_info("%p: sink unconnected", impl);
+		pw_impl_module_schedule_destroy(impl->module);
+		break;
+	case PW_STREAM_STATE_ERROR:
+		pw_log_info("%p: sink error: %s", impl, error);
 		break;
 	default:
 		break;
@@ -785,8 +840,6 @@ static void output_param_latency_changed(struct impl *impl, const struct spa_pod
 
 static void output_param_changed(void *data, uint32_t id, const struct spa_pod *param)
 {
-	struct spa_pod_object *obj = (struct spa_pod_object *) param;
-	const struct spa_pod_prop *prop;
 	struct impl *impl = data;
 
 	switch (id) {
@@ -798,26 +851,7 @@ static void output_param_changed(void *data, uint32_t id, const struct spa_pod *
 		output_param_latency_changed(impl, param);
 		break;
 	case SPA_PARAM_Props:
-		if (param != NULL) {
-			uint8_t buffer[1024];
-			struct spa_pod_dynamic_builder b;
-			const struct spa_pod* params[1];
-
-			SPA_POD_OBJECT_FOREACH(obj, prop)
-			{
-				if (prop->key == SPA_PROP_params) {
-					spa_audio_aec_set_params(impl->aec, &prop->value);
-				}
-			}
-			spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
-			params[0] = get_props_param(impl, &b.b);
-			if (params[0] != NULL) {
-				pw_stream_update_params(impl->capture, params, 1);
-				if (impl->playback != NULL)
-					pw_stream_update_params(impl->playback, params, 1);
-			}
-			spa_pod_dynamic_builder_clean(&b);
-		}
+		props_changed(impl, param);
 		break;
 	}
 }
@@ -904,23 +938,25 @@ static void playback_destroy(void *d)
 static const struct pw_stream_events playback_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = playback_destroy,
-	.state_changed = output_state_changed,
+	.state_changed = playback_state_changed,
 	.param_changed = output_param_changed
 };
 static const struct pw_stream_events sink_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = sink_destroy,
 	.process = sink_process,
-	.state_changed = output_state_changed,
+	.state_changed = sink_state_changed,
 	.param_changed = output_param_changed
 };
+
+#define MAX_PARAMS	512u
 
 static int setup_streams(struct impl *impl)
 {
 	int res;
 	uint32_t n_params, i;
-	uint32_t offsets[512];
-	const struct spa_pod *params[512];
+	uint32_t offsets[MAX_PARAMS];
+	const struct spa_pod *params[MAX_PARAMS];
 	struct spa_pod_dynamic_builder b;
 
 	impl->capture = pw_stream_new(impl->core,
@@ -970,15 +1006,28 @@ static int setup_streams(struct impl *impl)
 	n_params = 0;
 	spa_pod_dynamic_builder_init(&b, NULL, 0, 4096);
 
-	offsets[n_params++] = b.b.state.offset;
-	spa_format_audio_raw_build(&b.b, SPA_PARAM_EnumFormat, &impl->capture_info);
-
+	if (n_params < MAX_PARAMS) {
+		offsets[n_params++] = b.b.state.offset;
+		spa_format_audio_raw_build(&b.b, SPA_PARAM_EnumFormat, &impl->capture_info);
+	}
 	int nbr_of_external_props = spa_audio_aec_enum_props(impl->aec, 0, NULL);
-	if (nbr_of_external_props > 0) {
-		for (int i = 0; i < nbr_of_external_props; i++) {
+	for (int i = 0; i < nbr_of_external_props; i++) {
+		if (n_params < MAX_PARAMS) {
 			offsets[n_params++] = b.b.state.offset;
 			spa_audio_aec_enum_props(impl->aec, i, &b.b);
 		}
+	}
+	if (n_params < MAX_PARAMS) {
+		offsets[n_params++] = b.b.state.offset;
+		spa_pod_builder_add_object(&b.b,
+                                SPA_TYPE_OBJECT_PropInfo, SPA_PARAM_PropInfo,
+                                SPA_PROP_INFO_name, SPA_POD_String("debug.aec.wav-path"),
+                                SPA_PROP_INFO_description, SPA_POD_String("Path to WAV file"),
+                                SPA_PROP_INFO_type, SPA_POD_String(impl->wav_path),
+                                SPA_PROP_INFO_params, SPA_POD_Bool(true));
+	}
+	if (n_params < MAX_PARAMS) {
+		offsets[n_params++] = b.b.state.offset;
 		get_props_param(impl, &b.b);
 	}
 

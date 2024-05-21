@@ -71,6 +71,7 @@ struct port {
 	struct impl *impl;
 
 	bool alloc_buffers;
+	bool probed_expbuf;
 	bool have_expbuf;
 
 	bool next_fmtdesc;
@@ -81,7 +82,6 @@ struct port {
 
 	bool have_format;
 	struct spa_video_info current_format;
-	struct spa_fraction rate;
 
 	struct spa_v4l2_device dev;
 
@@ -695,11 +695,19 @@ static int port_set_format(struct impl *this, struct port *port,
     done:
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+	port->params[PORT_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 	if (port->have_format) {
+		uint64_t latency;
+		latency = port->info.rate.num * SPA_NSEC_PER_SEC / port->info.rate.denom;
+		this->latency[SPA_DIRECTION_OUTPUT] =
+			SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT,
+					.min_ns = latency,
+					.max_ns = latency);
 		port->params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
 		port->params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
 		this->params[NODE_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READ);
 	} else {
+		this->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 		port->params[PORT_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 		port->params[PORT_Buffers] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 		this->params[NODE_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, 0);
@@ -715,7 +723,7 @@ static int impl_node_port_set_param(void *object,
 				    uint32_t id, uint32_t flags,
 				    const struct spa_pod *param)
 {
-	int res;
+	int res = 0;
 	struct impl *this = object;
 	struct port *port;
 
@@ -1020,8 +1028,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = N_PORT_PARAMS;
 
-	port->alloc_buffers = true;
-	port->have_expbuf = true;
+	port->probed_expbuf = false;
 	port->have_query_ext_ctrl = true;
 	port->dev.log = this->log;
 	port->dev.fd = -1;

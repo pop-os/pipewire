@@ -34,6 +34,7 @@
 
 #include "module-netjack2/packets.h"
 #include "module-netjack2/peer.c"
+#include "network-utils.h"
 
 #ifndef IPTOS_DSCP
 #define IPTOS_DSCP_MASK 0xfc
@@ -416,7 +417,7 @@ static void make_stream_ports(struct stream *s)
 
 		if (i < s->info.channels) {
 			str = spa_debug_type_find_short_name(spa_type_audio_channel,
-					s->info.position[i]);
+					s->info.position[i % SPA_AUDIO_MAX_CHANNELS]);
 			if (str)
 				snprintf(name, sizeof(name), "%s_%s", prefix, str);
 			else
@@ -606,12 +607,16 @@ static int create_filters(struct impl *impl)
 	return res;
 }
 
-
-static inline uint64_t get_time_ns(void)
+static inline uint64_t get_time_nsec(struct impl *impl)
 {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return SPA_TIMESPEC_TO_NSEC(&ts);
+	uint64_t nsec;
+	if (impl->sink.filter)
+		nsec = pw_filter_get_nsec(impl->sink.filter);
+	else if (impl->source.filter)
+		nsec = pw_filter_get_nsec(impl->source.filter);
+	else
+		nsec = 0;
+	return nsec;
 }
 
 static void
@@ -633,7 +638,7 @@ on_data_io(void *data, int fd, uint32_t mask)
 		if (nframes == 0)
 			return;
 
-		nsec = get_time_ns();
+		nsec = get_time_nsec(impl);
 
 		if (!impl->done) {
 			impl->pw_xrun++;
@@ -687,26 +692,6 @@ on_data_io(void *data, int fd, uint32_t mask)
 		if (!sink_running)
 			netjack2_send_data(&impl->peer, nframes, NULL, 0, NULL, 0);
 	}
-}
-
-static int parse_address(const char *address, uint16_t port,
-		struct sockaddr_storage *addr, socklen_t *len)
-{
-	struct sockaddr_in *sa4 = (struct sockaddr_in*)addr;
-	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)addr;
-
-	if (inet_pton(AF_INET, address, &sa4->sin_addr) > 0) {
-		sa4->sin_family = AF_INET;
-		sa4->sin_port = htons(port);
-		*len = sizeof(*sa4);
-	} else if (inet_pton(AF_INET6, address, &sa6->sin6_addr) > 0) {
-		sa6->sin6_family = AF_INET6;
-		sa6->sin6_port = htons(port);
-		*len = sizeof(*sa6);
-	} else
-		return -EINVAL;
-
-	return 0;
 }
 
 static bool is_multicast(struct sockaddr *sa, socklen_t salen)
@@ -777,19 +762,6 @@ error:
 	return res;
 }
 
-static const char *get_ip(const struct sockaddr_storage *sa, char *ip, size_t len)
-{
-	if (sa->ss_family == AF_INET) {
-		struct sockaddr_in *in = (struct sockaddr_in*)sa;
-		inet_ntop(sa->ss_family, &in->sin_addr, ip, len);
-	} else if (sa->ss_family == AF_INET6) {
-		struct sockaddr_in6 *in = (struct sockaddr_in6*)sa;
-		inet_ntop(sa->ss_family, &in->sin6_addr, ip, len);
-	} else
-		snprintf(ip, len, "invalid ip");
-	return ip;
-}
-
 static void update_timer(struct impl *impl, uint64_t timeout)
 {
 	struct timespec value, interval;
@@ -819,6 +791,7 @@ static int handle_follower_setup(struct impl *impl, struct nj2_session_params *p
 {
 	int res;
 	struct netjack2_peer *peer = &impl->peer;
+	uint32_t i;
 
 	pw_log_info("got follower setup");
 	nj2_dump_session_params(params);
@@ -842,10 +815,18 @@ static int handle_follower_setup(struct impl *impl, struct nj2_session_params *p
 
 	impl->source.n_ports = peer->params.send_audio_channels + peer->params.send_midi_channels;
 	impl->source.info.rate =  peer->params.sample_rate;
-	impl->source.info.channels =  peer->params.send_audio_channels;
+	if ((uint32_t)peer->params.send_audio_channels != impl->source.info.channels) {
+		impl->source.info.channels = peer->params.send_audio_channels;
+		for (i = 0; i < SPA_MIN(impl->source.info.channels, SPA_AUDIO_MAX_CHANNELS); i++)
+			impl->source.info.position[i] = SPA_AUDIO_CHANNEL_AUX0 + i;
+	}
 	impl->sink.n_ports = peer->params.recv_audio_channels + peer->params.recv_midi_channels;
 	impl->sink.info.rate =  peer->params.sample_rate;
-	impl->sink.info.channels =  peer->params.recv_audio_channels;
+	if ((uint32_t)peer->params.recv_audio_channels != impl->sink.info.channels) {
+		impl->sink.info.channels =  peer->params.recv_audio_channels;
+		for (i = 0; i < SPA_MIN(impl->sink.info.channels, SPA_AUDIO_MAX_CHANNELS); i++)
+			impl->sink.info.position[i] = SPA_AUDIO_CHANNEL_AUX0 + i;
+	}
 	impl->samplerate = peer->params.sample_rate;
 	impl->period_size = peer->params.period_size;
 
@@ -920,7 +901,7 @@ on_socket_io(void *data, int fd, uint32_t mask)
 		if (len < (int)sizeof(struct nj2_session_params))
 			goto short_packet;
 
-		if (strcmp(params.type, "params") != 0)
+		if (strncmp(params.type, "params", sizeof(params.type)) != 0)
 			goto wrong_type;
 
 		switch(ntohl(params.packet_id)) {
@@ -950,7 +931,7 @@ static int send_follower_available(struct impl *impl)
 
 	pw_loop_update_io(impl->main_loop, impl->setup_socket, SPA_IO_IN);
 
-	pw_log_info("sending AVAILABLE to %s", get_ip(&impl->dst_addr, buffer, sizeof(buffer)));
+	pw_log_info("sending AVAILABLE to %s", pw_net_get_ip_fmt(&impl->dst_addr, buffer, sizeof(buffer)));
 
 	client_name = pw_properties_get(impl->props, "netjack2.client-name");
 	if (client_name == NULL)
@@ -987,11 +968,11 @@ static int create_netjack2_socket(struct impl *impl)
 		port = DEFAULT_NET_PORT;
 	if ((str = pw_properties_get(impl->props, "net.ip")) == NULL)
 		str = DEFAULT_NET_IP;
-	if ((res = parse_address(str, port, &impl->dst_addr, &impl->dst_len)) < 0) {
+	if ((res = pw_net_parse_address(str, port, &impl->dst_addr, &impl->dst_len)) < 0) {
 		pw_log_error("invalid net.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}
-	if ((res = parse_address("0.0.0.0", 0, &impl->src_addr, &impl->src_len)) < 0) {
+	if ((res = pw_net_parse_address("0.0.0.0", 0, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid source.ip: %s", spa_strerror(res));
 		goto out;
 	}
@@ -1143,6 +1124,9 @@ static void impl_destroy(struct impl *impl)
 	if (impl->timer)
 		pw_loop_destroy_source(impl->main_loop, impl->timer);
 
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
+
 	pw_properties_free(impl->sink.props);
 	pw_properties_free(impl->source.props);
 	pw_properties_free(impl->props);
@@ -1219,7 +1203,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props = NULL;
-	struct pw_data_loop *data_loop;
 	struct impl *impl;
 	const char *str;
 	int res;
@@ -1229,6 +1212,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl = calloc(1, sizeof(struct impl));
 	if (impl == NULL)
 		return -errno;
+
+	impl->module = module;
+	impl->context = context;
 
 	pw_log_debug("module %p: new %s", impl, args);
 
@@ -1242,8 +1228,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 	impl->props = props;
-	data_loop = pw_context_get_data_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(data_loop);
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
 	impl->quantum_limit = pw_properties_get_uint32(
 			pw_context_get_properties(context),
 			"default.clock.quantum-limit", 8192u);
@@ -1256,8 +1241,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 
-	impl->module = module;
-	impl->context = context;
 	impl->main_loop = pw_context_get_main_loop(context);
 	impl->system = impl->main_loop->system;
 
@@ -1283,6 +1266,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->latency = pw_properties_get_uint32(impl->props, "netjack2.latency",
 			DEFAULT_NETWORK_LATENCY);
 
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
@@ -1303,6 +1287,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "source.props")) != NULL)
 		pw_properties_update_string(impl->source.props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_NODE_ALWAYS_PROCESS);

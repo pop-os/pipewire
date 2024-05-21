@@ -35,7 +35,7 @@ struct impl_data {
 	std::unique_ptr<float *[]> play_buffer, rec_buffer, out_buffer;
 };
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.eac.webrtc");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.eac.webrtc");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
@@ -292,7 +292,7 @@ static int webrtc_run(void *object, const float *rec[], const float *play[], flo
 }
 
 static const struct spa_audio_aec_methods impl_aec = {
-	SPA_VERSION_AUDIO_AEC_METHODS,
+	.version = SPA_VERSION_AUDIO_AEC_METHODS,
 	.add_listener = NULL,
 	.init = webrtc_init,
 	.run = webrtc_run,
@@ -390,6 +390,10 @@ static const struct spa_handle_factory spa_aec_webrtc_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
+
+extern "C" {
+SPA_LOG_TOPIC_ENUM_DEFINE_REGISTERED;
+}
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)

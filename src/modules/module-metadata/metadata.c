@@ -37,7 +37,7 @@ struct resource_data {
 	pw_resource_call_res(r,struct pw_metadata_events,m,v,__VA_ARGS__)
 
 #define pw_metadata_resource_property(r,...)        \
-        pw_metadata_resource(r,property,0,__VA_ARGS__)
+	pw_metadata_resource(r,property,0,__VA_ARGS__)
 
 static int metadata_property(void *data,
 			uint32_t subject,
@@ -51,7 +51,9 @@ static int metadata_property(void *data,
 	struct impl *impl = d->impl;
 
 	if (impl->pending == 0 || d->pong_seq != 0) {
-		if (pw_impl_client_check_permissions(client, subject, PW_PERM_R) >= 0)
+		int res = pw_impl_client_check_permissions(client, subject, PW_PERM_R);
+		if (res >= 0 ||
+		    (res == -ENOENT && key == NULL && type == NULL && value == NULL))
 			pw_metadata_resource_property(d->resource, subject, key, type, value);
 	}
 	return 0;
@@ -147,31 +149,31 @@ static const struct pw_resource_events impl_resource_events = {
 
 static int
 global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
-            uint32_t version, uint32_t id)
+		uint32_t version, uint32_t id)
 {
 	struct impl *impl = object;
 	struct pw_resource *resource;
 	struct resource_data *data;
 
 	resource = pw_resource_new(client, id, permissions, PW_TYPE_INTERFACE_Metadata, version, sizeof(*data));
-        if (resource == NULL)
-                return -errno;
+	if (resource == NULL)
+		return -errno;
 
-        data = pw_resource_get_user_data(resource);
-        data->impl = impl;
-        data->resource = resource;
+	data = pw_resource_get_user_data(resource);
+	data->impl = impl;
+	data->resource = resource;
 
 	pw_global_add_resource(impl->global, resource);
 
 	/* listen for when the resource goes away */
-        pw_resource_add_listener(resource,
-                        &data->resource_listener,
-                        &resource_events, data);
+	pw_resource_add_listener(resource,
+			&data->resource_listener,
+			&resource_events, data);
 
 	/* resource methods -> implementation */
 	pw_resource_add_object_listener(resource,
 			&data->object_listener,
-                        &metadata_methods, data);
+			&metadata_methods, data);
 
 	pw_impl_client_set_busy(client, true);
 
@@ -182,7 +184,7 @@ global_bind(void *object, struct pw_impl_client *client, uint32_t permissions,
 
 	pw_resource_add_listener(impl->resource,
 			&data->impl_resource_listener,
-                        &impl_resource_events, data);
+			&impl_resource_events, data);
 
 	data->pong_seq = pw_resource_ping(impl->resource, data->pong_seq);
 	impl->pending++;
@@ -208,6 +210,8 @@ static const struct pw_global_events global_events = {
 static void context_global_removed(void *data, struct pw_global *global)
 {
 	struct impl *impl = data;
+	pw_log_trace("Clearing properties for global %u in %u",
+				 pw_global_get_id(global), pw_global_get_id(impl->global));
 	pw_metadata_set_property(impl->metadata,
 			pw_global_get_id(global), NULL, NULL, NULL);
 }

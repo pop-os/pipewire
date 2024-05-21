@@ -57,6 +57,32 @@ static inline int memfd_create(const char *name, unsigned int flags)
 #define MFD_ALLOW_SEALING 0x0002U
 #endif
 
+#ifndef MFD_HUGETLB
+#define MFD_HUGETLB 0x0004U
+#endif
+
+#ifndef MFD_NOEXEC_SEAL
+#define MFD_NOEXEC_SEAL 0x0008U
+#endif
+
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+
+#ifdef HAVE_MEMFD_CREATE
+static int pw_memfd_create(const char *name, unsigned int flags)
+{
+	int res;
+
+	res = memfd_create(name, flags);
+
+	if (res == -1 && errno == EINVAL && flags & MFD_NOEXEC_SEAL)
+		res = memfd_create(name, flags & ~MFD_NOEXEC_SEAL);
+
+	return res;
+}
+#endif
+
 /* fcntl() seals-related flags */
 
 #ifndef F_LINUX_SPECIFIC_BASE
@@ -78,6 +104,9 @@ static inline int memfd_create(const char *name, unsigned int flags)
 #define pw_mempool_emit_added(p,b)	pw_mempool_emit(p, added, 0, b)
 #define pw_mempool_emit_removed(p,b)	pw_mempool_emit(p, removed, 0, b)
 
+#define memblock_emit(b,m,v,...) spa_hook_list_call(&b->listener_list, struct memblock_events, m, v, ##__VA_ARGS__)
+#define memblock_emit_invalidated(b)	memblock_emit(b, invalidated, 0)
+
 struct mempool {
 	struct pw_mempool this;
 
@@ -93,6 +122,15 @@ struct memblock {
 	struct spa_list link;		/* link in mempool */
 	struct spa_list mappings;	/* list of struct mapping */
 	struct spa_list memmaps;	/* list of struct memmap */
+	struct memblock *owner;		/* owner of fd, if another memblock */
+	struct spa_hook owner_listener;	/* listen for fd owner memblock events */
+	struct spa_hook_list listener_list;
+};
+
+struct memblock_events {
+#define VERSION_MEMBLOCK_EVENTS	0
+	uint32_t version;
+	void (*invalidated) (void *data);
 };
 
 /* a mapped region of a block */
@@ -285,6 +323,16 @@ static struct mapping * memblock_map(struct memblock *b,
 		return NULL;
 	}
 
+	if ((b->this.flags & PW_MEMBLOCK_FLAG_UNMAPPABLE)) {
+		pw_log_error("%p: block:%p can't be mmaped", p, &b->this);
+		errno = EPERM;
+		return NULL;
+	}
+	if (b->this.fd == -1) {
+		pw_log_error("%p: block:%p cannot map memory with stale fd", p, b);
+		errno = EINVAL;
+		return NULL;
+	}
 
 	ptr = mmap(NULL, size, prot, fl, b->this.fd, offset);
 	if (ptr == MAP_FAILED) {
@@ -306,8 +354,8 @@ static struct mapping * memblock_map(struct memblock *b,
 	b->this.ref++;
 	spa_list_append(&b->mappings, &m->link);
 
-        pw_log_debug("%p: block:%p fd:%d map:%p ptr:%p (%u %u) block-ref:%d", p, &b->this,
-			b->this.fd, m, m->ptr, offset, size, b->this.ref);
+        pw_log_debug("%p: block:%p fd:%d flags:%08x map:%p ptr:%p (%u %u) block-ref:%d", p, &b->this,
+			b->this.fd, b->this.flags, m, m->ptr, offset, size, b->this.ref);
 
 	return m;
 }
@@ -347,6 +395,12 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 	struct pw_map_range range;
 	struct stat sb;
 
+	if (b->this.fd == -1) {
+		pw_log_error("%p: block:%p cannot map memory with stale fd", p, block);
+		errno = EINVAL;
+		return NULL;
+	}
+
 	if (fstat(b->this.fd, &sb) != 0)
 		return NULL;
 
@@ -359,7 +413,7 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 		(int64_t) sb.st_size);
 
 	if (!valid) {
-		errno = -EINVAL;
+		errno = EINVAL;
 		return NULL;
 	}
 
@@ -386,8 +440,8 @@ struct pw_memmap * pw_memblock_map(struct pw_memblock *block,
 	mm->this.size = size;
 	mm->this.ptr = SPA_PTROFF(m->ptr, range.start, void);
 
-        pw_log_debug("%p: map:%p block:%p fd:%d ptr:%p (%u %u) mapping:%p ref:%d", p,
-			&mm->this, b, b->this.fd, mm->this.ptr, offset, size, m, m->ref);
+        pw_log_debug("%p: map:%p block:%p fd:%d flags:%08x ptr:%p (%u %u) mapping:%p ref:%d", p,
+			&mm->this, b, b->this.fd, b->this.flags, mm->this.ptr, offset, size, m, m->ref);
 
 	if (tag) {
 		memcpy(mm->this.tag, tag, sizeof(mm->this.tag));
@@ -475,6 +529,12 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 	if (b == NULL)
 		return NULL;
 
+	if (type != SPA_DATA_MemFd) {
+		res = -ENOTSUP;
+		pw_log_error("%p: alloc failure: only MemFd is supported", pool);
+		goto error_free;
+	}
+
 	b->this.ref = 1;
 	b->this.pool = pool;
 	b->this.flags = flags;
@@ -482,6 +542,7 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 	b->this.size = size;
 	spa_list_init(&b->mappings);
 	spa_list_init(&b->memmaps);
+	spa_hook_list_init(&b->listener_list);
 
 #ifdef HAVE_MEMFD_CREATE
 	char name[128];
@@ -489,7 +550,7 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 		 "pipewire-memfd:flags=0x%08x,type=%" PRIu32 ",size=%zu",
 		 (unsigned int) flags, type, size);
 
-	b->this.fd = memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	b->this.fd = pw_memfd_create(name, MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
 	if (b->this.fd == -1) {
 		res = -errno;
 		pw_log_error("%p: Failed to create memfd: %m", pool);
@@ -544,8 +605,8 @@ struct pw_memblock * pw_mempool_alloc(struct pw_mempool *pool, enum pw_memblock_
 
 	b->this.id = pw_map_insert_new(&impl->map, b);
 	spa_list_append(&impl->blocks, &b->link);
-	pw_log_debug("%p: block:%p id:%d type:%u size:%zu", pool,
-			&b->this, b->this.id, type, size);
+	pw_log_debug("%p: block:%p id:%d type:%u flags:%08x size:%zu", pool,
+			&b->this, b->this.id, type, flags, size);
 
 	if (!SPA_FLAG_IS_SET(flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
 		pw_mempool_emit_added(impl, &b->this);
@@ -567,6 +628,9 @@ static struct memblock * mempool_find_fd(struct pw_mempool *pool, int fd)
 	struct memblock *b;
 
 	spa_list_for_each(b, &impl->blocks, link) {
+		if (b->this.fd == -1)
+			continue;
+
 		if (fd == b->this.fd) {
 			pw_log_debug("%p: found %p id:%u fd:%d ref:%d",
 					pool, &b->this, b->this.id, fd, b->this.ref);
@@ -583,6 +647,12 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	struct mempool *impl = SPA_CONTAINER_OF(pool, struct mempool, this);
 	struct memblock *b;
 
+	if (fd < 0) {
+		pw_log_error("%p: cannot import invalid fd:%d", pool, fd);
+		errno = EINVAL;
+		return NULL;
+	}
+
 	b = mempool_find_fd(pool, fd);
 	if (b != NULL) {
 		b->this.ref++;
@@ -595,6 +665,7 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 
 	spa_list_init(&b->memmaps);
 	spa_list_init(&b->mappings);
+	spa_hook_list_init(&b->listener_list);
 
 	b->this.ref = 1;
 	b->this.pool = pool;
@@ -605,7 +676,7 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	spa_list_append(&impl->blocks, &b->link);
 
 	pw_log_debug("%p: block:%p id:%u flags:%08x type:%u fd:%d",
-			pool, b, b->this.id, flags, type, fd);
+			pool, &b->this, b->this.id, flags, type, fd);
 
 	if (!SPA_FLAG_IS_SET(flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
 		pw_mempool_emit_added(impl, &b->this);
@@ -613,15 +684,57 @@ struct pw_memblock * pw_mempool_import(struct pw_mempool *pool,
 	return &b->this;
 }
 
+static void memblock_invalidated(void *data)
+{
+	struct memblock *b = data;
+
+	if (!b->owner)
+		return;
+
+	pw_log_debug("%p: invalidated block:%p id:%u fd:%d ref:%d owner:%p",
+			b->this.pool, b, b->this.id, b->this.fd, b->this.ref, b->owner);
+
+	spa_hook_remove(&b->owner_listener);
+	b->owner = NULL;
+
+	b->this.fd = -1;
+}
+
+static const struct memblock_events memblock_events = {
+	VERSION_MEMBLOCK_EVENTS,
+	.invalidated = memblock_invalidated,
+};
+
 SPA_EXPORT
 struct pw_memblock * pw_mempool_import_block(struct pw_mempool *pool,
 		struct pw_memblock *mem)
 {
-	pw_log_debug("%p: import block:%p type:%d fd:%d", pool,
-			mem, mem->type, mem->fd);
-	return pw_mempool_import(pool,
+	struct pw_memblock *block;
+	struct memblock *b;
+
+	block = pw_mempool_import(pool,
 			mem->flags | PW_MEMBLOCK_FLAG_DONT_CLOSE,
 			mem->type, mem->fd);
+	if (!block)
+		return NULL;
+
+	pw_log_debug("%p: import block:%p flags:%08x type:%d fd:%d as %p", pool,
+			mem, mem->flags, mem->type, mem->fd, block);
+
+	b = SPA_CONTAINER_OF(block, struct memblock, this);
+	if (!b->owner) {
+		struct memblock *bmem = SPA_CONTAINER_OF(mem, struct memblock, this);
+
+		while (bmem->owner)
+			bmem = bmem->owner;
+
+		if (!(bmem->this.flags & PW_MEMBLOCK_FLAG_DONT_CLOSE)) {
+			b->owner = bmem;
+			spa_hook_list_append(&bmem->listener_list, &b->owner_listener, &memblock_events, b);
+		}
+	}
+
+	return block;
 }
 
 SPA_EXPORT
@@ -725,6 +838,13 @@ void pw_memblock_free(struct pw_memblock *block)
 	if (!SPA_FLAG_IS_SET(block->flags, PW_MEMBLOCK_FLAG_DONT_NOTIFY))
 		pw_mempool_emit_removed(impl, block);
 
+	if (b->owner) {
+		spa_hook_remove(&b->owner_listener);
+		b->owner = NULL;
+	}
+
+	memblock_emit_invalidated(b);
+
 	spa_list_consume(mm, &b->memmaps, link)
 		pw_memmap_free(&mm->this);
 
@@ -737,6 +857,9 @@ void pw_memblock_free(struct pw_memblock *block)
 		pw_log_debug("%p: close fd:%d", pool, block->fd);
 		close(block->fd);
 	}
+
+	spa_hook_list_clean(&b->listener_list);
+
 	free(b);
 }
 

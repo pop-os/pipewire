@@ -37,7 +37,7 @@
 
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.audioconvert");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioconvert");
 
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
@@ -151,6 +151,7 @@ struct port {
 	unsigned int have_latency:1;
 
 	struct spa_audio_info format;
+	unsigned int valid:1;
 	unsigned int have_format:1;
 	unsigned int is_dsp:1;
 	unsigned int is_monitor:1;
@@ -237,6 +238,7 @@ struct impl {
 	unsigned int drained:1;
 	unsigned int rate_adjust:1;
 	unsigned int port_ignore_latency:1;
+	unsigned int monitor_passthrough:1;
 
 	uint32_t scratch_size;
 	uint32_t scratch_ports;
@@ -370,6 +372,7 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 		port->blocks = 1;
 		port->stride = 1;
 	}
+	port->valid = true;
 	spa_list_init(&port->queue);
 
 	spa_log_debug(this->log, "%p: add port %d:%d position:%s %d %d %d",
@@ -377,6 +380,16 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 			is_monitor, is_control);
 	emit_port_info(this, port, true);
 
+	return 0;
+}
+
+static int deinit_port(struct impl *this, enum spa_direction direction, uint32_t port_id)
+{
+	struct port *port = GET_PORT(this, direction, port_id);
+	if (port == NULL || !port->valid)
+		return -ENOENT;
+	port->valid = false;
+	spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 	return 0;
 }
 
@@ -1274,9 +1287,9 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 			control, mode, dir->n_ports);
 
 	for (i = 0; i < dir->n_ports; i++) {
-		spa_node_emit_port_info(&this->hooks, direction, i, NULL);
+		deinit_port(this, direction, i);
 		if (this->monitor && direction == SPA_DIRECTION_INPUT)
-			spa_node_emit_port_info(&this->hooks, SPA_DIRECTION_OUTPUT, i+1, NULL);
+			deinit_port(this, SPA_DIRECTION_OUTPUT, i+1);
 	}
 
 	this->monitor = monitor;
@@ -1325,6 +1338,11 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 		i = dir->n_ports++;
 		init_port(this, direction, i, 0, false, false, true);
 	}
+	/* when output is convert mode, we are in OUTPUT (merge) mode, we always output all
+	 * the incomming data to output. When output is DSP, we need to output quantum size
+	 * chunks. */
+	this->direction = this->dir[SPA_DIRECTION_OUTPUT].mode == SPA_PARAM_PORT_CONFIG_MODE_convert ?
+		SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS | SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info.flags &= ~SPA_NODE_FLAG_NEED_CONFIGURE;
@@ -1813,10 +1831,56 @@ static int ensure_tmp(struct impl *this, uint32_t maxsize, uint32_t maxports)
 	return 0;
 }
 
+static uint32_t resample_update_rate_match(struct impl *this, bool passthrough, uint32_t size, uint32_t queued)
+{
+	uint32_t delay, match_size;
+
+	if (passthrough) {
+		delay = 0;
+		match_size = size;
+	} else {
+		double rate = this->rate_scale / this->props.rate;
+		if (this->io_rate_match &&
+		    SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
+			rate *= this->io_rate_match->rate;
+		resample_update_rate(&this->resample, rate);
+		delay = resample_delay(&this->resample);
+		if (this->direction == SPA_DIRECTION_INPUT)
+			match_size = resample_in_len(&this->resample, size);
+		else
+			match_size = resample_out_len(&this->resample, size);
+	}
+	match_size -= SPA_MIN(match_size, queued);
+
+	spa_log_trace_fp(this->log, "%p: next match %u %u %u", this, match_size, size, queued);
+
+	if (this->io_rate_match) {
+		this->io_rate_match->delay = delay + queued;
+		this->io_rate_match->size = match_size;
+	}
+	return match_size;
+}
+
+static inline bool resample_is_passthrough(struct impl *this)
+{
+	if (this->props.resample_disabled)
+		return true;
+	if (this->resample.i_rate != this->resample.o_rate)
+		return false;
+	if (this->rate_scale != 1.0)
+		return false;
+	if (this->rate_adjust)
+		return false;
+	if (this->io_rate_match != NULL &&
+	    SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
+		return false;
+	return true;
+}
+
 static int setup_convert(struct impl *this)
 {
 	struct dir *in, *out;
-	uint32_t i, rate, maxsize, maxports;
+	uint32_t i, rate, maxsize, maxports, duration;
 	struct port *p;
 	int res;
 
@@ -1832,7 +1896,13 @@ static int setup_convert(struct impl *this)
 	if (!in->have_format || !out->have_format)
 		return -EINVAL;
 
-	rate = this->io_position ? this->io_position->clock.target_rate.denom : DEFAULT_RATE;
+	if (this->io_position != NULL) {
+		rate = this->io_position->clock.target_rate.denom;
+		duration = this->io_position->clock.target_duration;
+	} else {
+		rate = DEFAULT_RATE;
+		duration = this->quantum_limit;
+	}
 
 	/* in DSP mode we always convert to the DSP rate */
 	if (in->mode == SPA_PARAM_PORT_CONFIG_MODE_dsp)
@@ -1878,6 +1948,8 @@ static int setup_convert(struct impl *this)
 	maxports = SPA_MAX(in->format.info.raw.channels, out->format.info.raw.channels);
 	if ((res = ensure_tmp(this, maxsize, maxports)) < 0)
 		return res;
+
+	resample_update_rate_match(this, resample_is_passthrough(this), duration, 0);
 
 	this->setup = true;
 
@@ -1934,6 +2006,7 @@ impl_node_add_listener(void *object,
 	struct impl *this = object;
 	uint32_t i;
 	struct spa_hook_list save;
+	struct port *p;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
@@ -1942,10 +2015,12 @@ impl_node_add_listener(void *object,
 
 	emit_node_info(this, true);
 	for (i = 0; i < this->dir[SPA_DIRECTION_INPUT].n_ports; i++) {
-		emit_port_info(this, GET_IN_PORT(this, i), true);
+		if ((p = GET_IN_PORT(this, i)) && p->valid)
+			emit_port_info(this, p, true);
 	}
 	for (i = 0; i < this->dir[SPA_DIRECTION_OUTPUT].n_ports; i++) {
-		emit_port_info(this, GET_OUT_PORT(this, i), true);
+		if ((p = GET_OUT_PORT(this, i)) && p->valid)
+			emit_port_info(this, p, true);
 	}
 	spa_hook_list_join(&this->hooks, &save);
 
@@ -2176,8 +2251,6 @@ impl_node_port_enum_params(void *object, int seq,
 		case 0: case 1:
 		{
 			uint32_t idx = result.index;
-			if (port->is_monitor)
-				idx = idx ^ 1;
 			param = spa_latency_build(&b, id, &port->latency[idx]);
 			break;
 		}
@@ -2243,9 +2316,6 @@ static int port_set_latency(void *object,
 			this, direction, port_id, latency);
 
 	port = GET_PORT(this, direction, port_id);
-	if (port->is_monitor)
-		return 0;
-
 	if (latency == NULL) {
 		info = SPA_LATENCY_INFO(other);
 		have_latency = false;
@@ -2267,31 +2337,49 @@ static int port_set_latency(void *object,
 			info.min_rate, info.max_rate,
 			info.min_ns, info.max_ns);
 
-	spa_latency_info_combine_start(&info, other);
-	for (i = 0; i < this->dir[direction].n_ports; i++) {
-		oport = GET_PORT(this, direction, i);
-		if (oport->is_monitor || !oport->have_latency)
-			continue;
-		spa_log_debug(this->log, "%p: combine %d", this, i);
-		spa_latency_info_combine(&info, &oport->latency[other]);
-	}
-	spa_latency_info_combine_finish(&info);
+	if (this->monitor_passthrough) {
+		if (port->is_monitor)
+			oport = GET_PORT(this, other, port_id-1);
+		else if (this->monitor && direction == SPA_DIRECTION_INPUT)
+			oport = GET_PORT(this, other, port_id+1);
+		else
+			return 0;
 
-	spa_log_debug(this->log, "%p: combined %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
-			info.direction == SPA_DIRECTION_INPUT ? "input" : "output",
-			info.min_quantum, info.max_quantum,
-			info.min_rate, info.max_rate,
-			info.min_ns, info.max_ns);
-
-	for (i = 0; i < this->dir[other].n_ports; i++) {
-		oport = GET_PORT(this, other, i);
-
-		spa_log_debug(this->log, "%p: change %d", this, i);
-		if (spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
+		if (oport != NULL &&
+		    spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
 			oport->latency[other] = info;
 			oport->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 			oport->params[IDX_Latency].user++;
 			emit_port_info(this, oport, false);
+		}
+	} else {
+		spa_latency_info_combine_start(&info, other);
+		for (i = 0; i < this->dir[direction].n_ports; i++) {
+			oport = GET_PORT(this, direction, i);
+			if ((oport->is_monitor) || !oport->have_latency)
+				continue;
+			spa_log_debug(this->log, "%p: combine %d", this, i);
+			spa_latency_info_combine(&info, &oport->latency[other]);
+		}
+		spa_latency_info_combine_finish(&info);
+
+		spa_log_debug(this->log, "%p: combined %s latency %f-%f %d-%d %"PRIu64"-%"PRIu64, this,
+				info.direction == SPA_DIRECTION_INPUT ? "input" : "output",
+				info.min_quantum, info.max_quantum,
+				info.min_rate, info.max_rate,
+				info.min_ns, info.max_ns);
+
+		for (i = 0; i < this->dir[other].n_ports; i++) {
+			oport = GET_PORT(this, other, i);
+			if (oport->is_monitor)
+				continue;
+			spa_log_debug(this->log, "%p: change %d", this, i);
+			if (spa_latency_info_compare(&info, &oport->latency[other]) != 0) {
+				oport->latency[other] = info;
+				oport->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+				oport->params[IDX_Latency].user++;
+				emit_port_info(this, oport, false);
+			}
 		}
 	}
 	if (emit) {
@@ -2317,7 +2405,7 @@ static int port_set_tag(void *object,
 			this, direction, port_id, tag);
 
 	port = GET_PORT(this, direction, port_id);
-	if (port->is_monitor)
+	if (port->is_monitor && !this->monitor_passthrough)
 		return 0;
 
 	if (tag != NULL) {
@@ -2736,49 +2824,6 @@ static inline uint32_t resample_get_in_size(struct impl *this, bool passthrough,
 	return match_size;
 }
 
-static uint32_t resample_update_rate_match(struct impl *this, bool passthrough, uint32_t out_size, uint32_t in_queued)
-{
-	uint32_t delay, match_size;
-
-	if (passthrough) {
-		delay = 0;
-		match_size = out_size;
-	} else {
-		double rate = this->rate_scale / this->props.rate;
-		if (this->io_rate_match &&
-		    SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
-			rate *= this->io_rate_match->rate;
-		resample_update_rate(&this->resample, rate);
-		delay = resample_delay(&this->resample);
-		match_size = resample_in_len(&this->resample, out_size);
-	}
-	match_size -= SPA_MIN(match_size, in_queued);
-
-	spa_log_trace_fp(this->log, "%p: next match %u", this, match_size);
-
-	if (this->io_rate_match) {
-		this->io_rate_match->delay = delay + in_queued;
-		this->io_rate_match->size = match_size;
-	}
-	return match_size;
-}
-
-static inline bool resample_is_passthrough(struct impl *this)
-{
-	if (this->props.resample_disabled)
-		return true;
-	if (this->resample.i_rate != this->resample.o_rate)
-		return false;
-	if (this->rate_scale != 1.0)
-		return false;
-	if (this->rate_adjust)
-		return false;
-	if (this->io_rate_match != NULL &&
-	    SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
-		return false;
-	return true;
-}
-
 static uint64_t get_time_ns(struct impl *impl)
 {
 	struct timespec now;
@@ -3006,6 +3051,9 @@ static int impl_node_process(void *object)
 					if (this->monitor_channel_volumes)
 						volume *= this->props.channel.mute ? 0.0f :
 							this->props.channel.volumes[remap];
+
+					volume = SPA_CLAMPF(volume, this->props.min_volume,
+							this->props.max_volume);
 
 					mon_max = SPA_MIN(bd->maxsize / port->stride, max_in);
 
@@ -3243,10 +3291,20 @@ static int impl_node_process(void *object)
 			spa_log_trace_fp(this->log, "%p: no output buffer", this);
 		}
 	}
-	if (resample_update_rate_match(this, resample_passthrough,
-			max_out - this->out_offset,
-			max_in - this->in_offset) > 0)
-		res |= SPA_STATUS_NEED_DATA;
+	{
+		uint32_t size, queued;
+
+		if (this->direction == SPA_DIRECTION_INPUT) {
+			size = max_out - this->out_offset;
+			queued = max_in - this->in_offset;
+		} else {
+			size = quant_samples;
+			queued = 0;
+		}
+		if (resample_update_rate_match(this, resample_passthrough,
+					size, queued) > 0)
+			res |= SPA_STATUS_NEED_DATA;
+	}
 
 	return res;
 }
@@ -3401,18 +3459,14 @@ impl_init(const struct spa_handle_factory *factory,
 		else if (spa_streq(k, "resample.prefill"))
 			SPA_FLAG_UPDATE(this->resample.options,
 				RESAMPLE_OPTION_PREFILL, spa_atob(s));
-		else if (spa_streq(k, "factory.mode")) {
-			if (spa_streq(s, "merge"))
-				this->direction = SPA_DIRECTION_OUTPUT;
-			else
-				this->direction = SPA_DIRECTION_INPUT;
-		}
 		else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
 			if (s != NULL)
 	                        this->props.n_channels = parse_position(this->props.channel_map, s, strlen(s));
 		}
 		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
 			this->port_ignore_latency = spa_atob(s);
+		else if (spa_streq(k, "monitor.passthrough"))
+			this->monitor_passthrough = spa_atob(s);
 		else
 			audioconvert_set_param(this, k, s);
 	}

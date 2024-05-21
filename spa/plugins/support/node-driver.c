@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
-#if !defined(__FreeBSD__) && !defined(__MidnightBSD__)
+#ifdef __linux__
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
 #endif
@@ -27,11 +27,19 @@
 #include <spa/node/utils.h>
 #include <spa/param/param.h>
 
-#define NAME "driver"
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.driver");
+
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
 
 #define DEFAULT_FREEWHEEL	false
+#define DEFAULT_FREEWHEEL_WAIT	10
 #define DEFAULT_CLOCK_PREFIX	"clock.system"
 #define DEFAULT_CLOCK_ID	CLOCK_MONOTONIC
+#define DEFAULT_RESYNC_MS	10
+
+#define CLOCK_OFFSET_NAVG	20
+#define CLOCK_OFFSET_MAX_ERR	(50 * SPA_NSEC_PER_USEC)
 
 #define CLOCKFD 3
 #define FD_TO_CLOCKID(fd)	((~(clockid_t) (fd) << 3) | CLOCKFD)
@@ -44,6 +52,13 @@ struct props {
 	bool freewheel;
 	char clock_name[64];
 	clockid_t clock_id;
+	uint32_t freewheel_wait;
+	float resync_ms;
+};
+
+struct clock_offset {
+	int64_t offset;
+	int64_t err;
 };
 
 struct impl {
@@ -79,6 +94,9 @@ struct impl {
 	uint64_t base_time;
 	struct spa_dll dll;
 	double max_error;
+	double max_resync;
+
+	struct clock_offset nsec_offset;
 };
 
 static void reset_props(struct props *props)
@@ -86,6 +104,8 @@ static void reset_props(struct props *props)
 	props->freewheel = DEFAULT_FREEWHEEL;
 	spa_zero(props->clock_name);
 	props->clock_id = CLOCK_MONOTONIC;
+	props->freewheel_wait = DEFAULT_FREEWHEEL_WAIT;
+	props->resync_ms = DEFAULT_RESYNC_MS;
 }
 
 static const struct clock_info {
@@ -183,6 +203,68 @@ static int do_set_timers(struct spa_loop *loop,
 	return 0;
 }
 
+static int64_t get_nsec_offset(struct impl *this, uint64_t *now)
+{
+	struct timespec ts1, ts2, ts3;
+	int64_t t1, t2, t3;
+
+	/* Offset between timer clock and monotonic */
+	if (this->timer_clockid == CLOCK_MONOTONIC)
+		return 0;
+
+	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &ts1);
+	spa_system_clock_gettime(this->data_system, this->timer_clockid, &ts2);
+	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &ts3);
+
+	t1 = SPA_TIMESPEC_TO_NSEC(&ts1);
+	t2 = SPA_TIMESPEC_TO_NSEC(&ts2);
+	t3 = SPA_TIMESPEC_TO_NSEC(&ts3);
+
+	if (now)
+		*now = t3;
+
+	return t1 + (t3 - t1) / 2 - t2;
+}
+
+static int64_t clock_offset_update(struct clock_offset *off, int64_t offset, struct spa_log *log)
+{
+	const int64_t max_resync = CLOCK_OFFSET_MAX_ERR;
+	const int64_t n = CLOCK_OFFSET_NAVG;
+	int64_t err;
+
+	/* Moving average smoothing, discarding outliers */
+	err = offset - off->offset;
+
+	if (SPA_ABS(err) > max_resync) {
+		/* Clock jump */
+		spa_log_info(log, "nsec err %"PRIi64" > max_resync %"PRIi64", resetting",
+				err, max_resync);
+		off->offset = offset;
+		off->err = 0;
+		err = 0;
+	} else if (SPA_ABS(err) / 2 <= off->err) {
+		off->offset += err / n;
+	}
+
+	off->err += (SPA_ABS(err) - off->err) / n;
+
+	spa_log_trace(log, "clock offset %"PRIi64" err:%"PRIi64" abs-err:%"PRIi64,
+			off->offset, err, off->err);
+
+	return off->offset;
+}
+
+static int64_t smooth_nsec_offset(struct impl *this, uint64_t *now)
+{
+	int64_t offset;
+
+	if (this->timer_clockid == CLOCK_MONOTONIC)
+		return 0;
+
+	offset = get_nsec_offset(this, now);
+	return clock_offset_update(&this->nsec_offset, offset, this->log);
+}
+
 static int reassign_follower(struct impl *this)
 {
 	bool following;
@@ -196,7 +278,7 @@ static int reassign_follower(struct impl *this)
 
 	following = is_following(this);
 	if (following != this->following) {
-		spa_log_debug(this->log, NAME" %p: reassign follower %d->%d", this, this->following, following);
+		spa_log_debug(this->log, "%p: reassign follower %d->%d", this, this->following, following);
 		this->following = following;
 		spa_loop_invoke(this->data_loop, do_set_timers, 0, NULL, 0, true, this);
 	}
@@ -251,7 +333,7 @@ static void on_timeout(struct spa_source *source)
 	if ((res = spa_system_timerfd_read(this->data_system,
 				this->timer_source.fd, &expirations)) < 0) {
 		if (res != -EAGAIN)
-			spa_log_error(this->log, NAME " %p: timerfd error: %s",
+			spa_log_error(this->log, "%p: timerfd error: %s",
 					this, spa_strerror(res));
 		return;
 	}
@@ -262,7 +344,10 @@ static void on_timeout(struct spa_source *source)
 		duration = 1024;
 		rate = 48000;
 	}
-	nsec = this->next_time;
+	if (this->props.freewheel)
+		nsec = gettime_nsec(this, this->timer_clockid);
+	else
+		nsec = this->next_time;
 
 	if (this->tracking)
 		/* we are actually following another clock */
@@ -275,6 +360,7 @@ static void on_timeout(struct spa_source *source)
 	if (this->last_time == 0) {
 		spa_dll_set_bw(&this->dll, SPA_DLL_BW_MIN, duration, rate);
 		this->max_error = rate * MAX_ERROR_MS / 1000;
+		this->max_resync = rate * this->props.resync_ms / 1000;
 		position = current_position;
 	} else if (SPA_LIKELY(this->clock)) {
 		position = this->clock->position + this->clock->duration;
@@ -282,18 +368,27 @@ static void on_timeout(struct spa_source *source)
 		position = current_position;
 	}
 
-	/* check the elapsed time of the other clock against
-	 * the graph clock elapsed time, feed this error into the
-	 * dll and adjust the timeout of our MONOTONIC clock. */
-	err = (double)position - (double)current_position;
-	if (err > this->max_error)
-		err = this->max_error;
-	else if (err < -this->max_error)
-		err = -this->max_error;
-
 	this->last_time = current_time;
 
-	if (this->tracking) {
+	if (this->props.freewheel) {
+		corr = 1.0;
+		this->next_time = nsec + this->props.freewheel_wait * SPA_NSEC_PER_SEC;
+	} else if (this->tracking) {
+		/* check the elapsed time of the other clock against
+		 * the graph clock elapsed time, feed this error into the
+		 * dll and adjust the timeout of our MONOTONIC clock. */
+		err = (double)position - (double)current_position;
+		if (fabs(err) > this->max_error) {
+			if (fabs(err) > this->max_resync) {
+				spa_log_warn(this->log, "err %f > max_resync %f, resetting",
+						err, this->max_resync);
+				spa_dll_set_bw(&this->dll, SPA_DLL_BW_MIN, duration, rate);
+				position = current_position;
+				err = 0.0;
+			} else {
+				err = SPA_CLAMPD(err, -this->max_error, this->max_error);
+			}
+		}
 		corr = spa_dll_update(&this->dll, err);
 		this->next_time = nsec + duration / corr * 1e9 / rate;
 	} else {
@@ -310,13 +405,16 @@ static void on_timeout(struct spa_source *source)
 	}
 
 	if (SPA_LIKELY(this->clock)) {
-		this->clock->nsec = nsec;
+		uint64_t nsec_now = nsec;
+		int64_t nsec_offset = smooth_nsec_offset(this, &nsec_now);
+
+		this->clock->nsec = SPA_MIN(nsec + nsec_offset, nsec_now);
 		this->clock->rate = this->clock->target_rate;
 		this->clock->position = position;
 		this->clock->duration = duration;
 		this->clock->delay = 0;
 		this->clock->rate_diff = corr;
-		this->clock->next_nsec = this->next_time;
+		this->clock->next_nsec = this->next_time + nsec_offset;
 	}
 
 	spa_node_call_ready(&this->callbacks,
@@ -490,7 +588,7 @@ impl_get_size(const struct spa_handle_factory *factory,
 	return sizeof(struct impl);
 }
 
-int get_phc_index(struct spa_system *s, const char *name) {
+static int get_phc_index(struct spa_system *s, const char *name) {
 #ifdef ETHTOOL_GET_TS_INFO
 	struct ethtool_ts_info info = {0};
 	struct ifreq ifr = {0};
@@ -499,21 +597,19 @@ int get_phc_index(struct spa_system *s, const char *name) {
 	info.cmd = ETHTOOL_GET_TS_INFO;
 	strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
 	ifr.ifr_data = (char *) &info;
-	fd = socket(AF_INET, SOCK_DGRAM, 0);
 
-	if (fd < 0) {
-		return -1;
-	}
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0)
+		return -errno;
 
 	err = spa_system_ioctl(s, fd, SIOCETHTOOL, &ifr);
 	close(fd);
-	if (err < 0) {
-		return err;
-	}
+	if (err < 0)
+		return -errno;
 
 	return info.phc_index;
 #else
-	return -1;
+	return -ENOTSUP;
 #endif
 }
 
@@ -588,28 +684,33 @@ impl_init(const struct spa_handle_factory *factory,
 			if (this->clock_fd >= 0) {
 				close(this->clock_fd);
 			}
-			this->clock_fd = open(s, O_RDWR);
+			this->clock_fd = open(s, O_RDONLY);
 
 			if (this->clock_fd == -1) {
-				spa_log_warn(this->log, "failed to open clock device '%s'", s);
+				spa_log_warn(this->log, "failed to open clock device '%s': %m", s);
 			} else {
 				this->props.clock_id = FD_TO_CLOCKID(this->clock_fd);
 			}
 		} else if (spa_streq(k, "clock.interface") && this->clock_fd < 0) {
 			int phc_index = get_phc_index(this->data_system, s);
 			if (phc_index < 0) {
-				spa_log_warn(this->log, "failed to get phc device index for interface '%s'", s);
+				spa_log_warn(this->log, "failed to get phc device index for interface '%s': %s",
+						s, spa_strerror(phc_index));
 			} else {
 				char dev[19];
 				spa_scnprintf(dev, sizeof(dev), "/dev/ptp%d", phc_index);
-				this->clock_fd = open(dev, O_RDWR);
+				this->clock_fd = open(dev, O_RDONLY);
+				if (this->clock_fd == -1) {
+					spa_log_warn(this->log, "failed to open clock device '%s' "
+							"for interface '%s': %m", dev, s);
+				} else {
+					this->props.clock_id = FD_TO_CLOCKID(this->clock_fd);
+				}
 			}
-
-			if (this->clock_fd == -1) {
-				spa_log_warn(this->log, "failed to open clock device '%s'", s);
-			} else {
-				this->props.clock_id = FD_TO_CLOCKID(this->clock_fd);
-			}
+		} else if (spa_streq(k, "freewheel.wait")) {
+			this->props.freewheel_wait = atoi(s);
+		} else if (spa_streq(k, "resync.ms")) {
+			this->props.resync_ms = atof(s);
 		}
 	}
 	if (this->props.clock_name[0] == '\0') {
@@ -621,6 +722,9 @@ impl_init(const struct spa_handle_factory *factory,
 	this->tracking = !clock_for_timerfd(this->props.clock_id);
 	this->timer_clockid = this->tracking ? CLOCK_MONOTONIC : this->props.clock_id;
 	this->max_error = 128;
+
+	this->nsec_offset.offset = get_nsec_offset(this, NULL);
+	this->nsec_offset.err = 0;
 
 	this->timer_source.func = on_timeout;
 	this->timer_source.data = this;

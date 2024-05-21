@@ -64,6 +64,8 @@ snd_pcm_t *pa_alsa_open_by_device_id_auto(
         snd_pcm_uframes_t tsched_size,
         bool *use_mmap,                   /* modified at return */
         bool *use_tsched,                 /* modified at return */
+        pa_sample_format_t **query_supported_formats, /* modified at return */
+        unsigned int **query_supported_rates,         /* modified at return */
         pa_alsa_profile_set *ps,
         pa_alsa_mapping **mapping);       /* modified at return */
 #endif
@@ -80,6 +82,8 @@ snd_pcm_t *pa_alsa_open_by_device_id_mapping(
         snd_pcm_uframes_t tsched_size,
         bool *use_mmap,                   /* modified at return */
         bool *use_tsched,                 /* modified at return */
+        pa_sample_format_t **query_supported_formats, /* modified at return */
+        unsigned int **query_supported_rates,         /* modified at return */
         pa_alsa_mapping *mapping);
 
 /* Opens the explicit ALSA device */
@@ -94,6 +98,8 @@ snd_pcm_t *pa_alsa_open_by_device_string(
         snd_pcm_uframes_t tsched_size,
         bool *use_mmap,                   /* modified at return */
         bool *use_tsched,                 /* modified at return */
+        pa_sample_format_t **query_supported_formats, /* modified at return */
+        unsigned int **query_supported_rates,         /* modified at return */
         bool require_exact_channel_number);
 
 /* Opens the explicit ALSA device with a fallback list */
@@ -109,6 +115,8 @@ snd_pcm_t *pa_alsa_open_by_template(
         snd_pcm_uframes_t tsched_size,
         bool *use_mmap,                   /* modified at return */
         bool *use_tsched,                 /* modified at return */
+        pa_sample_format_t **query_supported_formats, /* modified at return */
+        unsigned int **query_supported_rates,        /* modified at return */
         bool require_exact_channel_number);
 
 #if 0
@@ -123,9 +131,7 @@ void pa_alsa_refcnt_dec(void);
 void pa_alsa_init_proplist_pcm_info(pa_core *c, pa_proplist *p, snd_pcm_info_t *pcm_info);
 void pa_alsa_init_proplist_card(pa_core *c, pa_proplist *p, int card);
 void pa_alsa_init_proplist_pcm(pa_core *c, pa_proplist *p, snd_pcm_t *pcm);
-#if 0
 void pa_alsa_init_proplist_ctl(pa_proplist *p, const char *name);
-#endif
 bool pa_alsa_init_description(pa_proplist *p, pa_card *card);
 
 #if 0

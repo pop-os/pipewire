@@ -36,6 +36,11 @@
 #include "module-netjack2/packets.h"
 
 #include "module-netjack2/peer.c"
+#include "network-utils.h"
+
+#ifdef __FreeBSD__
+#define ifr_ifindex ifr_index
+#endif
 
 #ifndef IPTOS_DSCP
 #define IPTOS_DSCP_MASK 0xfc
@@ -434,7 +439,7 @@ on_setup_io(void *data, int fd, uint32_t mask)
 		if (len < (int)sizeof(params))
 			goto short_packet;
 
-		if (strcmp(params.type, "params") != 0)
+		if (strncmp(params.type, "params", sizeof(params.type)) != 0)
 			goto wrong_type;
 
 		switch(ntohl(params.packet_id)) {
@@ -734,26 +739,6 @@ static int create_filters(struct follower *follower)
 	return res;
 }
 
-static int parse_address(const char *address, uint16_t port,
-		struct sockaddr_storage *addr, socklen_t *len)
-{
-	struct sockaddr_in *sa4 = (struct sockaddr_in*)addr;
-	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)addr;
-
-	if (inet_pton(AF_INET, address, &sa4->sin_addr) > 0) {
-		sa4->sin_family = AF_INET;
-		sa4->sin_port = htons(port);
-		*len = sizeof(*sa4);
-	} else if (inet_pton(AF_INET6, address, &sa6->sin6_addr) > 0) {
-		sa6->sin6_family = AF_INET6;
-		sa6->sin6_port = htons(port);
-		*len = sizeof(*sa6);
-	} else
-		return -EINVAL;
-
-	return 0;
-}
-
 static bool is_multicast(struct sockaddr *sa, socklen_t salen)
 {
 	if (sa->sa_family == AF_INET) {
@@ -876,20 +861,6 @@ static int make_announce_socket(struct sockaddr_storage *sa, socklen_t salen,
 error:
 	close(fd);
 	return res;
-}
-
-static const char *get_ip(const struct sockaddr_storage *sa, char *ip, size_t len)
-{
-	if (sa->ss_family == AF_INET) {
-		struct sockaddr_in *in = (struct sockaddr_in*)sa;
-		inet_ntop(sa->ss_family, &in->sin_addr, ip, len);
-	} else if (sa->ss_family == AF_INET6) {
-		struct sockaddr_in6 *in = (struct sockaddr_in6*)sa;
-		inet_ntop(sa->ss_family, &in->sin6_addr, ip, len);
-	} else {
-		snprintf(ip, len, "invalid address");
-	}
-	return ip;
 }
 
 static int handle_follower_available(struct impl *impl, struct nj2_session_params *params,
@@ -1035,8 +1006,8 @@ static int handle_follower_available(struct impl *impl, struct nj2_session_param
 
 	nj2_session_params_hton(params, &peer->params);
 	params->packet_id = htonl(NJ2_ID_FOLLOWER_SETUP);
-
-	pw_log_info("sending follower setup to %s", get_ip(addr, buffer, sizeof(buffer)));
+	pw_log_info("sending follower setup to %s",
+			pw_net_get_ip_fmt(addr, buffer, sizeof(buffer)));
 	nj2_dump_session_params(params);
 	send(follower->socket->fd, params, sizeof(*params), 0);
 
@@ -1072,7 +1043,7 @@ on_socket_io(void *data, int fd, uint32_t mask)
 		if (len < (int)sizeof(params))
 			goto short_packet;
 
-		if (strcmp(params.type, "params") != 0)
+		if (strncmp(params.type, "params", sizeof(params.type)) != 0)
 			goto wrong_type;
 
 		switch(ntohl(params.packet_id)) {
@@ -1109,7 +1080,7 @@ static int create_netjack2_socket(struct impl *impl)
 	if ((str = pw_properties_get(impl->props, "net.ip")) == NULL)
 		str = DEFAULT_NET_IP;
 
-	if ((res = parse_address(str, port, &impl->src_addr, &impl->src_len)) < 0) {
+	if ((res = pw_net_parse_address(str, port, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid net.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}
@@ -1135,7 +1106,7 @@ static int create_netjack2_socket(struct impl *impl)
 		goto out;
 	}
 	pw_log_info("listening for AVAILABLE on %s",
-			get_ip(&impl->src_addr, buffer, sizeof(buffer)));
+			pw_net_get_ip_fmt(&impl->src_addr, buffer, sizeof(buffer)));
 	return 0;
 out:
 	return res;
@@ -1182,6 +1153,9 @@ static void impl_destroy(struct impl *impl)
 
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
+
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
 
 	pw_properties_free(impl->sink_props);
 	pw_properties_free(impl->source_props);
@@ -1259,7 +1233,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props = NULL;
-	struct pw_data_loop *data_loop;
 	struct impl *impl;
 	const char *str;
 	int res;
@@ -1273,6 +1246,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_log_debug("module %p: new %s", impl, args);
 	spa_list_init(&impl->follower_list);
 
+	impl->module = module;
+	impl->context = context;
+
 	if (args == NULL)
 		args = "";
 
@@ -1283,8 +1259,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 	impl->props = props;
-	data_loop = pw_context_get_data_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(data_loop);
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
 	impl->quantum_limit = pw_properties_get_uint32(
 			pw_context_get_properties(context),
 			"default.clock.quantum-limit", 8192u);
@@ -1297,8 +1272,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 
-	impl->module = module;
-	impl->context = context;
 	impl->main_loop = pw_context_get_main_loop(context);
 	impl->system = impl->main_loop->system;
 
@@ -1342,6 +1315,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->kbps = pw_properties_get_uint32(impl->props, "netjack2.kbps",
 			DEFAULT_KBPS);
 
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, PW_KEY_NODE_NETWORK) == NULL)
@@ -1366,6 +1340,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "source.props")) != NULL)
 		pw_properties_update_string(impl->source_props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_NODE_VIRTUAL);
 	copy_props(impl, props, PW_KEY_NODE_NETWORK);
 	copy_props(impl, props, PW_KEY_NODE_LINK_GROUP);

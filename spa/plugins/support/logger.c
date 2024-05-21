@@ -20,13 +20,13 @@
 #include <spa/utils/string.h>
 #include <spa/utils/ansi.h>
 
-#include "log-patterns.h"
-
 #if defined(__FreeBSD__) || defined(__MidnightBSD__)
 #define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
 #endif
 
-#define NAME "logger"
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.logger");
 
 #define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_INFO
 
@@ -48,8 +48,6 @@ struct impl {
 	unsigned int colors:1;
 	unsigned int timestamp:1;
 	unsigned int line:1;
-
-	struct spa_list patterns;
 };
 
 static SPA_PRINTF_FUNC(7,0) void
@@ -94,8 +92,8 @@ impl_log_logtv(void *object,
 	if (impl->timestamp) {
 		struct timespec now;
 		clock_gettime(CLOCK_MONOTONIC_RAW, &now);
-		spa_scnprintf(timestamp, sizeof(timestamp), "[%05lu.%06lu]",
-			(now.tv_sec & 0x1FFFFFFF) % 100000, now.tv_nsec / 1000);
+		spa_scnprintf(timestamp, sizeof(timestamp), "[%05jd.%06jd]",
+			(intmax_t) (now.tv_sec & 0x1FFFFFFF) % 100000, (intmax_t) now.tv_nsec / 1000);
 	}
 
 	if (topic && topic->topic)
@@ -221,22 +219,12 @@ static void on_trace_event(struct spa_source *source)
         }
 }
 
-static void
-impl_log_topic_init(void *object, struct spa_log_topic *t)
-{
-	struct impl *impl = object;
-	enum spa_log_level level = impl->log.level;
-
-	support_log_topic_init(&impl->patterns, level, t);
-}
-
 static const struct spa_log_methods impl_log = {
 	SPA_VERSION_LOG_METHODS,
 	.log = impl_log_log,
 	.logv = impl_log_logv,
 	.logt = impl_log_logt,
 	.logtv = impl_log_logtv,
-	.topic_init = impl_log_topic_init,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
@@ -263,8 +251,6 @@ static int impl_clear(struct spa_handle *handle)
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	this = (struct impl *) handle;
-
-	support_log_free_patterns(&this->patterns);
 
 	if (this->close_file && this->file != NULL)
 		fclose(this->file);
@@ -313,7 +299,6 @@ impl_init(const struct spa_handle_factory *factory,
 
 	loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
 	this->system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_System);
-	spa_list_init(&this->patterns);
 
 	if (loop != NULL && this->system != NULL) {
 		this->source.func = on_trace_event;
@@ -358,8 +343,6 @@ impl_init(const struct spa_handle_factory *factory,
 					this->close_file = true;
 			}
 		}
-		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_PATTERNS)) != NULL)
-			support_log_parse_patterns(&this->patterns, str);
 	}
 	if (this->file == NULL) {
 		this->file = stderr;
@@ -370,13 +353,13 @@ impl_init(const struct spa_handle_factory *factory,
 	if (linebuf)
 		setlinebuf(this->file);
 
-	if (!isatty(fileno(this->file)) && !force_colors) {
+	if (this->colors && !force_colors && !isatty(fileno(this->file)) ) {
 		this->colors = false;
 	}
 
 	spa_ringbuffer_init(&this->trace_rb);
 
-	spa_log_debug(&this->log, NAME " %p: initialized to %s linebuf:%u", this, dest, linebuf);
+	spa_log_debug(&this->log, "%p: initialized to %s linebuf:%u", this, dest, linebuf);
 
 	return 0;
 }
