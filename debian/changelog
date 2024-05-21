@@ -1,4 +1,4 @@
-pipewire (1.1.81-0) UNRELEASED; urgency=medium
+pipewire (1.1.81-1) experimental; urgency=medium
 
   * New upstream release (1.2 release candidate 1)
   * Install new pw-container in pipewire-bin
@@ -10,7 +10,7 @@ pipewire (1.1.81-0) UNRELEASED; urgency=medium
   * Update symbols file
   * Drop patches included in upstream release: debian/patches/snap/*
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 16:30:22 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 17:41:31 +0200
 
 pipewire (1.0.6-1) unstable; urgency=medium
 
