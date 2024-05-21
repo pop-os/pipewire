@@ -3,6 +3,8 @@ pipewire (1.1.81-0) UNRELEASED; urgency=medium
   * New upstream release (1.2 release candidate 1)
   * Install new pw-container in pipewire-bin
   * Install new module parametric-equalizer in libpipewire-0.3-modules
+  * Install org.freedesktop.pulseaudio.gschema.xml in pipewire-pulse,
+      this file is required to use module-gsettings.
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 16:30:22 +0200
 
