@@ -255,6 +255,7 @@ Architecture: any
 Multi-Arch: foreign
 Replaces: pipewire-bin (<< 0.3.27-2)
 Breaks: pipewire-bin (<< 0.3.27-2)
+Conflicts: pulseaudio-module-gsettings
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}

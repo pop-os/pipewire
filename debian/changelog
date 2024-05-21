@@ -5,6 +5,8 @@ pipewire (1.1.81-0) UNRELEASED; urgency=medium
   * Install new module parametric-equalizer in libpipewire-0.3-modules
   * Install org.freedesktop.pulseaudio.gschema.xml in pipewire-pulse,
       this file is required to use module-gsettings.
+  * Mark pipewire-pulse in conflict with pulseaudio-module-gsettings,
+      both provide org.freedesktop.pulseaudio.gschema.xml.
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 16:30:22 +0200
 
