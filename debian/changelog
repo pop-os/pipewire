@@ -1,3 +1,9 @@
+pipewire (1.1.81-0) UNRELEASED; urgency=medium
+
+  * New upstream release (1.2 release candidate 1)
+
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 16:30:22 +0200
+
 pipewire (1.0.6-1) unstable; urgency=medium
 
   * New upstream release
