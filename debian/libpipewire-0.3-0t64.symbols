@@ -17,6 +17,8 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_conf_section_for_each@Base 0.3.70
  pw_conf_section_match_rules@Base 0.3.70
  pw_conf_section_update_props@Base 0.3.70
+ pw_conf_section_update_props_rules@Base 1.1.81
+ pw_context_acquire_loop@Base 1.1.81
  pw_context_add_listener@Base 0.3.1
  pw_context_add_spa_lib@Base 0.3.1
  pw_context_conf_section_for_each@Base 0.3.45
@@ -57,6 +59,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_context_new@Base 0.3.1
  pw_context_parse_conf_section@Base 0.3.22
  pw_context_register_export_type@Base 0.3.1
+ pw_context_release_loop@Base 1.1.81
  pw_context_set_object@Base 0.3.1
  pw_context_update_properties@Base 0.3.1
  pw_control_add_link@Base 0.3.1
@@ -80,7 +83,9 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_data_loop_add_listener@Base 0.3.1
  pw_data_loop_destroy@Base 0.3.1
  pw_data_loop_exit@Base 0.3.1
+ pw_data_loop_get_class@Base 1.1.81
  pw_data_loop_get_loop@Base 0.3.37
+ pw_data_loop_get_name@Base 1.1.81
  pw_data_loop_get_thread@Base 0.3.32
  pw_data_loop_in_thread@Base 0.3.1
  pw_data_loop_invoke@Base 0.3.5
@@ -107,6 +112,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_filter_disconnect@Base 0.3.1
  pw_filter_flush@Base 0.3.1
  pw_filter_get_core@Base 0.3.1
+ pw_filter_get_data_loop@Base 1.1.81
  pw_filter_get_dsp_buffer@Base 0.3.1
  pw_filter_get_name@Base 0.3.1
  pw_filter_get_node_id@Base 0.3.1
@@ -187,6 +193,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_impl_device_get_user_data@Base 0.3.1
  pw_impl_device_register@Base 0.3.1
  pw_impl_device_set_implementation@Base 0.3.1
+ pw_impl_device_set_param@Base 1.1.81
  pw_impl_device_update_properties@Base 0.3.1
  pw_impl_factory_add_listener@Base 0.3.1
  pw_impl_factory_create_object@Base 0.3.1
@@ -246,6 +253,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_impl_node_set_active@Base 0.3.1
  pw_impl_node_set_driver@Base 0.3.1
  pw_impl_node_set_implementation@Base 0.3.1
+ pw_impl_node_set_io@Base 1.1.81
  pw_impl_node_set_param@Base 0.3.1
  pw_impl_node_set_state@Base 0.3.1
  pw_impl_node_update_properties@Base 0.3.1
@@ -279,9 +287,13 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_log_logv@Base 0.3.1
  pw_log_set@Base 0.3.1
  pw_log_set_level@Base 0.3.1
+ pw_log_set_level_string@Base 1.1.81
+ pw_log_topic_register@Base 1.1.81
+ pw_log_topic_unregister@Base 1.1.81
  pw_loop_check@Base 0.3.68
  pw_loop_destroy@Base 0.3.1
  pw_loop_new@Base 0.3.1
+ pw_loop_set_name@Base 1.1.81
  pw_main_loop_add_listener@Base 0.3.1
  pw_main_loop_destroy@Base 0.3.1
  pw_main_loop_get_loop@Base 0.3.1
@@ -331,6 +343,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_properties_new@Base 0.3.1
  pw_properties_new_dict@Base 0.3.1
  pw_properties_new_string@Base 0.3.1
+ pw_properties_new_string_checked@Base 1.1.81
  pw_properties_serialize_dict@Base 0.3.28
  pw_properties_set@Base 0.3.1
  pw_properties_setf@Base 0.3.1
@@ -339,6 +352,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_properties_update_ignore@Base 0.3.23
  pw_properties_update_keys@Base 0.3.1
  pw_properties_update_string@Base 0.3.19
+ pw_properties_update_string_checked@Base 1.1.81
  pw_protocol_add_listener@Base 0.3.1
  pw_protocol_add_marshal@Base 0.3.1
  pw_protocol_destroy@Base 0.3.1
@@ -403,6 +417,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_stream_flush@Base 0.3.1
  pw_stream_get_control@Base 0.3.1
  pw_stream_get_core@Base 0.3.1
+ pw_stream_get_data_loop@Base 1.1.81
  pw_stream_get_name@Base 0.3.1
  pw_stream_get_node_id@Base 0.3.1
  pw_stream_get_nsec@Base 1.0.4

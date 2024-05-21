@@ -7,6 +7,7 @@ pipewire (1.1.81-0) UNRELEASED; urgency=medium
       this file is required to use module-gsettings.
   * Mark pipewire-pulse in conflict with pulseaudio-module-gsettings,
       both provide org.freedesktop.pulseaudio.gschema.xml.
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 21 May 2024 16:30:22 +0200
 
