@@ -13,6 +13,7 @@ usr/lib/*/pipewire-0.3/libpipewire-module-loopback.so
 usr/lib/*/pipewire-0.3/libpipewire-module-metadata.so
 usr/lib/*/pipewire-0.3/libpipewire-module-netjack2-driver.so
 usr/lib/*/pipewire-0.3/libpipewire-module-netjack2-manager.so
+usr/lib/*/pipewire-0.3/libpipewire-module-parametric-equalizer.so
 usr/lib/*/pipewire-0.3/libpipewire-module-pipe-tunnel.so
 usr/lib/*/pipewire-0.3/libpipewire-module-portal.so
 usr/lib/*/pipewire-0.3/libpipewire-module-profiler.so
