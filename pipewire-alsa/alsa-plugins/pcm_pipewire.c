@@ -499,7 +499,12 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 
 	snd_pcm_sw_params_alloca(&swparams);
 	if (snd_pcm_sw_params_current(io->pcm, swparams) == 0) {
-		snd_pcm_sw_params_get_avail_min(swparams, &pw->min_avail);
+		int event;
+		snd_pcm_sw_params_get_period_event(swparams, &event);
+		if (event)
+			pw->min_avail = io->period_size;
+		else
+			snd_pcm_sw_params_get_avail_min(swparams, &pw->min_avail);
 		snd_pcm_sw_params_get_boundary(swparams, &pw->boundary);
 		snd_pcm_sw_params_dump(swparams, pw->output);
 		fflush(pw->log_file);
@@ -525,8 +530,10 @@ static int snd_pcm_pipewire_prepare(snd_pcm_ioplug_t *io)
 	params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &pw->format);
 
 	if (pw->stream != NULL) {
+		pw_stream_set_active(pw->stream, false);
 		pw_stream_update_properties(pw->stream, &pw->props->dict);
 		pw_stream_update_params(pw->stream, params, 1);
+		pw_stream_set_active(pw->stream, true);
 		goto done;
 	}
 
@@ -1247,7 +1254,8 @@ static int snd_pcm_pipewire_open(snd_pcm_t **pcmp,
 	pw_core_add_listener(pw->core, &pw->core_listener, &core_events, pw);
 	pw_thread_loop_unlock(pw->main_loop);
 
-	pw->fd = spa_system_eventfd_create(pw->system, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	pw->fd = spa_system_eventfd_create(pw->system,
+			SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 	if (pw->fd < 0) {
 		err = pw->fd;
 		goto error;

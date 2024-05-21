@@ -40,12 +40,25 @@ context.properties = {
     #
     settings.check-quantum      = true
     settings.check-rate         = true
-    #
-    # These overrides are only applied when running in a vm.
-    vm.overrides = {
-        default.clock.min-quantum = 1024
-    }
+
+    # This config can use udev or hardcoded ALSA devices. Make sure to
+    # change the alsa device below when disabling udev
+    minimal.use-udev = true
+
+    # Load the pulseaudio emulation daemon
+    minimal.use-pulse = true
 }
+
+context.properties.rules = [
+    {   matches = [ { cpu.vm.name = !null } ]
+        actions = {
+            update-props = {
+                # These overrides are only applied when running in a vm.
+                default.clock.min-quantum = 1024
+	    }
+        }
+    }
+]
 
 context.spa-libs = {
     #<factory-name regex> = <library-name>
@@ -55,6 +68,7 @@ context.spa-libs = {
     # that factory.
     #
     audio.convert.* = audioconvert/libspa-audioconvert
+    audio.adapt     = audioconvert/libspa-audioconvert
     api.alsa.*      = alsa/libspa-alsa
     support.*       = support/libspa-support
 }
@@ -100,6 +114,8 @@ context.modules = [
     # context of the PipeWire server.
     { name = libpipewire-module-spa-node-factory }
 
+    { name = libpipewire-module-spa-device-factory }
+
     # Allows creating nodes that run in the context of the
     # client. Is used by all clients that want to provide
     # data to PipeWire.
@@ -133,7 +149,22 @@ context.modules = [
 
     # Makes a factory for creating links between ports.
     { name = libpipewire-module-link-factory }
+
+    { name = libpipewire-module-protocol-pulse
+      condition = [ { minimal.use-pulse = true } ]
+    }
 ]
+
+pulse.properties = {
+    # the addresses this server listens on
+    server.address = [
+        "unix:native"
+    ]
+}
+
+stream.properties = {
+    adapter.auto-port-config = { mode = dsp }
+}
 
 context.objects = [
     #{ factory = <factory-name>
@@ -180,7 +211,44 @@ context.objects = [
             priority.driver = 19000
             node.group      = pipewire.freewheel
             node.freewheel  = true
+            #freewheel.wait = 10
         }
+    }
+
+    # This creates a ALSA udev device that will enumerate all
+    # ALSA devices. Because it is using ACP and has the auto-profile
+    # property set, this will enable a profile and create associated
+    # nodes, which will be automatically configured to their best
+    # configuration with the auto-port-config settings.
+    # Extra node and device params can be given with node.param and
+    # device.param prefixes.
+    { factory = spa-device-factory
+        args = {
+            factory.name           = api.alsa.enum.udev
+            alsa.use-acp = true
+            device.object.properties = {
+                api.acp.auto-profile = true
+                api.acp.auto-port = true
+                device.object.properties = {
+                    node.adapter             = audio.adapt
+                    resample.disable         = false
+                    adapter.auto-port-config = {
+                        mode = dsp
+                        monitor = false
+                        control = false
+                        position = preserve   # unknown, aux
+                    }
+                    #node.param.Props    = {
+                    #    channelVolumes = [ 0.5 0.5 0.5 0.5 0.5 0.5 0.5 0.6 ]
+                    #}
+                }
+                #device.param.Profile    = {
+                #    #idx = 0
+                #    name = pro-audio
+                #}
+            }
+        }
+        condition = [ { minimal.use-udev = true } ]
     }
 
     # This creates a single PCM source device for the given
@@ -192,7 +260,7 @@ context.objects = [
             node.name              = "system"
             node.description       = "system"
             media.class            = "Audio/Source"
-            api.alsa.path          = "hw:0"
+            api.alsa.path          = "hw:4"
             #api.alsa.period-size   = 0
             #api.alsa.period-num    = 0
             #api.alsa.headroom      = 0
@@ -222,7 +290,7 @@ context.objects = [
             #channelmix.rear-delay  = 12.0
             #channelmix.stereo-widen = 0.0
             #channelmix.hilbert-taps = 0
-            channelmix.disable     = true
+            #channelmix.disable     = false
             #dither.noise = 0
             #node.param.Props      = {
             #    params = [
@@ -247,7 +315,11 @@ context.objects = [
             #        position = [ FL FR RL RR ]
             #    }
             #}
+            #node.param.Props    = {
+            #    channelVolumes = [ 0.5 0.4 0.3 0.5 ]
+            #}
         }
+        condition = [ { minimal.use-udev = false } ]
     }
     { factory = adapter
         args = {
@@ -255,7 +327,7 @@ context.objects = [
             node.name              = "system"
             node.description       = "system"
             media.class            = "Audio/Sink"
-            api.alsa.path          = "hw:0"
+            api.alsa.path          = "hw:4"
             #api.alsa.period-size   = 0
             #api.alsa.period-num    = 0
             #api.alsa.headroom      = 0
@@ -284,7 +356,7 @@ context.objects = [
             #channelmix.rear-delay = 12.0
             #channelmix.stereo-widen = 0.0
             #channelmix.hilbert-taps = 0
-            channelmix.disable     = true
+            #channelmix.disable     = false
             #dither.noise = 0
             #node.param.Props      = {
             #    params = [
@@ -309,7 +381,11 @@ context.objects = [
             #        channels = 4
             #    }
             #}
+            #node.param.Props    = {
+            #    channelVolumes = [ 0.5 0.4 0.3 0.5 ]
+            #}
         }
+        condition = [ { minimal.use-udev = false } ]
     }
     # This creates a new Source node. It will have input ports
     # that you can link, to provide audio for this source.
@@ -350,7 +426,7 @@ context.objects = [
 
 context.exec = [
     #{   path = <program-name>
-    #    ( args = "<arguments>" )
+    #    ( args = "<arguments>" | [ <arg1> <arg2> ... ] )
     #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
     #
@@ -362,4 +438,39 @@ context.exec = [
     # on another address with the -a option (eg. -a tcp:4713).
     #
     #@pulse_comment@{ path = "@pipewire_path@" args = "-c pipewire-pulse.conf" }
+]
+
+node.rules = [
+    {   matches = [
+            {
+                # all keys must match the value. ! negates. ~ starts regex.
+                #alsa.card_name = "ICUSBAUDIO7D"
+                #api.alsa.pcm.stream = "playback"
+            }
+        ]
+        actions = {
+            update-props = {
+                #node.name = "alsa_playback.ICUSBAUDIO7D"
+            }
+        }
+    }
+]
+device.rules = [
+    {   matches = [
+            {
+                #alsa.card_name = "ICUSBAUDIO7D"
+            }
+        ]
+        actions = {
+            update-props = {
+                #device.name = "alsa_card.ICUSBAUDIO7D"
+                #api.acp.auto-profile = false
+                #api.acp.auto-port = false
+                #device.param.Profile    = {
+                #    #idx = 0
+                #    name = off
+                #}
+            }
+        }
+    }
 ]

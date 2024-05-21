@@ -71,9 +71,6 @@ struct node_data {
 	struct spa_hook proxy_client_node_listener;
 
 	struct spa_list links;
-
-	struct spa_io_clock *clock;
-	struct spa_io_position *position;
 };
 
 struct link {
@@ -209,16 +206,20 @@ static int client_node_transport(void *_data,
 	}
 
 	node->rt.target.activation = data->activation->ptr;
-	node->rt.position = &node->rt.target.activation->position;
-	node->info.id = node->rt.target.activation->position.clock.id;
-	node->rt.target.id = node->info.id;
+
+	pw_impl_node_set_io(node, SPA_IO_Clock,
+			&node->rt.target.activation->position.clock,
+			sizeof(struct spa_io_clock));
+	pw_impl_node_set_io(node, SPA_IO_Position,
+			&node->rt.target.activation->position,
+			sizeof(struct spa_io_position));
 
 	pw_log_debug("remote-node %p: fds:%d %d node:%u activation:%p",
 		proxy, readfd, writefd, data->remote_id, data->activation->ptr);
 
 	data->rtwritefd = writefd;
-	spa_system_close(data->data_system, node->source.fd);
-	node->source.fd = readfd;
+	spa_system_close(node->rt.target.system, node->source.fd);
+	node->rt.target.fd = node->source.fd = readfd;
 
 	data->have_transport = true;
 
@@ -314,11 +315,25 @@ static int add_port_update(struct node_data *data, struct pw_impl_port *port, ui
 				continue;
 
 			for (idx = 0;;) {
+				struct spa_node *qnode;
+				uint32_t qport;
+
 				spa_pod_dynamic_builder_init(&b, buf, sizeof(buf), 4096);
 
-	                        res = spa_node_port_enum_params_sync(port->node->node,
-							port->direction, port->port_id,
-							id, &idx, NULL, &param, &b.b);
+				switch (id) {
+				case SPA_PARAM_IO:
+					qnode = port->mix;
+					qport = SPA_ID_INVALID;
+					break;
+				default:
+					qnode = port->node->node;
+					qport = port->port_id;
+					break;
+				}
+				res = spa_node_port_enum_params_sync(qnode,
+						port->direction, qport,
+						id, &idx, NULL, &param, &b.b);
+
 				if (res == 1) {
 					void *p;
 					p = pw_reallocarray(params, n_params + 1, sizeof(struct spa_pod*));
@@ -424,18 +439,7 @@ client_node_set_io(void *_data,
 	pw_log_debug("node %p: set io %s %p", proxy,
 			spa_debug_type_find_name(spa_type_io, id), ptr);
 
-	switch(id) {
-	case SPA_IO_Clock:
-		data->clock = size >= sizeof(*data->clock) ? ptr : NULL;
-		break;
-	case SPA_IO_Position:
-		data->position = size >= sizeof(*data->position) ? ptr : NULL;
-		break;
-	}
-	node->driving = data->clock && data->position &&
-		data->position->clock.id == data->clock->id;
-
-	res =  spa_node_set_io(node->node, id, ptr, size);
+	res =  pw_impl_node_set_io(node, id, ptr, size);
 
 	pw_memmap_free(old);
 exit:
@@ -527,7 +531,7 @@ static int clear_buffers(struct node_data *data, struct mix *mix)
 	int res;
 
         pw_log_debug("port %p: clear %zd buffers mix:%d", port,
-			pw_array_get_len(&mix->buffers, struct buffer *),
+			pw_array_get_len(&mix->buffers, struct buffer),
 			mix->mix.id);
 
 	if ((res = pw_impl_port_use_buffers(port, &mix->mix, 0, NULL, 0)) < 0) {
@@ -701,14 +705,14 @@ client_node_port_use_buffers(void *_data,
 				d->type = bm->type;
 				d->data = NULL;
 
-				pw_log_debug(" data %d %u -> fd %d maxsize %d",
-						j, bm->id, bm->fd, d->maxsize);
+				pw_log_debug(" data %d %u -> fd %d maxsize %d flags:%08x",
+						j, bm->id, bm->fd, d->maxsize, d->flags);
 			} else if (d->type == SPA_DATA_MemPtr) {
 				int offs = SPA_PTR_TO_INT(d->data);
 				d->data = SPA_PTROFF(mm->ptr, offs, void);
 				d->fd = -1;
-				pw_log_debug(" data %d id:%u -> mem:%p offs:%d maxsize:%d",
-						j, bid->id, d->data, offs, d->maxsize);
+				pw_log_debug(" data %d id:%u -> mem:%p offs:%d maxsize:%d flags:%08x",
+						j, bid->id, d->data, offs, d->maxsize, d->flags);
 			} else {
 				pw_log_warn("unknown buffer data type %d", d->type);
 			}

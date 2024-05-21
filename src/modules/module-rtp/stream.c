@@ -13,6 +13,7 @@
 #include <spa/control/control.h>
 #include <spa/debug/types.h>
 #include <spa/debug/mem.h>
+#include <spa/debug/log.h>
 
 #include "config.h"
 
@@ -22,6 +23,9 @@
 #include <module-rtp/rtp.h>
 #include <module-rtp/stream.h>
 #include <module-rtp/apple-midi.h>
+
+PW_LOG_TOPIC_EXTERN(mod_topic);
+#define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define BUFFER_SIZE			(1u<<22)
 #define BUFFER_MASK			(BUFFER_SIZE-1)
@@ -39,6 +43,8 @@
 struct impl {
 	struct spa_audio_info info;
 	struct spa_audio_info stream_info;
+
+	struct pw_context *context;
 
 	struct pw_stream *stream;
 	struct spa_hook stream_listener;
@@ -84,8 +90,23 @@ struct impl {
 	unsigned receiving:1;
 	unsigned first:1;
 
+	struct pw_loop *main_loop;
+	struct pw_loop *data_loop;
+	struct spa_source *timer;
+	bool timer_running;
+
 	int (*receive_rtp)(struct impl *impl, uint8_t *buffer, ssize_t len);
+	void (*flush_timeout)(struct impl *impl, uint64_t expirations);
 };
+
+static int do_emit_state_changed(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct impl *impl = user_data;
+	bool *started = (bool *)data;
+
+	rtp_stream_emit_state_changed(impl, *started, NULL);
+	return 0;
+}
 
 #include "module-rtp/audio.c"
 #include "module-rtp/midi.c"
@@ -148,7 +169,9 @@ static int stream_stop(struct impl *impl)
 	if (!impl->started)
 		return 0;
 
-	rtp_stream_emit_state_changed(impl, false, NULL);
+	/* if timer is running, the state changed event must be emitted by the timer after all packets have been sent */
+	if (!impl->timer_running)
+		rtp_stream_emit_state_changed(impl, false, NULL);
 
 	impl->started = false;
 	return 0;
@@ -165,7 +188,6 @@ static void on_stream_state_changed(void *d, enum pw_stream_state old,
 			break;
 		case PW_STREAM_STATE_ERROR:
 			pw_log_error("stream error: %s", error);
-			rtp_stream_emit_state_changed(impl, false, error);
 			break;
 		case PW_STREAM_STATE_STREAMING:
 			if ((errno = -stream_start(impl)) < 0)
@@ -261,9 +283,19 @@ static void parse_audio_info(const struct pw_properties *props, struct spa_audio
 		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
 }
 
-static uint32_t msec_to_samples(struct impl *impl, uint32_t msec)
+static uint32_t msec_to_samples(struct impl *impl, float msec)
 {
 	return msec * impl->rate / 1000;
+}
+static float samples_to_msec(struct impl *impl, uint32_t samples)
+{
+	return samples * 1000.0f / impl->rate;
+}
+
+static void on_flush_timeout(void *d, uint64_t expirations)
+{
+	struct impl *impl = d;
+	impl->flush_timeout(d, expirations);
 }
 
 struct rtp_stream *rtp_stream_new(struct pw_core *core,
@@ -272,24 +304,33 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 {
 	struct impl *impl;
 	const char *str;
+	char tmp[64];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
 	uint32_t n_params, min_samples, max_samples;
 	float min_ptime, max_ptime;
 	const struct spa_pod *params[1];
 	enum pw_stream_flags flags;
-	int latency_msec;
+	float latency_msec;
 	int res;
 
 	impl = calloc(1, sizeof(*impl));
 	if (impl == NULL) {
 		res = -errno;
 		goto out;
-		return NULL;
 	}
 	impl->first = true;
 	spa_hook_list_init(&impl->listener_list);
 	impl->stream_events = stream_events;
+	impl->context = pw_core_get_context(core);
+	impl->main_loop = pw_context_get_main_loop(impl->context);
+	impl->data_loop = pw_context_acquire_loop(impl->context, &props->dict);
+	impl->timer = pw_loop_add_timer(impl->data_loop, on_flush_timeout, impl);
+	if (impl->timer == NULL) {
+		res = -errno;
+		pw_log_error("can't create timer");
+		goto out;
+	}
 
 	if ((str = pw_properties_get(props, "sess.media")) == NULL)
 		str = "audio";
@@ -407,32 +448,74 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 	if (!spa_atof(str, &max_ptime))
 		max_ptime = DEFAULT_MAX_PTIME;
 
-	min_samples = min_ptime * impl->rate / 1000;
-	max_samples = max_ptime * impl->rate / 1000;
+	min_samples = msec_to_samples(impl, min_ptime);
+	max_samples = msec_to_samples(impl, max_ptime);
 
 	float ptime = 0;
 	if ((str = pw_properties_get(props, "rtp.ptime")) != NULL)
 		if (!spa_atof(str, &ptime))
-			ptime = 0.0;
+			ptime = 0.0f;
 
-	if (ptime) {
-		impl->psamples = ptime * impl->rate / 1000;
+	uint32_t framecount = 0;
+	if ((str = pw_properties_get(props, "rtp.framecount")) != NULL)
+		if (!spa_atou32(str, &framecount, 0))
+			framecount = 0;
+
+	if (ptime > 0.0f || framecount > 0) {
+		if (!framecount) {
+			impl->psamples = msec_to_samples(impl, ptime);
+			pw_properties_setf(props, "rtp.framecount", "%u", impl->psamples);
+		} else if (!ptime) {
+			impl->psamples = framecount;
+			pw_properties_set(props, "rtp.ptime",
+					spa_dtoa(tmp, sizeof(tmp),
+						samples_to_msec(impl, impl->psamples)));
+		} else if (fabsf((samples_to_msec(impl, framecount)) - ptime) > 0.1f) {
+			impl->psamples = msec_to_samples(impl, ptime);
+			pw_log_warn("rtp.ptime doesn't match rtp.framecount. Choosing rtp.ptime");
+		}
 	} else {
 		impl->psamples = impl->mtu / impl->stride;
 		impl->psamples = SPA_CLAMP(impl->psamples, min_samples, max_samples);
-		if (direction == PW_DIRECTION_INPUT)
-			pw_properties_setf(props, "rtp.ptime", "%f",
-					impl->psamples * 1000.0 / impl->rate);
+		if (direction == PW_DIRECTION_INPUT) {
+			pw_properties_set(props, "rtp.ptime",
+					spa_dtoa(tmp, sizeof(tmp),
+						samples_to_msec(impl, impl->psamples)));
+
+			pw_properties_setf(props, "rtp.framecount", "%u", impl->psamples);
+		}
 	}
-	latency_msec = pw_properties_get_uint32(props,
-			"sess.latency.msec", DEFAULT_SESS_LATENCY);
+
+	ptime = samples_to_msec(impl, impl->psamples);
+
+	/* For senders, the default latency is ptime and for a receiver it is
+	 * DEFAULT_SESS_LATENCY. Setting the sess.latency.msec for a sender to
+	 * something smaller/bigger will influence the quantum and the amount
+	 * of packets we send in one cycle */
+	str = pw_properties_get(props, "sess.latency.msec");
+	if (!spa_atof(str, &latency_msec)) {
+		latency_msec = direction == PW_DIRECTION_INPUT ?
+			ptime :
+			DEFAULT_SESS_LATENCY;
+	}
 	impl->target_buffer = msec_to_samples(impl, latency_msec);
 	impl->max_error = msec_to_samples(impl, ERROR_MSEC);
+
+	if (impl->target_buffer < ptime) {
+		pw_log_warn("sess.latency.msec cannot be lower than rtp.ptime");
+		impl->target_buffer = impl->psamples;
+	}
+
+	/* We're not expecting odd ptimes, so this modulo should be 0 */
+	if (fmodf(impl->target_buffer, ptime != 0)) {
+		pw_log_warn("sess.latency.msec should be an integer multiple of rtp.ptime");
+		impl->target_buffer = (impl->target_buffer / ptime) * impl->psamples;
+	}
 
 	pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%d", impl->rate);
 	if (direction == PW_DIRECTION_INPUT) {
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d",
-				impl->psamples, impl->rate);
+				impl->target_buffer, impl->rate);
 	} else {
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d",
 				impl->target_buffer / 2, impl->rate);
@@ -527,8 +610,20 @@ void rtp_stream_destroy(struct rtp_stream *s)
 	if (impl->stream)
 		pw_stream_destroy(impl->stream);
 
+	if (impl->timer)
+		pw_loop_destroy_source(impl->data_loop, impl->timer);
+
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
+
 	spa_hook_list_clean(&impl->listener_list);
 	free(impl);
+}
+
+int rtp_stream_update_properties(struct rtp_stream *s, const struct spa_dict *dict)
+{
+	struct impl *impl = (struct impl*)s;
+	return pw_stream_update_properties(impl->stream, dict);
 }
 
 int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len)
@@ -564,6 +659,12 @@ void rtp_stream_set_first(struct rtp_stream *s)
 	impl->first = true;
 }
 
+void rtp_stream_set_error(struct rtp_stream *s, int res, const char *error)
+{
+	struct impl *impl = (struct impl*)s;
+	pw_stream_set_error(impl->stream, res, "%s: %s", error, spa_strerror(res));
+}
+
 enum pw_stream_state rtp_stream_get_state(struct rtp_stream *s, const char **error)
 {
 	struct impl *impl = (struct impl*)s;
@@ -583,6 +684,5 @@ int rtp_stream_update_params(struct rtp_stream *s,
 			uint32_t n_params)
 {
 	struct impl *impl = (struct impl*)s;
-	
 	return pw_stream_update_params(impl->stream, params, n_params);
 }

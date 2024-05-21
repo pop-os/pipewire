@@ -48,6 +48,13 @@ struct impl {
 
 	struct spa_log *log;
 
+	uint32_t info_all;
+	struct spa_device_info device_info;
+
+#define IDX_EnumProfile		0
+#define IDX_Profile		1
+	struct spa_param_info params[2];
+
 	struct spa_hook_list hooks;
 
 	struct props props;
@@ -229,6 +236,9 @@ static int set_profile(struct impl *this, uint32_t id)
 	spa_log_debug(this->log, "done enumerating PCM nodes for card %s", this->props.device);
 	snd_ctl_close(ctl_hndl);
 
+	this->device_info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	this->params[IDX_Profile].user++;
+
 	return err;
 }
 
@@ -239,51 +249,54 @@ static int emit_info(struct impl *this, bool full)
 	uint32_t n_items = 0;
 	snd_ctl_t *ctl_hndl;
 	snd_ctl_card_info_t *info;
-	struct spa_device_info dinfo;
-	struct spa_param_info params[2];
 	char path[128];
 
-	spa_log_debug(this->log, "open card %s", this->props.device);
-	if ((err = snd_ctl_open(&ctl_hndl, this->props.device, 0)) < 0) {
-		spa_log_error(this->log, "can't open control for card %s: %s",
-				this->props.device, snd_strerror(err));
-		return err;
-	}
+	if (full)
+		this->device_info.change_mask = this->info_all;
 
-	snd_ctl_card_info_alloca(&info);
-	if ((err = snd_ctl_card_info(ctl_hndl, info)) < 0) {
-		spa_log_error(this->log, "error hardware info: %s", snd_strerror(err));
-		goto exit;
-	}
+	if (this->device_info.change_mask) {
+		spa_log_debug(this->log, "open card %s", this->props.device);
+		if ((err = snd_ctl_open(&ctl_hndl, this->props.device, 0)) < 0) {
+			spa_log_error(this->log, "can't open control for card %s: %s",
+					this->props.device, snd_strerror(err));
+			return err;
+		}
 
-	dinfo = SPA_DEVICE_INFO_INIT();
-
-	dinfo.change_mask = SPA_DEVICE_CHANGE_MASK_PROPS;
+		snd_ctl_card_info_alloca(&info);
+		if ((err = snd_ctl_card_info(ctl_hndl, info)) < 0) {
+			spa_log_error(this->log, "error hardware info: %s", snd_strerror(err));
+			goto exit;
+		}
 
 #define ADD_ITEM(key, value) items[n_items++] = SPA_DICT_ITEM_INIT(key, value)
-	snprintf(path, sizeof(path), "alsa:pcm:%s", snd_ctl_card_info_get_id(info));
-	ADD_ITEM(SPA_KEY_OBJECT_PATH, path);
-	ADD_ITEM(SPA_KEY_DEVICE_API, "alsa:pcm");
-	ADD_ITEM(SPA_KEY_MEDIA_CLASS, "Audio/Device");
-	ADD_ITEM(SPA_KEY_API_ALSA_PATH,	(char *)this->props.device);
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_ID, snd_ctl_card_info_get_id(info));
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_COMPONENTS, snd_ctl_card_info_get_components(info));
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_DRIVER, snd_ctl_card_info_get_driver(info));
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_NAME, snd_ctl_card_info_get_name(info));
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_LONGNAME, snd_ctl_card_info_get_longname(info));
-	ADD_ITEM(SPA_KEY_API_ALSA_CARD_MIXERNAME, snd_ctl_card_info_get_mixername(info));
-	dinfo.props = &SPA_DICT_INIT(items, n_items);
+		snprintf(path, sizeof(path), "alsa:pcm:%s", snd_ctl_card_info_get_id(info));
+		ADD_ITEM(SPA_KEY_OBJECT_PATH, path);
+		ADD_ITEM(SPA_KEY_DEVICE_API, "alsa:pcm");
+		ADD_ITEM(SPA_KEY_MEDIA_CLASS, "Audio/Device");
+		ADD_ITEM(SPA_KEY_API_ALSA_PATH,	(char *)this->props.device);
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_ID, snd_ctl_card_info_get_id(info));
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_COMPONENTS, snd_ctl_card_info_get_components(info));
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_DRIVER, snd_ctl_card_info_get_driver(info));
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_NAME, snd_ctl_card_info_get_name(info));
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_LONGNAME, snd_ctl_card_info_get_longname(info));
+		ADD_ITEM(SPA_KEY_API_ALSA_CARD_MIXERNAME, snd_ctl_card_info_get_mixername(info));
+		this->device_info.props = &SPA_DICT_INIT(items, n_items);
 #undef ADD_ITEM
 
-	dinfo.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
-	params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumProfile, SPA_PARAM_INFO_READ);
-	params[1] = SPA_PARAM_INFO(SPA_PARAM_Profile, SPA_PARAM_INFO_READWRITE);
-	dinfo.n_params = SPA_N_ELEMENTS(params);
-	dinfo.params = params;
+		if (this->device_info.change_mask & SPA_DEVICE_CHANGE_MASK_PARAMS) {
+			SPA_FOR_EACH_ELEMENT_VAR(this->params, p) {
+				if (p->user > 0) {
+					p->flags ^= SPA_PARAM_INFO_SERIAL;
+					p->user = 0;
+				}
+			}
+		}
 
-	spa_device_emit_info(&this->hooks, &dinfo);
+		spa_device_emit_info(&this->hooks, &this->device_info);
+		this->device_info.change_mask = 0;
+	}
 
-      exit:
+exit:
 	spa_log_debug(this->log, "close card %s", this->props.device);
 	snd_ctl_close(ctl_hndl);
 	return err;
@@ -427,6 +440,15 @@ static int impl_enum_params(void *object, int seq,
 	return 0;
 }
 
+static uint32_t find_profile_by_name(const char *name)
+{
+	if (spa_streq(name, "off"))
+		return 0;
+	else if (spa_streq(name, "on"))
+		return 1;
+	return SPA_ID_INVALID;
+}
+
 static int impl_set_param(void *object,
 			  uint32_t id, uint32_t flags,
 			  const struct spa_pod *param)
@@ -439,17 +461,32 @@ static int impl_set_param(void *object,
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
-		uint32_t idx;
+		uint32_t idx = SPA_ID_INVALID;
+		const char *name = NULL;
 
-		if ((res = spa_pod_parse_object(param,
+		if (param == NULL) {
+			idx = 1;
+		} else if ((res = spa_pod_parse_object(param,
 				SPA_TYPE_OBJECT_ParamProfile, NULL,
-				SPA_PARAM_PROFILE_index, SPA_POD_Int(&idx))) < 0) {
+				SPA_PARAM_PROFILE_index, SPA_POD_OPT_Int(&idx),
+				SPA_PARAM_PROFILE_name, SPA_POD_OPT_String(&name))) < 0) {
 			spa_log_warn(this->log, "can't parse profile");
 			spa_debug_log_pod(this->log, SPA_LOG_LEVEL_DEBUG, 0, NULL, param);
 			return res;
 		}
+		if (idx == SPA_ID_INVALID && name == NULL) {
+			spa_log_warn(this->log, "profile needs name or index");
+			return -EINVAL;
+		}
+		if (idx == SPA_ID_INVALID)
+			idx = find_profile_by_name(name);
+		if (idx == SPA_ID_INVALID) {
+			spa_log_warn(this->log, "unknown profile %s", name);
+			return -EINVAL;
+		}
 
 		set_profile(this, idx);
+		emit_info(this, false);
 		break;
 	}
 	default:
@@ -528,6 +565,15 @@ impl_init(const struct spa_handle_factory *factory,
 
 	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_ALSA_PATH)))
 		snprintf(this->props.device, 64, "%s", str);
+
+	this->device_info = SPA_DEVICE_INFO_INIT();
+	this->info_all = SPA_DEVICE_CHANGE_MASK_PROPS |
+		SPA_DEVICE_CHANGE_MASK_PARAMS;
+
+	this->params[IDX_EnumProfile] = SPA_PARAM_INFO(SPA_PARAM_EnumProfile, SPA_PARAM_INFO_READ);
+	this->params[IDX_Profile] = SPA_PARAM_INFO(SPA_PARAM_Profile, SPA_PARAM_INFO_READWRITE);
+	this->device_info.params = this->params;
+	this->device_info.n_params = SPA_N_ELEMENTS(this->params);
 
 	return 0;
 }

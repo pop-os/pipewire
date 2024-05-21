@@ -16,6 +16,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
 #include <spa/utils/json.h>
+#include <spa/debug/file.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/impl.h>
@@ -65,7 +66,7 @@ static const struct pw_impl_module_events module_events = {
 
 static void show_help(struct data *data, const char *name, bool error)
 {
-        fprintf(error ? stderr : stdout, "%s [options]\n"
+	fprintf(error ? stderr : stdout, "%s [options]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -r, --remote                          Remote daemon name\n"
@@ -111,6 +112,7 @@ int main(int argc, char *argv[])
 		{ NULL, 0, NULL, 0}
 	};
 	int c, res = -1;
+	struct spa_error_location loc;
 
 	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
@@ -170,10 +172,22 @@ int main(int argc, char *argv[])
 			pw_properties_set(data.playback_props, PW_KEY_TARGET_OBJECT, optarg);
 			break;
 		case 'i':
-			pw_properties_update_string(data.capture_props, optarg, strlen(optarg));
+			if (pw_properties_update_string_checked(data.capture_props,
+						optarg, strlen(optarg), &loc) < 0) {
+				spa_debug_file_error_location(stderr, &loc,
+						"error: syntax error in --capture-props: %s",
+						loc.reason);
+				return -1;
+			}
 			break;
 		case 'o':
-			pw_properties_update_string(data.playback_props, optarg, strlen(optarg));
+			if (pw_properties_update_string_checked(data.playback_props,
+						optarg, strlen(optarg), &loc) < 0) {
+				spa_debug_file_error_location(stderr, &loc,
+						"error: syntax error in --playback-props: %s",
+						loc.reason);
+				return -1;
+			}
 			break;
 		default:
 			show_help(&data, argv[0], true);
@@ -198,7 +212,7 @@ int main(int argc, char *argv[])
 	}
 
 
-        if ((f = open_memstream(&args, &size)) == NULL) {
+	if ((f = open_memstream(&args, &size)) == NULL) {
 		fprintf(stderr, "can't open memstream: %m\n");
 		goto exit;
 	}

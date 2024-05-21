@@ -30,6 +30,7 @@
 #include <pipewire/impl.h>
 
 #include <module-vban/stream.h>
+#include "network-utils.h"
 
 #ifdef __FreeBSD__
 #define ifr_ifindex ifr_index
@@ -187,26 +188,6 @@ receive_error:
 short_packet:
 	pw_log_warn("short packet received");
 	return;
-}
-
-static int parse_address(const char *address, uint16_t port,
-		struct sockaddr_storage *addr, socklen_t *len)
-{
-	struct sockaddr_in *sa4 = (struct sockaddr_in*)addr;
-	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)addr;
-
-	if (inet_pton(AF_INET, address, &sa4->sin_addr) > 0) {
-		sa4->sin_family = AF_INET;
-		sa4->sin_port = htons(port);
-		*len = sizeof(*sa4);
-	} else if (inet_pton(AF_INET6, address, &sa6->sin6_addr) > 0) {
-		sa6->sin6_family = AF_INET6;
-		sa6->sin6_port = htons(port);
-		*len = sizeof(*sa6);
-	} else
-		return -EINVAL;
-
-	return 0;
 }
 
 static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
@@ -389,6 +370,9 @@ static void impl_destroy(struct impl *impl)
 	if (impl->timer)
 		pw_loop_destroy_source(impl->loop, impl->timer);
 
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
+
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
@@ -463,11 +447,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(pw_context_get_data_loop(context));
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
 
 	if ((sess_name = pw_properties_get(props, "sess.name")) == NULL)
 		sess_name = pw_get_host_name();
 
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_NAME, "vban_session.%s", sess_name);
 	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
@@ -479,6 +464,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(stream_props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
@@ -508,7 +494,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 	if ((str = pw_properties_get(props, "source.ip")) == NULL)
 		str = DEFAULT_SOURCE_IP;
-	if ((res = parse_address(str, impl->src_port, &impl->src_addr, &impl->src_len)) < 0) {
+	if ((res = pw_net_parse_address(str, impl->src_port, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}

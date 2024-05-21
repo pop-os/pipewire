@@ -216,8 +216,12 @@ SPA_DEPRECATED
 int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time);
 
 /** Get the current time in nanoseconds. This value can be compared with
- * the nsec value in the spa_io_position. Since 1.0.4 */
+ * the nsec value in the spa_io_position. Since 1.1.0 */
 uint64_t pw_filter_get_nsec(struct pw_filter *filter);
+
+/** Get the data loop that is doing the processing of this filter. This loop
+ * is assigned after pw_filter_connect().  * Since 1.1.0 */
+struct pw_loop *pw_filter_get_data_loop(struct pw_filter *filter);
 
 /** Get a buffer that can be filled for output ports or consumed
  * for input ports.  */

@@ -13,15 +13,27 @@
 
 struct impl;
 
+enum message_type {
+	MESSAGE_TYPE_UNSPECIFIED,
+	MESSAGE_TYPE_SUBSCRIPTION_EVENT,
+};
+
 struct message {
 	struct spa_list link;
 	struct impl *impl;
-	uint32_t extra[4];
 	uint32_t channel;
 	uint32_t allocated;
 	uint32_t length;
 	uint32_t offset;
 	uint8_t *data;
+
+	enum message_type type;
+	union {
+		struct {
+			uint32_t event;
+			uint32_t index;
+		} subscription_event;
+	} u;
 };
 
 enum {
@@ -50,6 +62,6 @@ struct message *message_alloc(struct impl *impl, uint32_t channel, uint32_t size
 void message_free(struct message *msg, bool dequeue, bool destroy);
 int message_get(struct message *m, ...);
 int message_put(struct message *m, ...);
-int message_dump(enum spa_log_level level, struct message *m);
+int message_dump(enum spa_log_level level, const char *prefix, struct message *m);
 
 #endif /* PULSE_SERVER_MESSAGE_H */

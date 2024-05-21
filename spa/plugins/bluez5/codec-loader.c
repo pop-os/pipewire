@@ -15,7 +15,7 @@
 #define MAX_CODECS	0x3E
 #define MAX_HANDLES	MAX_CODECS
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.codecs");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.codecs");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
@@ -36,6 +36,7 @@ static int codec_order(const struct media_codec *c)
 		SPA_BLUETOOTH_AUDIO_CODEC_APTX_HD,
 		SPA_BLUETOOTH_AUDIO_CODEC_APTX,
 		SPA_BLUETOOTH_AUDIO_CODEC_AAC,
+		SPA_BLUETOOTH_AUDIO_CODEC_OPUS_G,
 		SPA_BLUETOOTH_AUDIO_CODEC_LC3PLUS_HR,
 		SPA_BLUETOOTH_AUDIO_CODEC_MPEG,
 		SPA_BLUETOOTH_AUDIO_CODEC_SBC,
@@ -49,6 +50,7 @@ static int codec_order(const struct media_codec *c)
 		SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_71,
 		SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_DUPLEX,
 		SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_PRO,
+		SPA_BLUETOOTH_AUDIO_CODEC_AAC_ELD,
 	};
 	size_t i;
 	for (i = 0; i < SPA_N_ELEMENTS(order); ++i)
@@ -169,6 +171,7 @@ const struct media_codec * const *load_media_codecs(struct spa_plugin_loader *lo
 		MEDIA_CODEC_FACTORY_LIB("sbc"),
 		MEDIA_CODEC_FACTORY_LIB("lc3plus"),
 		MEDIA_CODEC_FACTORY_LIB("opus"),
+		MEDIA_CODEC_FACTORY_LIB("opus-g"),
 		MEDIA_CODEC_FACTORY_LIB("lc3")
 #undef MEDIA_CODEC_FACTORY_LIB
 	};

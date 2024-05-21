@@ -7,9 +7,9 @@
 #include <dbus/dbus.h>
 
 #include <spa/utils/string.h>
+#include <spa-private/dbus-helpers.h>
 
 #include "defs.h"
-#include "dbus-helpers.h"
 #include "player.h"
 
 #define PLAYER_OBJECT_PATH_BASE	"/media_player"
@@ -50,7 +50,7 @@
 	" </interface>"							\
 	"</node>"
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.player");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.player");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 

@@ -35,7 +35,11 @@
 
 #include "defs.h"
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.source.sco");
+#ifdef HAVE_LC3
+#include <lc3.h>
+#endif
+
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.source.sco");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
@@ -120,6 +124,8 @@ struct impl {
 	unsigned int resampling:1;
 	unsigned int io_error:1;
 
+	unsigned int is_internal:1;
+
 	struct spa_source timer_source;
 	int timerfd;
 
@@ -129,14 +135,23 @@ struct impl {
 	uint64_t current_time;
 	uint64_t next_time;
 
+	/* Codecs */
+	bool h2_seq_initialized;
+	uint8_t h2_seq;
+
+	/* mSBC/LC3 frame parsing */
+	uint8_t recv_buffer[HFP_CODEC_PACKET_SIZE];
+	uint8_t recv_buffer_pos;
+
 	/* mSBC */
 	sbc_t msbc;
-	bool msbc_seq_initialized;
-	uint8_t msbc_seq;
 
-	/* mSBC frame parsing */
-	uint8_t msbc_buffer[MSBC_ENCODED_SIZE];
-	uint8_t msbc_buffer_pos;
+	/* LC3 */
+#ifdef HAVE_LC3
+	lc3_decoder_t lc3;
+#else
+	void *lc3;
+#endif
 
 	struct timespec now;
 };
@@ -343,51 +358,53 @@ static void recycle_buffer(struct impl *this, struct port *port, uint32_t buffer
 	}
 }
 
-/* Append data to msbc buffer, syncing buffer start to frame headers */
-static void msbc_buffer_append_byte(struct impl *this, uint8_t byte)
+/* Append data to recv buffer, syncing buffer start to headers */
+static void recv_buffer_append_byte(struct impl *this, uint8_t byte)
 {
-        /* Parse mSBC frame header */
-        if (this->msbc_buffer_pos == 0) {
+        /* Parse H2 sync header */
+        if (this->recv_buffer_pos == 0) {
                 if (byte != 0x01) {
-                        this->msbc_buffer_pos = 0;
+                        this->recv_buffer_pos = 0;
                         return;
                 }
-        }
-        else if (this->msbc_buffer_pos == 1) {
+        } else if (this->recv_buffer_pos == 1) {
                 if (!((byte & 0x0F) == 0x08 &&
                       ((byte >> 4) & 1) == ((byte >> 5) & 1) &&
                       ((byte >> 6) & 1) == ((byte >> 7) & 1))) {
-                        this->msbc_buffer_pos = 0;
+                        this->recv_buffer_pos = 0;
                         return;
                 }
-        }
-        else if (this->msbc_buffer_pos == 2) {
-                /* .. and beginning of MSBC frame: SYNCWORD + 2 nul bytes */
-                if (byte != 0xAD) {
-                        this->msbc_buffer_pos = 0;
-                        return;
+        } else if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+		/* Beginning of MSBC frame: SYNCWORD + 2 nul bytes */
+		if (this->recv_buffer_pos == 2) {
+			if (byte != 0xAD) {
+				this->recv_buffer_pos = 0;
+				return;
+			}
+		}
+		else if (this->recv_buffer_pos == 3) {
+			if (byte != 0x00) {
+				this->recv_buffer_pos = 0;
+				return;
+			}
+		}
+		else if (this->recv_buffer_pos == 4) {
+			if (byte != 0x00) {
+				this->recv_buffer_pos = 0;
+				return;
+			}
                 }
-        }
-        else if (this->msbc_buffer_pos == 3) {
-                if (byte != 0x00) {
-                        this->msbc_buffer_pos = 0;
-                        return;
-                }
-        }
-        else if (this->msbc_buffer_pos == 4) {
-                if (byte != 0x00) {
-                        this->msbc_buffer_pos = 0;
-                        return;
-                }
-        }
-        else if (this->msbc_buffer_pos >= MSBC_ENCODED_SIZE) {
-                /* Packet completed. Reset. */
-                this->msbc_buffer_pos = 0;
-                msbc_buffer_append_byte(this, byte);
-                return;
-        }
-        this->msbc_buffer[this->msbc_buffer_pos] = byte;
-        ++this->msbc_buffer_pos;
+	}
+
+	if (this->recv_buffer_pos >= HFP_CODEC_PACKET_SIZE) {
+		/* Packet completed. Reset. */
+		this->recv_buffer_pos = 0;
+		recv_buffer_append_byte(this, byte);
+		return;
+	}
+
+        this->recv_buffer[this->recv_buffer_pos] = byte;
+        ++this->recv_buffer_pos;
 }
 
 /* Helper function for debugging */
@@ -419,14 +436,38 @@ static bool is_zero_packet(uint8_t *data, int size)
 	return true;
 }
 
-static uint32_t preprocess_and_decode_msbc_data(void *userdata, uint8_t *read_data, int size_read)
+static int lc3_decode_frame(struct impl *this, const void *src, size_t src_size, void *dst,
+		size_t dst_size, size_t *dst_out)
+{
+#ifdef HAVE_LC3
+	int res;
+
+	if (src_size != LC3_SWB_PAYLOAD_SIZE)
+		return -EINVAL;
+	if (dst_size < LC3_SWB_DECODED_SIZE)
+		return -EINVAL;
+
+	res = lc3_decode(this->lc3, src, src_size, LC3_PCM_FORMAT_S24, dst, 1);
+	if (res != 0)
+		return -EINVAL;
+
+	*dst_out = LC3_SWB_DECODED_SIZE;
+	return LC3_SWB_DECODED_SIZE;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+static uint32_t preprocess_and_decode_codec_data(void *userdata, uint8_t *read_data, int size_read)
 {
 	struct impl *this = userdata;
 	struct port *port = &this->port;
 	uint32_t decoded = 0;
 	int i;
+	uint32_t decoded_size = (this->transport->codec == HFP_AUDIO_CODEC_MSBC) ? MSBC_DECODED_SIZE :
+		LC3_SWB_DECODED_SIZE;
 
-	spa_log_trace(this->log, "handling mSBC data");
+	spa_log_trace(this->log, "handling mSBC/LC3 data");
 
 	/*
 	 * Check if the packet contains only zeros - if so ignore the packet.
@@ -443,44 +484,49 @@ static uint32_t preprocess_and_decode_msbc_data(void *userdata, uint8_t *read_da
 		int seq, processed;
 		size_t written;
 
-		msbc_buffer_append_byte(this, read_data[i]);
+		recv_buffer_append_byte(this, read_data[i]);
 
-		if (this->msbc_buffer_pos != MSBC_ENCODED_SIZE)
+		if (this->recv_buffer_pos != HFP_CODEC_PACKET_SIZE)
 			continue;
 
 		/*
-		 * Handle found mSBC packet
+		 * Handle found mSBC/LC3 packet
 		 */
 
 		buf = spa_bt_decode_buffer_get_write(&port->buffer, &avail);
 
 		/* Check sequence number */
-		seq = ((this->msbc_buffer[1] >> 4) & 1) |
-			((this->msbc_buffer[1] >> 6) & 2);
+		seq = ((this->recv_buffer[1] >> 4) & 1) |
+			((this->recv_buffer[1] >> 6) & 2);
 
-		spa_log_trace(this->log, "mSBC packet seq=%u", seq);
-		if (!this->msbc_seq_initialized) {
-			this->msbc_seq_initialized = true;
-			this->msbc_seq = seq;
-		} else if (seq != this->msbc_seq) {
+		spa_log_trace(this->log, "mSBC/LC3 packet seq=%u", seq);
+		if (!this->h2_seq_initialized) {
+			this->h2_seq_initialized = true;
+			this->h2_seq = seq;
+		} else if (seq != this->h2_seq) {
 			/* TODO: PLC (too late to insert data now) */
 			spa_log_info(this->log,
-					"missing mSBC packet: %u != %u", seq, this->msbc_seq);
-			this->msbc_seq = seq;
+					"missing mSBC/LC3 packet: %u != %u", seq, this->h2_seq);
+			this->h2_seq = seq;
 		}
 
-		this->msbc_seq = (this->msbc_seq + 1) % 4;
+		this->h2_seq = (this->h2_seq + 1) % 4;
 
-		if (avail < MSBC_DECODED_SIZE)
-			spa_log_warn(this->log, "Output buffer full, dropping msbc data");
+		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
+			if (avail < decoded_size)
+				spa_log_warn(this->log, "Output buffer full, dropping msbc data");
 
-		/* decode frame */
-		processed = sbc_decode(
-			&this->msbc, this->msbc_buffer + 2, MSBC_ENCODED_SIZE - 3,
+			/* decode frame */
+			processed = sbc_decode(
+				&this->msbc, this->recv_buffer + 2, HFP_CODEC_PACKET_SIZE - 3,
+						buf, avail, &written);
+		} else {
+			processed = lc3_decode_frame(this, this->recv_buffer + 2, HFP_CODEC_PACKET_SIZE - 2,
 					buf, avail, &written);
+		}
 
 		if (processed < 0) {
-			spa_log_warn(this->log, "sbc_decode failed: %d", processed);
+			spa_log_warn(this->log, "decode failed: %d", processed);
 			/* TODO: manage errors */
 			continue;
 		}
@@ -518,8 +564,9 @@ static int sco_source_cb(void *userdata, uint8_t *read_data, int size_read)
 	hexdump_to_log(this, read_data, size_read);
 #endif
 
-	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
-		decoded = preprocess_and_decode_msbc_data(userdata, read_data, size_read);
+	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC ||
+			this->transport->codec == HFP_AUDIO_CODEC_LC3_SWB) {
+		decoded = preprocess_and_decode_codec_data(userdata, read_data, size_read);
 	} else {
 		uint32_t avail;
 		uint8_t *packet;
@@ -685,7 +732,7 @@ static int transport_start(struct impl *this)
 	spa_bt_decode_buffer_set_max_latency(&port->buffer,
 			port->current_format.info.raw.rate * 40 / 1000);
 
-	/* Init mSBC if needed */
+	/* Init mSBC/LC3 if needed */
 	if (this->transport->codec == HFP_AUDIO_CODEC_MSBC) {
 		res = sbc_init_msbc(&this->msbc, 0);
 		if (res < 0)
@@ -693,9 +740,24 @@ static int transport_start(struct impl *this)
 
 		/* Libsbc expects audio samples by default in host endianness, mSBC requires little endian */
 		this->msbc.endian = SBC_LE;
-		this->msbc_seq_initialized = false;
+		this->h2_seq_initialized = false;
 
-		this->msbc_buffer_pos = 0;
+		this->recv_buffer_pos = 0;
+	} else if (this->transport->codec == HFP_AUDIO_CODEC_LC3_SWB) {
+#ifdef HAVE_LC3
+		this->lc3 = lc3_setup_decoder(7500, 32000, 0,
+				calloc(1, lc3_decoder_size(7500, 32000)));
+		if (!this->lc3)
+			return -EINVAL;
+
+		spa_assert(lc3_frame_samples(7500, 32000) * port->frame_size == LC3_SWB_DECODED_SIZE);
+
+		this->h2_seq_initialized = false;
+		this->recv_buffer_pos = 0;
+#else
+		res = -EINVAL;
+		goto fail;
+#endif
 	}
 
 	this->io_error = false;
@@ -712,6 +774,8 @@ static int transport_start(struct impl *this)
 
 fail:
 	sbc_finish(&this->msbc);
+	free(this->lc3);
+	this->lc3 = NULL;
 	return res;
 }
 
@@ -804,6 +868,8 @@ static void transport_stop(struct impl *this)
 	spa_bt_decode_buffer_clear(&port->buffer);
 
 	sbc_finish(&this->msbc);
+	free(this->lc3);
+	this->lc3 = NULL;
 }
 
 static int do_stop(struct impl *this)
@@ -865,9 +931,9 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 static void emit_node_info(struct impl *this, bool full)
 {
-	static const struct spa_dict_item hu_node_info_items[] = {
+	const struct spa_dict_item hu_node_info_items[] = {
 		{ SPA_KEY_DEVICE_API, "bluez5" },
-		{ SPA_KEY_MEDIA_CLASS, "Audio/Source" },
+		{ SPA_KEY_MEDIA_CLASS, this->is_internal ? "Audio/Source/Internal" : "Audio/Source" },
 		{ SPA_KEY_NODE_DRIVER, "true" },
 	};
 	const struct spa_dict_item ag_node_info_items[] = {
@@ -997,13 +1063,20 @@ impl_node_port_enum_params(void *object, int seq,
 
 		/* set the info structure */
 		struct spa_audio_info_raw info = { 0, };
-		info.format = SPA_AUDIO_FORMAT_S16_LE;
+		if (this->transport->codec == HFP_AUDIO_CODEC_LC3_SWB)
+			info.format = SPA_AUDIO_FORMAT_S24_32_LE;
+		else
+			info.format = SPA_AUDIO_FORMAT_S16_LE;
 		info.channels = 1;
 		info.position[0] = SPA_AUDIO_CHANNEL_MONO;
 
 		 /* CVSD format has a rate of 8kHz
-		  * MSBC format has a rate of 16kHz */
-		if (this->transport->codec == HFP_AUDIO_CODEC_MSBC)
+		  * MSBC format has a rate of 16kHz
+		  * LC3-SWB format has a rate of 32kHz
+		  */
+		if (this->transport->codec == HFP_AUDIO_CODEC_LC3_SWB)
+			info.rate = 32000;
+		else if (this->transport->codec == HFP_AUDIO_CODEC_MSBC)
 			info.rate = 16000;
 		else
 			info.rate = 8000;
@@ -1119,6 +1192,9 @@ static int port_set_format(struct impl *this, struct port *port,
 	} else {
 		struct spa_audio_info info = { 0 };
 
+		if (!this->transport)
+			return -EIO;
+
 		if ((err = spa_format_parse(format, &info.media_type, &info.media_subtype)) < 0)
 			return err;
 
@@ -1129,12 +1205,25 @@ static int port_set_format(struct impl *this, struct port *port,
 		if (spa_format_audio_raw_parse(format, &info.info.raw) < 0)
 			return -EINVAL;
 
-		if (info.info.raw.format != SPA_AUDIO_FORMAT_S16_LE ||
-		    info.info.raw.rate == 0 ||
+		if (info.info.raw.rate == 0 ||
 		    info.info.raw.channels != 1)
 			return -EINVAL;
 
-		port->frame_size = info.info.raw.channels * 2;
+		switch (info.info.raw.format) {
+		case SPA_AUDIO_FORMAT_S16_LE:
+			if (this->transport->codec == HFP_AUDIO_CODEC_LC3_SWB)
+				return -EINVAL;
+			port->frame_size = info.info.raw.channels * 2;
+			break;
+		case SPA_AUDIO_FORMAT_S24_32_LE:
+			if (this->transport->codec != HFP_AUDIO_CODEC_LC3_SWB)
+				return -EINVAL;
+			port->frame_size = info.info.raw.channels * 4;
+			break;
+		default:
+			return -EINVAL;
+		}
+
 		port->current_format = info;
 		port->have_format = true;
 	}
@@ -1627,6 +1716,9 @@ impl_init(const struct spa_handle_factory *factory,
 	this->quantum_limit = 8192;
 	if (info && (str = spa_dict_lookup(info, "clock.quantum-limit")))
 		spa_atou32(str, &this->quantum_limit, 0);
+
+	if (info && (str = spa_dict_lookup(info, "api.bluez5.internal")) != NULL)
+		this->is_internal = spa_atob(str);
 
 	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
 		sscanf(str, "pointer:%p", &this->transport);

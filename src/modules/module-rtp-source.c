@@ -30,6 +30,7 @@
 #include <pipewire/impl.h>
 
 #include <module-rtp/stream.h>
+#include "network-utils.h"
 
 #ifdef __FreeBSD__
 #define ifr_ifindex ifr_index
@@ -52,10 +53,11 @@
  * Options specific to the behavior of this module
  *
  * - `local.ifname = <str>`: interface name to use
- * - `source.ip = <str>`: the source ip address, default 224.0.0.56
+ * - `source.ip = <str>`: the source ip address, default 224.0.0.56. Set this to the IP address
+ *                you want to receive packets from or 0.0.0.0 to receive from any source address.
  * - `source.port = <int>`: the source port
  * - `node.always-process = <bool>`: true to receive even when not running
- * - `sess.latency.msec = <str>`: target network latency in milliseconds, default 100
+ * - `sess.latency.msec = <float>`: target network latency in milliseconds, default 100
  * - `sess.ignore-ssrc = <bool>`: ignore SSRC, default false
  * - `sess.media = <string>`: the media type audio|midi|opus, default audio
  * - `stream.props = {}`: properties to be passed to the stream
@@ -107,7 +109,7 @@
 
 #define NAME "rtp-source"
 
-PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define DEFAULT_CLEANUP_SEC		60
@@ -194,35 +196,19 @@ short_packet:
 	return;
 }
 
-static int parse_address(const char *address, uint16_t port,
-		struct sockaddr_storage *addr, socklen_t *len)
-{
-	struct sockaddr_in *sa4 = (struct sockaddr_in*)addr;
-	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)addr;
-
-	if (inet_pton(AF_INET, address, &sa4->sin_addr) > 0) {
-		sa4->sin_family = AF_INET;
-		sa4->sin_port = htons(port);
-		*len = sizeof(*sa4);
-	} else if (inet_pton(AF_INET6, address, &sa6->sin6_addr) > 0) {
-		sa6->sin6_family = AF_INET6;
-		sa6->sin6_port = htons(port);
-		*len = sizeof(*sa6);
-	} else
-		return -EINVAL;
-
-	return 0;
-}
-
 static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
 {
 	int af, fd, val, res;
 	struct ifreq req;
+	struct sockaddr_storage ba = *(struct sockaddr_storage *)sa;
+	bool do_connect = false;
+	char addr[128];
 
 	af = sa->sa_family;
 	if ((fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
+		res = -errno;
 		pw_log_error("socket failed: %m");
-		return -errno;
+		return res;
 	}
 #ifdef SO_TIMESTAMP
 	val = 1;
@@ -255,9 +241,15 @@ static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
 			memset(&mr4, 0, sizeof(mr4));
 			mr4.imr_multiaddr = sa4->sin_addr;
 			mr4.imr_ifindex = req.ifr_ifindex;
+			pw_net_get_ip((struct sockaddr_storage*)sa, addr, sizeof(addr), NULL, NULL);
+			pw_log_info("join IPv4 group: %s", addr);
 			res = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr4, sizeof(mr4));
 		} else {
-			sa4->sin_addr.s_addr = INADDR_ANY;
+			struct sockaddr_in *ba4 = (struct sockaddr_in*)&ba;
+			if (ba4->sin_addr.s_addr != INADDR_ANY) {
+				ba4->sin_addr.s_addr = INADDR_ANY;
+				do_connect = true;
+			}
 		}
 	} else if (af == AF_INET6) {
 		struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)sa;
@@ -266,9 +258,12 @@ static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
 			memset(&mr6, 0, sizeof(mr6));
 			mr6.ipv6mr_multiaddr = sa6->sin6_addr;
 			mr6.ipv6mr_interface = req.ifr_ifindex;
+			pw_net_get_ip((struct sockaddr_storage*)sa, addr, sizeof(addr), NULL, NULL);
+			pw_log_info("join IPv6 group: %s", addr);
 			res = setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mr6, sizeof(mr6));
 		} else {
-		        sa6->sin6_addr = in6addr_any;
+			struct sockaddr_in6 *ba6 = (struct sockaddr_in6*)&ba;
+			ba6->sin6_addr = in6addr_any;
 		}
 	} else {
 		res = -EINVAL;
@@ -281,10 +276,17 @@ static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
 		goto error;
 	}
 
-	if (bind(fd, sa, salen) < 0) {
+	if (bind(fd, (struct sockaddr*)&ba, salen) < 0) {
 		res = -errno;
 		pw_log_error("bind() failed: %m");
 		goto error;
+	}
+	if (do_connect) {
+		if (connect(fd, sa, salen) < 0) {
+			res = -errno;
+			pw_log_error("connect() failed: %m");
+			goto error;
+		}
 	}
 	return fd;
 error:
@@ -304,7 +306,7 @@ static int stream_start(struct impl *impl)
 	if ((fd = make_socket((const struct sockaddr *)&impl->src_addr,
 					impl->src_len, impl->ifname)) < 0) {
 		pw_log_error("failed to create socket: %m");
-		return fd;
+		return -errno;
 	}
 
 	impl->source = pw_loop_add_io(impl->data_loop, fd,
@@ -337,16 +339,80 @@ static void stream_destroy(void *d)
 static void stream_state_changed(void *data, bool started, const char *error)
 {
 	struct impl *impl = data;
+	int res;
 
 	if (error) {
 		pw_log_error("stream error: %s", error);
 		pw_impl_module_schedule_destroy(impl->module);
 	} else if (started) {
-		if ((errno = -stream_start(impl)) < 0)
-			pw_log_error("failed to start RTP stream: %m");
+		if ((res = stream_start(impl)) < 0) {
+			pw_log_error("failed to start RTP stream: %s", spa_strerror(res));
+			rtp_stream_set_error(impl->stream, res, "Can't start RTP stream");
+		}
 	} else {
 		if (!impl->always_process)
 			stream_stop(impl);
+	}
+}
+
+static void stream_props_changed(struct impl *impl, uint32_t id, const struct spa_pod *param)
+{
+	struct spa_pod_object *obj = (struct spa_pod_object *)param;
+	struct spa_pod_prop *prop;
+
+	if (param == NULL)
+		return;
+
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		if (prop->key == SPA_PROP_params) {
+			struct spa_pod *params = NULL;
+			struct spa_pod_parser prs;
+			struct spa_pod_frame f;
+			const char *key;
+			struct spa_pod *pod;
+			const char *value;
+
+			if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_Props, NULL, SPA_PROP_params,
+					SPA_POD_OPT_Pod(&params)) < 0)
+				return;
+			spa_pod_parser_pod(&prs, params);
+			if (spa_pod_parser_push_struct(&prs, &f) < 0)
+				return;
+
+			while (true) {
+				if (spa_pod_parser_get_string(&prs, &key) < 0)
+					break;
+				if (spa_pod_parser_get_pod(&prs, &pod) < 0)
+					break;
+				if (spa_pod_get_string(pod, &value) < 0)
+					continue;
+				pw_log_info("key '%s', value '%s'", key, value);
+				if (!spa_streq(key, "source.ip"))
+					continue;
+				if (pw_net_parse_address(value, impl->src_port, &impl->src_addr,
+						&impl->src_len) < 0) {
+					pw_log_error("invalid source.ip: '%s'", value);
+					break;
+				}
+				pw_properties_set(impl->stream_props, "rtp.source.ip", value);
+				struct spa_dict_item item[1];
+				item[0] = SPA_DICT_ITEM_INIT("rtp.source.ip", value);
+				rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
+				break;
+			}
+		}
+	}
+}
+
+static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *param)
+{
+	struct impl *impl = data;
+
+	switch (id) {
+	case SPA_PARAM_Props:
+		if (param != NULL)
+			stream_props_changed(impl, id, param);
+		break;
 	}
 }
 
@@ -354,6 +420,7 @@ static const struct rtp_stream_events stream_events = {
 	RTP_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
+	.param_changed = stream_param_changed,
 };
 
 static void on_timer_event(void *data, uint64_t expirations)
@@ -393,6 +460,9 @@ static void impl_destroy(struct impl *impl)
 
 	if (impl->timer)
 		pw_loop_destroy_source(impl->loop, impl->timer);
+
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
 
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
@@ -447,6 +517,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct timespec value, interval;
 	struct pw_properties *props, *stream_props;
 	int64_t ts_offset;
+	char addr[128];
 	int res = 0;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
@@ -469,11 +540,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(pw_context_get_data_loop(context));
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
 
 	if ((sess_name = pw_properties_get(props, "sess.name")) == NULL)
 		sess_name = pw_get_host_name();
 
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_NAME, "rtp_session.%s", sess_name);
 	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
@@ -485,6 +557,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(stream_props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
@@ -511,15 +584,19 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->src_port = pw_properties_get_uint32(props, "source.port", 0);
 	if (impl->src_port == 0) {
+		res = -EINVAL;
 		pw_log_error("invalid source.port");
 		goto out;
 	}
 	if ((str = pw_properties_get(props, "source.ip")) == NULL)
 		str = DEFAULT_SOURCE_IP;
-	if ((res = parse_address(str, impl->src_port, &impl->src_addr, &impl->src_len)) < 0) {
+	if ((res = pw_net_parse_address(str, impl->src_port, &impl->src_addr, &impl->src_len)) < 0) {
 		pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}
+	pw_net_get_ip(&impl->src_addr, addr, sizeof(addr), NULL, NULL);
+	pw_properties_set(stream_props, "rtp.source.ip", addr);
+	pw_properties_setf(stream_props, "rtp.source.port", "%u", impl->src_port);
 
 	ts_offset = pw_properties_get_int64(props, "sess.ts-offset", DEFAULT_TS_OFFSET);
 	if (ts_offset == -1)

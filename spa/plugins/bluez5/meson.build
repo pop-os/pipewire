@@ -67,6 +67,10 @@ if get_option('bluez5-backend-hsphfpd').allowed()
   bluez5_sources += ['backend-hsphfpd.c']
 endif
 
+if get_option('bluez5-codec-lc3').allowed() and lc3_dep.found()
+  bluez5_deps += lc3_dep
+endif
+
 # The library uses GObject, and cannot be unloaded
 bluez5_link_args = [ '-Wl,-z', '-Wl,nodelete' ]
 
@@ -144,6 +148,14 @@ if get_option('bluez5-codec-opus').allowed() and opus_dep.found()
   opus_args = codec_args
   bluez_codec_opus = shared_library('spa-codec-bluez5-opus',
     [ 'a2dp-codec-opus.c', 'media-codecs.c' ],
+    include_directories : [ configinc ],
+    c_args : opus_args,
+    dependencies : [ spa_dep, opus_dep, mathlib ],
+    install : true,
+    install_dir : spa_plugindir / 'bluez5')
+
+  bluez_codec_opus_g = shared_library('spa-codec-bluez5-opus-g',
+    [ 'a2dp-codec-opus-g.c', 'media-codecs.c' ],
     include_directories : [ configinc ],
     c_args : opus_args,
     dependencies : [ spa_dep, opus_dep, mathlib ],

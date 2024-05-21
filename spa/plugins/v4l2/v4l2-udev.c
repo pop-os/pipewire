@@ -24,20 +24,20 @@
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
 
-#define NAME "v4l2-udev"
+#include "v4l2.h"
 
 #define MAX_DEVICES	64
 
-#define ACTION_ADD	0
-#define ACTION_REMOVE	1
-#define ACTION_DISABLE	2
+enum action {
+	ACTION_CHANGE,
+	ACTION_REMOVE,
+};
 
 struct device {
 	uint32_t id;
 	struct udev_device *dev;
 	int inotify_wd;
 	unsigned int accessible:1;
-	unsigned int ignored:1;
 	unsigned int emitted:1;
 };
 
@@ -358,48 +358,47 @@ static bool check_access(struct impl *this, struct device *device)
 	return device->accessible;
 }
 
-static void process_device(struct impl *this, uint32_t action, struct udev_device *dev)
+static void process_device(struct impl *this, enum action action, struct device *device)
 {
-	uint32_t id;
-	struct device *device;
-	bool emitted;
-
-	if ((id = get_device_id(this, dev)) == SPA_ID_INVALID)
-		return;
-
-	device = find_device(this, id);
-	if (device && device->ignored)
-		return;
-
 	switch (action) {
-	case ACTION_ADD:
-		if (device == NULL)
-			device = add_device(this, id, dev);
-		if (device == NULL)
-			return;
-		if (!check_access(this, device))
-			return;
-		emit_object_info(this, device);
+	case ACTION_CHANGE:
+		check_access(this, device);
+		if (device->accessible && !device->emitted) {
+			emit_object_info(this, device);
+		} else if (!device->accessible && device->emitted) {
+			device->emitted = false;
+			spa_device_emit_object_info(&this->hooks, device->id, NULL);
+		}
 		break;
+	case ACTION_REMOVE: {
+		bool emitted = device->emitted;
+		uint32_t id = device->id;
 
-	case ACTION_REMOVE:
-		if (device == NULL)
-			return;
-		emitted = device->emitted;
 		remove_device(this, device);
+
 		if (emitted)
 			spa_device_emit_object_info(&this->hooks, id, NULL);
 		break;
-
-	case ACTION_DISABLE:
-		if (device == NULL)
-			return;
-		if (device->emitted) {
-			device->emitted = false;
-			spa_device_emit_object_info(&this->hooks, id, NULL);
-		}
-		break;
 	}
+	}
+}
+
+static void process_udev_device(struct impl *this, enum action action, struct udev_device *udev_device)
+{
+	struct device *device;
+	uint32_t id;
+
+	if ((id = get_device_id(this, udev_device)) == SPA_ID_INVALID)
+		return;
+
+	device = find_device(this, id);
+	if (action == ACTION_CHANGE && !device)
+		device = add_device(this, id, udev_device);
+
+	if (!device)
+		return;
+
+	process_device(this, action, device);
 }
 
 static int stop_inotify(struct impl *this)
@@ -431,8 +430,6 @@ static void impl_on_notify_events(struct spa_source *source)
 		void *p, *e;
 
 		len = read(source->fd, &buf, sizeof(buf));
-		if (len < 0 && errno != EAGAIN)
-			break;
 		if (len <= 0)
 			break;
 
@@ -441,25 +438,23 @@ static void impl_on_notify_events(struct spa_source *source)
 		for (p = &buf; p < e;
 		    p = SPA_PTROFF(p, sizeof(struct inotify_event) + event->len, void)) {
 			event = (const struct inotify_event *) p;
+			struct device *device = NULL;
 
-			if ((event->mask & IN_ATTRIB)) {
-				struct device *device = NULL;
-
-				for (size_t i = 0; i < this->n_devices; i++) {
-					if (this->devices[i].inotify_wd == event->wd) {
-						device = &this->devices[i];
-						break;
-					}
+			for (size_t i = 0; i < this->n_devices; i++) {
+				if (this->devices[i].inotify_wd == event->wd) {
+					device = &this->devices[i];
+					break;
 				}
-
-				spa_assert(device);
-
-				bool access = check_access(this, device);
-				if (access && !device->emitted)
-					process_device(this, ACTION_ADD, device->dev);
-				else if (!access && device->emitted)
-					process_device(this, ACTION_DISABLE, device->dev);
 			}
+
+			if (!device)
+				continue;
+
+			if (event->mask & IN_ATTRIB)
+				process_device(this, ACTION_CHANGE, device);
+
+			if (event->mask & IN_IGNORED)
+				device->inotify_wd = -1;
 		}
 	}
 }
@@ -507,9 +502,9 @@ static void impl_on_fd_events(struct spa_source *source)
 
 	if (spa_streq(action, "add") ||
 	    spa_streq(action, "change")) {
-		process_device(this, ACTION_ADD, dev);
+		process_udev_device(this, ACTION_CHANGE, dev);
 	} else if (spa_streq(action, "remove")) {
-		process_device(this, ACTION_REMOVE, dev);
+		process_udev_device(this, ACTION_REMOVE, dev);
 	}
 	udev_device_unref(dev);
 }
@@ -579,7 +574,7 @@ static int enum_devices(struct impl *this)
 		if (dev == NULL)
 			continue;
 
-		process_device(this, ACTION_ADD, dev);
+		process_udev_device(this, ACTION_CHANGE, dev);
 
 		udev_device_unref(dev);
 	}

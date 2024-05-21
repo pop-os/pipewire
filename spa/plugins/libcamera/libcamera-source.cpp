@@ -60,14 +60,6 @@ struct buffer {
 	void *ptr;
 };
 
-#define MAX_CONTROLS	64
-
-struct control {
-	uint32_t id;
-	uint32_t ctrl_id;
-	double value;
-};
-
 struct port {
 	struct impl *impl;
 
@@ -77,9 +69,6 @@ struct port {
 	StreamConfiguration streamConfig;
 
 	uint32_t memtype = 0;
-
-	struct control controls[MAX_CONTROLS];
-	uint32_t n_controls = 0;
 
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers = 0;
@@ -905,7 +894,7 @@ static int impl_node_process(void *object)
 }
 
 static const struct spa_node_methods impl_node = {
-	SPA_VERSION_NODE_METHODS,
+	.version = SPA_VERSION_NODE_METHODS,
 	.add_listener = impl_node_add_listener,
 	.set_callbacks = impl_node_set_callbacks,
 	.sync = impl_node_sync,

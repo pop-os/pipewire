@@ -198,8 +198,8 @@ static void context_do_profile(void *data)
 			SPA_POD_Long(pos->clock.duration),
 			SPA_POD_Long(pos->clock.delay),
 			SPA_POD_Double(pos->clock.rate_diff),
-			SPA_POD_Long(pos->clock.next_nsec));
-
+			SPA_POD_Long(pos->clock.next_nsec),
+			SPA_POD_Int(pos->state));
 
 	spa_pod_builder_prop(&b, SPA_PROFILER_driverBlock, 0);
 	spa_pod_builder_add_struct(&b,
@@ -440,10 +440,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct pw_properties *props;
 	struct impl *impl;
-	static const char * const keys[] = {
-		PW_KEY_OBJECT_SERIAL,
-		NULL
-	};
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 
@@ -480,8 +476,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			pw_global_get_serial(impl->global));
 
 	impl->flush_event = pw_loop_add_event(impl->main_loop, do_flush_event, impl);
-
-	pw_global_update_keys(impl->global, &impl->properties->dict, keys);
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 

@@ -29,18 +29,21 @@ struct pw_array {
 	void *data;		/**< pointer to array data */
 	size_t size;		/**< length of array in bytes */
 	size_t alloc;		/**< number of allocated memory in \a data */
-	size_t extend;		/**< number of bytes to extend with */
+	size_t extend;		/**< number of bytes to extend with, 0 when the
+				  *  data should not expand */
 };
 
+/** Initialize an array. The new array is empty. */
 #define PW_ARRAY_INIT(extend) ((struct pw_array) { NULL, 0, 0, (extend) })
 
+/** Return the length of an array. */
 #define pw_array_get_len_s(a,s)			((a)->size / (s))
 #define pw_array_get_unchecked_s(a,idx,s,t)	SPA_PTROFF((a)->data,(idx)*(s),t)
 #define pw_array_check_index_s(a,idx,s)		((idx) < pw_array_get_len_s(a,s))
 
 /** Get the number of items of type \a t in array */
 #define pw_array_get_len(a,t)			pw_array_get_len_s(a,sizeof(t))
-/** Get the item with index \a idx and type \a t from array */
+/** Get the item with index \a idx and type \a t from array. No bounds check is done. */
 #define pw_array_get_unchecked(a,idx,t)		pw_array_get_unchecked_s(a,idx,sizeof(t),t)
 /** Check if an item with index \a idx and type \a t exist in array */
 #define pw_array_check_index(a,idx,t)		pw_array_check_index_s(a,idx,sizeof(t))
@@ -66,7 +69,8 @@ struct pw_array {
                 SPA_PTRDIFF(pw_array_end(a),(p)));			\
 })
 
-/** Initialize the array with given extend */
+/** Initialize the array with given extend. Extend needs to be > 0 or else
+ * the array will not be able to expand. */
 static inline void pw_array_init(struct pw_array *arr, size_t extend)
 {
 	arr->data = NULL;
@@ -74,11 +78,20 @@ static inline void pw_array_init(struct pw_array *arr, size_t extend)
 	arr->extend = extend;
 }
 
-/** Clear the array */
+/** Clear the array. This should be called when pw_array_init() was called.  */
 static inline void pw_array_clear(struct pw_array *arr)
 {
-	free(arr->data);
+	if (arr->extend > 0)
+		free(arr->data);
 	pw_array_init(arr, arr->extend);
+}
+
+/** Initialize a static array. */
+static inline void pw_array_init_static(struct pw_array *arr, void *data, size_t size)
+{
+	arr->data = data;
+	arr->alloc = size;
+	arr->size = arr->extend = 0;
 }
 
 /** Reset the array */
@@ -97,10 +110,9 @@ static inline int pw_array_ensure_size(struct pw_array *arr, size_t size)
 
 	if (SPA_UNLIKELY(alloc < need)) {
 		void *data;
-		alloc = SPA_MAX(alloc, arr->extend);
-		spa_assert(alloc != 0); /* forgot pw_array_init */
-		while (alloc < need)
-			alloc *= 2;
+		if (arr->extend == 0)
+			return -ENOSPC;
+		alloc = SPA_ROUND_UP(need, arr->extend);
 		if (SPA_UNLIKELY((data = realloc(arr->data, alloc)) == NULL))
 			return -errno;
 		arr->data = data;
@@ -110,7 +122,8 @@ static inline int pw_array_ensure_size(struct pw_array *arr, size_t size)
 }
 
 /** Add \a ref size bytes to \a arr. A pointer to memory that can
- * hold at least \a size bytes is returned */
+ * hold at least \a size bytes is returned or NULL when an error occured
+ * and errno will be set.*/
 static inline void *pw_array_add(struct pw_array *arr, size_t size)
 {
 	void *p;
@@ -124,26 +137,16 @@ static inline void *pw_array_add(struct pw_array *arr, size_t size)
 	return p;
 }
 
-/** Add \a ref size bytes to \a arr. When there is not enough memory to
- * hold \a size bytes, NULL is returned */
-static inline void *pw_array_add_fixed(struct pw_array *arr, size_t size)
+/** Add a pointer to array. Returns 0 on success and a negative errno style
+ * error on failure. */
+static inline int pw_array_add_ptr(struct pw_array *arr, void *ptr)
 {
-	void *p;
-
-	if (SPA_UNLIKELY(arr->alloc < arr->size + size)) {
-		errno = ENOSPC;
-		return NULL;
-	}
-
-	p = SPA_PTROFF(arr->data, arr->size, void);
-	arr->size += size;
-
-	return p;
+	void **p = (void **)pw_array_add(arr, sizeof(void*));
+	if (p == NULL)
+		return -errno;
+	*p = ptr;
+	return 0;
 }
-
-/** Add a pointer to array */
-#define pw_array_add_ptr(a,p)					\
-	*((void**) pw_array_add(a, sizeof(void*))) = (p)
 
 /**
  * \}

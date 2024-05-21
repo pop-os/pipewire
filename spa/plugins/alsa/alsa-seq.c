@@ -250,7 +250,9 @@ int spa_alsa_seq_open(struct seq_state *state)
 	snd_seq_port_subscribe_t *sub;
 	snd_seq_addr_t addr;
 	snd_seq_queue_timer_t *timer;
+	snd_seq_client_pool_t *pool;
 	struct seq_conn reserve[16];
+	size_t pool_size;
 
 	if (state->opened)
 		return 0;
@@ -317,6 +319,31 @@ int spa_alsa_seq_open(struct seq_state *state)
 	snd_seq_queue_timer_set_resolution(timer, INT_MAX);
 	if ((res = snd_seq_set_queue_timer(state->event.hndl, state->event.queue_id, timer)) < 0) {
 		spa_log_warn(state->log, "failed to set queue timer: %s", snd_strerror(res));
+	}
+
+	/* Increase client pool sizes. This determines the max sysex message that
+	 * can be received. */
+	snd_seq_client_pool_alloca(&pool);
+	if ((res = snd_seq_get_client_pool(state->event.hndl, pool)) < 0) {
+		spa_log_warn(state->log, "failed to get pool: %s", snd_strerror(res));
+	} else {
+		/* make sure we at least use the default size */
+		pool_size = snd_seq_client_pool_get_output_pool(pool);
+		pool_size = SPA_MAX(pool_size, snd_seq_client_pool_get_input_pool(pool));
+
+		/* The pool size is in cells, which are about 24 bytes long. Try to
+		 * make sure we can fit sysex of at least twice the quantum limit. */
+		pool_size = SPA_MAX(pool_size, state->quantum_limit * 2 / 24);
+		/* The kernel ignores values larger than 2000 (by default) so clamp
+		 * this here. It's configurable in case the kernel was modified. */
+		pool_size = SPA_CLAMP(pool_size, state->min_pool_size, state->max_pool_size);
+
+		snd_seq_client_pool_set_input_pool(pool, pool_size);
+		snd_seq_client_pool_set_output_pool(pool, pool_size);
+
+		if ((res = snd_seq_set_client_pool(state->event.hndl, pool)) < 0) {
+			spa_log_warn(state->log, "failed to set pool: %s", snd_strerror(res));
+		}
 	}
 
 	init_ports(state);
@@ -503,7 +530,7 @@ static int process_read(struct seq_state *state)
 	int res;
 
 	/* copy all new midi events into their port buffers */
-	while (snd_seq_event_input(state->event.hndl, &ev) > 0) {
+	while ((res = snd_seq_event_input(state->event.hndl, &ev)) > 0) {
 		const snd_seq_addr_t *addr = &ev->source;
 		struct seq_port *port;
 		uint64_t ev_time, diff;
@@ -546,14 +573,23 @@ static int process_read(struct seq_state *state)
 		else
 			offset = 0;
 
-		spa_log_trace_fp(state->log, "event time:%"PRIu64" offset:%d size:%ld port:%d.%d",
-				ev_time, offset, size, addr->client, addr->port);
+		spa_log_trace_fp(state->log, "event %d time:%"PRIu64" offset:%d size:%ld port:%d.%d",
+				ev->type, ev_time, offset, size, addr->client, addr->port);
 
 		spa_pod_builder_control(&port->builder, offset, SPA_CONTROL_Midi);
 		spa_pod_builder_bytes(&port->builder, data, size);
 
 		snd_seq_free_event(ev);
+
+		/* make sure we can fit at least one control event of max size otherwise
+		 * we keep the event in the queue and try to copy it in the next cycle */
+		if (port->builder.state.offset +
+		    sizeof(struct spa_pod_control) +
+		    MAX_EVENT_SIZE > port->buffer->buf->datas[0].maxsize)
+			break;
         }
+	if (res < 0 && res != -EAGAIN)
+		spa_log_warn(state->log, "event read failed: %s", snd_strerror(res));
 
 	/* prepare a buffer on each port, some ports might have their
 	 * buffer filled above */
@@ -570,6 +606,12 @@ static int process_read(struct seq_state *state)
 
 			port->buffer->buf->datas[0].chunk->offset = 0;
 			port->buffer->buf->datas[0].chunk->size = port->builder.state.offset;
+
+			if (port->builder.state.offset > port->buffer->buf->datas[0].maxsize) {
+				spa_log_warn(state->log, "control overflow: %d > %d",
+						port->builder.state.offset,
+						port->buffer->buf->datas[0].maxsize);
+			}
 
 			/* move buffer to ready queue */
 			spa_list_remove(&port->buffer->link);
@@ -620,6 +662,7 @@ static int process_write(struct seq_state *state)
 		snd_seq_event_t ev;
 		uint64_t out_time;
 		snd_seq_real_time_t out_rt;
+		long size = 0;
 
 		if (!port->valid || io == NULL)
 			continue;
@@ -643,37 +686,53 @@ static int process_write(struct seq_state *state)
 		}
 
 		SPA_POD_SEQUENCE_FOREACH(pod, c) {
-			long size;
+			long s, body_size;
+			uint8_t *body;
 
 			if (c->type != SPA_CONTROL_Midi)
 				continue;
 
-			snd_seq_ev_clear(&ev);
+			body = SPA_POD_BODY(&c->value);
+			body_size = SPA_POD_BODY_SIZE(&c->value);
 
-			snd_midi_event_reset_encode(stream->codec);
-			if ((size = snd_midi_event_encode(stream->codec,
-						SPA_POD_BODY(&c->value),
-						SPA_POD_BODY_SIZE(&c->value), &ev)) <= 0) {
-				spa_log_warn(state->log, "failed to encode event: %s",
-						snd_strerror(size));
-	                        continue;
-			}
+			while (body_size > 0) {
+				if (size == 0)
+					/* only reset when we start decoding a new message */
+					snd_seq_ev_clear(&ev);
 
-			snd_seq_ev_set_source(&ev, state->event.addr.port);
-			snd_seq_ev_set_dest(&ev, port->addr.client, port->addr.port);
+				if ((s = snd_midi_event_encode(stream->codec,
+							body, body_size, &ev)) < 0) {
+					spa_log_warn(state->log, "failed to encode event: %s",
+							snd_strerror(s));
+					snd_midi_event_reset_encode(stream->codec);
+					size = 0;
+					break;
+				}
+				body += s;
+				body_size -= s;
+				size += s;
+				if (ev.type == SND_SEQ_EVENT_NONE)
+					/* this can happen when the event is not complete yet, like
+					 * a sysex message and we need to encode some more data. */
+					break;
 
-			out_time = state->queue_time + NSEC_FROM_CLOCK(&state->rate, c->offset);
+				snd_seq_ev_set_source(&ev, state->event.addr.port);
+				snd_seq_ev_set_dest(&ev, port->addr.client, port->addr.port);
 
-			out_rt.tv_nsec = out_time % SPA_NSEC_PER_SEC;
-			out_rt.tv_sec = out_time / SPA_NSEC_PER_SEC;
-			snd_seq_ev_schedule_real(&ev, state->event.queue_id, 0, &out_rt);
+				out_time = state->queue_time + NSEC_FROM_CLOCK(&state->rate, c->offset);
 
-			spa_log_trace_fp(state->log, "event time:%"PRIu64" offset:%d size:%ld port:%d.%d",
-				out_time, c->offset, size, port->addr.client, port->addr.port);
+				out_rt.tv_nsec = out_time % SPA_NSEC_PER_SEC;
+				out_rt.tv_sec = out_time / SPA_NSEC_PER_SEC;
+				snd_seq_ev_schedule_real(&ev, state->event.queue_id, 0, &out_rt);
 
-			if ((err = snd_seq_event_output(state->event.hndl, &ev)) < 0) {
-				spa_log_warn(state->log, "failed to output event: %s",
-						snd_strerror(err));
+				spa_log_trace_fp(state->log, "event %d time:%"PRIu64" offset:%d size:%ld port:%d.%d",
+					ev.type, out_time, c->offset, size, port->addr.client, port->addr.port);
+
+				if ((err = snd_seq_event_output(state->event.hndl, &ev)) < 0) {
+					spa_log_warn(state->log, "failed to output event: %s",
+							snd_strerror(err));
+				}
+				size = 0;
 			}
 		}
 	}
