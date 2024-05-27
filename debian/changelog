@@ -1,9 +1,9 @@
-pipewire (1.1.82-0) UNRELEASED; urgency=medium
+pipewire (1.1.82-1) experimental; urgency=medium
 
   * New upstream release (1.2 release candidate 2)
   * Install new module snapcast-discover in libpipewire-0.3-modules
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 27 May 2024 11:56:09 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 27 May 2024 13:13:56 +0200
 
 pipewire (1.1.81-1) experimental; urgency=medium
 
