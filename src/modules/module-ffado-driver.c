@@ -407,7 +407,7 @@ static int process_byte(struct port *p, uint32_t time, uint8_t byte,
 	int res = 0;
 	if (byte >= 0xf8) {
 		if (byte == 0xfd) {
-			pw_log_warn("droping invalid MIDI status bytes %08x", byte);
+			pw_log_warn("dropping invalid MIDI status bytes %08x", byte);
 			return false;
 		}
 		p->event_byte = byte;
@@ -1501,11 +1501,13 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	pw_properties_set(impl->sink.props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
 	pw_properties_set(impl->sink.props, PW_KEY_PRIORITY_DRIVER, "35000");
+	pw_properties_set(impl->sink.props, PW_KEY_PRIORITY_SESSION, "2000");
 	pw_properties_set(impl->sink.props, PW_KEY_NODE_NAME, "ffado_sink");
 	pw_properties_set(impl->sink.props, PW_KEY_NODE_DESCRIPTION, "FFADO Sink");
 
 	pw_properties_set(impl->source.props, PW_KEY_MEDIA_CLASS, "Audio/Source");
 	pw_properties_set(impl->source.props, PW_KEY_PRIORITY_DRIVER, "35001");
+	pw_properties_set(impl->source.props, PW_KEY_PRIORITY_SESSION, "2001");
 	pw_properties_set(impl->source.props, PW_KEY_NODE_NAME, "ffado_source");
 	pw_properties_set(impl->source.props, PW_KEY_NODE_DESCRIPTION, "FFADO Source");
 
