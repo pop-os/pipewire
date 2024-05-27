@@ -29,6 +29,7 @@
 #include <spa/pod/iter.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/builder.h>
+#include <spa/utils/cleanup.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
@@ -44,7 +45,6 @@
 
 #include <pipewire/impl.h>
 #include <pipewire/extensions/protocol-native.h>
-#include <pipewire/cleanup.h>
 
 #include "pipewire/private.h"
 
@@ -86,7 +86,7 @@ PW_LOG_TOPIC(mod_topic_connection, "conn." NAME);
  *   if the context is a server. If not absolute paths, the sockets are created
  *   in the default runtime directory.
  *
- *   The props are copied directly to any client that connects trough this server
+ *   The props are copied directly to any client that connects through this server
  *   socket and can be used to configure special permissions.
  *
  *   Has the default value `[ { name = "CORENAME" }, { name = "CORENAME-manager" } ]`,
