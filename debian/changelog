@@ -1,9 +1,10 @@
-pipewire (1.1.83-0) UNRELEASED; urgency=medium
+pipewire (1.1.83-1) experimental; urgency=medium
 
   * New upstream release (1.2 release candidate 3)
   * Update symbols file
+  * Add branch debian/experimental in Vcs-Git
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 18 Jun 2024 16:11:09 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 18 Jun 2024 17:39:33 +0200
 
 pipewire (1.1.82-1) experimental; urgency=medium
 
