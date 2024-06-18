@@ -234,6 +234,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_impl_module_update_properties@Base 0.3.1
  pw_impl_node_add_listener@Base 0.3.1
  pw_impl_node_add_rt_listener@Base 0.3.75
+ pw_impl_node_add_target@Base 1.1.83
  pw_impl_node_destroy@Base 0.3.1
  pw_impl_node_find_port@Base 0.3.1
  pw_impl_node_for_each_param@Base 0.3.1
@@ -249,6 +250,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_impl_node_is_active@Base 0.3.1
  pw_impl_node_register@Base 0.3.1
  pw_impl_node_remove_rt_listener@Base 0.3.75
+ pw_impl_node_remove_target@Base 1.1.83
  pw_impl_node_send_command@Base 0.3.39
  pw_impl_node_set_active@Base 0.3.1
  pw_impl_node_set_driver@Base 0.3.1
@@ -324,6 +326,8 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_node_info_free@Base 0.3.1
  pw_node_info_merge@Base 0.3.35
  pw_node_info_update@Base 0.3.1
+ pw_node_peer_ref@Base 1.1.83
+ pw_node_peer_unref@Base 1.1.83
  pw_node_state_as_string@Base 0.3.1
  pw_port_info_free@Base 0.3.1
  pw_port_info_merge@Base 0.3.35

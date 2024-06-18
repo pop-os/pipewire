@@ -1,6 +1,7 @@
 pipewire (1.1.83-0) UNRELEASED; urgency=medium
 
   * New upstream release (1.2 release candidate 3)
+  * Update symbols file
 
  -- Dylan Aïssi <daissi@debian.org>  Tue, 18 Jun 2024 16:11:09 +0200
 
