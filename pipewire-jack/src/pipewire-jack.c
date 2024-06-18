@@ -229,7 +229,6 @@ struct mix {
 	struct port *peer_port;
 
 	struct spa_io_buffers *io[2];
-	struct spa_io_buffers *io_data;
 
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers;
@@ -279,6 +278,7 @@ struct link {
 	struct pw_memmap *mem;
 	struct pw_node_activation *activation;
 	int signalfd;
+	void (*trigger) (struct link *l, uint64_t nsec);
 };
 
 struct context {
@@ -420,6 +420,9 @@ struct client {
 		struct spa_io_position *position;
 		struct pw_node_activation *driver_activation;
 		struct spa_list target_links;
+		unsigned int prepared:1;
+		unsigned int first:1;
+		unsigned int thread_entered:1;
 	} rt;
 
 	pthread_mutex_t rt_lock;
@@ -429,8 +432,6 @@ struct client {
 	unsigned int started:1;
 	unsigned int active:1;
 	unsigned int destroyed:1;
-	unsigned int first:1;
-	unsigned int thread_entered:1;
 	unsigned int has_transport:1;
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
@@ -575,26 +576,24 @@ do_mix_set_io(struct spa_loop *loop, bool async, uint32_t seq,
 {
 	const struct io_info *info = data;
 	struct port *port = info->mix->port;
-	info->mix->io_data = info->data;
-	if (info->mix->io_data) {
+	if (info->data) {
 		if (info->size >= sizeof(struct spa_io_async_buffers)) {
-			info->mix->io[0] = &info->mix->io_data[port->direction];
-			info->mix->io[1] = &info->mix->io_data[port->direction^1];
+			struct spa_io_async_buffers *ab = info->data;
+			info->mix->io[0] = &ab->buffers[port->direction];
+			info->mix->io[1] = &ab->buffers[port->direction^1];
 		} else if (info->size >= sizeof(struct spa_io_buffers)) {
-			info->mix->io[0] = &info->mix->io_data[0];
-			info->mix->io[1] = &info->mix->io_data[0];
+			info->mix->io[0] = info->data;
+			info->mix->io[1] = info->data;
 		} else {
 			info->mix->io[0] = NULL;
 			info->mix->io[1] = NULL;
 		}
 		if (port->n_mix++ == 0 && port->global_mix != NULL) {
-			port->global_mix->io_data = port->io;
 			port->global_mix->io[0] = &port->io[0];
 			port->global_mix->io[1] = &port->io[1];
 		}
 	} else {
 		if (--port->n_mix == 0 && port->global_mix != NULL) {
-			port->global_mix->io_data = NULL;
 			port->global_mix->io[0] = NULL;
 			port->global_mix->io[1] = NULL;
 		}
@@ -616,7 +615,6 @@ static void init_mix(struct mix *mix, uint32_t mix_id, struct port *port, uint32
 	mix->peer_id = peer_id;
 	mix->port = port;
 	mix->peer_port = NULL;
-	mix->io_data = NULL;
 	mix->io[0] = mix->io[1] = NULL;
 	mix->n_buffers = 0;
 	spa_list_init(&mix->queue);
@@ -1608,7 +1606,7 @@ static void prepare_output(struct port *p, uint32_t frames, uint32_t cycle)
 		return;
 
 	spa_list_for_each(mix, &p->mix, port_link) {
-		if (SPA_LIKELY(mix->io != NULL))
+		if (SPA_LIKELY(mix->io[cycle] != NULL))
 			*mix->io[cycle] = *io;
 	}
 }
@@ -1738,7 +1736,7 @@ static inline jack_transport_state_t position_to_jack(struct pw_node_activation 
 		running = s->clock.position - s->offset;
 		if (running >= seg->start &&
 		    (seg->duration == 0 || running < seg->start + seg->duration))
-			d->frame = (running - seg->start) * seg->rate + seg->position;
+			d->frame = (unsigned int)((running - seg->start) * seg->rate + seg->position);
 		else
 			d->frame = seg->position;
 	}
@@ -1760,12 +1758,12 @@ static inline jack_transport_state_t position_to_jack(struct pw_node_activation 
 
 		abs_beat = seg->bar.beat;
 
-		d->bar = abs_beat / d->beats_per_bar;
-		beats = d->bar * d->beats_per_bar;
+		d->bar = (int32_t) (abs_beat / d->beats_per_bar);
+		beats = (long int) (d->bar * d->beats_per_bar);
 		d->bar_start_tick = beats * d->ticks_per_beat;
-		d->beat = abs_beat - beats;
+		d->beat = (int32_t) (abs_beat - beats);
 		beats += d->beat;
-		d->tick = (abs_beat - beats) * d->ticks_per_beat;
+		d->tick = (int32_t) ((abs_beat - beats) * d->ticks_per_beat);
 		d->bar++;
 		d->beat++;
 	}
@@ -1801,13 +1799,6 @@ static inline int check_sample_rate(struct client *c, struct spa_io_position *po
 	return c->sample_rate == sample_rate;
 }
 
-static inline uint64_t get_time_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return SPA_TIMESPEC_TO_NSEC(&ts);
-}
-
 static inline uint32_t cycle_run(struct client *c)
 {
 	uint64_t cmd;
@@ -1826,9 +1817,6 @@ static inline uint32_t cycle_run(struct client *c)
 		}
 		break;
 	}
-	activation->status = PW_NODE_ACTIVATION_AWAKE;
-	activation->awake_time = get_time_ns();
-
 	if (SPA_UNLIKELY(cmd > 1)) {
 		pw_log_info("%p: missed %"PRIu64" wakeups", c, cmd - 1);
 		activation->xrun_count += cmd - 1;
@@ -1837,10 +1825,17 @@ static inline uint32_t cycle_run(struct client *c)
 		activation->max_delay = SPA_MAX(activation->max_delay, 0u);
 	}
 
-	if (SPA_UNLIKELY(c->first)) {
+	if (!SPA_ATOMIC_CAS(activation->status,
+				PW_NODE_ACTIVATION_TRIGGERED,
+				PW_NODE_ACTIVATION_AWAKE))
+		return 0;
+
+	activation->awake_time = get_time_ns(c->l->system);
+
+	if (SPA_UNLIKELY(c->rt.first)) {
 		if (c->thread_init_callback)
 			c->thread_init_callback(c->thread_init_arg);
-		c->first = false;
+		c->rt.first = false;
 	}
 
 	if (SPA_UNLIKELY(pos == NULL)) {
@@ -1890,46 +1885,75 @@ static inline uint32_t cycle_wait(struct client *c)
 	return nframes;
 }
 
+static void trigger_link_v1(struct link *l, uint64_t nsec)
+{
+	struct client *c = l->client;
+	struct pw_node_activation *a = l->activation;
+	struct pw_node_activation_state *state = &a->state[0];
+	uint64_t cmd = 1;
+
+	pw_log_trace_fp("%p: link %p-%d %p %d/%d", c, l, l->node_id, state,
+			state->pending, state->required);
+
+	if (pw_node_activation_state_dec(state)) {
+		if (SPA_ATOMIC_CAS(a->status,
+					PW_NODE_ACTIVATION_NOT_TRIGGERED,
+					PW_NODE_ACTIVATION_TRIGGERED)) {
+			a->signal_time = nsec;
+
+			pw_log_trace_fp("%p: signal %p %p", c, l, state);
+
+			if (SPA_UNLIKELY(write(l->signalfd, &cmd, sizeof(cmd)) != sizeof(cmd)))
+				pw_log_warn("%p: write failed %m", c);
+		}
+	}
+}
+
+static void trigger_link_v0(struct link *l, uint64_t nsec)
+{
+	struct client *c = l->client;
+	struct pw_node_activation *a = l->activation;
+	struct pw_node_activation_state *state = &a->state[0];
+	uint64_t cmd = 1;
+
+	pw_log_trace_fp("%p: link %p-%d %p %d/%d", c, l, l->node_id, state,
+			state->pending, state->required);
+
+	if (pw_node_activation_state_dec(state)) {
+		SPA_ATOMIC_STORE(a->status, PW_NODE_ACTIVATION_TRIGGERED);
+		a->signal_time = nsec;
+
+		pw_log_trace_fp("%p: signal %p %p", c, l, state);
+
+		if (SPA_UNLIKELY(write(l->signalfd, &cmd, sizeof(cmd)) != sizeof(cmd)))
+			pw_log_warn("%p: write failed %m", c);
+	}
+}
+
+static inline void deactivate_link(struct client *c, struct link *l, uint64_t trigger)
+{
+	if (!c->async && trigger != 0)
+		l->trigger(l, trigger);
+}
+
 static inline void signal_sync(struct client *c)
 {
-	uint64_t cmd, nsec;
+	uint64_t nsec;
 	struct link *l;
 	struct pw_node_activation *activation = c->activation;
+	int old_status;
 
 	complete_process(c, c->buffer_frames);
 
-	nsec = get_time_ns();
-	activation->status = PW_NODE_ACTIVATION_FINISHED;
+	nsec = get_time_ns(c->l->system);
+	old_status = SPA_ATOMIC_XCHG(activation->status, PW_NODE_ACTIVATION_FINISHED);
 	activation->finish_time = nsec;
 
-	if (c->async)
+	if (c->async || old_status != PW_NODE_ACTIVATION_AWAKE)
 		return;
 
-	cmd = 1;
-	spa_list_for_each(l, &c->rt.target_links, target_link) {
-		struct pw_node_activation_state *state;
-
-		if (SPA_UNLIKELY(l->activation == NULL))
-			continue;
-
-		state = &l->activation->state[0];
-
-		pw_log_trace_fp("%p: link %p %p %d/%d", c, l, state,
-				state->pending, state->required);
-
-		if (pw_node_activation_state_dec(state)) {
-			if (SPA_ATOMIC_CAS(l->activation->status,
-					PW_NODE_ACTIVATION_NOT_TRIGGERED,
-					PW_NODE_ACTIVATION_TRIGGERED)) {
-				l->activation->signal_time = nsec;
-
-				pw_log_trace_fp("%p: signal %p %p", c, l, state);
-
-				if (SPA_UNLIKELY(write(l->signalfd, &cmd, sizeof(cmd)) != sizeof(cmd)))
-					pw_log_warn("%p: write failed %m", c);
-			}
-		}
-	}
+	spa_list_for_each(l, &c->rt.target_links, target_link)
+		l->trigger(l, nsec);
 }
 
 static inline void cycle_signal(struct client *c, int status)
@@ -1969,8 +1993,8 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 		return;
 	}
 	if (SPA_UNLIKELY(c->thread_callback)) {
-		if (!c->thread_entered) {
-			c->thread_entered = true;
+		if (!c->rt.thread_entered) {
+			c->rt.thread_entered = true;
 			c->thread_callback(c->thread_arg);
 		}
 	} else if (SPA_LIKELY(mask & SPA_IO_IN)) {
@@ -2045,6 +2069,8 @@ static int client_node_transport(void *data,
 	pw_log_debug("%p: create client transport with fds %d %d for node %u",
 			c, readfd, writefd, c->node_id);
 
+	c->activation->client_version = PW_VERSION_NODE_ACTIVATION;
+
 	close(writefd);
 	c->socket_source = pw_loop_add_io(c->l,
 					  readfd,
@@ -2108,7 +2134,7 @@ do_update_driver_activation(struct spa_loop *loop,
 	c->rt.position = c->position;
 	c->rt.driver_activation = c->driver_activation;
 	if (c->position) {
-		pw_log_info("%p: driver:%d clock:%s", c,
+		pw_log_debug("%p: driver:%d clock:%s", c,
 				c->driver_id, c->position->clock.name);
 		check_sample_rate(c, c->position);
 		check_buffer_frames(c, c->position);
@@ -2150,6 +2176,37 @@ static int update_driver_activation(struct client *c)
 	return 0;
 }
 
+static int
+do_memmap_free(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	struct pw_memmap *mm = *((struct pw_memmap **)data);
+	pw_log_trace("memmap %p free", mm);
+	pw_memmap_free(mm);
+	pw_core_set_paused(c->core, false);
+	return 0;
+}
+
+static int
+do_queue_memmap_free(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	pw_loop_invoke(c->context.l, do_memmap_free, 0, data, size, false, c);
+	return 0;
+}
+
+static void queue_memmap_free(struct client *c, struct pw_memmap *mem)
+{
+	if (mem != NULL) {
+		mem->tag[0] = SPA_ID_INVALID;
+		pw_core_set_paused(c->core, true);
+		pw_data_loop_invoke(c->loop,
+			do_queue_memmap_free, SPA_ID_INVALID, &mem, sizeof(&mem), false, c);
+	}
+}
+
 static int client_node_set_io(void *data,
 			uint32_t id,
 			uint32_t mem_id,
@@ -2182,6 +2239,9 @@ static int client_node_set_io(void *data,
 		c->position = ptr;
 		c->driver_id = ptr ? c->position->clock.id : SPA_ID_INVALID;
 		update_driver_activation(c);
+		c->activation->active_driver_id = c->driver_id;
+		queue_memmap_free(c, old);
+		old = NULL;
 		break;
 	default:
 		break;
@@ -2196,6 +2256,54 @@ static int client_node_event(void *data, const struct spa_event *event)
 	return -ENOTSUP;
 }
 
+static int do_prepare_client(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+
+	pw_log_debug("%p prepared:%d ", c, c->rt.prepared);
+	if (c->rt.prepared)
+		return 0;
+
+	SPA_ATOMIC_STORE(c->activation->status, PW_NODE_ACTIVATION_FINISHED);
+	pw_loop_update_io(c->l,
+			  c->socket_source,
+			  SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP);
+
+	c->rt.first = true;
+	c->rt.thread_entered = false;
+	c->rt.prepared = true;
+	return 0;
+}
+
+static int do_unprepare_client(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	int old_state;
+	uint64_t trigger = 0;
+	struct link *l;
+
+	pw_log_debug("%p prepared:%d ", c, c->rt.prepared);
+	if (!c->rt.prepared)
+		return 0;
+
+	old_state = SPA_ATOMIC_XCHG(c->activation->status, PW_NODE_ACTIVATION_INACTIVE);
+	if (old_state != PW_NODE_ACTIVATION_FINISHED)
+		trigger = get_time_ns(c->l->system);
+
+	spa_list_for_each(l, &c->rt.target_links, target_link) {
+		if (!c->async && trigger != 0)
+			l->trigger(l, trigger);
+	}
+
+	pw_loop_update_io(c->l,
+			  c->socket_source, SPA_IO_ERR | SPA_IO_HUP);
+
+	c->rt.prepared = false;
+	return 0;
+}
+
 static int client_node_command(void *data, const struct spa_command *command)
 {
 	struct client *c = (struct client *) data;
@@ -2206,21 +2314,17 @@ static int client_node_command(void *data, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
 		if (c->started) {
-			pw_loop_update_io(c->l,
-					  c->socket_source, SPA_IO_ERR | SPA_IO_HUP);
-
+			pw_data_loop_invoke(c->loop,
+				do_unprepare_client, SPA_ID_INVALID, NULL, 0, false, c);
 			c->started = false;
 		}
 		break;
 
 	case SPA_NODE_COMMAND_Start:
 		if (!c->started) {
-			pw_loop_update_io(c->l,
-					  c->socket_source,
-					  SPA_IO_IN | SPA_IO_ERR | SPA_IO_HUP);
+			pw_data_loop_invoke(c->loop,
+				do_prepare_client, SPA_ID_INVALID, NULL, 0, false, c);
 			c->started = true;
-			c->first = true;
-			c->thread_entered = false;
 		}
 		break;
 	default:
@@ -2809,27 +2913,6 @@ static int client_node_port_use_buffers(void *data,
 	return res;
 }
 
-static int
-do_memmap_free(struct spa_loop *loop,
-                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct client *c = user_data;
-	struct pw_memmap *mm = *((struct pw_memmap **)data);
-	pw_log_trace("memmap %p free", mm);
-	pw_memmap_free(mm);
-	pw_core_set_paused(c->core, false);
-	return 0;
-}
-
-static int
-do_queue_memmap_free(struct spa_loop *loop,
-                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct client *c = user_data;
-	pw_loop_invoke(c->context.l, do_memmap_free, 0, data, size, false, c);
-	return 0;
-}
-
 static int client_node_port_set_io(void *data,
                              enum spa_direction direction,
                              uint32_t port_id,
@@ -2880,17 +2963,13 @@ static int client_node_port_set_io(void *data,
 	case SPA_IO_Buffers:
 	case SPA_IO_AsyncBuffers:
 		mix_set_io(mix, ptr, size);
-		if (old != NULL) {
-			old->tag[0] = SPA_ID_INVALID;
-			pw_core_set_paused(c->core, true);
-			pw_data_loop_invoke(c->loop,
-				do_queue_memmap_free, SPA_ID_INVALID, &old, sizeof(&old), false, c);
-			old = NULL;
-		}
+		queue_memmap_free(c, old);
+		old = NULL;
 		break;
 	default:
 		break;
 	}
+
 exit_free:
 	pw_memmap_free(old);
 exit:
@@ -2900,25 +2979,61 @@ exit:
 }
 
 static int
-do_activate_link(struct spa_loop *loop,
+do_add_link(struct spa_loop *loop,
                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct link *link = user_data;
 	struct client *c = link->client;
-	pw_log_trace("link %p activate", link);
+	pw_log_trace("link %p", link);
 	spa_list_append(&c->rt.target_links, &link->target_link);
 	return 0;
 }
 
 static int
-do_deactivate_link(struct spa_loop *loop,
+do_remove_link(struct spa_loop *loop,
                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct link *link = user_data;
-	pw_log_trace("link %p activate", link);
+	struct client *c = link->client;
+
+	pw_log_trace("link %p", link);
 	spa_list_remove(&link->target_link);
-	free_link(link);
+
+	if (c->rt.prepared) {
+		int old_state = SPA_ATOMIC_LOAD(c->activation->status);
+		uint64_t trigger = 0;
+		if (old_state != PW_NODE_ACTIVATION_FINISHED)
+			trigger = get_time_ns(c->l->system);
+		deactivate_link(c, link, trigger);
+	}
 	return 0;
+}
+
+static int
+do_free_link(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	struct link *l = *((struct link **)data);
+	free_link(l);
+	pw_core_set_paused(c->core, false);
+	return 0;
+}
+
+static int
+do_queue_free_link(struct spa_loop *loop,
+                bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+	struct client *c = user_data;
+	pw_loop_invoke(c->context.l, do_free_link, 0, data, size, false, c);
+	return 0;
+}
+
+static void queue_free_link(struct client *c, struct link *l)
+{
+	pw_core_set_paused(c->core, true);
+	pw_data_loop_invoke(c->loop,
+		do_queue_free_link, SPA_ID_INVALID, &l, sizeof(&l), false, c);
 }
 
 static int client_node_set_activation(void *data,
@@ -2968,10 +3083,11 @@ static int client_node_set_activation(void *data,
 		link->mem = mm;
 		link->activation = ptr;
 		link->signalfd = signalfd;
+		link->trigger = link->activation->server_version < 1 ? trigger_link_v0 : trigger_link_v1;
 		spa_list_append(&c->links, &link->link);
 
 		pw_data_loop_invoke(c->loop,
-                       do_activate_link, SPA_ID_INVALID, NULL, 0, false, link);
+                       do_add_link, SPA_ID_INVALID, NULL, 0, false, link);
 	}
 	else {
 		link = find_activation(&c->links, node_id);
@@ -2982,7 +3098,8 @@ static int client_node_set_activation(void *data,
 		spa_list_remove(&link->link);
 
 		pw_data_loop_invoke(c->loop,
-                       do_deactivate_link, SPA_ID_INVALID, NULL, 0, false, link);
+                       do_remove_link, SPA_ID_INVALID, NULL, 0, false, link);
+		queue_free_link(c, link);
 	}
 
 	if (c->driver_id == node_id)
@@ -5944,7 +6061,7 @@ static int check_connect(struct client *c, struct object *src, struct object *ds
 	dst_self = dst->port.node_id == c->node_id ? 1 : 0;
 	sum = src_self + dst_self;
 
-	pw_log_info("sum %d %d", sum, c->self_connect_mode);
+	pw_log_debug("sum %d %d", sum, c->self_connect_mode);
 
 	/* check for other connection first */
 	if (sum == 0)
@@ -6205,10 +6322,10 @@ void jack_port_get_latency_range (jack_port_t *port, jack_latency_callback_mode_
 	rate = jack_get_sample_rate((jack_client_t*)c);
 	info = &o->port.latency[direction];
 
-	range->min = (info->min_quantum * nframes) +
-		info->min_rate + (info->min_ns * rate) / SPA_NSEC_PER_SEC;
-	range->max = (info->max_quantum * nframes) +
-		info->max_rate + (info->max_ns * rate) / SPA_NSEC_PER_SEC;
+	range->min = (jack_nframes_t)((info->min_quantum * nframes) +
+		info->min_rate + (info->min_ns * rate) / SPA_NSEC_PER_SEC);
+	range->max = (jack_nframes_t)((info->max_quantum * nframes) +
+		info->max_rate + (info->max_ns * rate) / SPA_NSEC_PER_SEC);
 
 	pw_log_debug("%p: %s get %d latency range %d %d", c, o->port.name,
 			mode, range->min, range->max);
@@ -6529,7 +6646,7 @@ jack_nframes_t jack_frames_since_cycle_start (const jack_client_t *client)
 	return_val_if_fail(c != NULL, 0);
 
 	get_frame_times(c, &times);
-	diff = get_time_ns() - times.nsec;
+	diff = get_time_ns(c->l->system) - times.nsec;
 	return (jack_nframes_t) floor(((double)times.sample_rate * diff) / SPA_NSEC_PER_SEC);
 }
 
@@ -6571,8 +6688,8 @@ int jack_get_cycle_times(const jack_client_t *client,
 
 	*current_frames = times.frames;
 	*next_usecs = times.next_nsec / SPA_NSEC_PER_USEC;
-	*period_usecs = times.buffer_frames *
-			(float)SPA_USEC_PER_SEC / (times.sample_rate * times.rate_diff);
+	*period_usecs = (float)(times.buffer_frames *
+			SPA_USEC_PER_SEC / (times.sample_rate * times.rate_diff));
 	*current_usecs = *next_usecs - (jack_time_t)*period_usecs;
 
 	pw_log_trace("%p: %d %"PRIu64" %"PRIu64" %f", c, *current_frames,
@@ -6627,7 +6744,9 @@ jack_nframes_t jack_time_to_frames(const jack_client_t *client, jack_time_t usec
 SPA_EXPORT
 jack_time_t jack_get_time(void)
 {
-	return get_time_ns()/SPA_NSEC_PER_USEC;
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
 }
 
 SPA_EXPORT
@@ -6828,7 +6947,7 @@ jack_nframes_t jack_get_current_transport_frame (const jack_client_t *client)
 	res = pos.frame;
 
 	if (state == JackTransportRolling) {
-		float usecs = get_time_ns()/1000 - pos.usecs;
+		float usecs = get_time_ns(c->l->system)/1000 - pos.usecs;
 		res += (jack_nframes_t)floor((((float) pos.frame_rate) / 1000000.0f) * usecs);
 	}
 	return res;
@@ -6863,6 +6982,14 @@ int  jack_transport_reposition (jack_client_t *client,
 	return 0;
 }
 
+static void update_command(struct client *c, uint32_t command)
+{
+	struct pw_node_activation *a = c->rt.driver_activation;
+	if (!a)
+		return;
+	SPA_ATOMIC_STORE(a->command, command);
+}
+
 static int transport_update(struct client* c, int active)
 {
 	pw_log_info("%p: transport %d", c, active);
@@ -6889,7 +7016,10 @@ void jack_transport_start (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
 	return_if_fail(c != NULL);
-	transport_update(c, true);
+	if (c->activation->server_version < 1)
+		update_command(c, PW_NODE_ACTIVATION_COMMAND_START);
+	else
+		transport_update(c, true);
 }
 
 SPA_EXPORT
@@ -6897,7 +7027,10 @@ void jack_transport_stop (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
 	return_if_fail(c != NULL);
-	transport_update(c, false);
+	if (c->activation->server_version < 1)
+		update_command(c, PW_NODE_ACTIVATION_COMMAND_STOP);
+	else
+		transport_update(c, false);
 }
 
 SPA_EXPORT

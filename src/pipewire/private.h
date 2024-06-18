@@ -524,7 +524,7 @@ struct pw_node_activation_state {
 
 static inline void pw_node_activation_state_reset(struct pw_node_activation_state *state)
 {
-        state->pending = state->required;
+	SPA_ATOMIC_STORE(state->pending, SPA_ATOMIC_LOAD(state->required));
 }
 
 #define pw_node_activation_state_dec(s) (SPA_ATOMIC_DEC(s->pending) == 0)
@@ -532,8 +532,6 @@ static inline void pw_node_activation_state_reset(struct pw_node_activation_stat
 
 struct pw_node_target {
 	struct spa_list link;
-#define PW_NODE_TARGET_NONE	0
-#define PW_NODE_TARGET_PEER	1
 	uint32_t flags;
 	uint32_t id;
 	char name[128];
@@ -541,7 +539,9 @@ struct pw_node_target {
 	struct pw_node_activation *activation;
 	struct spa_system *system;
 	int fd;
+	void (*trigger)(struct pw_node_target *t, uint64_t nsec);
 	unsigned int active:1;
+	unsigned int added:1;
 };
 
 static inline void copy_target(struct pw_node_target *dst, const struct pw_node_target *src)
@@ -552,13 +552,37 @@ static inline void copy_target(struct pw_node_target *dst, const struct pw_node_
 	dst->activation = src->activation;
 	dst->system = src->system;
 	dst->fd = src->fd;
+	dst->trigger = src->trigger;
 }
 
+/* versions:
+ * 0 baseline
+ * 1 the activation status needs to be CAS
+ *   async nodes, driver resumes async nodes
+ *   transport with sync.group properties instead of client command
+ */
+#define PW_VERSION_NODE_ACTIVATION	1
+
+/* nodes start as INACTIVE, when they are ready to be scheduled, they add their
+ * fd to the loop and change status to FINISHED. When the node shuts down, the
+ * status is set back to INACTIVE.
+ *
+ * We have status changes (using compare-and-swap) from
+ *
+ *   INACTIVE -> FINISHED (node is added to loop and can be scheduled)
+ *   * -> INACTIVE (node can not be scheduled anymore)
+ *
+ *   !INACTIVE -> NOT_TRIGGERED (node is prepared by the driver)
+ *   NOT_TRIGGERED -> TRIGGERED (eventfd is written)
+ *   TRIGGERED -> AWAKE (eventfd is read, node starts processing)
+ *   AWAKE -> FINISHED (node completed processing and triggered the peers)
+ */
 struct pw_node_activation {
 #define PW_NODE_ACTIVATION_NOT_TRIGGERED	0
 #define PW_NODE_ACTIVATION_TRIGGERED		1
 #define PW_NODE_ACTIVATION_AWAKE		2
 #define PW_NODE_ACTIVATION_FINISHED		3
+#define PW_NODE_ACTIVATION_INACTIVE		4
 	uint32_t status;
 
 	unsigned int version:1;
@@ -582,7 +606,11 @@ struct pw_node_activation {
 	uint32_t segment_owner[16];			/* id of owners for each segment info struct.
 							 * nodes that want to update segment info need to
 							 * CAS their node id in this array. */
-	uint32_t padding[14];
+	uint32_t padding[11];				/* must be 0 */
+	uint32_t client_version;			/* verions of client, see above */
+	uint32_t server_version;			/* verions of server, see above */
+
+	uint32_t active_driver_id;			/* driver active on client */
 	uint32_t driver_id;				/* the current node driver id */
 #define PW_NODE_ACTIVATION_FLAG_NONE		0
 #define PW_NODE_ACTIVATION_FLAG_PROFILER	(1<<0)	/* the profiler is running */
@@ -610,6 +638,60 @@ struct pw_node_activation {
 	uint32_t reposition_owner;			/* owner id with new reposition info, last one
 							 * to update wins */
 };
+
+static inline uint64_t get_time_ns(struct spa_system *system)
+{
+	struct timespec ts;
+	spa_system_clock_gettime(system, CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+/* called from data-loop decrement the dependency counter of the target and when
+ * there are no more dependencies, trigger the node. */
+static inline void trigger_target_v1(struct pw_node_target *t, uint64_t nsec)
+{
+	struct pw_node_activation *a = t->activation;
+	struct pw_node_activation_state *state = &a->state[0];
+
+	pw_log_trace_fp("%p: (%s-%u) state:%p pending:%d/%d", t->node,
+			t->name, t->id, state, state->pending, state->required);
+
+	if (pw_node_activation_state_dec(state)) {
+		if (SPA_ATOMIC_CAS(a->status,
+					PW_NODE_ACTIVATION_NOT_TRIGGERED,
+					PW_NODE_ACTIVATION_TRIGGERED)) {
+			a->signal_time = nsec;
+			if (SPA_UNLIKELY(spa_system_eventfd_write(t->system, t->fd, 1) < 0))
+				pw_log_warn("%p: write failed %m", t->node);
+		}
+	}
+}
+
+static inline void trigger_target_v0(struct pw_node_target *t, uint64_t nsec)
+{
+	struct pw_node_activation *a = t->activation;
+	struct pw_node_activation_state *state = &a->state[0];
+
+	pw_log_trace_fp("%p: (%s-%u) state:%p pending:%d/%d", t->node,
+			t->name, t->id, state, state->pending, state->required);
+
+	if (pw_node_activation_state_dec(state)) {
+		SPA_ATOMIC_STORE(a->status, PW_NODE_ACTIVATION_TRIGGERED);
+		a->signal_time = nsec;
+		if (SPA_UNLIKELY(spa_system_eventfd_write(t->system, t->fd, 1) < 0))
+			pw_log_warn("%p: write failed %m", t->node);
+	}
+}
+
+struct pw_node_peer {
+	int ref;
+	struct spa_list link;			/**< link in peer list */
+	struct pw_impl_node *output;		/**< the output node */
+	struct pw_node_target target;		/**< target of the input node */
+};
+
+struct pw_node_peer *pw_node_peer_ref(struct pw_impl_node *onode, struct pw_impl_node *inode);
+void pw_node_peer_unref(struct pw_node_peer *peer);
 
 #define pw_impl_node_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_impl_node_events, m, v, ##__VA_ARGS__)
 #define pw_impl_node_emit_destroy(n)			pw_impl_node_emit(n, destroy, 0)
@@ -729,7 +811,6 @@ struct pw_impl_node {
 
 		struct spa_list target_list;		/* list of targets to signal after
 							 * this node */
-		struct pw_node_target driver_target;	/* driver target that we signal */
 		struct spa_list input_mix;		/* our input ports (and mixers) */
 		struct spa_list output_mix;		/* output ports (and mixers) */
 
@@ -740,8 +821,9 @@ struct pw_impl_node {
 		struct spa_ratelimit rate_limit;
 
 		bool prepared;				/**< the node was added to loop */
-		bool added;				/**< the node was added to driver */
 	} rt;
+	struct pw_node_peer *to_driver_peer;		/* node -> driver */
+	struct pw_node_peer *from_driver_peer;		/* driver -> node */
 	struct spa_fraction target_rate;
 	uint64_t target_quantum;
 
@@ -885,14 +967,6 @@ struct pw_control_link {
 	uint32_t out_port;
 	uint32_t in_port;
 	unsigned int valid:1;
-};
-
-struct pw_node_peer {
-	int ref;
-	int active_count;
-	struct spa_list link;			/**< link in peer list */
-	struct pw_impl_node *output;		/**< the output node */
-	struct pw_node_target target;		/**< target of the input node */
 };
 
 #define pw_impl_link_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_impl_link_events, m, v, ##__VA_ARGS__)
@@ -1262,6 +1336,9 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 int pw_impl_node_trigger(struct pw_impl_node *node);
 
 int pw_impl_node_set_io(struct pw_impl_node *node, uint32_t id, void *data, size_t size);
+
+int pw_impl_node_add_target(struct pw_impl_node *node, struct pw_node_target *t);
+int pw_impl_node_remove_target(struct pw_impl_node *node, struct pw_node_target *t);
 
 /** Prepare a link
   * Starts the negotiation of formats and buffers on \a link */

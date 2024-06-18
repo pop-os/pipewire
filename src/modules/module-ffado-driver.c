@@ -192,6 +192,7 @@ struct stream {
 
 	unsigned int ready:1;
 	unsigned int running:1;
+	unsigned int transfered:1;
 };
 
 struct impl {
@@ -598,6 +599,7 @@ static void sink_process(void *d, struct spa_io_position *position)
 		p->cleared = false;
 	}
 	ffado_streaming_transfer_playback_buffers(impl->dev);
+	s->transfered = true;
 
 	if (impl->mode == MODE_SINK) {
 		pw_log_trace_fp("done %u", impl->frame_time);
@@ -617,6 +619,7 @@ static void silence_playback(struct impl *impl)
 			clear_port_buffer(p, impl->period_size);
 	}
 	ffado_streaming_transfer_playback_buffers(impl->dev);
+	s->transfered = true;
 }
 
 static void source_process(void *d, struct spa_io_position *position)
@@ -630,6 +633,8 @@ static void source_process(void *d, struct spa_io_position *position)
 	if (!impl->triggered) {
 		pw_log_trace_fp("done %u", impl->frame_time);
 		impl->done = true;
+		if (!impl->sink.transfered)
+			silence_playback(impl);
 		set_timeout(impl, position->clock.nsec);
 		return;
 	}
@@ -637,6 +642,7 @@ static void source_process(void *d, struct spa_io_position *position)
 	impl->triggered = false;
 
 	ffado_streaming_transfer_capture_buffers(impl->dev);
+	s->transfered = true;
 
 	for (i = 0; i < s->n_ports; i++) {
 		struct port *p = s->ports[i];
@@ -944,12 +950,15 @@ static void on_ffado_timeout(void *data, uint64_t expirations)
 	uint64_t nsec;
 	ffado_wait_response response;
 
+	pw_log_trace_fp("wakeup %d", impl->done);
+
 	if (!impl->done) {
 		impl->pw_xrun++;
 		impl->new_xrun = true;
 		ffado_streaming_reset(impl->dev);
 	}
 again:
+	pw_log_trace_fp("FFADO wait");
 	response = ffado_streaming_wait(impl->dev);
 	nsec = get_time_ns(impl);
 
@@ -972,13 +981,18 @@ again:
 	source_running = impl->source.running && impl->sink.ready;
 	sink_running = impl->sink.running && impl->source.ready;
 
-	if (!source_running)
+	impl->source.transfered = false;
+	impl->sink.transfered = false;
+
+	if (!source_running) {
 		ffado_streaming_transfer_capture_buffers(impl->dev);
+		impl->source.transfered = true;
+	}
 	if (!sink_running)
 		silence_playback(impl);
 
-	pw_log_trace_fp("process %d %u %u %p %d", impl->period_size, source_running,
-			sink_running, impl->position, impl->frame_time);
+	pw_log_trace_fp("process %d %u %u %p %d %"PRIu64, impl->period_size, source_running,
+			sink_running, impl->position, impl->frame_time, nsec);
 
 	if (impl->new_xrun) {
 		pw_log_warn("Xrun FFADO:%u PipeWire:%u source:%d sink:%d",
@@ -1010,7 +1024,7 @@ again:
 		c->duration = impl->period_size;
 		c->delay = 0;
 		c->rate_diff = 1.0;
-		c->next_nsec = nsec;
+		c->next_nsec = nsec + (c->duration * SPA_NSEC_PER_SEC) / impl->sample_rate;
 
 		c->target_rate = c->rate;
 		c->target_duration = c->duration;

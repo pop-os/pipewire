@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.1.82',
+  version : '1.1.83',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -94,6 +94,7 @@ common_flags = [
   '-Wdeprecated-declarations',
   '-Wunused-result',
   '-Werror=return-type',
+  '-Werror=float-conversion',
 ]
 
 cc_flags = common_flags + [
@@ -393,18 +394,23 @@ cdata.set('HAVE_GSTREAMER_DEVICE_PROVIDER', get_option('gstreamer-device-provide
 summary({'gstreamer DMA_DRM support': gst_dma_drm_found}, bool_yn: true, section: 'Backend')
 cdata.set('HAVE_GSTREAMER_DMA_DRM', gst_dma_drm_found)
 
-webrtc_dep = dependency('webrtc-audio-processing-1',
-  version : ['>= 1.2' ],
-  required : false)
-cdata.set('HAVE_WEBRTC1', webrtc_dep.found())
-if webrtc_dep.found()
+if get_option('echo-cancel-webrtc').disabled()
+  webrtc_dep = dependency('', required: false)
   summary({'WebRTC Echo Canceling >= 1.2': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 else
-  webrtc_dep = dependency('webrtc-audio-processing',
-    version : ['>= 0.2', '< 1.0'],
-    required : get_option('echo-cancel-webrtc'))
-  cdata.set('HAVE_WEBRTC', webrtc_dep.found())
-  summary({'WebRTC Echo Canceling < 1.0': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+  webrtc_dep = dependency('webrtc-audio-processing-1',
+    version : ['>= 1.2' ],
+    required : false)
+  cdata.set('HAVE_WEBRTC1', webrtc_dep.found())
+  if webrtc_dep.found()
+    summary({'WebRTC Echo Canceling >= 1.2': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+  else
+    webrtc_dep = dependency('webrtc-audio-processing',
+      version : ['>= 0.2', '< 1.0'],
+      required : get_option('echo-cancel-webrtc'))
+    cdata.set('HAVE_WEBRTC', webrtc_dep.found())
+    summary({'WebRTC Echo Canceling < 1.0': webrtc_dep.found()}, bool_yn: true, section: 'Misc dependencies')
+  endif
 endif
 
 # On FreeBSD and MidnightBSD, epoll-shim library is required for eventfd() and timerfd()
