@@ -489,6 +489,10 @@ static void add_bind_ctl_params(struct state *state, struct spa_pod_builder *b)
 	int err;
 
 	for (unsigned int i = 0; i < state->num_bind_ctls; i++) {
+
+		if(!state->bound_ctls[i].value || !state->bound_ctls[i].info)
+			continue;
+
 		err = snd_ctl_elem_read(state->ctl, state->bound_ctls[i].value);
 		if (err < 0) {
 			spa_log_warn(state->log, "Could not read elem value for '%s': %s",
@@ -657,21 +661,6 @@ static void fill_device_name(struct state *state, const char *params, char devic
 			state->props.device, params ? params : "");
 }
 
-static void device_name_to_card_name(const char *device_name, char *card_name, size_t card_len)
-{
-	size_t card_name_len = strcspn(device_name, ",");
-	snprintf(card_name, card_len, "%.*s", (int) card_name_len, device_name);
-}
-
-static void fill_card_name(struct state *state, const char *params, char *card_name, size_t len)
-{
-	char device_name[256];
-	size_t max_len = SPA_MIN(len, sizeof(device_name));
-
-	fill_device_name(state, params, device_name, max_len);
-	device_name_to_card_name(device_name, card_name, max_len);
-}
-
 static void bind_ctl_event(struct spa_source *source)
 {
 	struct state *state = source->data;
@@ -713,6 +702,9 @@ static void bind_ctl_event(struct spa_source *source)
 
 		for (unsigned int i = 0; i < state->num_bind_ctls; i++) {
 			int err;
+
+			if(!state->bound_ctls[i].value || !state->bound_ctls[i].info)
+				continue;
 
 			// Check if we have the right element
 			snd_ctl_elem_value_get_id(state->bound_ctls[i].value, bound_id);
@@ -830,6 +822,23 @@ cleanup:
 	snd_ctl_elem_list_free_space(element_list);
 }
 
+int open_card_ctl(struct state *state)
+{
+	int err;
+	char card_name[256];
+
+	snprintf(card_name, sizeof(card_name), "hw:%d", state->card_index);
+
+	err = snd_ctl_open(&state->ctl, card_name, SND_CTL_NONBLOCK);
+	if (err < 0) {
+		spa_log_info(state->log, "%s could not find ctl card: %s",
+				card_name, snd_strerror(err));
+		return err;
+	}
+
+	return 0;
+}
+
 static void bind_ctls_for_params(struct state *state)
 {
 	int err;
@@ -838,17 +847,9 @@ static void bind_ctls_for_params(struct state *state)
 		return;
 
 	if (!state->ctl) {
-		char card_name[256];
-
-		fill_card_name(state, NULL, card_name, sizeof(card_name));
-
-		err = snd_ctl_open(&state->ctl, card_name, SND_CTL_NONBLOCK);
-		if (err < 0) {
-			spa_log_info(state->log, "%s could not find ctl card: %s",
-					card_name, snd_strerror(err));
-			state->ctl = NULL;
+		err = open_card_ctl(state);
+		if (err < 0)
 			return;
-		}
 	}
 
 	state->ctl_n_fds = snd_ctl_poll_descriptors_count(state->ctl);
@@ -1003,7 +1004,7 @@ int spa_alsa_clear(struct state *state)
 	return err;
 }
 
-static int probe_pitch_ctl(struct state *state, const char* device_name)
+static int probe_pitch_ctl(struct state *state)
 {
 	snd_ctl_elem_id_t *id;
 	/* TODO: Add configuration params for the control name and units */
@@ -1017,16 +1018,10 @@ static int probe_pitch_ctl(struct state *state, const char* device_name)
 	snd_lib_error_set_handler(silence_error_handler);
 
 	if (!state->ctl) {
-		char card_name[256];
-		device_name_to_card_name(device_name, card_name, sizeof(card_name));
-
-		err = snd_ctl_open(&state->ctl, card_name, SND_CTL_NONBLOCK);
-		if (err < 0) {
-			spa_log_info(state->log, "%s could not find ctl card: %s",
-					card_name, snd_strerror(err));
-			state->ctl = NULL;
+		err = open_card_ctl(state);
+		if (err < 0)
 			goto error;
-		}
+
 		opened = true;
 	}
 
@@ -1039,8 +1034,8 @@ static int probe_pitch_ctl(struct state *state, const char* device_name)
 
 	err = snd_ctl_elem_read(state->ctl, state->pitch_elem);
 	if (err < 0) {
-		spa_log_debug(state->log, "%s: did not find ctl %s: %s",
-				device_name, elem_name, snd_strerror(err));
+		spa_log_debug(state->log, "%s: did not find ctl: %s",
+				 elem_name, snd_strerror(err));
 
 		snd_ctl_elem_value_free(state->pitch_elem);
 		state->pitch_elem = NULL;
@@ -1057,7 +1052,7 @@ static int probe_pitch_ctl(struct state *state, const char* device_name)
 	CHECK(snd_ctl_elem_write(state->ctl, state->pitch_elem), "snd_ctl_elem_write");
 	state->last_rate = 1.0;
 
-	spa_log_info(state->log, "%s: found ctl %s", device_name, elem_name);
+	spa_log_info(state->log, "found ctl %s", elem_name);
 	err = 0;
 error:
 	snd_lib_error_set_handler(NULL);
@@ -1124,7 +1119,7 @@ int spa_alsa_open(struct state *state, const char *params)
 	state->sample_count = 0;
 	state->sample_time = 0;
 
-	probe_pitch_ctl(state, device_name);
+	probe_pitch_ctl(state);
 
 	return 0;
 
@@ -2288,11 +2283,11 @@ int spa_alsa_update_rate_match(struct state *state)
 	 * means that to adjust the playback rate, we need to apply the inverse
 	 * of the given rate. */
 	if (state->stream == SND_PCM_STREAM_CAPTURE) {
-		pitch = 1000000 * state->rate_match->rate;
-		last_pitch = 1000000 * state->last_rate;
+		pitch = (uint64_t)(1000000 * state->rate_match->rate);
+		last_pitch = (uint64_t)(1000000 * state->last_rate);
 	} else {
-		pitch = 1000000 / state->rate_match->rate;
-		last_pitch = 1000000 / state->last_rate;
+		pitch = (uint64_t)(1000000 / state->rate_match->rate);
+		last_pitch = (uint64_t)(1000000 / state->last_rate);
 	}
 
 	/* The pitch adjustment is limited to 1 ppm */
@@ -2732,7 +2727,7 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 		corr = 1.0;
 
 	if (diff < 0)
-		state->next_time += diff / corr * 1e9 / state->rate;
+		state->next_time += (uint64_t)(diff / corr * 1e9 / state->rate);
 
 	if (SPA_UNLIKELY((state->next_time - state->base_time) > BW_PERIOD)) {
 		state->base_time = state->next_time;
@@ -2756,7 +2751,7 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 			SPA_FLAG_UPDATE(state->rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE, state->matching);
 	}
 
-	state->next_time += state->threshold / corr * 1e9 / state->rate;
+	state->next_time += (uint64_t)(state->threshold / corr * 1e9 / state->rate);
 
 	if (SPA_LIKELY(!follower && state->clock)) {
 		state->clock->nsec = current_time;
@@ -2864,7 +2859,7 @@ static int alsa_write_sync(struct state *state, uint64_t current_time)
 
 	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0)) {
 		spa_log_error(state->log, "get_status error: %s", spa_strerror(res));
-		state->next_time += state->threshold * 1e9 / state->rate;
+		state->next_time += (uint64_t)(state->threshold * 1e9 / state->rate);
 		return res;
 	}
 
@@ -3125,7 +3120,7 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 
 	if (SPA_UNLIKELY((res = get_status(state, current_time, &avail, &delay, &target)) < 0)) {
 		spa_log_error(state->log, "get_status error: %s", spa_strerror(res));
-		state->next_time += state->threshold * 1e9 / state->rate;
+		state->next_time += (uint64_t)(state->threshold * 1e9 / state->rate);
 		return res;
 	}
 
@@ -3447,7 +3442,7 @@ static void alsa_timer_wakeup_event(struct spa_source *source)
 				state->next_time - current_time, state->threshold,
 				state->sample_count, suppressed);
 		}
-		state->next_time = current_time + state->threshold * 1e9 / state->rate;
+		state->next_time = (uint64_t)(current_time + state->threshold * 1e9 / state->rate);
 	}
 	set_timeout(state, state->next_time);
 }

@@ -175,7 +175,8 @@ struct spa_bt_bis {
 
 struct spa_bt_big {
 	struct spa_list link;
-	int broadcast_code[BROADCAST_CODE_LEN];
+	char broadcast_code[BROADCAST_CODE_LEN];
+	bool encryption;
 	int presentation_delay;
 	struct spa_list bis_list;
 	int big_id;
@@ -2612,29 +2613,30 @@ static struct spa_bt_remote_endpoint *remote_endpoint_find(struct spa_bt_monitor
 	return NULL;
 }
 
-static struct spa_bt_device *create_bcast_device(struct spa_bt_monitor *monitor, const char *object_path)
+static struct spa_bt_device *create_bcast_device(struct spa_bt_monitor *monitor, const char *adapter_path,
+		const char *transport_path, const char *address)
 {
 	struct spa_bt_device *d;
 	struct spa_bt_adapter *adapter;
 
-	adapter = adapter_find(monitor, object_path);
+	adapter = adapter_find(monitor, adapter_path);
 	if (adapter == NULL) {
-		spa_log_warn(monitor->log, "unknown adapter %s", object_path);
+		spa_log_warn(monitor->log, "unknown adapter %s", adapter_path);
 		return NULL;
 	}
 
-	d = device_create(monitor, object_path);
+	d = device_create(monitor, transport_path);
 	if (d == NULL) {
 		spa_log_warn(monitor->log, "can't create Bluetooth device %s: %m",
-				object_path);
+				transport_path);
 		return NULL;
 	}
 
 	d->adapter = adapter;
 	d->adapter_path = strdup(adapter->path);
-	d->alias = strdup(adapter->alias);
-	d->name = strdup(adapter->name);
-	d->address = strdup("00:00:00:00:00:00");
+	d->address = spa_aprintf("%s.%d", address, d->id);
+	d->alias = strdup(d->address);
+	d->name = strdup(d->address);
 	d->reconnect_state = BT_DEVICE_RECONNECT_STOP;
 
 	device_update_hw_volume_profiles(d);
@@ -2672,28 +2674,19 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 			if (spa_streq(key, "UUID")) {
 				free(remote_endpoint->uuid);
 				remote_endpoint->uuid = strdup(value);
+
+				if(spa_streq(remote_endpoint->uuid, SPA_BT_UUID_BAP_BROADCAST_SINK))
+					/* Set remote endpoint as an acceptor for a broadcast sink.
+					 * So the transport is an initiator.
+					 */
+					remote_endpoint->acceptor = true;
 			}
 			else if (spa_streq(key, "Device")) {
 				struct spa_bt_device *device;
 
 				device = spa_bt_device_find(monitor, value);
 				if (device == NULL) {
-					/*
-					* If a broadcast sink endpoint is detected (over DBus) a new device
-					* will be created. This device will be our simulated remote device.
-					* This is done because BlueZ sets the adapter as the device
-					* that is connected to for a broadcast sink endpoint/transport.
-					*/
-					if (spa_streq(remote_endpoint->uuid, SPA_BT_UUID_BAP_BROADCAST_SINK)) {
-						device = create_bcast_device(monitor, value);
-						if (device == NULL)
-							goto next;
-
-						remote_endpoint->acceptor = true;
-						device_set_connected(device, 1);
-					} else {
-						goto next;
-					}
+					goto next;
 				}
 
 				spa_log_debug(monitor->log, "remote_endpoint %p: device -> %p", remote_endpoint, device);
@@ -3179,7 +3172,7 @@ static void spa_bt_transport_volume_changed(struct spa_bt_transport *transport)
 
 	if (t_volume->hw_volume != t_volume->new_hw_volume) {
 		t_volume->hw_volume = t_volume->new_hw_volume;
-		t_volume->volume = spa_bt_volume_hw_to_linear(t_volume->hw_volume,
+		t_volume->volume = (float)spa_bt_volume_hw_to_linear(t_volume->hw_volume,
 					t_volume->hw_volume_max);
 		spa_log_debug(monitor->log, "transport %p: volume changed %d(%f) ",
 			transport, t_volume->new_hw_volume, t_volume->volume);
@@ -3305,7 +3298,45 @@ static int transport_update_props(struct spa_bt_transport *transport,
 					spa_bt_transport_set_state(transport, state);
 			}
 			else if (spa_streq(key, "Device")) {
+				char *pos;
 				struct spa_bt_device *device = spa_bt_device_find(monitor, value);
+				if ((device == NULL) &&
+					(transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK)) {
+					/*
+					* If a transport with profile broadcast source is detected (over DBus)
+					* and no device is found for it, a new device will be created.
+					* This device will be our simulated remote device.
+					* This is done because BlueZ sets the adapter as the device
+					* that is connected to a broadcast sink endpoint/transport.
+					*/
+					device = spa_bt_device_find(monitor, transport->path);
+					if (device == NULL) {
+						device = create_bcast_device(monitor, value, transport->path, "00:00:00:00:00:00");
+						if (device == NULL) {
+							spa_log_warn(monitor->log, "could not find device %s", value);
+						} else
+							device_set_connected(device, 1);
+					}
+				} if ((device != NULL) &&
+					(transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE)) {
+					/*
+					 * For each transport that has a broadcast source profile,
+					 * we need to create a new node for each BIS.
+					 * example of transport path = /org/bluez/hci0/dev_2D_9D_93_F9_D7_5E/bis1/fd0
+					 * Create new devices only for a case of a big with multiple BISes,
+					 * for this case will have the scanned device to the transport
+					 * "/fd0" and create new devices for the other transports from this device
+					 * that appear only in case of multiple BISes per BIG.
+					 */
+					pos = strstr(transport->path, "/fd0");
+					if (pos == NULL) {
+						device = create_bcast_device(monitor, device->adapter_path, transport->path, device->address);
+						if (device == NULL) {
+							spa_log_warn(monitor->log, "could not find device created");
+						} else
+							device_set_connected(device, 1);
+					}
+				}
 				if (transport->device != device) {
 					if (transport->device != NULL)
 						spa_list_remove(&transport->device_link);
@@ -5340,6 +5371,7 @@ static void configure_bis(struct spa_bt_monitor *monitor,
 	append_basic_variant_dict_entry(&qos_dict, "MSE", DBUS_TYPE_BYTE, "y", &mse);
 	append_basic_variant_dict_entry(&qos_dict, "Timeout", DBUS_TYPE_UINT16, "q", &timeout);
 	append_basic_array_variant_dict_entry(&qos_dict, "BCode", "ay", "y", DBUS_TYPE_BYTE, big->broadcast_code, BROADCAST_CODE_LEN);
+	append_basic_variant_dict_entry(&qos_dict, "Encryption", DBUS_TYPE_BYTE, "y", &big->encryption);
 	append_basic_variant_dict_entry(&qos_dict, "Interval", DBUS_TYPE_UINT32, "u", &qos.interval);
 	append_basic_variant_dict_entry(&qos_dict, "Framing", DBUS_TYPE_BYTE, "y", &qos.framing);
 	append_basic_variant_dict_entry(&qos_dict, "PHY", DBUS_TYPE_BYTE, "y", &qos.phy);
@@ -5558,6 +5590,37 @@ static void interfaces_removed(struct spa_bt_monitor *monitor, DBusMessageIter *
 				remote_endpoint_free(ep);
 				if (d)
 					spa_bt_device_emit_profiles_changed(d, d->profiles, d->connected_profiles);
+			}
+		} else if (spa_streq(interface_name, BLUEZ_MEDIA_TRANSPORT_INTERFACE)) {
+			struct spa_bt_transport *transport;
+			transport = spa_bt_transport_find(monitor, object_path);
+			if (transport != NULL) {
+				if (transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SINK) {
+					struct spa_bt_device *d = transport->device;
+					if (d != NULL){
+						device_free(d);
+					}		
+				} else if (transport->profile == SPA_BT_PROFILE_BAP_BROADCAST_SOURCE) {
+					/*
+					 * For each transport that has a broadcast source profile,
+					 * we need to create a new node for each BIS.
+					 * example of transport path = /org/bluez/hci0/dev_2D_9D_93_F9_D7_5E/bis1/fd0
+					 * Create new devices only for a case of a big with multiple BISes,
+					 * for this case will have the scanned device to the transport
+					 * "/fd0" and create new devices for the other transports from this device
+					 * that appear only in case of multiple BISes per BIG.
+					 * 
+					 * Here we delete the created devices.
+					 */
+					char *pos = strstr(transport->path, "/fd0");
+					if (pos == NULL) {
+						struct spa_bt_device *d = transport->device;
+						if (d != NULL){
+							device_free(d);
+						}
+					}
+				}
+				spa_bt_transport_free(transport);
 			}
 		}
 
@@ -6108,13 +6171,27 @@ static void parse_broadcast_source_config(struct spa_bt_monitor *monitor, const 
 		/* Iterate on all BIG values */
 		while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
 			if (spa_streq(key, "broadcast_code")) {
-				if (spa_json_enter_array(&it[1], &it_array[1]) <= 0)
-					goto parse_failed;
-				for (cursor = 0; cursor < BROADCAST_CODE_LEN; cursor++) {
-					if (spa_json_get_int(&it_array[1], &big_entry->broadcast_code[cursor]) <= 0)
+				/* Len is BROADCAST_CODE_LEN plus 2 (for the quotes, as they count towards the string length
+				 * even if they don't appear in the final big_entry->broadcast_code string) plus 1 for the
+				 * null string terminator.
+				 */
+				if (spa_json_get_string(&it[1], big_entry->broadcast_code,BROADCAST_CODE_LEN + 2 + 1) <= 0)
 						goto parse_failed;
-					spa_log_debug(monitor->log, "big_entry->broadcast_code[%d] %d", cursor, big_entry->broadcast_code[cursor]);
-				}
+				/* BLUETOOTH CORE SPECIFICATION Version 5.4 | Vol 3, Part C
+				 * 3.2.6.3 Representation
+				 *
+				 * The transformation from string to number shall be by
+				 * representing the string in UTF-8, placing the resulting bytes in 8-bit fields of the
+				 * value starting at the least significant bit, and then padding with zeros in the
+				 * most significant bits if necessary.
+				*/
+				for (int i = 0; i <= BROADCAST_CODE_LEN/2 - 1; i++)
+					SPA_SWAP(big_entry->broadcast_code[i], big_entry->broadcast_code[BROADCAST_CODE_LEN - 1 -i]);
+				spa_log_debug(monitor->log, "big_entry->broadcast_code %s", big_entry->broadcast_code);
+			} else if (spa_streq(key, "encryption")) {
+				if (spa_json_get_bool(&it[1], &big_entry->encryption) <= 0)
+					goto parse_failed;
+				spa_log_debug(monitor->log, "big_entry->encryption %d", big_entry->encryption);
 			} else if (spa_streq(key, "bis")) {
 				if (spa_json_enter_array(&it[1], &it_array[1]) <= 0)
 					goto parse_failed;
