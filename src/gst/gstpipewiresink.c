@@ -244,8 +244,9 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
 }
 
 static void
-pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
+gst_pipewire_sink_update_params (GstPipeWireSink *sink)
 {
+  GstPipeWirePool *pool = sink->stream->pool;
   GstStructure *config;
   GstCaps *caps;
   guint size;
@@ -290,6 +291,13 @@ pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
   pw_thread_loop_lock (sink->stream->core->loop);
   pw_stream_update_params (sink->stream->pwstream, port_params, 3);
   pw_thread_loop_unlock (sink->stream->core->loop);
+}
+
+static void
+pool_activated (GstPipeWirePool *pool, GstPipeWireSink *sink)
+{
+  GST_DEBUG_OBJECT (pool, "activated");
+  g_cond_signal (&sink->stream->pool->cond);
 }
 
 static void
@@ -534,7 +542,7 @@ static void
 on_process (void *data)
 {
   GstPipeWireSink *pwsink = data;
-  GST_DEBUG_OBJECT (pwsink, "signal");
+  GST_LOG_OBJECT (pwsink, "signal");
   g_cond_signal (&pwsink->stream->pool->cond);
 }
 
@@ -543,7 +551,8 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
 {
   GstPipeWireSink *pwsink = data;
 
-  GST_DEBUG ("got stream state %d", state);
+  GST_DEBUG_OBJECT (pwsink, "got stream state \"%s\" (%d)",
+      pw_stream_state_as_string(state), state);
 
   switch (state) {
     case PW_STREAM_STATE_UNCONNECTED:
@@ -571,12 +580,19 @@ static void
 on_param_changed (void *data, uint32_t id, const struct spa_pod *param)
 {
   GstPipeWireSink *pwsink = data;
+  GstPipeWirePool *pool = pwsink->stream->pool;
 
   if (param == NULL || id != SPA_PARAM_Format)
     return;
 
-  if (gst_buffer_pool_is_active (GST_BUFFER_POOL_CAST (pwsink->stream->pool)))
-    pool_activated (pwsink->stream->pool, pwsink);
+  GST_OBJECT_LOCK (pool);
+  while (!gst_buffer_pool_is_active (GST_BUFFER_POOL (pool))) {
+    GST_DEBUG_OBJECT (pool, "waiting for pool to become active");
+    g_cond_wait(&pool->cond, GST_OBJECT_GET_LOCK (pool));
+  }
+  GST_OBJECT_UNLOCK (pool);
+
+  gst_pipewire_sink_update_params (pwsink);
 }
 
 static gboolean

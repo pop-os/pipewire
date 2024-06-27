@@ -165,6 +165,7 @@ struct impl {
 	struct spa_source *source;
 
 	unsigned receiving:1;
+	unsigned last_receiving:1;
 };
 
 static void
@@ -181,8 +182,10 @@ on_rtp_io(void *data, int fd, uint32_t mask)
 		if (len < 12)
 			goto short_packet;
 
-		if (SPA_LIKELY(impl->stream))
-			rtp_stream_receive_packet(impl->stream, buffer, len);
+		if (SPA_LIKELY(impl->stream)) {
+			if (rtp_stream_receive_packet(impl->stream, buffer, len) < 0)
+				goto receive_error;
+		}
 
 		impl->receiving = true;
 	}
@@ -426,6 +429,15 @@ static const struct rtp_stream_events stream_events = {
 static void on_timer_event(void *data, uint64_t expirations)
 {
 	struct impl *impl = data;
+
+	if (impl->receiving != impl->last_receiving) {
+		struct spa_dict_item item[1];
+
+		impl->last_receiving = impl->receiving;
+
+		item[0] = SPA_DICT_ITEM_INIT("rtp.receiving", impl->receiving ? "true" : "false");
+		rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
+	}
 
 	if (!impl->receiving) {
 		pw_log_info("timeout, inactive RTP source");
