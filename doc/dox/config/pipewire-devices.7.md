@@ -100,9 +100,17 @@ The priority for selecting this device as the default device.
 \parblock
 The name of the clock. This name is auto generated from the card index and stream direction. Devices with the same clock name will not use a resampler to align the clocks. This can be used to link devices together with a shared word clock.
 
-In Pro Audio mode, nodes from the same device are assumed to have the same clock and no resampling will happen when linked togther. So, linking a capture port to a playback port will not use any adaptive resampling in Pro Audio mode.
+In Pro Audio mode, nodes from the same device are assumed to have the same clock and no resampling will happen when linked together. So, linking a capture port to a playback port will not use any adaptive resampling in Pro Audio mode.
 
 In Non Pro Audio profile, no such assumption is made and adaptive resampling is done in all cases by default. This can also be disabled by setting the same clock.name on the nodes.
+\endparblock
+
+@PAR@ device-param  node.param.PARAM = JSON    # JSON
+\parblock
+Set value of a node \ref spa_param_type "Param" to a JSON value when the device is loaded.
+This works similarly as \ref page_man_pw-cli_1 "pw-cli(1)" `set-param` command.
+The `PARAM` should be replaced with the name of the Param to set,
+ie. for example `node.param.Props = { ... }` to set `Props`.
 \endparblock
 
 @PAR@ device-param  device.id
@@ -114,6 +122,14 @@ These are common properties for devices.
 
 @PAR@ device-param  device.name    # string
 A (unique) name for the device. It can be used by command-line and other tools to identify the device.
+
+@PAR@ device-param  device.param.PARAM = JSON    # JSON
+\parblock
+Set value of a device \ref spa_param_type "Param" to a JSON value when the device is loaded.
+This works similarly as \ref page_man_pw-cli_1 "pw-cli(1)" `set-param` command.
+The `PARAM` should be replaced with the name of the Param to set,
+ie. for example `device.Param.Props = { ... }` to set `Props`.
+\endparblock
 
 Other `device.*` properties: UNDOCUMENTED
 
@@ -173,11 +189,14 @@ for explanations.
 @PAR@ device-param  resample.disable
 \ref client_conf__resample_disable "See pipewire-client.conf(5)"
 
-@PAR@ device-param  resample.peaks
-UNDOCUMENTED
+@PAR@ device-param  resample.peaks = false # boolean
+Instead of actually resampling, produce peak amplitude values as output.
+This is used for volume monitoring, where it is set as a property
+of the "recording" stream.
 
-@PAR@ device-param  resample.prefill
-UNDOCUMENTED
+@PAR@ device-param  resample.prefill = false # boolean
+Prefill resampler buffers with silence. This affects the initial
+samples produced by the resampler.
 
 @PAR@ device-param  monitor.channel-volumes
 \ref client_conf__monitor_channel-volumes "See pipewire-client.conf(5)"
@@ -191,9 +210,23 @@ UNDOCUMENTED
 @PAR@ device-param  debug.wav-path
 \ref client_conf__debug_wav-path "See pipewire-client.conf(5)"
 
-@PAR@ device-param  adapter.auto-port-config
-UNDOCUMENTED
+@PAR@ device-param  adapter.auto-port-config = null # JSON
+\parblock
+If specified, configure the ports of the node when it is created, instead of
+leaving that to the session manager to do. This is useful (only) for minimal
+configurations without a session manager.
 
+Value is SPA JSON of the form:
+```json
+{
+    mode = "none",          # "none", "passthrough", "convert", "dsp"
+    monitor = false,        # boolean
+    control = false,        # boolean
+    position = "preserve"   # "unknown", "aux", "preserve"
+}
+```
+See \ref spa_param_port_config for the meaning.
+\endparblock
 
 # ALSA PROPERTIES  @IDX@ device-param
 
@@ -257,10 +290,10 @@ Disable mmap operation of the device and use the ALSA read/write API instead. De
 Ignore the ALSA batch flag. If the batch flag is set, ALSA will need an extra period to update the read/write pointers. Ignore this flag from ALSA can reduce the latency. Default is false.
 
 @PAR@ device-param  api.alsa.use-chmap    # boolean
-Use the driver provided channel map. Default is false because many drivers don't report this correctly.
+Use the driver provided channel map. Default is true when using UCM, false otherwise because many driver don't report this correctly.
 
 @PAR@ device-param  api.alsa.multi-rate    # boolean
-Allow devices from the same card to be opened in multiple sample rates. Default is true. Some older drivers did not properly advertize the capabilities of the device and only really supported opening the device in one rate.
+Allow devices from the same card to be opened in multiple sample rates. Default is true. Some older drivers did not properly advertise the capabilities of the device and only really supported opening the device in one rate.
 
 @PAR@ device-param  api.alsa.htimestamp = false    # boolean
 Use ALSA htimestamps in scheduling, instead of the system clock.
@@ -390,6 +423,28 @@ PipeWire Opus Pro audio profile duplex max bitrate.
 @PAR@ device-param  bluez5.a2dp.opus.pro.bidi.frame-dms = 400   # integer
 PipeWire Opus Pro audio profile duplex frame duration (1/10 ms).
 
+@PAR@ device-param  bluez5.bcast_source.config   # JSON
+\parblock
+Example:
+```
+bluez5.bcast_source.config = [
+  {
+    "broadcast_code": "Børne House",
+    "encryption: false,
+    "bis": [
+      { # BIS configuration
+        "qos_preset": "16_2_1", # QOS preset name from table Table 6.4 from BAP_v1.0.1.
+        "audio_channel_allocation": 1, # audio channel allocation configuration for the BIS
+        "metadata": [ # metadata configurations for the BIS
+           { "type": 1, "value": [ 1, 1 ] }
+        ]
+      }
+    ]
+  }
+]
+```
+\endparblock
+
 ## Device properties
 
 @PAR@ device-param  bluez5.auto-connect   # boolean
@@ -420,6 +475,10 @@ PipeWire Opus Pro Audio encoding mode: audio, voip, lowdelay
 
 @PAR@ device-param  bluez5.a2dp.opus.pro.bidi.application = "audio"   # string
 PipeWire Opus Pro Audio duplex encoding mode: audio, voip, lowdelay
+
+@PAR@ device-param  bluez5.bap.cig = auto   # integer, or 'auto'
+Set CIG ID for BAP unicast streams of the device.
+Default: "auto" (automatic).
 
 ## Node properties
 

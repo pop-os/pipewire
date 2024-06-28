@@ -13,6 +13,7 @@
 #include <spa/control/control.h>
 #include <spa/debug/types.h>
 #include <spa/debug/mem.h>
+#include <spa/debug/log.h>
 
 #include "config.h"
 
@@ -253,6 +254,7 @@ struct vban_stream *vban_stream_new(struct pw_core *core,
 {
 	struct impl *impl;
 	const char *str;
+	char tmp[64];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
 	uint32_t n_params, min_samples, max_samples;
@@ -356,22 +358,23 @@ struct vban_stream *vban_stream_new(struct pw_core *core,
 	if (!spa_atof(str, &max_ptime))
 		max_ptime = DEFAULT_MAX_PTIME;
 
-	min_samples = min_ptime * impl->rate / 1000;
-	max_samples = SPA_MIN(256, max_ptime * impl->rate / 1000);
+	min_samples = (uint32_t)(min_ptime * impl->rate / 1000);
+	max_samples = SPA_MIN(256u, (uint32_t)(max_ptime * impl->rate / 1000));
 
-	float ptime = 0;
+	float ptime = 0.f;
 	if ((str = pw_properties_get(props, "vban.ptime")) != NULL)
 		if (!spa_atof(str, &ptime))
-			ptime = 0.0;
+			ptime = 0.0f;
 
-	if (ptime) {
-		impl->psamples = ptime * impl->rate / 1000;
+	if (ptime != 0.f) {
+		impl->psamples = (uint32_t)(ptime * impl->rate / 1000);
 	} else {
 		impl->psamples = impl->mtu / impl->stride;
 		impl->psamples = SPA_CLAMP(impl->psamples, min_samples, max_samples);
 		if (direction == PW_DIRECTION_OUTPUT)
-			pw_properties_setf(props, "vban.ptime", "%f",
-					impl->psamples * 1000.0 / impl->rate);
+			pw_properties_set(props, "vban.ptime",
+					spa_dtoa(tmp, sizeof(tmp),
+						impl->psamples * 1000.0 / impl->rate));
 	}
 	latency_msec = pw_properties_get_uint32(props,
 			"sess.latency.msec", DEFAULT_SESS_LATENCY);

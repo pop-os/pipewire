@@ -37,7 +37,7 @@
 
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.audioconvert");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioconvert");
 
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
@@ -240,6 +240,8 @@ struct impl {
 	unsigned int port_ignore_latency:1;
 	unsigned int monitor_passthrough:1;
 
+	char group_name[128];
+
 	uint32_t scratch_size;
 	uint32_t scratch_ports;
 	float *empty;
@@ -287,7 +289,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
-		struct spa_dict_item items[4];
+		struct spa_dict_item items[5];
 		uint32_t n_items = 0;
 
 		if (PORT_IS_DSP(this, port->direction, port->id)) {
@@ -301,6 +303,8 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, "control");
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
 		}
+		if (this->group_name[0] != '\0')
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, this->group_name);
 		port->info.props = &SPA_DICT_INIT(items, n_items);
 
 		if (port->info.change_mask & SPA_PORT_CHANGE_MASK_PARAMS) {
@@ -1338,6 +1342,11 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 		i = dir->n_ports++;
 		init_port(this, direction, i, 0, false, false, true);
 	}
+	/* when output is convert mode, we are in OUTPUT (merge) mode, we always output all
+	 * the incoming data to output. When output is DSP, we need to output quantum size
+	 * chunks. */
+	this->direction = this->dir[SPA_DIRECTION_OUTPUT].mode == SPA_PARAM_PORT_CONFIG_MODE_convert ?
+		SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS | SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info.flags &= ~SPA_NODE_FLAG_NEED_CONFIGURE;
@@ -1847,7 +1856,7 @@ static uint32_t resample_update_rate_match(struct impl *this, bool passthrough, 
 	}
 	match_size -= SPA_MIN(match_size, queued);
 
-	spa_log_trace_fp(this->log, "%p: next match %u", this, match_size);
+	spa_log_trace_fp(this->log, "%p: next match %u %u %u", this, match_size, size, queued);
 
 	if (this->io_rate_match) {
 		this->io_rate_match->delay = delay + queued;
@@ -1875,7 +1884,7 @@ static inline bool resample_is_passthrough(struct impl *this)
 static int setup_convert(struct impl *this)
 {
 	struct dir *in, *out;
-	uint32_t i, rate, maxsize, maxports;
+	uint32_t i, rate, maxsize, maxports, duration;
 	struct port *p;
 	int res;
 
@@ -1891,7 +1900,13 @@ static int setup_convert(struct impl *this)
 	if (!in->have_format || !out->have_format)
 		return -EINVAL;
 
-	rate = this->io_position ? this->io_position->clock.target_rate.denom : DEFAULT_RATE;
+	if (this->io_position != NULL) {
+		rate = this->io_position->clock.target_rate.denom;
+		duration = this->io_position->clock.target_duration;
+	} else {
+		rate = DEFAULT_RATE;
+		duration = this->quantum_limit;
+	}
 
 	/* in DSP mode we always convert to the DSP rate */
 	if (in->mode == SPA_PARAM_PORT_CONFIG_MODE_dsp)
@@ -1937,6 +1952,8 @@ static int setup_convert(struct impl *this)
 	maxports = SPA_MAX(in->format.info.raw.channels, out->format.info.raw.channels);
 	if ((res = ensure_tmp(this, maxsize, maxports)) < 0)
 		return res;
+
+	resample_update_rate_match(this, resample_is_passthrough(this), duration, 0);
 
 	this->setup = true;
 
@@ -3446,18 +3463,14 @@ impl_init(const struct spa_handle_factory *factory,
 		else if (spa_streq(k, "resample.prefill"))
 			SPA_FLAG_UPDATE(this->resample.options,
 				RESAMPLE_OPTION_PREFILL, spa_atob(s));
-		else if (spa_streq(k, "factory.mode")) {
-			if (spa_streq(s, "merge"))
-				this->direction = SPA_DIRECTION_OUTPUT;
-			else
-				this->direction = SPA_DIRECTION_INPUT;
-		}
 		else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
 			if (s != NULL)
 	                        this->props.n_channels = parse_position(this->props.channel_map, s, strlen(s));
 		}
 		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
 			this->port_ignore_latency = spa_atob(s);
+		else if (spa_streq(k, SPA_KEY_PORT_GROUP))
+			spa_scnprintf(this->group_name, sizeof(this->group_name), "%s", s);
 		else if (spa_streq(k, "monitor.passthrough"))
 			this->monitor_passthrough = spa_atob(s);
 		else

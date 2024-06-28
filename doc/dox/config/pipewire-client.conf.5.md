@@ -262,6 +262,16 @@ When the node is not linked anymore, it becomes idle. Normally idle nodes keep p
 When the session manager does not suspend nodes (or when there is no session manager), the node.suspend-on-idle property can be used instead.
 \endparblock
 
+@PAR@ client.conf  node.loop.name = null
+@PAR@ client.conf  node.loop.class = data.rt
+\parblock
+Add the node to a specific loop name or loop class. By default the node is added to the
+data.rt loop class. You can make more specific data loops and then assign the nodes to those.
+
+Other well known names are main-loop.0 and the main node.loop.class which runs the node data processing
+in the main loop.
+\endparblock
+
 ## Session Manager Properties  @IDX@ client.conf
 
 @PAR@ client.conf  node.autoconnect = true
@@ -277,7 +287,7 @@ deprecated, the target.object property should be used instead, which uses the mo
 a possible target.
 
 @PAR@ client.conf  target.object = <node.name|object.serial>
-Where the node should link to ths can be a node.name or an object.serial.
+Where the node should link to, this can be a node.name or an object.serial.
 
 @PAR@ client.conf  node.dont-reconnect = false
 \parblock
@@ -427,7 +437,7 @@ This option is only active when the up-mix is enabled.
 @PAR@ client.conf  channelmix.rear-delay = 12.0
 \parblock
 Apply a delay in milliseconds when up-mixing the rear channels. This improves
-spacialization of the sound. A typical delay of 12 milliseconds is the default.
+specialization of the sound. A typical delay of 12 milliseconds is the default.
 
 This is only active when the `psd` up-mix method is used.
 \endparblock
@@ -442,7 +452,7 @@ This is only active when up-mix is enabled and a Front Center channel is mixed.
 
 @PAR@ client.conf  channelmix.hilbert-taps = 0
 \parblock
-This option will apply a 90 degree phase shift to the rear channels to improve spacialization.
+This option will apply a 90 degree phase shift to the rear channels to improve specialization.
 Taps needs to be between 15 and 255 with more accurate results (and more CPU consumption)
 for higher values.
 
@@ -450,9 +460,20 @@ This is only active when the `psd` up-mix method is used.
 \endparblock
 
 @PAR@ client.conf  dither.noise = 0
-This option will add N bits of random data to the signal. This can be used
-to keep some amplifiers alive during silent periods. This is usually used together with
+\parblock
+This option will add N bits of random data to the signal. When no dither.method is
+specified, the random data will flip between [-(1<<(N-1)), 0] every 1024 samples. With
+a dither.method, the dither noise is amplified with 1<<(N-1) bits.
+
+This can be used to keep some amplifiers alive during silent periods. One or two bits of noise is
+usually enough, otherwise the noise will become audible. This is usually used together with
 `session.suspend-timeout-seconds` to disable suspend in the session manager.
+
+Note that PipeWire uses floating point operations with 24 bits precission for all of the audio
+processing. Conversion to 24 bits integer sample formats is lossless and conversion to 32 bits
+integer sample formats are simply padded with 0 bits at the end. This means that the dither noise
+is always only in the 24 most significant bits.
+\endparblock
 
 @PAR@ client.conf  dither.method = none
 \parblock
@@ -462,8 +483,11 @@ output signal.
 There are 6 modes available:
 
 1. none           No dithering is done.
-2. rectangular    Dithering with a rectangular noise distribution.
-3. triangular     Dithering with a triangular noise distribution.
+2. rectangular    Dithering with a rectangular noise distribution. This adds random
+                  bits in the [-0.5, 0.5] range to the signal with even distribution.
+3. triangular     Dithering with a triangular noise distribution. This add random
+                  bits in the [-1.0, 1.0] range to the signal with triangular distribution
+                  around 0.0.
 4. triangular-hf  Dithering with a sloped triangular noise distribution.
 5. wannamaker3    Additional noise shaping is performed on the sloped triangular
                   dithering to move the noise to the more inaudible range. This is using
@@ -479,7 +503,7 @@ disabled otherwise.
 ## Debug Parameters
 
 @PAR@ client.conf  debug.wav-path = ""
-Make the stream to also write the raw samples to a WAV file for debugging puposes.
+Make the stream to also write the raw samples to a WAV file for debugging purposes.
 
 ## Format Properties
 

@@ -26,7 +26,7 @@
 
 #define SPA_TYPE_INTERFACE_Bluez5CodecMedia	SPA_TYPE_INFO_INTERFACE_BASE "Bluez5:Codec:Media:Private"
 
-#define SPA_VERSION_BLUEZ5_CODEC_MEDIA		7
+#define SPA_VERSION_BLUEZ5_CODEC_MEDIA		9
 
 struct spa_bluez5_codec_a2dp {
 	struct spa_interface iface;
@@ -39,10 +39,14 @@ struct spa_bluez5_codec_a2dp {
 #define MEDIA_CODEC_EXPORT_DEF(basename,...)	\
 	const char *codec_plugin_factory_name = MEDIA_CODEC_FACTORY_NAME(basename); \
 	static const struct media_codec * const codec_plugin_media_codec_list[] = { __VA_ARGS__, NULL };	\
-	const struct media_codec * const * const codec_plugin_media_codecs = codec_plugin_media_codec_list;
+	const struct media_codec * const * const codec_plugin_media_codecs = codec_plugin_media_codec_list;	\
+	SPA_LOG_TOPIC_DEFINE(codec_plugin_log_topic, "spa.bluez5.codecs." basename);
 
 extern const struct media_codec * const * const codec_plugin_media_codecs;
 extern const char *codec_plugin_factory_name;
+extern struct spa_log_topic codec_plugin_log_topic;
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &codec_plugin_log_topic
 #endif
 
 #define MEDIA_CODEC_FLAG_SINK		(1 << 0)
@@ -77,7 +81,9 @@ struct media_codec {
 
 	const struct media_codec *duplex_codec;	/**< Codec for non-standard A2DP duplex channel */
 
-	struct spa_log *log;
+	int (*get_bis_config)(const struct media_codec *codec, uint8_t *caps,
+				uint8_t *caps_size,	struct spa_dict *settings,
+				struct bap_codec_qos *qos);
 
 	/** If fill_caps is NULL, no endpoint is registered (for sharing with another codec). */
 	int (*fill_caps) (const struct media_codec *codec, uint32_t flags,
@@ -119,19 +125,71 @@ struct media_codec {
 
 	int (*update_props) (void *data, void *props);
 
+	/** Number of bytes needed for encoding */
 	int (*get_block_size) (void *data);
+
+	/**
+	 * Duration of the next packet in nanoseconds.
+	 *
+	 * For BAP this shall be constant and equal to the SDU interval.
+	 *
+	 * \param data Codec data from init()
+	 * \return Duration in nanoseconds.
+	 */
+	uint64_t (*get_interval) (void *data);
 
 	int (*abr_process) (void *data, size_t unsent);
 
+	/**
+	 * Start encoding new packet.
+	 *
+	 * \param data Codec data from init()
+	 * \param timestamp Packet time stamp (in samples played)
+	 * \return Size of packet header written to dst in bytes, or < 0 for error
+	 */
 	int (*start_encode) (void *data,
 		void *dst, size_t dst_size, uint16_t seqnum, uint32_t timestamp);
+
+	/**
+	 * Consume data from input buffer, encode to output buffer.
+	 *
+	 * \param data Codec data from init()
+	 * \param src Source data. NULL if encoding packet fragment.
+	 * \param dst Output buffer position. The memory region passed to the
+	 *    previous start_encode() is still valid, and this position is inside
+	 *    that region. The caller does not modify the contents of the buffer.
+	 * \param dst_size Remaining buffer space after dst
+	 * \param dst_out Bytes written to dst
+	 * \param need_flush
+	 *    - NEED_FLUSH_NO: don't flush this packet,
+	 *    - NEED_FLUSH_ALL: flush this packet,
+	 *    - NEED_FLUSH_FRAGMENT: flush packet fragment. The next start_encode()
+	 *      and encode() are expected to produce more fragments or the final
+	 *      fragment with NEED_FLUSH_ALL, without consuming source data.
+	 *      The fragment start_encode() is called with the same output buffer
+	 *      as previous. The fragment encode() will be called with NULL src.
+	 *      No new source data will be fed in before NEED_FLUSH_ALL.
+	 * \return Number of bytes consumed from src, or < 0 for error
+	 */
 	int (*encode) (void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
 		size_t *dst_out, int *need_flush);
 
+	/**
+	 * Start decoding received packet.
+	 *
+	 * \return Number of bytes consumed from source data, or < 0 for error
+	 */
 	int (*start_decode) (void *data,
 		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp);
+
+	/**
+	 * Decode received packet data.
+	 *
+	 * \param dst_out Number of bytes output to dst
+	 * \return Number of bytes consumed from src, or < 0 for error
+	 */
 	int (*decode) (void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
@@ -151,6 +209,9 @@ struct media_codec_config {
 
 int media_codec_select_config(const struct media_codec_config configs[], size_t n,
 	uint32_t cap, int preferred_value);
+
+int media_codec_get_config(const struct media_codec_config configs[], size_t n,
+	uint32_t conf);
 
 bool media_codec_check_caps(const struct media_codec *codec, unsigned int codec_id,
 	const void *caps, size_t caps_size, const struct media_codec_audio_info *info,

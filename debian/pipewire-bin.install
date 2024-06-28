@@ -14,6 +14,7 @@ usr/bin/pipewire-avb
 usr/bin/pw-cat
 usr/bin/pw-cli
 usr/bin/pw-config
+usr/bin/pw-container
 usr/bin/pw-dot
 usr/bin/pw-dsdplay
 usr/bin/pw-dump

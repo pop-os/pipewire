@@ -141,8 +141,9 @@ extern "C" {
 #define BUS_TYPE_USB		1
 #define BUS_TYPE_OTHER		255
 
-#define HFP_AUDIO_CODEC_CVSD    0x01
-#define HFP_AUDIO_CODEC_MSBC    0x02
+#define HFP_AUDIO_CODEC_CVSD	0x01
+#define HFP_AUDIO_CODEC_MSBC	0x02
+#define HFP_AUDIO_CODEC_LC3_SWB	0x03
 
 #define A2DP_OBJECT_MANAGER_PATH "/MediaEndpoint"
 #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
@@ -160,9 +161,11 @@ extern "C" {
 
 /* HFP uses SBC encoding with precisely defined parameters. Hence, the size
  * of the input (number of PCM samples) and output is known up front. */
-#define MSBC_DECODED_SIZE       240
-#define MSBC_ENCODED_SIZE       60  /* 2 bytes header + 57 mSBC payload + 1 byte padding */
-#define MSBC_PAYLOAD_SIZE       57
+#define MSBC_DECODED_SIZE       	240
+#define MSBC_PAYLOAD_SIZE       	57	/* 1 byte padding follows payload */
+#define LC3_SWB_DECODED_SIZE    	960	/* 32 kHz mono S24_32 @ 7.5 ms */
+#define LC3_SWB_PAYLOAD_SIZE    	58
+#define HFP_CODEC_PACKET_SIZE		60	/* 2 bytes header + payload */
 
 enum spa_bt_media_direction {
 	SPA_BT_MEDIA_SOURCE,
@@ -190,6 +193,8 @@ enum spa_bt_profile {
 	SPA_BT_PROFILE_HEADSET_HEAD_UNIT = (SPA_BT_PROFILE_HSP_HS | SPA_BT_PROFILE_HFP_HF),
 	SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY = (SPA_BT_PROFILE_HSP_AG | SPA_BT_PROFILE_HFP_AG),
 	SPA_BT_PROFILE_HEADSET_AUDIO =  (SPA_BT_PROFILE_HEADSET_HEAD_UNIT | SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY),
+	SPA_BT_PROFILE_BAP_AUDIO =  (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_BROADCAST_SINK |
+			SPA_BT_PROFILE_BAP_SOURCE | SPA_BT_PROFILE_BAP_BROADCAST_SOURCE),
 
 	SPA_BT_PROFILE_MEDIA_SINK =		(SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_BAP_SINK |
 										SPA_BT_PROFILE_BAP_BROADCAST_SINK),
@@ -462,6 +467,9 @@ struct spa_bt_device_events {
 	/** Device set configuration changed */
 	void (*device_set_changed) (void *data);
 
+	/** Switch profile between OFF and HSP_HFP */
+	void (*switch_profile) (void *data);
+
 	/** Device freed */
 	void (*destroy) (void *data);
 };
@@ -554,6 +562,7 @@ void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device);
 #define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
 #define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
 #define spa_bt_device_emit_device_set_changed(d)	spa_bt_device_emit(d, device_set_changed, 0)
+#define spa_bt_device_emit_switch_profile(d)		spa_bt_device_emit(d, switch_profile, 0)
 #define spa_bt_device_emit_destroy(d)			spa_bt_device_emit(d, destroy, 0)
 #define spa_bt_device_add_listener(d,listener,events,data)           \
 	spa_hook_list_append(&(d)->listener_list, listener, events, data)
@@ -562,7 +571,7 @@ struct spa_bt_iso_io;
 
 struct spa_bt_sco_io;
 
-struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_loop *data_loop, int fd, uint16_t read_mtu, uint16_t write_mtu);
+struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_bt_transport *transport, struct spa_loop *data_loop, struct spa_log *log);
 void spa_bt_sco_io_destroy(struct spa_bt_sco_io *io);
 void spa_bt_sco_io_set_source_cb(struct spa_bt_sco_io *io, int (*source_cb)(void *userdata, uint8_t *data, int size), void *userdata);
 void spa_bt_sco_io_set_sink_cb(struct spa_bt_sco_io *io, int (*sink_cb)(void *userdata), void *userdata);
@@ -650,7 +659,6 @@ struct spa_bt_transport {
 	uint8_t bap_cis;
 	uint8_t bap_big;
 	uint8_t bap_bis;
-	uint32_t bap_interval;
 
 	struct spa_bt_iso_io *iso_io;
 	struct spa_bt_sco_io *sco_io;

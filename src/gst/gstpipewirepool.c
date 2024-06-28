@@ -15,6 +15,8 @@
 
 #include "gstpipewirepool.h"
 
+#include <spa/debug/types.h>
+
 GST_DEBUG_CATEGORY_STATIC (gst_pipewire_pool_debug_category);
 #define GST_CAT_DEFAULT gst_pipewire_pool_debug_category
 
@@ -33,11 +35,12 @@ static guint pool_signals[LAST_SIGNAL] = { 0 };
 static GQuark pool_data_quark;
 
 GstPipeWirePool *
-gst_pipewire_pool_new (void)
+gst_pipewire_pool_new (GstPipeWireStream *stream)
 {
   GstPipeWirePool *pool;
 
   pool = g_object_new (GST_TYPE_PIPEWIRE_POOL, NULL);
+  g_weak_ref_set (&pool->stream, stream);
 
   return pool;
 }
@@ -57,7 +60,7 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
   uint32_t i;
   GstPipeWirePoolData *data;
 
-  GST_LOG_OBJECT (pool, "wrap buffer");
+  GST_DEBUG_OBJECT (pool, "wrap buffer");
 
   data = g_slice_new (GstPipeWirePoolData);
 
@@ -67,21 +70,20 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
     struct spa_data *d = &b->buffer->datas[i];
     GstMemory *gmem = NULL;
 
-    GST_LOG_OBJECT (pool, "wrap buffer %d %d", d->mapoffset, d->maxsize);
+    GST_DEBUG_OBJECT (pool, "wrap data (%s %d) %d %d",
+        spa_debug_type_find_short_name(spa_type_data_type, d->type), d->type,
+        d->mapoffset, d->maxsize);
     if (d->type == SPA_DATA_MemFd) {
-      GST_LOG_OBJECT (pool, "memory type MemFd");
       gmem = gst_fd_allocator_alloc (pool->fd_allocator, dup(d->fd),
                 d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_NONE);
       gst_memory_resize (gmem, d->mapoffset, d->maxsize);
     }
     else if(d->type == SPA_DATA_DmaBuf) {
-      GST_LOG_OBJECT (pool, "memory type DmaBuf");
       gmem = gst_fd_allocator_alloc (pool->dmabuf_allocator, dup(d->fd),
                 d->mapoffset + d->maxsize, GST_FD_MEMORY_FLAG_NONE);
       gst_memory_resize (gmem, d->mapoffset, d->maxsize);
     }
     else if (d->type == SPA_DATA_MemPtr) {
-      GST_LOG_OBJECT (pool, "memory type MemPtr");
       gmem = gst_memory_new_wrapped (0, d->data, d->maxsize, 0,
                                      d->maxsize, NULL, NULL);
     }
@@ -116,6 +118,25 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
                              data,
                              pool_data_destroy);
   b->user_data = data;
+
+  pool->n_buffers++;
+}
+
+void gst_pipewire_pool_remove_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
+{
+  GstPipeWirePoolData *data = b->user_data;
+
+  data->b = NULL;
+  data->header = NULL;
+  data->crop = NULL;
+  data->videotransform = NULL;
+
+  gst_buffer_remove_all_memory (data->buf);
+
+  /* this will also destroy the pool data, if this is the last reference */
+  gst_clear_buffer (&data->buf);
+
+  pool->n_buffers--;
 }
 
 GstPipeWirePoolData *gst_pipewire_pool_get_data (GstBuffer *buffer)
@@ -123,51 +144,24 @@ GstPipeWirePoolData *gst_pipewire_pool_get_data (GstBuffer *buffer)
   return gst_mini_object_get_qdata (GST_MINI_OBJECT_CAST (buffer), pool_data_quark);
 }
 
-#if 0
-gboolean
-gst_pipewire_pool_add_buffer (GstPipeWirePool *pool, GstBuffer *buffer)
-{
-  g_return_val_if_fail (GST_IS_PIPEWIRE_POOL (pool), FALSE);
-  g_return_val_if_fail (GST_IS_BUFFER (buffer), FALSE);
-
-  GST_OBJECT_LOCK (pool);
-  g_queue_push_tail (&pool->available, buffer);
-  g_cond_signal (&pool->cond);
-  GST_OBJECT_UNLOCK (pool);
-
-  return TRUE;
-}
-
-gboolean
-gst_pipewire_pool_remove_buffer (GstPipeWirePool *pool, GstBuffer *buffer)
-{
-  gboolean res;
-
-  g_return_val_if_fail (GST_IS_PIPEWIRE_POOL (pool), FALSE);
-  g_return_val_if_fail (GST_IS_BUFFER (buffer), FALSE);
-
-  GST_OBJECT_LOCK (pool);
-  res = g_queue_remove (&pool->available, buffer);
-  GST_OBJECT_UNLOCK (pool);
-
-  return res;
-}
-#endif
-
 static GstFlowReturn
 acquire_buffer (GstBufferPool * pool, GstBuffer ** buffer,
         GstBufferPoolAcquireParams * params)
 {
   GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
+  g_autoptr (GstPipeWireStream) s = g_weak_ref_get (&p->stream);
   GstPipeWirePoolData *data;
   struct pw_buffer *b;
+
+  if (G_UNLIKELY (!s))
+    return GST_FLOW_ERROR;
 
   GST_OBJECT_LOCK (pool);
   while (TRUE) {
     if (G_UNLIKELY (GST_BUFFER_POOL_IS_FLUSHING (pool)))
       goto flushing;
 
-    if ((b = pw_stream_dequeue_buffer(p->stream)))
+    if ((b = pw_stream_dequeue_buffer(s->pwstream)))
       break;
 
     if (params && (params->flags & GST_BUFFER_POOL_ACQUIRE_FLAG_DONTWAIT))
@@ -181,7 +175,7 @@ acquire_buffer (GstBufferPool * pool, GstBuffer ** buffer,
   *buffer = data->buf;
 
   GST_OBJECT_UNLOCK (pool);
-  GST_DEBUG ("acquire buffer %p", *buffer);
+  GST_LOG_OBJECT (pool, "acquire buffer %p", *buffer);
 
   return GST_FLOW_OK;
 
@@ -210,6 +204,7 @@ set_config (GstBufferPool * pool, GstStructure * config)
 {
   GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
   GstCaps *caps;
+  GstStructure *structure;
   guint size, min_buffers, max_buffers;
   gboolean has_video;
 
@@ -223,7 +218,14 @@ set_config (GstBufferPool * pool, GstStructure * config)
     return FALSE;
   }
 
-  has_video = gst_video_info_from_caps (&p->video_info, caps);
+  structure = gst_caps_get_structure (caps, 0);
+  if (g_str_has_prefix (gst_structure_get_name (structure), "video/") ||
+      g_str_has_prefix (gst_structure_get_name (structure), "image/")) {
+    has_video = TRUE;
+    gst_video_info_from_caps (&p->video_info, caps);
+  } else {
+    has_video = FALSE;
+  }
 
   p->add_metavideo = has_video && gst_buffer_pool_config_has_option (config,
       GST_BUFFER_POOL_OPTION_VIDEO_META);
@@ -250,7 +252,7 @@ flush_start (GstBufferPool * pool)
 static void
 release_buffer (GstBufferPool * pool, GstBuffer *buffer)
 {
-  GST_DEBUG ("release buffer %p", buffer);
+  GST_LOG_OBJECT (pool, "release buffer %p", buffer);
 }
 
 static gboolean
@@ -266,6 +268,7 @@ gst_pipewire_pool_finalize (GObject * object)
   GstPipeWirePool *pool = GST_PIPEWIRE_POOL (object);
 
   GST_DEBUG_OBJECT (pool, "finalize");
+  g_weak_ref_set (&pool->stream, NULL);
   g_object_unref (pool->fd_allocator);
   g_object_unref (pool->dmabuf_allocator);
 

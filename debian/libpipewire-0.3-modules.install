@@ -13,6 +13,7 @@ usr/lib/*/pipewire-0.3/libpipewire-module-loopback.so
 usr/lib/*/pipewire-0.3/libpipewire-module-metadata.so
 usr/lib/*/pipewire-0.3/libpipewire-module-netjack2-driver.so
 usr/lib/*/pipewire-0.3/libpipewire-module-netjack2-manager.so
+usr/lib/*/pipewire-0.3/libpipewire-module-parametric-equalizer.so
 usr/lib/*/pipewire-0.3/libpipewire-module-pipe-tunnel.so
 usr/lib/*/pipewire-0.3/libpipewire-module-portal.so
 usr/lib/*/pipewire-0.3/libpipewire-module-profiler.so
@@ -31,6 +32,7 @@ usr/lib/*/pipewire-0.3/libpipewire-module-rtp-session.so
 usr/lib/*/pipewire-0.3/libpipewire-module-rtp-sink.so
 usr/lib/*/pipewire-0.3/libpipewire-module-rtp-source.so
 usr/lib/*/pipewire-0.3/libpipewire-module-session-manager.so
+usr/lib/*/pipewire-0.3/libpipewire-module-snapcast-discover.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-device-factory.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-device.so
 usr/lib/*/pipewire-0.3/libpipewire-module-spa-node-factory.so

@@ -26,6 +26,7 @@
 #include <spa/param/latency-utils.h>
 #include <spa/pod/filter.h>
 #include <spa/control/control.h>
+#include <spa/debug/types.h>
 
 #include "v4l2.h"
 
@@ -54,6 +55,7 @@ struct buffer {
 	struct spa_list link;
 	struct spa_buffer *outbuf;
 	struct spa_meta_header *h;
+	struct spa_meta_videotransform *vt;
 	struct v4l2_buffer v4l2_buffer;
 	void *ptr;
 };
@@ -121,6 +123,8 @@ struct impl {
 	struct spa_log *log;
 	struct spa_loop *data_loop;
 
+	enum spa_meta_videotransform_value transform;
+
 	uint64_t info_all;
 	struct spa_node_info info;
 #define NODE_PropInfo	0
@@ -149,15 +153,14 @@ struct impl {
 
 #include "v4l2-utils.c"
 
-static const struct spa_dict_item info_items[] = {
-	{ SPA_KEY_DEVICE_API, "v4l2" },
-	{ SPA_KEY_MEDIA_CLASS, "Video/Source" },
-	{ SPA_KEY_MEDIA_ROLE, "Camera" },
-	{ SPA_KEY_NODE_DRIVER, "true" },
-};
-
 static void emit_node_info(struct impl *this, bool full)
 {
+	static const struct spa_dict_item info_items[] = {
+		{ SPA_KEY_DEVICE_API, "v4l2" },
+		{ SPA_KEY_MEDIA_CLASS, "Video/Source" },
+		{ SPA_KEY_MEDIA_ROLE, "Camera" },
+		{ SPA_KEY_NODE_DRIVER, "true" },
+	};
 	uint64_t old = full ? this->info.change_mask : 0;
 	if (full)
 		this->info.change_mask = this->info_all;
@@ -170,10 +173,14 @@ static void emit_node_info(struct impl *this, bool full)
 
 static void emit_port_info(struct impl *this, struct port *port, bool full)
 {
+	static const struct spa_dict_item info_items[] = {
+		{ SPA_KEY_PORT_GROUP, "stream.0" },
+	};
 	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
+		port->info.props = &SPA_DICT_INIT_ARRAY(info_items);
 		spa_node_emit_port_info(&this->hooks,
 				SPA_DIRECTION_OUTPUT, 0, &port->info);
 		port->info.change_mask = old;
@@ -580,6 +587,12 @@ static int impl_node_port_enum_params(void *object, int seq,
 				SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
 				SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
 			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamMeta, id,
+				SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoTransform),
+				SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_videotransform)));
+			break;
 		default:
 			return 0;
 		}
@@ -965,8 +978,8 @@ impl_init(const struct spa_handle_factory *factory,
 	  uint32_t n_support)
 {
 	struct impl *this;
-	const char *str;
 	struct port *port;
+	uint32_t i;
 	int res;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -1013,6 +1026,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->impl = this;
 	spa_list_init(&port->queue);
 	port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
+			SPA_PORT_CHANGE_MASK_PROPS |
 			SPA_PORT_CHANGE_MASK_PARAMS;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = SPA_PORT_FLAG_LIVE |
@@ -1033,13 +1047,18 @@ impl_init(const struct spa_handle_factory *factory,
 	port->dev.log = this->log;
 	port->dev.fd = -1;
 
-	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_V4L2_PATH))) {
-		strncpy(this->props.device, str, 63);
-		if ((res = spa_v4l2_open(&port->dev, this->props.device)) < 0)
-			return res;
-		spa_v4l2_close(&port->dev);
+	for (i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, SPA_KEY_API_V4L2_PATH)) {
+			strncpy(this->props.device, s, 63);
+			if ((res = spa_v4l2_open(&port->dev, this->props.device)) < 0)
+				return res;
+			spa_v4l2_close(&port->dev);
+		} else if (spa_streq(k, "meta.videotransform.transform")) {
+			this->transform = spa_debug_type_find_type_short(spa_type_meta_videotransform_type, s);
+		}
 	}
-
 	return 0;
 }
 

@@ -29,9 +29,11 @@
 #include <spa/pod/iter.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/builder.h>
+#include <spa/utils/cleanup.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
+#include <spa/debug/log.h>
 
 #ifdef HAVE_SYSTEMD
 #include <systemd/sd-daemon.h>
@@ -43,7 +45,6 @@
 
 #include <pipewire/impl.h>
 #include <pipewire/extensions/protocol-native.h>
-#include <pipewire/cleanup.h>
 
 #include "pipewire/private.h"
 
@@ -79,11 +80,14 @@ PW_LOG_TOPIC(mod_topic_connection, "conn." NAME);
  *
  * The module supports the following arguments:
  *
- * - `sockets`: `[ { name = "socket-name", owner = "owner", group = "group", mode = "mode", selinux.context = "context" }, ... ]`
+ * - `sockets`: `[ { name = "socket-name", owner = "owner", group = "group", mode = "mode", selinux.context = "context" }, props = { ... }, ... ]`
  *
  *   Array of Unix socket names and (optionally) owner/permissions to serve,
  *   if the context is a server. If not absolute paths, the sockets are created
  *   in the default runtime directory.
+ *
+ *   The props are copied directly to any client that connects through this server
+ *   socket and can be used to configure special permissions.
  *
  *   Has the default value `[ { name = "CORENAME" }, { name = "CORENAME-manager" } ]`,
  *   where `CORENAME` is the name of the PipeWire core, usually `pipewire-0`.
@@ -137,7 +141,16 @@ PW_LOG_TOPIC(mod_topic_connection, "conn." NAME);
  *\code{.unparsed}
  * context.modules = [
  *  { name = libpipewire-module-protocol-native,
- *    args = { sockets = [ { name = "pipewire-0" }, { name = "pipewire-0-manager" } ] } }
+ *    args = {
+ *        sockets = [
+ *            { name = "pipewire-0" }
+ *            { name = "pipewire-0-manager" }
+ *            { name = "pipewire-1"
+ *              props = { my.connection = "the other one" }
+ *            }
+ *        ]
+ *    }
+ *  }
  * ]
  *\endcode
  */
@@ -157,18 +170,21 @@ static const struct spa_dict_item module_props[] = {
 #define SO_PEERSEC 31
 #endif
 
-static bool debug_messages = 0;
-
 #define LOCK_SUFFIX     ".lock"
 #define LOCK_SUFFIXLEN  5
 
 void pw_protocol_native_init(struct pw_protocol *protocol);
 void pw_protocol_native0_init(struct pw_protocol *protocol);
+void *protocol_native_security_context_init(struct pw_impl_module *module, struct pw_protocol *protocol);
+void protocol_native_security_context_free(void *data);
 
 struct protocol_data {
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
 	struct pw_protocol *protocol;
+
+	struct pw_properties *props;
+	void *security;
 
 	struct server *local;
 };
@@ -214,11 +230,13 @@ struct server {
 	int fd_lock;
 	struct sockaddr_un addr;
 	char lock_addr[UNIX_PATH_MAX + LOCK_SUFFIXLEN];
-	struct socket_info socket_info;
+
+	struct pw_properties *props;
 
 	struct pw_loop *loop;
 	struct spa_source *source;
 	struct spa_source *resume;
+	struct spa_source *close;
 	unsigned int activated:1;
 };
 
@@ -244,16 +262,24 @@ struct client_data {
 static void debug_msg(const char *prefix, const struct pw_protocol_native_message *msg, bool hex)
 {
 	struct spa_pod *pod;
+	struct spa_debug_log_ctx c;
+
+	if (!pw_log_topic_custom_enabled(SPA_LOG_LEVEL_DEBUG, mod_topic_connection))
+		return;
+
+	c = SPA_LOGT_DEBUG_INIT(pw_log_get(),
+				SPA_LOG_LEVEL_DEBUG, mod_topic_connection);
+
 	pw_logt_debug(mod_topic_connection,
 		      "%s: id:%d op:%d size:%d seq:%d fds:%d", prefix,
 		      msg->id, msg->opcode, msg->size, msg->seq, msg->n_fds);
 
 	if ((pod = get_first_pod_from_data(msg->data, msg->size, 0)) != NULL)
-		spa_debug_pod(0, NULL, pod);
+		spa_debugc_pod(&c.ctx, 0, NULL, pod);
 	else
 		hex = true;
 	if (hex)
-		spa_debug_mem(0, msg->data, msg->size);
+		spa_debugc_mem(&c.ctx, 0, msg->data, msg->size);
 
 	pw_logt_debug(mod_topic_connection, "%s ****", prefix);
 
@@ -341,7 +367,7 @@ process_messages(struct client_data *data)
 		pw_log_trace("%p: got message %d from %u", client->protocol,
 			     msg->opcode, msg->id);
 
-		if (debug_messages)
+		if (pw_log_topic_custom_enabled(SPA_LOG_LEVEL_DEBUG, mod_topic_connection))
 			debug_msg("<<<<<< in", msg, false);
 
 		pre_demarshal(conn, msg, client, footer_client_demarshal,
@@ -580,11 +606,9 @@ static struct client_data *client_new(struct server *s, int fd)
 	struct protocol_data *d = pw_protocol_get_user_data(protocol);
 	int i, res;
 
-	props = pw_properties_new(PW_KEY_PROTOCOL, "protocol-native", NULL);
+	props = pw_properties_copy(s->props);
 	if (props == NULL)
 		goto exit;
-
-	pw_properties_set(props, PW_KEY_SEC_SOCKET, s->socket_info.name);
 
 #if defined(__linux__)
 	len = sizeof(ucred);
@@ -797,6 +821,17 @@ socket_data(void *data, int fd, uint32_t mask)
 	}
 }
 
+static void
+close_data(void *data, int fd, uint32_t mask)
+{
+	struct server *s = data;
+
+	if (mask & (SPA_IO_HUP | SPA_IO_ERR)) {
+		pw_log_info("server %p: closed socket %d %08x", s, fd, mask);
+		pw_protocol_server_destroy(&s->this);
+	}
+}
+
 static int write_socket_address(struct server *s)
 {
 	long v;
@@ -835,9 +870,8 @@ error:
 	return res;
 }
 
-static int set_socket_permissions(struct server *s)
+static int set_socket_permissions(struct server *s, struct socket_info *info)
 {
-	struct socket_info *info = &s->socket_info;
 	const char *path = s->addr.sun_path;
 
 	if (info->has_owner)
@@ -860,7 +894,7 @@ static int set_socket_permissions(struct server *s)
 	return 0;
 }
 
-static int add_socket(struct pw_protocol *protocol, struct server *s)
+static int add_socket(struct pw_protocol *protocol, struct server *s, struct socket_info *info)
 {
 	socklen_t size;
 	int fd = -1, res;
@@ -907,10 +941,10 @@ static int add_socket(struct pw_protocol *protocol, struct server *s)
 			goto error_close;
 		}
 
-		if ((res = set_socket_permissions(s)) < 0) {
+		if ((res = set_socket_permissions(s, info)) < 0) {
 			errno = -res;
 			pw_log_error("server %p: failed to set socket %s permissions: %m",
-					s, s->socket_info.name);
+					s, info->name);
 			goto error_close;
 		}
 
@@ -920,9 +954,9 @@ static int add_socket(struct pw_protocol *protocol, struct server *s)
 			goto error_close;
 		}
 	} else {
-		if (s->socket_info.has_owner || s->socket_info.has_mode || s->socket_info.selinux_context)
+		if (info->has_owner || info->has_mode || info->selinux_context)
 			pw_log_info("server %p: permissions ignored for socket %s from systemd",
-					s, s->socket_info.name);
+					s, info->name);
 	}
 
 	res = write_socket_address(s);
@@ -995,7 +1029,7 @@ process_remote(struct client *impl)
 
 		this->recv_seq = msg->seq;
 
-		if (debug_messages)
+		if (pw_log_topic_custom_enabled(SPA_LOG_LEVEL_DEBUG, mod_topic_connection))
 			debug_msg("<<<<<< in", msg, false);
 
 		pre_demarshal(conn, msg, this, footer_core_demarshal,
@@ -1326,14 +1360,15 @@ static void destroy_server(struct pw_protocol_server *server)
 		pw_loop_destroy_source(s->loop, s->source);
 	if (s->resume)
 		pw_loop_destroy_source(s->loop, s->resume);
+	if (s->close)
+		pw_loop_destroy_source(s->loop, s->close);
 	if (s->addr.sun_path[0] && !s->activated)
 		unlink(s->addr.sun_path);
 	if (s->lock_addr[0])
 		unlink(s->lock_addr);
 	if (s->fd_lock != -1)
 		close(s->fd_lock);
-	free(s->socket_info.name);
-	free(s->socket_info.selinux_context);
+	pw_properties_free(s->props);
 	free(s);
 }
 
@@ -1379,6 +1414,12 @@ create_server(struct pw_protocol *protocol,
 	if ((s = calloc(1, sizeof(struct server))) == NULL)
 		return NULL;
 
+	s->props = pw_properties_new(PW_KEY_PROTOCOL, "protocol-native", NULL);
+	if (s->props == NULL) {
+		free(s);
+		return NULL;
+	}
+	pw_properties_update(s->props, props);
 	s->fd_lock = -1;
 
 	this = &s->this;
@@ -1386,7 +1427,6 @@ create_server(struct pw_protocol *protocol,
 	this->core = core;
 	spa_list_init(&this->client_list);
 	this->destroy = destroy_server;
-
 	spa_list_append(&protocol->server_list, &this->link);
 
 	pw_log_debug("%p: created server %p", protocol, this);
@@ -1410,16 +1450,12 @@ add_server(struct pw_protocol *protocol,
 
 	this = &s->this;
 
-	if (socket_info) {
-		s->socket_info = *socket_info;
-		s->socket_info.name = strdup(socket_info->name);
-		s->socket_info.selinux_context = socket_info->selinux_context ?
-			strdup(socket_info->selinux_context) : NULL;
+	if (socket_info)
 		name = socket_info->name;
-	} else {
+	else
 		name = get_server_name(props);
-		s->socket_info.name = strdup(name);
-	}
+
+	pw_properties_set(s->props, PW_KEY_SEC_SOCKET, name);
 
 	if ((res = init_socket_name(s, name)) < 0)
 		goto error;
@@ -1427,7 +1463,7 @@ add_server(struct pw_protocol *protocol,
 	if ((res = lock_socket(s)) < 0)
 		goto error;
 
-	if ((res = add_socket(protocol, s)) < 0)
+	if ((res = add_socket(protocol, s, socket_info)) < 0)
 		goto error;
 
 	if ((s->resume = pw_loop_add_event(s->loop, do_resume, s)) == NULL) {
@@ -1453,10 +1489,58 @@ impl_add_server(struct pw_protocol *protocol,
 	return add_server(protocol, core, props, NULL);
 }
 
+static struct pw_protocol_server *
+impl_add_fd_server(struct pw_protocol *protocol,
+		struct pw_impl_core *core,
+		int listen_fd, int close_fd,
+                const struct spa_dict *props)
+{
+	struct pw_protocol_server *this;
+	struct server *s;
+	int res;
+
+	if ((s = create_server(protocol, core, props)) == NULL)
+		return NULL;
+
+	this = &s->this;
+
+	pw_properties_setf(s->props, PW_KEY_SEC_SOCKET, "pipewire-fd-%d", listen_fd);
+
+	s->loop = pw_context_get_main_loop(protocol->context);
+	if (s->loop == NULL) {
+		res = -errno;
+		goto error;
+	}
+	s->source = pw_loop_add_io(s->loop, listen_fd, SPA_IO_IN, true, socket_data, s);
+	if (s->source == NULL) {
+		res = -errno;
+		goto error;
+	}
+	s->close = pw_loop_add_io(s->loop, close_fd, 0, true, close_data, s);
+	if (s->close == NULL) {
+		res = -errno;
+		goto error;
+	}
+	if ((s->resume = pw_loop_add_event(s->loop, do_resume, s)) == NULL) {
+		res = -errno;
+		goto error;
+	}
+
+	pw_log_info("%p: Listening on fd:%d", protocol, listen_fd);
+
+	return this;
+
+error:
+	destroy_server(this);
+	errno = -res;
+	return NULL;
+}
+
 static const struct pw_protocol_implementation protocol_impl = {
 	PW_VERSION_PROTOCOL_IMPLEMENTATION,
 	.new_client = impl_new_client,
 	.add_server = impl_add_server,
+	.add_fd_server = impl_add_fd_server,
 };
 
 static struct spa_pod_builder *
@@ -1546,7 +1630,10 @@ static void module_destroy(void *data)
 {
 	struct protocol_data *d = data;
 
+	if (d->security)
+		protocol_native_security_context_free(d->security);
 	spa_hook_remove(&d->module_listener);
+	pw_properties_free(d->props);
 
 	pw_protocol_destroy(d->protocol);
 }
@@ -1573,13 +1660,14 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 {
 	const char *sockets = args ? pw_properties_get(args, "sockets") : NULL;
 	struct spa_json it[3];
+	spa_autoptr(pw_properties) p = pw_properties_copy(props);
 
 	if (sockets == NULL) {
 		struct socket_info info = {0};
 		spa_autofree char *manager_name = NULL;
 
-		info.name = (char *)get_server_name(&props->dict);
-		if (add_server(this, core, &props->dict, &info) == NULL)
+		info.name = (char *)get_server_name(&p->dict);
+		if (add_server(this, core, &p->dict, &info) == NULL)
 			return -errno;
 
 		manager_name = spa_aprintf("%s-manager", info.name);
@@ -1587,7 +1675,7 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 			return -ENOMEM;
 
 		info.name = manager_name;
-		if (add_server(this, core, &props->dict, &info) == NULL)
+		if (add_server(this, core, &p->dict, &info) == NULL)
 			return -errno;
 
 		return 0;
@@ -1606,6 +1694,9 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 
 		info.uid = getuid();
 		info.gid = getgid();
+
+		pw_properties_clear(p);
+		pw_properties_update(p, &props->dict);
 
 		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
 			const char *value;
@@ -1669,13 +1760,18 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 					goto error_invalid;
 
 				info.has_mode = true;
+			} else if (spa_streq(key, "props")) {
+				if (spa_json_is_container(value, len))
+	                                len = spa_json_container_len(&it[2], value, len);
+
+				pw_properties_update_string(p, value, len);
 			}
 		}
 
 		if (info.name == NULL)
 			goto error_invalid;
 
-		if (add_server(this, core, &props->dict, &info) == NULL)
+		if (add_server(this, core, &p->dict, &info) == NULL)
 			return -errno;
 	}
 
@@ -1696,6 +1792,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args_str)
 	const struct pw_properties *props;
 	spa_autoptr(pw_properties) args = NULL;
 	int res;
+	static const char * const keys[] = {
+		PW_KEY_CORE_NAME,
+		NULL
+	};
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 	PW_LOG_TOPIC_INIT(mod_topic_connection);
@@ -1711,25 +1811,36 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args_str)
 	if (this == NULL)
 		return -errno;
 
-	debug_messages = mod_topic_connection->level >= SPA_LOG_LEVEL_DEBUG;
-
 	this->implementation = &protocol_impl;
 	this->extension = &protocol_ext_impl;
 
 	pw_protocol_native_init(this);
 	pw_protocol_native0_init(this);
 
-	pw_log_debug("%p: new debug:%d", this, debug_messages);
+	pw_log_debug("%p: new", this);
 
 	d = pw_protocol_get_user_data(this);
 	d->protocol = this;
 	d->module = module;
+	d->props = pw_properties_new(NULL, NULL);
+	if (d->props == NULL) {
+		res = -ENOMEM;
+		goto error_cleanup;
+	}
+
+	d->security = protocol_native_security_context_init(module, this);
+	if (d->security == NULL) {
+		res = -errno;
+		goto error_cleanup;
+	}
 
 	props = pw_context_get_properties(context);
-	d->local = create_server(this, core, &props->dict);
+	pw_properties_update_keys(d->props, &props->dict, keys);
+
+	d->local = create_server(this, core, &d->props->dict);
 
 	if (need_server(context, &props->dict))
-		if ((res = create_servers(this, core, props, args)) < 0)
+		if ((res = create_servers(this, core, d->props, args)) < 0)
 			goto error_cleanup;
 
 	pw_impl_module_add_listener(module, &d->module_listener, &module_events, d);
@@ -1739,6 +1850,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args_str)
 	return 0;
 
 error_cleanup:
+	pw_properties_free(d->props);
+	if (d->security)
+		protocol_native_security_context_free(d->security);
 	pw_protocol_destroy(this);
 	return res;
 }

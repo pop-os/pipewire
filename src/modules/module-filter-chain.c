@@ -23,6 +23,7 @@
 #include <spa/param/tag-utils.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
+#include <spa/debug/log.h>
 
 #include <pipewire/utils.h>
 #include <pipewire/impl.h>
@@ -128,7 +129,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * use a mixer if you want the output of multiple filters to go into one
  * filter input port.
  *
- * links can be omited when the graph has just 1 filter.
+ * links can be omitted when the graph has just 1 filter.
  *
  * ### Inputs and Outputs
  *
@@ -389,7 +390,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * It has an output port "Out" and also a control output port "notify".
  *
  * "Freq", "Ampl", "Offset" and "Phase" can be used to control the sine wave
- * frequence, amplitude, offset and phase.
+ * frequency, amplitude, offset and phase.
  *
  * ## SOFA filter
  *
@@ -461,13 +462,13 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * - \ref PW_KEY_NODE_GROUP
  * - \ref PW_KEY_NODE_LINK_GROUP
  * - \ref PW_KEY_NODE_VIRTUAL
- * - \ref PW_KEY_NODE_NAME: See notes below. If not specified, defaults to
- *	'filter-chain-<pid>-<module-id>'.
+ * - \ref PW_KEY_NODE_NAME : See notes below. If not specified, defaults to
+ *	'filter-chain-PID-MODULEID'.
  *
  * Stream only properties:
  *
  * - \ref PW_KEY_MEDIA_CLASS
- * - \ref PW_KEY_NODE_NAME:  if not given per stream, the global node.name will be
+ * - \ref PW_KEY_NODE_NAME :  if not given per stream, the global node.name will be
  *         prefixed with 'input.' and 'output.' to generate a capture and playback
  *         stream node.name respectively.
  *
@@ -512,8 +513,6 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  *
  * This example uses the ladpsa surround encoder to encode a 5.1 signal
  * to a stereo Dolby Surround signal.
- *
- *\code{.unparsed}
  *
  *\code{.unparsed}
  * context.modules = [
@@ -1023,12 +1022,12 @@ static struct spa_pod *get_prop_info(struct graph *graph, struct spa_pod_builder
 		}
 	} else if (p->hint & FC_HINT_INTEGER) {
 		if (min == max) {
-			spa_pod_builder_int(b, def);
+			spa_pod_builder_int(b, (int32_t)def);
 		} else {
 			spa_pod_builder_push_choice(b, &f[1], SPA_CHOICE_Range, 0);
-			spa_pod_builder_int(b, def);
-			spa_pod_builder_int(b, min);
-			spa_pod_builder_int(b, max);
+			spa_pod_builder_int(b, (int32_t)def);
+			spa_pod_builder_int(b, (int32_t)min);
+			spa_pod_builder_int(b, (int32_t)max);
 			spa_pod_builder_pop(b, &f[1]);
 		}
 	} else {
@@ -1074,7 +1073,7 @@ static struct spa_pod *get_props_param(struct graph *graph, struct spa_pod_build
 		if (p->hint & FC_HINT_BOOLEAN) {
 			spa_pod_builder_bool(b, port->control_data[0] <= 0.0f ? false : true);
 		} else if (p->hint & FC_HINT_INTEGER) {
-			spa_pod_builder_int(b, port->control_data[0]);
+			spa_pod_builder_int(b, (int32_t)port->control_data[0]);
 		} else {
 			spa_pod_builder_float(b, port->control_data[0]);
 		}
@@ -1141,7 +1140,7 @@ static int parse_params(struct graph *graph, const struct spa_pod *pod)
 		if (spa_pod_parser_get_float(&prs, &value) >= 0) {
 			val = &value;
 		} else if (spa_pod_parser_get_double(&prs, &dbl_val) >= 0) {
-			value = dbl_val;
+			value = (float)dbl_val;
 			val = &value;
 		} else if (spa_pod_parser_get_int(&prs, &int_val) >= 0) {
 			value = int_val;
@@ -1218,7 +1217,7 @@ static int sync_volume(struct graph *graph, struct volume *vol)
 		float v = vol->mute ? 0.0f : vol->volumes[i];
 		switch (vol->scale[n_port]) {
 		case SCALE_CUBIC:
-			v = cbrt(v);
+			v = cbrtf(v);
 			break;
 		}
 		v = v * (vol->max[n_port] - vol->min[n_port]) + vol->min[n_port];
@@ -1874,24 +1873,35 @@ exit:
  */
 static int parse_config(struct node *node, struct spa_json *config)
 {
-	const char *val;
-	int len;
+	const char *val, *s = config->cur;
+	int res = 0, len;
+	struct spa_error_location loc;
 
-	if ((len = spa_json_next(config, &val)) <= 0)
-		return len;
-
+	if ((len = spa_json_next(config, &val)) <= 0) {
+		res = -EINVAL;
+		goto done;
+	}
 	if (spa_json_is_null(val, len))
-		return 0;
+		goto done;
 
-	if (spa_json_is_container(val, len))
+	if (spa_json_is_container(val, len)) {
 		len = spa_json_container_len(config, val, len);
-
-	if ((node->config = malloc(len+1)) == NULL)
-		return -errno;
+		if (len == 0) {
+			res = -EINVAL;
+			goto done;
+		}
+	}
+	if ((node->config = malloc(len+1)) == NULL) {
+		res = -errno;
+		goto done;
+	}
 
 	spa_json_parse_stringn(val, len, node->config, len+1);
-
-	return 0;
+done:
+	if (spa_json_get_error(config, s, &loc))
+		spa_debug_log_error_location(pw_log_get(), SPA_LOG_LEVEL_WARN,
+				&loc, "error: %s", loc.reason);
+	return res;
 }
 
 /**
@@ -3010,8 +3020,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 
 	cpu_iface = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
-	impl->dsp.cpu_flags = cpu_iface ? spa_cpu_get_flags(cpu_iface) : 0;
-	dsp_ops_init(&impl->dsp);
+	dsp_ops_init(&impl->dsp, cpu_iface ? spa_cpu_get_flags(cpu_iface) : 0);
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_GROUP, "filter-chain-%u-%u", pid, id);

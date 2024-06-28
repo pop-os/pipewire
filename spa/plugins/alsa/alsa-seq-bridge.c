@@ -225,7 +225,7 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
-		struct spa_dict_item items[5];
+		struct spa_dict_item items[6];
 		uint32_t n_items = 0;
 		int id;
 		snd_seq_port_info_t *info;
@@ -234,6 +234,7 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 		char name[256];
 		char path[128];
 		char alias[128];
+		char stream[32];
 
 		snd_seq_port_info_alloca(&info);
 		snd_seq_get_any_port_info(this->sys.hndl,
@@ -273,9 +274,12 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 		}
 		clean_name(name);
 
-		snprintf(path, sizeof(path), "alsa:seq:%s:client_%d:%s_%d",
+		snprintf(stream, sizeof(stream), "client_%d", port->addr.client);
+		clean_name(stream);
+
+		snprintf(path, sizeof(path), "alsa:seq:%s:%s:%s_%d",
 				this->props.device,
-				port->addr.client,
+				stream,
 				port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback",
 				port->addr.port);
 		clean_name(path);
@@ -285,10 +289,12 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 				snd_seq_port_info_get_name(info));
 		clean_name(alias);
 
+
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH, path);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, name);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_ALIAS, alias);
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, stream);
 		if ((id = snd_seq_client_info_get_card(client_info)) != -1) {
 			snprintf(card, sizeof(card), "%d", id);
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_CARD, card);
@@ -563,7 +569,7 @@ impl_node_port_enum_params(void *object, int seq,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(
-							4096, 4096, INT32_MAX),
+							this->quantum_limit, this->quantum_limit, INT32_MAX),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(1));
 		break;
 
@@ -927,6 +933,10 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info.n_params = N_NODE_PARAMS;
 	reset_props(&this->props);
 
+	this->quantum_limit = 8192;
+	this->min_pool_size = 500;
+	this->max_pool_size = 2000;
+
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
@@ -936,8 +946,14 @@ impl_init(const struct spa_handle_factory *factory,
 		} else if (spa_streq(k, "clock.name")) {
 			spa_scnprintf(this->props.clock_name,
 					sizeof(this->props.clock_name), "%s", s);
+		} else if (spa_streq(k, "clock.quantum-limit")) {
+			spa_atou32(s, &this->quantum_limit, 0);
 		} else if (spa_streq(k, SPA_KEY_API_ALSA_DISABLE_LONGNAME)) {
 			this->props.disable_longname = spa_atob(s);
+		} else if (spa_streq(k, "api.alsa.seq.min-pool")) {
+			spa_atou32(s, &this->min_pool_size, 0);
+		} else if (spa_streq(k, "api.alsa.seq.max-pool")) {
+			spa_atou32(s, &this->max_pool_size, 0);
 		}
 	}
 
@@ -974,7 +990,14 @@ impl_enum_interface_info(const struct spa_handle_factory *factory,
 static const struct spa_dict_item info_items[] = {
 	{ SPA_KEY_FACTORY_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ SPA_KEY_FACTORY_DESCRIPTION, "Bridge midi ports with the alsa sequencer API" },
-	{ SPA_KEY_FACTORY_USAGE, "["SPA_KEY_API_ALSA_PATH"=<device>]" },
+	{ SPA_KEY_FACTORY_USAGE,
+		"["SPA_KEY_API_ALSA_PATH"=<device, default \"default\">] "
+		"[ clock.name=<clock name, default \"clock.system.monotonic\">] "
+		"[ clock.quantum-limit=<limit, default 8192>] "
+		"["SPA_KEY_API_ALSA_DISABLE_LONGNAME"=<bool, default false>] "
+		"[ api.alsa.seq.min-pool=<min-pool, default 500>] "
+		"[ api.alsa.seq.max-pool=<max-pool, default 2000>]"
+	},
 };
 
 static const struct spa_dict info = SPA_DICT_INIT_ARRAY(info_items);

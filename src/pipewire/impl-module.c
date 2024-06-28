@@ -13,9 +13,9 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+#include <spa/utils/cleanup.h>
 #include <spa/utils/string.h>
 
-#include <pipewire/cleanup.h>
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
 
@@ -149,7 +149,6 @@ pw_context_load_module(struct pw_context *context,
 	size_t len;
 	char path_part[PATH_MAX];
 	static const char * const keys[] = {
-		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_MODULE_NAME,
 		NULL
 	};

@@ -29,8 +29,6 @@ static struct pw_main_loop *loop_new(struct pw_loop *loop, const struct spa_dict
 		goto error_cleanup;
 	}
 
-	pw_log_debug("%p: new", this);
-
 	if (loop == NULL) {
 		loop = pw_loop_new(props);
 		this->created = true;
@@ -41,7 +39,11 @@ static struct pw_main_loop *loop_new(struct pw_loop *loop, const struct spa_dict
 	}
 	this->loop = loop;
 
+	if (!this->loop->name[0])
+		pw_loop_set_name(this->loop, "main-loop");
 	spa_hook_list_init(&this->listener_list);
+
+	pw_log_debug("%p: new '%s'", this, loop->name);
 
 	return this;
 
@@ -133,5 +135,8 @@ int pw_main_loop_run(struct pw_main_loop *loop)
 		}
 	}
 	pw_loop_leave(loop->loop);
+
+	if (res > 0) // This is the number of fds last polled, not useful for the caller.
+		res = 0;
 	return res;
 }

@@ -63,6 +63,8 @@
  *         #  client.access = "restricted"     # permissions for clients
  *         #}
  *     ]
+ *     #server.dbus-name       = "org.pulseaudio.Server"
+ *     #pulse.allow-module-loading = true
  *     #pulse.min.req          = 128/48000     # 2.7ms
  *     #pulse.default.req      = 960/48000     # 20 milliseconds
  *     #pulse.min.frag         = 128/48000     # 2.7ms
@@ -71,11 +73,19 @@
  *     #pulse.min.quantum      = 128/48000     # 2.7ms
  *     #pulse.default.format   = F32
  *     #pulse.default.position = [ FL FR ]
- *     # These overrides are only applied when running in a vm.
- *     vm.overrides = {
- *         pulse.min.quantum = 1024/48000      # 22ms
- *     }
+ *     #pulse.idle.timeout     = 0
  * }
+ *
+ * pulse.properties.rules = [
+ *     {   matches = [ { cpu.vm.name = !null } ]
+ *         actions = {
+ *             update-props = {
+ *                 # These overrides are only applied when running in a vm.
+ *                 pulse.min.quantum = 1024/48000      # 22ms
+ *             }
+ *         }
+ *     }
+ * ]
  *\endcode
  *
  * ### Connection options
@@ -110,6 +120,20 @@
  *
  * By default network access is given the "restricted" permissions. The session manager is responsible
  * for assigning permission to clients with restricted permissions (usually read-only permissions).
+ *
+ *\code{.unparsed}
+ *     server.dbus-name       = "org.pulseaudio.Server"
+ *\endcode
+ *
+ * The DBus name to reserve for the server. If you have multiple servers, you might want
+ * to change the name.
+ *
+ *\code{.unparsed}
+ *     pulse.allow-module-loading = true
+ *\endcode
+ *
+ * By default, clients are allowed to load and unload modules. You can disable this
+ * feature with this option.
  *
  * ### Playback buffering options
  *
@@ -185,19 +209,6 @@
  * This is equivalent to the PulseAudio `default-sample-channels` and
  * `default-channel-map` options in `/etc/pulse/daemon.conf`.
  *
- * ### VM options
- *
- *\code{.unparsed}
- *     vm.overrides = {
- *         pulse.min.quantum = 1024/48000      # 22ms
- *     }
- *\endcode
- *
- * When running in a VM, the `vm.override` section will override the properties
- * in pulse.properties with the given values. This might be interesting because
- * VMs usually can't support the low latency settings that are possible on real
- * hardware.
- *
  * ### Quirk options
  *
  *\code{.unparsed}
@@ -224,6 +235,16 @@
  * Normally the channels would be fixed to the sink/source that the stream connects
  * to. When an invalid position (null or "") is set, the FIX_CHANNELS flag is ignored.
  *
+ *\code{.unparsed}
+ *     pulse.idle.timeout = 0
+ *\endcode
+ *
+ * Some clients are not sending data when they should and cause underruns. When
+ * setting this option such clients will be set to paused if they underrun
+ * for the given amount of seconds. This makes sure that sinks can suspend and
+ * save battery power. When the client resumes, it will unpause again.
+ * A value of 0 disables this feature.
+ *
  * ## Command execution
  *
  * As part of the server startup sequence, a set of commands can be executed.
@@ -240,6 +261,30 @@
  *     #{ cmd = "load-module" args = "module-gsettings" flags = [ "nofail" ] }
  * ]
  *\endcode
+
+ * ## Dynamic properties
+ *
+ * The pulse.properties can be dynamically updated with rules. It supports
+ * an `update-props` action. The matches will be performed on the values in
+ * context.properties.
+ *
+ *\code{.unparsed}
+ * pulse.properties.rules = [
+ *     {   matches = [ { cpu.vm.name = !null } ]
+ *         actions = {
+ *             update-props = {
+ *                 # These overrides are only applied when running in a vm.
+ *                 pulse.min.quantum = 1024/48000      # 22ms
+ *             }
+ *         }
+ *     }
+ * ]
+ *\endcode
+ *
+ * In the above example, when running in a VM, the rule will override the properties
+ * in pulse.properties with the given values. This might be interesting because
+ * VMs usually can't support the low latency settings that are possible on real
+ * hardware.
  *
  * ## Stream settings and rules
  *
@@ -269,6 +314,7 @@
  *             update-props = {
  *                 pulse.min.req          = 1024/48000     # 21ms
  *                 pulse.min.quantum      = 1024/48000     # 21ms
+ *                 pulse.idle.timeout     = 5              # pause after 5 seconds of underrun
  *             }
  *         }
  *     }
@@ -324,6 +370,7 @@
  *            update-props = {
  *                pulse.min.req          = 1024/48000     # 21ms
  *                pulse.min.quantum      = 1024/48000     # 21ms
+ *                pulse.idle.timeout     = 5              # pause after 5 seconds of underrun
  *            }
  *        }
  *    }

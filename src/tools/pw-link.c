@@ -9,40 +9,74 @@
 #include <regex.h>
 #include <locale.h>
 
+#include <spa/utils/cleanup.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/utils/defs.h>
+#include <spa/debug/file.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
+
+enum object_type {
+	OBJECT_ANY,
+	OBJECT_NODE,
+	OBJECT_PORT,
+	OBJECT_LINK,
+};
+
+union object_data {
+	struct {
+		enum pw_direction direction;
+		uint32_t node;
+	} port;
+	struct {
+		uint32_t output_port;
+		uint32_t input_port;
+	} link;
+};
 
 struct object {
 	struct spa_list link;
 
 	uint32_t id;
-#define OBJECT_ANY	0
-#define OBJECT_NODE	1
-#define OBJECT_PORT	2
-#define OBJECT_LINK	3
-	uint32_t type;
+	enum object_type type;
 	struct pw_properties *props;
-	uint32_t extra[2];
+	union object_data data;
+};
+
+struct target_link {
+	struct spa_list link;
+	struct data *data;
+	struct pw_proxy *proxy;
+	struct spa_hook listener, link_listener;
+	enum pw_link_state state;
+	int result;
+};
+
+enum mode {
+	MODE_CONNECT,
+	MODE_DISCONNECT,
+	MODE_LIST,
+};
+
+enum list_target {
+	LIST_OUTPUT = 1 << 0,
+	LIST_INPUT = 1 << 1,
+	LIST_PORTS = LIST_OUTPUT | LIST_INPUT,
+	LIST_LINKS = 1 << 2,
 };
 
 struct data {
 	struct pw_main_loop *loop;
 
 	const char *opt_remote;
-#define MODE_LIST_OUTPUT	(1<<0)
-#define MODE_LIST_INPUT		(1<<1)
-#define MODE_LIST_PORTS		(MODE_LIST_OUTPUT|MODE_LIST_INPUT)
-#define MODE_LIST_LINKS		(1<<2)
-#define MODE_LIST		(MODE_LIST_PORTS|MODE_LIST_LINKS)
-#define MODE_MONITOR		(1<<3)
-#define MODE_DISCONNECT		(1<<4)
-	uint32_t opt_mode;
+	enum mode opt_mode;
+	enum list_target opt_list; /* for `MODE_LIST` */
 	bool opt_id;
 	bool opt_verbose;
+	bool opt_wait;
+	bool opt_monitor;
 	const char *opt_output;
 	const char *opt_input;
 	struct pw_properties *props;
@@ -56,9 +90,11 @@ struct data {
 	struct spa_hook registry_listener;
 
 	struct spa_list objects;
+	struct spa_list target_links;
 
 	int sync;
-	int link_res;
+	int nb_links;
+	bool new_object;
 	bool monitoring;
 	bool list_inputs;
 	bool list_outputs;
@@ -68,15 +104,78 @@ struct data {
 	regex_t in_port_regex, *in_regex;
 };
 
+static void link_event(struct target_link *tl, enum pw_link_state state, int result)
+{
+	/* Ignore non definitive states (negotiating, allocating, etc). */
+	if (state != PW_LINK_STATE_ERROR &&
+	    state != PW_LINK_STATE_PAUSED &&
+	    state != PW_LINK_STATE_ACTIVE)
+		return;
+
+	/* Keep the first definitive state. For example, once a link is marked
+	 * as paused, we start ignoring all errors. */
+	if (tl->state == PW_LINK_STATE_INIT) {
+		tl->state = state;
+		tl->result = result;
+	}
+
+	/* End if all links have a definitive state. */
+	struct target_link *m;
+	spa_list_for_each(m, &tl->data->target_links, link) {
+		if (m->state == PW_LINK_STATE_INIT)
+			return;
+	}
+	pw_main_loop_quit(tl->data->loop);
+}
+
+static void link_proxy_destroy(void *data)
+{
+	struct target_link *tl = data;
+
+	spa_hook_remove(&tl->listener);
+	spa_hook_remove(&tl->link_listener);
+	tl->proxy = NULL;
+
+	link_event(tl, PW_LINK_STATE_ERROR, -EINVAL);
+}
+
+static void link_proxy_removed(void *data)
+{
+	struct target_link *tl = data;
+	pw_proxy_destroy(tl->proxy);
+}
+
 static void link_proxy_error(void *data, int seq, int res, const char *message)
 {
-	struct data *d = data;
-	d->link_res = res;
+	struct target_link *tl = data;
+	link_event(tl, PW_LINK_STATE_ERROR, res);
 }
 
 static const struct pw_proxy_events link_proxy_events = {
 	PW_VERSION_PROXY_EVENTS,
+	.destroy = link_proxy_destroy,
+	.removed = link_proxy_removed,
 	.error = link_proxy_error,
+};
+
+static void link_event_info(void *data, const struct pw_link_info *info)
+{
+	struct target_link *tl = data;
+	int result = 0;
+
+	/*
+	 * Invent an error code to always have one if state == error. That does
+	 * not occur currently; on link error a proxy error is raised first.
+	 */
+	if (tl->state == PW_LINK_STATE_ERROR)
+		result = -EINVAL;
+
+	link_event(tl, info->state, result);
+}
+
+static const struct pw_link_events link_events = {
+	PW_VERSION_LINK_EVENTS,
+	.info = link_event_info,
 };
 
 static void core_sync(struct data *data)
@@ -84,35 +183,7 @@ static void core_sync(struct data *data)
 	data->sync = pw_core_sync(data->core, PW_ID_CORE, data->sync);
 }
 
-static int create_link(struct data *data)
-{
-	struct pw_proxy *proxy;
-	struct spa_hook listener;
-
-	data->link_res = 0;
-
-	proxy = pw_core_create_object(data->core,
-			"link-factory",
-			PW_TYPE_INTERFACE_Link,
-			PW_VERSION_LINK,
-			&data->props->dict, 0);
-	if (proxy == NULL)
-		return -errno;
-
-	spa_zero(listener);
-	pw_proxy_add_listener(proxy, &listener, &link_proxy_events, data);
-
-	core_sync(data);
-	pw_main_loop_run(data->loop);
-
-        spa_hook_remove(&listener);
-
-        pw_proxy_destroy(proxy);
-
-	return data->link_res;
-}
-
-static struct object *find_object(struct data *data, uint32_t type, uint32_t id)
+static struct object *find_object(struct data *data, enum object_type type, uint32_t id)
 {
 	struct object *o;
 	spa_list_for_each(o, &data->objects, link)
@@ -129,9 +200,9 @@ static struct object *find_node_port(struct data *data, struct object *node, enu
 		const char *o_port_id;
 		if (o->type != OBJECT_PORT)
 			continue;
-		if (o->extra[1] != node->id)
+		if (o->data.port.node != node->id)
 			continue;
-		if (o->extra[0] != direction)
+		if (o->data.port.direction != direction)
 			continue;
 		if ((o_port_id = pw_properties_get(o->props, PW_KEY_PORT_ID)) == NULL)
 			continue;
@@ -231,7 +302,7 @@ static void print_port_id(struct data *data, const char *prefix, uint32_t peer)
 	struct object *n, *p;
 	if ((p = find_object(data, OBJECT_PORT, peer)) == NULL)
 		return;
-	if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+	if ((n = find_object(data, OBJECT_NODE, p->data.port.node)) == NULL)
 		return;
 	print_port(data, prefix, n, p, false);
 }
@@ -241,7 +312,7 @@ static void do_list_port_links(struct data *data, struct object *node, struct ob
 	struct object *o;
 	bool first = false;
 
-	if ((data->opt_mode & MODE_LIST_PORTS) == 0)
+	if (!(data->opt_list & LIST_PORTS))
 		first = true;
 
 	spa_list_for_each(o, &data->objects, link) {
@@ -254,14 +325,14 @@ static void do_list_port_links(struct data *data, struct object *node, struct ob
 		if (o->type != OBJECT_LINK)
 			continue;
 
-		if (port->extra[0] == PW_DIRECTION_OUTPUT &&
-		    o->extra[0] == port->id) {
-			peer = o->extra[1];
+		if (port->data.port.direction == PW_DIRECTION_OUTPUT &&
+		    o->data.link.output_port == port->id) {
+			peer = o->data.link.input_port;
 			snprintf(prefix, sizeof(prefix), "%s  |-> ", id);
 		}
-		else if (port->extra[0] == PW_DIRECTION_INPUT &&
-		    o->extra[1] == port->id) {
-			peer = o->extra[0];
+		else if (port->data.port.direction == PW_DIRECTION_INPUT &&
+		    o->data.link.input_port == port->id) {
+			peer = o->data.link.output_port;
 			snprintf(prefix, sizeof(prefix), "%s  |<- ", id);
 		}
 		else
@@ -318,17 +389,17 @@ static void do_list_ports(struct data *data, struct object *node,
 	spa_list_for_each(o, &data->objects, link) {
 		if (o->type != OBJECT_PORT)
 			continue;
-		if (o->extra[1] != node->id)
+		if (o->data.port.node != node->id)
 			continue;
-		if (o->extra[0] != direction)
+		if (o->data.port.direction != direction)
 			continue;
 
 		if (regex && !port_regex(data, node, o, regex))
 			continue;
 
-		if (data->opt_mode & MODE_LIST_PORTS)
+		if (data->opt_list & LIST_PORTS)
 			print_port(data, "", node, o, data->opt_verbose);
-		if (data->opt_mode & MODE_LIST_LINKS)
+		if (data->opt_list & LIST_LINKS)
 			do_list_port_links(data, node, o);
 	}
 }
@@ -347,11 +418,46 @@ static void do_list(struct data *data)
 	}
 }
 
-static int do_link_ports(struct data *data)
+static int create_link_target(struct data *data)
+{
+	struct target_link *tl = calloc(1, sizeof(*tl));
+	if (!tl)
+		return -ENOMEM;
+
+	tl->proxy = pw_core_create_object(data->core,
+			"link-factory", PW_TYPE_INTERFACE_Link,
+			PW_VERSION_LINK, &data->props->dict, 0);
+	if (tl->proxy == NULL) {
+		free(tl);
+		return -errno;
+	}
+
+	tl->data = data;
+	tl->state = PW_LINK_STATE_INIT;
+	pw_proxy_add_listener(tl->proxy, &tl->listener, &link_proxy_events, tl);
+	pw_proxy_add_object_listener(tl->proxy, &tl->link_listener, &link_events, tl);
+	spa_list_append(&data->target_links, &tl->link);
+	return 0;
+}
+
+/*
+ * create_link_proxies() looks at the current objects and tries to find the
+ * matching output and input nodes (multiple links) or the matching output and
+ * input ports.
+ *
+ * If successful, it fills data->target_links with proxies for all links and
+ * returns the number of links. This can be zero (two nodes with no ports). It
+ * might return (negative) errors. -ENOENT means no matching nodes or ports
+ * were found.
+ */
+static int create_link_proxies(struct data *data)
 {
 	uint32_t in_port = 0, out_port = 0;
 	struct object *n, *p;
 	struct object *in_node = NULL, *out_node = NULL;
+
+	spa_assert(data->opt_output);
+	spa_assert(data->opt_input);
 
 	spa_list_for_each(n, &data->objects, link) {
 		if (n->type != OBJECT_NODE)
@@ -368,22 +474,21 @@ static int do_link_ports(struct data *data)
 		spa_list_for_each(p, &data->objects, link) {
 			if (p->type != OBJECT_PORT)
 				continue;
-			if (p->extra[1] != n->id)
+			if (p->data.port.node != n->id)
 				continue;
 
-			if (out_port == 0 && p->extra[0] == PW_DIRECTION_OUTPUT &&
+			if (out_port == 0 && p->data.port.direction == PW_DIRECTION_OUTPUT &&
 			    port_matches(data, n, p, data->opt_output))
 				out_port = p->id;
-			else if (in_port == 0 && p->extra[0] == PW_DIRECTION_INPUT &&
+			else if (in_port == 0 && p->data.port.direction == PW_DIRECTION_INPUT &&
 			    port_matches(data, n, p, data->opt_input))
 				in_port = p->id;
 		}
 	}
 
 	if (in_node && out_node) {
-		int i, ret;
+		int i;
 		char port_id[32];
-		bool all_links_exist = true;
 
 		for (i=0;; i++) {
 			snprintf(port_id, sizeof(port_id), "%d", i);
@@ -391,27 +496,17 @@ static int do_link_ports(struct data *data)
 			struct object *port_out = find_node_port(data, out_node, PW_DIRECTION_OUTPUT, port_id);
 			struct object *port_in = find_node_port(data, in_node, PW_DIRECTION_INPUT, port_id);
 
-			if (!port_out && !port_in) {
-				fprintf(stderr, "Input & output port do not exist\n");
-				goto no_port;
-			} else if (!port_in) {
-				fprintf(stderr, "Input port does not exist\n");
-				goto no_port;
-			} else if (!port_out) {
-				fprintf(stderr, "Output port does not exist\n");
-				goto no_port;
-			}
+			if (!port_out || !port_in)
+				return i;
 
 			pw_properties_setf(data->props, PW_KEY_LINK_OUTPUT_PORT, "%u", port_out->id);
 			pw_properties_setf(data->props, PW_KEY_LINK_INPUT_PORT, "%u", port_in->id);
 
-			if ((ret = create_link(data)) < 0 && ret != -EEXIST)
+			int ret = create_link_target(data);
+			if (ret)
 				return ret;
-
-			if (ret >= 0)
-				all_links_exist = false;
 		}
-		return (all_links_exist ? -EEXIST : 0);
+		return i;
 	}
 
 	if (in_port == 0 || out_port == 0)
@@ -420,10 +515,12 @@ static int do_link_ports(struct data *data)
 	pw_properties_setf(data->props, PW_KEY_LINK_OUTPUT_PORT, "%u", out_port);
 	pw_properties_setf(data->props, PW_KEY_LINK_INPUT_PORT, "%u", in_port);
 
-	return create_link(data);
-
-no_port:
-	return -ENOENT;
+	/*
+	 * create_link_target() returns zero on success. We return the number of
+	 * links on success, meaning 1.
+	 */
+	int ret = create_link_target(data);
+	return !ret ? 1 : ret;
 }
 
 static int do_unlink_ports(struct data *data)
@@ -431,6 +528,8 @@ static int do_unlink_ports(struct data *data)
 	struct object *l, *n, *p;
 	bool found_any = false;
 	struct object *in_node = NULL, *out_node = NULL;
+
+	spa_assert(data->opt_output);
 
 	if (data->opt_input != NULL) {
 		/* 2 args, check if they are node names */
@@ -458,31 +557,31 @@ static int do_unlink_ports(struct data *data)
 				continue;
 		} else if (out_node && in_node) {
 			/* 2 args, check nodes */
-			if ((p = find_object(data, OBJECT_PORT, l->extra[0])) == NULL)
+			if ((p = find_object(data, OBJECT_PORT, l->data.link.output_port)) == NULL)
 				continue;
-			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+			if ((n = find_object(data, OBJECT_NODE, p->data.port.node)) == NULL)
 				continue;
 			if (n->id != out_node->id)
 				continue;
 
-			if ((p = find_object(data, OBJECT_PORT, l->extra[1])) == NULL)
+			if ((p = find_object(data, OBJECT_PORT, l->data.link.input_port)) == NULL)
 				continue;
-			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+			if ((n = find_object(data, OBJECT_NODE, p->data.port.node)) == NULL)
 				continue;
 			if (n->id != in_node->id)
 				continue;
 		} else {
 			/* 2 args, check port names */
-			if ((p = find_object(data, OBJECT_PORT, l->extra[0])) == NULL)
+			if ((p = find_object(data, OBJECT_PORT, l->data.link.output_port)) == NULL)
 				continue;
-			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+			if ((n = find_object(data, OBJECT_NODE, p->data.port.node)) == NULL)
 				continue;
 			if (!port_matches(data, n, p, data->opt_output))
 				continue;
 
-			if ((p = find_object(data, OBJECT_PORT, l->extra[1])) == NULL)
+			if ((p = find_object(data, OBJECT_PORT, l->data.link.input_port)) == NULL)
 				continue;
-			if ((n = find_object(data, OBJECT_NODE, p->extra[1])) == NULL)
+			if ((n = find_object(data, OBJECT_NODE, p->data.port.node)) == NULL)
 				continue;
 			if (!port_matches(data, n, p, data->opt_input))
 				continue;
@@ -505,18 +604,18 @@ static int do_monitor_port(struct data *data, struct object *port)
 	bool do_print = false;
 	struct object *node;
 
-	if (port->extra[0] == PW_DIRECTION_OUTPUT && data->list_outputs) {
+	if (port->data.port.direction == PW_DIRECTION_OUTPUT && data->list_outputs) {
 		regex = data->out_regex;
 		do_print = true;
 	}
-	if (port->extra[0] == PW_DIRECTION_INPUT && data->list_inputs) {
+	if (port->data.port.direction == PW_DIRECTION_INPUT && data->list_inputs) {
 		regex = data->in_regex;
 		do_print = true;
 	}
 	if (!do_print)
 		return 0;
 
-	if ((node = find_object(data, OBJECT_NODE, port->extra[1])) == NULL)
+	if ((node = find_object(data, OBJECT_NODE, port->data.port.node)) == NULL)
 		return -ENOENT;
 
 	if (regex && !port_regex(data, node, port, regex))
@@ -531,19 +630,19 @@ static int do_monitor_link(struct data *data, struct object *link)
 	char buffer1[1024], buffer2[1024], id[64] = "";
 	struct object *n1, *n2, *p1, *p2;
 
-	if (!(data->opt_mode & MODE_LIST_LINKS))
+	if (!(data->opt_list & LIST_LINKS))
 		return 0;
 
-	if ((p1 = find_object(data, OBJECT_PORT, link->extra[0])) == NULL)
+	if ((p1 = find_object(data, OBJECT_PORT, link->data.link.output_port)) == NULL)
 		return -ENOENT;
-	if ((n1 = find_object(data, OBJECT_NODE, p1->extra[1])) == NULL)
+	if ((n1 = find_object(data, OBJECT_NODE, p1->data.port.node)) == NULL)
 		return -ENOENT;
 	if (data->out_regex && !port_regex(data, n1, p1, data->out_regex))
 		return 0;
 
-	if ((p2 = find_object(data, OBJECT_PORT, link->extra[1])) == NULL)
+	if ((p2 = find_object(data, OBJECT_PORT, link->data.link.input_port)) == NULL)
 		return -ENOENT;
-	if ((n2 = find_object(data, OBJECT_NODE, p2->extra[1])) == NULL)
+	if ((n2 = find_object(data, OBJECT_NODE, p2->data.port.node)) == NULL)
 		return -ENOENT;
 	if (data->in_regex && !port_regex(data, n2, p2, data->in_regex))
 		return 0;
@@ -562,7 +661,8 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 				  const struct spa_dict *props)
 {
 	struct data *d = data;
-	uint32_t t, extra[2];
+	enum object_type t;
+	union object_data extra = {0};
 	struct object *obj;
 	const char *str;
 
@@ -573,26 +673,31 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 	if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
 		t = OBJECT_NODE;
 	} else if (spa_streq(type, PW_TYPE_INTERFACE_Port)) {
+		if (!d->new_object && d->opt_wait && spa_list_is_empty(&d->target_links)) {
+			d->new_object = true;
+			core_sync(d);
+		}
+
 		t = OBJECT_PORT;
 		if ((str = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION)) == NULL)
 			return;
 		if (spa_streq(str, "in"))
-			extra[0] = PW_DIRECTION_INPUT;
+			extra.port.direction = PW_DIRECTION_INPUT;
 		else if (spa_streq(str, "out"))
-			extra[0] = PW_DIRECTION_OUTPUT;
+			extra.port.direction = PW_DIRECTION_OUTPUT;
 		else
 			return;
 		if ((str = spa_dict_lookup(props, PW_KEY_NODE_ID)) == NULL)
 			return;
-		extra[1] = atoi(str);
+		extra.port.node = atoi(str);
 	} else if (spa_streq(type, PW_TYPE_INTERFACE_Link)) {
 		t = OBJECT_LINK;
 		if ((str = spa_dict_lookup(props, PW_KEY_LINK_OUTPUT_PORT)) == NULL)
 			return;
-		extra[0] = atoi(str);
+		extra.link.output_port = atoi(str);
 		if ((str = spa_dict_lookup(props, PW_KEY_LINK_INPUT_PORT)) == NULL)
 			return;
-		extra[1] = atoi(str);
+		extra.link.input_port = atoi(str);
 	} else
 		return;
 
@@ -600,12 +705,16 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 	obj->type = t;
 	obj->id = id;
 	obj->props = pw_properties_new_dict(props);
-	memcpy(obj->extra, extra, sizeof(extra));
+	obj->data = extra;
 	spa_list_append(&d->objects, &obj->link);
 
 	if (d->monitoring) {
 		d->prefix = "+ ";
 		switch (obj->type) {
+		case OBJECT_ANY:
+			spa_assert_not_reached();
+		case OBJECT_NODE:
+			break;
 		case OBJECT_PORT:
 			do_monitor_port(d, obj);
 			break;
@@ -614,6 +723,13 @@ static void registry_event_global(void *data, uint32_t id, uint32_t permissions,
 			break;
 		}
 	}
+}
+
+static void destroy_object(struct object *obj)
+{
+	spa_list_remove(&obj->link);
+	pw_properties_free(obj->props);
+	free(obj);
 }
 
 static void registry_event_global_remove(void *data, uint32_t id)
@@ -627,6 +743,10 @@ static void registry_event_global_remove(void *data, uint32_t id)
 	if (d->monitoring) {
 		d->prefix = "- ";
 		switch (obj->type) {
+		case OBJECT_ANY:
+			spa_assert_not_reached();
+		case OBJECT_NODE:
+			break;
 		case OBJECT_PORT:
 			do_monitor_port(d, obj);
 			break;
@@ -636,9 +756,7 @@ static void registry_event_global_remove(void *data, uint32_t id)
 		}
 	}
 
-	spa_list_remove(&obj->link);
-	pw_properties_free(obj->props);
-	free(obj);
+	destroy_object(obj);
 }
 
 static const struct pw_registry_events registry_events = {
@@ -650,8 +768,22 @@ static const struct pw_registry_events registry_events = {
 static void on_core_done(void *data, uint32_t id, int seq)
 {
 	struct data *d = data;
-	if (d->sync == seq)
-		pw_main_loop_quit(d->loop);
+
+	if (d->sync != seq)
+		return;
+
+	/* Connect mode, look for our targets. */
+	if (d->opt_mode == MODE_CONNECT) {
+		d->nb_links = create_link_proxies(d);
+		/* In wait mode, if none exist, keep running. */
+		if (d->opt_wait && d->nb_links == -ENOENT) {
+			d->new_object = false;
+			return;
+		}
+	}
+
+	pw_main_loop_quit(d->loop);
+
 }
 
 static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
@@ -679,7 +811,7 @@ static void do_quit(void *userdata, int signal_number)
 
 static void show_help(struct data *data, const char *name, bool error)
 {
-        fprintf(error ? stderr : stdout, "%1$s : PipeWire port and link manager.\n"
+	fprintf(error ? stderr : stdout, "%1$s : PipeWire port and link manager.\n"
 		"Generic: %1$s [options]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
@@ -695,18 +827,60 @@ static void show_help(struct data *data, const char *name, bool error)
 		"  -L, --linger                          Linger (default, unless -m is used)\n"
 		"  -P, --passive                         Passive link\n"
 		"  -p, --props=PROPS                     Properties as JSON object\n"
+		"  -w, --wait                            Wait until link creation attempt\n"
 		"Disconnect: %1$s -d [options] output input\n"
 		"            %1$s -d [options] link-id\n"
 		"  -d, --disconnect                      Disconnect ports\n",
 		name);
 }
 
-int main(int argc, char *argv[])
+static void data_clear(struct data *data)
 {
-	struct data data = { 0, };
+	struct object *o;
+	spa_list_consume(o, &data->objects, link)
+		destroy_object(o);
+
+	struct target_link *tl;
+	spa_list_consume(tl, &data->target_links, link) {
+		if (tl->proxy != NULL) {
+			spa_hook_remove(&tl->listener);
+			spa_hook_remove(&tl->link_listener);
+			pw_proxy_destroy(tl->proxy);
+		}
+		spa_list_remove(&tl->link);
+		free(tl);
+	}
+
+	if (data->out_regex)
+		regfree(data->out_regex);
+	if (data->in_regex)
+		regfree(data->in_regex);
+
+	if (data->registry) {
+		spa_hook_remove(&data->registry_listener);
+		pw_proxy_destroy((struct pw_proxy *) data->registry);
+	}
+
+	if (data->core) {
+		spa_hook_remove(&data->core_listener);
+		pw_core_disconnect(data->core);
+	}
+
+	spa_clear_ptr(data->context, pw_context_destroy);
+	spa_clear_ptr(data->loop, pw_main_loop_destroy);
+
+	pw_properties_free(data->props);
+}
+
+static int run(int argc, char *argv[])
+{
+	spa_cleanup(data_clear) struct data data = {
+		.opt_mode = MODE_CONNECT,
+		.objects = SPA_LIST_INIT(&data.objects),
+		.target_links = SPA_LIST_INIT(&data.target_links),
+	};
 	int res = 0, c;
-	regex_t out_port_regex;
-	regex_t in_port_regex;
+	struct spa_error_location loc;
 	static const struct option long_options[] = {
 		{ "help",	no_argument,		NULL, 'h' },
 		{ "version",	no_argument,		NULL, 'V' },
@@ -720,15 +894,10 @@ int main(int argc, char *argv[])
 		{ "linger",	no_argument,		NULL, 'L' },
 		{ "passive",	no_argument,		NULL, 'P' },
 		{ "props",	required_argument,	NULL, 'p' },
+		{ "wait",	no_argument,		NULL, 'w' },
 		{ "disconnect",	no_argument,		NULL, 'd' },
 		{ NULL,	0, NULL, 0}
 	};
-
-	setlocale(LC_ALL, "");
-	pw_init(&argc, &argv);
-	spa_list_init(&data.objects);
-
-	setlinebuf(stdout);
 
 	data.props = pw_properties_new(NULL, NULL);
 	if (data.props == NULL) {
@@ -736,10 +905,10 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	while ((c = getopt_long(argc, argv, "hVr:oilmIvLPp:d", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVr:oilmIvLPp:wd", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
-			show_help(&data, argv[0], NULL);
+			show_help(&data, argv[0], false);
 			return 0;
 		case 'V':
 			printf("%s\n"
@@ -753,16 +922,19 @@ int main(int argc, char *argv[])
 			data.opt_remote = optarg;
 			break;
 		case 'o':
-			data.opt_mode |= MODE_LIST_OUTPUT;
+			data.opt_mode = MODE_LIST;
+			data.opt_list |= LIST_OUTPUT;
 			break;
 		case 'i':
-			data.opt_mode |= MODE_LIST_INPUT;
+			data.opt_mode = MODE_LIST;
+			data.opt_list |= LIST_INPUT;
 			break;
 		case 'l':
-			data.opt_mode |= MODE_LIST_LINKS;
+			data.opt_mode = MODE_LIST;
+			data.opt_list |= LIST_LINKS;
 			break;
 		case 'm':
-			data.opt_mode |= MODE_MONITOR;
+			data.opt_monitor = true;
 			break;
 		case 'I':
 			data.opt_id = true;
@@ -777,10 +949,17 @@ int main(int argc, char *argv[])
 			pw_properties_set(data.props, PW_KEY_LINK_PASSIVE, "true");
 			break;
 		case 'p':
-			pw_properties_update_string(data.props, optarg, strlen(optarg));
+			if (pw_properties_update_string_checked(data.props, optarg, strlen(optarg), &loc) < 0) {
+				spa_debug_file_error_location(stderr, &loc,
+						"error: syntax error in --props: %s", loc.reason);
+				return -1;
+			}
 			break;
 		case 'd':
-			data.opt_mode |= MODE_DISCONNECT;
+			data.opt_mode = MODE_DISCONNECT;
+			break;
+		case 'w':
+			data.opt_wait = true;
 			break;
 		default:
 			show_help(&data, argv[0], true);
@@ -790,18 +969,35 @@ int main(int argc, char *argv[])
 	if (argc == 1)
 		show_help(&data, argv[0], true);
 
-	if (data.opt_id && (data.opt_mode & MODE_LIST) == 0) {
+	if (data.opt_id && data.opt_mode != MODE_LIST) {
 		fprintf(stderr, "-I option needs one or more of -l, -i or -o\n");
 		return -1;
 	}
 
-	if ((data.opt_mode & MODE_MONITOR) == 0)
+	if (!data.opt_monitor)
 		pw_properties_set(data.props, PW_KEY_OBJECT_LINGER, "true");
 
 	if (optind < argc)
 		data.opt_output = argv[optind++];
 	if (optind < argc)
 		data.opt_input = argv[optind++];
+
+	switch (data.opt_mode) {
+	case MODE_LIST:
+		break;
+	case MODE_DISCONNECT:
+		if (data.opt_output == NULL) {
+			fprintf(stderr, "missing link-id or output and input port names to disconnect\n");
+			return -1;
+		}
+		break;
+	case MODE_CONNECT:
+		if (data.opt_output == NULL || data.opt_input == NULL) {
+			fprintf(stderr, "missing output and input port names to connect\n");
+			return -1;
+		}
+		break;
+	}
 
 	data.loop = pw_main_loop_new(NULL);
 	if (data.loop == NULL) {
@@ -837,66 +1033,74 @@ int main(int argc, char *argv[])
 			&data.registry_listener,
 			&registry_events, &data);
 
-	data.prefix = (data.opt_mode & MODE_MONITOR) ? "= " : "";
+	data.prefix = data.opt_monitor ? "= " : "";
 
 	core_sync(&data);
 	pw_main_loop_run(data.loop);
 
-	if ((data.opt_mode & (MODE_LIST_PORTS|MODE_LIST_LINKS)) == MODE_LIST_LINKS)
+	if ((data.opt_list & (LIST_PORTS|LIST_LINKS)) == LIST_LINKS)
 		data.list_inputs = data.list_outputs = true;
-	if ((data.opt_mode & MODE_LIST_INPUT) == MODE_LIST_INPUT)
+	if ((data.opt_list & LIST_INPUT) == LIST_INPUT)
 		data.list_inputs = true;
-	if ((data.opt_mode & MODE_LIST_OUTPUT) == MODE_LIST_OUTPUT)
+	if ((data.opt_list & LIST_OUTPUT) == LIST_OUTPUT)
 		data.list_outputs = true;
 
 	if (data.opt_output) {
-		if (regcomp(&out_port_regex, data.opt_output, REG_EXTENDED | REG_NOSUB) == 0)
-			data.out_regex = &out_port_regex;
+		if (regcomp(&data.out_port_regex, data.opt_output, REG_EXTENDED | REG_NOSUB) == 0)
+			data.out_regex = &data.out_port_regex;
 	}
 	if (data.opt_input) {
-		if (regcomp(&in_port_regex, data.opt_input, REG_EXTENDED | REG_NOSUB) == 0)
-			data.in_regex = &in_port_regex;
+		if (regcomp(&data.in_port_regex, data.opt_input, REG_EXTENDED | REG_NOSUB) == 0)
+			data.in_regex = &data.in_port_regex;
 	}
 
-	if (data.opt_mode & (MODE_LIST)) {
+	switch (data.opt_mode) {
+	case MODE_LIST:
 		do_list(&data);
-	} else if (data.opt_mode & MODE_DISCONNECT) {
-		if (data.opt_output == NULL) {
-			fprintf(stderr, "missing link-id or output and input port names to disconnect\n");
-			return -1;
-		}
+		break;
+	case MODE_DISCONNECT:
 		if ((res = do_unlink_ports(&data)) < 0) {
 			fprintf(stderr, "failed to unlink ports: %s\n", spa_strerror(res));
 			return -1;
 		}
-	} else {
-		if (data.opt_output == NULL ||
-		    data.opt_input == NULL) {
-			fprintf(stderr, "missing output and input port names to connect\n");
+		break;
+	case MODE_CONNECT:
+		if (data.nb_links < 0) {
+			fprintf(stderr, "failed to link ports: %s\n", spa_strerror(data.nb_links));
 			return -1;
 		}
-		if ((res = do_link_ports(&data)) < 0) {
-			fprintf(stderr, "failed to link ports: %s\n", spa_strerror(res));
-			return -1;
+
+		if (data.nb_links > 0) {
+			pw_main_loop_run(data.loop);
+
+			struct target_link *tl;
+			spa_list_for_each(tl, &data.target_links, link) {
+				if (tl->state == PW_LINK_STATE_ERROR) {
+					fprintf(stderr, "failed to link ports: %s\n",
+						spa_strerror(tl->result));
+					return -1;
+				}
+			}
 		}
+		break;
 	}
 
-	if (data.opt_mode & MODE_MONITOR) {
+	if (data.opt_monitor) {
 		data.monitoring = true;
 		pw_main_loop_run(data.loop);
 		data.monitoring = false;
 	}
 
-	if (data.out_regex)
-		regfree(data.out_regex);
-	if (data.in_regex)
-		regfree(data.in_regex);
-	spa_hook_remove(&data.registry_listener);
-	pw_proxy_destroy((struct pw_proxy*)data.registry);
-	spa_hook_remove(&data.core_listener);
-	pw_core_disconnect(data.core);
-	pw_context_destroy(data.context);
-	pw_main_loop_destroy(data.loop);
+	return 0;
+}
+
+int main(int argc, char *argv[])
+{
+	setlocale(LC_ALL, "");
+	setlinebuf(stdout);
+
+	pw_init(&argc, &argv);
+	int res = run(argc, argv);
 	pw_deinit();
 
 	return res;

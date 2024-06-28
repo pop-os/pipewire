@@ -21,7 +21,9 @@
 #include <spa/control/control.h>
 #include <spa/pod/filter.h>
 
-#define NAME "control-mixer"
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.control-mixer");
 
 #define MAX_BUFFERS     64
 #define MAX_PORTS       512
@@ -39,7 +41,7 @@ struct port {
 	uint32_t direction;
 	uint32_t id;
 
-	struct spa_io_buffers *io;
+	struct spa_io_buffers *io[2];
 
 	uint64_t info_all;
 	struct spa_port_info info;
@@ -58,6 +60,8 @@ struct impl {
 	struct spa_handle handle;
 	struct spa_node node;
 
+	uint32_t quantum_limit;
+
 	struct spa_log *log;
 
 	struct spa_loop *data_loop;
@@ -65,6 +69,8 @@ struct impl {
 	uint64_t info_all;
 	struct spa_node_info info;
 	struct spa_param_info params[8];
+
+	struct spa_io_position *position;
 
 	struct spa_hook_list hooks;
 
@@ -83,13 +89,16 @@ struct impl {
 };
 
 #define PORT_VALID(p)                ((p) != NULL && (p)->valid)
+#define CHECK_ANY_IN(this,d,p)       ((d) == SPA_DIRECTION_INPUT && (p) == SPA_ID_INVALID)
 #define CHECK_FREE_IN_PORT(this,d,p) ((d) == SPA_DIRECTION_INPUT && (p) < MAX_PORTS && !PORT_VALID(this->in_ports[(p)]))
 #define CHECK_IN_PORT(this,d,p)      ((d) == SPA_DIRECTION_INPUT && (p) < MAX_PORTS && PORT_VALID(this->in_ports[(p)]))
 #define CHECK_OUT_PORT(this,d,p)     ((d) == SPA_DIRECTION_OUTPUT && (p) == 0)
 #define CHECK_PORT(this,d,p)         (CHECK_OUT_PORT(this,d,p) || CHECK_IN_PORT (this,d,p))
+#define CHECK_PORT_ANY(this,d,p)     (CHECK_ANY_IN(this,d,p) || CHECK_PORT(this,d,p))
 #define GET_IN_PORT(this,p)          (this->in_ports[p])
 #define GET_OUT_PORT(this,p)         (&this->out_ports[p])
 #define GET_PORT(this,d,p)           (d == SPA_DIRECTION_INPUT ? GET_IN_PORT(this,p) : GET_OUT_PORT(this,p))
+#define GET_PORT_ANY(this,d,p)       (CHECK_ANY_IN(this,d,p) ? NULL : GET_PORT(this,d,p))
 
 static int impl_node_enum_params(void *object, int seq,
 				 uint32_t id, uint32_t start, uint32_t num,
@@ -106,7 +115,16 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 {
-	return -ENOTSUP;
+	struct impl *this = object;
+
+	switch (id) {
+	case SPA_IO_Position:
+		this->position = data;
+		break;
+	default:
+		return -ENOTSUP;
+	}
+	return 0;
 }
 
 static int impl_node_send_command(void *object, const struct spa_command *command)
@@ -226,7 +244,7 @@ static int impl_node_add_port(void *object, enum spa_direction direction, uint32
 		this->last_port = port_id + 1;
 	port->valid = true;
 
-	spa_log_debug(this->log, NAME " %p: add port %d %d", this, port_id, this->last_port);
+	spa_log_debug(this->log, "%p: add port %d %d", this, port_id, this->last_port);
 	emit_port_info(this, port, true);
 
 	return 0;
@@ -260,15 +278,14 @@ impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_
 
 		this->last_port = i + 1;
 	}
-	spa_log_debug(this->log, NAME " %p: remove port %d %d", this, port_id, this->last_port);
+	spa_log_debug(this->log, "%p: remove port %d %d", this, port_id, this->last_port);
 
 	spa_node_emit_port_info(&this->hooks, direction, port_id, NULL);
 
 	return 0;
 }
 
-static int port_enum_formats(void *object,
-			     enum spa_direction direction, uint32_t port_id,
+static int port_enum_formats(void *object, struct port *port,
 			     uint32_t index,
 			     struct spa_pod **param,
 			     struct spa_pod_builder *builder)
@@ -303,9 +320,9 @@ impl_node_port_enum_params(void *object, int seq,
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
-	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
+	spa_return_val_if_fail(CHECK_PORT_ANY(this, direction, port_id), -EINVAL);
 
-	port = GET_PORT(this, direction, port_id);
+	port = GET_PORT_ANY(this, direction, port_id);
 
 	result.id = id;
 	result.next = start;
@@ -316,19 +333,19 @@ next:
 
 	switch (id) {
 	case SPA_PARAM_EnumFormat:
-		if ((res = port_enum_formats(this, direction, port_id, result.index, &param, &b)) <= 0)
+		if ((res = port_enum_formats(this, port, result.index, &param, &b)) <= 0)
 			return res;
 		break;
 
 	case SPA_PARAM_Format:
-		if (!port->have_format)
+		if (port == NULL || !port->have_format)
 			return -EIO;
-		if ((res = port_enum_formats(this, direction, port_id, result.index, &param, &b)) <= 0)
+		if ((res = port_enum_formats(this, port, result.index, &param, &b)) <= 0)
 			return res;
 		break;
 
 	case SPA_PARAM_Buffers:
-		if (!port->have_format)
+		if (port == NULL || !port->have_format)
 			return -EIO;
 		if (result.index > 0)
 			return 0;
@@ -337,7 +354,8 @@ next:
 			SPA_TYPE_OBJECT_ParamBuffers, id,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
-			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(4096, 512, INT32_MAX),
+			SPA_PARAM_BUFFERS_size,    SPA_POD_CHOICE_RANGE_Int(this->quantum_limit,
+				this->quantum_limit, INT32_MAX),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(1));
 		break;
 
@@ -348,6 +366,12 @@ next:
 				SPA_TYPE_OBJECT_ParamIO, id,
 				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
 				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
+			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamIO, id,
+				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_AsyncBuffers),
+				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_async_buffers)));
 			break;
 		default:
 			return 0;
@@ -371,7 +395,7 @@ next:
 static int clear_buffers(struct impl *this, struct port *port)
 {
 	if (port->n_buffers > 0) {
-		spa_log_debug(this->log, NAME " %p: clear buffers %p", this, port);
+		spa_log_debug(this->log, "%p: clear buffers %p", this, port);
 		port->n_buffers = 0;
 		spa_list_init(&port->queue);
 	}
@@ -385,7 +409,7 @@ static int queue_buffer(struct impl *this, struct port *port, struct buffer *b)
 
 	spa_list_append(&port->queue, &b->link);
 	SPA_FLAG_SET(b->flags, BUFFER_FLAG_QUEUED);
-	spa_log_trace_fp(this->log, NAME " %p: queue buffer %d", this, b->id);
+	spa_log_trace_fp(this->log, "%p: queue buffer %d", this, b->id);
 	return 0;
 }
 
@@ -399,7 +423,7 @@ static struct buffer *dequeue_buffer(struct impl *this, struct port *port)
 	b = spa_list_first(&port->queue, struct buffer, link);
 	spa_list_remove(&b->link);
 	SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_QUEUED);
-	spa_log_trace_fp(this->log, NAME " %p: dequeue buffer %d", this, b->id);
+	spa_log_trace_fp(this->log, "%p: dequeue buffer %d", this, b->id);
 	return b;
 }
 
@@ -438,7 +462,7 @@ static int port_set_format(void *object,
 		if (!port->have_format) {
 			this->n_formats++;
 			port->have_format = true;
-			spa_log_debug(this->log, NAME " %p: set format on port %d:%d",
+			spa_log_debug(this->log, "%p: set format on port %d:%d",
 					this, direction, port_id);
 		}
 	}
@@ -491,7 +515,7 @@ impl_node_port_use_buffers(void *object,
 
 	port = GET_PORT(this, direction, port_id);
 
-	spa_log_debug(this->log, NAME " %p: use buffers %d on port %d:%d",
+	spa_log_debug(this->log, "%p: use buffers %d on port %d:%d",
 			this, n_buffers, direction, port_id);
 
 	spa_return_val_if_fail(!this->started || port->io == NULL, -EIO);
@@ -513,7 +537,7 @@ impl_node_port_use_buffers(void *object,
 		b->id = i;
 
 		if (d[0].data == NULL) {
-			spa_log_error(this->log, NAME " %p: invalid memory on buffer %d", this, i);
+			spa_log_error(this->log, "%p: invalid memory on buffer %d", this, i);
 			return -EINVAL;
 		}
 		if (direction == SPA_DIRECTION_OUTPUT)
@@ -527,13 +551,24 @@ impl_node_port_use_buffers(void *object,
 struct io_info {
 	struct port *port;
 	void *data;
+	size_t size;
 };
 
 static int do_port_set_io(struct spa_loop *loop, bool async, uint32_t seq,
 		const void *data, size_t size, void *user_data)
 {
 	struct io_info *info = user_data;
-	info->port->io = info->data;
+	if (info->size >= sizeof(struct spa_io_async_buffers)) {
+		struct spa_io_async_buffers *ab = info->data;
+		info->port->io[0] = &ab->buffers[0];
+		info->port->io[1] = &ab->buffers[1];
+	} else if (info->size >= sizeof(struct spa_io_buffers)) {
+		info->port->io[0] = info->data;
+		info->port->io[1] = info->data;
+	} else {
+		info->port->io[0] = NULL;
+		info->port->io[1] = NULL;
+	}
 	return 0;
 }
 
@@ -548,7 +583,7 @@ impl_node_port_set_io(void *object,
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	spa_log_debug(this->log, NAME " %p: port %d:%d io %d %p/%zd", this,
+	spa_log_debug(this->log, "%p: port %d:%d io %d %p/%zd", this,
 			direction, port_id, id, data, size);
 
 	spa_return_val_if_fail(CHECK_PORT(this, direction, port_id), -EINVAL);
@@ -556,9 +591,11 @@ impl_node_port_set_io(void *object,
 	port = GET_PORT(this, direction, port_id);
 	info.port = port;
 	info.data = data;
+	info.size = size;
 
 	switch (id) {
 	case SPA_IO_Buffers:
+	case SPA_IO_AsyncBuffers:
 		spa_loop_invoke(this->data_loop,
                                do_port_set_io, SPA_ID_INVALID, NULL, 0, true, &info);
 		break;
@@ -627,14 +664,15 @@ static int impl_node_process(void *object)
 	struct spa_pod_frame f;
         struct buffer *outb;
 	struct spa_data *d;
+	uint32_t cycle = this->position->clock.cycle & 1;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
 	outport = GET_OUT_PORT(this, 0);
-	if ((outio = outport->io) == NULL)
+	if ((outio = outport->io[cycle]) == NULL)
 		return -EIO;
 
-	spa_log_trace_fp(this->log, NAME " %p: status %p %d %d",
+	spa_log_trace_fp(this->log, "%p: status %p %d %d",
 			this, outio, outio->status, outio->buffer_id);
 
 	if (outio->status == SPA_STATUS_HAVE_DATA)
@@ -649,7 +687,7 @@ static int impl_node_process(void *object)
 	/* get output buffer */
 	if ((outb = dequeue_buffer(this, outport)) == NULL) {
 		if (outport->n_buffers > 0)
-	                spa_log_warn(this->log, NAME " %p: out of buffers (%d)",
+	                spa_log_warn(this->log, "%p: out of buffers (%d)",
 					this, outport->n_buffers);
                 return -EPIPE;
         }
@@ -664,33 +702,34 @@ static int impl_node_process(void *object)
 		struct spa_io_buffers *inio = NULL;
 		void *pod;
 
-		if (!inport->valid ||
-		    (inio = inport->io) == NULL ||
-		    inio->buffer_id >= inport->n_buffers ||
+		if (SPA_UNLIKELY(!PORT_VALID(inport) || (inio = inport->io[cycle]) == NULL)) {
+			spa_log_trace_fp(this->log, "%p: skip input idx:%d valid:%d io:%p/%p/%d",
+					this, i, PORT_VALID(inport),
+					inport->io[0], inport->io[1], cycle);
+			continue;
+		}
+		if (inio->buffer_id >= inport->n_buffers ||
 		    inio->status != SPA_STATUS_HAVE_DATA) {
-			spa_log_trace_fp(this->log, NAME " %p: skip input idx:%d valid:%d "
+			spa_log_trace_fp(this->log, "%p: skip input idx:%d "
 					"io:%p status:%d buf_id:%d n_buffers:%d", this,
-				i, inport->valid, inio,
-				inio ? inio->status : -1,
-				inio ? inio->buffer_id : SPA_ID_INVALID,
-				inport->n_buffers);
+				i, inio, inio->status, inio->buffer_id, inport->n_buffers);
 			continue;
 		}
 
-		spa_log_trace_fp(this->log, NAME " %p: mix input %d %p->%p %d %d", this,
+		spa_log_trace_fp(this->log, "%p: mix input %d %p->%p %d %d", this,
 				i, inio, outio, inio->status, inio->buffer_id);
 
 		d = inport->buffers[inio->buffer_id].buffer->datas;
 
 		if ((pod = spa_pod_from_data(d->data, d->maxsize,
 				d->chunk->offset, d->chunk->size)) == NULL) {
-			spa_log_trace_fp(this->log, NAME " %p: skip input idx:%d max:%u "
+			spa_log_trace_fp(this->log, "%p: skip input idx:%d max:%u "
 					"offset:%u size:%u", this, i,
 					d->maxsize, d->chunk->offset, d->chunk->size);
 			continue;
 		}
 		if (!spa_pod_is_sequence(pod)) {
-			spa_log_trace_fp(this->log, NAME " %p: skip input idx:%d", this, i);
+			spa_log_trace_fp(this->log, "%p: skip input idx:%d", this, i);
 			continue;
 		}
 
@@ -730,6 +769,12 @@ static int impl_node_process(void *object)
 		ctrl[next_index] = spa_pod_control_next(ctrl[next_index]);
 	}
 	spa_pod_builder_pop(&builder, &f);
+
+	if (builder.state.offset > d->maxsize) {
+		spa_log_warn(this->log, "%p: control overflow %d > %d",
+				this, builder.state.offset, d->maxsize);
+		builder.state.offset = 0;
+	}
 
 	d->chunk->offset = 0;
 	d->chunk->size = builder.state.offset;
@@ -807,6 +852,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	struct port *port;
+	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -822,6 +868,16 @@ impl_init(const struct spa_handle_factory *factory,
 	if (this->data_loop == NULL) {
 		spa_log_error(this->log, "a data loop is needed");
 		return -EINVAL;
+	}
+
+	this->quantum_limit = 8192;
+
+	for (i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, "clock.quantum-limit")) {
+			spa_atou32(s, &this->quantum_limit, 0);
+		}
 	}
 
 	spa_hook_list_init(&this->hooks);

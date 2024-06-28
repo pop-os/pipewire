@@ -26,7 +26,9 @@
 
 #include "vulkan-compute-utils.h"
 
-#define NAME "vulkan-compute-source"
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.vulkan.compute-source");
 
 #define FRAMES_TO_TIME(this,f) ((this->position->video.framerate.denom * (f) * SPA_NSEC_PER_SEC) / \
                                 (this->position->video.framerate.num))
@@ -54,7 +56,15 @@ struct buffer {
 struct port {
 	uint64_t info_all;
 	struct spa_port_info info;
-	struct spa_param_info params[5];
+
+	enum spa_direction direction;
+#define IDX_EnumFormat	0
+#define IDX_Meta	1
+#define IDX_IO		2
+#define IDX_Format	3
+#define IDX_Buffer	4
+#define N_PORT_PARAMS	5
+	struct spa_param_info params[N_PORT_PARAMS];
 
 	struct spa_io_buffers *io;
 
@@ -81,7 +91,10 @@ struct impl {
 
 	uint64_t info_all;
 	struct spa_node_info info;
-	struct spa_param_info params[2];
+#define IDX_PropInfo	0
+#define IDX_Props	1
+#define N_NODE_PARAMS	2
+	struct spa_param_info params[N_NODE_PARAMS];
 	struct props props;
 
 	struct spa_hook_list hooks;
@@ -257,7 +270,7 @@ static int read_timer(struct impl *this)
 		if ((res = spa_system_timerfd_read(this->data_system,
 						this->timer_source.fd, &expirations)) < 0) {
 			if (res != -EAGAIN)
-				spa_log_error(this->log, NAME " %p: timerfd error: %s",
+				spa_log_error(this->log, "%p: timerfd error: %s",
 						this, spa_strerror(res));
 		}
 	}
@@ -274,14 +287,14 @@ static int make_buffer(struct impl *this)
 	if (read_timer(this) < 0)
 		return 0;
 
-	if ((res = spa_vulkan_ready(&this->state)) < 0) {
+	if ((res = spa_vulkan_compute_ready(&this->state)) < 0) {
 		res = SPA_STATUS_OK;
 		goto next;
 	}
 
 	if (spa_list_is_empty(&port->empty)) {
 		set_timer(this, false);
-		spa_log_error(this->log, NAME " %p: out of buffers", this);
+		spa_log_error(this->log, "%p: out of buffers", this);
 		return -EPIPE;
 	}
 	b = spa_list_first(&port->empty, struct buffer, link);
@@ -289,20 +302,20 @@ static int make_buffer(struct impl *this)
 
 	n_bytes = b->outbuf->datas[0].maxsize;
 
-	spa_log_trace(this->log, NAME " %p: dequeue buffer %d", this, b->id);
+	spa_log_trace(this->log, "%p: dequeue buffer %d", this, b->id);
 
 	this->state.constants.time = this->elapsed_time / (float) SPA_NSEC_PER_SEC;
 	this->state.constants.frame = this->frame_count;
 
 	this->state.streams[0].pending_buffer_id = b->id;
-	spa_vulkan_process(&this->state);
+	spa_vulkan_compute_process(&this->state);
 
 	if (this->state.streams[0].ready_buffer_id != SPA_ID_INVALID) {
 		struct buffer *b = &port->buffers[this->state.streams[0].ready_buffer_id];
 
 		this->state.streams[0].ready_buffer_id = SPA_ID_INVALID;
 
-		spa_log_trace(this->log, NAME " %p: ready buffer %d", this, b->id);
+		spa_log_trace(this->log, "%p: ready buffer %d", this, b->id);
 
 		b->outbuf->datas[0].chunk->offset = 0;
 		b->outbuf->datas[0].chunk->size = n_bytes;
@@ -331,7 +344,7 @@ static inline void reuse_buffer(struct impl *this, struct port *port, uint32_t i
 	struct buffer *b = &port->buffers[id];
 
 	if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_OUT)) {
-		spa_log_trace(this->log, NAME " %p: reuse buffer %d", this, id);
+		spa_log_trace(this->log, "%p: reuse buffer %d", this, id);
 
 		SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_OUT);
 		spa_list_append(&port->empty, &b->link);
@@ -405,7 +418,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 		this->started = true;
 		set_timer(this, true);
-		spa_vulkan_start(&this->state);
+		spa_vulkan_compute_start(&this->state);
 		break;
 	}
 	case SPA_NODE_COMMAND_Suspend:
@@ -415,7 +428,7 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 
 		this->started = false;
 		set_timer(this, false);
-		spa_vulkan_stop(&this->state);
+		spa_vulkan_compute_stop(&this->state);
 		break;
 	default:
 		return -ENOTSUP;
@@ -503,64 +516,6 @@ impl_node_remove_port(void *object, enum spa_direction direction, uint32_t port_
 	return -ENOTSUP;
 }
 
-static struct spa_pod *build_EnumFormat(uint32_t fmt, const struct vulkan_format_info *fmtInfo, struct spa_pod_builder *builder) {
-	struct spa_pod_frame f[2];
-	uint32_t i, c;
-
-	spa_pod_builder_push_object(builder, &f[0], SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
-	spa_pod_builder_add(builder, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
-	spa_pod_builder_add(builder, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp), 0);
-	spa_pod_builder_add(builder, SPA_FORMAT_VIDEO_format, SPA_POD_Id(fmt), 0);
-	if (fmtInfo && fmtInfo->modifierCount > 0) {
-		spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
-		spa_pod_builder_push_choice(builder, &f[1], SPA_CHOICE_Enum, 0);
-		for (i = 0, c = 0; i < fmtInfo->modifierCount; i++) {
-			spa_pod_builder_long(builder, fmtInfo->infos[i].props.drmFormatModifier);
-			if (c++ == 0)
-				spa_pod_builder_long(builder, fmtInfo->infos[i].props.drmFormatModifier);
-		}
-		spa_pod_builder_pop(builder, &f[1]);
-	}
-	return spa_pod_builder_pop(builder, &f[0]);
-}
-
-// This function enumerates the available formats in vulkan_state::formats, announcing all formats capable to support DmaBufs
-// first and then falling back to those supported with SHM buffers.
-static bool find_EnumFormatInfo(struct vulkan_base *s, uint32_t index, uint32_t caps, uint32_t *fmt_idx, bool *has_modifier) {
-	int64_t fmtIterator = 0;
-	int64_t maxIterator = 0;
-	if (caps & VULKAN_BUFFER_TYPE_CAP_SHM)
-		maxIterator += s->formatInfoCount;
-	if (caps & VULKAN_BUFFER_TYPE_CAP_DMABUF)
-		maxIterator += s->formatInfoCount;
-	// Count available formats until index underflows, while fmtIterator indexes the current format.
-	// Iterate twice over formats first time with modifiers, second time without if both caps are supported.
-	while (index < (uint32_t)-1 && fmtIterator < maxIterator) {
-		const struct vulkan_format_info *f_info = &s->formatInfos[fmtIterator%s->formatInfoCount];
-		if (caps & VULKAN_BUFFER_TYPE_CAP_DMABUF && fmtIterator < s->formatInfoCount) {
-			// First round, check for modifiers
-			if (f_info->modifierCount > 0) {
-				index--;
-			}
-		} else if (caps & VULKAN_BUFFER_TYPE_CAP_SHM) {
-			// Second round, every format should be supported.
-			index--;
-		}
-		fmtIterator++;
-	}
-
-	if (index != (uint32_t)-1) {
-		// No more formats available
-		return false;
-	}
-	// Undo end of loop increment
-	fmtIterator--;
-	*fmt_idx = fmtIterator%s->formatInfoCount;
-	// Loop finished in first round
-	*has_modifier = caps & VULKAN_BUFFER_TYPE_CAP_DMABUF && fmtIterator < s->formatInfoCount;
-	return true;
-}
-
 static int port_enum_formats(void *object,
 			     enum spa_direction direction, uint32_t port_id,
 			     uint32_t index,
@@ -570,8 +525,6 @@ static int port_enum_formats(void *object,
 {
 	struct impl *this = object;
 
-	uint32_t fmt_index;
-	bool has_modifier;
 	if (this->port.have_format
 			&& this->port.current_format.info.dsp.flags & SPA_VIDEO_FLAG_MODIFIER
 			&& this->port.current_format.info.dsp.flags ^ SPA_VIDEO_FLAG_MODIFIER_FIXATION_REQUIRED) {
@@ -581,18 +534,10 @@ static int port_enum_formats(void *object,
 			*param = spa_format_video_dsp_build(builder, SPA_PARAM_EnumFormat, &this->port.current_format.info.dsp);
 			return 1;
 		}
-		if (!find_EnumFormatInfo(&this->state.base, index-1, spa_vulkan_get_buffer_caps(&this->state, direction), &fmt_index, &has_modifier))
-			return 0;
+		return spa_vulkan_compute_enumerate_formats(&this->state, index-1, spa_vulkan_compute_get_buffer_caps(&this->state, direction), param, builder);
 	} else {
-		if (!find_EnumFormatInfo(&this->state.base, index, spa_vulkan_get_buffer_caps(&this->state, direction), &fmt_index, &has_modifier))
-			return 0;
+		return spa_vulkan_compute_enumerate_formats(&this->state, index, spa_vulkan_compute_get_buffer_caps(&this->state, direction), param, builder);
 	}
-
-	const struct vulkan_format_info *f_info = &this->state.base.formatInfos[fmt_index];
-	spa_log_info(this->log, "vulkan-compute-source: enum_formats idx: %d, format %d, has_modifier %d", index, f_info->spa_format, has_modifier);
-	*param = build_EnumFormat(f_info->spa_format, has_modifier ? f_info : NULL, builder);
-
-	return 1;
 }
 
 static int
@@ -648,14 +593,14 @@ impl_node_port_enum_params(void *object, int seq,
 		if (result.index > 0)
 			return 0;
 
-		spa_log_debug(this->log, NAME" %p: %dx%d stride %d", this,
+		spa_log_debug(this->log, "%p: %dx%d stride %d", this,
 				this->position->video.size.width,
 				this->position->video.size.height,
 				this->position->video.stride);
 
 
 		if (port->current_format.info.dsp.flags & SPA_VIDEO_FLAG_MODIFIER) {
-			struct vulkan_modifier_info *mod_info = spa_vulkan_get_modifier_info(&this->state,
+			struct vulkan_modifier_info *mod_info = spa_vulkan_compute_get_modifier_info(&this->state,
 				&port->current_format.info.dsp);
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_ParamBuffers, id,
@@ -706,8 +651,8 @@ impl_node_port_enum_params(void *object, int seq,
 static int clear_buffers(struct impl *this, struct port *port)
 {
 	if (port->n_buffers > 0) {
-		spa_log_debug(this->log, NAME " %p: clear buffers", this);
-		spa_vulkan_use_buffers(&this->state, &this->state.streams[0], 0, &port->current_format.info.dsp, 0, NULL);
+		spa_log_debug(this->log, "%p: clear buffers", this);
+		spa_vulkan_compute_use_buffers(&this->state, &this->state.streams[0], 0, &port->current_format.info.dsp, 0, NULL);
 		port->n_buffers = 0;
 		spa_list_init(&port->empty);
 		spa_list_init(&port->ready);
@@ -726,7 +671,7 @@ static int port_set_format(struct impl *this, struct port *port,
 	if (format == NULL) {
 		port->have_format = false;
 		clear_buffers(this, port);
-		spa_vulkan_unprepare(&this->state);
+		spa_vulkan_compute_unprepare(&this->state);
 	} else {
 		struct spa_video_info info = { 0 };
 
@@ -763,10 +708,10 @@ static int port_set_format(struct impl *this, struct port *port,
 			modifiers++;
 
 			uint64_t fixed_modifier;
-			if (spa_vulkan_fixate_modifier(&this->state, &this->state.streams[0], &info.info.dsp, modifierCount, modifiers, &fixed_modifier) != 0)
+			if (spa_vulkan_compute_fixate_modifier(&this->state, &this->state.streams[0], &info.info.dsp, modifierCount, modifiers, &fixed_modifier) != 0)
 				return -EINVAL;
 
-			spa_log_info(this->log, NAME ": modifier fixated %"PRIu64, fixed_modifier);
+			spa_log_info(this->log, "modifier fixated %"PRIu64, fixed_modifier);
 
 			info.info.dsp.modifier = fixed_modifier;
 			info.info.dsp.flags &= ~SPA_VIDEO_FLAG_MODIFIER_FIXATION_REQUIRED;
@@ -782,11 +727,11 @@ static int port_set_format(struct impl *this, struct port *port,
 
 		port->current_format = info;
 		port->have_format = true;
-		spa_vulkan_prepare(&this->state);
+		spa_vulkan_compute_prepare(&this->state);
 
 		if (modifier_fixed) {
 			port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
-			port->params[0].flags ^= SPA_PARAM_INFO_SERIAL;
+			port->params[IDX_EnumFormat].flags ^= SPA_PARAM_INFO_SERIAL;
 			emit_port_info(this, port, false);
 			return 0;
 		}
@@ -794,11 +739,11 @@ static int port_set_format(struct impl *this, struct port *port,
 
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 	if (port->have_format) {
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_READWRITE);
+		port->params[IDX_Buffer] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
 	} else {
-		port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-		port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+		port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+		port->params[IDX_Buffer] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	}
 	emit_port_info(this, port, false);
 
@@ -864,7 +809,7 @@ impl_node_port_use_buffers(void *object,
 		spa_log_info(this->log, "%p: %d:%d add buffer %p", port, direction, port_id, b);
 		spa_list_append(&port->empty, &b->link);
 	}
-	spa_vulkan_use_buffers(&this->state, &this->state.streams[0], flags, &port->current_format.info.dsp, n_buffers, buffers);
+	spa_vulkan_compute_use_buffers(&this->state, &this->state.streams[0], flags, &port->current_format.info.dsp, n_buffers, buffers);
 	port->n_buffers = n_buffers;
 
 	return 0;
@@ -985,7 +930,7 @@ static int impl_clear(struct spa_handle *handle)
 
 	this = (struct impl *) handle;
 
-	spa_vulkan_deinit(&this->state);
+	spa_vulkan_compute_deinit(&this->state);
 
 	if (this->data_loop)
 		spa_loop_invoke(this->data_loop, do_remove_timer, 0, NULL, 0, true, this);
@@ -1036,10 +981,10 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info = SPA_NODE_INFO_INIT();
 	this->info.max_output_ports = 1;
 	this->info.flags = SPA_NODE_FLAG_RT;
-	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
-	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
+	this->params[IDX_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, SPA_PARAM_INFO_READ);
+	this->params[IDX_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_READWRITE);
 	this->info.params = this->params;
-	this->info.n_params = 2;
+	this->info.n_params = N_NODE_PARAMS;
 	reset_props(&this->props);
 
 	this->timer_source.func = on_output;
@@ -1064,22 +1009,22 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.flags = SPA_PORT_FLAG_NO_REF;
 	if (this->props.live)
 		port->info.flags |= SPA_PORT_FLAG_LIVE;
-	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
-	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
-	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
-	port->params[3] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
-	port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
+	port->params[IDX_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	port->params[IDX_Meta] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
+	port->params[IDX_IO] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	port->params[IDX_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	port->params[IDX_Buffer] = SPA_PARAM_INFO(SPA_PARAM_Buffers, 0);
 	port->info.params = port->params;
-	port->info.n_params = 5;
+	port->info.n_params = N_PORT_PARAMS;
 	spa_list_init(&port->empty);
 	spa_list_init(&port->ready);
 
 	this->state.log = this->log;
-	spa_vulkan_init_stream(&this->state, &this->state.streams[0],
+	spa_vulkan_compute_init_stream(&this->state, &this->state.streams[0],
 			SPA_DIRECTION_OUTPUT, NULL);
 	this->state.shaderName = "spa/plugins/vulkan/shaders/main.spv";
 	this->state.n_streams = 1;
-	spa_vulkan_init(&this->state);
+	spa_vulkan_compute_init(&this->state);
 
 	return 0;
 }

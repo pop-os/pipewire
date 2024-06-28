@@ -9,6 +9,7 @@
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
 #include <spa/utils/string.h>
+#include <spa/utils/json-pod.h>
 
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
@@ -66,6 +67,7 @@ struct object_data {
 #define OBJECT_DEVICE	1
 	uint32_t type;
 	struct spa_handle *handle;
+	struct spa_handle *subhandle;
 	void *object;
 	struct spa_hook listener;
 };
@@ -94,22 +96,53 @@ static void object_update(struct object_data *od, const struct spa_dict *props)
 	}
 }
 
-static void object_register(struct object_data *od)
+static void object_register(struct object_data *od, uint32_t device_id)
 {
+	char id[64];
+	struct spa_dict_item it[1];
+	snprintf(id, sizeof(id), "%u", device_id);
+
+	it[0] = SPA_DICT_ITEM_INIT(PW_KEY_DEVICE_ID, id);
 	switch (od->type) {
 	case OBJECT_NODE:
+		pw_impl_node_update_properties(od->object, &SPA_DICT_INIT_ARRAY(it));
 		pw_impl_node_register(od->object, NULL);
 		pw_impl_node_set_active(od->object, true);
 		break;
 	case OBJECT_DEVICE:
+		pw_impl_device_update_properties(od->object, &SPA_DICT_INIT_ARRAY(it));
 		pw_impl_device_register(od->object, NULL);
 		break;
 	}
 }
 
+struct match {
+	struct pw_impl_device *device;
+	int count;
+};
+#define MATCH_INIT(n) ((struct match){ .device = (n) })
+
+static int execute_match(void *data, const char *location, const char *action,
+		const char *val, size_t len)
+{
+	struct match *match = data;
+	struct pw_impl_device *this = match->device;
+	if (spa_streq(action, "update-props")) {
+		match->count += pw_properties_update_string(this->properties, val, len);
+		this->info.props = &this->properties->dict;
+	}
+	return 1;
+}
+
 static void check_properties(struct pw_impl_device *device)
 {
+	struct pw_context *context = device->context;
 	const char *str;
+	struct match match;
+
+	match = MATCH_INIT(device);
+	pw_context_conf_section_match_rules(context, "device.rules",
+			&device->properties->dict, execute_match, &match);
 
 	if ((str = pw_properties_get(device->properties, PW_KEY_DEVICE_NAME)) &&
 	    (device->name == NULL || !spa_streq(str, device->name))) {
@@ -352,6 +385,16 @@ int pw_impl_device_for_each_param(struct pw_impl_device *device,
 	return res;
 }
 
+SPA_EXPORT
+int pw_impl_device_set_param(struct pw_impl_device *device,
+		uint32_t id, uint32_t flags, const struct spa_pod *param)
+{
+	pw_log_debug("%p: set_param id:%d (%s) flags:%08x param:%p", device, id,
+			spa_debug_type_find_name(spa_type_param, id), flags, param);
+	return spa_device_set_param(device->device, id, flags, param);
+}
+
+
 static int reply_param(void *data, int seq, uint32_t id,
 		uint32_t index, uint32_t next, struct spa_pod *param)
 {
@@ -538,7 +581,6 @@ int pw_impl_device_register(struct pw_impl_device *device,
 		       struct pw_properties *properties)
 {
 	static const char * const keys[] = {
-		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_ID,
@@ -584,7 +626,7 @@ int pw_impl_device_register(struct pw_impl_device *device,
 	pw_global_register(device->global);
 
 	spa_list_for_each(od, &device->object_list, link)
-		object_register(od);
+		object_register(od, device->info.id);
 
 	return 0;
 
@@ -603,6 +645,8 @@ static void on_object_free(void *data)
 {
 	struct object_data *od = data;
 	pw_unload_spa_handle(od->handle);
+	if (od->subhandle)
+		pw_unload_spa_handle(od->subhandle);
 }
 
 static const struct pw_impl_node_events node_object_events = {
@@ -647,11 +691,10 @@ static int update_properties(struct pw_impl_device *device, const struct spa_dic
 
 	pw_log_debug("%p: updated %d properties", device, changed);
 
-	if (!changed)
-		return 0;
-
-	device->info.change_mask |= PW_DEVICE_CHANGE_MASK_PROPS;
-
+	if (changed) {
+		check_properties(device);
+		device->info.change_mask |= PW_DEVICE_CHANGE_MASK_PROPS;
+	}
 	return changed;
 }
 
@@ -758,37 +801,72 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 		const struct spa_device_object_info *info)
 {
 	struct pw_context *context = device->context;
-	struct spa_handle *handle;
-	struct pw_properties *props;
+	struct spa_handle *handle, *subhandle = NULL;
+	spa_autoptr(pw_properties) props = NULL;
+	const struct pw_properties *p;
 	int res;
 	void *iface;
 	struct object_data *od = NULL;
+	const char *str;
 
 	if (info->factory_name == NULL) {
 		pw_log_debug("%p: missing factory name", device);
 		return;
 	}
 
-	handle = pw_context_load_spa_handle(context, info->factory_name, info->props);
+	props = pw_properties_new(NULL, NULL);
+	if (props == NULL) {
+		pw_log_warn("%p: allocation error: %m", device);
+		return;
+	}
+	if (info->props)
+		pw_properties_update(props, info->props);
+	if ((str = pw_properties_get(device->properties, "device.object.properties")))
+		pw_properties_update_string(props, str, strlen(str));
+
+	p = pw_context_get_properties(context);
+	pw_properties_set(props, "clock.quantum-limit",
+			pw_properties_get(p, "default.clock.quantum-limit"));
+
+	handle = pw_context_load_spa_handle(context, info->factory_name, &props->dict);
 	if (handle == NULL) {
 		pw_log_warn("%p: can't load handle %s: %m",
 				device, info->factory_name);
-		return;
+		goto cleanup;
 	}
 
 	if ((res = spa_handle_get_interface(handle, info->type, &iface)) < 0) {
 		pw_log_error("%p: can't get %s interface: %s", device, info->type,
 				spa_strerror(res));
-		return;
+		goto cleanup;
 	}
-
-	props = pw_properties_copy(device->properties);
-	if (info->props && props)
-		pw_properties_update(props, info->props);
 
 	if (spa_streq(info->type, SPA_TYPE_INTERFACE_Node)) {
 		struct pw_impl_node *node;
-		node = pw_context_create_node(context, props, sizeof(struct object_data));
+
+		if ((str = pw_properties_get(props, "node.adapter")) != NULL) {
+			char name[64];
+			snprintf(name, sizeof(name), "%s.follower", str);
+	                pw_properties_setf(props, name, "pointer:%p", iface);
+
+			subhandle = handle;
+
+			handle = pw_context_load_spa_handle(context, str, &props->dict);
+			if (handle == NULL) {
+				pw_log_warn("%p: can't load handle %s: %m", device, str);
+				goto cleanup;
+			}
+			if ((res = spa_handle_get_interface(handle, info->type, &iface)) < 0) {
+				pw_log_error("%p: can't get %s interface: %s", device, info->type,
+						spa_strerror(res));
+				goto cleanup;
+			}
+		}
+
+		node = pw_context_create_node(context, spa_steal_ptr(props),
+				sizeof(struct object_data));
+		if (node == NULL)
+			goto cleanup;
 
 		od = pw_impl_node_get_user_data(node);
 		od->object = node;
@@ -797,7 +875,10 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 		pw_impl_node_set_implementation(node, iface);
 	} else if (spa_streq(info->type, SPA_TYPE_INTERFACE_Device)) {
 		struct pw_impl_device *dev;
-		dev = pw_context_create_device(context, props, sizeof(struct object_data));
+		dev = pw_context_create_device(context, spa_steal_ptr(props),
+				sizeof(struct object_data));
+		if (dev == NULL)
+			goto cleanup;
 
 		od = pw_impl_device_get_user_data(dev);
 		od->object = dev;
@@ -806,16 +887,23 @@ static void device_add_object(struct pw_impl_device *device, uint32_t id,
 		pw_impl_device_set_implementation(dev, iface);
 	} else {
 		pw_log_warn("%p: unknown type %s", device, info->type);
-		pw_properties_free(props);
+		goto cleanup;
 	}
-
 	if (od) {
 		od->id = id;
 		od->handle = handle;
+		od->subhandle = subhandle;
 		spa_list_append(&device->object_list, &od->link);
 		if (device->global)
-			object_register(od);
+			object_register(od, device->info.id);
 	}
+	return;
+
+cleanup:
+	if (handle)
+		pw_unload_spa_handle(handle);
+	if (subhandle)
+		pw_unload_spa_handle(subhandle);
 	return;
 }
 
@@ -857,9 +945,36 @@ static const struct spa_device_events device_events = {
 	.object_info = device_object_info,
 };
 
+static int handle_device_param(struct pw_impl_device *device, const char *key, const char *value)
+{
+	const struct spa_type_info *ti;
+	uint8_t buffer[1024];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod *pod;
+	int res;
+
+	ti = spa_debug_type_find_short(spa_type_param, key);
+	if (ti == NULL)
+		return -ENOENT;
+
+	if ((res = spa_json_to_pod(&b, 0, ti, value, strlen(value))) < 0)
+		return res;
+
+	if ((pod = spa_pod_builder_deref(&b, 0)) == NULL)
+		return -ENOSPC;
+
+	if ((res = pw_impl_device_set_param(device, ti->type, 0, pod)) < 0)
+		return res;
+
+	return 0;
+}
+
 SPA_EXPORT
 int pw_impl_device_set_implementation(struct pw_impl_device *device, struct spa_device *spa_device)
 {
+	int res;
+	const struct spa_dict_item *it;
+
 	pw_log_debug("%p: implementation %p", device, spa_device);
 
 	if (device->device) {
@@ -868,10 +983,19 @@ int pw_impl_device_set_implementation(struct pw_impl_device *device, struct spa_
 		return -EEXIST;
 	}
 	device->device = spa_device;
-	spa_device_add_listener(device->device,
+	res = spa_device_add_listener(device->device,
 			&device->listener, &device_events, device);
 
-	return 0;
+again:
+	spa_dict_for_each(it, &device->properties->dict) {
+		if (spa_strstartswith(it->key, "device.param.")) {
+			if ((res = handle_device_param(device, &it->key[13], it->value)) < 0)
+				pw_log_warn("can't set device param: %s", spa_strerror(res));
+			pw_properties_set(device->properties, it->key, NULL);
+			goto again;
+		}
+	}
+	return res;
 }
 
 SPA_EXPORT

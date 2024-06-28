@@ -21,9 +21,9 @@
 
 #include <systemd/sd-journal.h>
 
-#include "log-patterns.h"
-
-#define NAME "journal"
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.journal");
 
 #define DEFAULT_LOG_LEVEL SPA_LOG_LEVEL_INFO
 
@@ -33,8 +33,6 @@ struct impl {
 
 	/* if non-null, we'll additionally forward all logging to there */
 	struct spa_log *chain_log;
-
-	struct spa_list patterns;
 };
 
 static SPA_PRINTF_FUNC(7,0) void
@@ -58,6 +56,7 @@ impl_log_logtv(void *object,
 	if (impl->chain_log != NULL) {
 		va_list args_copy;
 		va_copy(args_copy, args);
+		impl->chain_log->level = impl->log.level;
 		spa_log_logtv(impl->chain_log,
 			      level, topic,
 			      file, line, func, fmt, args_copy);
@@ -161,22 +160,12 @@ impl_log_logt(void *object,
 	va_end(args);
 }
 
-static void
-impl_log_topic_init(void *object, struct spa_log_topic *t)
-{
-	struct impl *impl = object;
-	enum spa_log_level level = impl->log.level;
-
-	support_log_topic_init(&impl->patterns, level, t);
-}
-
 static const struct spa_log_methods impl_log = {
 	SPA_VERSION_LOG_METHODS,
 	.log = impl_log_log,
 	.logv = impl_log_logv,
 	.logt = impl_log_logt,
 	.logtv = impl_log_logtv,
-	.topic_init = impl_log_topic_init,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
@@ -198,12 +187,11 @@ static int impl_get_interface(struct spa_handle *handle, const char *type, void 
 
 static int impl_clear(struct spa_handle *handle)
 {
-	struct impl *this;
+	struct impl SPA_UNUSED *this;
 
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
 	this = (struct impl *) handle;
-	support_log_free_patterns(&this->patterns);
 
 	return 0;
 }
@@ -269,13 +257,9 @@ impl_init(const struct spa_handle_factory *factory,
 			&impl_log, impl);
 	impl->log.level = DEFAULT_LOG_LEVEL;
 
-	spa_list_init(&impl->patterns);
-
 	if (info) {
 		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_LEVEL)) != NULL)
 			impl->log.level = atoi(str);
-		if ((str = spa_dict_lookup(info, SPA_KEY_LOG_PATTERNS)) != NULL)
-			support_log_parse_patterns(&impl->patterns, str);
 	}
 
 	/* if our stderr goes to the journal, there's no point in logging both
@@ -286,7 +270,7 @@ impl_init(const struct spa_handle_factory *factory,
 	else
 		impl->chain_log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 
-	spa_log_debug(&impl->log, NAME " %p: initialized", impl);
+	spa_log_debug(&impl->log, "%p: initialized", impl);
 
 	return 0;
 }
@@ -325,6 +309,7 @@ static const struct spa_handle_factory journal_factory = {
 	.enum_interface_info = impl_enum_interface_info,
 };
 
+SPA_LOG_TOPIC_ENUM_DEFINE_REGISTERED;
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)

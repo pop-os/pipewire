@@ -49,7 +49,7 @@ Build-Depends: dpkg-dev (>= 1.22.5), debhelper-compat (= 13),
 Build-Conflicts: libfdk-aac-dev
 Standards-Version: 4.7.0
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
-Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
+Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git -b debian/experimental
 Homepage: https://pipewire.org/
 Rules-Requires-Root: no
 
@@ -255,6 +255,7 @@ Architecture: any
 Multi-Arch: foreign
 Replaces: pipewire-bin (<< 0.3.27-2)
 Breaks: pipewire-bin (<< 0.3.27-2)
+Conflicts: pulseaudio-module-gsettings
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}

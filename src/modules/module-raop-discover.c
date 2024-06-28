@@ -45,6 +45,8 @@
  *
  * Options specific to the behavior of this module
  *
+ * - `roap.discover-local` = allow discovery of local services as well.
+ *    false by default.
  * - `raop.latency.ms` = latency for all streams in microseconds. This
  *    can be overwritten in the stream rules.
  * - `stream.rules` = <rules>: match rules, use create-stream actions. See
@@ -56,12 +58,11 @@
  * context.modules = [
  * {   name = libpipewire-raop-discover
  *     args = {
+ *         #roap.discover-local = false;
  *         #raop.latency.ms = 1000
  *         stream.rules = [
  *             {   matches = [
  *                     {    raop.ip = "~.*"
- *                          #raop.ip.version = 4 | 6
- *                          #raop.ip.version = 4
  *                          #raop.port = 1000
  *                          #raop.name = ""
  *                          #raop.hostname = ""
@@ -118,6 +119,8 @@ static const struct spa_dict_item module_props[] = {
 
 struct impl {
 	struct pw_context *context;
+
+	bool discover_local;
 
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
@@ -247,7 +250,7 @@ static void pw_properties_from_avahi_string(const char *key, const char *value,
 			value = "none";
 		pw_properties_set(props, "raop.encryption.type", value);
 	} else if (spa_streq(key, "cn")) {
-		/* Suported audio codecs:
+		/* Supported audio codecs:
 		 *  0 = PCM,
 		 *  1 = ALAC,
 		 *  2 = AAC,
@@ -365,15 +368,20 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	struct impl *impl = userdata;
 	struct tunnel_info tinfo;
 	struct tunnel *t;
-	const char *str;
+	const char *str, *link_local_range = "169.254.";
 	AvahiStringList *l;
 	struct pw_properties *props = NULL;
-	char at[AVAHI_ADDRESS_STR_MAX];
-	int ipv;
+	char at[AVAHI_ADDRESS_STR_MAX], if_suffix[16] = "";
 
 	if (event != AVAHI_RESOLVER_FOUND) {
 		pw_log_error("Resolving of '%s' failed: %s", name,
 				avahi_strerror(avahi_client_errno(impl->client)));
+		goto done;
+	}
+
+	avahi_address_snprint(at, sizeof(at), a);
+	if (spa_strstartswith(at, link_local_range)) {
+		pw_log_info("found link-local ip address %s - skipping tunnel creation", at);
 		goto done;
 	}
 
@@ -387,7 +395,7 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 		goto done;
 	}
 	if (t->module != NULL) {
-		pw_log_info("found duplicate mdns entry - skipping tunnel creation");
+		pw_log_info("found duplicate mdns entry for %s on IP %s - skipping tunnel creation", name, at);
 		goto done;
 	}
 
@@ -397,10 +405,13 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 		goto done;
 	}
 
-	avahi_address_snprint(at, sizeof(at), a);
-	ipv = protocol == AVAHI_PROTO_INET ? 4 : 6;
-	pw_properties_setf(props, "raop.ip", "%s", at);
-	pw_properties_setf(props, "raop.ip.version", "%d", ipv);
+	if (a->proto == AVAHI_PROTO_INET6 &&
+	    a->data.ipv6.address[0] == 0xfe &&
+	    (a->data.ipv6.address[1] & 0xc0) == 0x80)
+		snprintf(if_suffix, sizeof(if_suffix), "%%%d", interface);
+
+	pw_properties_setf(props, "raop.ip", "%s%s", at, if_suffix);
+	pw_properties_setf(props, "raop.ifindex", "%d", interface);
 	pw_properties_setf(props, "raop.port", "%u", port);
 	pw_properties_setf(props, "raop.name", "%s", name);
 	pw_properties_setf(props, "raop.hostname", "%s", host_name);
@@ -449,7 +460,7 @@ static void browser_cb(AvahiServiceBrowser *b, AvahiIfIndex interface, AvahiProt
 	struct tunnel_info info;
 	struct tunnel *t;
 
-	if (flags & AVAHI_LOOKUP_RESULT_LOCAL)
+	if ((flags & AVAHI_LOOKUP_RESULT_LOCAL) && !impl->discover_local)
 		return;
 
 	info = TUNNEL_INFO(.name = name);
@@ -582,6 +593,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->properties = props;
+
+	impl->discover_local =  pw_properties_get_bool(impl->properties,
+			"raop.discover-local", false);
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 

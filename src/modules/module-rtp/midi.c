@@ -15,7 +15,7 @@ static void rtp_midi_process_playback(void *data)
 	struct spa_pod_control *c;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
-		pw_log_debug("Out of stream buffers: %m");
+		pw_log_info("Out of stream buffers: %m");
 		return;
 	}
 	d = buf->buffer->datas;
@@ -204,12 +204,12 @@ static int rtp_midi_receive_midi(struct impl *impl, uint8_t *packet, uint32_t ti
 			/* our current time is now the estimated time */
 			t = estimated;
 		}
-		pw_log_debug("%f %f %f %f", t, estimated, diff, impl->corr);
+		pw_log_trace("%f %f %f %f", t, estimated, diff, impl->corr);
 
-		timestamp = t * impl->rate;
+		timestamp = (uint32_t)(t * impl->rate);
 
-		impl->last_timestamp = ts;
-		impl->last_time = t;
+		impl->last_timestamp = (float)ts;
+		impl->last_time = (float)t;
 	}
 
 	filled = spa_ringbuffer_get_write_index(&impl->ring, &write);
@@ -248,7 +248,7 @@ static int rtp_midi_receive_midi(struct impl *impl, uint8_t *packet, uint32_t ti
 		else
 			offs += parse_varlen(&packet[offs], end - offs, &delta);
 
-		timestamp += delta * impl->corr;
+		timestamp += (uint32_t)(delta * impl->corr);
 		spa_pod_builder_control(&b, timestamp, SPA_CONTROL_Midi);
 
 		size = get_midi_size(&packet[offs], end - offs);
@@ -315,7 +315,7 @@ short_packet:
 	return -EINVAL;
 invalid_version:
 	pw_log_warn("invalid RTP version");
-	spa_debug_mem(0, buffer, len);
+	spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_INFO, 0, buffer, len);
 	return -EPROTO;
 invalid_len:
 	pw_log_warn("invalid RTP length");
@@ -400,7 +400,7 @@ static void rtp_midi_flush_packets(struct impl *impl,
 			}
 			iov[2].iov_len = len;
 
-			pw_log_debug("sending %d timestamp:%d %u %u",
+			pw_log_trace("sending %d timestamp:%d %u %u",
 					len, timestamp + base,
 					offset, impl->psamples);
 			rtp_stream_emit_send_packet(impl, iov, 3);
@@ -436,7 +436,7 @@ static void rtp_midi_flush_packets(struct impl *impl,
 		}
 		iov[2].iov_len = len;
 
-		pw_log_debug("sending %d timestamp:%d", len, base);
+		pw_log_trace("sending %d timestamp:%d", len, base);
 		rtp_stream_emit_send_packet(impl, iov, 3);
 		impl->seq++;
 	}
@@ -452,7 +452,7 @@ static void rtp_midi_process_capture(void *data)
 	void *ptr;
 
 	if ((buf = pw_stream_dequeue_buffer(impl->stream)) == NULL) {
-		pw_log_debug("Out of stream buffers: %m");
+		pw_log_info("Out of stream buffers: %m");
 		return;
 	}
 	d = buf->buffer->datas;

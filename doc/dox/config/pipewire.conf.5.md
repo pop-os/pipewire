@@ -153,6 +153,41 @@ The name of the shared library to use for the system functions for the data proc
 thread. This can typically be changed if the data thread is running on a realtime
 kernel such as EVL.
 
+@PAR@ pipewire.conf  loop.rt-prio = -1
+The priority of the data loops. The data loops are used to schedule the nodes in the graph.
+A value of -1 uses the default realtime priority from the module-rt. A value of 0 disables
+realtime scheduling for the data loops.
+
+@PAR@ pipewire.conf  loop.class = [ data.rt .. ]
+An array of classes of the data loops. Normally nodes are assigned to a loop by name or by class.
+Nodes are by default assigned to the data.rt class so it is good to have a data loop
+of this class as well.
+
+@PAR@ pipewire.conf  context.num-data-loops = 1
+The number of data loops to create. By default 1 data-loop is created and all nodes are
+scheduled in this thread. A value of 0 disables the real-time data loops and schedules
+all nodes in the main thread. A value of -1 spawns as many data threads as there are
+cpu cores.
+
+@PAR@ pipewire.conf  context.data-loops = [ ... ]
+This controls the data loops that will be created for the context. Is is an array of
+data loop specifications, one entry for each data loop to start:
+```json
+context.data-loops = [
+    {
+         #library.name.system = support/libspa-support
+         loop.rt-prio = -1
+         loop.class = [ data.rt .. ]
+         thread.name = data-loop.0
+         thread.affinity = [ 0 1 ]
+    }
+    ...
+]
+```
+A specific priority, classes and name can be given with loop.rt-prio, loop.class and
+thread.name respectively. It is also possible to pin the data loop to specific CPU
+cores with the thread.affinity property.
+
 @PAR@ pipewire.conf  core.daemon = false
 Makes the PipeWire process, started with this config, a daemon
 process. This means that it will manage and schedule a graph for
@@ -166,6 +201,11 @@ PipeWire socket clients can connect to.
 @PAR@ pipewire.conf  cpu.zero.denormals = false
 Configures the CPU to zero denormals automatically. This will be
 enabled for the data processing thread only, when enabled.
+
+@PAR@ pipewire.conf  cpu.vm.name = null
+This will be set automatically when the context is created and will
+contain the name of the VM. It is typically used to write match rules
+to set extra properties.
 
 @PAR@ pipewire.conf  default.clock.rate  = 48000
 The default clock rate determines the real time duration of the
@@ -245,7 +285,8 @@ it. Disable this if you want to globally disable DBus support in the process.
 
 @PAR@ pipewire.conf  vm.overrides = { default.clock.min-quantum = 1024 }
 Any property in the vm.overrides property object will override the property
-in the context.properties when PipeWire detects it is running in a VM.
+in the context.properties when PipeWire detects it is running in a VM. This
+is deprecated, use the context.properties.rules instead.
 
 @PAR@ pipewire.conf  context.modules.allow-empty = false
 By default, a warning is logged when there are no context.modules loaded because this
@@ -372,7 +413,7 @@ part of the initialization of the PipeWire program.
 ```json
 context.exec = [
     #{   path = <program-name>
-    #    ( args = "<arguments>" )
+    #    ( args = "<arguments>" | [ <arg1> <arg2> ... ] )
     #    ( condition = [ { <key> = <value> ... } ... ] )
     #}
 ]
@@ -433,13 +474,191 @@ The general rules object follows the following pattern:
     }
 ]
 ```
+Match rules are an array of rules.
 
-The rules is an array of things to match and what actions to perform
-when a match is found.
+A rule is always a JSON object with two keys: matches and actions. The matches key is used to
+define the conditions that need to be met for the rule to be evaluated as true, and the actions
+key is used to define the actions that are performed when the rule is evaluated as true.
 
-The available actions and their values depend on the specific rule
-that is used. Usually it is possible to update some properties or set
-some quirks on the object.
+The matches key is always a JSON array of objects, where each object defines a condition that needs
+to be met. Each condition is a list of key-value pairs, where the key is the name of the property
+that is being matched, and the value is the value that the property needs to have. Within a condition,
+all the key-value pairs are combined with a logical AND, and all the conditions in the matches
+array are combined with a logical OR.
+
+The actions key is always a JSON object, where each key-value pair defines an action that is
+performed when the rule is evaluated as true. The action name is specific to the rule and is
+defined by the rule’s documentation, but most frequently you will see the update-props action,
+which is used to update the properties of the matched object.
+
+In the matches array, it is also possible to use regular expressions to match property values.
+For example, to match all nodes with a name that starts with my_, you can use the following condition:
+
+```
+matches = [
+  {
+    node.name = "~my_.*"
+  }
+]
+```
+
+The ~ character signifies that the value is a regular expression. The exact syntax of the regular
+expressions is the POSIX extended regex syntax, as described in the regex (7) man page. 
+
+In addition to regular expressions, you may also use the ! character to negate a condition. For
+example, to match all nodes with a name that does not start with my_, you can use the following condition:
+
+```
+matches = [
+  {
+    node.name = "!~my_.*"
+  }
+]
+```
+
+The ! character can be used with or without a regular expression. For example, to match all
+nodes with a name that is not equal to my_node, you can use the following condition:
+
+```
+matches = [
+  {
+    node.name = "!my_node"
+  }
+]
+```
+
+The null value has a special meaning; it checks if the property is not available
+(or unset). To check if a property is not set:
+
+```
+matches = [
+  {
+    node.name = null
+  }
+]
+```
+
+To check the existence of a property, one can use the !null condition, for example:
+
+```
+matches = [
+  {
+    node.name = "!null"
+  }
+  {
+    node.name = !null            # simplified syntax
+  }
+]
+```
+To handle the "null" string, one needs to escape the string. For example, to check
+if a property has the string value "null", use:
+
+```
+matches = [
+  {
+    node.name = "null"
+  }
+]
+```
+To handle anything but the "null" string, use:
+
+```
+matches = [
+  {
+    node.name = "!\"null\""
+  }
+  {
+    node.name = !"null"      # simplified syntax
+  }
+]
+```
+
+
+# CONTEXT PROPERTIES RULES  @IDX@ pipewire.conf
+
+`context.properties.rules` can be used to dynamically update the properties
+based on other properties.
+
+A typical case is to update custom settings when running inside a VM.
+The `cpu.vm.name` is automatically set when running in a VM with the name of
+the VM. A match rule can be written to set custom properties like this:
+
+```
+context.properties.rules = [
+    {   matches = [ { cpu.vm.name = !null } ]
+        actions = {
+            update-props = {
+                # These overrides are only applied when running in a vm.
+                default.clock.min-quantum = 1024
+	    }
+        }
+    }
+}
+```
+
+# NODE RULES  @IDX@ pipewire.conf
+
+The node.rules are evaluated every time the properties on a node are set
+or updated. This can be used on the server side to override client set
+properties on arbitrary nodes.
+
+`node.rules` provides an `update-props` action that takes an object with
+properties that are updated on the node object.
+
+Add a `node.rules` section in the config file like this:
+
+```
+node.rules = [
+    {
+        matches = [
+            {
+                # all keys must match the value. ! negates. ~ starts regex.
+                client.name = "jack_simple_client"
+            }
+        ]
+        actions = {
+            update-props = {
+                node.force-quantum = 512
+            }
+        }
+    }
+]
+```
+
+Will set the `node.force-quantum` property of `jack_simple_client` to 512.
+
+# DEVICE RULES  @IDX@ pipewire.conf
+
+The device.rules are evaluated every time the properties on a device are set
+or updated. This can be used on the server side to override client set
+properties on arbitrary devices.
+
+`device.rules` provides an `update-props` action that takes an object with
+properties that are updated on the device object.
+
+Add a `device.rules` section in the config file like this:
+
+```
+device.rules = [
+    {
+        matches = [
+            {
+                # all keys must match the value. ! negates. ~ starts regex.
+                device.name = ""v4l2_device.pci-0000_00_14.0-usb-0_1.2_1.0
+            }
+        ]
+        actions = {
+            update-props = {
+                device.description = "My Webcam"
+            }
+        }
+    }
+]
+```
+
+Will set the `device.description` property of the device with the given `device.name`
+to "My Webcam".
+
 
 # AUTHORS
 

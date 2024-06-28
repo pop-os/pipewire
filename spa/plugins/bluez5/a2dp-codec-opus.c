@@ -27,9 +27,6 @@
 #include "media-codecs.h"
 
 static struct spa_log *log;
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.codecs.opus");
-#undef SPA_LOG_TOPIC_DEFAULT
-#define SPA_LOG_TOPIC_DEFAULT &log_topic
 
 #define BUFSIZE_FROM_BITRATE(frame_dms,bitrate)	((bitrate)/8 * (frame_dms) / 10000 * 5/4)  /* estimate */
 
@@ -182,7 +179,7 @@ struct surround_encoder_mapping {
 #define BT_AUDIO_LOCATION_BC	0x00200000  /* Bottom Front Center */
 #define BT_AUDIO_LOCATION_BLC	0x00400000  /* Bottom Front Left */
 #define BT_AUDIO_LOCATION_BRC	0x00800000  /* Bottom Front Right */
-#define BT_AUDIO_LOCATION_FLW	0x01000000  /* Fron Left Wide */
+#define BT_AUDIO_LOCATION_FLW	0x01000000  /* Front Left Wide */
 #define BT_AUDIO_LOCATION_FRW	0x02000000  /* Front Right Wide */
 #define BT_AUDIO_LOCATION_SSL	0x04000000  /* Left Surround */
 #define BT_AUDIO_LOCATION_SSR	0x08000000  /* Right Surround */
@@ -1333,7 +1330,7 @@ static int codec_increase_bitpool(void *data)
 static void codec_set_log(struct spa_log *global_log)
 {
 	log = global_log;
-	spa_log_topic_init(log, &log_topic);
+	spa_log_topic_init(log, &codec_plugin_log_topic);
 }
 
 #define OPUS_05_COMMON_DEFS					\
@@ -1363,7 +1360,7 @@ const struct media_codec a2dp_codec_opus_05 = {
 	OPUS_05_COMMON_FULL_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05,
 	.name = "opus_05",
-	.description = "Opus",
+	.description = "Opus 05",
 	.fill_caps = codec_fill_caps,
 };
 
@@ -1371,7 +1368,7 @@ const struct media_codec a2dp_codec_opus_05_51 = {
 	OPUS_05_COMMON_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_51,
 	.name = "opus_05_51",
-	.description = "Opus 5.1 Surround",
+	.description = "Opus 05 5.1 Surround",
 	.endpoint_name = "opus_05",
 	.fill_caps = NULL,
 };
@@ -1380,7 +1377,7 @@ const struct media_codec a2dp_codec_opus_05_71 = {
 	OPUS_05_COMMON_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_71,
 	.name = "opus_05_71",
-	.description = "Opus 7.1 Surround",
+	.description = "Opus 05 7.1 Surround",
 	.endpoint_name = "opus_05",
 	.fill_caps = NULL,
 };
@@ -1390,14 +1387,14 @@ const struct media_codec a2dp_codec_opus_05_return = {
 	OPUS_05_COMMON_FULL_DEFS,
 	.id = 0,
 	.name = "opus_05_duplex_bidi",
-	.description = "Opus Duplex Bidi channel",
+	.description = "Opus 05 Duplex Bidi channel",
 };
 
 const struct media_codec a2dp_codec_opus_05_duplex = {
 	OPUS_05_COMMON_FULL_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_DUPLEX,
 	.name = "opus_05_duplex",
-	.description = "Opus Duplex",
+	.description = "Opus 05 Duplex",
 	.duplex_codec = &a2dp_codec_opus_05_return,
 	.fill_caps = codec_fill_caps,
 };
@@ -1406,7 +1403,7 @@ const struct media_codec a2dp_codec_opus_05_pro = {
 	OPUS_05_COMMON_DEFS,
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_05_PRO,
 	.name = "opus_05_pro",
-	.description = "Opus Pro Audio",
+	.description = "Opus 05 Pro Audio",
 	.init_props = codec_init_props,
 	.clear_props = codec_clear_props,
 	.duplex_codec = &a2dp_codec_opus_05_return,

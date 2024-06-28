@@ -185,18 +185,18 @@ static void on_process(void *userdata)
 	}
 	if ((mc = spa_buffer_find_meta_data(buf, SPA_META_VideoCrop, sizeof(*mc)))) {
 		data->crop = (sin(data->accumulator) + 1.0) * 32.0;
-		mc->region.position.x = data->crop;
-		mc->region.position.y = data->crop;
-		mc->region.size.width = data->format.size.width - data->crop*2;
-		mc->region.size.height = data->format.size.height - data->crop*2;
+		mc->region.position.x = (int32_t)data->crop;
+		mc->region.position.y = (int32_t)data->crop;
+		mc->region.size.width = data->format.size.width - (int32_t)(data->crop*2);
+		mc->region.size.height = data->format.size.height - (int32_t)(data->crop*2);
 	}
 	if ((mcs = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof(*mcs)))) {
 		struct spa_meta_bitmap *mb;
 		uint32_t *bitmap, color;
 
 		mcs->id = 1;
-		mcs->position.x = (sin(data->accumulator) + 1.0) * 160.0 + 80;
-		mcs->position.y = (cos(data->accumulator) + 1.0) * 100.0 + 50;
+		mcs->position.x = (int32_t)((sin(data->accumulator) + 1.0) * 160.0 + 80);
+		mcs->position.y = (int32_t)((cos(data->accumulator) + 1.0) * 100.0 + 50);
 		mcs->hotspot.x = 0;
 		mcs->hotspot.y = 0;
 		mcs->bitmap_offset = sizeof(struct spa_meta_cursor);
@@ -209,7 +209,7 @@ static void on_process(void *userdata)
 		mb->offset = sizeof(struct spa_meta_bitmap);
 
 		bitmap = SPA_PTROFF(mb, mb->offset, uint32_t);
-		color = (cos(data->accumulator) + 1.0) * (1 << 23);
+		color = (uint32_t)((cos(data->accumulator) + 1.0) * (1 << 23));
 		color |= 0xff000000;
 
 		draw_elipse(bitmap, mb->size.width, mb->size.height, color);
@@ -308,7 +308,7 @@ static void on_stream_add_buffer(void *_data, struct pw_buffer *buffer)
 	printf("use memfd\n");
 	/* create the memfd on the buffer, set the type and flags */
 	d[0].type = SPA_DATA_MemFd;
-	d[0].flags = SPA_DATA_FLAG_READWRITE;
+	d[0].flags = SPA_DATA_FLAG_READWRITE | SPA_DATA_FLAG_MAPPABLE;
 #ifdef HAVE_MEMFD_CREATE
 	d[0].fd = memfd_create("video-src-fixate-memfd", MFD_CLOEXEC | MFD_ALLOW_SEALING);
 #else

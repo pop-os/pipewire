@@ -60,14 +60,6 @@ struct buffer {
 	void *ptr;
 };
 
-#define MAX_CONTROLS	64
-
-struct control {
-	uint32_t id;
-	uint32_t ctrl_id;
-	double value;
-};
-
 struct port {
 	struct impl *impl;
 
@@ -78,16 +70,14 @@ struct port {
 
 	uint32_t memtype = 0;
 
-	struct control controls[MAX_CONTROLS];
-	uint32_t n_controls = 0;
-
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers = 0;
 	struct spa_list queue;
 	struct spa_ringbuffer ring = SPA_RINGBUFFER_INIT();
 	uint32_t ring_ids[MAX_BUFFERS];
 
-	static constexpr uint64_t info_all = SPA_PORT_CHANGE_MASK_FLAGS | SPA_PORT_CHANGE_MASK_PARAMS;
+	static constexpr uint64_t info_all = SPA_PORT_CHANGE_MASK_FLAGS |
+		SPA_PORT_CHANGE_MASK_PROPS | SPA_PORT_CHANGE_MASK_PARAMS;
 	struct spa_port_info info = SPA_PORT_INFO_INIT();
 	struct spa_io_buffers *io = nullptr;
 	struct spa_io_sequence *control = nullptr;
@@ -413,15 +403,14 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	return 0;
 }
 
-static const struct spa_dict_item info_items[] = {
-	{ SPA_KEY_DEVICE_API, "libcamera" },
-	{ SPA_KEY_MEDIA_CLASS, "Video/Source" },
-	{ SPA_KEY_MEDIA_ROLE, "Camera" },
-	{ SPA_KEY_NODE_DRIVER, "true" },
-};
-
 static void emit_node_info(struct impl *impl, bool full)
 {
+	static const struct spa_dict_item info_items[] = {
+		{ SPA_KEY_DEVICE_API, "libcamera" },
+		{ SPA_KEY_MEDIA_CLASS, "Video/Source" },
+		{ SPA_KEY_MEDIA_ROLE, "Camera" },
+		{ SPA_KEY_NODE_DRIVER, "true" },
+	};
 	uint64_t old = full ? impl->info.change_mask : 0;
 	if (full)
 		impl->info.change_mask = impl->info_all;
@@ -435,10 +424,15 @@ static void emit_node_info(struct impl *impl, bool full)
 
 static void emit_port_info(struct impl *impl, struct port *port, bool full)
 {
+	static const struct spa_dict_item info_items[] = {
+		{ SPA_KEY_PORT_GROUP, "stream.0" },
+	};
 	uint64_t old = full ? port->info.change_mask : 0;
 	if (full)
 		port->info.change_mask = port->info_all;
 	if (port->info.change_mask) {
+		struct spa_dict dict = SPA_DICT_INIT_ARRAY(info_items);
+		port->info.props = &dict;
 		spa_node_emit_port_info(&impl->hooks,
 				SPA_DIRECTION_OUTPUT, 0, &port->info);
 		port->info.change_mask = old;
@@ -905,7 +899,7 @@ static int impl_node_process(void *object)
 }
 
 static const struct spa_node_methods impl_node = {
-	SPA_VERSION_NODE_METHODS,
+	.version = SPA_VERSION_NODE_METHODS,
 	.add_listener = impl_node_add_listener,
 	.set_callbacks = impl_node_set_callbacks,
 	.sync = impl_node_sync,

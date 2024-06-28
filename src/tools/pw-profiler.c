@@ -182,8 +182,8 @@ static void dump_point(struct data *d, struct point *point)
 	int64_t d1, d2;
 	int64_t delay, period_usecs;
 
-#define CLOCK_AS_USEC(cl,val) (val * (float)SPA_USEC_PER_SEC / (cl)->rate.denom)
-#define CLOCK_AS_SUSEC(cl,val) (val * (float)SPA_USEC_PER_SEC / ((cl)->rate.denom * (cl)->rate_diff))
+#define CLOCK_AS_USEC(cl,val) (int64_t)(val * (float)SPA_USEC_PER_SEC / (cl)->rate.denom)
+#define CLOCK_AS_SUSEC(cl,val) (int64_t)(val * (float)SPA_USEC_PER_SEC / ((cl)->rate.denom * (cl)->rate_diff))
 
 	delay = CLOCK_AS_USEC(&point->clock, point->clock.delay);
 	period_usecs = CLOCK_AS_SUSEC(&point->clock, point->clock.duration);
@@ -193,7 +193,7 @@ static void dump_point(struct data *d, struct point *point)
 
 	if (d1 > period_usecs * 1.3 ||
 	    d2 > period_usecs * 1.3)
-		d1 = d2 = period_usecs * 1.4;
+		d1 = d2 = (int64_t)(period_usecs * 1.4);
 
 	/* 4 columns for the driver */
 	fprintf(d->output, "%"PRIi64"\t%"PRIi64"\t%"PRIi64"\t%"PRIi64"\t",
@@ -406,7 +406,7 @@ static void dump_scripts(struct data *d)
 
 static void profiler_profile(void *data, const struct spa_pod *pod)
 {
-        struct data *d = data;
+	struct data *d = data;
 	struct spa_pod *o;
 	struct spa_pod_prop *p;
 	struct point point;
@@ -446,7 +446,7 @@ static void profiler_profile(void *data, const struct spa_pod *pod)
 
 static const struct pw_profiler_events profiler_events = {
 	PW_VERSION_PROFILER_EVENTS,
-        .profile = profiler_profile,
+	.profile = profiler_profile,
 };
 
 static void registry_event_global(void *data, uint32_t id,
@@ -522,7 +522,7 @@ static void do_quit(void *data, int signal_number)
 
 static void show_help(const char *name, bool error)
 {
-        fprintf(error ? stderr : stdout, "%s [options]\n"
+	fprintf(error ? stderr : stdout, "%s [options]\n"
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -r, --remote                          Remote daemon name\n"

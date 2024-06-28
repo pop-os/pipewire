@@ -22,6 +22,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/debug/types.h>
 #include <spa/debug/mem.h>
+#include <spa/debug/log.h>
 
 #include <pipewire/pipewire.h>
 #include <pipewire/impl.h>
@@ -36,6 +37,7 @@
 #include <module-rtp/rtp.h>
 #include <module-rtp/apple-midi.h>
 #include <module-rtp/stream.h>
+#include "network-utils.h"
 
 #ifdef __FreeBSD__
 #define ifr_ifindex ifr_index
@@ -47,7 +49,7 @@
  * with avahi/mDNS/Bonjour.
  *
  * Other machines on the network that run a compatible session will see
- * eachother and will be able to send audio/midi between eachother.
+ * each other and will be able to send audio/midi between each other.
  *
  * The session setup is based on apple-midi and is compatible with
  * apple-midi when the session is using midi.
@@ -66,6 +68,7 @@
  * - `net.mtu = <int>`: MTU to use, default 1280
  * - `net.ttl = <int>`: TTL to use, default 1
  * - `net.loop = <bool>`: loopback multicast, default false
+ *   `sess.discover-local`: discover local services as well, default false
  * - `sess.min-ptime = <int>`: minimum packet time in milliseconds, default 2
  * - `sess.max-ptime = <int>`: maximum packet time in milliseconds, default 20
  * - `sess.latency.msec = <int>`: receiver latency in milliseconds, default 100
@@ -103,6 +106,7 @@
  *         #net.mtu = 1280
  *         #net.ttl = 1
  *         #net.loop = false
+ *         #sess.discover-local = false
  *         #sess.min-ptime = 2
  *         #sess.max-ptime = 20
  *         #sess.name = "PipeWire RTP stream"
@@ -124,7 +128,7 @@
 
 #define NAME "rtp-session"
 
-PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
+PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
 #define DEFAULT_CONTROL_IP	"0.0.0.0"
@@ -224,6 +228,7 @@ struct impl {
 	struct spa_hook module_listener;
 	struct pw_properties *props;
 
+	bool discover_local;
 	AvahiPoll *avahi_poll;
 	AvahiClient *client;
 	AvahiServiceBrowser *browser;
@@ -269,7 +274,7 @@ static ssize_t send_packet(int fd, struct msghdr *msg)
 	ssize_t n;
 	n = sendmsg(fd, msg, MSG_NOSIGNAL);
 	if (n < 0)
-		pw_log_debug("sendmsg() failed: %m");
+		pw_log_warn("sendmsg() failed: %m");
 	return n;
 }
 
@@ -602,24 +607,9 @@ static bool cmp_ip(const struct sockaddr_storage *sa, const struct sockaddr_stor
 	} else if (sa->ss_family == AF_INET6 && sb->ss_family == AF_INET6) {
 		struct sockaddr_in6 *ia = (struct sockaddr_in6*)sa;
 		struct sockaddr_in6 *ib = (struct sockaddr_in6*)sb;
-		return ia->sin6_addr.s6_addr == ib->sin6_addr.s6_addr;
+		return ia->sin6_addr.s6_addr == ib->sin6_addr.s6_addr && ia->sin6_scope_id == ib->sin6_scope_id;
 	}
 	return false;
-}
-
-static int get_ip(const struct sockaddr_storage *sa, char *ip, size_t len, uint16_t *port)
-{
-	if (sa->ss_family == AF_INET) {
-		struct sockaddr_in *in = (struct sockaddr_in*)sa;
-		inet_ntop(sa->ss_family, &in->sin_addr, ip, len);
-		*port = ntohs(in->sin_port);
-	} else if (sa->ss_family == AF_INET6) {
-		struct sockaddr_in6 *in = (struct sockaddr_in6*)sa;
-		inet_ntop(sa->ss_family, &in->sin6_addr, ip, len);
-		*port = ntohs(in->sin6_port);
-	} else
-		return -EIO;
-	return 0;
 }
 
 static struct session *make_session(struct impl *impl, struct pw_properties *props)
@@ -728,7 +718,7 @@ static void parse_apple_midi_cmd_in(struct impl *impl, bool ctrl, uint8_t *buffe
 	initiator = ntohl(hdr->initiator);
 	ssrc = ntohl(hdr->ssrc);
 
-	get_ip(sa, addr, sizeof(addr), &port);
+	pw_net_get_ip(sa, addr, sizeof(addr), NULL, &port);
 	pw_log_info("IN from %s:%d %s ssrc:%08x initiator:%08x",
 			addr, port, hdr->name, ssrc, initiator);
 
@@ -791,7 +781,7 @@ static void parse_apple_midi_cmd_in(struct impl *impl, bool ctrl, uint8_t *buffe
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 2;
 
-	pw_log_debug("send %p %u", msg.msg_name, msg.msg_namelen);
+	pw_log_trace("send %p %u", msg.msg_name, msg.msg_namelen);
 
 	send_packet(ctrl ? impl->ctrl_source->fd : impl->data_source->fd, &msg);
 }
@@ -866,7 +856,7 @@ static void parse_apple_midi_cmd_ck(struct impl *impl, bool ctrl, uint8_t *buffe
 		return;
 	}
 
-	pw_log_debug("got CK count %d", hdr->count);
+	pw_log_trace("got CK count %d", hdr->count);
 
 	now = current_time_ns() / 10000;
 	reply = *hdr;
@@ -896,7 +886,7 @@ static void parse_apple_midi_cmd_ck(struct impl *impl, bool ctrl, uint8_t *buffe
 		latency = t3 - t1;
 		offset = ((t3 + t1) / 2) - t2;
 
-		pw_log_debug("latency:%f offset:%f", latency / 1e5, offset / 1e5);
+		pw_log_trace("latency:%f offset:%f", latency / 1e5, offset / 1e5);
 		if (hdr->count >= 2)
 			return;
 	}
@@ -912,7 +902,7 @@ static void parse_apple_midi_cmd_ck(struct impl *impl, bool ctrl, uint8_t *buffe
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 1;
 
-	pw_log_debug("send %p %u", msg.msg_name, msg.msg_namelen);
+	pw_log_trace("send %p %u", msg.msg_name, msg.msg_namelen);
 
 	send_packet(ctrl ? impl->ctrl_source->fd : impl->data_source->fd, &msg);
 }
@@ -1010,7 +1000,7 @@ on_ctrl_io(void *data, int fd, uint32_t mask)
 		if (buffer[0] == 0xff && buffer[1] == 0xff) {
 			parse_apple_midi_cmd(impl, true, buffer, len, &sa, salen);
 		} else {
-			spa_debug_mem(0, buffer, len);
+			spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_DEBUG, 0, buffer, len);
 		}
 	}
 	return;
@@ -1020,7 +1010,7 @@ receive_error:
 	return;
 short_packet:
 	pw_log_warn("short packet received");
-	spa_debug_mem(0, buffer, len);
+	spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_DEBUG, 0, buffer, len);
 	return;
 }
 
@@ -1065,7 +1055,7 @@ receive_error:
 	return;
 short_packet:
 	pw_log_warn("short packet received");
-	spa_debug_mem(0, buffer, len);
+	spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_DEBUG, 0, buffer, len);
 	return;
 unknown_ssrc:
 	pw_log_debug("unknown SSRC %08x", ssrc);
@@ -1158,7 +1148,6 @@ static int make_socket(const struct sockaddr_storage* sa, socklen_t salen,
 		pw_log_error("bind() failed: %m");
 		goto error;
 	}
-	/* FIXME AES67 wants IPTOS_DSCP_AF41 */
 	val = IPTOS_LOWDELAY;
 	if (setsockopt(fd, IPPROTO_IP, IP_TOS, &val, sizeof(val)) < 0)
 		pw_log_warn("setsockopt(IP_TOS) failed: %m");
@@ -1232,6 +1221,9 @@ static void impl_destroy(struct impl *impl)
 	if (impl->client)
 		avahi_client_free(impl->client);
 
+	if (impl->data_loop)
+		pw_context_release_loop(impl->context, impl->data_loop);
+
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
@@ -1269,26 +1261,6 @@ static const struct pw_core_events core_events = {
 	.error = on_core_error,
 };
 
-static int parse_address(const char *address, uint16_t port,
-		struct sockaddr_storage *addr, socklen_t *len)
-{
-	struct sockaddr_in *sa4 = (struct sockaddr_in*)addr;
-	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)addr;
-
-	if (inet_pton(AF_INET, address, &sa4->sin_addr) > 0) {
-		sa4->sin_family = AF_INET;
-		sa4->sin_port = htons(port);
-		*len = sizeof(*sa4);
-	} else if (inet_pton(AF_INET6, address, &sa6->sin6_addr) > 0) {
-		sa6->sin6_family = AF_INET6;
-		sa6->sin6_port = htons(port);
-		*len = sizeof(*sa6);
-	} else
-		return -EINVAL;
-
-	return 0;
-}
-
 static void free_service(struct service *s)
 {
 	spa_list_remove(&s->link);
@@ -1318,7 +1290,7 @@ static struct service *make_service(struct impl *impl, const struct service_info
 		AvahiStringList *txt)
 {
 	struct service *s = NULL;
-	char at[AVAHI_ADDRESS_STR_MAX];
+	char at[AVAHI_ADDRESS_STR_MAX], if_suffix[16] = "";
 	struct session *sess;
 	int res, ipv;
 	struct pw_properties *props = NULL;
@@ -1415,9 +1387,15 @@ static struct service *make_service(struct impl *impl, const struct service_info
 	avahi_address_snprint(at, sizeof(at), &s->info.address);
 	pw_log_info("create session: %s %s:%u %s", s->info.name, at, s->info.port, s->info.type);
 
+	if (s->info.protocol == AVAHI_PROTO_INET6 &&
+	    s->info.address.data.ipv6.address[0] == 0xfe &&
+	    (s->info.address.data.ipv6.address[1] & 0xc0) == 0x80)
+		snprintf(if_suffix, sizeof(if_suffix), "%%%d", s->info.interface);
+
 	ipv = s->info.protocol == AVAHI_PROTO_INET ? 4 : 6;
 	pw_properties_set(props, "sess.name", s->info.name);
-	pw_properties_setf(props, "destination.ip", "%s", at);
+	pw_properties_setf(props, "destination.ip", "%s%s", at, if_suffix);
+	pw_properties_setf(props, "destination.ifindex", "%u", s->info.interface);
 	pw_properties_setf(props, "destination.port", "%u", s->info.port);
 
 	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
@@ -1439,10 +1417,10 @@ static struct service *make_service(struct impl *impl, const struct service_info
 	}
 	s->sess = sess;
 
-	if ((res = parse_address(at, s->info.port, &sess->ctrl_addr, &sess->ctrl_len)) < 0) {
+	if ((res = pw_net_parse_address(at, s->info.port, &sess->ctrl_addr, &sess->ctrl_len)) < 0) {
 		pw_log_error("invalid address %s: %s", at, spa_strerror(res));
 	}
-	if ((res = parse_address(at, s->info.port+1, &sess->data_addr, &sess->data_len)) < 0) {
+	if ((res = pw_net_parse_address(at, s->info.port+1, &sess->data_addr, &sess->data_len)) < 0) {
 		pw_log_error("invalid address %s: %s", at, spa_strerror(res));
 	}
 	return s;
@@ -1504,7 +1482,7 @@ static void browser_cb(AvahiServiceBrowser *b, AvahiIfIndex interface, AvahiProt
 	struct service_info info;
 	struct service *s;
 
-	if (flags & AVAHI_LOOKUP_RESULT_LOCAL)
+	if ((flags & AVAHI_LOOKUP_RESULT_LOCAL) && !impl->discover_local)
 		return;
 
 	info = SERVICE_INFO(.interface = interface,
@@ -1714,6 +1692,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 	impl->props = props;
 
+	impl->discover_local =  pw_properties_get_bool(impl->props,
+			"sess.discover-local", false);
+
 	stream_props = pw_properties_new(NULL, NULL);
 	if (stream_props == NULL) {
 		res = -errno;
@@ -1725,7 +1706,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
-	impl->data_loop = pw_data_loop_get_loop(pw_context_get_data_loop(context));
+	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
+
+	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
 
 	if (pw_properties_get(props, "sess.media") == NULL)
 		pw_properties_set(props, "sess.media", "midi");
@@ -1733,6 +1716,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(stream_props, str, strlen(str));
 
+	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
@@ -1782,11 +1766,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->ctrl_port = port;
 
-	if ((res = parse_address(str, port, &impl->ctrl_addr, &impl->ctrl_len)) < 0) {
+	if ((res = pw_net_parse_address(str, port, &impl->ctrl_addr, &impl->ctrl_len)) < 0) {
 		pw_log_error("invalid control.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}
-	if ((res = parse_address(str, port ? port+1 : 0, &impl->data_addr, &impl->data_len)) < 0) {
+	if ((res = pw_net_parse_address(str, port ? port+1 : 0, &impl->data_addr, &impl->data_len)) < 0) {
 		pw_log_error("invalid data.ip %s: %s", str, spa_strerror(res));
 		goto out;
 	}

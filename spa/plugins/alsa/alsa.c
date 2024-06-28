@@ -22,7 +22,9 @@ extern const struct spa_handle_factory spa_alsa_compress_offload_sink_factory;
 extern const struct spa_handle_factory spa_alsa_compress_offload_device_factory;
 #endif
 
-struct spa_log_topic alsa_log_topic = SPA_LOG_TOPIC(0, "spa.alsa");
+SPA_LOG_TOPIC_DEFINE(alsa_log_topic, "spa.alsa");
+
+SPA_LOG_TOPIC_ENUM_DEFINE_REGISTERED;
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
@@ -38,8 +40,13 @@ int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t 
 		*factory = &spa_alsa_sink_factory;
 		break;
 	case 2:
+#ifdef HAVE_LIBUDEV
 		*factory = &spa_alsa_udev_factory;
 		break;
+#else
+		(*index)++;
+		SPA_FALLTHROUGH;
+#endif
 	case 3:
 		*factory = &spa_alsa_pcm_device_factory;
 		break;

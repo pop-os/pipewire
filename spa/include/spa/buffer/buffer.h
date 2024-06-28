@@ -27,9 +27,15 @@ enum spa_data_type {
 	SPA_DATA_Invalid,
 	SPA_DATA_MemPtr,		/**< pointer to memory, the data field in
 					  *  struct spa_data is set. */
-	SPA_DATA_MemFd,			/**< generic fd, mmap to get to memory */
-	SPA_DATA_DmaBuf,		/**< fd to dmabuf memory */
-	SPA_DATA_MemId,			/**< memory is identified with an id */
+	SPA_DATA_MemFd,			/**< memfd, mmap to get to memory. */
+	SPA_DATA_DmaBuf,		/**< fd to dmabuf memory. This might not be readily
+					  *  mappable (unless the MAPPABLE flag is set) and should
+					  *  normally be handled with DMABUF apis. */
+	SPA_DATA_MemId,			/**< memory is identified with an id. The actual memory
+					  *  can be obtained in some other way and can be identified
+					  *  with this id. */
+	SPA_DATA_SyncObj,		/**< a syncobj, usually requires a spa_meta_sync_timeline metadata
+					  *  with timeline points. */
 
 	_SPA_DATA_LAST,			/**< not part of ABI */
 };
@@ -70,7 +76,7 @@ struct spa_data {
 					  *  specified with this flag. */
 	uint32_t flags;			/**< data flags */
 	int64_t fd;			/**< optional fd for data */
-	uint32_t mapoffset;		/**< offset to map fd at */
+	uint32_t mapoffset;		/**< offset to map fd at, this is page aligned */
 	uint32_t maxsize;		/**< max size of data */
 	void *data;			/**< optional data pointer */
 	struct spa_chunk *chunk;	/**< valid chunk of memory */

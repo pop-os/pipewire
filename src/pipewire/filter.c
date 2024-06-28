@@ -12,13 +12,13 @@
 #include <spa/param/props.h>
 #include <spa/node/io.h>
 #include <spa/node/utils.h>
+#include <spa/utils/cleanup.h>
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/string.h>
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
 
-#include <pipewire/cleanup.h>
 #include "pipewire/pipewire.h"
 #include "pipewire/filter.h"
 #include "pipewire/private.h"
@@ -31,8 +31,6 @@ PW_LOG_TOPIC_EXTERN(log_filter);
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 
 static bool mlock_warned = false;
-
-static uint32_t mappable_dataTypes = (1<<SPA_DATA_MemFd);
 
 struct buffer {
 	struct pw_buffer this;
@@ -116,12 +114,6 @@ struct filter {
 	struct spa_node impl_node;
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
-	struct spa_io_clock *clock;
-	struct spa_io_position *position;
-
-	struct {
-		struct spa_io_position *position;
-	} rt;
 
 	struct spa_list port_list;
 	struct pw_map ports[2];
@@ -152,8 +144,6 @@ struct filter {
 	unsigned int drained:1;
 	unsigned int allow_mlock:1;
 	unsigned int warn_mlock:1;
-	unsigned int process_rt:1;
-	unsigned int driving:1;
 	unsigned int trigger:1;
 	int in_emit_param_changed;
 };
@@ -218,28 +208,31 @@ static void fix_datatype(struct spa_pod *param)
 	pw_log_debug("dataType: %u", dataType);
 	if (dataType & (1u << SPA_DATA_MemPtr)) {
 		SPA_POD_VALUE(struct spa_pod_int, &vals[0]) =
-			dataType | mappable_dataTypes;
+			dataType | (1<<SPA_DATA_MemFd);
 		pw_log_debug("Change dataType: %u -> %u", dataType,
 				SPA_POD_VALUE(struct spa_pod_int, &vals[0]));
 	}
 }
 
-static struct param *add_param(struct filter *impl, struct port *port,
+static int add_param(struct filter *impl, struct port *port,
 		uint32_t id, uint32_t flags, const struct spa_pod *param)
 {
 	struct param *p;
 	int idx;
 
-	if (param == NULL || !spa_pod_is_object(param)) {
-		errno = EINVAL;
-		return NULL;
-	}
+	if (param != NULL && !spa_pod_is_object(param))
+		return -EINVAL;
+	if (param == NULL || !spa_pod_object_has_props((struct spa_pod_object*)param))
+		return 0;
+
+	pw_log_pod(SPA_LOG_LEVEL_DEBUG, param);
+
 	if (id == SPA_ID_INVALID)
 		id = SPA_POD_OBJECT_ID(param);
 
 	p = malloc(sizeof(struct param) + SPA_POD_SIZE(param));
 	if (p == NULL)
-		return NULL;
+		return -errno;
 
 	if (id == SPA_PARAM_ProcessLatency && port == NULL)
 		spa_process_latency_parse(param, &impl->process_latency);
@@ -275,7 +268,7 @@ static struct param *add_param(struct filter *impl, struct port *port,
 			impl->params[idx].user++;
 		}
 	}
-	return p;
+	return 0;
 }
 
 static void clear_params(struct filter *impl, struct port *port, uint32_t id)
@@ -490,38 +483,12 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags, const struc
 	return 0;
 }
 
-static int
-do_set_position(struct spa_loop *loop,
-		bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct filter *impl = user_data;
-	impl->rt.position = impl->position;
-	return 0;
-}
-
 static int impl_set_io(void *object, uint32_t id, void *data, size_t size)
 {
 	struct filter *impl = object;
 
 	pw_log_debug("%p: io %d %p/%zd", impl, id, data, size);
 
-	switch(id) {
-	case SPA_IO_Clock:
-		if (data && size >= sizeof(struct spa_io_clock))
-			impl->clock = data;
-		else
-			impl->clock = NULL;
-		break;
-	case SPA_IO_Position:
-		if (data && size >= sizeof(struct spa_io_position))
-			impl->position = data;
-		else
-			impl->position = NULL;
-		pw_loop_invoke(impl->data_loop,
-			do_set_position, 1, NULL, 0, true, impl);
-		break;
-	}
-	impl->driving = impl->clock && impl->position && impl->position->clock.id == impl->clock->id;
 	pw_filter_emit_io_changed(&impl->this, NULL, id, data, size);
 
 	return 0;
@@ -702,10 +669,8 @@ static int update_params(struct filter *impl, struct port *port, uint32_t id,
 			}
 			continue;
 		}
-		if (add_param(impl, port, id, 0, params[i]) == NULL) {
-			res = -errno;
+		if ((res = add_param(impl, port, id, 0, params[i])) < 0)
 			break;
-		}
 	}
 	if (port != NULL && update_latency) {
 		uint8_t buffer[4096];
@@ -779,8 +744,7 @@ static void clear_buffers(struct port *port)
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			for (j = 0; j < b->this.buffer->n_datas; j++) {
 				struct spa_data *d = &b->this.buffer->datas[j];
-				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE) ||
-				    (mappable_dataTypes & (1<<d->type)) > 0) {
+				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE)) {
 					pw_log_debug("%p: clear buffer %d mem",
 							impl, b->id);
 					unmap_data(impl, d);
@@ -947,8 +911,7 @@ static int impl_port_use_buffers(void *object,
 		if (SPA_FLAG_IS_SET(impl_flags, PW_FILTER_PORT_FLAG_MAP_BUFFERS)) {
 			for (j = 0; j < buffers[i]->n_datas; j++) {
 				struct spa_data *d = &buffers[i]->datas[j];
-				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE) ||
-				    (mappable_dataTypes & (1<<d->type)) > 0) {
+				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE)) {
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
@@ -958,6 +921,8 @@ static int impl_port_use_buffers(void *object,
 					return -EINVAL;
 				}
 				buf_size += d->maxsize;
+				pw_log_debug("%p:  data:%d type:%d flags:%08x size:%d", filter, j,
+						d->type, d->flags, d->maxsize);
 			}
 
 			if (size > 0 && buf_size != size) {
@@ -966,7 +931,7 @@ static int impl_port_use_buffers(void *object,
 			} else
 				size = buf_size;
 		}
-		pw_log_debug("%p: got buffer %d %d datas, mapped size %d", filter, i,
+		pw_log_debug("%p: got buffer id:%d datas:%d mapped size %d", filter, i,
 				buffers[i]->n_datas, size);
 	}
 
@@ -1004,28 +969,12 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 	return 0;
 }
 
-static int
-do_call_process(struct spa_loop *loop,
-                 bool async, uint32_t seq, const void *data, size_t size, void *user_data)
-{
-	struct filter *impl = user_data;
-	struct pw_filter *filter = &impl->this;
-	pw_log_trace("%p: do process", filter);
-	pw_filter_emit_process(filter, impl->position);
-	return 0;
-}
-
 static void call_process(struct filter *impl)
 {
 	pw_log_trace_fp("%p: call process", impl);
-	if (SPA_FLAG_IS_SET(impl->flags, PW_FILTER_FLAG_RT_PROCESS)) {
-		if (impl->rt_callbacks.funcs)
-			spa_callbacks_call_fast(&impl->rt_callbacks, struct pw_filter_events,
-					process, 0, impl->rt.position);
-	} else {
-		pw_loop_invoke(impl->main_loop,
-			do_call_process, 1, NULL, 0, false, impl);
-	}
+	if (impl->rt_callbacks.funcs)
+		spa_callbacks_call_fast(&impl->rt_callbacks, struct pw_filter_events,
+				process, 0, impl->this.node->rt.position);
 }
 
 static int
@@ -1053,7 +1002,7 @@ static int impl_node_process(void *object)
 	bool drained = true;
 	int res = 0;
 
-	pw_log_trace_fp("%p: do process %p", impl, impl->rt.position);
+	pw_log_trace_fp("%p: do process %p", impl, impl->this.node->rt.position);
 
 	/** first dequeue and recycle buffers */
 	spa_list_for_each(p, &impl->port_list, link) {
@@ -1611,8 +1560,6 @@ pw_filter_connect(struct pw_filter *filter,
 	pw_log_debug("%p: connect", filter);
 	impl->flags = flags;
 
-	impl->process_rt = SPA_FLAG_IS_SET(flags, PW_FILTER_FLAG_RT_PROCESS);
-
 	impl->warn_mlock = pw_properties_get_bool(filter->properties, "mem.warn-mlock", impl->warn_mlock);
 
 	impl->impl_node.iface = SPA_INTERFACE_INIT(
@@ -1629,7 +1576,7 @@ pw_filter_connect(struct pw_filter *filter,
 	impl->info.max_input_ports = UINT32_MAX;
 	impl->info.max_output_ports = UINT32_MAX;
 	impl->info.flags = SPA_NODE_FLAG_RT;
-	if (!impl->process_rt || SPA_FLAG_IS_SET(flags, PW_FILTER_FLAG_ASYNC))
+	if (SPA_FLAG_IS_SET(flags, PW_FILTER_FLAG_ASYNC))
 		impl->info.flags |= SPA_NODE_FLAG_ASYNC;
 	impl->info.props = &filter->properties->dict;
 	impl->params[NODE_PropInfo] = SPA_PARAM_INFO(SPA_PARAM_PropInfo, 0);
@@ -1642,15 +1589,18 @@ pw_filter_connect(struct pw_filter *filter,
 	impl->info.change_mask = impl->change_mask_all;
 
 	clear_params(impl, NULL, SPA_ID_INVALID);
-	for (i = 0; i < n_params; i++) {
+	for (i = 0; i < n_params; i++)
 		add_param(impl, NULL, SPA_ID_INVALID, 0, params[i]);
-	}
 
 	impl->disconnecting = false;
 	impl->draining = false;
-	impl->driving = false;
 	filter_set_state(filter, PW_FILTER_STATE_CONNECTING, 0, NULL);
 
+	if (!SPA_FLAG_IS_SET(flags, PW_FILTER_FLAG_RT_PROCESS)) {
+		if (pw_properties_get(filter->properties, PW_KEY_NODE_LOOP_CLASS) == NULL)
+			pw_properties_set(filter->properties, PW_KEY_NODE_LOOP_CLASS, "main");
+		pw_properties_set(filter->properties, PW_KEY_NODE_ASYNC, "true");
+	}
 	if (flags & PW_FILTER_FLAG_DRIVER)
 		pw_properties_set(filter->properties, PW_KEY_NODE_DRIVER, "true");
 	if (flags & PW_FILTER_FLAG_TRIGGER) {
@@ -1843,6 +1793,9 @@ void *pw_filter_add_port(struct pw_filter *filter,
 	if ((p = alloc_port(impl, direction, port_data_size)) == NULL)
 		goto error_cleanup;
 
+	if (pw_properties_get(props, PW_KEY_PORT_GROUP) == NULL)
+		pw_properties_setf(props, PW_KEY_PORT_GROUP, "stream.%u", p->id);
+
 	p->props = props;
 	p->flags = flags;
 
@@ -1980,7 +1933,7 @@ SPA_EXPORT
 int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	struct spa_io_position *p = impl->position;
+	struct spa_io_position *p = filter->node->rt.position;
 
 	if (SPA_LIKELY(p != NULL)) {
 		impl->time.now = p->clock.nsec;
@@ -2005,6 +1958,13 @@ uint64_t pw_filter_get_nsec(struct pw_filter *filter)
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+SPA_EXPORT
+struct pw_loop *pw_filter_get_data_loop(struct pw_filter *filter)
+{
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+	return impl->data_loop;
 }
 
 SPA_EXPORT
@@ -2097,8 +2057,7 @@ int pw_filter_flush(struct pw_filter *filter, bool drain)
 SPA_EXPORT
 bool pw_filter_is_driving(struct pw_filter *filter)
 {
-	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	return impl->driving;
+	return filter->node->driving;
 }
 
 static int
@@ -2130,11 +2089,11 @@ int pw_filter_trigger_process(struct pw_filter *filter)
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
 	int res = 0;
 
-	pw_log_trace_fp("%p: driving:%d", impl, impl->driving);
+	pw_log_trace_fp("%p: driving:%d", impl, filter->node->driving);
 
 	if (impl->trigger) {
 		pw_impl_node_trigger(filter->node);
-	} else if (impl->driving) {
+	} else if (filter->node->driving) {
 		res = pw_loop_invoke(impl->data_loop,
 			do_trigger_process, 1, NULL, 0, false, impl);
 	} else {

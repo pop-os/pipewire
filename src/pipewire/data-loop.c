@@ -4,12 +4,14 @@
 
 #include <pthread.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/resource.h>
 
 #include "pipewire/log.h"
 #include "pipewire/data-loop.h"
 #include "pipewire/private.h"
 #include "pipewire/thread.h"
+#include "pipewire/utils.h"
 
 PW_LOG_TOPIC_EXTERN(log_data_loop);
 #define PW_LOG_TOPIC_DEFAULT log_data_loop
@@ -86,7 +88,7 @@ static int do_stop(struct spa_loop *loop, bool async, uint32_t seq,
 static struct pw_data_loop *loop_new(struct pw_loop *loop, const struct spa_dict *props)
 {
 	struct pw_data_loop *this;
-	const char *str;
+	const char *str, *name = NULL, *class = NULL;
 	int res;
 
 	this = calloc(1, sizeof(struct pw_data_loop));
@@ -107,11 +109,29 @@ static struct pw_data_loop *loop_new(struct pw_loop *loop, const struct spa_dict
 		goto error_free;
 	}
 	this->loop = loop;
+	this->rt_prio = -1;
 
-	if (props != NULL &&
-	    (str = spa_dict_lookup(props, "loop.cancel")) != NULL)
-		this->cancel = pw_properties_parse_bool(str);
+	if (props != NULL) {
+		if ((str = spa_dict_lookup(props, PW_KEY_LOOP_CANCEL)) != NULL)
+			this->cancel = pw_properties_parse_bool(str);
+		if ((str = spa_dict_lookup(props, PW_KEY_LOOP_CLASS)) != NULL)
+			class = str;
+		if ((str = spa_dict_lookup(props, PW_KEY_LOOP_RT_PRIO)) != NULL)
+			this->rt_prio = atoi(str);
+		if ((str = spa_dict_lookup(props, SPA_KEY_THREAD_NAME)) != NULL)
+			name = str;
+		if ((str = spa_dict_lookup(props, SPA_KEY_THREAD_AFFINITY)) != NULL)
+			this->affinity = strdup(str);
+	}
+	if (class == NULL)
+		class = this->rt_prio != 0 ? "data.rt" : "data";
+	if (name == NULL)
+		name = "data-loop";
 
+	this->class = strdup(class);
+	this->classes = pw_strv_parse(class, strlen(class), INT_MAX, NULL);
+	if (!this->loop->name[0])
+		pw_loop_set_name(this->loop, name);
 	spa_hook_list_init(&this->listener_list);
 
 	return this;
@@ -151,6 +171,9 @@ void pw_data_loop_destroy(struct pw_data_loop *loop)
 
 	spa_hook_list_clean(&loop->listener_list);
 
+	free(loop->affinity);
+	free(loop->class);
+	pw_free_strv(loop->classes);
 	free(loop);
 }
 
@@ -170,6 +193,36 @@ pw_data_loop_get_loop(struct pw_data_loop *loop)
 	return loop->loop;
 }
 
+/** Get the loop name
+ * \param loop the data loop to query
+ * \return the data loop name
+ *
+ * Get the name of the data loop. The data loop name is a unique name that
+ * identifies this data loop.
+ *
+ * \since 1.1.0
+ */
+SPA_EXPORT
+const char * pw_data_loop_get_name(struct pw_data_loop *loop)
+{
+	return loop->loop->name;
+}
+
+/** Get the loop class
+ * \param loop the data loop to query
+ * \return the data loop class
+ *
+ * Get the class of the data loop. Multiple data loop can have the same class
+ * and processing can be assigned to any data loop from the same class.
+ *
+ * \since 1.1.0
+ */
+SPA_EXPORT
+const char * pw_data_loop_get_class(struct pw_data_loop *loop)
+{
+	return loop->class;
+}
+
 /** Start a data loop
  * \param loop the data loop to start
  * \return 0 if ok, -1 on error
@@ -183,24 +236,28 @@ int pw_data_loop_start(struct pw_data_loop *loop)
 	if (!loop->running) {
 		struct spa_thread_utils *utils;
 		struct spa_thread *thr;
+		struct spa_dict_item items[2];
+		uint32_t n_items = 0;
 
 		loop->running = true;
 
 		if ((utils = loop->thread_utils) == NULL)
 			utils = pw_thread_utils_get();
 
-		static const struct spa_dict_item items[] = {
-			{ SPA_KEY_THREAD_NAME, "pw-data-loop" },
-		};
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_THREAD_NAME, loop->loop->name);
+		if (loop->affinity)
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_THREAD_AFFINITY,
+					loop->affinity);
 
-		thr = spa_thread_utils_create(utils, &SPA_DICT_INIT_ARRAY(items), do_loop, loop);
+		thr = spa_thread_utils_create(utils, &SPA_DICT_INIT(items, n_items), do_loop, loop);
 		loop->thread = (pthread_t)thr;
 		if (thr == NULL) {
 			pw_log_error("%p: can't create thread: %m", loop);
 			loop->running = false;
 			return -errno;
 		}
-		spa_thread_utils_acquire_rt(utils, thr, -1);
+		if (loop->rt_prio != 0)
+			spa_thread_utils_acquire_rt(utils, thr, loop->rt_prio);
 	}
 	return 0;
 }

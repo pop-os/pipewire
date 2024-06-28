@@ -9,19 +9,30 @@
 extern "C" {
 # if __cplusplus >= 201103L
 #  define SPA_STATIC_ASSERT_IMPL(expr, msg, ...) static_assert(expr, msg)
+#  define SPA_ALIGNOF alignof
 # endif
+#elif __STDC_VERSION__ >= 202311L
+#  define SPA_STATIC_ASSERT_IMPL(expr, msg, ...) static_assert(expr, msg)
+#  define SPA_ALIGNOF alignof
 #else
 # include <stdbool.h>
 # if __STDC_VERSION__ >= 201112L
 #  define SPA_STATIC_ASSERT_IMPL(expr, msg, ...) _Static_assert(expr, msg)
+#  define SPA_ALIGNOF _Alignof
 # endif
 #endif
 #ifndef SPA_STATIC_ASSERT_IMPL
 #define SPA_STATIC_ASSERT_IMPL(expr, ...) \
 	((void)sizeof(struct { int spa_static_assertion_failed : 2 * !!(expr) - 1; }))
 #endif
+#ifndef SPA_ALIGNOF
+#define SPA_ALIGNOF __alignof__
+#endif
 
 #define SPA_STATIC_ASSERT(expr, ...) SPA_STATIC_ASSERT_IMPL(expr, ## __VA_ARGS__, "`" #expr "` evaluated to false")
+
+#define SPA_CONCAT_NOEXPAND(a, b) a ## b
+#define SPA_CONCAT(a, b) SPA_CONCAT_NOEXPAND(a, b)
 
 #include <inttypes.h>
 #include <signal.h>
@@ -192,7 +203,6 @@ struct spa_fraction {
 #define SPA_PTROFF_ALIGN(ptr_,offset_,alignment_,type_) \
    SPA_PTR_ALIGN(SPA_PTROFF(ptr_,offset_,type_),alignment_,type_)
 
-
 /**
  * Deprecated, use SPA_PTROFF and SPA_PTROFF_ALIGN instead
  */
@@ -202,9 +212,6 @@ struct spa_fraction {
 #define SPA_CONTAINER_OF(p,t,m) ((t*)((uintptr_t)(p) - offsetof(t,m)))
 
 #define SPA_PTRDIFF(p1,p2) ((intptr_t)(p1) - (intptr_t)(p2))
-
-#define SPA_PTR_TO_INT(p) ((int) ((intptr_t) (p)))
-#define SPA_INT_TO_PTR(u) ((void*) ((intptr_t) (u)))
 
 #define SPA_PTR_TO_UINT32(p) ((uint32_t) ((uintptr_t) (p)))
 #define SPA_UINT32_TO_PTR(u) ((void*) ((uintptr_t) (u)))
@@ -279,7 +286,7 @@ struct spa_fraction {
 })
 
 
-#define SPA_PTR_ALIGNMENT(p,align)	((intptr_t)(p) & ((align)-1))
+#define SPA_PTR_ALIGNMENT(p,align)	((uintptr_t)(p) & ((align)-1))
 #define SPA_IS_ALIGNED(p,align)		(SPA_PTR_ALIGNMENT(p,align) == 0)
 #define SPA_PTR_ALIGN(p,align,type)	((type*)SPA_ROUND_UP_N((intptr_t)(p), (intptr_t)(align)))
 
@@ -293,8 +300,50 @@ struct spa_fraction {
 #endif
 #endif
 
+static inline bool spa_ptrinside(const void *p1, size_t s1, const void *p2, size_t s2,
+                                 size_t *remaining)
+{
+	if (SPA_LIKELY((uintptr_t)p1 <= (uintptr_t)p2 && s2 <= s1 &&
+	               (uintptr_t)p2 - (uintptr_t)p1 <= s1 - s2)) {
+		if (remaining != NULL)
+			*remaining = ((uintptr_t)p1 + s1) - ((uintptr_t)p2 + s2);
+		return true;
+	} else {
+		if (remaining != NULL)
+			*remaining = 0;
+		return false;
+	}
+}
+
+static inline bool spa_ptr_inside_and_aligned(const void *p1, size_t s1,
+                                              const void *p2, size_t s2, size_t align,
+                                              size_t *remaining)
+{
+	if (SPA_IS_ALIGNED(p2, align)) {
+		return spa_ptrinside(p1, s1, p2, s2, remaining);
+	} else {
+		if (remaining != NULL)
+			*remaining = 0;
+		return false;
+	}
+}
+
+#define spa_ptr_type_inside(p1, s1, p2, type, remaining) \
+	spa_ptr_inside_and_aligned(p1, s1, p2, sizeof(type), SPA_ALIGNOF(type), remaining)
+
+#define SPA_PTR_TO_INT(p) ((int) ((intptr_t) (p)))
+#define SPA_INT_TO_PTR(u) ((void*) ((intptr_t) (u)))
+
 #define SPA_STRINGIFY_1(...)	#__VA_ARGS__
 #define SPA_STRINGIFY(...)	SPA_STRINGIFY_1(__VA_ARGS__)
+
+struct spa_error_location {
+	int line;
+	int col;
+	size_t len;
+	const char *location;
+	const char *reason;
+};
 
 #define spa_return_if_fail(expr)					\
 	do {								\

@@ -35,7 +35,7 @@ struct impl_data {
 	std::unique_ptr<float *[]> play_buffer, rec_buffer, out_buffer;
 };
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.eac.webrtc");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.eac.webrtc");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
@@ -171,6 +171,8 @@ static int webrtc_init2(void *object, const struct spa_dict *args,
 #else
 	webrtc::AudioProcessing::Config config;
 	config.echo_canceller.enabled = true;
+	config.pipeline.multi_channel_capture = rec_info->channels > 1;
+	config.pipeline.multi_channel_render = play_info->channels > 1;
 	// FIXME: Example code enables both gain controllers, but that seems sus
 	config.gain_controller1.enabled = gain_control;
 	config.gain_controller1.mode = webrtc::AudioProcessing::Config::GainController1::Mode::kAdaptiveDigital;
@@ -211,7 +213,7 @@ static int webrtc_init2(void *object, const struct spa_dict *args,
 	// drift compensation on all sinks and sources linked to this echo-canceler
 	apm->echo_cancellation()->enable_drift_compensation(false);
 	apm->echo_cancellation()->Enable(true);
-	// TODO: wire up supression levels to args
+	// TODO: wire up suppression levels to args
 	apm->echo_cancellation()->set_suppression_level(webrtc::EchoCancellation::kHighSuppression);
 	apm->noise_suppression()->set_level(webrtc::NoiseSuppression::kHigh);
 	apm->noise_suppression()->Enable(noise_suppression);
@@ -292,7 +294,7 @@ static int webrtc_run(void *object, const float *rec[], const float *play[], flo
 }
 
 static const struct spa_audio_aec_methods impl_aec = {
-	SPA_VERSION_AUDIO_AEC_METHODS,
+	.version = SPA_VERSION_AUDIO_AEC_METHODS,
 	.add_listener = NULL,
 	.init = webrtc_init,
 	.run = webrtc_run,
@@ -390,6 +392,10 @@ static const struct spa_handle_factory spa_aec_webrtc_factory = {
 	impl_init,
 	impl_enum_interface_info,
 };
+
+extern "C" {
+SPA_LOG_TOPIC_ENUM_DEFINE_REGISTERED;
+}
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)

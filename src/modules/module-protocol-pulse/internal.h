@@ -25,6 +25,7 @@ struct pw_work_queue;
 struct pw_properties;
 
 struct defs {
+	bool allow_module_loading;
 	struct spa_fraction min_req;
 	struct spa_fraction default_req;
 	struct spa_fraction min_frag;
@@ -81,8 +82,6 @@ struct impl_events {
 void impl_add_listener(struct impl *impl,
 		struct spa_hook *listener,
 		const struct impl_events *events, void *data);
-
-extern bool debug_messages;
 
 void broadcast_subscribe_event(struct impl *impl, uint32_t mask, uint32_t event, uint32_t id);
 

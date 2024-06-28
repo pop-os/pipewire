@@ -227,7 +227,6 @@ static inline bool is_following(struct impl *this);
 static int do_start(struct impl *this);
 static void do_stop(struct impl *this);
 static int write_queued_output_buffers(struct impl *this);
-static const char * spa_command_to_string(const struct spa_command *command);
 
 /* Node and port functions */
 
@@ -962,7 +961,7 @@ static int write_queued_output_buffers(struct impl *this)
 
 	/* In here, we write as much data as possible. The device may
 	 * initially not have sufficient space, but it is possible
-	 * that due to ongoing data consumption, it can accomodate
+	 * that due to ongoing data consumption, it can accommodate
 	 * for more data in a next attempt, hence the "again" label.
 	 *
 	 * If during the write attempts, only a portion of a chunk
@@ -1049,26 +1048,6 @@ again:
 
 	return 0;
 }
-
-
-static const char * spa_command_to_string(const struct spa_command *command)
-{
-	switch (SPA_NODE_COMMAND_ID(command)) {
-	case SPA_NODE_COMMAND_Suspend: return "Suspend";
-	case SPA_NODE_COMMAND_Pause: return "Pause";
-	case SPA_NODE_COMMAND_Start: return "Start";
-	case SPA_NODE_COMMAND_Enable: return "Enable";
-	case SPA_NODE_COMMAND_Disable: return "Disable";
-	case SPA_NODE_COMMAND_Flush: return "Flush";
-	case SPA_NODE_COMMAND_Drain: return "Drain";
-	case SPA_NODE_COMMAND_Marker: return "Marker";
-	case SPA_NODE_COMMAND_ParamBegin: return "ParamBegin";
-	case SPA_NODE_COMMAND_ParamEnd: return "ParamEnd";
-	case SPA_NODE_COMMAND_RequestProcess: return "RequestProcess";
-	default: return "<unknown>";
-	}
-}
-
 
 
 /* Node and port functions */
@@ -1341,7 +1320,8 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(command != NULL, -EINVAL);
 
-	spa_log_debug(this->log, "%p: got new command: %s", this, spa_command_to_string(command));
+	spa_log_debug(this->log, "%p: got new command: %s", this,
+		spa_debug_type_find_name(spa_type_node_command_id, SPA_NODE_COMMAND_ID(command)));
 
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_ParamBegin:

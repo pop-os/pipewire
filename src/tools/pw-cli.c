@@ -66,6 +66,7 @@ struct data {
 	struct pw_map vars;
 	unsigned int interactive:1;
 	unsigned int monitoring:1;
+	unsigned int monitoring_info:1;
 	unsigned int quit:1;
 };
 
@@ -164,7 +165,7 @@ static void print_params(struct spa_param_info *params, uint32_t n_params, char 
 
 static bool do_not_implemented(struct data *data, const char *cmd, char *args, char **error)
 {
-        *error = spa_aprintf("Command \"%s\" not yet implemented", cmd);
+	*error = spa_aprintf("Command \"%s\" not yet implemented", cmd);
 	return false;
 }
 
@@ -438,7 +439,7 @@ static struct global *find_global(struct remote_data *rd, const char *pattern)
 			continue;
 		if (global_matches(g, pattern))
 			return g;
-        }
+	}
 	return NULL;
 }
 
@@ -495,7 +496,7 @@ static void remote_data_free(struct remote_data *rd)
 static bool do_connect(struct data *data, const char *cmd, char *args, char **error)
 {
 	char *a[1];
-        int n;
+	int n;
 	struct pw_properties *props = NULL;
 	struct pw_core *core;
 	struct remote_data *rd;
@@ -540,7 +541,7 @@ static bool do_connect(struct data *data, const char *cmd, char *args, char **er
 static bool do_disconnect(struct data *data, const char *cmd, char *args, char **error)
 {
 	char *a[1];
-        int n;
+	int n;
 	uint32_t idx;
 	struct remote_data *rd = data->current;
 
@@ -564,8 +565,8 @@ static bool do_disconnect(struct data *data, const char *cmd, char *args, char *
 
 	return true;
 
-      no_remote:
-        *error = spa_aprintf("Remote %d does not exist", idx);
+no_remote:
+	*error = spa_aprintf("Remote %d does not exist", idx);
 	return false;
 }
 
@@ -582,7 +583,7 @@ static bool do_list_remotes(struct data *data, const char *cmd, char *args, char
 static bool do_switch_remote(struct data *data, const char *cmd, char *args, char **error)
 {
 	char *a[1];
-        int n, idx = 0;
+	int n, idx = 0;
 	struct remote_data *rd;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -599,8 +600,8 @@ static bool do_switch_remote(struct data *data, const char *cmd, char *args, cha
 
 	return true;
 
-      no_remote:
-        *error = spa_aprintf("Remote %d does not exist", idx);
+no_remote:
+	*error = spa_aprintf("Remote %d does not exist", idx);
 	return false;
 }
 
@@ -656,18 +657,20 @@ static void info_node(struct proxy_data *pd)
 	info_global(pd);
 	if (info == NULL)
 		return;
-	printf("%c\tinput ports: %u/%u\n", MARK_CHANGE(PW_NODE_CHANGE_MASK_INPUT_PORTS),
-			info->n_input_ports, info->max_input_ports);
-	printf("%c\toutput ports: %u/%u\n", MARK_CHANGE(PW_NODE_CHANGE_MASK_OUTPUT_PORTS),
-			info->n_output_ports, info->max_output_ports);
-	printf("%c\tstate: \"%s\"", MARK_CHANGE(PW_NODE_CHANGE_MASK_STATE),
-			pw_node_state_as_string(info->state));
+	if (info->change_mask & PW_NODE_CHANGE_MASK_INPUT_PORTS)
+		printf("%c\tinput ports: %u/%u\n", '*', info->n_input_ports, info->max_input_ports);
+	if (info->change_mask & PW_NODE_CHANGE_MASK_OUTPUT_PORTS)
+		printf("%c\toutput ports: %u/%u\n", '*', info->n_output_ports, info->max_output_ports);
+	if (info->change_mask & PW_NODE_CHANGE_MASK_STATE)
+		printf("%c\tstate: \"%s\"", '*', pw_node_state_as_string(info->state));
 	if (info->state == PW_NODE_STATE_ERROR && info->error)
 		printf(" \"%s\"\n", info->error);
 	else
 		printf("\n");
-	print_properties(info->props, MARK_CHANGE(PW_NODE_CHANGE_MASK_PROPS), true);
-	print_params(info->params, info->n_params, MARK_CHANGE(PW_NODE_CHANGE_MASK_PARAMS), true);
+	if (info->change_mask & PW_NODE_CHANGE_MASK_PROPS)
+		print_properties(info->props, '*', true);
+	if (info->change_mask & PW_NODE_CHANGE_MASK_PARAMS)
+		print_params(info->params, info->n_params, '*', true);
 	info->change_mask = 0;
 }
 
@@ -679,8 +682,10 @@ static void info_port(struct proxy_data *pd)
 	if (info == NULL)
 		return;
 	printf("\tdirection: \"%s\"\n", pw_direction_as_string(info->direction));
-	print_properties(info->props, MARK_CHANGE(PW_PORT_CHANGE_MASK_PROPS), true);
-	print_params(info->params, info->n_params, MARK_CHANGE(PW_PORT_CHANGE_MASK_PARAMS), true);
+	if (info->change_mask & PW_PORT_CHANGE_MASK_PROPS)
+		print_properties(info->props, '*', true);
+	if (info->change_mask & PW_PORT_CHANGE_MASK_PARAMS)
+		print_params(info->params, info->n_params, '*', true);
 	info->change_mask = 0;
 }
 
@@ -720,18 +725,20 @@ static void info_link(struct proxy_data *pd)
 	printf("\tinput-node-id: %u\n", info->input_node_id);
 	printf("\tinput-port-id: %u\n", info->input_port_id);
 
-	printf("%c\tstate: \"%s\"", MARK_CHANGE(PW_LINK_CHANGE_MASK_STATE),
-			pw_link_state_as_string(info->state));
+	if (info->change_mask & PW_LINK_CHANGE_MASK_STATE)
+		printf("%c\tstate: \"%s\"", '*', pw_link_state_as_string(info->state));
 	if (info->state == PW_LINK_STATE_ERROR && info->error)
 		printf(" \"%s\"\n", info->error);
 	else
 		printf("\n");
-	printf("%c\tformat:\n", MARK_CHANGE(PW_LINK_CHANGE_MASK_FORMAT));
+	if (info->change_mask & PW_LINK_CHANGE_MASK_FORMAT)
+		printf("%c\tformat:\n", '*');
 	if (info->format)
 		spa_debug_pod(2, NULL, info->format);
 	else
 		printf("\t\tnone\n");
-	print_properties(info->props, MARK_CHANGE(PW_LINK_CHANGE_MASK_PROPS), true);
+	if (info->change_mask & PW_LINK_CHANGE_MASK_STATE)
+		print_properties(info->props, '*', true);
 	info->change_mask = 0;
 }
 
@@ -742,8 +749,10 @@ static void info_device(struct proxy_data *pd)
 	info_global(pd);
 	if (info == NULL)
 		return;
-	print_properties(info->props, MARK_CHANGE(PW_DEVICE_CHANGE_MASK_PROPS), true);
-	print_params(info->params, info->n_params, MARK_CHANGE(PW_DEVICE_CHANGE_MASK_PARAMS), true);
+	if (info->change_mask & PW_DEVICE_CHANGE_MASK_PROPS)
+		print_properties(info->props, '*', true);
+	if (info->change_mask & PW_DEVICE_CHANGE_MASK_PARAMS)
+		print_params(info->params, info->n_params, '*', true);
 	info->change_mask = 0;
 }
 
@@ -815,7 +824,7 @@ static void core_event_info(void *data, const struct pw_core_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_core(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -836,7 +845,7 @@ static void module_event_info(void *data, const struct pw_module_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_module(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -856,14 +865,14 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_node(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
 static void event_param(void *_data, int seq, uint32_t id,
 		uint32_t index, uint32_t next, const struct spa_pod *param)
 {
-        struct proxy_data *data = _data;
+	struct proxy_data *data = _data;
 	struct remote_data *rd = data->rd;
 
 	if (rd->data->interactive)
@@ -891,7 +900,7 @@ static void port_event_info(void *data, const struct pw_port_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_port(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -912,7 +921,7 @@ static void factory_event_info(void *data, const struct pw_factory_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_factory(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -932,14 +941,14 @@ static void client_event_info(void *data, const struct pw_client_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_client(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
 static void client_event_permissions(void *_data, uint32_t index,
 		uint32_t n_permissions, const struct pw_permission *permissions)
 {
-        struct proxy_data *data = _data;
+	struct proxy_data *data = _data;
 	struct remote_data *rd = data->rd;
 	uint32_t i;
 
@@ -973,7 +982,7 @@ static void link_event_info(void *data, const struct pw_link_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_link(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -994,7 +1003,7 @@ static void device_event_info(void *data, const struct pw_device_info *info)
 		pd->global = pw_map_lookup(&rd->globals, info->id);
 	if (pd->global && pd->global->info_pending) {
 		info_device(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -1039,7 +1048,7 @@ static void session_event_info(void *data,
 		pd->global = pw_map_lookup(&rd->globals, update->id);
 	if (pd->global && pd->global->info_pending) {
 		info_session(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -1095,7 +1104,7 @@ static void endpoint_event_info(void *data,
 		pd->global = pw_map_lookup(&rd->globals, update->id);
 	if (pd->global && pd->global->info_pending) {
 		info_endpoint(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -1144,7 +1153,7 @@ static void endpoint_stream_event_info(void *data,
 		pd->global = pw_map_lookup(&rd->globals, update->id);
 	if (pd->global && pd->global->info_pending) {
 		info_endpoint_stream(pd);
-		pd->global->info_pending = false;
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 }
 
@@ -1181,9 +1190,9 @@ destroy_proxy (void *data)
 }
 
 static const struct pw_proxy_events proxy_events = {
-        PW_VERSION_PROXY_EVENTS,
-        .removed = removed_proxy,
-        .destroy = destroy_proxy,
+	PW_VERSION_PROXY_EVENTS,
+	.removed = removed_proxy,
+	.destroy = destroy_proxy,
 };
 
 static bool do_list_objects(struct data *data, const char *cmd, char *args, char **error)
@@ -1358,6 +1367,7 @@ static bool do_global_info(struct global *global, char **error)
 		pd = pw_proxy_get_user_data(global->proxy);
 		if (pd->class->info)
 			pd->class->info(pd);
+		pd->global->info_pending = rd->data->monitoring_info;
 	}
 	return true;
 }
@@ -1380,7 +1390,7 @@ static bool do_info(struct data *data, const char *cmd, char *args, char **error
 {
 	struct remote_data *rd = data->current;
 	char *a[1];
-        int n;
+	int n;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -1402,6 +1412,19 @@ static bool do_info(struct data *data, const char *cmd, char *args, char **error
 	return true;
 }
 
+static struct pw_properties *properties_new_checked(const char *str, char **error)
+{
+	struct pw_properties *props;
+	struct spa_error_location loc;
+
+	props = pw_properties_new_string_checked(str, strlen(str), &loc);
+	if (!props) {
+		*error = spa_aprintf("syntax error in properties, line:%d col:%d: %s",
+				loc.line, loc.col, loc.reason);
+	}
+	return props;
+}
+
 static bool do_create_device(struct data *data, const char *cmd, char *args, char **error)
 {
 	struct remote_data *rd = data->current;
@@ -1417,8 +1440,10 @@ static bool do_create_device(struct data *data, const char *cmd, char *args, cha
 		*error = spa_aprintf("%s <factory-name> [<properties>]", cmd);
 		return false;
 	}
-	if (n == 2)
-		props = pw_properties_new_string(a[1]);
+	if (n == 2) {
+		if ((props = properties_new_checked(a[1], error)) == NULL)
+			return false;
+	}
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Device,
@@ -1446,7 +1471,7 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 {
 	struct remote_data *rd = data->current;
 	char *a[2];
-        int n;
+	int n;
 	uint32_t id;
 	struct pw_proxy *proxy;
 	struct pw_properties *props = NULL;
@@ -1457,8 +1482,10 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 		*error = spa_aprintf("%s <factory-name> [<properties>]", cmd);
 		return false;
 	}
-	if (n == 2)
-		props = pw_properties_new_string(a[1]);
+	if (n == 2) {
+		if ((props = properties_new_checked(a[1], error)) == NULL)
+			return false;
+	}
 
 	proxy = pw_core_create_object(rd->core, a[0],
 					    PW_TYPE_INTERFACE_Node,
@@ -1471,9 +1498,9 @@ static bool do_create_node(struct data *data, const char *cmd, char *args, char 
 	pd = pw_proxy_get_user_data(proxy);
 	pd->rd = rd;
 	pd->proxy = proxy;
-        pd->class = &node_class;
-        pw_proxy_add_object_listener(proxy, &pd->object_listener, &node_events, pd);
-        pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
+	pd->class = &node_class;
+	pw_proxy_add_object_listener(proxy, &pd->object_listener, &node_events, pd);
+	pw_proxy_add_listener(proxy, &pd->proxy_listener, &proxy_events, pd);
 
 	id = pw_map_insert_new(&data->vars, proxy);
 	if (rd->data->interactive)
@@ -1486,7 +1513,7 @@ static bool do_destroy(struct data *data, const char *cmd, char *args, char **er
 {
 	struct remote_data *rd = data->current;
 	char *a[1];
-        int n;
+	int n;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -1574,10 +1601,12 @@ static bool do_create_link(struct data *data, const char *cmd, char *args, char 
 		*error = spa_aprintf("%s <node-id> <port> <node-id> <port> [<properties>]", cmd);
 		return false;
 	}
-	if (n == 5)
-		props = pw_properties_new_string(a[4]);
-	else
+	if (n == 5) {
+		if ((props = properties_new_checked(a[4], error)) == NULL)
+			return false;
+	} else {
 		props = pw_properties_new(NULL, NULL);
+	}
 
 	if (!spa_streq(a[0], "-"))
 		pw_properties_set(props, PW_KEY_LINK_OUTPUT_NODE, a[0]);
@@ -1683,8 +1712,8 @@ static bool do_export_node(struct data *data, const char *cmd, char *args, char 
 
 	return true;
 
-      no_remote:
-        *error = spa_aprintf("Remote %d does not exist", idx);
+no_remote:
+	*error = spa_aprintf("Remote %d does not exist", idx);
 	return false;
 }
 
@@ -1847,7 +1876,7 @@ static bool do_get_permissions(struct data *data, const char *cmd, char *args, c
 {
 	struct remote_data *rd = data->current;
 	char *a[3];
-        int n;
+	int n;
 	struct global *global;
 
 	n = pw_split_ip(args, WHITESPACE, 1, a);
@@ -2132,7 +2161,7 @@ static bool parse(struct data *data, char *buf, char **error)
 			return c->func(data, cmd, args, error);
 		}
 	}
-        *error = spa_aprintf("Command \"%s\" does not exist. Type 'help' for usage.", cmd);
+	*error = spa_aprintf("Command \"%s\" does not exist. Type 'help' for usage.", cmd);
 	return false;
 }
 
@@ -2365,6 +2394,9 @@ int main(int argc, char *argv[])
 			p = stpcpy(p, argv[i]);
 			p = stpcpy(p, " ");
 		}
+
+		// If we're monitoring, surface info changes as well
+		data.monitoring_info = monitor;
 
 		pw_main_loop_run(data.loop);
 

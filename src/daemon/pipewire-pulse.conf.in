@@ -62,6 +62,9 @@ context.exec = [
 #      ( flags = [ nofail ] )
 pulse.cmd = [
     { cmd = "load-module" args = "module-always-sink" flags = [ ] }
+    { cmd = "load-module" args = "module-device-manager" flags = [ ] }
+    { cmd = "load-module" args = "module-device-restore" flags = [ ] }
+    { cmd = "load-module" args = "module-stream-restore" flags = [ ] }
     #{ cmd = "load-module" args = "module-switch-on-connect" }
     #{ cmd = "load-module" args = "module-gsettings" flags = [ nofail ] }
 ]
@@ -98,6 +101,7 @@ pulse.properties = {
         #}
     ]
     #server.dbus-name       = "org.pulseaudio.Server"
+    #pulse.allow-module-loading = true
     #pulse.min.req          = 128/48000     # 2.7ms
     #pulse.default.req      = 960/48000     # 20 milliseconds
     #pulse.min.frag         = 128/48000     # 2.7ms
@@ -107,11 +111,18 @@ pulse.properties = {
     #pulse.idle.timeout     = 0             # don't pause after underruns
     #pulse.default.format   = F32
     #pulse.default.position = [ FL FR ]
-    # These overrides are only applied when running in a vm.
-    vm.overrides = {
-        pulse.min.quantum = 1024/48000      # 22ms
-    }
 }
+
+pulse.properties.rules = [
+    {   matches = [ { cpu.vm.name = !null } ]
+        actions = {
+            update-props = {
+            # These overrides are only applied when running in a vm.
+                pulse.min.quantum = 1024/48000      # 22ms
+	    }
+        }
+    }
+]
 
 # client/stream specific properties
 pulse.rules = [

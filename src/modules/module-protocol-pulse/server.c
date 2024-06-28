@@ -25,10 +25,10 @@
 #include <systemd/sd-daemon.h>
 #endif
 
+#include <spa/utils/cleanup.h>
 #include <spa/utils/defs.h>
 #include <spa/utils/json.h>
 #include <spa/utils/result.h>
-#include <pipewire/cleanup.h>
 #include <pipewire/pipewire.h>
 
 #include "client.h"
@@ -42,9 +42,14 @@
 #include "stream.h"
 #include "utils.h"
 #include "flatpak-utils.h"
+#ifdef HAVE_SNAP
+#include "snap-policy.h"
+#endif
 
 #define LISTEN_BACKLOG 32
 #define MAX_CLIENTS 64
+
+PW_LOG_TOPIC_EXTERN(pulse_conn);
 
 static int handle_packet(struct client *client, struct message *msg)
 {
@@ -67,9 +72,9 @@ static int handle_packet(struct client *client, struct message *msg)
 		goto finish;
 	}
 
-	if (debug_messages) {
+	if (pw_log_topic_custom_enabled(SPA_LOG_LEVEL_INFO, pulse_conn)) {
 		pw_log_debug("client %p: command:%s", client, commands[command].name);
-		message_dump(SPA_LOG_LEVEL_INFO, msg);
+		message_dump(SPA_LOG_LEVEL_INFO, "<<", msg);
 	}
 
 	const struct command *cmd = &commands[command];
@@ -405,7 +410,10 @@ on_connect(void *data, int fd, uint32_t mask)
 		client_access = server->client_access;
 
 	if (server->addr.ss_family == AF_UNIX) {
-		spa_autofree char *app_id = NULL, *devices = NULL;
+		spa_autofree char *app_id = NULL, *snap_app_id = NULL, *devices = NULL;
+#ifdef HAVE_SNAP
+		pw_sandbox_access_t snap_access;
+#endif
 
 #ifdef SO_PRIORITY
 		val = 6;
@@ -444,6 +452,21 @@ on_connect(void *data, int fd, uint32_t mask)
 			else
 				pw_properties_set(client->props, PW_KEY_MEDIA_CATEGORY, NULL);
 		}
+		// check SNAP permissions
+#ifdef HAVE_SNAP
+		snap_access = pw_snap_get_audio_permissions(client, client_fd, &snap_app_id);
+		if ((snap_access & PW_SANDBOX_ACCESS_NOT_A_SANDBOX) == 0) {
+			pw_properties_set(client->props, PW_KEY_SNAP_ID, snap_app_id);
+
+			pw_properties_set(client->props,
+					  PW_KEY_SNAP_PLAYBACK_ALLOWED,
+					  (snap_access & PW_SANDBOX_ACCESS_PLAYBACK) ? "true" : "false");
+
+			pw_properties_set(client->props,
+					  PW_KEY_SNAP_RECORD_ALLOWED,
+					  (snap_access & PW_SANDBOX_ACCESS_RECORD) ? "true" : "false");
+		}
+#endif
 	}
 	else if (server->addr.ss_family == AF_INET || server->addr.ss_family == AF_INET6) {
 

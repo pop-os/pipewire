@@ -41,9 +41,11 @@
 #include "rate-control.h"
 #include "iso-io.h"
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.sink.media");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.sink.media");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
+
+#include "bt-latency.h"
 
 #define DEFAULT_CLOCK_NAME	"clock.system.monotonic"
 
@@ -57,6 +59,7 @@ struct props {
 #define MAX_BUFFERS 32
 #define BUFFER_SIZE	(8192*8)
 #define RATE_CTL_DIFF_MAX 0.005
+#define LATENCY_PERIOD		(200 * SPA_NSEC_PER_MSEC)
 
 /* Wait for two cycles before trying to sync ISO. On start/driver reassign,
  * first cycle may have strange number of samples. */
@@ -108,6 +111,7 @@ struct impl {
 	struct spa_log *log;
 	struct spa_loop *data_loop;
 	struct spa_system *data_system;
+	struct spa_loop_utils *loop_utils;
 
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
@@ -157,6 +161,9 @@ struct impl {
 
 	uint64_t prev_flush_time;
 	uint64_t next_flush_time;
+
+	uint64_t packet_delay_ns;
+	struct spa_source *update_delay_event;
 
 	const struct media_codec *codec;
 	bool codec_props_changed;
@@ -371,18 +378,60 @@ static void set_latency(struct impl *this, bool emit_latency)
 	struct port *port = &this->port;
 	int64_t delay;
 
+	/* in main loop */
+
 	if (this->transport == NULL)
 		return;
 
-	delay = spa_bt_transport_get_delay_nsec(this->transport);
+	/*
+	 * We start flushing data immediately, so the delay is:
+	 *
+	 * (packet delay) + (codec internal delay) + (transport delay) + (latency offset)
+	 *
+	 * and doesn't depend on the quantum. The codec internal delay is neglected.
+	 * Kernel knows the latency due to socket/controller queue, but doesn't
+	 * tell us, so not included but hopefully in < 20 ms range.
+	 */
+
+	delay = __atomic_load_n(&this->packet_delay_ns, __ATOMIC_RELAXED);
+	delay += spa_bt_transport_get_delay_nsec(this->transport);
 	delay += SPA_CLAMP(this->props.latency_offset, -delay, INT64_MAX / 2);
+	delay = SPA_MAX(delay, 0);
+
 	port->latency.min_ns = port->latency.max_ns = delay;
+	port->latency.min_rate = port->latency.max_rate = 0;
+	port->latency.min_quantum = port->latency.max_quantum = 0.0f;
+
+	spa_log_info(this->log, "%p: total latency:%d ms", this, (int)(delay / SPA_NSEC_PER_MSEC));
 
 	if (emit_latency) {
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 		port->params[IDX_Latency].flags ^= SPA_PARAM_INFO_SERIAL;
 		emit_port_info(this, port, false);
 	}
+}
+
+static void update_delay_event(void *data, uint64_t count)
+{
+	struct impl *this = data;
+
+	/* in main loop */
+	set_latency(this, true);
+}
+
+static void update_packet_delay(struct impl *this, uint64_t delay)
+{
+	uint64_t old_delay = this->packet_delay_ns;
+
+	/* in data thread */
+
+	delay = SPA_MAX(delay, old_delay);
+	if (delay == old_delay)
+		return;
+
+	__atomic_store_n(&this->packet_delay_ns, delay, __ATOMIC_RELAXED);
+	if (this->update_delay_event)
+		spa_loop_utils_signal_event(this->loop_utils, this->update_delay_event);
 }
 
 static int apply_props(struct impl *this, const struct spa_pod *param)
@@ -489,9 +538,9 @@ static uint64_t get_reference_time(struct impl *this, uint64_t *duration_ns_ret)
 
 	/* Account for resampling delay */
 	resampling = (port->current_format.info.raw.rate != this->process_rate) || this->following;
-	if (port->rate_match && this->clock && resampling) {
+	if (port->rate_match && this->position && resampling) {
 		t -= (uint64_t)port->rate_match->delay * SPA_NSEC_PER_SEC
-			/ this->clock->rate.denom;
+			/ this->position->clock.rate.denom;
 		t += SPA_NSEC_PER_SEC / port->current_format.info.raw.rate;
 	}
 
@@ -814,6 +863,8 @@ again:
 			this->iso_pending = false;
 
 			reset_buffer(this);
+
+			update_packet_delay(this, iso_io->duration * 3/2);
 		}
 		return 0;
 	}
@@ -895,6 +946,8 @@ again:
 				this->next_flush_time = this->process_time;
 			this->next_flush_time += packet_time;
 		}
+
+		update_packet_delay(this, packet_time);
 
 		if (this->need_flush == NEED_FLUSH_FRAGMENT) {
 			reset_buffer(this);
@@ -992,7 +1045,7 @@ static void media_iso_pull(struct spa_bt_iso_io *iso_io)
 	max_err = iso_io->duration;
 
 	if (iso_io->resync && err >= 0) {
-		unsigned int req = err * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC;
+		unsigned int req = (unsigned int)(err * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC);
 
 		if (req > 0) {
 			spa_bt_rate_control_init(&port->ratectl, 0);
@@ -1000,7 +1053,7 @@ static void media_iso_pull(struct spa_bt_iso_io *iso_io)
 		}
 		spa_log_debug(this->log, "%p: ISO sync skip frames:%u", this, req);
 	} else if (iso_io->resync && -err >= 0) {
-		unsigned int req = -err * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC;
+		unsigned int req = (unsigned int)(-err * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC);
 		static const uint8_t empty[8192] = {0};
 
 		if (req > 0) {
@@ -1035,9 +1088,18 @@ static void media_on_flush_error(struct spa_source *source)
 {
 	struct impl *this = source->data;
 
+	if (source->rmask & SPA_IO_ERR) {
+		/* TX timestamp info? */
+		if (this->transport && this->transport->iso_io)
+			if (spa_bt_iso_io_recv_errqueue(this->transport->iso_io) == 0)
+				return;
+
+		/* Otherwise: actual error */
+	}
+
 	spa_log_trace(this->log, "%p: flush event", this);
 
-	if (source->rmask & (SPA_IO_ERR | SPA_IO_HUP)) {
+	if (source->rmask & (SPA_IO_HUP | SPA_IO_ERR)) {
 		spa_log_warn(this->log, "%p: error %d", this, source->rmask);
 		if (this->flush_source.loop)
 			spa_loop_remove_source(this->data_loop, &this->flush_source);
@@ -1083,7 +1145,7 @@ static void media_on_timeout(struct spa_source *source)
 	uint32_t rate;
 	struct spa_io_buffers *io = port->io;
 	uint64_t prev_time, now_time;
-	int res;
+	int status, res;
 
 	if (this->started) {
 		if ((res = spa_system_timerfd_read(this->data_system, this->timerfd, &exp)) < 0) {
@@ -1110,31 +1172,24 @@ static void media_on_timeout(struct spa_source *source)
 
 	setup_matching(this);
 
-	this->next_time = now_time + duration * SPA_NSEC_PER_SEC / rate * port->ratectl.corr;
+	this->next_time = (uint64_t)(now_time + duration * SPA_NSEC_PER_SEC / rate * port->ratectl.corr);
 
 	if (SPA_LIKELY(this->clock)) {
-		int64_t delay_nsec = 0;
-
 		this->clock->nsec = now_time;
 		this->clock->rate = this->clock->target_rate;
 		this->clock->position += this->clock->duration;
 		this->clock->duration = duration;
 		this->clock->rate_diff = 1 / port->ratectl.corr;
 		this->clock->next_nsec = this->next_time;
-
-		if (this->transport)
-			delay_nsec = spa_bt_transport_get_delay_nsec(this->transport);
-
-		/* Negative delay doesn't work properly, so disallow it */
-		delay_nsec += SPA_CLAMP(this->props.latency_offset, -delay_nsec, INT64_MAX / 2);
-
-		this->clock->delay = (delay_nsec * this->clock->rate.denom) / SPA_NSEC_PER_SEC;
+		this->clock->delay = 0;
 	}
 
+	status = this->transport_started ? SPA_STATUS_NEED_DATA : SPA_STATUS_HAVE_DATA;
 
-	spa_log_trace(this->log, "%p: %d", this, io->status);
-	io->status = SPA_STATUS_NEED_DATA;
-	spa_node_call_ready(&this->callbacks, SPA_STATUS_NEED_DATA);
+	spa_log_trace(this->log, "%p: %d -> %d", this, io->status, status);
+	io->status = status;
+	io->buffer_id = SPA_ID_INVALID;
+	spa_node_call_ready(&this->callbacks, status);
 
 	set_timeout(this, this->next_time);
 }
@@ -1184,8 +1239,11 @@ static int transport_start(struct impl *this)
 				&port->current_format,
 				this->codec_props,
 				this->transport->write_mtu);
-		if (this->codec_data == NULL)
+		if (this->codec_data == NULL) {
+			spa_log_error(this->log, "%p: codec %s initialization failed", this,
+					this->codec->description);
 			return -EIO;
+		}
 	} else {
 		this->own_codec_data = false;
 		this->codec_data = this->transport->iso_io->codec_data;
@@ -1230,6 +1288,8 @@ static int transport_start(struct impl *this)
 	reset_buffer(this);
 
 	spa_bt_rate_control_init(&port->ratectl, 0);
+
+	this->update_delay_event = spa_loop_utils_add_event(this->loop_utils, update_delay_event, this);
 
 	if (!this->transport->iso_io) {
 		this->flush_timer_source.data = this;
@@ -1279,6 +1339,8 @@ static int do_start(struct impl *this)
 		return res;
 	}
 
+	this->packet_delay_ns = 0;
+
 	this->source.data = this;
 	this->source.fd = this->timerfd;
 	this->source.func = media_on_timeout;
@@ -1307,6 +1369,12 @@ static int do_remove_source(struct spa_loop *loop,
 	if (this->source.loop)
 		spa_loop_remove_source(this->data_loop, &this->source);
 	set_timeout(this, 0);
+
+	if (this->update_delay_event) {
+		spa_loop_utils_destroy_source(this->loop_utils, this->update_delay_event);
+		this->update_delay_event = NULL;
+	}
+
 	return 0;
 }
 
@@ -1323,7 +1391,6 @@ static int do_remove_transport_source(struct spa_loop *loop,
 
 	if (this->flush_source.loop)
 		spa_loop_remove_source(this->data_loop, &this->flush_source);
-
 	if (this->flush_timer_source.loop)
 		spa_loop_remove_source(this->data_loop, &this->flush_timer_source);
 	enable_flush_timer(this, false);
@@ -1412,12 +1479,12 @@ static void emit_node_info(struct impl *this, bool full)
 	char *node_group = NULL;
 
 	if (this->transport && (this->transport->profile & SPA_BT_PROFILE_BAP_SINK)) {
-		spa_scnprintf(node_group_buf, sizeof(node_group_buf), "bluez-iso-%s-cig-%d",
+		spa_scnprintf(node_group_buf, sizeof(node_group_buf), "[\"bluez-iso-%s-cig-%d\"]",
 				this->transport->device->adapter->address,
 				this->transport->bap_cig);
 		node_group = node_group_buf;
 	} else if (this->transport && (this->transport->profile & SPA_BT_PROFILE_BAP_BROADCAST_SINK)) {
-		spa_scnprintf(node_group_buf, sizeof(node_group_buf), "bluez-iso-%s-big-%d",
+		spa_scnprintf(node_group_buf, sizeof(node_group_buf), "[\"bluez-iso-%s-big-%d\"]",
 				this->transport->device->adapter->address,
 				this->transport->bap_big);
 		node_group = node_group_buf;
@@ -1711,6 +1778,8 @@ static int port_set_format(struct impl *this, struct port *port,
 		port->have_format = true;
 	}
 
+	set_latency(this, false);
+
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 	if (port->have_format) {
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_RATE;
@@ -1850,8 +1919,13 @@ static int impl_node_process(void *object)
 		return SPA_STATUS_HAVE_DATA;
 	}
 
-	if (!this->started || !this->transport_started)
-		return SPA_STATUS_OK;
+	if (!this->started || !this->transport_started) {
+		if (io->status != SPA_STATUS_HAVE_DATA) {
+			io->status = SPA_STATUS_HAVE_DATA;
+			io->buffer_id = SPA_ID_INVALID;
+		}
+		return SPA_STATUS_HAVE_DATA;
+	}
 
 	if (io->status == SPA_STATUS_HAVE_DATA && io->buffer_id < port->n_buffers) {
 		struct buffer *b = &port->buffers[io->buffer_id];
@@ -2061,6 +2135,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+	this->loop_utils = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_LoopUtils);
 
 	spa_log_topic_init(this->log, &log_topic);
 
@@ -2070,6 +2145,10 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (this->data_system == NULL) {
 		spa_log_error(this->log, "a data system is needed");
+		return -EINVAL;
+	}
+	if (this->loop_utils == NULL) {
+		spa_log_error(this->log, "loop utils are needed");
 		return -EINVAL;
 	}
 
@@ -2108,8 +2187,6 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.n_params = N_PORT_PARAMS;
 
 	port->latency = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
-	port->latency.min_quantum = 1.0f;
-	port->latency.max_quantum = 1.0f;
 
 	spa_list_init(&port->ready);
 

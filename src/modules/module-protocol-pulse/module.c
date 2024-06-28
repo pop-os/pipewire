@@ -7,11 +7,11 @@
 #include <string.h>
 #include <ctype.h>
 
+#include <spa/utils/cleanup.h>
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 #include <spa/utils/hook.h>
 #include <spa/utils/string.h>
-#include <pipewire/cleanup.h>
 #include <pipewire/log.h>
 #include <pipewire/map.h>
 #include <pipewire/properties.h>
@@ -293,7 +293,7 @@ void audioinfo_to_properties(struct spa_audio_info_raw *info, struct pw_properti
 	}
 }
 
-static const struct module_info *find_module_info(const char *name)
+const struct module_info *module_info_find(struct impl *impl, const char *name)
 {
 	extern const struct module_info __start_pw_mod_pulse_modules[];
 	extern const struct module_info __stop_pw_mod_pulse_modules[];
@@ -323,7 +323,7 @@ struct module *module_create(struct impl *impl, const char *name, const char *ar
 	struct module *module;
 	int res;
 
-	info = find_module_info(name);
+	info = module_info_find(impl, name);
 	if (info == NULL) {
 		errno = ENOENT;
 		return NULL;
@@ -374,4 +374,20 @@ error_free:
 	module_free(module);
 	return NULL;
 
+}
+
+struct module *module_lookup(struct impl *impl, uint32_t index, const char *name)
+{
+	union pw_map_item *item;
+
+	if (index != SPA_ID_INVALID)
+		return pw_map_lookup(&impl->modules, index);
+
+	pw_array_for_each(item, &impl->modules.items) {
+		struct module *m = item->data;
+		if (!pw_map_item_is_free(item) &&
+		    spa_streq(m->info->name, name))
+			return m;
+	}
+	return NULL;
 }

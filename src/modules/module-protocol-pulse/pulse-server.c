@@ -16,6 +16,7 @@
 #include "log.h"
 
 #include <spa/support/cpu.h>
+#include <spa/utils/cleanup.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/debug/dict.h>
@@ -28,7 +29,6 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/json.h>
 
-#include <pipewire/cleanup.h>
 #include <pipewire/pipewire.h>
 #include <pipewire/extensions/metadata.h>
 
@@ -56,6 +56,7 @@
 #include "utils.h"
 #include "volume.h"
 
+#define DEFAULT_ALLOW_MODULE_LOADING 	"true"
 #define DEFAULT_MIN_REQ		"128/48000"
 #define DEFAULT_DEFAULT_REQ	"960/48000"
 #define DEFAULT_MIN_FRAG	"128/48000"
@@ -72,10 +73,6 @@
 #define MAX_BLOCK	(64*1024)
 
 #define TEMPORARY_MOVE_TIMEOUT	(SPA_NSEC_PER_SEC)
-
-PW_LOG_TOPIC_EXTERN(pulse_conn);
-
-bool debug_messages = false;
 
 struct latency_offset_data {
 	int64_t prev_latency_offset;
@@ -999,12 +996,8 @@ static void manager_metadata(void *data, struct pw_manager_object *o,
 		if (changed)
 			send_default_change_subscribe_event(client, true, true);
 	}
-	if (subject == PW_ID_CORE && o == client->metadata_routes) {
-		if (key == NULL)
-			pw_properties_clear(client->routes);
-		else
-			pw_properties_set(client->routes, key, value);
-	}
+	if (subject == PW_ID_CORE && o == client->metadata_routes)
+		client_update_routes(client, key, value);
 }
 
 
@@ -4206,7 +4199,7 @@ static int do_get_info(struct client *client, uint32_t command, uint32_t tag, st
 
 	if (command == COMMAND_GET_MODULE_INFO && (sel.index & MODULE_FLAG) != 0) {
 		struct module *module;
-		module = pw_map_lookup(&impl->modules, sel.index & MODULE_INDEX_MASK);
+		module = module_lookup(impl, sel.index & MODULE_INDEX_MASK, NULL);
 		if (module == NULL)
 			goto error_noentity;
 		fill_ext_module_info(client, reply, module);
@@ -4566,7 +4559,7 @@ static int do_update_stream_sample_rate(struct client *client, uint32_t command,
 
 	stream->rate = rate;
 
-	corr = (double)rate/(double)stream->ss.rate;
+	corr = (float)rate/(float)stream->ss.rate;
 	pw_stream_set_control(stream->stream, SPA_PROP_rate, 1, &corr, NULL);
 
 	return reply_simple_ack(client, tag);
@@ -4574,9 +4567,10 @@ static int do_update_stream_sample_rate(struct client *client, uint32_t command,
 
 static int do_extension(struct client *client, uint32_t command, uint32_t tag, struct message *m)
 {
+	struct impl *impl = client->impl;
 	uint32_t index;
 	const char *name;
-	const struct extension *ext;
+	struct module *module;
 
 	if (message_get(m,
 			TAG_U32, &index,
@@ -4591,11 +4585,11 @@ static int do_extension(struct client *client, uint32_t command, uint32_t tag, s
 	    (index != SPA_ID_INVALID && name != NULL))
 		return -EINVAL;
 
-	ext = extension_find(index, name);
-	if (ext == NULL)
+	module = module_lookup(impl, index, name);
+	if (module == NULL)
 		return -ENOENT;
 
-	return ext->process(client, tag, m);
+	return extension_process(module, client, tag, m);
 }
 
 static int do_set_profile(struct client *client, uint32_t command, uint32_t tag, struct message *m)
@@ -5021,6 +5015,9 @@ static int do_load_module(struct client *client, uint32_t command, uint32_t tag,
 	struct pending_module *pm;
 	int r;
 
+	if (!impl->defs.allow_module_loading)
+		return -EACCES;
+
 	if (message_get(m,
 			TAG_STRING, &name,
 			TAG_STRING, &argument,
@@ -5066,6 +5063,9 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 	struct module *module;
 	uint32_t module_index;
 
+	if (!impl->defs.allow_module_loading)
+		return -EACCES;
+
 	if (message_get(m,
 			TAG_U32, &module_index,
 			TAG_INVALID) < 0)
@@ -5079,7 +5079,7 @@ static int do_unload_module(struct client *client, uint32_t command, uint32_t ta
 	if ((module_index & MODULE_FLAG) == 0)
 		return -EPERM;
 
-	module = pw_map_lookup(&impl->modules, module_index & MODULE_INDEX_MASK);
+	module = module_lookup(impl, module_index & MODULE_INDEX_MASK, NULL);
 	if (module == NULL)
 		return -ENOENT;
 
@@ -5456,9 +5456,22 @@ static int parse_uint32(struct pw_properties *props, const char *key, const char
 	pw_log_info(": defaults: %s = %u", key, *res);
 	return 0;
 }
+static int parse_bool(struct pw_properties *props, const char *key, const char *def,
+		bool *res)
+{
+	const char *str;
+	if (props == NULL ||
+	    (str = pw_properties_get(props, key)) == NULL)
+		str = def;
+	*res = spa_atob(str);
+	pw_log_info(": defaults: %s = %s", key, *res ? "true" : "false");
+	return 0;
+}
 
 static void load_defaults(struct defs *def, struct pw_properties *props)
 {
+	parse_bool(props, "pulse.allow-module-loading", DEFAULT_ALLOW_MODULE_LOADING,
+			&def->allow_module_loading);
 	parse_frac(props, "pulse.min.req", DEFAULT_MIN_REQ, &def->min_req);
 	parse_frac(props, "pulse.default.req", DEFAULT_DEFAULT_REQ, &def->default_req);
 	parse_frac(props, "pulse.min.frag", DEFAULT_MIN_FRAG, &def->min_frag);
@@ -5481,8 +5494,6 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	struct impl *impl;
 	const char *str;
 	int res = 0;
-
-	debug_messages = pw_log_topic_enabled(SPA_LOG_LEVEL_INFO, pulse_conn);
 
 	impl = calloc(1, sizeof(*impl) + user_data_size);
 	if (impl == NULL)
@@ -5511,6 +5522,8 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	pw_context_conf_update_props(context, "pulse.properties", props);
 
 	if ((str = pw_properties_get(props, "vm.overrides")) != NULL) {
+		pw_log_warn("vm.overrides in pulse.properties are deprecated, "
+				"use pulse.properties.rules instead");
 		if (cpu != NULL && spa_cpu_get_vm_type(cpu) != SPA_CPU_VM_NONE)
 			pw_properties_update_string(props, str, strlen(str));
 		pw_properties_set(props, "vm.overrides", NULL);

@@ -5,9 +5,9 @@
 #include <errno.h>
 
 #include <spa/debug/types.h>
+#include <spa/utils/cleanup.h>
 #include <spa/utils/string.h>
 
-#include <pipewire/cleanup.h>
 #include "pipewire/impl.h"
 #include "pipewire/private.h"
 
@@ -523,7 +523,6 @@ int pw_impl_metadata_register(struct pw_impl_metadata *metadata,
 {
 	struct pw_context *context = metadata->context;
 	static const char * const keys[] = {
-		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_MODULE_ID,
 		PW_KEY_FACTORY_ID,
 		PW_KEY_METADATA_NAME,

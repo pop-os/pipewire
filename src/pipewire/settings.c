@@ -143,8 +143,8 @@ static int metadata_property(void *data, uint32_t subject, const char *key,
 		return 0;
 
 	if (spa_streq(key, "log.level")) {
-		v = value ? atoi(value) : 3;
-		pw_log_set_level(v);
+		if (pw_log_set_level_string(value) < 0)
+			pw_log_warn("Ignoring unknown settings metadata log.level '%s'", value);
 	} else if (spa_streq(key, "clock.rate")) {
 		v = value ? atoi(value) : 0;
 		s->clock_rate = v == 0 ? d->clock_rate : v;
@@ -228,6 +228,8 @@ void pw_settings_init(struct pw_context *this)
 
 	d->check_quantum = get_default_bool(p, "settings.check-quantum", DEFAULT_CHECK_QUANTUM);
 	d->check_rate = get_default_bool(p, "settings.check-rate", DEFAULT_CHECK_RATE);
+
+	d->link_max_buffers = SPA_MAX(d->link_max_buffers, 1u);
 
 	d->clock_quantum_limit = SPA_CLAMP(d->clock_quantum_limit,
 			CLOCK_QUANTUM_FLOOR, CLOCK_QUANTUM_LIMIT);

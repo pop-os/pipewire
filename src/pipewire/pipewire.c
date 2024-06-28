@@ -25,7 +25,6 @@
 #include <spa/support/cpu.h>
 #include <spa/support/i18n.h>
 
-#include <pipewire/cleanup.h>
 #include "pipewire.h"
 #include "private.h"
 #include "i18n.h"
@@ -47,6 +46,7 @@ struct plugin {
 	void *hnd;
 	spa_handle_factory_enum_func_t enum_func;
 	int ref;
+	const struct spa_log_topic_enum *log_topic_enum;
 };
 
 struct handle {
@@ -131,8 +131,11 @@ open_plugin(struct registry *registry,
 	plugin->filename = strdup(filename);
 	plugin->hnd = hnd;
 	plugin->enum_func = enum_func;
+	plugin->log_topic_enum = dlsym(hnd, SPA_LOG_TOPIC_ENUM_NAME);
 
 	spa_list_append(&registry->plugins, &plugin->link);
+
+	pw_log_topic_register_enum(plugin->log_topic_enum);
 
 	return plugin;
 
@@ -148,6 +151,7 @@ unref_plugin(struct plugin *plugin)
 {
 	if (--plugin->ref == 0) {
 		spa_list_remove(&plugin->link);
+		pw_log_topic_unregister_enum(plugin->log_topic_enum);
 		pw_log_debug("unloaded plugin:'%s'", plugin->filename);
 		if (pw_should_dlclose())
 			dlclose(plugin->hnd);
@@ -469,78 +473,6 @@ static struct spa_log *load_journal_logger(struct support *support,
 }
 #endif
 
-static bool
-parse_log_level(const char *str, enum spa_log_level *l)
-{
-	uint32_t lvl;
-	if (strlen(str) == 1) {
-		switch(str[0]) {
-		case 'X': lvl = SPA_LOG_LEVEL_NONE; break;
-		case 'E': lvl = SPA_LOG_LEVEL_ERROR; break;
-		case 'W': lvl = SPA_LOG_LEVEL_WARN; break;
-		case 'I': lvl = SPA_LOG_LEVEL_INFO; break;
-		case 'D': lvl = SPA_LOG_LEVEL_DEBUG; break;
-		case 'T': lvl = SPA_LOG_LEVEL_TRACE; break;
-		default:
-			  goto check_int;
-		}
-	} else {
-check_int:
-		  if (!spa_atou32(str, &lvl, 0))
-			  return false;
-		  if (lvl > SPA_LOG_LEVEL_TRACE)
-			  return false;
-	}
-	*l = lvl;
-	return true;
-}
-
-static char *
-parse_pw_debug_env(void)
-{
-	const char *str;
-	int n_tokens;
-	char json[1024] = {0};
-	char *pos = json;
-	char *end = pos + sizeof(json) - 1;
-	enum spa_log_level lvl;
-
-	str = getenv("PIPEWIRE_DEBUG");
-
-	if (!str || !*str)
-		return NULL;
-
-	/* String format is PIPEWIRE_DEBUG=[<glob>:]<level>,...,
-	 * converted into [{ conn.* = 0}, {glob = level}, {glob = level}, ....] ,
-	 * with the connection namespace disabled by default.
-	 */
-	pos += spa_scnprintf(pos, end - pos, "[ { conn.* = %d },", SPA_LOG_LEVEL_NONE);
-
-	spa_auto(pw_strv) tokens = pw_split_strv(str, ",", INT_MAX, &n_tokens);
-	if (n_tokens > 0) {
-		int i;
-		for (i = 0; i < n_tokens; i++) {
-			int n_tok;
-			char *tok[2];
-
-			n_tok = pw_split_ip(tokens[i], ":", SPA_N_ELEMENTS(tok), tok);
-			if (n_tok == 2 && parse_log_level(tok[1], &lvl)) {
-				char *pattern = tok[0];
-				pos += spa_scnprintf(pos, end - pos, "{ %s = %d },",
-						     pattern, lvl);
-			} else if (n_tok == 1 && parse_log_level(tok[0], &lvl)) {
-				pw_log_set_level(lvl);
-			} else {
-				pw_log_warn("Ignoring invalid format in PIPEWIRE_DEBUG: '%s'",
-						tokens[i]);
-			}
-		}
-	}
-
-	pos += spa_scnprintf(pos, end - pos, "]");
-	return strdup(json);
-}
-
 /** Initialize PipeWire
  *
  * \param argc pointer to argc
@@ -595,8 +527,6 @@ void pw_init(int *argc, char **argv[])
 	spa_list_init(&support->registry.handles);
 
 	if (pw_log_is_default()) {
-		char *patterns = NULL;
-
 		n_items = 0;
 		if (!support->no_color) {
 			if ((str = getenv("PIPEWIRE_LOG_COLOR")) == NULL)
@@ -610,8 +540,6 @@ void pw_init(int *argc, char **argv[])
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_LEVEL, level);
 		if ((str = getenv("PIPEWIRE_LOG")) != NULL)
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_FILE, str);
-		if ((patterns = parse_pw_debug_env()) != NULL)
-			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_LOG_PATTERNS, patterns);
 		info = SPA_DICT_INIT(items, n_items);
 
 		log = add_interface(support, SPA_NAME_SUPPORT_LOG, SPA_TYPE_INTERFACE_Log, &info);
@@ -625,7 +553,10 @@ void pw_init(int *argc, char **argv[])
 				pw_log_set(log);
 		}
 #endif
-		free(patterns);
+
+		str = getenv("PIPEWIRE_DEBUG");
+		if (str && *str)
+			pw_log_set_level_string(str);
 	} else {
 		support->support[support->n_support++] =
 			SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Log, pw_log_get());
@@ -678,7 +609,7 @@ void pw_deinit(void)
 		goto done;
 
 	pthread_mutex_lock(&support_lock);
-	pw_log_set(NULL);
+	pw_log_deinit();
 
 	spa_list_consume(h, &registry->handles, link)
 		unref_handle(h);

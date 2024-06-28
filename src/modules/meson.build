@@ -24,6 +24,7 @@ module_sources = [
   'module-metadata.c',
   'module-netjack2-driver.c',
   'module-netjack2-manager.c',
+  'module-parametric-equalizer.c',
   'module-pipe-tunnel.c',
   'module-portal.c',
   'module-profiler.c',
@@ -38,6 +39,7 @@ module_sources = [
   'module-rtp-session.c',
   'module-rtp-source.c',
   'module-rtp-sink.c',
+  'module-snapcast-discover.c',
   'module-vban-recv.c',
   'module-vban-send.c',
   'module-session-manager.c',
@@ -68,6 +70,11 @@ pipewire_module_loopback = shared_library('pipewire-module-loopback',
   install_rpath: modules_install_dir,
   dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
+
+plugin_dependencies = []
+if get_option('spa-plugins').allowed()
+  plugin_dependencies += audioconvert_dep
+endif
 
 simd_cargs = []
 simd_dependencies = []
@@ -122,7 +129,7 @@ filter_chain_sources = [
   'module-filter-chain/convolver.c'
 ]
 filter_chain_dependencies = [
-  mathlib, dl_lib, pipewire_dep, sndfile_dep, audioconvert_dep
+  mathlib, dl_lib, pipewire_dep, sndfile_dep, plugin_dependencies
 ]
 
 pipewire_module_filter_chain = shared_library('pipewire-module-filter-chain',
@@ -175,7 +182,7 @@ pipewire_module_echo_cancel = shared_library('pipewire-module-echo-cancel',
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [mathlib, dl_lib, pipewire_dep, audioconvert_dep],
+  dependencies : [mathlib, dl_lib, pipewire_dep, plugin_dependencies],
 )
 
 build_module_jack_tunnel = jack_dep.found()
@@ -244,6 +251,15 @@ pipewire_module_netjack2_manager = shared_library('pipewire-module-netjack2-mana
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
   dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep, opus_custom_dep],
+)
+
+pipewire_module_parametric_equalizer = shared_library('pipewire-module-parametric-equalizer',
+  [ 'module-parametric-equalizer.c' ],
+  include_directories : [configinc],
+  install : true,
+  install_dir : modules_install_dir,
+  install_rpath: modules_install_dir,
+  dependencies : [filter_chain_dependencies],
 )
 
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
@@ -326,6 +342,7 @@ pipewire_module_protocol_native = shared_library('pipewire-module-protocol-nativ
     'module-protocol-native/protocol-native.c',
     'module-protocol-native/v0/protocol-native.c',
     'module-protocol-native/protocol-footer.c',
+    'module-protocol-native/security-context.c',
     'module-protocol-native/connection.c' ],
   include_directories : [configinc],
   install : true,
@@ -342,9 +359,6 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/collect.c',
   'module-protocol-pulse/cmd.c',
   'module-protocol-pulse/extension.c',
-  'module-protocol-pulse/extensions/ext-device-manager.c',
-  'module-protocol-pulse/extensions/ext-device-restore.c',
-  'module-protocol-pulse/extensions/ext-stream-restore.c',
   'module-protocol-pulse/format.c',
   'module-protocol-pulse/manager.c',
   'module-protocol-pulse/message.c',
@@ -366,6 +380,8 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-alsa-source.c',
   'module-protocol-pulse/modules/module-always-sink.c',
   'module-protocol-pulse/modules/module-combine-sink.c',
+  'module-protocol-pulse/modules/module-device-manager.c',
+  'module-protocol-pulse/modules/module-device-restore.c',
   'module-protocol-pulse/modules/module-echo-cancel.c',
   'module-protocol-pulse/modules/module-jackdbus-detect.c',
   'module-protocol-pulse/modules/module-ladspa-sink.c',
@@ -384,6 +400,7 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-rtp-recv.c',
   'module-protocol-pulse/modules/module-rtp-send.c',
   'module-protocol-pulse/modules/module-simple-protocol-tcp.c',
+  'module-protocol-pulse/modules/module-stream-restore.c',
   'module-protocol-pulse/modules/module-switch-on-connect.c',
   'module-protocol-pulse/modules/module-tunnel-sink.c',
   'module-protocol-pulse/modules/module-tunnel-source.c',
@@ -392,6 +409,13 @@ pipewire_module_protocol_pulse_sources = [
   'module-protocol-pulse/modules/module-x11-bell.c',
   'module-protocol-pulse/modules/module-zeroconf-discover.c',
 ]
+
+if snap_dep.found() and glib2_snap_dep.found() and gio2_snap_dep.found() and apparmor_snap_dep.found()
+  pipewire_module_protocol_pulse_sources += [
+    'module-protocol-pulse/snap-policy.c',
+  ]
+  pipewire_module_protocol_pulse_deps += snap_deps
+endif
 
 if dbus_dep.found()
   pipewire_module_protocol_pulse_sources += [
@@ -415,6 +439,15 @@ if gio_dep.found()
   ]
   pipewire_module_protocol_pulse_deps += gio_dep
   cdata.set('HAVE_GIO', true)
+  if get_option('gsettings-pulse-schema').enabled()
+    install_data(['module-protocol-pulse/modules/org.freedesktop.pulseaudio.gschema.xml'],
+      install_dir: pipewire_datadir / 'glib-2.0' / 'schemas'
+    )
+    gnome = import('gnome')
+    gnome.post_install(
+      glib_compile_schemas: true
+    )
+  endif
 endif
 
 if flatpak_support
@@ -608,6 +641,20 @@ if build_module_raop_discover
   )
 endif
 summary({'raop-discover (needs Avahi)': build_module_raop_discover}, bool_yn: true, section: 'Optional Modules')
+
+build_module_snapcast_discover = avahi_dep.found()
+if build_module_snapcast_discover
+  pipewire_module_snapcast_discover = shared_library('pipewire-module-snapcast-discover',
+    [ 'module-snapcast-discover.c',
+      'module-zeroconf-discover/avahi-poll.c' ],
+    include_directories : [configinc],
+    install : true,
+    install_dir : modules_install_dir,
+    install_rpath: modules_install_dir,
+    dependencies : [mathlib, dl_lib, rt_lib, pipewire_dep, avahi_dep],
+  )
+endif
+summary({'snapcast-discover (needs Avahi)': build_module_snapcast_discover}, bool_yn: true, section: 'Optional Modules')
 
 build_module_raop = openssl_lib.found()
 if build_module_raop

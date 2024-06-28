@@ -9,12 +9,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <threads.h>
 
 #include <spa/support/loop.h>
 #include <spa/support/system.h>
 #include <spa/support/log.h>
 #include <spa/support/plugin.h>
 #include <spa/utils/list.h>
+#include <spa/utils/cleanup.h>
+#include <spa/utils/atomic.h>
 #include <spa/utils/names.h>
 #include <spa/utils/ratelimit.h>
 #include <spa/utils/result.h>
@@ -22,14 +25,17 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/string.h>
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.loop");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.loop");
+
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
+
 
 #define MAX_ALIGN	8
 #define ITEM_ALIGN	8
 #define DATAS_SIZE	(4096*8)
 #define MAX_EP		32
+#define DEFAULT_RETRY	(1 * SPA_USEC_PER_SEC)
 
 /** \cond */
 
@@ -37,6 +43,7 @@ struct invoke_item {
 	size_t item_size;
 	spa_invoke_func_t func;
 	uint32_t seq;
+	uint32_t count;
 	void *data;
 	size_t size;
 	bool block;
@@ -57,22 +64,34 @@ struct impl {
 
 	struct spa_list source_list;
 	struct spa_list destroy_list;
+	struct spa_list queue_list;
 	struct spa_hook_list hooks_list;
+	int retry_timeout;
 
 	int poll_fd;
 	pthread_t thread;
 	int enter_count;
 
 	struct spa_source *wakeup;
+
+	tss_t queue_tss_id;
+	pthread_mutex_t queue_lock;
+	uint32_t count;
+	uint32_t flush_count;
+
+	unsigned int polling:1;
+};
+
+struct queue {
+	struct impl *impl;
+	struct spa_list link;
+
 	int ack_fd;
 	struct spa_ratelimit rate_limit;
 
 	struct spa_ringbuffer buffer;
 	uint8_t *buffer_data;
 	uint8_t buffer_mem[DATAS_SIZE + MAX_ALIGN];
-
-	uint32_t flush_count;
-	unsigned int polling:1;
 };
 
 struct source_impl {
@@ -153,29 +172,46 @@ static int loop_remove_source(void *object, struct spa_source *source)
 	return res;
 }
 
-static void flush_items(struct impl *impl)
+static inline int32_t item_compare(struct invoke_item *a, struct invoke_item *b)
 {
-	uint32_t index, flush_count;
-	int32_t avail;
+	return (int32_t)(a->count - b->count);
+}
+
+static void flush_all_queues(struct impl *impl)
+{
+	uint32_t flush_count;
 	int res;
 
+	pthread_mutex_lock(&impl->queue_lock);
 	flush_count = ++impl->flush_count;
-	avail = spa_ringbuffer_get_read_index(&impl->buffer, &index);
-	while (avail > 0) {
-		struct invoke_item *item;
-		bool block;
+	while (true) {
+		struct queue *cqueue, *queue;
+		struct invoke_item *citem, *item = NULL;
+		uint32_t cindex, index;
 		spa_invoke_func_t func;
+		bool block;
 
-		item = SPA_PTROFF(impl->buffer_data, index & (DATAS_SIZE - 1), struct invoke_item);
-		block = item->block;
-		func = item->func;
+		spa_list_for_each(cqueue, &impl->queue_list, link) {
+			if (spa_ringbuffer_get_read_index(&cqueue->buffer, &cindex) <
+					(int32_t)sizeof(struct invoke_item))
+				continue;
+			citem = SPA_PTROFF(cqueue->buffer_data, cindex & (DATAS_SIZE - 1), struct invoke_item);
 
-		spa_log_trace_fp(impl->log, "%p: flush item %p", impl, item);
+			if (item == NULL || item_compare(citem, item) < 0) {
+				item = citem;
+				queue = cqueue;
+				index = cindex;
+			}
+		}
+		if (item == NULL)
+			break;
+
+		spa_log_trace_fp(impl->log, "%p: flush item %p", queue, item);
 		/* first we remove the function from the item so that recursive
 		 * calls don't call the callback again. We can't update the
 		 * read index before we call the function because then the item
 		 * might get overwritten. */
-		item->func = NULL;
+		func = spa_steal_ptr(item->func);
 		if (func)
 			item->res = func(&impl->loop, true, item->seq, item->data,
 				item->size, item->user_data);
@@ -186,35 +222,20 @@ static void flush_items(struct impl *impl)
 			break;
 
 		index += item->item_size;
-		avail -= item->item_size;
-		spa_ringbuffer_read_update(&impl->buffer, index);
+		block = item->block;
+		spa_ringbuffer_read_update(&queue->buffer, index);
 
 		if (block) {
-			if ((res = spa_system_eventfd_write(impl->system, impl->ack_fd, 1)) < 0)
+			if ((res = spa_system_eventfd_write(impl->system, queue->ack_fd, 1)) < 0)
 				spa_log_warn(impl->log, "%p: failed to write event fd:%d: %s",
-						impl, impl->ack_fd, spa_strerror(res));
+						queue, queue->ack_fd, spa_strerror(res));
 		}
 	}
+	pthread_mutex_unlock(&impl->queue_lock);
 }
 
 static int
-loop_invoke_inthread(struct impl *impl,
-		spa_invoke_func_t func,
-		uint32_t seq,
-		const void *data,
-		size_t size,
-		bool block,
-		void *user_data)
-{
-	/* we should probably have a second ringbuffer for the in-thread pending
-	 * callbacks. A recursive callback when flushing will insert itself
-	 * before this one. */
-	flush_items(impl);
-	return func ? func(&impl->loop, true, seq, data, size, user_data) : 0;
-}
-
-static int
-loop_invoke(void *object,
+loop_queue_invoke(void *object,
 	    spa_invoke_func_t func,
 	    uint32_t seq,
 	    const void *data,
@@ -222,27 +243,25 @@ loop_invoke(void *object,
 	    bool block,
 	    void *user_data)
 {
-	struct impl *impl = object;
+	struct queue *queue = object;
+	struct impl *impl = queue->impl;
 	struct invoke_item *item;
-	int res;
+	int res, suppressed;
 	int32_t filled;
 	uint32_t avail, idx, offset, l0;
+	size_t need;
+	uint64_t nsec;
+	bool in_thread;
 
-	/* the ringbuffer can only be written to from one thread, if we are
-	 * in the same thread as the loop, don't write into the ringbuffer
-	 * but try to emit the calback right away after flushing what we have */
-	if (impl->thread == 0 || pthread_equal(impl->thread, pthread_self()))
-		return loop_invoke_inthread(impl, func, seq, data, size, block, user_data);
+	in_thread = (impl->thread == 0 || pthread_equal(impl->thread, pthread_self()));
 
-	filled = spa_ringbuffer_get_write_index(&impl->buffer, &idx);
-	if (filled < 0 || filled > DATAS_SIZE) {
-		spa_log_warn(impl->log, "%p: queue xrun %d", impl, filled);
-		return -EPIPE;
-	}
-	avail = DATAS_SIZE - filled;
+retry:
+	filled = spa_ringbuffer_get_write_index(&queue->buffer, &idx);
+	spa_assert_se(filled >= 0 && filled <= DATAS_SIZE && "queue xrun");
+	avail = (uint32_t)(DATAS_SIZE - filled);
 	if (avail < sizeof(struct invoke_item)) {
-		spa_log_warn(impl->log, "%p: queue full %d", impl, avail);
-		return -EPIPE;
+		need = sizeof(struct invoke_item);
+		goto xrun;
 	}
 	offset = idx & (DATAS_SIZE - 1);
 
@@ -250,16 +269,17 @@ loop_invoke(void *object,
 	 * invoke_item, see below */
 	l0 = DATAS_SIZE - offset;
 
-	item = SPA_PTROFF(impl->buffer_data, offset, struct invoke_item);
+	item = SPA_PTROFF(queue->buffer_data, offset, struct invoke_item);
 	item->func = func;
 	item->seq = seq;
+	item->count = SPA_ATOMIC_INC(impl->count);
 	item->size = size;
-	item->block = block;
+	item->block = in_thread ? false : block;
 	item->user_data = user_data;
 	item->res = 0;
 	item->item_size = SPA_ROUND_UP_N(sizeof(struct invoke_item) + size, ITEM_ALIGN);
 
-	spa_log_trace_fp(impl->log, "%p: add item %p filled:%d", impl, item, filled);
+	spa_log_trace_fp(impl->log, "%p: add item %p filled:%d", queue, item, filled);
 
 	if (l0 >= item->item_size) {
 		/* item + size fit in current ringbuffer idx */
@@ -272,51 +292,130 @@ loop_invoke(void *object,
 	} else {
 		/* item does not fit, place the invoke_item at idx and start the
 		 * data at the start of the ringbuffer */
-		item->data = impl->buffer_data;
+		item->data = queue->buffer_data;
 		item->item_size = SPA_ROUND_UP_N(l0 + size, ITEM_ALIGN);
 	}
 	if (avail < item->item_size) {
-		int suppressed;
-		uint64_t nsec = get_time_ns(impl->system);
-		if ((suppressed = spa_ratelimit_test(&impl->rate_limit, nsec)) >= 0) {
-			spa_log_warn(impl->log, "%p: queue full %d, need %zd (%d suppressed)",
-					impl, avail, item->item_size, suppressed);
-		}
-		return -EPIPE;
+		need = item->item_size;
+		goto xrun;
 	}
 	if (data && size > 0)
 		memcpy(item->data, data, size);
 
-	spa_ringbuffer_write_update(&impl->buffer, idx + item->item_size);
+	spa_ringbuffer_write_update(&queue->buffer, idx + item->item_size);
 
-	loop_signal_event(impl, impl->wakeup);
-
-	if (block) {
-		uint64_t count = 1;
-
-		spa_loop_control_hook_before(&impl->hooks_list);
-
-		if ((res = spa_system_eventfd_read(impl->system, impl->ack_fd, &count)) < 0)
-			spa_log_warn(impl->log, "%p: failed to read event fd:%d: %s",
-					impl, impl->ack_fd, spa_strerror(res));
-
-		spa_loop_control_hook_after(&impl->hooks_list);
-
+	if (in_thread) {
+		flush_all_queues(impl);
 		res = item->res;
-	}
-	else {
-		if (seq != SPA_ID_INVALID)
-			res = SPA_RESULT_RETURN_ASYNC(seq);
-		else
-			res = 0;
+	} else {
+		loop_signal_event(impl, impl->wakeup);
+
+		if (block) {
+			uint64_t count = 1;
+
+			spa_loop_control_hook_before(&impl->hooks_list);
+
+			if ((res = spa_system_eventfd_read(impl->system, queue->ack_fd, &count)) < 0)
+				spa_log_warn(impl->log, "%p: failed to read event fd:%d: %s",
+						queue, queue->ack_fd, spa_strerror(res));
+
+			spa_loop_control_hook_after(&impl->hooks_list);
+
+			res = item->res;
+		}
+		else {
+			if (seq != SPA_ID_INVALID)
+				res = SPA_RESULT_RETURN_ASYNC(seq);
+			else
+				res = 0;
+		}
 	}
 	return res;
+
+xrun:
+	nsec = get_time_ns(impl->system);
+	if ((suppressed = spa_ratelimit_test(&queue->rate_limit, nsec)) >= 0) {
+		spa_log_warn(impl->log, "%p: queue full %d, need %zd (%d suppressed)",
+				queue, avail, need, suppressed);
+	}
+	if (impl->retry_timeout == 0)
+		return -EPIPE;
+	usleep(impl->retry_timeout);
+	goto retry;
 }
 
 static void wakeup_func(void *data, uint64_t count)
 {
 	struct impl *impl = data;
-	flush_items(impl);
+	flush_all_queues(impl);
+}
+
+static void loop_queue_destroy(void *data)
+{
+	struct queue *queue = data;
+	struct impl *impl = queue->impl;
+
+	pthread_mutex_lock(&impl->queue_lock);
+	spa_list_remove(&queue->link);
+	pthread_mutex_unlock(&impl->queue_lock);
+
+	spa_system_close(impl->system, queue->ack_fd);
+	free(queue);
+}
+
+static struct queue *loop_create_queue(void *object, uint32_t flags)
+{
+	struct impl *impl = object;
+	struct queue *queue;
+	int res;
+
+	queue = calloc(1, sizeof(struct queue));
+	if (queue == NULL)
+		return NULL;
+
+	queue->impl = impl;
+
+	queue->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
+	queue->rate_limit.burst = 1;
+
+	queue->buffer_data = SPA_PTR_ALIGN(queue->buffer_mem, MAX_ALIGN, uint8_t);
+	spa_ringbuffer_init(&queue->buffer);
+
+	if ((res = spa_system_eventfd_create(impl->system,
+			SPA_FD_EVENT_SEMAPHORE | SPA_FD_CLOEXEC)) < 0) {
+		spa_log_error(impl->log, "%p: can't create ack event: %s",
+				impl, spa_strerror(res));
+		goto error;
+	}
+	queue->ack_fd = res;
+
+	pthread_mutex_lock(&impl->queue_lock);
+	spa_list_append(&impl->queue_list, &queue->link);
+	pthread_mutex_unlock(&impl->queue_lock);
+
+	spa_log_info(impl->log, "%p created queue %p", impl, queue);
+
+	return queue;
+
+error:
+	free(queue);
+	errno = -res;
+	return NULL;
+}
+
+static int loop_invoke(void *object, spa_invoke_func_t func, uint32_t seq,
+		const void *data, size_t size, bool block, void *user_data)
+{
+	struct impl *impl = object;
+	struct queue *local_queue = tss_get(impl->queue_tss_id);
+
+	if (local_queue == NULL) {
+		local_queue = loop_create_queue(impl, 0);
+		if (local_queue == NULL)
+			return -errno;
+		tss_set(impl->queue_tss_id, local_queue);
+	}
+	return loop_queue_invoke(local_queue, func, seq, data, size, block, user_data);
 }
 
 static int loop_get_fd(void *object)
@@ -366,7 +465,7 @@ static void loop_leave(void *object)
 
 	if (--impl->enter_count == 0) {
 		impl->thread = 0;
-		flush_items(impl);
+		flush_all_queues(impl);
 		impl->polling = false;
 	}
 }
@@ -946,6 +1045,7 @@ static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *impl;
 	struct source_impl *source;
+	struct queue *queue;
 
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
 
@@ -957,9 +1057,12 @@ static int impl_clear(struct spa_handle *handle)
 
 	spa_list_consume(source, &impl->source_list, link)
 		loop_destroy_source(impl, &source->source);
+	spa_list_consume(queue, &impl->queue_list, link)
+		loop_queue_destroy(queue);
 
-	spa_system_close(impl->system, impl->ack_fd);
 	spa_system_close(impl->system, impl->poll_fd);
+	pthread_mutex_destroy(&impl->queue_lock);
+	tss_delete(impl->queue_tss_id);
 
 	return 0;
 }
@@ -971,6 +1074,15 @@ impl_get_size(const struct spa_handle_factory *factory,
 	return sizeof(struct impl);
 }
 
+#define CHECK(expression,label)						\
+do {									\
+	if ((errno = (expression)) != 0) {				\
+		res = -errno;						\
+		spa_log_error(impl->log, #expression ": %s", strerror(errno));	\
+		goto label;						\
+	}								\
+} while(false);
+
 static int
 impl_init(const struct spa_handle_factory *factory,
 	  struct spa_handle *handle,
@@ -980,6 +1092,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *impl;
 	const char *str;
+	pthread_mutexattr_t attr;
 	int res;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -1002,11 +1115,18 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_VERSION_LOOP_UTILS,
 			&impl_loop_utils, impl);
 
+	impl->retry_timeout = DEFAULT_RETRY;
 	if (info) {
 		if ((str = spa_dict_lookup(info, "loop.cancel")) != NULL &&
 		    spa_atob(str))
 			impl->control.iface.cb.funcs = &impl_loop_control_cancel;
+		if ((str = spa_dict_lookup(info, "loop.retry-timeout")) != NULL)
+			impl->retry_timeout = atoi(str);
 	}
+
+	CHECK(pthread_mutexattr_init(&attr), error_exit);
+	CHECK(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE), error_exit);
+	CHECK(pthread_mutex_init(&impl->queue_lock, &attr), error_exit);
 
 	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	spa_log_topic_init(impl->log, &log_topic);
@@ -1015,24 +1135,19 @@ impl_init(const struct spa_handle_factory *factory,
 	if (impl->system == NULL) {
 		spa_log_error(impl->log, "%p: a System is needed", impl);
 		res = -EINVAL;
-		goto error_exit;
+		goto error_exit_free_mutex;
 	}
-	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
-	impl->rate_limit.burst = 1;
-
 	if ((res = spa_system_pollfd_create(impl->system, SPA_FD_CLOEXEC)) < 0) {
 		spa_log_error(impl->log, "%p: can't create pollfd: %s",
 				impl, spa_strerror(res));
-		goto error_exit;
+		goto error_exit_free_mutex;
 	}
 	impl->poll_fd = res;
 
 	spa_list_init(&impl->source_list);
+	spa_list_init(&impl->queue_list);
 	spa_list_init(&impl->destroy_list);
 	spa_hook_list_init(&impl->hooks_list);
-
-	impl->buffer_data = SPA_PTR_ALIGN(impl->buffer_mem, MAX_ALIGN, uint8_t);
-	spa_ringbuffer_init(&impl->buffer);
 
 	impl->wakeup = loop_add_event(impl, wakeup_func, impl);
 	if (impl->wakeup == NULL) {
@@ -1040,13 +1155,12 @@ impl_init(const struct spa_handle_factory *factory,
 		spa_log_error(impl->log, "%p: can't create wakeup event: %m", impl);
 		goto error_exit_free_poll;
 	}
-	if ((res = spa_system_eventfd_create(impl->system,
-			SPA_FD_EVENT_SEMAPHORE | SPA_FD_CLOEXEC)) < 0) {
-		spa_log_error(impl->log, "%p: can't create ack event: %s",
-				impl, spa_strerror(res));
+
+	if (tss_create(&impl->queue_tss_id, (tss_dtor_t)loop_queue_destroy) != 0) {
+		res = -errno;
+		spa_log_error(impl->log, "%p: can't create tss: %m", impl);
 		goto error_exit_free_wakeup;
 	}
-	impl->ack_fd = res;
 
 	spa_log_debug(impl->log, "%p: initialized", impl);
 
@@ -1056,6 +1170,8 @@ error_exit_free_wakeup:
 	loop_destroy_source(impl, impl->wakeup);
 error_exit_free_poll:
 	spa_system_close(impl->system, impl->poll_fd);
+error_exit_free_mutex:
+	pthread_mutex_destroy(&impl->queue_lock);
 error_exit:
 	return res;
 }

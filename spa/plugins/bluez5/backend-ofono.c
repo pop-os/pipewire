@@ -20,14 +20,14 @@
 #include <spa/utils/type.h>
 #include <spa/utils/result.h>
 #include <spa/param/audio/raw.h>
+#include <spa-private/dbus-helpers.h>
 
 #include "defs.h"
-#include "dbus-helpers.h"
 
 #define INITIAL_INTERVAL_NSEC	(500 * SPA_NSEC_PER_MSEC)
 #define ACTION_INTERVAL_NSEC	(3000 * SPA_NSEC_PER_MSEC)
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.ofono");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.ofono");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 

@@ -342,6 +342,14 @@ option('libffado',
        description: 'Enable code that depends on libffado',
        type: 'feature',
        value: 'auto')
+option('gsettings-pulse-schema',
+       description: 'Install gsettings schema for pulseaudio',
+       type: 'feature',
+       value: 'auto')
+option('snap',
+       description : 'Enable Snap permissions support.',
+       type : 'feature',
+       value : 'auto')
 option('doc-prefix-value',
        description : 'Installation prefix to show in documentation instead of the actual value.',
        type : 'string',

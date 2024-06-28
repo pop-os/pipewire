@@ -112,9 +112,9 @@ static struct device *add_device(struct impl *impl, std::shared_ptr<Camera> came
 
 	if (impl->n_devices >= MAX_DEVICES)
 		return NULL;
-	id = get_free_id(impl);;
+	id = get_free_id(impl);
 	device = &impl->devices[id];
-	device->id = get_free_id(impl);;
+	device->id = id;
 	device->camera = std::move(camera);
 	impl->n_devices++;
 	return device;
@@ -151,7 +151,6 @@ static int emit_object_info(struct impl *impl, struct device *device)
 	struct spa_dict_item items[20];
 	struct spa_dict dict;
 	uint32_t n_items = 0;
-	char path[256];
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 
@@ -165,8 +164,7 @@ static int emit_object_info(struct impl *impl, struct device *device)
 	ADD_ITEM(SPA_KEY_DEVICE_ENUM_API,"libcamera.manager");
 	ADD_ITEM(SPA_KEY_DEVICE_API, "libcamera");
 	ADD_ITEM(SPA_KEY_MEDIA_CLASS, "Video/Device");
-	snprintf(path, sizeof(path), "%s", device->camera->id().c_str());
-	ADD_ITEM(SPA_KEY_API_LIBCAMERA_PATH, path);
+	ADD_ITEM(SPA_KEY_API_LIBCAMERA_PATH, device->camera->id().c_str());
 #undef ADD_ITEM
 
 	dict = SPA_DICT_INIT(items, n_items);
@@ -352,7 +350,7 @@ impl_device_add_listener(void *object, struct spa_hook *listener,
 }
 
 static const struct spa_device_methods impl_device = {
-	SPA_VERSION_DEVICE_METHODS,
+	.version = SPA_VERSION_DEVICE_METHODS,
 	.add_listener = impl_device_add_listener,
 };
 

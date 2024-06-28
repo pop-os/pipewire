@@ -58,6 +58,9 @@
  * - `pulse.server.address`: the address of the PulseAudio server to tunnel to.
  * - `pulse.latency`: the latency to end-to-end latency in milliseconds to
  *                    maintain (Default 200).
+ * - `reconnect.interval.ms`: when the remote connection is broken, retry to connect
+ *                  with this interval in millisconds. A value of 0 disables recovery
+ *                  and will result in a module unload. (Default 0) (Since 1.1.0)
  * - `stream.props`: Extra properties for the local stream.
  *
  * ## General options
@@ -87,6 +90,7 @@
  *         # Set the remote address to tunnel to
  *         pulse.server.address = "tcp:192.168.1.126"
  *         #pulse.latency = 200
+ *         #reconnect.interval.ms = 0
  *         #audio.rate=<sample rate>
  *         #audio.channels=<number of channels>
  *         #audio.position=<channel map>
@@ -121,6 +125,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"( audio.position=<channel map> ] "			\
 			"pulse.server.address=<address> "			\
 			"( pulse.latency=<latency in msec, default 200> ) "	\
+			"( reconnect.interval.ms=<reconnect interval in msec, default 0> ) "	\
 			"( tunnel.mode=source|sink, default sink ) "				\
 			"( stream.props=<properties> ) "
 
@@ -184,8 +189,15 @@ struct impl {
 	float max_error;
 	unsigned resync:1;
 
-	unsigned int do_disconnect:1;
+	bool do_disconnect:1;
+	bool stopping;
+
+	struct spa_source *timer;
+	uint32_t reconnect_interval_ms;
+	bool recovering;
 };
+
+static int start_pulse_connection(struct impl *impl);
 
 static void cork_stream(struct impl *impl, bool cork)
 {
@@ -327,7 +339,7 @@ static void update_rate(struct impl *impl, uint32_t filled)
 	error = (float)impl->target_latency - (float)(current_latency);
 	error = SPA_CLAMP(error, -impl->max_error, impl->max_error);
 
-	corr = spa_dll_update(&impl->dll, error);
+	corr = (float)spa_dll_update(&impl->dll, error);
 	pw_log_debug("error:%f corr:%f current:%u target:%u",
 			error, corr,
 			current_latency, impl->target_latency);
@@ -463,8 +475,8 @@ static int create_stream(struct impl *impl)
 	struct spa_pod_builder b;
 	struct spa_latency_info latency;
 
-	impl->stream = pw_stream_new(impl->core, "pulse", impl->stream_props);
-	impl->stream_props = NULL;
+	impl->stream = pw_stream_new(impl->core, "pulse",
+			pw_properties_copy(impl->stream_props));
 
 	if (impl->stream == NULL)
 		return -errno;
@@ -503,66 +515,104 @@ static int create_stream(struct impl *impl)
 	return 0;
 }
 
+static void cleanup_streams(struct impl *impl)
+{
+	if (impl->pa_mainloop) {
+		pa_threaded_mainloop_stop(impl->pa_mainloop);
+		pa_threaded_mainloop_lock(impl->pa_mainloop);
+	}
+	if (impl->pa_stream) {
+		pa_stream_unref(impl->pa_stream);
+		impl->pa_stream = NULL;
+	}
+	if (impl->pa_context) {
+		pa_context_disconnect(impl->pa_context);
+		pa_context_unref(impl->pa_context);
+		impl->pa_context = NULL;
+	}
+	if (impl->pa_mainloop) {
+		pa_threaded_mainloop_unlock(impl->pa_mainloop);
+		pa_threaded_mainloop_free(impl->pa_mainloop);
+		impl->pa_mainloop = NULL;
+	}
+	if (impl->stream)
+		pw_stream_destroy(impl->stream);
+}
+
+static void on_timer_event(void *data, uint64_t expirations)
+{
+	struct impl *impl = data;
+	cleanup_streams(impl);
+	start_pulse_connection(impl);
+}
+
 static int
-do_schedule_destroy(struct spa_loop *loop,
+do_schedule_recovery(struct spa_loop *loop,
 	bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct impl *impl = user_data;
-	if (impl->module)
-		pw_impl_module_schedule_destroy(impl->module);
+	if (impl->reconnect_interval_ms > 0) {
+		struct timespec value;
+		uint64_t timestamp;
+
+		timestamp = impl->reconnect_interval_ms * SPA_NSEC_PER_MSEC;
+		value.tv_sec = timestamp / SPA_NSEC_PER_SEC;
+		value.tv_nsec = timestamp % SPA_NSEC_PER_SEC;
+		pw_loop_update_timer(impl->main_loop, impl->timer, &value, NULL, false);
+	} else {
+		if (impl->module)
+			pw_impl_module_schedule_destroy(impl->module);
+	}
 	return 0;
 }
 
-static void module_schedule_destroy(struct impl *impl)
+static void schedule_recovery(struct impl *impl)
 {
-	pw_loop_invoke(impl->main_loop, do_schedule_destroy, 1, NULL, 0, false, impl);
+	if (!impl->stopping)
+		pw_loop_invoke(impl->main_loop, do_schedule_recovery, 1, NULL, 0, false, impl);
 }
 
-static void context_state_cb(pa_context *c, void *userdata)
+static int
+do_create_stream(struct spa_loop *loop,
+	bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
-	struct impl *impl = userdata;
-	bool do_destroy = false;
-	switch (pa_context_get_state(c)) {
-	case PA_CONTEXT_TERMINATED:
-	case PA_CONTEXT_FAILED:
-		do_destroy = true;
-		SPA_FALLTHROUGH;
-	case PA_CONTEXT_READY:
-		pa_threaded_mainloop_signal(impl->pa_mainloop, 0);
-		break;
-	case PA_CONTEXT_UNCONNECTED:
-		do_destroy = true;
-		break;
-	case PA_CONTEXT_CONNECTING:
-	case PA_CONTEXT_AUTHORIZING:
-	case PA_CONTEXT_SETTING_NAME:
-		break;
+	struct impl *impl = user_data;
+	int res;
+	if (impl->stream == NULL) {
+		if ((res = create_stream(impl)) < 0) {
+			pw_log_error("failed to create stream: %s", spa_strerror(res));
+			if (impl->module)
+				pw_impl_module_schedule_destroy(impl->module);
+		}
 	}
-	if (do_destroy)
-		module_schedule_destroy(impl);
+	return 0;
 }
 
 static void stream_state_cb(pa_stream *s, void * userdata)
 {
 	struct impl *impl = userdata;
 	bool do_destroy = false;
-	switch (pa_stream_get_state(s)) {
-	case PA_STREAM_FAILED:
-	case PA_STREAM_TERMINATED:
-		do_destroy = true;
-		SPA_FALLTHROUGH;
+	pa_stream_state_t state = pa_stream_get_state(s);
+
+	pw_log_debug("stream state %d", state);
+
+	switch (state) {
+	case PA_STREAM_CREATING:
+		break;
 	case PA_STREAM_READY:
 		impl->pa_index = pa_stream_get_index(impl->pa_stream);
-		pa_threaded_mainloop_signal(impl->pa_mainloop, 0);
+		pw_loop_invoke(impl->main_loop, do_create_stream, 1, NULL, 0, false, impl);
 		break;
+	case PA_STREAM_FAILED:
+	case PA_STREAM_TERMINATED:
 	case PA_STREAM_UNCONNECTED:
 		do_destroy = true;
 		break;
-	case PA_STREAM_CREATING:
-		break;
 	}
-	if (do_destroy)
-		module_schedule_destroy(impl);
+	if (do_destroy) {
+		pw_log_warn("stream failure: %d", state);
+		schedule_recovery(impl);
+	}
 }
 
 static void stream_read_request_cb(pa_stream *s, size_t length, void *userdata)
@@ -697,14 +747,96 @@ static void stream_overflow_cb(pa_stream *s, void *userdata)
 
 static void stream_latency_update_cb(pa_stream *s, void *userdata)
 {
-	struct impl *impl = userdata;
 	pa_usec_t usec;
 	int negative;
-
 	pa_stream_get_latency(s, &usec, &negative);
-
 	pw_log_debug("latency %ld negative %d", usec, negative);
-	pa_threaded_mainloop_signal(impl->pa_mainloop, 0);
+}
+
+static int create_pulse_stream(struct impl *impl)
+{
+	pa_sample_spec ss;
+	pa_channel_map map;
+	uint32_t latency_bytes, i, aux = 0;
+	const char *remote_node_target;
+	char stream_name[1024];
+	pa_buffer_attr bufferattr;
+	int err = PA_ERR_IO;
+
+	ss.format = (pa_sample_format_t) format_id2pa(impl->info.format);
+	ss.channels = impl->info.channels;
+	ss.rate = impl->info.rate;
+
+	map.channels = impl->info.channels;
+	for (i = 0; i < map.channels; i++)
+		map.map[i] = (pa_channel_position_t)channel_id2pa(impl->info.position[i], &aux);
+
+	snprintf(stream_name, sizeof(stream_name), _("Tunnel for %s@%s"),
+			pw_get_user_name(), pw_get_host_name());
+
+	pw_log_info("create stream %s", stream_name);
+
+	if (!(impl->pa_stream = pa_stream_new(impl->pa_context, stream_name, &ss, &map))) {
+		err = pa_context_errno(impl->pa_context);
+		goto exit;
+	}
+
+	pa_stream_set_state_callback(impl->pa_stream, stream_state_cb, impl);
+	pa_stream_set_read_callback(impl->pa_stream, stream_read_request_cb, impl);
+	pa_stream_set_write_callback(impl->pa_stream, stream_write_request_cb, impl);
+	pa_stream_set_underflow_callback(impl->pa_stream, stream_underflow_cb, impl);
+	pa_stream_set_overflow_callback(impl->pa_stream, stream_overflow_cb, impl);
+	pa_stream_set_latency_update_callback(impl->pa_stream, stream_latency_update_cb, impl);
+
+	remote_node_target = pw_properties_get(impl->props, PW_KEY_TARGET_OBJECT);
+
+	bufferattr.fragsize = (uint32_t) -1;
+	bufferattr.minreq = (uint32_t) -1;
+	bufferattr.maxlength = (uint32_t) -1;
+	bufferattr.prebuf = (uint32_t) -1;
+
+	latency_bytes = pa_usec_to_bytes(impl->latency_msec * SPA_USEC_PER_MSEC, &ss);
+
+	impl->target_latency = latency_bytes / impl->frame_size;
+
+	/* half in our buffer, half in the network + remote */
+	impl->target_buffer = latency_bytes / 2;
+
+	if (impl->mode == MODE_SOURCE) {
+		bufferattr.fragsize = latency_bytes / 2;
+
+		pa_context_subscribe(impl->pa_context,
+				PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT, NULL, impl);
+
+		if ((err = pa_stream_connect_record(impl->pa_stream,
+				remote_node_target, &bufferattr,
+				PA_STREAM_DONT_MOVE |
+				PA_STREAM_INTERPOLATE_TIMING |
+				PA_STREAM_ADJUST_LATENCY |
+				PA_STREAM_AUTO_TIMING_UPDATE)) != 0)
+			err = pa_context_errno(impl->pa_context);
+	} else {
+		bufferattr.tlength = latency_bytes / 2;
+		bufferattr.minreq = bufferattr.tlength / 4;
+		bufferattr.prebuf = bufferattr.tlength;
+
+		pa_context_subscribe(impl->pa_context,
+				PA_SUBSCRIPTION_MASK_SINK_INPUT, NULL, impl);
+
+		if ((err = pa_stream_connect_playback(impl->pa_stream,
+				remote_node_target, &bufferattr,
+				PA_STREAM_DONT_MOVE |
+				PA_STREAM_INTERPOLATE_TIMING |
+				PA_STREAM_ADJUST_LATENCY |
+				PA_STREAM_AUTO_TIMING_UPDATE,
+				NULL, NULL)) != 0)
+			err = pa_context_errno(impl->pa_context);
+	}
+
+exit:
+	if (err != PA_OK)
+		pw_log_error("failed to create stream: %s", pa_strerror(err));
+	return err_to_res(err);
 }
 
 static int
@@ -721,7 +853,7 @@ do_stream_sync_volumes(struct spa_loop *loop,
 	float soft_vols[SPA_AUDIO_MAX_CHANNELS];
 
 	for (i = 0; i < impl->volume.channels; i++) {
-		vols[i] = pa_sw_volume_to_linear(impl->volume.values[i]);
+		vols[i] = (float)pa_sw_volume_to_linear(impl->volume.values[i]);
 		soft_vols[i] = 1.0f;
 	}
 
@@ -779,6 +911,36 @@ static void context_subscribe_cb(pa_context *c, pa_subscription_event_type_t t,
 				idx, sink_input_info_cb, impl);
 }
 
+static void context_state_cb(pa_context *c, void *userdata)
+{
+	struct impl *impl = userdata;
+	bool do_destroy = false;
+	pa_context_state_t state = pa_context_get_state(c);
+
+	pw_log_debug("state %d", state);
+
+	switch (state) {
+	case PA_CONTEXT_CONNECTING:
+	case PA_CONTEXT_AUTHORIZING:
+	case PA_CONTEXT_SETTING_NAME:
+		break;
+	case PA_CONTEXT_READY:
+		if (impl->pa_stream == NULL)
+			if (create_pulse_stream(impl) < 0)
+				do_destroy = true;
+		break;
+	case PA_CONTEXT_TERMINATED:
+	case PA_CONTEXT_UNCONNECTED:
+	case PA_CONTEXT_FAILED:
+		do_destroy = true;
+		break;
+	}
+	if (do_destroy) {
+		pw_log_warn("connection failure: %s", pa_strerror(pa_context_errno(c)));
+		schedule_recovery(impl);
+	}
+}
+
 static pa_proplist* tunnel_new_proplist(struct impl *impl)
 {
 	pa_proplist *proplist = pa_proplist_new();
@@ -788,20 +950,15 @@ static pa_proplist* tunnel_new_proplist(struct impl *impl)
 	return proplist;
 }
 
-static int create_pulse_stream(struct impl *impl)
+static int start_pulse_connection(struct impl *impl)
 {
-	pa_sample_spec ss;
-	pa_channel_map map;
-	const char *server_address, *remote_node_target;
+	const char *server_address;
 	pa_proplist *props = NULL;
 	pa_mainloop_api *api;
-	char stream_name[1024];
-	pa_buffer_attr bufferattr;
-	int res = -EIO;
-	uint32_t latency_bytes, i, aux = 0;
+	int err = PA_ERR_IO;
 
 	if ((impl->pa_mainloop = pa_threaded_mainloop_new()) == NULL)
-		goto error;
+		goto exit;
 
 	api = pa_threaded_mainloop_get_api(impl->pa_mainloop);
 
@@ -810,15 +967,17 @@ static int create_pulse_stream(struct impl *impl)
 	pa_proplist_free(props);
 
 	if (impl->pa_context == NULL)
-		goto error;
+		goto exit;
 
 	pa_context_set_state_callback(impl->pa_context, context_state_cb, impl);
 
 	server_address = pw_properties_get(impl->props, "pulse.server.address");
 
+	pw_log_info("connecting to %s...", server_address);
+
 	if (pa_context_connect(impl->pa_context, server_address, 0, NULL) < 0) {
-		res = pa_context_errno(impl->pa_context);
-		goto error;
+		err = pa_context_errno(impl->pa_context);
+		goto exit;
 	}
 
 	pa_threaded_mainloop_lock(impl->pa_mainloop);
@@ -826,121 +985,17 @@ static int create_pulse_stream(struct impl *impl)
 	pa_context_set_subscribe_callback(impl->pa_context, context_subscribe_cb, impl);
 
 	if (pa_threaded_mainloop_start(impl->pa_mainloop) < 0)
-		goto error_unlock;
+		goto exit_unlock;
 
-	for (;;) {
-		pa_context_state_t state;
+	err = PA_OK;
 
-		state = pa_context_get_state(impl->pa_context);
-		if (state == PA_CONTEXT_READY)
-			break;
-
-		if (!PA_CONTEXT_IS_GOOD(state)) {
-			res = pa_context_errno(impl->pa_context);
-			goto error_unlock;
-		}
-		/* Wait until the context is ready */
-		pa_threaded_mainloop_wait(impl->pa_mainloop);
-	}
-
-	ss.format = (pa_sample_format_t) format_id2pa(impl->info.format);
-	ss.channels = impl->info.channels;
-	ss.rate = impl->info.rate;
-
-	map.channels = impl->info.channels;
-	for (i = 0; i < map.channels; i++)
-		map.map[i] = (pa_channel_position_t)channel_id2pa(impl->info.position[i], &aux);
-
-	snprintf(stream_name, sizeof(stream_name), _("Tunnel for %s@%s"),
-			pw_get_user_name(), pw_get_host_name());
-
-	if (!(impl->pa_stream = pa_stream_new(impl->pa_context, stream_name, &ss, &map))) {
-		res = pa_context_errno(impl->pa_context);
-		goto error_unlock;
-	}
-
-	pa_stream_set_state_callback(impl->pa_stream, stream_state_cb, impl);
-	pa_stream_set_read_callback(impl->pa_stream, stream_read_request_cb, impl);
-	pa_stream_set_write_callback(impl->pa_stream, stream_write_request_cb, impl);
-	pa_stream_set_underflow_callback(impl->pa_stream, stream_underflow_cb, impl);
-	pa_stream_set_overflow_callback(impl->pa_stream, stream_overflow_cb, impl);
-	pa_stream_set_latency_update_callback(impl->pa_stream, stream_latency_update_cb, impl);
-
-	remote_node_target = pw_properties_get(impl->props, PW_KEY_TARGET_OBJECT);
-
-	bufferattr.fragsize = (uint32_t) -1;
-	bufferattr.minreq = (uint32_t) -1;
-	bufferattr.maxlength = (uint32_t) -1;
-	bufferattr.prebuf = (uint32_t) -1;
-
-	latency_bytes = pa_usec_to_bytes(impl->latency_msec * SPA_USEC_PER_MSEC, &ss);
-
-	impl->target_latency = latency_bytes / impl->frame_size;
-
-	/* half in our buffer, half in the network + remote */
-	impl->target_buffer = latency_bytes / 2;
-
-	if (impl->mode == MODE_SOURCE) {
-		bufferattr.fragsize = latency_bytes / 2;
-
-		pa_context_subscribe(impl->pa_context,
-				PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT, NULL, impl);
-
-		res = pa_stream_connect_record(impl->pa_stream,
-				remote_node_target, &bufferattr,
-				PA_STREAM_DONT_MOVE |
-				PA_STREAM_INTERPOLATE_TIMING |
-				PA_STREAM_ADJUST_LATENCY |
-				PA_STREAM_AUTO_TIMING_UPDATE);
-	} else {
-		bufferattr.tlength = latency_bytes / 2;
-		bufferattr.minreq = bufferattr.tlength / 4;
-		bufferattr.prebuf = bufferattr.tlength;
-
-		pa_context_subscribe(impl->pa_context,
-				PA_SUBSCRIPTION_MASK_SINK_INPUT, NULL, impl);
-
-		res = pa_stream_connect_playback(impl->pa_stream,
-				remote_node_target, &bufferattr,
-				PA_STREAM_DONT_MOVE |
-				PA_STREAM_INTERPOLATE_TIMING |
-				PA_STREAM_ADJUST_LATENCY |
-				PA_STREAM_AUTO_TIMING_UPDATE,
-				NULL, NULL);
-	}
-
-	if (res < 0) {
-		res = pa_context_errno(impl->pa_context);
-		goto error_unlock;
-	}
-
-	for (;;) {
-		pa_stream_state_t state;
-
-		state = pa_stream_get_state(impl->pa_stream);
-		if (state == PA_STREAM_READY)
-			break;
-
-		if (!PA_STREAM_IS_GOOD(state)) {
-			res = pa_context_errno(impl->pa_context);
-			goto error_unlock;
-		}
-
-		/* Wait until the stream is ready */
-		pa_threaded_mainloop_wait(impl->pa_mainloop);
-	}
-
+exit_unlock:
 	pa_threaded_mainloop_unlock(impl->pa_mainloop);
-
-	return 0;
-
-error_unlock:
-	pa_threaded_mainloop_unlock(impl->pa_mainloop);
-error:
-	pw_log_error("failed to connect: %s", pa_strerror(res));
-	return err_to_res(res);
+exit:
+	if (err != PA_OK)
+		pw_log_error("failed to connect: %s", pa_strerror(err));
+	return err_to_res(err);
 }
-
 
 static void core_error(void *data, uint32_t id, int seq, int res, const char *message)
 {
@@ -975,20 +1030,10 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct impl *impl)
 {
+	impl->stopping = true;
 
-	if (impl->pa_mainloop)
-		pa_threaded_mainloop_stop(impl->pa_mainloop);
-	if (impl->pa_stream)
-		pa_stream_unref(impl->pa_stream);
-	if (impl->pa_context) {
-		pa_context_disconnect(impl->pa_context);
-		pa_context_unref(impl->pa_context);
-	}
-	if (impl->pa_mainloop)
-		pa_threaded_mainloop_free(impl->pa_mainloop);
+	cleanup_streams(impl);
 
-	if (impl->stream)
-		pw_stream_destroy(impl->stream);
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
 
@@ -996,6 +1041,9 @@ static void impl_destroy(struct impl *impl)
 
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
+
+	if (impl->timer)
+		pw_loop_destroy_source(impl->main_loop, impl->timer);
 
 	free(impl->buffer);
 	free(impl);
@@ -1170,9 +1218,17 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			goto error;
 		}
 	}
+	impl->reconnect_interval_ms = pw_properties_get_uint32(props,
+			"reconnect.interval.ms", 0);
+
+	impl->timer = pw_loop_add_timer(impl->main_loop, on_timer_event, impl);
+	if (impl->timer == NULL) {
+		res = -errno;
+		pw_log_error("can't create timer source: %m");
+		goto error;
+	}
 
 	impl->latency_msec = pw_properties_get_uint32(props, "pulse.latency", DEFAULT_LATENCY_MSEC);
-
 
 	if (pw_properties_get(props, PW_KEY_NODE_VIRTUAL) == NULL)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
@@ -1234,10 +1290,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			&impl->core_listener,
 			&core_events, impl);
 
-	if ((res = create_pulse_stream(impl)) < 0)
-		goto error;
-
-	if ((res = create_stream(impl)) < 0)
+	if ((res = start_pulse_connection(impl)) < 0)
 		goto error;
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);

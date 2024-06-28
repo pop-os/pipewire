@@ -25,6 +25,13 @@ struct vulkan_format_info {
 	struct vulkan_modifier_info *infos;
 };
 
+struct vulkan_format_infos {
+	uint32_t formatCount;
+	struct vulkan_format_info *infos;
+
+	uint32_t formatsWithModifiersCount;
+};
+
 struct vulkan_buffer {
 	int fd;
 	VkImage image;
@@ -33,26 +40,13 @@ struct vulkan_buffer {
 	VkSemaphore foreign_semaphore;
 };
 
-struct vulkan_stream {
-	enum spa_direction direction;
-
-	uint32_t pending_buffer_id;
-	uint32_t current_buffer_id;
-	uint32_t busy_buffer_id;
-	uint32_t ready_buffer_id;
-
-	struct vulkan_buffer buffers[MAX_BUFFERS];
-	struct spa_buffer *spa_buffers[MAX_BUFFERS];
-	uint32_t n_buffers;
+struct vulkan_staging_buffer {
+	VkBuffer buffer;
+	VkDeviceMemory memory;
 };
 
 struct vulkan_base_info {
 	uint32_t queueFlags;
-
-	struct {
-		uint32_t formatCount;
-		uint32_t *formats;
-	} formatInfo;
 };
 
 struct vulkan_base {
@@ -65,9 +59,6 @@ struct vulkan_base {
 	VkQueue queue;
 	uint32_t queueFamilyIndex;
 	VkDevice device;
-
-	uint32_t formatInfoCount;
-	struct vulkan_format_info *formatInfos;
 
 	bool implicit_sync_interop;
 

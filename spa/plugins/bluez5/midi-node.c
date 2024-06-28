@@ -41,7 +41,7 @@
 
 #include "bluez5-interface-gen.h"
 
-static struct spa_log_topic log_topic = SPA_LOG_TOPIC(0, "spa.bluez5.midi.node");
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.midi.node");
 #undef SPA_LOG_TOPIC_DEFAULT
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
@@ -598,7 +598,7 @@ again:
 				-SPA_CLAMP(err_nsec, -20*SPA_NSEC_PER_MSEC, 20*SPA_NSEC_PER_MSEC)
 				* this->rate / SPA_NSEC_PER_SEC);
 		tcorr = SPA_MIN(device_elapsed, SPA_NSEC_PER_SEC) * (corr - 1);
-		sync->device_time += tcorr;
+		sync->device_time += (uint64_t)tcorr;
 
 		/* reset if too much off */
 		if (err_nsec < -50 * SPA_NSEC_PER_MSEC ||
@@ -2011,11 +2011,13 @@ impl_init(const struct spa_handle_factory *factory,
 			SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi"),
 			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, "in"),
 			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_ALIAS, "in"),
+			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, "group.0"),
 		};
 		static const struct spa_dict_item out_port_items[] = {
 			SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi"),
 			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, "out"),
 			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_ALIAS, "out"),
+			SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, "group.0"),
 		};
 		static const struct spa_dict in_port_props = SPA_DICT_INIT_ARRAY(in_port_items);
 		static const struct spa_dict out_port_props = SPA_DICT_INIT_ARRAY(out_port_items);

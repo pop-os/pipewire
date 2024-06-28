@@ -7,11 +7,6 @@
 #include "config.h"
 
 #include <stddef.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-
-#include <sys/ioctl.h>
 
 #include <spa/support/plugin.h>
 #include <spa/support/log.h>
@@ -97,6 +92,26 @@ static const char *cameraLoc(const Camera *camera)
 	return nullptr;
 }
 
+static const char *cameraRot(const Camera *camera)
+{
+	const ControlList &props = camera->properties();
+
+	if (auto rotation = props.get(properties::Rotation)) {
+		switch (rotation.value()) {
+		case 90:
+			return "90";
+		case 180:
+			return "180";
+		case 270:
+			return "270";
+		default:
+			return "0";
+		}
+	}
+
+	return nullptr;
+}
+
 static int emit_info(struct impl *impl, bool full)
 {
 	struct spa_dict_item items[10];
@@ -120,6 +135,8 @@ static int emit_info(struct impl *impl, bool full)
 
 	if (auto location = cameraLoc(impl->camera.get()))
 		ADD_ITEM(SPA_KEY_API_LIBCAMERA_LOCATION, location);
+	if (auto rotation = cameraRot(impl->camera.get()))
+		ADD_ITEM(SPA_KEY_API_LIBCAMERA_ROTATION, rotation);
 
 	const auto model = cameraModel(impl->camera.get());
 	ADD_ITEM(SPA_KEY_DEVICE_PRODUCT_NAME, model.c_str());
@@ -217,7 +234,7 @@ static int impl_set_param(void *object,
 }
 
 static const struct spa_device_methods impl_device = {
-	SPA_VERSION_DEVICE_METHODS,
+	.version = SPA_VERSION_DEVICE_METHODS,
 	.add_listener = impl_add_listener,
 	.sync = impl_sync,
 	.enum_params = impl_enum_params,

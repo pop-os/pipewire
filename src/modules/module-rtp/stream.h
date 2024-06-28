@@ -16,12 +16,12 @@ struct rtp_stream;
 #define DEFAULT_CHANNELS	2
 #define DEFAULT_POSITION	"[ FL FR ]"
 
-#define ERROR_MSEC			2
-#define DEFAULT_SESS_LATENCY		100
+#define ERROR_MSEC		2.0f
+#define DEFAULT_SESS_LATENCY	100.0f
 
 #define DEFAULT_MTU		1280
-#define DEFAULT_MIN_PTIME	2
-#define DEFAULT_MAX_PTIME	20
+#define DEFAULT_MIN_PTIME	2.0f
+#define DEFAULT_MAX_PTIME	20.0f
 
 struct rtp_stream_events {
 #define RTP_VERSION_STREAM_EVENTS        0
@@ -44,14 +44,17 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 
 void rtp_stream_destroy(struct rtp_stream *s);
 
+int rtp_stream_update_properties(struct rtp_stream *s, const struct spa_dict *dict);
+
 int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len);
 
-uint64_t rtp_stream_get_time(struct rtp_stream *s, uint64_t *rate);
+uint64_t rtp_stream_get_time(struct rtp_stream *s, uint32_t *rate);
 
 uint16_t rtp_stream_get_seq(struct rtp_stream *s);
 
 void rtp_stream_set_first(struct rtp_stream *s);
 
+void rtp_stream_set_error(struct rtp_stream *s, int res, const char *error);
 enum pw_stream_state rtp_stream_get_state(struct rtp_stream *s, const char **error);
 
 int rtp_stream_set_param(struct rtp_stream *s, uint32_t id, const struct spa_pod *param);

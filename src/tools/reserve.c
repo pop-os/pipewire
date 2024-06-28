@@ -11,7 +11,7 @@
 #include <spa/utils/string.h>
 #include <pipewire/log.h>
 
-#define SERVICE_PREFIX "org.freedesktop.ReserveDevice1."
+#define SERVICE_NAMESPACE "org.freedesktop.ReserveDevice1"
 #define OBJECT_PREFIX "/org/freedesktop/ReserveDevice1/"
 
 static const char introspection[] =
@@ -307,12 +307,45 @@ invalid:
 	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 }
 
+bool rd_device_valid_device_name(const char *name)
+{
+	const char *p = name;
+
+	if (!p || !*p)
+		return false;
+
+	/* cf. dbus-marshal-validate.c:_dbus_validate_bus_name_full */
+	while (*p) {
+		switch (*p) {
+		case 'A' ... 'Z':
+		case 'a' ... 'z':
+		case '-':
+		case '_':
+			break;
+		case '0' ... '9':
+			if (p == name)
+				return false;
+			break;
+		default:
+			return false;
+		}
+		++p;
+	}
+
+	return true;
+}
+
 struct rd_device *
 rd_device_new(DBusConnection *connection, const char *device_name, const char *application_name,
 		int32_t priority, const struct rd_device_callbacks *callbacks, void *data)
 {
 	struct rd_device *d;
 	int res;
+
+	if (!rd_device_valid_device_name(device_name)) {
+		errno = EINVAL;
+		return NULL;
+	}
 
 	d = calloc(1, sizeof(struct rd_device));
 	if (d == NULL)
@@ -330,7 +363,7 @@ rd_device_new(DBusConnection *connection, const char *device_name, const char *a
 		res = -errno;
 		goto error_free;
 	}
-	d->service_name = spa_aprintf(SERVICE_PREFIX "%s", device_name);
+	d->service_name = spa_aprintf(SERVICE_NAMESPACE ".%s", device_name);
 	if (d->service_name == NULL) {
 		res = -errno;
 		goto error_free;
@@ -351,7 +384,7 @@ rd_device_new(DBusConnection *connection, const char *device_name, const char *a
                         "interface='org.freedesktop.DBus',member='NameAcquired'", NULL);
 	dbus_bus_add_match(d->connection,
                         "type='signal',sender='org.freedesktop.DBus',"
-                        "interface='org.freedesktop.DBus',member='NameOwnerChanged'", NULL);
+                        "interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0namespace='" SERVICE_NAMESPACE "'", NULL);
 
 	dbus_connection_ref(d->connection);
 
@@ -403,6 +436,7 @@ int rd_device_acquire(struct rd_device *d)
 int rd_device_request_release(struct rd_device *d)
 {
 	DBusMessage *m = NULL;
+	int res = 0;
 
 	if (d->priority <= INT32_MIN)
 		return -EBUSY;
@@ -413,16 +447,22 @@ int rd_device_request_release(struct rd_device *d)
 					"RequestRelease")) == NULL) {
 		return -ENOMEM;
 	}
-        if (!dbus_message_append_args(m,
+
+	if (!dbus_message_append_args(m,
 				DBUS_TYPE_INT32, &d->priority,
 				DBUS_TYPE_INVALID)) {
-		dbus_message_unref(m);
-		return -ENOMEM;
-        }
-	if (!dbus_connection_send(d->connection, m, NULL)) {
-		return -EIO;
+		res = -ENOMEM;
+		goto exit;
 	}
-	return 0;
+
+	if (!dbus_connection_send(d->connection, m, NULL)) {
+		res = -EIO;
+		goto exit;
+	}
+
+exit:
+	dbus_message_unref(m);
+	return res;
 }
 
 int rd_device_complete_release(struct rd_device *d, int res)

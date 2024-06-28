@@ -29,6 +29,8 @@ PW_LOG_TOPIC_EXTERN(log_port);
 struct impl {
 	struct pw_impl_port this;
 	struct spa_node mix_node;	/**< mix node implementation */
+	struct spa_hook_list mix_hooks;
+
 	struct {
 		struct spa_list mix_list;
 	} rt;
@@ -117,6 +119,71 @@ void pw_impl_port_update_state(struct pw_impl_port *port, enum pw_impl_port_stat
 	}
 }
 
+static int mix_add_listener(void *object, struct spa_hook *listener,
+		const struct spa_node_events *events, void *data)
+{
+	struct impl *impl = object;
+	spa_hook_list_append(&impl->mix_hooks, listener, events, data);
+	return 0;
+}
+
+static int mix_port_enum_params(void *object, int seq,
+		enum spa_direction direction, uint32_t port_id,
+		uint32_t id, uint32_t start, uint32_t max,
+		const struct spa_pod *filter)
+{
+	struct impl *impl = object;
+	struct spa_pod *param;
+	struct spa_result_node_params result;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[1024];
+	uint32_t count = 0;
+	int res;
+
+	pw_log_trace("%p: %d", impl, id);
+
+	result.id = id;
+	result.next = start;
+next:
+	result.index = result.next++;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+
+	switch (id) {
+	case SPA_PARAM_IO:
+		switch (result.index) {
+		case 0:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamIO, id,
+				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
+				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
+			break;
+		case 1:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamIO, id,
+				SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_AsyncBuffers),
+				SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
+			break;
+		default:
+			return 0;
+		}
+		break;
+	default:
+		res = -ENOTSUP;
+		return res;
+	}
+
+	if (spa_pod_filter(&b, &result.param, param, filter) < 0)
+		goto next;
+
+	spa_node_emit_result(&impl->mix_hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+	if (++count != max)
+		goto next;
+
+	return 0;
+}
+
 static struct pw_impl_port_mix *find_mix(struct pw_impl_port *port,
 		enum spa_direction direction, uint32_t port_id)
 {
@@ -169,13 +236,22 @@ static int port_set_io(void *object,
 	if (mix == NULL)
 		return -ENOENT;
 
-	if (id == SPA_IO_Buffers) {
+	switch (id) {
+	case SPA_IO_Buffers:
+	case SPA_IO_AsyncBuffers:
 		if (data == NULL || size == 0) {
 			pw_loop_invoke(this->node->data_loop,
 			       do_remove_mix, SPA_ID_INVALID, NULL, 0, true, mix);
-			mix->io = NULL;
+			mix->io_data = mix->io[0] = mix->io[1] = NULL;
 		} else if (data != NULL && size >= sizeof(struct spa_io_buffers)) {
-			mix->io = data;
+			if (size >= sizeof(struct spa_io_async_buffers)) {
+				struct spa_io_async_buffers *ab = data;
+				mix->io_data = data;
+				mix->io[0] = &ab->buffers[this->direction];
+				mix->io[1] = &ab->buffers[this->direction^1];
+			} else {
+				mix->io_data = mix->io[0] = mix->io[1] = data;
+			}
 			pw_loop_invoke(this->node->data_loop,
 			       do_add_mix, SPA_ID_INVALID, NULL, 0, false, mix);
 		}
@@ -189,12 +265,13 @@ static int tee_process(void *object)
 	struct pw_impl_port *this = &impl->this;
 	struct pw_impl_port_mix *mix;
 	struct spa_io_buffers *io = &this->rt.io;
+	uint32_t cycle = this->node->rt.position->clock.cycle & 1;
 
-	pw_log_trace_fp("%p: tee input %d %d", this, io->status, io->buffer_id);
+	pw_log_trace_fp("%p: tee input status:%d id:%d cycle:%d", this, io->status, io->buffer_id, cycle);
 	spa_list_for_each(mix, &impl->rt.mix_list, rt.link) {
-		pw_log_trace_fp("%p: port %d %p->%p %d", this,
-				mix->port.port_id, io, mix->io, mix->io->buffer_id);
-		*mix->io = *io;
+		pw_log_trace_fp("%p: port %d %p->%p id:%d", this,
+				mix->port.port_id, io, mix->io[cycle], mix->io[cycle]->buffer_id);
+		*mix->io[cycle] = *io;
 	}
 	io->status = SPA_STATUS_NEED_DATA;
 
@@ -213,9 +290,11 @@ static int tee_reuse_buffer(void *object, uint32_t port_id, uint32_t buffer_id)
 
 static const struct spa_node_methods schedule_tee_node = {
 	SPA_VERSION_NODE_METHODS,
-	.process = tee_process,
+	.add_listener = mix_add_listener,
+	.port_enum_params = mix_port_enum_params,
 	.port_set_io = port_set_io,
 	.port_reuse_buffer = tee_reuse_buffer,
+	.process = tee_process,
 };
 
 static int schedule_mix_input(void *object)
@@ -224,15 +303,17 @@ static int schedule_mix_input(void *object)
 	struct pw_impl_port *this = &impl->this;
 	struct spa_io_buffers *io = &this->rt.io;
 	struct pw_impl_port_mix *mix;
+	uint32_t cycle = this->node->rt.position->clock.cycle & 1;
 
 	if (SPA_UNLIKELY(PW_IMPL_PORT_IS_CONTROL(this)))
 		return SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA;
 
 	spa_list_for_each(mix, &impl->rt.mix_list, rt.link) {
-		pw_log_trace_fp("%p: mix input %d %p->%p %d %d", this,
-				mix->port.port_id, mix->io, io, mix->io->status, mix->io->buffer_id);
-		*io = *mix->io;
-		mix->io->status = SPA_STATUS_NEED_DATA;
+		pw_log_trace_fp("%p: mix input %d %p->%p status:%d id:%d cycle:%d", this,
+				mix->port.port_id, mix->io[cycle], io,
+				mix->io[cycle]->status, mix->io[cycle]->buffer_id, cycle);
+		*io = *mix->io[cycle];
+		mix->io[cycle]->status = SPA_STATUS_NEED_DATA;
 		break;
 	}
         return SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA;
@@ -253,9 +334,11 @@ static int schedule_mix_reuse_buffer(void *object, uint32_t port_id, uint32_t bu
 
 static const struct spa_node_methods schedule_mix_node = {
 	SPA_VERSION_NODE_METHODS,
-	.process = schedule_mix_input,
+	.add_listener = mix_add_listener,
+	.port_enum_params = mix_port_enum_params,
 	.port_set_io = port_set_io,
 	.port_reuse_buffer = schedule_mix_reuse_buffer,
+	.process = schedule_mix_input,
 };
 
 SPA_EXPORT
@@ -442,6 +525,40 @@ static void emit_params(struct pw_impl_port *port, uint32_t *changed_ids, uint32
 	}
 }
 
+static int check_param_io(void *data, int seq, uint32_t id,
+		uint32_t index, uint32_t next, struct spa_pod *param)
+{
+	struct pw_impl_port *port = data;
+	struct pw_impl_node *node = port->node;
+	uint32_t pid, psize;
+
+	if (spa_pod_parse_object(param,
+			SPA_TYPE_OBJECT_ParamIO, NULL,
+			SPA_PARAM_IO_id,   SPA_POD_Id(&pid),
+			SPA_PARAM_IO_size, SPA_POD_Int(&psize)) < 0)
+		return 0;
+
+	pw_log_debug("%p: got io id:%d (%s)", port, pid,
+			spa_debug_type_find_name(spa_type_io, pid));
+
+	switch (pid) {
+	case SPA_IO_Control:
+	case SPA_IO_Notify:
+		pw_control_new(node->context, port, pid, psize, 0);
+		SPA_FLAG_SET(port->flags, PW_IMPL_PORT_FLAG_CONTROL);
+		break;
+	case SPA_IO_AsyncBuffers:
+		SPA_FLAG_SET(port->flags, PW_IMPL_PORT_FLAG_ASYNC);
+		SPA_FALLTHROUGH;
+	case SPA_IO_Buffers:
+		SPA_FLAG_SET(port->flags, PW_IMPL_PORT_FLAG_BUFFERS);
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
 static int process_latency_param(void *data, int seq,
 		uint32_t id, uint32_t index, uint32_t next, struct spa_pod *param)
 {
@@ -498,6 +615,21 @@ static int process_tag_param(void *data, int seq,
 		pw_impl_port_emit_tag_changed(this);
 
 	return 0;
+}
+
+static void check_params(struct pw_impl_port *port)
+{
+	uint32_t i;
+	for (i = 0; i < port->info.n_params; i++)
+		port->info.params[i].user = 0;
+
+	port->flags &= ~(PW_IMPL_PORT_FLAG_CONTROL |
+			PW_IMPL_PORT_FLAG_ASYNC |
+			PW_IMPL_PORT_FLAG_BUFFERS);
+
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_IO, 0, 0, NULL, check_param_io, port);
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Latency, 0, 0, NULL, process_latency_param, port);
+	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Tag, 0, 0, NULL, process_tag_param, port);
 }
 
 static void update_info(struct pw_impl_port *port, const struct spa_port_info *info)
@@ -643,6 +775,7 @@ struct pw_impl_port *pw_context_create_port(
 			SPA_TYPE_INTERFACE_Node,
 			SPA_VERSION_NODE,
 			mix_methods, impl);
+	spa_hook_list_init(&impl->mix_hooks);
 
 	pw_impl_port_set_mix(this, NULL, 0);
 
@@ -684,6 +817,7 @@ int pw_impl_port_set_mix(struct pw_impl_port *port, struct spa_node *node, uint3
 			     pw_direction_reverse(port->direction), 0,
 			     SPA_IO_Buffers, NULL, 0);
 	}
+
 	if (port->mix_handle != NULL) {
 		pw_unload_spa_handle(port->mix_handle);
 		port->mix_handle = NULL;
@@ -700,6 +834,14 @@ int pw_impl_port_set_mix(struct pw_impl_port *port, struct spa_node *node, uint3
 			     pw_direction_reverse(port->direction), 0,
 			     SPA_IO_Buffers,
 			     &port->rt.io, sizeof(port->rt.io));
+
+		if (port->node && port->node->rt.position) {
+			spa_node_set_io(port->mix,
+				     SPA_IO_Position,
+				     port->node->rt.position,
+				     sizeof(struct spa_io_position));
+		}
+		check_params(port);
 	}
 	return 0;
 }
@@ -710,7 +852,7 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 	int res;
 	const char *fallback_lib, *factory_name;
 	struct spa_handle *handle;
-	struct spa_dict_item items[2];
+	struct spa_dict_item items[3];
 	char quantum_limit[16];
 	void *iface;
 	struct pw_context *context = port->node->context;
@@ -718,7 +860,7 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 	if ((res = spa_format_parse(param, &media_type, &media_subtype)) < 0)
 		return res;
 
-	pw_log_debug("%p: %s/%s", port,
+	pw_log_debug("%p/%p: %s/%s", port->node, port,
 			spa_debug_type_find_name(spa_type_media_type, media_type),
 			spa_debug_type_find_name(spa_type_media_subtype, media_subtype));
 
@@ -766,6 +908,7 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 	spa_scnprintf(quantum_limit, sizeof(quantum_limit), "%u",
 			context->settings.clock_quantum_limit);
 	items[1] = SPA_DICT_ITEM_INIT("clock.quantum-limit", quantum_limit);
+	items[2] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_LOOP_NAME, port->node->data_loop->name);
 
 	handle = pw_context_load_spa_handle(context, factory_name,
 			&SPA_DICT_INIT_ARRAY(items));
@@ -778,7 +921,8 @@ static int setup_mixer(struct pw_impl_port *port, const struct spa_pod *param)
 		return res;
 	}
 
-	pw_log_debug("mix node handle:%p iface:%p", handle, iface);
+	pw_log_debug("mix node %s (%s) handle:%p iface:%p", factory_name, fallback_lib,
+			handle, iface);
 	pw_impl_port_set_mix(port, (struct spa_node*)iface,
 			PW_IMPL_PORT_MIX_FLAG_MULTI |
 			PW_IMPL_PORT_MIX_FLAG_NEGOTIATE);
@@ -862,37 +1006,6 @@ static int do_add_port(struct spa_loop *loop,
 		spa_list_append(&this->node->rt.output_mix, &this->rt.node_link);
 	this->rt.added = true;
 
-	return 0;
-}
-
-static int check_param_io(void *data, int seq, uint32_t id,
-		uint32_t index, uint32_t next, struct spa_pod *param)
-{
-	struct pw_impl_port *port = data;
-	struct pw_impl_node *node = port->node;
-	uint32_t pid, psize;
-
-	if (spa_pod_parse_object(param,
-			SPA_TYPE_OBJECT_ParamIO, NULL,
-			SPA_PARAM_IO_id,   SPA_POD_Id(&pid),
-			SPA_PARAM_IO_size, SPA_POD_Int(&psize)) < 0)
-		return 0;
-
-	pw_log_debug("%p: got io id:%d (%s)", port, pid,
-			spa_debug_type_find_name(spa_type_io, pid));
-
-	switch (pid) {
-	case SPA_IO_Control:
-	case SPA_IO_Notify:
-		pw_control_new(node->context, port, pid, psize, 0);
-		SPA_FLAG_SET(port->flags, PW_IMPL_PORT_FLAG_CONTROL);
-		break;
-	case SPA_IO_Buffers:
-		SPA_FLAG_SET(port->flags, PW_IMPL_PORT_FLAG_BUFFERS);
-		break;
-	default:
-		break;
-	}
 	return 0;
 }
 
@@ -1021,7 +1134,6 @@ int pw_impl_port_register(struct pw_impl_port *port,
 		     struct pw_properties *properties)
 {
 	static const char * const keys[] = {
-		PW_KEY_OBJECT_SERIAL,
 		PW_KEY_OBJECT_PATH,
 		PW_KEY_FORMAT_DSP,
 		PW_KEY_NODE_ID,
@@ -1036,6 +1148,7 @@ int pw_impl_port_register(struct pw_impl_port *port,
 		PW_KEY_PORT_ALIAS,
 		PW_KEY_PORT_EXTRA,
 		PW_KEY_PORT_IGNORE_LATENCY,
+		PW_KEY_PORT_GROUP,
 		NULL
 	};
 
@@ -1106,9 +1219,7 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 
 	pw_impl_node_emit_port_init(node, port);
 
-	pw_impl_port_for_each_param(port, 0, SPA_PARAM_IO, 0, 0, NULL, check_param_io, port);
-	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Latency, 0, 0, NULL, process_latency_param, port);
-	pw_impl_port_for_each_param(port, 0, SPA_PARAM_Tag, 0, 0, NULL, process_tag_param, port);
+	check_params(port);
 
 	nprops = pw_impl_node_get_properties(node);
 	media_class = pw_properties_get(nprops, PW_KEY_MEDIA_CLASS);
@@ -1231,11 +1342,11 @@ int pw_impl_port_add(struct pw_impl_port *port, struct pw_impl_node *node)
 	if (is_control) {
 		pw_log_debug("%p: setting node control", port);
 	} else {
-		pw_log_debug("%p: setting mixer io", port);
-		spa_node_port_set_io(port->mix,
-			     pw_direction_reverse(port->direction), 0,
-			     SPA_IO_Buffers,
-			     &port->rt.io, sizeof(port->rt.io));
+		pw_log_debug("%p: setting mixer position io", port);
+		spa_node_set_io(port->mix,
+			     SPA_IO_Position,
+			     node->rt.position,
+			     sizeof(struct spa_io_position));
 	}
 
 	pw_log_debug("%p: %d add to node %p", port, port_id, node);
@@ -1409,7 +1520,6 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 {
 	int res;
 	struct impl *impl = SPA_CONTAINER_OF(port, struct impl, this);
-	struct pw_impl_node *node = port->node;
 	struct result_port_params_data user_data = { impl, data, callback, seq, false };
 	struct spa_hook listener;
 	struct spa_param_info *pi;
@@ -1461,6 +1571,9 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 		}
 		res = 0;
 	} else {
+		struct spa_node *qnode;
+		uint32_t qport;
+
 		user_data.cache = impl->cache_params &&
 			(filter == NULL && index == 0 && max == UINT32_MAX);
 
@@ -1468,11 +1581,20 @@ int pw_impl_port_for_each_param(struct pw_impl_port *port,
 			pw_param_add(&impl->pending_list, seq, param_id, NULL);
 
 		spa_zero(listener);
-		spa_node_add_listener(node->node, &listener, &node_events, &user_data);
-		res = spa_node_port_enum_params(node->node, seq,
-						port->direction, port->port_id,
-						param_id, index, max,
-						filter);
+		switch (param_id) {
+		case SPA_PARAM_IO:
+			qnode = port->mix;
+			qport = SPA_ID_INVALID;
+			break;
+		default:
+			qnode = port->node->node;
+			qport = port->port_id;
+			break;
+		}
+		spa_node_add_listener(qnode, &listener, &node_events, &user_data);
+		res = spa_node_port_enum_params(qnode, seq,
+				port->direction, qport,
+				param_id, index, max, filter);
 		spa_hook_remove(&listener);
 
 		if (user_data.cache) {
