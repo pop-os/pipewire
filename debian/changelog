@@ -1,8 +1,9 @@
-pipewire (1.2.0-2) UNRELEASED; urgency=medium
+pipewire (1.2.1-0) UNRELEASED; urgency=medium
 
+  * New upstream release
   * Bump minimum libasound2-dev to 1.2.5
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 04 Jul 2024 13:02:35 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 12 Jul 2024 15:27:52 +0200
 
 pipewire (1.2.0-1) unstable; urgency=medium
 
