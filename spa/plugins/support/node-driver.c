@@ -33,7 +33,7 @@ SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.driver");
 #define SPA_LOG_TOPIC_DEFAULT &log_topic
 
 #define DEFAULT_FREEWHEEL	false
-#define DEFAULT_FREEWHEEL_WAIT	10
+#define DEFAULT_FREEWHEEL_WAIT	5
 #define DEFAULT_CLOCK_PREFIX	"clock.system"
 #define DEFAULT_CLOCK_ID	CLOCK_MONOTONIC
 #define DEFAULT_RESYNC_MS	10
@@ -524,7 +524,8 @@ static int impl_node_process(void *object)
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_log_trace(this->log, "process %d", this->props.freewheel);
 
-	if (this->props.freewheel) {
+	if (this->props.freewheel &&
+	    !SPA_FLAG_IS_SET(this->position->clock.flags, SPA_IO_CLOCK_FLAG_XRUN_RECOVER)) {
 		this->next_time = gettime_nsec(this, this->timer_clockid);
 		set_timeout(this, this->next_time);
 	}
