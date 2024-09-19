@@ -1324,6 +1324,11 @@ spa_v4l2_update_controls(struct impl *this)
 		spa_zero(control);
 		control.id = c->ctrl_id;
 		if (xioctl(dev->fd, VIDIOC_G_CTRL, &control) < 0) {
+			/* Write only controls like relative pan/tilt return EACCES */
+			if (errno == EACCES) {
+				c->value = 0;
+				continue;
+			}
 			res = -errno;
 			goto done;
 		}
@@ -1403,8 +1408,10 @@ static int mmap_read(struct impl *this)
 
 	/* Drop the first frame in order to work around common firmware
 	 * timestamp issues */
-	if (buf.sequence == 0)
+	if (buf.sequence == 0) {
+		xioctl(dev->fd, VIDIOC_QBUF, &buf);
 		return 0;
+	}
 
 	pts = SPA_TIMEVAL_TO_NSEC(&buf.timestamp);
 	spa_log_trace(this->log, "v4l2 %p: have output %d", this, buf.index);
