@@ -1,8 +1,8 @@
-pipewire (1.2.4-0) UNRELEASED; urgency=medium
+pipewire (1.2.4-1) unstable; urgency=medium
 
   * New upstream release (Closes: #1081904)
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 19 Sep 2024 17:22:22 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 19 Sep 2024 17:54:25 +0200
 
 pipewire (1.2.3-1) unstable; urgency=medium
 
