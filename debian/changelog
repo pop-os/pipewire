@@ -1,3 +1,10 @@
+pipewire (1.2.4-2) unstable; urgency=medium
+
+  [ Alessandro Astone ]
+  * Backport patch to fix muted sound on login (LP: #2080604)
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 26 Sep 2024 10:22:18 +0200
+
 pipewire (1.2.4-1) unstable; urgency=medium
 
   * New upstream release (Closes: #1081904)
