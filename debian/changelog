@@ -1,11 +1,11 @@
-pipewire (1.2.5-0) UNRELEASED; urgency=medium
+pipewire (1.2.5-1) unstable; urgency=medium
 
   * New upstream release
   * Drop patch included in upstream release
   * Drop lintian overrides due to the t64 transition,
       no longer required since lintian 2.117.1
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 30 Sep 2024 14:00:03 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 30 Sep 2024 14:37:57 +0200
 
 pipewire (1.2.4-2) unstable; urgency=medium
 
