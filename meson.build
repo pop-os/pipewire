@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.2.4',
+  version : '1.2.5',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -250,6 +250,10 @@ systemd_dep = dependency('libsystemd',required: get_option('systemd'))
 summary({'systemd conf data': systemd.found()}, bool_yn: true)
 summary({'libsystemd': systemd_dep.found()}, bool_yn: true)
 cdata.set('HAVE_SYSTEMD', systemd.found() and systemd_dep.found())
+
+logind_dep = dependency(get_option('logind-provider'), required: get_option('logind'))
+summary({'logind': logind_dep.found()}, bool_yn: true)
+cdata.set('HAVE_LOGIND', logind_dep.found())
 
 selinux_dep = dependency('libselinux', required: get_option('selinux'))
 summary({'libselinux': selinux_dep.found()}, bool_yn: true)

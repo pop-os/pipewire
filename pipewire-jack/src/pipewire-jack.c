@@ -55,7 +55,7 @@
 #define MAX_MIX				1024
 #define MAX_CLIENT_PORTS		768
 
-#define MAX_ALIGN			16
+#define MAX_ALIGN			32
 #define MAX_BUFFERS			2
 #define MAX_BUFFER_DATAS		1u
 
@@ -125,8 +125,6 @@ static thread_local float midi_scratch[MIDI_SCRATCH_FRAMES];
 
 typedef void (*mix_func) (float *dst, float *src[], uint32_t n_src, bool aligned, uint32_t n_samples);
 
-static mix_func mix_function;
-
 struct object {
 	struct spa_list link;
 
@@ -183,6 +181,7 @@ struct object {
 	unsigned int visible;
 	unsigned int removing:1;
 	unsigned int removed:1;
+	unsigned int to_free:1;
 };
 
 struct midi_buffer {
@@ -230,9 +229,11 @@ struct mix {
 
 	struct spa_io_buffers *io[2];
 
+	struct spa_list queue;
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers;
-	struct spa_list queue;
+
+	unsigned int to_free:1;
 };
 
 struct port {
@@ -263,6 +264,7 @@ struct port {
 
 	unsigned int empty_out:1;
 	unsigned int zeroed:1;
+	unsigned int to_free:1;
 
 	void *(*get_buffer) (struct port *p, jack_nframes_t frames);
 
@@ -460,6 +462,8 @@ struct client {
 	unsigned int async:1;
 
 	uint32_t max_frames;
+	uint32_t max_align;
+	mix_func mix_function;
 
 	jack_position_t jack_position;
 	jack_transport_state_t jack_state;
@@ -505,6 +509,7 @@ static struct object * alloc_object(struct client *c, int type)
 			pthread_mutex_unlock(&globals.lock);
 			return NULL;
 		}
+		o[0].to_free = true;
 		for (i = 0; i < OBJECT_CHUNK; i++)
 			spa_list_append(&globals.free_objects, &o[i].link);
 	}
@@ -525,9 +530,10 @@ static void recycle_objects(struct client *c, uint32_t remain)
 	struct object *o, *t;
 	pthread_mutex_lock(&globals.lock);
 	spa_list_for_each_safe(o, t, &c->context.objects, link) {
+		pw_log_debug("%p: recycle object:%p remived:%d type:%d id:%u/%u %u/%u",
+				c, o, o->removed, o->type, o->id, o->serial,
+				c->context.free_count, remain);
 		if (o->removed) {
-			pw_log_debug("%p: recycle object:%p type:%d id:%u/%u",
-					c, o, o->type, o->id, o->serial);
 			spa_list_remove(&o->link);
 			memset(o, 0, sizeof(struct object));
 			spa_list_append(&globals.free_objects, &o->link);
@@ -543,13 +549,14 @@ static void recycle_objects(struct client *c, uint32_t remain)
  * move it to the end of the queue. */
 static void free_object(struct client *c, struct object *o)
 {
-	pw_log_debug("%p: object:%p type:%d", c, o, o->type);
+	pw_log_debug("%p: object:%p type:%d %u/%u", c, o, o->type,
+			c->context.free_count, RECYCLE_THRESHOLD);
 	pthread_mutex_lock(&c->context.lock);
 	spa_list_remove(&o->link);
 	o->removed = true;
 	o->id = SPA_ID_INVALID;
 	spa_list_append(&c->context.objects, &o->link);
-	if (++c->context.free_count > RECYCLE_THRESHOLD)
+	if (++c->context.free_count >= RECYCLE_THRESHOLD)
 		recycle_objects(c, RECYCLE_THRESHOLD / 2);
 	pthread_mutex_unlock(&c->context.lock);
 
@@ -666,6 +673,7 @@ static struct mix *create_mix(struct client *c, struct port *port,
 		mix = calloc(OBJECT_CHUNK, sizeof(struct mix));
 		if (mix == NULL)
 			return NULL;
+		mix[0].to_free = true;
 		for (i = 0; i < OBJECT_CHUNK; i++)
 			spa_list_append(&c->free_mix, &mix[i].link);
 	}
@@ -725,11 +733,12 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	}
 
 	if (spa_list_is_empty(&c->free_ports)) {
-		port_size = sizeof(struct port) + (c->max_frames * sizeof(float)) + MAX_ALIGN;
+		port_size = sizeof(struct port) + (c->max_frames * sizeof(float)) + c->max_align;
 
 		p = calloc(OBJECT_CHUNK, port_size);
 		if (p == NULL)
 			return NULL;
+		p[0].to_free = true;
 		for (i = 0; i < OBJECT_CHUNK; i++) {
 			struct port *t = SPA_PTROFF(p, port_size * i, struct port);
 			spa_list_append(&c->free_ports, &t->link);
@@ -756,7 +765,7 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 	p->props = pw_properties_new(NULL, NULL);
 
 	p->direction = direction;
-	p->emptyptr = SPA_PTR_ALIGN(p->empty, MAX_ALIGN, float);
+	p->emptyptr = SPA_PTR_ALIGN(p->empty, c->max_align, float);
 	p->port_id = pw_map_insert_new(&c->ports[direction], p);
 	c->n_ports++;
 
@@ -1671,39 +1680,41 @@ static void complete_process(struct client *c, uint32_t frames)
 
 static inline void debug_position(struct client *c, jack_position_t *p)
 {
-	pw_log_trace_fp("usecs:       %"PRIu64, p->usecs);
-	pw_log_trace_fp("frame_rate:  %u", p->frame_rate);
-	pw_log_trace_fp("frame:       %u", p->frame);
-	pw_log_trace_fp("valid:       %08x", p->valid);
+#define pw_log_custom pw_log_trace_fp
+	pw_log_custom("usecs:       %"PRIu64, p->usecs);
+	pw_log_custom("frame_rate:  %u", p->frame_rate);
+	pw_log_custom("frame:       %u", p->frame);
+	pw_log_custom("valid:       %08x", p->valid);
 
 	if (p->valid & JackPositionBBT) {
-		pw_log_trace_fp("BBT");
-		pw_log_trace_fp(" bar:              %u", p->bar);
-		pw_log_trace_fp(" beat:             %u", p->beat);
-		pw_log_trace_fp(" tick:             %u", p->tick);
-		pw_log_trace_fp(" bar_start_tick:   %f", p->bar_start_tick);
-		pw_log_trace_fp(" beats_per_bar:    %f", p->beats_per_bar);
-		pw_log_trace_fp(" beat_type:        %f", p->beat_type);
-		pw_log_trace_fp(" ticks_per_beat:   %f", p->ticks_per_beat);
-		pw_log_trace_fp(" beats_per_minute: %f", p->beats_per_minute);
+		pw_log_custom("BBT");
+		pw_log_custom(" bar:              %u", p->bar);
+		pw_log_custom(" beat:             %u", p->beat);
+		pw_log_custom(" tick:             %u", p->tick);
+		pw_log_custom(" bar_start_tick:   %f", p->bar_start_tick);
+		pw_log_custom(" beats_per_bar:    %f", p->beats_per_bar);
+		pw_log_custom(" beat_type:        %f", p->beat_type);
+		pw_log_custom(" ticks_per_beat:   %f", p->ticks_per_beat);
+		pw_log_custom(" beats_per_minute: %f", p->beats_per_minute);
 	}
 	if (p->valid & JackPositionTimecode) {
-		pw_log_trace_fp("Timecode:");
-		pw_log_trace_fp(" frame_time:       %f", p->frame_time);
-		pw_log_trace_fp(" next_time:        %f", p->next_time);
+		pw_log_custom("Timecode:");
+		pw_log_custom(" frame_time:       %f", p->frame_time);
+		pw_log_custom(" next_time:        %f", p->next_time);
 	}
 	if (p->valid & JackBBTFrameOffset) {
-		pw_log_trace_fp("BBTFrameOffset:");
-		pw_log_trace_fp(" bbt_offset:       %u", p->bbt_offset);
+		pw_log_custom("BBTFrameOffset:");
+		pw_log_custom(" bbt_offset:       %u", p->bbt_offset);
 	}
 	if (p->valid & JackAudioVideoRatio) {
-		pw_log_trace_fp("AudioVideoRatio:");
-		pw_log_trace_fp(" audio_frames_per_video_frame: %f", p->audio_frames_per_video_frame);
+		pw_log_custom("AudioVideoRatio:");
+		pw_log_custom(" audio_frames_per_video_frame: %f", p->audio_frames_per_video_frame);
 	}
 	if (p->valid & JackVideoFrameOffset) {
-		pw_log_trace_fp("JackVideoFrameOffset:");
-		pw_log_trace_fp(" video_offset:     %u", p->video_offset);
+		pw_log_custom("JackVideoFrameOffset:");
+		pw_log_custom(" video_offset:     %u", p->video_offset);
 	}
+#undef pw_log_custom
 }
 
 static inline void jack_to_position(jack_position_t *s, struct pw_node_activation *a)
@@ -1718,8 +1729,10 @@ static inline void jack_to_position(jack_position_t *s, struct pw_node_activatio
 			d->bar.offset = 0;
 		d->bar.signature_num = s->beats_per_bar;
 		d->bar.signature_denom = s->beat_type;
+		d->bar.ticks_per_beat = s->ticks_per_beat;
+		d->bar.bar_start_tick = s->bar_start_tick;
 		d->bar.bpm = s->beats_per_minute;
-		d->bar.beat = (s->bar - 1) * s->beats_per_bar + (s->beat - 1) +
+		d->bar.beat = s->bar * s->beats_per_bar + (s->beat-1) +
 			(s->tick / s->ticks_per_beat);
 	}
 }
@@ -1782,18 +1795,17 @@ static inline jack_transport_state_t position_to_jack(struct pw_node_activation 
 
 		d->beats_per_bar = seg->bar.signature_num;
 		d->beat_type = seg->bar.signature_denom;
-		d->ticks_per_beat = 1920.0f;
+		d->ticks_per_beat = seg->bar.ticks_per_beat;
+		d->bar_start_tick = seg->bar.bar_start_tick;
 		d->beats_per_minute = seg->bar.bpm;
 
 		abs_beat = seg->bar.beat;
 
 		d->bar = (int32_t) (abs_beat / d->beats_per_bar);
 		beats = (long int) (d->bar * d->beats_per_bar);
-		d->bar_start_tick = beats * d->ticks_per_beat;
 		d->beat = (int32_t) (abs_beat - beats);
 		beats += d->beat;
 		d->tick = (int32_t) ((abs_beat - beats) * d->ticks_per_beat);
-		d->bar++;
 		d->beat++;
 	}
 	d->unique_2 = d->unique_1;
@@ -4093,14 +4105,17 @@ jack_client_t * jack_client_open (const char *client_name,
 
 	support = pw_context_get_support(client->context.context, &n_support);
 
-	mix_function = mix_c;
+	client->mix_function = mix_c;
 	cpu_iface = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_CPU);
 	if (cpu_iface) {
 #if defined (__SSE__)
 		uint32_t flags = spa_cpu_get_flags(cpu_iface);
 		if (flags & SPA_CPU_FLAG_SSE)
-			mix_function = mix_sse;
+			client->mix_function = mix_sse;
 #endif
+		client->max_align = spa_cpu_get_max_align(cpu_iface);
+	} else {
+		client->max_align = MAX_ALIGN;
 	}
 	client->context.old_thread_utils =
 		pw_context_get_object(client->context.context,
@@ -4324,6 +4339,9 @@ int jack_client_close (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
 	struct object *o;
+	union pw_map_item *item;
+	struct mix *m, *tm;
+	struct port *p, *tp;
 	int res;
 
 	return_val_if_fail(c != NULL, -EINVAL);
@@ -4378,10 +4396,42 @@ int jack_client_close (jack_client_t *client)
 
 	pw_log_debug("%p: free", client);
 
-	spa_list_consume(o, &c->context.objects, link)
-		free_object(c, o);
-	recycle_objects(c, 0);
+	pw_array_for_each(item, &c->ports[SPA_DIRECTION_OUTPUT].items) {
+                if (pw_map_item_is_free(item))
+			continue;
+		free_port(c, item->data, false);
+	}
+	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
+                if (pw_map_item_is_free(item))
+			continue;
+		free_port(c, item->data, false);
+	}
+	pthread_mutex_lock(&globals.lock);
+	spa_list_consume(o, &c->context.objects, link) {
+		bool to_free = o->to_free;
+		spa_list_remove(&o->link);
+		memset(o, 0, sizeof(struct object));
+		o->to_free = to_free;
+		spa_list_append(&globals.free_objects, &o->link);
+	}
+	pthread_mutex_unlock(&globals.lock);
 
+	spa_list_for_each_safe(m, tm, &c->free_mix, link) {
+		if (!m->to_free)
+			spa_list_remove(&m->link);
+	}
+	spa_list_consume(m, &c->free_mix, link) {
+		spa_list_remove(&m->link);
+		free(m);
+	}
+	spa_list_for_each_safe(p, tp, &c->free_ports, link) {
+		if (!p->to_free)
+			spa_list_remove(&p->link);
+	}
+	spa_list_consume(p, &c->free_ports, link) {
+		spa_list_remove(&p->link);
+		free(p);
+	}
 	pw_map_clear(&c->ports[SPA_DIRECTION_INPUT]);
 	pw_map_clear(&c->ports[SPA_DIRECTION_OUTPUT]);
 
@@ -5439,15 +5489,16 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 	float *mix_ptr[MAX_MIX], *np;
 	uint32_t n_ptr = 0;
 	bool ptr_aligned = true;
+	struct client *c = p->client;
 
 	spa_list_for_each(mix, &p->mix, port_link) {
 		if (mix->id == SPA_ID_INVALID)
 			continue;
 
 		pw_log_trace_fp("%p: port %s mix %d.%d get buffer %d",
-				p->client, p->object->port.name, p->port_id, mix->id, frames);
+				c, p->object->port.name, p->port_id, mix->id, frames);
 
-		if ((b = get_mix_buffer(p->client, mix, frames)) == NULL)
+		if ((b = get_mix_buffer(c, mix, frames)) == NULL)
 			continue;
 
 		if ((np = get_buffer_data(b, frames)) == NULL)
@@ -5464,7 +5515,7 @@ static void *get_buffer_input_float(struct port *p, jack_nframes_t frames)
 		ptr = mix_ptr[0];
 	} else if (n_ptr > 1) {
 		ptr = p->emptyptr;
-		mix_function(ptr, mix_ptr, n_ptr, ptr_aligned, frames);
+		c->mix_function(ptr, mix_ptr, n_ptr, ptr_aligned, frames);
 		p->zeroed = false;
 	}
 	if (ptr == NULL)
@@ -7506,4 +7557,20 @@ static void reg(void)
 	pthread_mutex_init(&globals.lock, NULL);
 	pw_array_init(&globals.descriptions, 16);
 	spa_list_init(&globals.free_objects);
+}
+static void unreg(void) __attribute__ ((destructor));
+static void unreg(void)
+{
+	struct object *o, *to;
+	pthread_mutex_lock(&globals.lock);
+	spa_list_for_each_safe(o, to, &globals.free_objects, link) {
+		if (!o->to_free)
+			spa_list_remove(&o->link);
+	}
+	spa_list_consume(o, &globals.free_objects, link) {
+		spa_list_remove(&o->link);
+		free(o);
+	}
+	pthread_mutex_unlock(&globals.lock);
+	pw_deinit();
 }
