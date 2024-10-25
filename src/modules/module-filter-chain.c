@@ -477,7 +477,12 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * This example uses the rnnoise LADSPA plugin to create a new
  * virtual source.
  *
+ * Run with `pipewire -c filter-chain.conf`. The configuration can also
+ * be put under `pipewire.conf.d/` to run it inside the PipeWire server.
+ *
  *\code{.unparsed}
+ * # ~/.config/pipewire/filter-chain.conf.d/my-filter-chain-1.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-filter-chain
  *     args = {
@@ -515,6 +520,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
  * to a stereo Dolby Surround signal.
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/filter-chain.conf.d/my-filter-chain-2.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-filter-chain
  *     args = {
@@ -1087,13 +1094,15 @@ static int port_set_control_value(struct port *port, float *value, uint32_t id)
 	struct node *node = port->node;
 	struct descriptor *desc = node->desc;
 	float old;
+	bool changed;
 
 	old = port->control_data[id];
 	port->control_data[id] = value ? *value : desc->default_control[port->idx];
 	pw_log_info("control %d %d ('%s') from %f to %f", port->idx, id,
 			desc->desc->ports[port->p].name, old, port->control_data[id]);
-	node->control_changed = old != port->control_data[id];
-	return node->control_changed ? 1 : 0;
+	changed = old != port->control_data[id];
+	node->control_changed |= changed;
+	return changed ? 1 : 0;
 }
 
 static int set_control_value(struct node *node, const char *name, float *value)
@@ -2332,7 +2341,7 @@ static int graph_instantiate(struct graph *graph)
 	const struct fc_descriptor *d;
 	uint32_t i, j, max_samples = impl->quantum_limit;
 	int res;
-	float *sd = impl->silence_data, *dd = impl->discard_data;
+	float *sd, *dd;
 
 	if (graph->instantiated)
 		return 0;
@@ -2345,8 +2354,13 @@ static int graph_instantiate(struct graph *graph)
 
 		desc = node->desc;
 		d = desc->desc;
-		if (d->flags & FC_DESCRIPTOR_SUPPORTS_NULL_DATA)
+		if (d->flags & FC_DESCRIPTOR_SUPPORTS_NULL_DATA) {
 			sd = dd = NULL;
+		}
+		else {
+			sd = impl->silence_data;
+			dd = impl->discard_data;
+		}
 
 		for (i = 0; i < node->n_hndl; i++) {
 			pw_log_info("instantiate %s %d rate:%lu", d->name, i, impl->rate);
