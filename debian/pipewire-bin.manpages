@@ -19,4 +19,4 @@ usr/share/man/man1/spa-json-dump.*
 usr/share/man/man1/spa-monitor.*
 usr/share/man/man1/spa-resample.*
 usr/share/man/man5/*
-usr/share/man/man7/pipewire-devices.*
+usr/share/man/man7/pipewire-props.*
