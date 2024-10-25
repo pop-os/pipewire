@@ -1,10 +1,10 @@
-pipewire (1.2.6-0) UNRELEASED; urgency=medium
+pipewire (1.2.6-1) unstable; urgency=medium
 
   * New upstream release
   * Rename pipewire-devices.7 to pipewire-props.7
   * Add lintian overrides for groff-message in manpages
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 25 Oct 2024 10:00:30 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 25 Oct 2024 11:58:28 +0200
 
 pipewire (1.2.5-1) unstable; urgency=medium
 
