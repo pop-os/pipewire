@@ -1,1 +1,2 @@
 pipewire-jack: groff-message * [usr/share/man/*]
+pipewire-jack: shared-library-lacks-prerequisites [usr/lib/*/pipewire-0.3/jack/libjacknet.so.0.3.*]
