@@ -58,6 +58,7 @@ struct buffer {
 	struct spa_meta_videotransform *vt;
 	struct v4l2_buffer v4l2_buffer;
 	void *ptr;
+	void *mmap_ptr;
 };
 
 #define MAX_CONTROLS	64
@@ -75,6 +76,8 @@ struct port {
 	bool alloc_buffers;
 	bool probed_expbuf;
 	bool have_expbuf;
+	bool first_buffer;
+	uint32_t max_buffers;
 
 	bool next_fmtdesc;
 	struct v4l2_fmtdesc fmtdesc;
@@ -578,10 +581,13 @@ static int impl_node_port_enum_params(void *object, int seq,
 			return -EIO;
 		if (result.index > 0)
 			return 0;
+		if (port->max_buffers == 0)
+			return -EIO;
 
 		param = spa_pod_builder_add_object(&b.b,
 			SPA_TYPE_OBJECT_ParamBuffers, id,
-			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 1, MAX_BUFFERS),
+			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(SPA_MIN(4u, port->max_buffers),
+				1, port->max_buffers),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_Int(port->fmt.fmt.pix.sizeimage),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(port->fmt.fmt.pix.bytesperline));

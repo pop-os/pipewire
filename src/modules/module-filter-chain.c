@@ -620,9 +620,9 @@ static const struct spa_dict_item module_props[] = {
 #define DEFAULT_RATE	48000
 
 struct fc_plugin *load_ladspa_plugin(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *dsp, const char *path, const char *config);
+		struct dsp_ops *dsp, const char *path, const struct spa_dict *info);
 struct fc_plugin *load_builtin_plugin(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *dsp, const char *path, const char *config);
+		struct dsp_ops *dsp, const char *path, const struct spa_dict *info);
 
 struct plugin {
 	struct spa_list link;
@@ -762,6 +762,7 @@ struct impl {
 	struct pw_context *context;
 
 	struct pw_impl_module *module;
+	struct pw_properties *props;
 
 	struct spa_hook module_listener;
 
@@ -1722,7 +1723,7 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 		pw_log_error("can't load plugin type '%s': %m", type);
 		pl = NULL;
 	} else {
-		pl = plugin_func(support, n_support, &impl->dsp, path, NULL);
+		pl = plugin_func(support, n_support, &impl->dsp, path, &impl->props->dict);
 	}
 	if (pl == NULL)
 		goto exit;
@@ -2339,6 +2340,7 @@ static int graph_instantiate(struct graph *graph)
 	struct link *link;
 	struct descriptor *desc;
 	const struct fc_descriptor *d;
+	const struct fc_plugin *p;
 	uint32_t i, j, max_samples = impl->quantum_limit;
 	int res;
 	float *sd, *dd;
@@ -2348,10 +2350,27 @@ static int graph_instantiate(struct graph *graph)
 
 	graph->instantiated = true;
 
+	/* first make instances */
 	spa_list_for_each(node, &graph->node_list, link) {
-
 		node_cleanup(node);
 
+		desc = node->desc;
+		d = desc->desc;
+		p = desc->plugin->plugin;
+
+		for (i = 0; i < node->n_hndl; i++) {
+			pw_log_info("instantiate %s %d rate:%lu", d->name, i, impl->rate);
+			errno = EINVAL;
+			if ((node->hndl[i] = d->instantiate(p, d, impl->rate, i, node->config)) == NULL) {
+				pw_log_error("cannot create plugin instance %d rate:%lu: %m", i, impl->rate);
+				res = -errno;
+				goto error;
+			}
+		}
+	}
+
+	/* then link ports and activate */
+	spa_list_for_each(node, &graph->node_list, link) {
 		desc = node->desc;
 		d = desc->desc;
 		if (d->flags & FC_DESCRIPTOR_SUPPORTS_NULL_DATA) {
@@ -2361,15 +2380,7 @@ static int graph_instantiate(struct graph *graph)
 			sd = impl->silence_data;
 			dd = impl->discard_data;
 		}
-
 		for (i = 0; i < node->n_hndl; i++) {
-			pw_log_info("instantiate %s %d rate:%lu", d->name, i, impl->rate);
-			errno = EINVAL;
-			if ((node->hndl[i] = d->instantiate(d, impl->rate, i, node->config)) == NULL) {
-				pw_log_error("cannot create plugin instance %d rate:%lu: %m", i, impl->rate);
-				res = -errno;
-				goto error;
-			}
 			for (j = 0; j < desc->n_input; j++) {
 				port = &node->input_port[j];
 				d->connect_port(node->hndl[i], port->p, sd);
@@ -2898,6 +2909,7 @@ static void impl_destroy(struct impl *impl)
 	spa_list_consume(pl, &impl->plugin_func_list, link)
 		free_plugin_func(pl);
 
+	pw_properties_free(impl->props);
 	free(impl->silence_data);
 	free(impl->discard_data);
 	free(impl);
@@ -2997,6 +3009,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_log_error( "can't create properties: %m");
 		goto error;
 	}
+	impl->props = props;
 
 	impl->capture_props = pw_properties_new(NULL, NULL);
 	impl->playback_props = pw_properties_new(NULL, NULL);
@@ -3020,6 +3033,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->quantum_limit = pw_properties_get_uint32(
 			pw_context_get_properties(impl->context),
 			"default.clock.quantum-limit", 8192u);
+
+	pw_properties_setf(props, "clock.quantum-limit", "%u", impl->quantum_limit);
 
 	impl->silence_data = calloc(impl->quantum_limit, sizeof(float));
 	if (impl->silence_data == NULL) {
@@ -3122,7 +3137,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_log_error("can't connect: %m");
 		goto error;
 	}
-	pw_properties_free(props);
 
 	pw_proxy_add_listener((struct pw_proxy*)impl->core,
 			&impl->core_proxy_listener,
@@ -3140,7 +3154,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	return 0;
 
 error:
-	pw_properties_free(props);
 	impl_destroy(impl);
 	return res;
 }

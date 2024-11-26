@@ -324,6 +324,9 @@ static int start_node(struct pw_impl_node *this)
 	pw_log_debug("%p: start node driving:%d driver:%d prepared:%d", this,
 			this->driving, this->driver, this->rt.prepared);
 
+	this->lazy = this->rt.position && SPA_FLAG_IS_SET(this->rt.position->clock.flags,
+			SPA_IO_CLOCK_FLAG_LAZY);
+
 	if (!(this->driving && this->driver)) {
 		impl->pending_play = true;
 		res = spa_node_send_command(this->node,
@@ -758,6 +761,14 @@ static inline void insert_driver(struct pw_context *context, struct pw_impl_node
 	spa_list_for_each_safe(n, t, &context->driver_list, driver_link) {
 		if (n->priority_driver < node->priority_driver)
 			break;
+		if (n->priority_driver == 0 && node->priority_driver == 0) {
+			/* no priority is set, we prefer the driver that does
+			 * lazy scheduling. */
+			if (n->supports_request > 0 && node->supports_lazy > 0) {
+				if (n->supports_request <= node->supports_lazy)
+					break;
+			}
+		}
 	}
 	spa_list_append(&n->driver_link, &node->driver_link);
 	pw_context_emit_driver_added(context, node);
@@ -1122,6 +1133,8 @@ static void check_properties(struct pw_impl_node *node)
 			}
 		}
 	}
+	node->supports_lazy = pw_properties_get_uint32(node->properties, PW_KEY_NODE_SUPPORTS_LAZY, 0);
+	node->supports_request = pw_properties_get_uint32(node->properties, PW_KEY_NODE_SUPPORTS_REQUEST, 0);
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_NAME)) &&
 	    (node->name == NULL || !spa_streq(node->name, str))) {
@@ -2149,9 +2162,11 @@ retry_status:
 		} else {
 			all_ready &= ta->pending_sync == false;
 		}
+		ta->prev_signal_time = ta->signal_time;
+		ta->prev_awake_time = ta->awake_time;
+		ta->prev_finish_time = ta->finish_time;
 	}
 
-	a->prev_signal_time = a->signal_time;
 	node->driver_start = nsec;
 
 	a->sync_timeout = SPA_MIN(min_timeout, DEFAULT_SYNC_TIMEOUT);

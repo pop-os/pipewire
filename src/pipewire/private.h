@@ -608,7 +608,10 @@ struct pw_node_activation {
 	uint32_t segment_owner[16];			/* id of owners for each segment info struct.
 							 * nodes that want to update segment info need to
 							 * CAS their node id in this array. */
-	uint32_t padding[11];				/* must be 0 */
+	uint64_t prev_awake_time;
+	uint64_t prev_finish_time;
+	uint32_t padding[7];				/* must be 0 */
+
 	uint32_t client_version;			/* verions of client, see above */
 	uint32_t server_version;			/* verions of server, see above */
 
@@ -740,6 +743,9 @@ struct pw_impl_node {
 
 	char *name;				/** for debug */
 
+	uint32_t supports_lazy;		/**< lazy driver preference */
+	uint32_t supports_request;	/**< request follower preference */
+
 	uint32_t priority_driver;	/** priority for being driver */
 	char **groups;			/** groups to schedule this node in */
 	char **link_groups;		/** groups this node is linked to */
@@ -779,6 +785,7 @@ struct pw_impl_node {
 	unsigned int sync:1;		/**< the sync-groups are active */
 	unsigned int transport:1;	/**< the transport is active */
 	unsigned int async:1;		/**< async processing, one cycle latency */
+	unsigned int lazy:1;		/**< the graph is lazy scheduling */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 

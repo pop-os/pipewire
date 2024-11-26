@@ -19,6 +19,9 @@ struct rtp_stream;
 #define ERROR_MSEC		2.0f
 #define DEFAULT_SESS_LATENCY	100.0f
 
+/* 28 bytes IP/UDP, 12 bytes RTP header */
+#define PACKET_HEADER_SIZE	(12+28)
+
 #define DEFAULT_MTU		1280
 #define DEFAULT_MIN_PTIME	2.0f
 #define DEFAULT_MAX_PTIME	20.0f
@@ -51,6 +54,8 @@ int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len)
 uint64_t rtp_stream_get_time(struct rtp_stream *s, uint32_t *rate);
 
 uint16_t rtp_stream_get_seq(struct rtp_stream *s);
+
+size_t rtp_stream_get_mtu(struct rtp_stream *s);
 
 void rtp_stream_set_first(struct rtp_stream *s);
 
