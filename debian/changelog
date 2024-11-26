@@ -1,11 +1,11 @@
-pipewire (1.2.7-0) UNRELEASED; urgency=medium
+pipewire (1.2.7-1) unstable; urgency=medium
 
   * New upstream release
   * Update symbols file
   * Override shared-library-lacks-prerequisites lintian tag for
       libjacknet.so.0.3.*, it's a dummy library so no need to complain.
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 26 Nov 2024 11:11:49 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 26 Nov 2024 11:50:10 +0100
 
 pipewire (1.2.6-1) unstable; urgency=medium
 
