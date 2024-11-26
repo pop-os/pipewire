@@ -80,7 +80,7 @@ static const char *uri_table_unmap(LV2_URID_Map_Handle handle, LV2_URID urid)
 	URITable *table = (URITable*)handle;
 
 	if (urid > 0 && urid <= pw_array_get_len(&table->array, char*))
-		return *pw_array_get_unchecked(&table->array, urid, char*);
+		return *pw_array_get_unchecked(&table->array, urid - 1, char*);
 	return NULL;
 }
 
@@ -278,7 +278,7 @@ work_schedule(LV2_Worker_Schedule_Handle handle, uint32_t size, const void *data
 	return LV2_WORKER_SUCCESS;
 }
 
-static void *lv2_instantiate(const struct fc_descriptor *desc,
+static void *lv2_instantiate(const struct fc_plugin *plugin, const struct fc_descriptor *desc,
                         unsigned long SampleRate, int index, const char *config)
 {
 	struct descriptor *d = (struct descriptor*)desc;
@@ -460,7 +460,7 @@ static void lv2_unload(struct fc_plugin *plugin)
 
 SPA_EXPORT
 struct fc_plugin *pipewire__filter_chain_plugin_load(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *ops, const char *plugin_uri, const char *config)
+		struct dsp_ops *dsp, const char *plugin_uri, const struct spa_dict *info)
 {
 	struct context *c;
 	const LilvPlugins *plugins;

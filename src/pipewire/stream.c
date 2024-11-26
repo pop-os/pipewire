@@ -1057,6 +1057,8 @@ again:
 		if ((b = get_buffer(stream, io->buffer_id)) != NULL) {
 			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
 			queue_push(impl, &impl->dequeued, b);
+			if (impl->early_process)
+				ask_more = true;
 		}
 
 		/* pop new buffer */
@@ -2521,6 +2523,12 @@ SPA_EXPORT
 bool pw_stream_is_driving(struct pw_stream *stream)
 {
 	return stream->node->driving;
+}
+
+SPA_EXPORT
+bool pw_stream_is_lazy(struct pw_stream *stream)
+{
+	return stream->node->lazy;
 }
 
 static int

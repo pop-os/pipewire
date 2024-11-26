@@ -29,7 +29,7 @@ struct descriptor {
 	const LADSPA_Descriptor *d;
 };
 
-static void *ladspa_instantiate(const struct fc_descriptor *desc,
+static void *ladspa_instantiate(const struct fc_plugin *plugin, const struct fc_descriptor *desc,
                         unsigned long SampleRate, int index, const char *config)
 {
 	struct descriptor *d = (struct descriptor *)desc;
@@ -210,7 +210,7 @@ exit:
 }
 
 struct fc_plugin *load_ladspa_plugin(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *dsp, const char *plugin, const char *config)
+		struct dsp_ops *dsp, const char *plugin, const struct spa_dict *info)
 {
 	struct fc_plugin *pl = NULL;
 

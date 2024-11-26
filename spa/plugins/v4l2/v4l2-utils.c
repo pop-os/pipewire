@@ -120,7 +120,6 @@ static int spa_v4l2_buffer_recycle(struct impl *this, uint32_t buffer_id)
 		spa_log_error(this->log, "'%s' VIDIOC_QBUF: %m", this->props.device);
 		return -err;
 	}
-
 	return 0;
 }
 
@@ -147,6 +146,8 @@ static int spa_v4l2_clear_buffers(struct impl *this)
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_MAPPED)) {
 			munmap(b->ptr, d[0].maxsize);
 		}
+		if (b->mmap_ptr)
+			munmap(b->mmap_ptr, b->v4l2_buffer.length);
 		if (SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_ALLOCATED)) {
 			spa_log_debug(this->log, "close %d", (int) d[0].fd);
 			close(d[0].fd);
@@ -911,12 +912,13 @@ static int probe_expbuf(struct impl *this)
 	spa_zero(reqbuf);
 	reqbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	reqbuf.memory = V4L2_MEMORY_MMAP;
-	reqbuf.count = 2;
+	reqbuf.count = port->max_buffers = MAX_BUFFERS;
 
 	if (xioctl(dev->fd, VIDIOC_REQBUFS, &reqbuf) < 0) {
 		spa_log_error(this->log, "'%s' VIDIOC_REQBUFS: %m", this->props.device);
 		return -errno;
 	}
+	port->max_buffers = reqbuf.count;
 
 	spa_zero(expbuf);
 	expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -1048,6 +1050,8 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 	size->width = fmt.fmt.pix.width;
 	size->height = fmt.fmt.pix.height;
 
+	probe_expbuf(this);
+
 	port->fmt = fmt;
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_FLAGS | SPA_PORT_CHANGE_MASK_RATE;
 	port->info.flags = (port->alloc_buffers ? SPA_PORT_FLAG_CAN_ALLOC_BUFFERS : 0) |
@@ -1056,8 +1060,6 @@ static int spa_v4l2_set_format(struct impl *this, struct spa_video_info *format,
 		SPA_PORT_FLAG_TERMINAL;
 	port->info.rate.num = streamparm.parm.capture.timeperframe.numerator;
 	port->info.rate.denom = streamparm.parm.capture.timeperframe.denominator;
-
-	probe_expbuf(this);
 
 	return match ? 0 : 1;
 }
@@ -1406,15 +1408,18 @@ static int mmap_read(struct impl *this)
 	if (xioctl(dev->fd, VIDIOC_DQBUF, &buf) < 0)
 		return -errno;
 
+	spa_log_trace(this->log, "v4l2 %p: have output %d/%d", this, buf.index, buf.sequence);
+
 	/* Drop the first frame in order to work around common firmware
 	 * timestamp issues */
-	if (buf.sequence == 0) {
-		xioctl(dev->fd, VIDIOC_QBUF, &buf);
+	if (port->first_buffer) {
+		port->first_buffer = false;
+		if (xioctl(dev->fd, VIDIOC_QBUF, &buf) < 0)
+			spa_log_warn(this->log, "v4l2 %p: error qbuf: %m", this);
 		return 0;
 	}
 
 	pts = SPA_TIMEVAL_TO_NSEC(&buf.timestamp);
-	spa_log_trace(this->log, "v4l2 %p: have output %d", this, buf.index);
 
 	if (this->clock) {
 		/* FIXME, we should follow the driver clock and target_ values.
@@ -1447,11 +1452,14 @@ static int mmap_read(struct impl *this)
 
 	d = b->outbuf->datas;
 	d[0].chunk->offset = 0;
-	d[0].chunk->size = buf.bytesused;
+	d[0].chunk->size = SPA_MIN(buf.bytesused, d[0].maxsize);
 	d[0].chunk->stride = port->fmt.fmt.pix.bytesperline;
 	d[0].chunk->flags = 0;
 	if (buf.flags & V4L2_BUF_FLAG_ERROR)
 		d[0].chunk->flags |= SPA_CHUNK_FLAG_CORRUPTED;
+
+	if (b->mmap_ptr && b->ptr)
+		memcpy(b->ptr, b->mmap_ptr, d[0].chunk->size);
 
 	spa_list_append(&port->queue, &b->link);
 	return 0;
@@ -1463,6 +1471,7 @@ static void v4l2_on_fd_events(struct spa_source *source)
 	struct spa_io_buffers *io;
 	struct port *port = &this->out_ports[0];
 	struct buffer *b;
+	int res;
 
 	if (source->rmask & SPA_IO_ERR) {
 		struct port *port = &this->out_ports[0];
@@ -1477,8 +1486,10 @@ static void v4l2_on_fd_events(struct spa_source *source)
 		return;
 	}
 
-	if (mmap_read(this) < 0)
+	if ((res = mmap_read(this)) < 0) {
+		spa_log_warn(this->log, "v4l2 %p: mmap read error:%s", this, spa_strerror(res));
 		return;
+	}
 
 	if (spa_list_is_empty(&port->queue))
 		return;
@@ -1534,8 +1545,22 @@ static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, 
 	reqbuf.count = n_buffers;
 
 	if (xioctl(dev->fd, VIDIOC_REQBUFS, &reqbuf) < 0) {
-		spa_log_error(this->log, "'%s' VIDIOC_REQBUFS %m", this->props.device);
-		return -errno;
+		if (port->memtype != V4L2_MEMORY_USERPTR) {
+			spa_log_error(this->log, "'%s' VIDIOC_REQBUFS %m", this->props.device);
+			return -errno;
+		}
+		/* some drivers (v4l2loopback) don't support USERPTR
+		 * and so we need to try again with MMAP and memcpy */
+		port->memtype = V4L2_MEMORY_MMAP;
+		spa_zero(reqbuf);
+		reqbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		reqbuf.memory = port->memtype;
+		reqbuf.count = n_buffers;
+
+		if (xioctl(dev->fd, VIDIOC_REQBUFS, &reqbuf) < 0) {
+			spa_log_error(this->log, "'%s' VIDIOC_REQBUFS %m", this->props.device);
+			return -errno;
+		}
 	}
 	spa_log_debug(this->log, "got %d buffers", reqbuf.count);
 	if (reqbuf.count < n_buffers) {
@@ -1568,7 +1593,8 @@ static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, 
 		b->v4l2_buffer.memory = port->memtype;
 		b->v4l2_buffer.index = i;
 
-		if (port->memtype == V4L2_MEMORY_USERPTR) {
+		if (port->memtype == V4L2_MEMORY_USERPTR ||
+		    port->memtype == V4L2_MEMORY_MMAP) {
 			if (d[0].data == NULL) {
 				void *data;
 
@@ -1586,8 +1612,24 @@ static int spa_v4l2_use_buffers(struct impl *this, struct spa_buffer **buffers, 
 			else
 				b->ptr = d[0].data;
 
-			b->v4l2_buffer.m.userptr = (unsigned long) b->ptr;
-			b->v4l2_buffer.length = d[0].maxsize;
+			if (port->memtype == V4L2_MEMORY_USERPTR) {
+				b->v4l2_buffer.m.userptr = (unsigned long) b->ptr;
+				b->v4l2_buffer.length = d[0].maxsize;
+			}
+			else {
+				if (xioctl(dev->fd, VIDIOC_QUERYBUF, &b->v4l2_buffer) < 0) {
+					spa_log_error(this->log, "'%s' VIDIOC_QUERYBUF: %m", this->props.device);
+					return -errno;
+				}
+				b->mmap_ptr = mmap(NULL,
+						b->v4l2_buffer.length,
+						PROT_READ, MAP_PRIVATE,
+						dev->fd, b->v4l2_buffer.m.offset);
+				if (b->mmap_ptr == MAP_FAILED) {
+					spa_log_error(this->log, "'%s' mmap: %m", this->props.device);
+					return -errno;
+				}
+			}
 		}
 		else if (port->memtype == V4L2_MEMORY_DMABUF) {
 			b->v4l2_buffer.m.fd = d[0].fd;
@@ -1797,6 +1839,9 @@ static int spa_v4l2_stream_on(struct impl *this)
 		return 0;
 
 	spa_log_debug(this->log, "starting");
+
+	port->first_buffer = true;
+	mmap_read(this);
 
 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (xioctl(dev->fd, VIDIOC_STREAMON, &type) < 0) {

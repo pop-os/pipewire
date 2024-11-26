@@ -14,13 +14,16 @@
 
 #include <mysofa.h>
 
-#define MAX_SAMPLES	8192u
-
-static struct dsp_ops *dsp_ops;
-static struct spa_loop *data_loop;
-static struct spa_loop *main_loop;
+struct plugin {
+	struct fc_plugin plugin;
+	struct dsp_ops *dsp_ops;
+	struct spa_loop *data_loop;
+	struct spa_loop *main_loop;
+	uint32_t quantum_limit;
+};
 
 struct spatializer_impl {
+	struct plugin *plugin;
 	unsigned long rate;
 	float *port[6];
 	int n_samples, blocksize, tailsize;
@@ -32,7 +35,7 @@ struct spatializer_impl {
 	struct convolver *r_conv[3];
 };
 
-static void * spatializer_instantiate(const struct fc_descriptor * Descriptor,
+static void * spatializer_instantiate(const struct fc_plugin *plugin, const struct fc_descriptor * Descriptor,
 		unsigned long SampleRate, int index, const char *config)
 {
 	struct spatializer_impl *impl;
@@ -58,6 +61,7 @@ static void * spatializer_instantiate(const struct fc_descriptor * Descriptor,
 		errno = ENOMEM;
 		return NULL;
 	}
+	impl->plugin = (struct plugin *) plugin;
 
 	while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
 		if (spa_streq(key, "blocksize")) {
@@ -175,8 +179,8 @@ static void * spatializer_instantiate(const struct fc_descriptor * Descriptor,
 	pw_log_info("using n_samples:%u %d:%d blocksize sofa:%s", impl->n_samples,
 		impl->blocksize, impl->tailsize, filename);
 
-	impl->tmp[0] = calloc(MAX_SAMPLES, sizeof(float));
-	impl->tmp[1] = calloc(MAX_SAMPLES, sizeof(float));
+	impl->tmp[0] = calloc(impl->plugin->quantum_limit, sizeof(float));
+	impl->tmp[1] = calloc(impl->plugin->quantum_limit, sizeof(float));
 	impl->rate = SampleRate;
 	return impl;
 error:
@@ -239,9 +243,9 @@ static void spatializer_reload(void * Instance)
 	if (impl->r_conv[2])
 		convolver_free(impl->r_conv[2]);
 
-	impl->l_conv[2] = convolver_new(dsp_ops, impl->blocksize, impl->tailsize,
+	impl->l_conv[2] = convolver_new(impl->plugin->dsp_ops, impl->blocksize, impl->tailsize,
 			left_ir, impl->n_samples);
-	impl->r_conv[2] = convolver_new(dsp_ops, impl->blocksize, impl->tailsize,
+	impl->r_conv[2] = convolver_new(impl->plugin->dsp_ops, impl->blocksize, impl->tailsize,
 			right_ir, impl->n_samples);
 
 	free(left_ir);
@@ -251,7 +255,7 @@ static void spatializer_reload(void * Instance)
 		pw_log_error("reloading left or right convolver failed");
 		return;
 	}
-	spa_loop_invoke(data_loop, do_switch, 1, NULL, 0, true, impl);
+	spa_loop_invoke(impl->plugin->data_loop, do_switch, 1, NULL, 0, true, impl);
 }
 
 struct free_data {
@@ -275,7 +279,7 @@ static void spatializer_run(void * Instance, unsigned long SampleCount)
 	struct spatializer_impl *impl = Instance;
 
 	if (impl->interpolate) {
-		uint32_t len = SPA_MIN(SampleCount, MAX_SAMPLES);
+		uint32_t len = SPA_MIN(SampleCount, impl->plugin->quantum_limit);
 		struct free_data free_data;
 		float *l = impl->tmp[0], *r = impl->tmp[1];
 
@@ -296,7 +300,7 @@ static void spatializer_run(void * Instance, unsigned long SampleCount)
 		impl->l_conv[1] = impl->r_conv[1] = NULL;
 		impl->interpolate = false;
 
-		spa_loop_invoke(main_loop, do_free, 1, &free_data, sizeof(free_data), false, impl);
+		spa_loop_invoke(impl->plugin->main_loop, do_free, 1, &free_data, sizeof(free_data), false, impl);
 	} else if (impl->l_conv[0] && impl->r_conv[0]) {
 		convolver_run(impl->l_conv[0], impl->port[2], impl->port[0], SampleCount);
 		convolver_run(impl->r_conv[0], impl->port[2], impl->port[1], SampleCount);
@@ -413,19 +417,33 @@ static const struct fc_descriptor *sofa_make_desc(struct fc_plugin *plugin, cons
 	return NULL;
 }
 
-static struct fc_plugin builtin_plugin = {
-	.make_desc = sofa_make_desc
-};
+static void sofa_plugin_unload(struct fc_plugin *p)
+{
+	free(p);
+}
 
 SPA_EXPORT
 struct fc_plugin *pipewire__filter_chain_plugin_load(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *dsp, const char *plugin, const char *config)
+		struct dsp_ops *dsp, const char *plugin, const struct spa_dict *info)
 {
-	dsp_ops = dsp;
+	struct plugin *impl = calloc(1, sizeof (struct plugin));
+
+	impl->plugin.make_desc = sofa_make_desc;
+	impl->plugin.unload = sofa_plugin_unload;
+
+	impl->quantum_limit = 8192u;
+
+	for (uint32_t i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, "clock.quantum-limit"))
+			spa_atou32(s, &impl->quantum_limit, 0);
+	}
+	impl->dsp_ops = dsp;
 	pffft_select_cpu(dsp->cpu_flags);
 
-	data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
-	main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+	impl->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	impl->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
 
-	return &builtin_plugin;
+	return (struct fc_plugin *) impl;
 }
