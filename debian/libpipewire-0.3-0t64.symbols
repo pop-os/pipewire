@@ -121,6 +121,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_filter_get_state@Base 0.3.1
  pw_filter_get_time@Base 0.3.1
  pw_filter_is_driving@Base 0.3.66
+ pw_filter_is_lazy@Base 1.2.7
  pw_filter_new@Base 0.3.1
  pw_filter_new_simple@Base 0.3.1
  pw_filter_queue_buffer@Base 0.3.1
@@ -430,6 +431,7 @@ libpipewire-0.3.so.0 libpipewire-0.3-0t64 #MINVER#
  pw_stream_get_time@Base 0.3.1
  pw_stream_get_time_n@Base 0.3.50
  pw_stream_is_driving@Base 0.3.34
+ pw_stream_is_lazy@Base 1.2.7
  pw_stream_new@Base 0.3.1
  pw_stream_new_simple@Base 0.3.1
  pw_stream_queue_buffer@Base 0.3.1

@@ -1,6 +1,7 @@
 pipewire (1.2.7-0) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Update symbols file
   * Override shared-library-lacks-prerequisites lintian tag for
       libjacknet.so.0.3.*, it's a dummy library so no need to complain.
 
