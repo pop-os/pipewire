@@ -77,9 +77,9 @@ static void show_help(struct data *data, const char *name, bool error)
 		"  -l, --latency                         Desired latency in ms\n"
 		"  -d, --delay                           Desired delay in float s\n"
 		"  -C  --capture                         Capture source to connect to (name or serial)\n"
-		"      --capture-props                   Capture stream properties\n"
+		"  -i  --capture-props                   Capture stream properties\n"
 		"  -P  --playback                        Playback sink to connect to (name or serial)\n"
-		"      --playback-props                  Playback stream properties\n",
+		"  -o  --playback-props                  Playback stream properties\n",
 		name,
 		data->opt_node_name,
 		data->opt_group_name,
@@ -163,7 +163,8 @@ int main(int argc, char *argv[])
 			data.latency = atoi(optarg) * DEFAULT_RATE / SPA_MSEC_PER_SEC;
 			break;
 		case 'd':
-			data.delay = (float)atof(optarg);
+			if (!spa_atof(optarg, &data.delay))
+				data.delay = (float)atof(optarg);
 			break;
 		case 'C':
 			pw_properties_set(data.capture_props, PW_KEY_TARGET_OBJECT, optarg);

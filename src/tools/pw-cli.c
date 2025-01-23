@@ -10,9 +10,6 @@
 #include <signal.h>
 #include <string.h>
 #include <ctype.h>
-#if !defined(__FreeBSD__) && !defined(__MidnightBSD__)
-#include <alloca.h>
-#endif
 #include <getopt.h>
 #include <fnmatch.h>
 #ifdef HAVE_READLINE
@@ -30,9 +27,10 @@
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/debug/pod.h>
+#include <spa/debug/file.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/json-pod.h>
-#include <spa/pod/builder.h>
+#include <spa/pod/dynamic.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -163,14 +161,17 @@ static void print_params(struct spa_param_info *params, uint32_t n_params, char 
 	}
 }
 
+#if 0
 static bool do_not_implemented(struct data *data, const char *cmd, char *args, char **error)
 {
 	*error = spa_aprintf("Command \"%s\" not yet implemented", cmd);
 	return false;
 }
+#endif
 
 static bool do_help(struct data *data, const char *cmd, char *args, char **error);
 static bool do_load_module(struct data *data, const char *cmd, char *args, char **error);
+static bool do_unload_module(struct data *data, const char *cmd, char *args, char **error);
 static bool do_list_objects(struct data *data, const char *cmd, char *args, char **error);
 static bool do_connect(struct data *data, const char *cmd, char *args, char **error);
 static bool do_disconnect(struct data *data, const char *cmd, char *args, char **error);
@@ -194,7 +195,7 @@ static bool do_quit(struct data *data, const char *cmd, char *args, char **error
 static const struct command command_list[] = {
 	{ "help", "h", "Show this help", do_help },
 	{ "load-module", "lm", "Load a module. <module-name> [<module-arguments>]", do_load_module },
-	{ "unload-module", "um", "Unload a module. <module-var>", do_not_implemented },
+	{ "unload-module", "um", "Unload a module. <module-var>", do_unload_module },
 	{ "connect", "con", "Connect to a remote. [<remote-name>]", do_connect },
 	{ "disconnect", "dis", "Disconnect from a remote. [<remote-var>]", do_disconnect },
 	{ "list-remotes", "lr", "List connected remotes.", do_list_remotes },
@@ -260,6 +261,29 @@ static bool do_load_module(struct data *data, const char *cmd, char *args, char 
 	if (data->interactive)
 		printf("%d = @module:%d\n", id, pw_global_get_id(pw_impl_module_get_global(module)));
 
+	return true;
+}
+
+static bool do_unload_module(struct data *data, const char *cmd, char *args, char **error)
+{
+	char *a[1];
+	int n;
+	struct pw_impl_module *module;
+	uint32_t idx;
+
+	n = pw_split_ip(args, WHITESPACE, 1, a);
+	if (n < 1) {
+		*error = spa_aprintf("%s <module-var>", cmd);
+		return false;
+	}
+	idx = atoi(a[0]);
+	module = pw_map_lookup(&data->vars, idx);
+	if (module == NULL) {
+		*error = spa_aprintf("%s: unknown module '%s'", cmd, a[0]);
+		return false;
+	}
+	pw_map_remove(&data->vars, idx);
+	pw_impl_module_destroy(module);
 	return true;
 }
 
@@ -1777,9 +1801,12 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 	uint32_t param_id;
 	struct global *global;
 	uint8_t buffer[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	spa_auto(spa_pod_dynamic_builder) b = { 0 };
 	const struct spa_type_info *ti;
 	struct spa_pod *pod;
+	struct spa_error_location loc;
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 
 	n = pw_split_ip(args, WHITESPACE, 3, a);
 	if (n < 3) {
@@ -1802,11 +1829,16 @@ static bool do_set_param(struct data *data, const char *cmd, char *args, char **
 		*error = spa_aprintf("%s: unknown param type: %s", cmd, a[1]);
 		return false;
 	}
-	if ((res = spa_json_to_pod(&b, 0, ti, a[2], strlen(a[2]))) < 0) {
-		*error = spa_aprintf("%s: can't make pod: %s", cmd, spa_strerror(res));
+	if ((res = spa_json_to_pod_checked(&b.b, 0, ti, a[2], strlen(a[2]), &loc)) < 0) {
+		if (loc.line != 0) {
+			spa_debug_file_error_location(stderr, &loc,
+					"syntax error in json '%s': %s",
+					a[2], loc.reason);
+		}
+		*error = spa_aprintf("%s: invalid pod: %s", cmd, loc.reason);
 		return false;
 	}
-	if ((pod = spa_pod_builder_deref(&b, 0)) == NULL) {
+	if ((pod = spa_pod_builder_deref(&b.b, 0)) == NULL) {
 		*error = spa_aprintf("%s: can't make pod", cmd);
 		return false;
 	}
@@ -1911,9 +1943,11 @@ static bool do_send_command(struct data *data, const char *cmd, char *args, char
 	int res, n;
 	struct global *global;
 	uint8_t buffer[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	spa_auto(spa_pod_dynamic_builder) b = { 0 };
 	const struct spa_type_info *ti;
 	struct spa_pod *pod;
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 
 	n = pw_split_ip(args, WHITESPACE, 3, a);
 	if (n < 3) {
@@ -1943,11 +1977,11 @@ static bool do_send_command(struct data *data, const char *cmd, char *args, char
 		*error = spa_aprintf("%s: unknown node command type: %s", cmd, a[1]);
 		return false;
 	}
-	if ((res = spa_json_to_pod(&b, 0, ti, a[2], strlen(a[2]))) < 0) {
+	if ((res = spa_json_to_pod(&b.b, 0, ti, a[2], strlen(a[2]))) < 0) {
 		*error = spa_aprintf("%s: can't make pod: %s", cmd, spa_strerror(res));
 		return false;
 	}
-	if ((pod = spa_pod_builder_deref(&b, 0)) == NULL) {
+	if ((pod = spa_pod_builder_deref(&b.b, 0)) == NULL) {
 		*error = spa_aprintf("%s: can't make pod", cmd);
 		return false;
 	}
@@ -2124,15 +2158,6 @@ children_of(struct remote_data *rd, uint32_t parent_id,
 	}
 	return count;
 }
-
-#define INDENT(_level) \
-	({ \
-		int __level = (_level); \
-		char *_indent = alloca(__level + 1); \
-		memset(_indent, '\t', __level); \
-		_indent[__level] = '\0'; \
-		(const char *)_indent; \
-	})
 
 static bool parse(struct data *data, char *buf, char **error)
 {
@@ -2387,23 +2412,26 @@ int main(int argc, char *argv[])
 		readline_cleanup();
 #endif
 	} else {
-		char buf[4096], *p, *error;
+		FILE *buf;
+		char *error, *ptr;
+		size_t size;
 
-		p = buf;
-		for (i = optind; i < argc; i++) {
-			p = stpcpy(p, argv[i]);
-			p = stpcpy(p, " ");
-		}
+		buf = open_memstream(&ptr, &size);
+		for (i = optind; i < argc; i++)
+			fprintf(buf, "%s%s", i == optind ? "" : " ", argv[i]);
+		fclose(buf);
 
 		// If we're monitoring, surface info changes as well
 		data.monitoring_info = monitor;
 
 		pw_main_loop_run(data.loop);
 
-		if (!parse(&data, buf, &error)) {
+		if (!parse(&data, ptr, &error)) {
 			fprintf(stderr, "Error: \"%s\"\n", error);
 			free(error);
 		}
+		free(ptr);
+
 		if (data.current != NULL)
 			data.current->prompt_pending = pw_core_sync(data.current->core, 0, 0);
 

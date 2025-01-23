@@ -165,6 +165,8 @@ struct impl {
 	uint64_t packet_delay_ns;
 	struct spa_source *update_delay_event;
 
+	uint32_t encoder_delay;
+
 	const struct media_codec *codec;
 	bool codec_props_changed;
 	void *codec_props;
@@ -380,7 +382,7 @@ static void set_latency(struct impl *this, bool emit_latency)
 
 	/* in main loop */
 
-	if (this->transport == NULL)
+	if (this->transport == NULL || !port->have_format)
 		return;
 
 	/*
@@ -388,12 +390,13 @@ static void set_latency(struct impl *this, bool emit_latency)
 	 *
 	 * (packet delay) + (codec internal delay) + (transport delay) + (latency offset)
 	 *
-	 * and doesn't depend on the quantum. The codec internal delay is neglected.
-	 * Kernel knows the latency due to socket/controller queue, but doesn't
-	 * tell us, so not included but hopefully in < 20 ms range.
+	 * and doesn't depend on the quantum. Kernel knows the latency due to
+	 * socket/controller queue, but doesn't tell us, so not included but
+	 * hopefully in < 10 ms range.
 	 */
 
 	delay = __atomic_load_n(&this->packet_delay_ns, __ATOMIC_RELAXED);
+	delay += (int64_t)this->encoder_delay * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate;
 	delay += spa_bt_transport_get_delay_nsec(this->transport);
 	delay += SPA_CLAMP(this->props.latency_offset, -delay, INT64_MAX / 2);
 	delay = SPA_MAX(delay, 0);
@@ -539,9 +542,8 @@ static uint64_t get_reference_time(struct impl *this, uint64_t *duration_ns_ret)
 	/* Account for resampling delay */
 	resampling = (port->current_format.info.raw.rate != this->process_rate) || this->following;
 	if (port->rate_match && this->position && resampling) {
-		t -= (uint64_t)port->rate_match->delay * SPA_NSEC_PER_SEC
-			/ this->position->clock.rate.denom;
-		t += SPA_NSEC_PER_SEC / port->current_format.info.raw.rate;
+		t -= (port->rate_match->delay * SPA_NSEC_PER_SEC + port->rate_match->delay_frac)
+			/ port->current_format.info.raw.rate;
 	}
 
 	return t;
@@ -716,8 +718,8 @@ static int encode_fragment(struct impl *this)
 
 static int flush_buffer(struct impl *this)
 {
-	spa_log_trace(this->log, "%p: used:%d block_size:%d", this,
-			this->buffer_used, this->block_size);
+	spa_log_trace(this->log, "%p: used:%d block_size:%d need_flush:%d", this,
+			this->buffer_used, this->block_size, this->need_flush);
 
 	if (this->need_flush)
 		return send_buffer(this);
@@ -1069,7 +1071,7 @@ static void media_iso_pull(struct spa_bt_iso_io *iso_io)
 	} else {
 		spa_bt_rate_control_update(&port->ratectl, err, 0,
 				iso_io->duration, period, RATE_CTL_DIFF_MAX);
-		spa_log_trace(this->log, "%p: ISO sync err:%+.3f value:%.3f target:%.3f (ms) corr:%g",
+		spa_log_trace(this->log, "%p: ISO sync err:%+.3g value:%.6f target:%.6f (ms) corr:%g",
 				this,
 				port->ratectl.avg / SPA_NSEC_PER_MSEC,
 				value / SPA_NSEC_PER_MSEC,
@@ -1250,9 +1252,15 @@ static int transport_start(struct impl *this)
 		this->codec_props_changed = true;
 	}
 
-	spa_log_info(this->log, "%p: using %s codec %s, delay:%"PRIi64" ms", this,
-			this->codec->bap ? "BAP" : "A2DP", this->codec->description,
-			(int64_t)(spa_bt_transport_get_delay_nsec(this->transport) / SPA_NSEC_PER_MSEC));
+	this->encoder_delay = 0;
+	if (this->codec->get_delay)
+		this->codec->get_delay(this->codec_data, &this->encoder_delay, NULL);
+
+	const char *codec_profile = this->codec->asha ? "ASHA" : (this->codec->bap ? "BAP" : "A2DP");
+	spa_log_info(this->log, "%p: using %s codec %s, delay:%.2f ms, codec-delay:%.2f ms", this,
+			codec_profile, this->codec->description,
+			(double)spa_bt_transport_get_delay_nsec(this->transport) / SPA_NSEC_PER_MSEC,
+			(double)this->encoder_delay * SPA_MSEC_PER_SEC / port->current_format.info.raw.rate);
 
 	this->seqnum = UINT16_MAX;
 
@@ -1490,12 +1498,13 @@ static void emit_node_info(struct impl *this, bool full)
 		node_group = node_group_buf;
 	}
 
+	const char *codec_profile = this->codec->asha ? "ASHA" : (this->codec->bap ? "BAP" : "A2DP");
 	struct spa_dict_item node_info_items[] = {
 		{ SPA_KEY_DEVICE_API, "bluez5" },
 		{ SPA_KEY_MEDIA_CLASS, this->is_internal ? "Audio/Sink/Internal" :
 		  this->is_output ? "Audio/Sink" : "Stream/Input/Audio" },
 		{ "media.name", ((this->transport && this->transport->device->name) ?
-					this->transport->device->name : this->codec->bap ? "BAP" : "A2DP" ) },
+					this->transport->device->name : codec_profile ) },
 		{ SPA_KEY_NODE_DRIVER, this->is_output ? "true" : "false" },
 		{ "node.group", node_group },
 	};

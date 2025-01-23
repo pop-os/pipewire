@@ -1012,6 +1012,13 @@ next_indicator:
 		}
 
 		rfcomm_send_reply(rfcomm, "OK");
+	} else if (spa_strstartswith(buf, "AT+CCWA=")) {
+		/*
+		 * Claim that call waiting notifications are supported.
+		 * Required for some devices (e.g. Soundcore Motion 300),
+		 * as they stop sending commands if the reply to CCWA is not OK.
+		 */
+		rfcomm_send_reply(rfcomm, "OK");
 	} else if (spa_strstartswith(buf, "AT+CLCC")) {
 		struct spa_list *calls;
 		struct call *call;
@@ -1388,7 +1395,8 @@ static void rfcomm_process_events(struct rfcomm *rfcomm, char *buf, bool ag, boo
 
 		if (!handler(rfcomm, token)) {
 			spa_log_debug(backend->log, "RFCOMM received unsupported event: %s", token);
-			rfcomm_send_error(rfcomm, CMEE_OPERATION_NOT_SUPPORTED);
+			if (ag)
+				rfcomm_send_error(rfcomm, CMEE_OPERATION_NOT_SUPPORTED);
 		}
 	}
 }
@@ -2530,6 +2538,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 
 		/* We announce wideband speech support anyway */
 		features = SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH;
+#ifdef HAVE_LC3
+		features |= SPA_BT_HFP_SDP_AG_FEATURE_SUPER_WIDEBAND_SPEECH;
+#endif
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
@@ -2537,9 +2548,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 		dbus_message_iter_close_container(&it[2], &it[3]);
 		dbus_message_iter_close_container(&it[1], &it[2]);
 
-		/* HFP version 1.7 */
+		/* HFP version 1.9 */
 		str = "Version";
-		version = 0x0107;
+		version = 0x0109;
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
@@ -2551,6 +2562,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 
 		/* We announce wideband speech support anyway */
 		features = SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH;
+#ifdef HAVE_LC3
+		features |= SPA_BT_HFP_SDP_HF_FEATURE_SUPER_WIDEBAND_SPEECH;
+#endif
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);
@@ -2558,9 +2572,9 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 		dbus_message_iter_close_container(&it[2], &it[3]);
 		dbus_message_iter_close_container(&it[1], &it[2]);
 
-		/* HFP version 1.7 */
+		/* HFP version 1.9 */
 		str = "Version";
-		version = 0x0107;
+		version = 0x0109;
 		dbus_message_iter_open_container(&it[1], DBUS_TYPE_DICT_ENTRY, NULL, &it[2]);
 		dbus_message_iter_append_basic(&it[2], DBUS_TYPE_STRING, &str);
 		dbus_message_iter_open_container(&it[2], DBUS_TYPE_VARIANT, "q", &it[3]);

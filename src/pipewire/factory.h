@@ -32,6 +32,10 @@ extern "C" {
 #define PW_VERSION_FACTORY		3
 struct pw_factory;
 
+#ifndef PW_API_FACTORY_IMPL
+#define PW_API_FACTORY_IMPL static inline
+#endif
+
 /** The factory information. Extra information can be added in later versions */
 struct pw_factory_info {
 	uint32_t id;			/**< id of the global */
@@ -83,16 +87,17 @@ struct pw_factory_methods {
 			void *data);
 };
 
-#define pw_factory_method(o,method,version,...)				\
-({									\
-	int _res = -ENOTSUP;						\
-	spa_interface_call_res((struct spa_interface*)o,		\
-			struct pw_factory_methods, _res,		\
-			method, version, ##__VA_ARGS__);		\
-	_res;								\
-})
-
-#define pw_factory_add_listener(c,...)	pw_factory_method(c,add_listener,0,__VA_ARGS__)
+/** \copydoc pw_factory_methods.add_listener
+ * \sa pw_factory_methods.add_listener */
+PW_API_FACTORY_IMPL int pw_factory_add_listener(struct pw_factory *object,
+			struct spa_hook *listener,
+			const struct pw_factory_events *events,
+			void *data)
+{
+	return spa_api_method_r(int, -ENOTSUP,
+			pw_factory, (struct spa_interface*)object, add_listener, 0,
+			listener, events, data);
+}
 
 /**
  * \}

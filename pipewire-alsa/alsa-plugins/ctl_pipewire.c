@@ -555,7 +555,7 @@ static int set_volume_mute(snd_ctl_pipewire_t *ctl, const char *name, struct vol
 		param = spa_pod_builder_pop(&b, &f[0]);
 
 		pw_log_debug("set device %d mute/volume for node %d", dg->id, g->id);
-		pw_device_set_param((struct pw_node*)dg->proxy,
+		pw_device_set_param((struct pw_device*)dg->proxy,
 			SPA_PARAM_Route, 0, param);
 	} else {
 		if (!SPA_FLAG_IS_SET(g->permissions, PW_PERM_W | PW_PERM_X))
@@ -1019,29 +1019,6 @@ static const struct global_info node_info = {
 };
 
 /** metadata */
-static int json_object_find(const char *obj, const char *key, char *value, size_t len)
-{
-	struct spa_json it[2];
-	const char *v;
-	char k[128];
-
-	spa_json_init(&it[0], obj, strlen(obj));
-	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
-		return -EINVAL;
-
-	while (spa_json_get_string(&it[1], k, sizeof(k)) > 0) {
-		if (spa_streq(k, key)) {
-			if (spa_json_get_string(&it[1], value, len) <= 0)
-				continue;
-			return 0;
-		} else {
-			if (spa_json_next(&it[1], &v) <= 0)
-				break;
-		}
-	}
-	return -ENOENT;
-}
-
 static int metadata_property(void *data,
                         uint32_t subject,
                         const char *key,
@@ -1054,14 +1031,14 @@ static int metadata_property(void *data,
 	if (subject == PW_ID_CORE) {
 		if (key == NULL || spa_streq(key, "default.audio.sink")) {
 			if (value == NULL ||
-			    json_object_find(value, "name",
+			    spa_json_str_object_find(value, strlen(value), "name",
 					ctl->default_sink, sizeof(ctl->default_sink)) < 0)
 				ctl->default_sink[0] = '\0';
 			pw_log_debug("found default sink: %s", ctl->default_sink);
 		}
 		if (key == NULL || spa_streq(key, "default.audio.source")) {
 			if (value == NULL ||
-			    json_object_find(value, "name",
+			    spa_json_str_object_find(value, strlen(value), "name",
 					ctl->default_source, sizeof(ctl->default_source)) < 0)
 				ctl->default_source[0] = '\0';
 			pw_log_debug("found default source: %s", ctl->default_source);
@@ -1367,7 +1344,6 @@ SND_CTL_PLUGIN_DEFINE_FUNC(pipewire)
 	ctl->context = pw_context_new(loop,
 					pw_properties_new(
 						PW_KEY_CLIENT_API, "alsa",
-						PW_KEY_CONFIG_NAME, "client-rt.conf",
 						NULL),
 					0);
 	if (ctl->context == NULL) {

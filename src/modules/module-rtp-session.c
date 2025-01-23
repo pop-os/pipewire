@@ -39,10 +39,6 @@
 #include <module-rtp/stream.h>
 #include "network-utils.h"
 
-#ifdef __FreeBSD__
-#define ifr_ifindex ifr_index
-#endif
-
 /** \page page_module_rtp_session RTP session
  *
  * The `rtp-session` module creates a media session that is announced
@@ -97,6 +93,8 @@
  *
  * ## Example configuration
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-rtp-session.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-rtp-session
  *     args = {

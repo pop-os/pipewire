@@ -5,6 +5,8 @@
 #include "channelmix-ops.h"
 
 #include <xmmintrin.h>
+#include <float.h>
+#include <math.h>
 
 static inline void clear_sse(float *d, uint32_t n_samples)
 {
@@ -149,6 +151,197 @@ void channelmix_copy_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		vol_sse(d[i], s[i], mix->matrix[i][i], n_samples);
 }
 
+static void lr4_process_sse(struct lr4 *lr4, float *dst, const float *src, const float vol, int samples)
+{
+	__m128 x, y, z;
+	__m128 b012;
+	__m128 a12;
+	__m128 x12, y12, v;
+	int i;
+
+	if (vol == 0.0f || !lr4->active) {
+		vol_sse(dst, src, vol, samples);
+		return;
+	}
+
+	b012 = _mm_setr_ps(lr4->bq.b0, lr4->bq.b1, lr4->bq.b2, 0.0f);	/* b0  b1  b2  0 */
+	a12 = _mm_setr_ps(0.0f, lr4->bq.a1, lr4->bq.a2, 0.0f);	  	/* 0   a1  a2  0 */
+	x12 = _mm_setr_ps(lr4->x1, lr4->x2, 0.0f, 0.0f);	  	/* x1  x2  0   0 */
+	y12 = _mm_setr_ps(lr4->y1, lr4->y2, 0.0f, 0.0f);	  	/* y1  y2  0   0 */
+	v = _mm_setr_ps(vol, vol, 0.0f, 0.0f);
+
+	for (i = 0; i < samples; i++) {
+		x = _mm_load1_ps(&src[i]);		/*  x         x         x      x */
+
+		z = _mm_mul_ps(x, b012);				/*  b0*x      b1*x      b2*x   0 */
+		z = _mm_add_ps(z, x12); 				/*  b0*x+x1   b1*x+x2   b2*x   0 */
+		y = _mm_shuffle_ps(z, z, _MM_SHUFFLE(0,0,0,0));	/*  b0*x+x1  b0*x+x1  b0*x+x1  b0*x+x1 = y*/
+		x = _mm_mul_ps(y, a12);			        /*  0        a1*y     a2*y     0 */
+		x = _mm_sub_ps(z, x);	 			/*  y        x1       x2       0 */
+		x12 = _mm_shuffle_ps(x, x, _MM_SHUFFLE(3,3,2,1));    /*  x1  x2  0  0*/
+
+		z = _mm_mul_ps(y, b012);
+		z = _mm_add_ps(z, y12);
+		x = _mm_shuffle_ps(z, z, _MM_SHUFFLE(0,0,0,0));
+		y = _mm_mul_ps(x, a12);
+		y = _mm_sub_ps(z, y);
+		y12 = _mm_shuffle_ps(y, y, _MM_SHUFFLE(3,3,2,1));
+
+		x = _mm_mul_ps(x, v);
+		_mm_store_ss(&dst[i], x);
+	}
+#define F(x) (isnormal(x) ? (x) : 0.0f)
+	lr4->x1 = F(x12[0]);
+	lr4->x2 = F(x12[1]);
+	lr4->y1 = F(y12[0]);
+	lr4->y2 = F(y12[1]);
+#undef F
+}
+
+static void lr4_process_2_sse(struct lr4 *lr40, struct lr4 *lr41, float *dst0, float *dst1,
+		const float *src0, const float *src1, const float vol0, const float vol1, uint32_t samples)
+{
+	__m128 x, y, z;
+	__m128 b0, b1, b2;
+	__m128 a1, a2;
+	__m128 x1, x2;
+	__m128 y1, y2, v;
+	uint32_t i;
+
+	b0 = _mm_setr_ps(lr40->bq.b0, lr41->bq.b0, 0.0f, 0.0f);
+	b1 = _mm_setr_ps(lr40->bq.b1, lr41->bq.b1, 0.0f, 0.0f);
+	b2 = _mm_setr_ps(lr40->bq.b2, lr41->bq.b2, 0.0f, 0.0f);
+	a1 = _mm_setr_ps(lr40->bq.a1, lr41->bq.a1, 0.0f, 0.0f);
+	a2 = _mm_setr_ps(lr40->bq.a2, lr41->bq.a2, 0.0f, 0.0f);
+	x1 = _mm_setr_ps(lr40->x1, lr41->x1, 0.0f, 0.0f);
+	x2 = _mm_setr_ps(lr40->x2, lr41->x2, 0.0f, 0.0f);
+	y1 = _mm_setr_ps(lr40->y1, lr41->y1, 0.0f, 0.0f);
+	y2 = _mm_setr_ps(lr40->y2, lr41->y2, 0.0f, 0.0f);
+	v = _mm_setr_ps(vol0, vol1, 0.0f, 0.0f);
+
+	for (i = 0; i < samples; i++) {
+		x = _mm_setr_ps(src0[i], src1[i], 0.0f, 0.0f);
+
+		y = _mm_mul_ps(x, b0);		/* y = x * b0 */
+		y = _mm_add_ps(y, x1);		/* y = x * b0 + x1*/
+		z = _mm_mul_ps(y, a1);		/* z = a1 * y */
+		x1 = _mm_mul_ps(x, b1);		/* x1 = x * b1 */
+		x1 = _mm_add_ps(x1, x2);	/* x1 = x * b1 + x2*/
+		x1 = _mm_sub_ps(x1, z);		/* x1 = x * b1 + x2 - a1 * y*/
+		z = _mm_mul_ps(y, a2);		/* z = a2 * y */
+		x2 = _mm_mul_ps(x, b2);		/* x2 = x * b2 */
+		x2 = _mm_sub_ps(x2, z);		/* x2 = x * b2 - a2 * y*/
+
+		x = _mm_mul_ps(y, b0);		/* y = x * b0 */
+		x = _mm_add_ps(x, y1);		/* y = x * b0 + x1*/
+		z = _mm_mul_ps(x, a1);		/* z = a1 * y */
+		y1 = _mm_mul_ps(y, b1);		/* x1 = x * b1 */
+		y1 = _mm_add_ps(y1, y2);	/* x1 = x * b1 + x2*/
+		y1 = _mm_sub_ps(y1, z);		/* x1 = x * b1 + x2 - a1 * y*/
+		z = _mm_mul_ps(x, a2);		/* z = a2 * y */
+		y2 = _mm_mul_ps(y, b2);		/* x2 = x * b2 */
+		y2 = _mm_sub_ps(y2, z);		/* x2 = x * b2 - a2 * y*/
+
+		x = _mm_mul_ps(x, v);
+		dst0[i] = x[0];
+		dst1[i] = x[1];
+	}
+#define F(x) (isnormal(x) ? (x) : 0.0f)
+	lr40->x1 = F(x1[0]);
+	lr40->x2 = F(x2[0]);
+	lr40->y1 = F(y1[0]);
+	lr40->y2 = F(y2[0]);
+	lr41->x1 = F(x1[1]);
+	lr41->x2 = F(x2[1]);
+	lr41->y1 = F(y1[1]);
+	lr41->y2 = F(y2[1]);
+#undef F
+}
+
+static inline void convolver_run(const float *src, float *dst,
+		const float *taps, uint32_t n_taps, const __m128 vol)
+{
+	__m128 t[1], sum[4];
+	uint32_t i;
+
+	sum[0] = _mm_setzero_ps();
+	for(i = 0; i < n_taps; i+=4) {
+		t[0] = _mm_loadu_ps(&src[i]);
+		sum[0] = _mm_add_ps(sum[0], _mm_mul_ps(_mm_load_ps(&taps[i]), t[0]));
+	}
+	sum[0] = _mm_add_ps(sum[0], _mm_movehl_ps(sum[0], sum[0]));
+	sum[0] = _mm_add_ss(sum[0], _mm_shuffle_ps(sum[0], sum[0], 0x55));
+	t[0] = _mm_mul_ss(sum[0], vol);
+	_mm_store_ss(dst, t[0]);
+}
+
+static inline void delay_convolve_run_sse(float *buffer, uint32_t *pos,
+		uint32_t n_buffer, uint32_t delay,
+		const float *taps, uint32_t n_taps,
+		float *dst, const float *src, const float vol, uint32_t n_samples)
+{
+	__m128 t[1];
+	const __m128 v = _mm_set1_ps(vol);
+	uint32_t i;
+	uint32_t w = *pos;
+	uint32_t o = n_buffer - delay - n_taps-1;
+	uint32_t n, unrolled;
+
+	if (SPA_IS_ALIGNED(src, 16) &&
+	    SPA_IS_ALIGNED(dst, 16))
+		unrolled = n_samples & ~3;
+	else
+		unrolled = 0;
+
+	if (n_taps == 1) {
+		for(n = 0; n < unrolled; n += 4) {
+			t[0] = _mm_load_ps(&src[n]);
+			_mm_storeu_ps(&buffer[w], t[0]);
+			_mm_storeu_ps(&buffer[w+n_buffer], t[0]);
+			t[0] = _mm_loadu_ps(&buffer[w+o]);
+			t[0] = _mm_mul_ps(t[0], v);
+			_mm_store_ps(&dst[n], t[0]);
+			w += 4;
+			if (w >= n_buffer) {
+				w -= n_buffer;
+				t[0] = _mm_load_ps(&buffer[n_buffer]);
+				_mm_store_ps(&buffer[0], t[0]);
+			}
+		}
+		for(; n < n_samples; n++) {
+			t[0] = _mm_load_ss(&src[n]);
+			_mm_store_ss(&buffer[w], t[0]);
+			_mm_store_ss(&buffer[w+n_buffer], t[0]);
+			t[0] = _mm_load_ss(&buffer[w+o]);
+			t[0] = _mm_mul_ss(t[0], v);
+			_mm_store_ss(&dst[n], t[0]);
+			w = w + 1 >= n_buffer ? 0 : w + 1;
+		}
+	} else {
+		for(n = 0; n < unrolled; n += 4) {
+			t[0] = _mm_load_ps(&src[n]);
+			_mm_storeu_ps(&buffer[w], t[0]);
+			_mm_storeu_ps(&buffer[w+n_buffer], t[0]);
+			for(i = 0; i < 4; i++)
+				convolver_run(&buffer[w+o+i], &dst[n+i], taps, n_taps, v);
+			w += 4;
+			if (w >= n_buffer) {
+				w -= n_buffer;
+				t[0] = _mm_load_ps(&buffer[n_buffer]);
+				_mm_store_ps(&buffer[0], t[0]);
+			}
+		}
+		for(; n < n_samples; n++) {
+			t[0] = _mm_load_ss(&src[n]);
+			_mm_store_ss(&buffer[w], t[0]);
+			_mm_store_ss(&buffer[w+n_buffer], t[0]);
+			convolver_run(&buffer[w+o], &dst[n], taps, n_taps, v);
+			w = w + 1 >= n_buffer ? 0 : w + 1;
+		}
+	}
+	*pos = w;
+}
+
 void
 channelmix_f32_n_m_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		   const void * SPA_RESTRICT src[], uint32_t n_samples)
@@ -172,13 +365,10 @@ channelmix_f32_n_m_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		if (n_j == 0) {
 			clear_sse(di, n_samples);
 		} else if (n_j == 1) {
-			if (mix->lr4[i].active)
-				lr4_process(&mix->lr4[i], di, sj[0], mj[0], n_samples);
-			else
-				vol_sse(di, sj[0], mj[0], n_samples);
+			lr4_process_sse(&mix->lr4[i], di, sj[0], mj[0], n_samples);
 		} else {
 			conv_sse(di, sj, mj, n_j, n_samples);
-			lr4_process(&mix->lr4[i], di, di, 1.0f, n_samples);
+			lr4_process_sse(&mix->lr4[i], di, di, 1.0f, n_samples);
 		}
 	}
 }
@@ -239,8 +429,7 @@ channelmix_f32_2_3p1_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 				_mm_store_ss(&d[2][n], _mm_mul_ss(c[0], mh));
 			}
 		}
-		lr4_process(&mix->lr4[3], d[3], d[2], v3, n_samples);
-		lr4_process(&mix->lr4[2], d[2], d[2], v2, n_samples);
+		lr4_process_2_sse(&mix->lr4[3], &mix->lr4[2], d[3], d[2], d[2], d[2], v3, v2, n_samples);
 	}
 }
 
@@ -267,9 +456,9 @@ channelmix_f32_2_5p1_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		} else {
 			sub_sse(d[4], s[0], s[1], n_samples);
 
-			delay_convolve_run(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_sse(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[5], d[4], -v5, n_samples);
-			delay_convolve_run(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_sse(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[4], d[4], v4, n_samples);
 		}
 	}
@@ -303,9 +492,9 @@ channelmix_f32_2_7p1_sse(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		} else {
 			sub_sse(d[6], s[0], s[1], n_samples);
 
-			delay_convolve_run(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_sse(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[7], d[6], -v7, n_samples);
-			delay_convolve_run(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_sse(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[6], d[6], v6, n_samples);
 		}
 	}

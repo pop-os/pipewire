@@ -73,42 +73,50 @@ static int parse_cmd(void *user_data, const char *location,
 	int res = 0;
 
 	spa_autofree char *s = strndup(str, len);
-	spa_json_init(&it[0], s, len);
-	if (spa_json_enter_array(&it[0], &it[1]) < 0) {
+	if (spa_json_begin_array(&it[0], s, len) < 0) {
 		pw_log_error("config file error: pulse.cmd is not an array");
 		return -EINVAL;
 	}
 
-	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+	while (spa_json_enter_object(&it[0], &it[1]) > 0) {
 		char *cmd = NULL, *args = NULL, *flags = NULL;
+		const char *val;
+		bool have_match = true;
+		int l;
 
-		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-			const char *val;
-			int len;
-
-			if ((len = spa_json_next(&it[2], &val)) <= 0)
-				break;
-
+		while ((l = spa_json_object_next(&it[1], key, sizeof(key), &val)) > 0) {
 			if (spa_streq(key, "cmd")) {
 				cmd = (char*)val;
-				spa_json_parse_stringn(val, len, cmd, len+1);
+				spa_json_parse_stringn(val, l, cmd, l+1);
 			} else if (spa_streq(key, "args")) {
 				args = (char*)val;
-				spa_json_parse_stringn(val, len, args, len+1);
+				spa_json_parse_stringn(val, l, args, l+1);
 			} else if (spa_streq(key, "flags")) {
-				if (spa_json_is_container(val, len))
-					len = spa_json_container_len(&it[2], val, len);
+				if (spa_json_is_container(val, l))
+					l = spa_json_container_len(&it[1], val, l);
 				flags = (char*)val;
-				spa_json_parse_stringn(val, len, flags, len+1);
+				spa_json_parse_stringn(val, l, flags, l+1);
+			} else if (spa_streq(key, "condition")) {
+				if (!spa_json_is_array(val, l)) {
+					pw_log_warn("expected array for condition in '%.*s'",
+							(int)l, str);
+					break;
+				}
+				spa_json_enter(&it[1], &it[2]);
+				have_match = pw_conf_find_match(&it[2], &impl->props->dict, true);
+			} else {
+				pw_log_warn("unknown pulse.cmd key %s", key);
 			}
 		}
+		if (!have_match)
+			continue;
+
 		if (cmd != NULL)
 			res = do_cmd(impl, cmd, args, flags);
 		if (res < 0)
 			break;
 	}
-
-	return res;
+	return res < 0 ? res : 0;
 }
 
 int cmd_run(struct impl *impl)

@@ -115,11 +115,12 @@ struct stream {
 
 	uint64_t change_mask_all;
 	struct spa_node_info info;
-#define NODE_PropInfo	0
-#define NODE_Props	1
-#define NODE_EnumFormat	2
-#define NODE_Format	3
-#define N_NODE_PARAMS	4
+#define NODE_PropInfo		0
+#define NODE_Props		1
+#define NODE_EnumFormat		2
+#define NODE_Format		3
+#define NODE_ProcessLatency	4
+#define N_NODE_PARAMS		5
 	struct spa_param_info params[N_NODE_PARAMS];
 
 	uint32_t media_type;
@@ -166,6 +167,8 @@ static int get_param_index(uint32_t id)
 		return NODE_EnumFormat;
 	case SPA_PARAM_Format:
 		return NODE_Format;
+	case SPA_PARAM_ProcessLatency:
+		return NODE_ProcessLatency;
 	default:
 		return -1;
 	}
@@ -245,10 +248,13 @@ static int add_param(struct stream *impl,
 	memcpy(p->param, param, SPA_POD_SIZE(param));
 	SPA_POD_OBJECT_ID(p->param) = id;
 
-	if (id == SPA_PARAM_Buffers &&
-	    SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_MAP_BUFFERS) &&
-	    impl->direction == SPA_DIRECTION_INPUT)
-		fix_datatype(p->param);
+	switch (id) {
+	case SPA_PARAM_Buffers:
+		if (impl->direction == SPA_DIRECTION_INPUT &&
+		    SPA_FLAG_IS_SET(impl->flags, PW_STREAM_FLAG_MAP_BUFFERS))
+			fix_datatype(p->param);
+		break;
+	}
 
 	spa_list_append(&impl->param_list, &p->link);
 
@@ -306,7 +312,7 @@ static void clear_params(struct stream *impl, uint32_t id)
 	}
 }
 
-static int update_params(struct stream *impl, uint32_t id,
+static int update_params(struct stream *impl, uint32_t id, uint32_t flags,
 		const struct spa_pod **params, uint32_t n_params)
 {
 	uint32_t i;
@@ -322,7 +328,7 @@ static int update_params(struct stream *impl, uint32_t id,
 		}
 	}
 	for (i = 0; i < n_params; i++) {
-		if ((res = add_param(impl, id, 0, params[i])) < 0)
+		if ((res = add_param(impl, id, flags, params[i])) < 0)
 			break;
 	}
 	return res;
@@ -601,8 +607,13 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags, const struc
 	struct stream *impl = object;
 	struct pw_stream *stream = &impl->this;
 
-	if (id != SPA_PARAM_Props)
+	switch (id) {
+	case SPA_PARAM_Props:
+	case SPA_PARAM_ProcessLatency:
+		break;
+	default:
 		return -ENOTSUP;
+	}
 
 	if (impl->in_set_param == 0)
 		emit_param_changed(impl, id, param);
@@ -627,7 +638,12 @@ static inline void copy_position(struct stream *impl, int64_t queued)
 			impl->base_pos = p->clock.position - impl->time.ticks;
 			impl->clock_id = p->clock.id;
 		}
-		impl->time.ticks = p->clock.position - impl->base_pos;
+		if (SPA_FLAG_IS_SET(p->clock.flags, SPA_IO_CLOCK_FLAG_NO_RATE))
+			impl->time.ticks = p->clock.nsec * p->clock.rate.denom /
+				(SPA_NSEC_PER_SEC * p->clock.rate.num);
+		else
+			impl->time.ticks = p->clock.position - impl->base_pos;
+
 		impl->time.delay = 0;
 		impl->time.queued = queued;
 		impl->quantum = p->clock.duration;
@@ -648,7 +664,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	struct pw_stream *stream = &impl->this;
 	uint32_t id = SPA_NODE_COMMAND_ID(command);
 
-	pw_log_info("%p: command %s", impl,
+	pw_log_debug("%p: command %s", impl,
 			spa_debug_type_find_name(spa_type_node_command_id, id));
 
 	switch (id) {
@@ -657,8 +673,7 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Pause:
 		pw_loop_invoke(impl->main_loop,
 			NULL, 0, NULL, 0, false, impl);
-		if (stream->state == PW_STREAM_STATE_STREAMING) {
-
+		if (stream->state == PW_STREAM_STATE_STREAMING && id != SPA_NODE_COMMAND_Flush) {
 			pw_log_debug("%p: pause", stream);
 			stream_set_state(stream, PW_STREAM_STATE_PAUSED, 0, NULL);
 		}
@@ -666,13 +681,11 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Start:
 		if (stream->state == PW_STREAM_STATE_PAUSED) {
 			pw_log_debug("%p: start direction:%d", stream, impl->direction);
-
 			if (impl->direction == SPA_DIRECTION_INPUT) {
 				if (impl->io != NULL)
 					impl->io->status = SPA_STATUS_NEED_DATA;
 			}
 			copy_position(impl, impl->queued.incount);
-			stream_set_state(stream, PW_STREAM_STATE_STREAMING, 0, NULL);
 		}
 		break;
 	default:
@@ -873,7 +886,7 @@ static int impl_port_set_param(void *object,
 	if (param)
 		pw_log_pod(SPA_LOG_LEVEL_DEBUG, param);
 
-	if ((res = update_params(impl, id, &param, param ? 1 : 0)) < 0)
+	if ((res = update_params(impl, id, 0, &param, param ? 1 : 0)) < 0)
 		return res;
 
 	switch (id) {
@@ -1060,6 +1073,8 @@ again:
 		if ((b = get_buffer(stream, io->buffer_id)) != NULL) {
 			pw_log_trace_fp("%p: recycle buffer %d", stream, b->id);
 			queue_push(impl, &impl->dequeued, b);
+			if (impl->early_process)
+				ask_more = true;
 		}
 
 		/* pop new buffer */
@@ -1377,10 +1392,29 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 	}
 }
 
+static void node_state_changed(void *data, enum pw_node_state old,
+		enum pw_node_state state, const char *error)
+{
+	struct pw_stream *stream = data;
+
+	switch (state) {
+	case PW_NODE_STATE_RUNNING:
+		if (stream->state == PW_STREAM_STATE_PAUSED)
+			stream_set_state(stream, PW_STREAM_STATE_STREAMING, 0, NULL);
+		break;
+	case PW_NODE_STATE_ERROR:
+		stream_set_state(stream, PW_STREAM_STATE_ERROR, -EIO, error);
+		break;
+	default:
+		break;
+	}
+}
+
 static const struct pw_impl_node_events node_events = {
 	PW_VERSION_IMPL_NODE_EVENTS,
 	.destroy = node_event_destroy,
 	.info_changed = node_event_info,
+	.state_changed = node_state_changed,
 };
 
 static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
@@ -1901,6 +1935,7 @@ pw_stream_connect(struct pw_stream *stream,
 	impl->params[NODE_Props] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
 	impl->params[NODE_EnumFormat] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, 0);
 	impl->params[NODE_Format] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
+	impl->params[NODE_ProcessLatency] = SPA_PARAM_INFO(SPA_PARAM_ProcessLatency, SPA_PARAM_INFO_READWRITE);
 	impl->info.params = impl->params;
 	impl->info.n_params = N_NODE_PARAMS;
 	impl->info.change_mask = impl->change_mask_all;
@@ -1992,7 +2027,7 @@ pw_stream_connect(struct pw_stream *stream,
 		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, str);
 	else if (impl->media_type == SPA_MEDIA_TYPE_application &&
 	    impl->media_subtype == SPA_MEDIA_SUBTYPE_control)
-		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, "8 bit raw midi");
+		pw_properties_set(impl->port_props, PW_KEY_FORMAT_DSP, "32 bit raw UMP");
 	if (pw_properties_get(impl->port_props, PW_KEY_PORT_GROUP) == NULL)
 		pw_properties_set(impl->port_props, PW_KEY_PORT_GROUP, "stream.0");
 
@@ -2059,9 +2094,8 @@ pw_stream_connect(struct pw_stream *stream,
 	if (pw_properties_get(props, PW_KEY_PORT_GROUP) == NULL)
 		pw_properties_set(props, PW_KEY_PORT_GROUP, "stream.0");
 
-	if (impl->media_type == SPA_MEDIA_TYPE_audio
-			|| (impl->media_type == SPA_MEDIA_TYPE_video
-				&& pw_properties_get(props, "video.adapt.converter"))) {
+	if (impl->media_type == SPA_MEDIA_TYPE_audio ||
+	    impl->media_type == SPA_MEDIA_TYPE_video) {
 		factory = pw_context_find_factory(impl->context, "adapter");
 		if (factory == NULL) {
 			pw_log_error("%p: no adapter factory found", stream);
@@ -2178,7 +2212,7 @@ int pw_stream_update_params(struct pw_stream *stream,
 	ensure_loop(impl->main_loop, return -EIO);
 
 	pw_log_debug("%p: update params", stream);
-	if ((res = update_params(impl, SPA_ID_INVALID, params, n_params)) < 0)
+	if ((res = update_params(impl, SPA_ID_INVALID, 0, params, n_params)) < 0)
 		return res;
 
 	if (impl->in_emit_param_changed == 0) {
@@ -2298,8 +2332,11 @@ int pw_stream_set_active(struct pw_stream *stream, bool active)
 
 	pw_impl_node_set_active(stream->node, active);
 
-	if (!active || impl->drained)
+	if (!active || impl->drained) {
+		if (impl->drained && impl->io != NULL)
+			impl->io->status = SPA_STATUS_NEED_DATA;
 		impl->drained = impl->draining = false;
+	}
 	return 0;
 }
 
@@ -2341,7 +2378,8 @@ int pw_stream_get_time_n(struct pw_stream *stream, struct pw_time *time, size_t 
 
 	time->delay += (int64_t)(((impl->latency.min_quantum + impl->latency.max_quantum) / 2.0f) * quantum);
 	time->delay += (impl->latency.min_rate + impl->latency.max_rate) / 2;
-	time->delay += ((impl->latency.min_ns + impl->latency.max_ns) / 2) * time->rate.denom / SPA_NSEC_PER_SEC;
+	time->delay += ((impl->latency.min_ns + impl->latency.max_ns) / 2) *
+		(int64_t)time->rate.denom / (int64_t)SPA_NSEC_PER_SEC;
 
 	avail_buffers = spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index);
 	avail_buffers = SPA_CLAMP(avail_buffers, 0, (int32_t)impl->n_buffers);
@@ -2441,6 +2479,41 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 	return res;
 }
 
+static inline int queue_push_front(struct stream *stream, struct queue *queue, struct buffer *buffer)
+{
+	int ret = 0;
+	uint32_t index;
+
+	if ((ret = spa_ringbuffer_get_read_index(&queue->ring, &index)) < 0)
+		return ret;
+
+	/* undo the pop operation and place the buffer in front of the queue */
+	index -= 1;
+	queue->ids[index & MASK_BUFFERS] = buffer->id;
+	queue->outcount -= buffer->this.size;
+	SPA_FLAG_SET(buffer->flags, BUFFER_FLAG_QUEUED);
+	spa_ringbuffer_read_update(&queue->ring, index);
+
+	return ret;
+}
+
+SPA_EXPORT
+int pw_stream_return_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	struct buffer *b = SPA_CONTAINER_OF(buffer, struct buffer, this);
+
+	pw_log_trace_fp("%p: %p id: %d", impl, buffer, b->id);
+
+	/* dequeue increments the busy count, so undo that */
+	if (b->busy) {
+		SPA_ATOMIC_DEC(b->busy->count);
+		pw_log_trace_fp("%p: %p: %p busy count %u", impl, b, b->busy, SPA_ATOMIC_LOAD(b->busy->count));
+	}
+
+	return queue_push_front(impl, &impl->dequeued, b);
+}
+
 static int
 do_flush(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
@@ -2504,6 +2577,12 @@ bool pw_stream_is_driving(struct pw_stream *stream)
 	return stream->node->driving;
 }
 
+SPA_EXPORT
+bool pw_stream_is_lazy(struct pw_stream *stream)
+{
+	return stream->node->lazy;
+}
+
 static int
 do_trigger_driver(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
@@ -2519,18 +2598,21 @@ do_trigger_driver(struct spa_loop *loop,
 	return spa_node_call_ready(&impl->callbacks, res);
 }
 
-static int do_trigger_request_process(struct spa_loop *loop,
+static int do_emit_event(struct spa_loop *loop,
                  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
 {
 	struct stream *impl = user_data;
-	uint8_t buffer[1024];
-	struct spa_pod_builder b = { 0 };
-
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	spa_node_emit_event(&impl->hooks,
-			spa_pod_builder_add_object(&b,
-				SPA_TYPE_EVENT_Node, SPA_NODE_EVENT_RequestProcess));
+	const struct spa_event *event = data;
+	spa_node_emit_event(&impl->hooks, event);
 	return 0;
+}
+
+SPA_EXPORT
+int pw_stream_emit_event(struct pw_stream *stream, const struct spa_event *event)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	return pw_loop_invoke(impl->main_loop,
+		do_emit_event, 1, event, SPA_POD_SIZE(&event->pod), false, impl);
 }
 
 SPA_EXPORT
@@ -2545,13 +2627,33 @@ int pw_stream_trigger_process(struct pw_stream *stream)
 	impl->using_trigger = true;
 
 	if (impl->trigger) {
-		pw_impl_node_trigger(stream->node);
+		res = pw_impl_node_trigger(stream->node);
 	} else if (stream->node->driving) {
 		res = pw_loop_invoke(impl->data_loop,
 			do_trigger_driver, 1, NULL, 0, false, impl);
 	} else {
-		res = pw_loop_invoke(impl->main_loop,
-			do_trigger_request_process, 1, NULL, 0, false, impl);
+		pw_stream_emit_event(stream,
+				&SPA_NODE_EVENT_INIT(SPA_NODE_EVENT_RequestProcess));
 	}
 	return res;
+}
+
+SPA_EXPORT
+int pw_stream_set_rate(struct pw_stream *stream, double rate)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	bool enable;
+
+	if (impl->rate_match == NULL)
+		return -ENOTSUP;
+
+	if (rate <= 0.0) {
+		rate = 1.0;
+		enable = false;
+	} else {
+		enable = true;
+	}
+	impl->rate_match->rate = rate;
+	SPA_FLAG_UPDATE(impl->rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE, enable);
+	return 0;
 }

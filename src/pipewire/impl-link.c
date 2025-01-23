@@ -13,6 +13,7 @@
 #include <spa/param/param.h>
 #include <spa/debug/types.h>
 
+#define PW_API_LINK_IMPL	SPA_EXPORT
 #include "pipewire/impl-link.h"
 #include "pipewire/private.h"
 
@@ -33,6 +34,10 @@ struct impl {
 
 	uint32_t output_busy_id;
 	uint32_t input_busy_id;
+	int output_pending_seq;
+	int input_pending_seq;
+	int output_result;
+	int input_result;
 
 	struct spa_pod *format_filter;
 	struct pw_properties *properties;
@@ -68,28 +73,36 @@ static void info_changed(struct pw_impl_link *link)
 	link->info.change_mask = 0;
 }
 
-static inline void input_set_busy_id(struct pw_impl_link *link, uint32_t id)
+static inline int input_set_busy_id(struct pw_impl_link *link, uint32_t id, int pending_seq)
 {
 	struct impl *impl = SPA_CONTAINER_OF(link, struct impl, this);
+	int res = impl->input_result;
 	if (impl->input_busy_id != SPA_ID_INVALID)
 		link->input->busy_count--;
 	if (id != SPA_ID_INVALID)
 		link->input->busy_count++;
 	impl->input_busy_id = id;
+	impl->input_pending_seq = SPA_RESULT_ASYNC_SEQ(pending_seq);
+	impl->input_result = 0;
 	if (link->input->busy_count < 0)
 		pw_log_error("%s: invalid busy count:%d", link->name, link->input->busy_count);
+	return res;
 }
 
-static inline void output_set_busy_id(struct pw_impl_link *link, uint32_t id)
+static inline int output_set_busy_id(struct pw_impl_link *link, uint32_t id, int pending_seq)
 {
 	struct impl *impl = SPA_CONTAINER_OF(link, struct impl, this);
+	int res = impl->output_result;
 	if (impl->output_busy_id != SPA_ID_INVALID)
 		link->output->busy_count--;
 	if (id != SPA_ID_INVALID)
 		link->output->busy_count++;
 	impl->output_busy_id = id;
+	impl->output_pending_seq = SPA_RESULT_ASYNC_SEQ(pending_seq);
+	impl->output_result = 0;
 	if (link->output->busy_count < 0)
 		pw_log_error("%s: invalid busy count:%d", link->name, link->output->busy_count);
+	return res;
 }
 
 static void link_update_state(struct pw_impl_link *link, enum pw_link_state state, int res, char *error)
@@ -139,7 +152,7 @@ static void link_update_state(struct pw_impl_link *link, enum pw_link_state stat
 		link->prepared = true;
 		link->preparing = false;
 		pw_context_recalc_graph(link->context, "link prepared");
-	} else if (old == PW_LINK_STATE_PAUSED && state < PW_LINK_STATE_PAUSED) {
+	} else if (old >= PW_LINK_STATE_PAUSED && state < PW_LINK_STATE_PAUSED) {
 		link->prepared = false;
 		link->preparing = false;
 		pw_context_recalc_graph(link->context, "link unprepared");
@@ -147,10 +160,10 @@ static void link_update_state(struct pw_impl_link *link, enum pw_link_state stat
 		link->prepared = false;
 		link->preparing = false;
 
-		output_set_busy_id(link, SPA_ID_INVALID);
+		output_set_busy_id(link, SPA_ID_INVALID, SPA_ID_INVALID);
 		pw_work_queue_cancel(impl->work, &link->output_link, SPA_ID_INVALID);
 
-		input_set_busy_id(link, SPA_ID_INVALID);
+		input_set_busy_id(link, SPA_ID_INVALID, SPA_ID_INVALID);
 		pw_work_queue_cancel(impl->work, &link->input_link, SPA_ID_INVALID);
 	}
 }
@@ -167,13 +180,12 @@ static void complete_ready(void *obj, void *data, int res, uint32_t id)
 		port = this->output;
 
 	if (id != SPA_ID_INVALID) {
-		if (id == impl->input_busy_id) {
-			input_set_busy_id(this, SPA_ID_INVALID);
-		} else if (id == impl->output_busy_id) {
-			output_set_busy_id(this, SPA_ID_INVALID);
-		} else {
+		if (id == impl->input_busy_id)
+			res = input_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
+		else if (id == impl->output_busy_id)
+			res = output_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
+		else
 			return;
-		}
 	}
 
 	pw_log_debug("%p: obj:%p port %p complete state:%d: %s", this, obj, port,
@@ -183,13 +195,12 @@ static void complete_ready(void *obj, void *data, int res, uint32_t id)
 		if (port->state < PW_IMPL_PORT_STATE_READY)
 			pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_READY,
 					0, NULL);
+		if (this->input->state >= PW_IMPL_PORT_STATE_READY &&
+		    this->output->state >= PW_IMPL_PORT_STATE_READY)
+			link_update_state(this, PW_LINK_STATE_ALLOCATING, 0, NULL);
 	} else {
-		pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_ERROR,
-				res, spa_aprintf("port error going to READY: %s", spa_strerror(res)));
+		link_update_state(this, PW_LINK_STATE_ERROR, -EIO, strdup("Format negotiation failed"));
 	}
-	if (this->input->state >= PW_IMPL_PORT_STATE_READY &&
-	    this->output->state >= PW_IMPL_PORT_STATE_READY)
-		link_update_state(this, PW_LINK_STATE_ALLOCATING, 0, NULL);
 }
 
 static void complete_paused(void *obj, void *data, int res, uint32_t id)
@@ -208,13 +219,12 @@ static void complete_paused(void *obj, void *data, int res, uint32_t id)
 	}
 
 	if (id != SPA_ID_INVALID) {
-		if (id == impl->input_busy_id) {
-			input_set_busy_id(this, SPA_ID_INVALID);
-		} else if (id == impl->output_busy_id) {
-			output_set_busy_id(this, SPA_ID_INVALID);
-		} else {
+		if (id == impl->input_busy_id)
+			res = input_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
+		else if (id == impl->output_busy_id)
+			res = output_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
+		else
 			return;
-		}
 	}
 
 	pw_log_debug("%p: obj:%p port %p complete state:%d: %s", this, obj, port,
@@ -225,13 +235,13 @@ static void complete_paused(void *obj, void *data, int res, uint32_t id)
 			pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_PAUSED,
 					0, NULL);
 		mix->have_buffers = true;
+
+		if (this->rt.in_mix.have_buffers && this->rt.out_mix.have_buffers)
+			link_update_state(this, PW_LINK_STATE_PAUSED, 0, NULL);
 	} else {
-		pw_impl_port_update_state(port, PW_IMPL_PORT_STATE_ERROR,
-				res, spa_aprintf("port error going to PAUSED: %s", spa_strerror(res)));
 		mix->have_buffers = false;
+		link_update_state(this, PW_LINK_STATE_ERROR, -EIO, strdup("Buffer allocation failed"));
 	}
-	if (this->rt.in_mix.have_buffers && this->rt.out_mix.have_buffers)
-		link_update_state(this, PW_LINK_STATE_PAUSED, 0, NULL);
 }
 
 static void complete_sync(void *obj, void *data, int res, uint32_t id)
@@ -395,10 +405,11 @@ static int do_negotiate(struct pw_impl_link *this)
 			goto error;
 		}
 		if (SPA_RESULT_IS_ASYNC(res)) {
-			res = spa_node_sync(output->node->node, res);
-			busy_id = pw_work_queue_add(impl->work, &this->output_link, res,
+			pw_log_info("output set format %d", res);
+			busy_id = pw_work_queue_add(impl->work, &this->output_link,
+					spa_node_sync(output->node->node, res),
 					complete_ready, this);
-			output_set_busy_id(this, busy_id);
+			output_set_busy_id(this, busy_id, res);
 		} else {
 			complete_ready(&this->output_link, this, res, SPA_ID_INVALID);
 		}
@@ -414,10 +425,11 @@ static int do_negotiate(struct pw_impl_link *this)
 			goto error;
 		}
 		if (SPA_RESULT_IS_ASYNC(res2)) {
-			res2 = spa_node_sync(input->node->node, res2);
-			busy_id = pw_work_queue_add(impl->work, &this->input_link, res2,
+			pw_log_info("input set format %d", res2);
+			busy_id = pw_work_queue_add(impl->work, &this->input_link,
+					spa_node_sync(input->node->node, res2),
 					complete_ready, this);
-			input_set_busy_id(this, busy_id);
+			input_set_busy_id(this, busy_id, res2);
 			if (res == 0)
 				res = res2;
 		} else {
@@ -579,10 +591,10 @@ static int do_allocation(struct pw_impl_link *this)
 			goto error_clear;
 		}
 		if (SPA_RESULT_IS_ASYNC(res)) {
-			res = spa_node_sync(output->node->node, res);
-			busy_id = pw_work_queue_add(impl->work, &this->output_link, res,
+			busy_id = pw_work_queue_add(impl->work, &this->output_link,
+					spa_node_sync(output->node->node, res),
 					complete_paused, this);
-			output_set_busy_id(this, busy_id);
+			output_set_busy_id(this, busy_id, res);
 			if (flags & SPA_NODE_BUFFERS_FLAG_ALLOC)
 				return 0;
 		} else {
@@ -602,10 +614,10 @@ static int do_allocation(struct pw_impl_link *this)
 	}
 
 	if (SPA_RESULT_IS_ASYNC(res)) {
-		res = spa_node_sync(input->node->node, res);
-		busy_id = pw_work_queue_add(impl->work, &this->input_link, res,
+		busy_id = pw_work_queue_add(impl->work, &this->input_link,
+				spa_node_sync(input->node->node, res),
 				complete_paused, this);
-		input_set_busy_id(this, busy_id);
+		input_set_busy_id(this, busy_id, res);
 	} else {
 		complete_paused(&this->input_link, this, res, SPA_ID_INVALID);
 	}
@@ -742,7 +754,7 @@ static void input_remove(struct pw_impl_link *this, struct pw_impl_port *port)
 
 	pw_log_debug("%p: remove input port %p", this, port);
 
-	input_set_busy_id(this, SPA_ID_INVALID);
+	input_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
 
 	spa_hook_remove(&impl->input_port_listener);
 	spa_hook_remove(&impl->input_node_listener);
@@ -754,9 +766,11 @@ static void input_remove(struct pw_impl_link *this, struct pw_impl_port *port)
 	pw_impl_port_recalc_latency(this->input);
 	pw_impl_port_recalc_tag(this->input);
 
-	if ((res = pw_impl_port_use_buffers(port, mix, 0, NULL, 0)) < 0) {
+	if ((res = port_set_io(this, this->input, SPA_IO_Buffers, NULL, 0, mix)) < 0)
+		pw_log_warn("%p: port %p set_io error %s", this, port, spa_strerror(res));
+	if ((res = pw_impl_port_use_buffers(port, mix, 0, NULL, 0)) < 0)
 		pw_log_warn("%p: port %p clear error %s", this, port, spa_strerror(res));
-	}
+
 	pw_impl_port_release_mix(port, mix);
 
 	pw_work_queue_cancel(impl->work, &this->input_link, SPA_ID_INVALID);
@@ -770,7 +784,7 @@ static void output_remove(struct pw_impl_link *this, struct pw_impl_port *port)
 
 	pw_log_debug("%p: remove output port %p", this, port);
 
-	output_set_busy_id(this, SPA_ID_INVALID);
+	output_set_busy_id(this, SPA_ID_INVALID, SPA_ID_INVALID);
 
 	spa_hook_remove(&impl->output_port_listener);
 	spa_hook_remove(&impl->output_node_listener);
@@ -1005,8 +1019,12 @@ static void input_node_result(void *data, int seq, int res, uint32_t type, const
 {
 	struct impl *impl = data;
 	struct pw_impl_port *port = impl->this.input;
-	pw_log_trace("%p: input port %p result seq:%d res:%d type:%u",
-			impl, port, seq, res, type);
+	pw_log_trace("%p: input port %p result seq:%d %d res:%d type:%u",
+			impl, port, seq, SPA_RESULT_ASYNC_SEQ(seq), res, type);
+
+	if (type == SPA_RESULT_TYPE_NODE_ERROR && impl->input_pending_seq == seq)
+		impl->input_result = res;
+
 	node_result(impl, &impl->this.input_link, seq, res, type, result);
 }
 
@@ -1014,8 +1032,12 @@ static void output_node_result(void *data, int seq, int res, uint32_t type, cons
 {
 	struct impl *impl = data;
 	struct pw_impl_port *port = impl->this.output;
-	pw_log_trace("%p: output port %p result seq:%d res:%d type:%u",
-			impl, port, seq, res, type);
+	pw_log_trace("%p: output port %p result seq:%d %d res:%d type:%u",
+			impl, port, seq, SPA_RESULT_ASYNC_SEQ(seq), res, type);
+
+	if (type == SPA_RESULT_TYPE_NODE_ERROR && impl->output_pending_seq == seq)
+		impl->output_result = res;
+
 	node_result(impl, &impl->this.output_link, seq, res, type, result);
 }
 
@@ -1375,8 +1397,10 @@ struct pw_impl_link *pw_context_create_link(struct pw_context *context,
 	this->name = spa_aprintf("%d.%d.%d -> %d.%d.%d",
 			output_node->info.id, output->port_id, this->rt.out_mix.port.port_id,
 			input_node->info.id, input->port_id, this->rt.in_mix.port.port_id);
-	pw_log_info("(%s) (%s) -> (%s) async:%04x:%04x:%d", this->name, output_node->name,
-			input_node->name, output->flags, input->flags, impl->async);
+	pw_log_info("(%s) (%s) -> (%s) async:%d:%d:%d:%04x:%04x:%d", this->name, output_node->name,
+			input_node->name, output_node->driving,
+			output_node->async, input_node->async,
+			output->flags, input->flags, impl->async);
 
 	pw_impl_port_emit_link_added(output, this);
 	pw_impl_port_emit_link_added(input, this);
@@ -1554,6 +1578,7 @@ void pw_impl_link_destroy(struct pw_impl_link *link)
 
 	free(link->name);
 	free(link->info.format);
+	free((char *) link->info.error);
 	free(impl);
 }
 

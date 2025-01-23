@@ -49,7 +49,7 @@ struct data_loop {
 	struct pw_data_loop *impl;
 	bool autostart;
 	bool started;
-	int ref;
+	uint64_t last_used;
 };
 
 /** \cond */
@@ -204,20 +204,21 @@ static int setup_data_loops(struct impl *impl)
 	lib_name = pw_properties_get(this->properties, "context.data-loop." PW_KEY_LIBRARY_NAME_SYSTEM);
 
 	if ((str = pw_properties_get(this->properties, "context.data-loops")) != NULL) {
-		struct spa_json it[4];
+		struct spa_json it[2];
 		char key[512];
 		int r, len = strlen(str);
 		spa_autofree char *s = strndup(str, len);
 
 		i = 0;
-		spa_json_init(&it[0], s, len);
-		if (spa_json_enter_array(&it[0], &it[1]) < 0) {
+		if (spa_json_begin_array(&it[0], s, len) < 0) {
 			pw_log_error("context.data-loops is not an array in '%s'", str);
 			res = -EINVAL;
 			goto exit;
 		}
-		while ((r = spa_json_enter_object(&it[1], &it[2])) > 0) {
+		while ((r = spa_json_enter_object(&it[0], &it[1])) > 0) {
 			char *props = NULL;
+			const char *val;
+			int l;
 
 			if (i >= MAX_LOOPS) {
 				pw_log_warn("too many context.data-loops, using first %d",
@@ -229,17 +230,9 @@ static int setup_data_loops(struct impl *impl)
 			pw_properties_update(pr, &this->properties->dict);
 			pw_properties_set(pr, PW_KEY_LIBRARY_NAME_SYSTEM, lib_name);
 
-			while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-				const char *val;
-				int l;
-
-				if ((l = spa_json_next(&it[2], &val)) <= 0) {
-					pw_log_warn("malformed data-loop: key '%s' has no "
-							"value in '%.*s'", key, (int)len, str);
-					break;
-				}
+			while ((l = spa_json_object_next(&it[1], key, sizeof(key), &val)) > 0) {
 				if (spa_json_is_container(val, l))
-					l = spa_json_container_len(&it[2], val, l);
+					l = spa_json_container_len(&it[1], val, l);
 
 				props = (char*)val;
 				spa_json_parse_stringn(val, l, props, l+1);
@@ -679,12 +672,12 @@ static struct pw_data_loop *acquire_data_loop(struct impl *impl, const char *nam
 			}
 		}
 
-		pw_log_debug("%d: name:'%s' class:'%s' score:%d ref:%d", i,
-				ln, l->impl->class, score, l->ref);
+		pw_log_debug("%d: name:'%s' class:'%s' score:%d last_used:%"PRIu64, i,
+				ln, l->impl->class, score, l->last_used);
 
 		if ((best_loop == NULL) ||
 		    (score > best_score) ||
-		    (score == best_score && l->ref < best_loop->ref)) {
+		    (score == best_score && l->last_used < best_loop->last_used)) {
 			best_loop = l;
 			best_score = score;
 		}
@@ -692,15 +685,15 @@ static struct pw_data_loop *acquire_data_loop(struct impl *impl, const char *nam
 	if (best_loop == NULL)
 		return NULL;
 
-	best_loop->ref++;
+	best_loop->last_used = get_time_ns(impl->this.main_loop->system);
 	if ((res = data_loop_start(impl, best_loop)) < 0) {
 		errno = -res;
 		return NULL;
 	}
 
-	pw_log_info("%p: using name:'%s' class:'%s' ref:%d", impl,
+	pw_log_info("%p: using name:'%s' class:'%s' last_used:%"PRIu64, impl,
 			best_loop->impl->loop->name,
-			best_loop->impl->class, best_loop->ref);
+			best_loop->impl->class, best_loop->last_used);
 
 	return best_loop->impl;
 }
@@ -744,9 +737,8 @@ void pw_context_release_loop(struct pw_context *context, struct pw_loop *loop)
 	for (i = 0; i < impl->n_data_loops; i++) {
 		struct data_loop *l = &impl->data_loops[i];
 		if (l->impl->loop == loop) {
-			l->ref--;
-			pw_log_info("release name:'%s' class:'%s' ref:%d", l->impl->loop->name,
-					l->impl->class, l->ref);
+			pw_log_info("release name:'%s' class:'%s' last_used:%"PRIu64,
+					l->impl->loop->name, l->impl->class, l->last_used);
 			return;
 		}
 	}
@@ -982,7 +974,15 @@ int pw_context_find_format(struct pw_context *context,
 			if (res == -ENOENT || res == 0) {
 				pw_log_debug("%p: no input format filter, using output format: %s",
 						context, spa_strerror(res));
-				*format = filter;
+
+				uint32_t offset = builder->state.offset;
+				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
+				if (res < 0) {
+					*error = spa_aprintf("failed to add pod");
+					goto error;
+				}
+
+				*format = spa_pod_builder_deref(builder, offset);
 			} else {
 				*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
 				goto error;
@@ -1011,7 +1011,15 @@ int pw_context_find_format(struct pw_context *context,
 			if (res == -ENOENT || res == 0) {
 				pw_log_debug("%p: no output format filter, using input format: %s",
 						context, spa_strerror(res));
-				*format = filter;
+
+				uint32_t offset = builder->state.offset;
+				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
+				if (res < 0) {
+					*error = spa_aprintf("failed to add pod");
+					goto error;
+				}
+
+				*format = spa_pod_builder_deref(builder, offset);
 			} else {
 				*error = spa_aprintf("error output enum formats: %s", spa_strerror(res));
 				goto error;
@@ -1163,13 +1171,14 @@ static inline int run_nodes(struct pw_context *context, struct pw_impl_node *nod
  * This ensures that we only activate the paths from the runnable nodes to the
  * driver nodes and leave the other nodes idle.
  */
-static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, struct spa_list *collect,
-		char **sync)
+static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, struct spa_list *collect)
 {
 	struct spa_list queue;
 	struct pw_impl_node *n, *t;
 	struct pw_impl_port *p;
 	struct pw_impl_link *l;
+	uint32_t n_sync;
+	char *sync[MAX_SYNC+1];
 
 	pw_log_debug("node %p: '%s'", node, node->name);
 
@@ -1178,20 +1187,30 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 	spa_list_append(&queue, &node->sort_link);
 	node->visited = true;
 
+	n_sync = 0;
+	sync[0] = NULL;
+
 	/* now follow all the links from the nodes in the queue
 	 * and add the peers to the queue. */
 	spa_list_consume(n, &queue, sort_link) {
 		spa_list_remove(&n->sort_link);
 		spa_list_append(collect, &n->sort_link);
 
-		pw_log_debug(" next node %p: '%s' runnable:%u", n, n->name, n->runnable);
+		pw_log_debug(" next node %p: '%s' runnable:%u active:%d",
+				n, n->name, n->runnable, n->active);
 
 		if (!n->active)
 			continue;
 
-		if (sync[0] != NULL) {
-			if (pw_strv_find_common(n->sync_groups, sync) < 0)
-				continue;
+		if (n->sync) {
+			for (uint32_t i = 0; n->sync_groups[i]; i++) {
+				if (n_sync >= MAX_SYNC)
+					break;
+				if (pw_strv_find(sync, n->sync_groups[i]) >= 0)
+					continue;
+				sync[n_sync++] = n->sync_groups[i];
+				sync[n_sync] = NULL;
+			}
 		}
 
 		spa_list_for_each(p, &n->input_ports, link) {
@@ -1242,6 +1261,8 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 			spa_list_for_each(t, &context->node_list, link) {
 				if (t->exported || !t->active || t->visited)
 					continue;
+				/* the other node will be scheduled with this one if it's in
+				 * the same group or link group */
 				if (pw_strv_find_common(t->groups, n->groups) < 0 &&
 				    pw_strv_find_common(t->link_groups, n->link_groups) < 0 &&
 				    pw_strv_find_common(t->sync_groups, sync) < 0)
@@ -1253,7 +1274,8 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 				spa_list_append(&queue, &t->sort_link);
 			}
 		}
-		pw_log_debug(" next node %p: '%s' runnable:%u", n, n->name, n->runnable);
+		pw_log_debug(" next node %p: '%s' runnable:%u %p %p %p", n, n->name, n->runnable,
+				n->groups, n->link_groups, sync);
 	}
 	spa_list_for_each(n, collect, sort_link)
 		if (!n->driving && n->runnable) {
@@ -1497,10 +1519,9 @@ int pw_context_recalc_graph(struct pw_context *context, const char *reason)
 	struct pw_impl_node *n, *s, *target, *fallback;
 	const uint32_t *rates;
 	uint32_t max_quantum, min_quantum, def_quantum, rate_quantum, floor_quantum, ceil_quantum;
-	uint32_t n_rates, def_rate, n_sync;
+	uint32_t n_rates, def_rate;
 	bool freewheel, global_force_rate, global_force_quantum, transport_start;
 	struct spa_list collect;
-	char *sync[MAX_SYNC+1];
 
 	pw_log_info("%p: busy:%d reason:%s", context, impl->recalc, reason);
 
@@ -1514,23 +1535,11 @@ again:
 	freewheel = false;
 	transport_start = false;
 
-	/* clean up the flags first and collect sync */
-	n_sync = 0;
-	sync[0] = NULL;
+	/* clean up the flags first */
 	spa_list_for_each(n, &context->node_list, link) {
 		n->visited = false;
 		n->checked = 0;
 		n->runnable = n->always_process && n->active;
-		if (n->sync) {
-			for (uint32_t i = 0; n->sync_groups[i]; i++) {
-				if (n_sync >= MAX_SYNC)
-					break;
-				if (pw_strv_find(sync, n->sync_groups[i]) >= 0)
-					continue;
-				sync[n_sync++] = n->sync_groups[i];
-				sync[n_sync] = NULL;
-			}
-		}
 	}
 
 	get_quantums(context, &def_quantum, &min_quantum, &max_quantum, &rate_quantum,
@@ -1551,7 +1560,7 @@ again:
 
 		if (!n->visited) {
 			spa_list_init(&collect);
-			collect_nodes(context, n, &collect, sync);
+			collect_nodes(context, n, &collect);
 			move_to_driver(context, &collect, n);
 		}
 		/* from now on we are only interested in active driving nodes
@@ -1605,7 +1614,7 @@ again:
 
 		/* collect all nodes in this group */
 		spa_list_init(&collect);
-		collect_nodes(context, n, &collect, sync);
+		collect_nodes(context, n, &collect);
 
 		driver = NULL;
 		spa_list_for_each(t, &collect, sort_link) {
@@ -1636,6 +1645,7 @@ again:
 		uint64_t quantum_stamp = 0, rate_stamp = 0;
 		bool force_rate, force_quantum, restore_rate = false, restore_quantum = false;
 		bool do_reconfigure = false, need_resume, was_target_pending;
+		bool have_request = false;
 		const uint32_t *node_rates;
 		uint32_t node_n_rates, node_def_rate;
 		uint32_t node_max_quantum, node_min_quantum, node_def_quantum, node_rate_quantum;
@@ -1703,6 +1713,9 @@ again:
 			pw_log_debug("%p: follower %p running:%d runnable:%d rate:%u/%u latency %u/%u '%s'",
 				context, s, running, s->runnable, rate.num, rate.denom,
 				latency.num, latency.denom, s->name);
+
+			if (running && s != n && s->supports_request > 0)
+				have_request = true;
 
 			s->moved = false;
 		}
@@ -1794,7 +1807,7 @@ again:
 		/* calculate desired quantum. Don't limit to the max_latency when we are
 		 * going to force a quantum or rate and reconfigure the nodes. */
 		if (max_latency.denom != 0 && !force_quantum && !force_rate) {
-			uint32_t tmp = (max_latency.num * current_rate / max_latency.denom);
+			uint32_t tmp = ((uint64_t)max_latency.num * current_rate / max_latency.denom);
 			if (tmp < node_max_quantum)
 				node_max_quantum = tmp;
 		}
@@ -1859,6 +1872,9 @@ again:
 			n->target_quantum = n->rt.position->clock.target_duration;
 			n->target_rate = n->rt.position->clock.target_rate;
 		}
+
+		SPA_FLAG_UPDATE(n->rt.position->clock.flags,
+				SPA_IO_CLOCK_FLAG_LAZY, have_request && n->supports_lazy > 0);
 
 		pw_log_debug("%p: driver %p running:%d runnable:%d quantum:%u rate:%u (%"PRIu64"/%u)'%s'",
 				context, n, running, n->runnable, target_quantum, target_rate,

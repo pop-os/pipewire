@@ -17,18 +17,20 @@
 #include <spa/monitor/device.h>
 #include <spa/param/audio/format.h>
 #include <spa/param/latency-utils.h>
+#include <spa/control/control.h>
 #include <spa/pod/filter.h>
 
 #include "alsa-seq.h"
 
 #define DEFAULT_DEVICE		"default"
 #define DEFAULT_CLOCK_NAME	"clock.system.monotonic"
+#define DEFAULT_DISABLE_LONGNAME true
 
 static void reset_props(struct props *props)
 {
 	strncpy(props->device, DEFAULT_DEVICE, sizeof(props->device));
 	strncpy(props->clock_name, DEFAULT_CLOCK_NAME, sizeof(props->clock_name));
-	props->disable_longname = 0;
+	props->disable_longname = DEFAULT_DISABLE_LONGNAME;
 }
 
 static int impl_node_enum_params(void *object, int seq,
@@ -227,9 +229,11 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 	if (port->info.change_mask) {
 		struct spa_dict_item items[6];
 		uint32_t n_items = 0;
-		int id;
+		int card_id;
 		snd_seq_port_info_t *info;
 		snd_seq_client_info_t *client_info;
+		const char *client_name, *port_name, *dir, *pn;
+		char prefix[32] = "";
 		char card[8];
 		char name[256];
 		char path[128];
@@ -244,59 +248,40 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 		snd_seq_get_any_client_info(this->sys.hndl,
 				port->addr.client, client_info);
 
-		int card_id;
+		card_id = snd_seq_client_info_get_card(client_info);
+		client_name = snd_seq_client_info_get_name(client_info);
+		port_name = snd_seq_port_info_get_name(info);
+		dir = port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback";
 
-		// Failed to obtain card number (software device) or disabled
-		if (this->props.disable_longname || (card_id = snd_seq_client_info_get_card(client_info)) < 0) {
-			snprintf(name, sizeof(name), "%s:(%s_%d) %s",
-					snd_seq_client_info_get_name(client_info),
-					port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback",
-					port->addr.port,
-					snd_seq_port_info_get_name(info));
-		} else {
-			char *longname;
-			if (snd_card_get_longname(card_id, &longname) == 0) {
-				snprintf(name, sizeof(name), "%s:(%s_%d) %s",
-						longname,
-						port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback",
-						port->addr.port,
-						snd_seq_port_info_get_name(info));
-				free(longname);
-			} else {
-				// At least add card number to be distinct
-				snprintf(name, sizeof(name), "%s %d:(%s_%d) %s",
-						snd_seq_client_info_get_name(client_info),
-						card_id,
-						port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback",
-						port->addr.port,
-						snd_seq_port_info_get_name(info));
-			}
-		}
+		if (!this->props.disable_longname)
+			snprintf(prefix, sizeof(prefix), "[%d:%d] ",
+					port->addr.client, port->addr.port);
+
+		pn = port_name;
+		if (spa_strstartswith(pn, client_name))
+			pn += strlen(client_name);
+
+		snprintf(name, sizeof(name), "%s%s%s (%s)", prefix,
+				client_name, pn, dir);
 		clean_name(name);
 
 		snprintf(stream, sizeof(stream), "client_%d", port->addr.client);
 		clean_name(stream);
 
 		snprintf(path, sizeof(path), "alsa:seq:%s:%s:%s_%d",
-				this->props.device,
-				stream,
-				port->direction == SPA_DIRECTION_OUTPUT ? "capture" : "playback",
-				port->addr.port);
+				this->props.device, stream, dir, port->addr.port);
 		clean_name(path);
 
-		snprintf(alias, sizeof(alias), "%s:%s",
-				snd_seq_client_info_get_name(client_info),
-				snd_seq_port_info_get_name(info));
+		snprintf(alias, sizeof(alias), "%s:%s", client_name, port_name);
 		clean_name(alias);
 
-
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "32 bit raw UMP");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH, path);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, name);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_ALIAS, alias);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, stream);
-		if ((id = snd_seq_client_info_get_card(client_info)) != -1) {
-			snprintf(card, sizeof(card), "%d", id);
+		if (card_id != -1) {
+			snprintf(card, sizeof(card), "%d", card_id);
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_API_ALSA_CARD, card);
 		}
 		port->info.props = &SPA_DICT_INIT(items, n_items);
@@ -544,7 +529,8 @@ impl_node_port_enum_params(void *object, int seq,
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+			SPA_FORMAT_CONTROL_types,  SPA_POD_CHOICE_FLAGS_Int(1u<<SPA_CONTROL_UMP));
 		break;
 
 	case SPA_PARAM_Format:
@@ -555,7 +541,8 @@ impl_node_port_enum_params(void *object, int seq,
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+			SPA_FORMAT_CONTROL_types,  SPA_POD_Int(1u<<SPA_CONTROL_UMP));
 		break;
 
 	case SPA_PARAM_Buffers:
@@ -648,12 +635,20 @@ static int port_set_format(void *object, struct seq_port *port,
 		port->have_format = false;
 	} else {
 		struct spa_audio_info info = { 0 };
+		uint32_t types;
 
 		if ((err = spa_format_parse(format, &info.media_type, &info.media_subtype)) < 0)
 			return err;
 
 		if (info.media_type != SPA_MEDIA_TYPE_application ||
 		    info.media_subtype != SPA_MEDIA_SUBTYPE_control)
+			return -EINVAL;
+
+		if ((err = spa_pod_parse_object(format,
+				SPA_TYPE_OBJECT_Format, NULL,
+				SPA_FORMAT_CONTROL_types,  SPA_POD_Int(&types))) < 0)
+			return err;
+		if (types != 1u << SPA_CONTROL_UMP)
 			return -EINVAL;
 
 		port->current_format = info;

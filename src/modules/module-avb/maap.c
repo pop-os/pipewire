@@ -253,9 +253,10 @@ static int load_state(struct maap *maap)
 {
 	const char *str;
 	char key[512];
-	struct spa_json it[3];
+	struct spa_json it[2];
 	bool have_offset = false;
-	int count = 0, offset = 0;
+	int count = 0, offset = 0, len;
+	const char *val;
 
 	snprintf(key, sizeof(key), "maap.%s", maap->server->ifname);
 	pw_conf_load_state("module-avb", key, maap->props);
@@ -263,20 +264,13 @@ static int load_state(struct maap *maap)
 	if ((str = pw_properties_get(maap->props, "maap.addresses")) == NULL)
 		return 0;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+	if (spa_json_begin_array(&it[0], str, strlen(str)) <= 0)
 		return 0;
 
-	if (spa_json_enter_object(&it[1], &it[2]) <= 0)
+	if (spa_json_enter_object(&it[0], &it[1]) <= 0)
 		return 0;
 
-	while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-		const char *val;
-		int len;
-
-		if ((len = spa_json_next(&it[2], &val)) <= 0)
-			break;
-
+	while ((len = spa_json_object_next(&it[1], key, sizeof(key), &val)) > 0) {
 		if (spa_streq(key, "start")) {
 			uint8_t addr[6];
 			if (avb_utils_parse_addr(val, len, addr) >= 0 &&

@@ -23,6 +23,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/param/audio/format.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/debug/types.h>
 
 #include <pipewire/impl.h>
@@ -34,6 +35,8 @@
 
 #include "module-protocol-pulse/format.h"
 #include "module-zeroconf-discover/avahi-poll.h"
+
+#include "network-utils.h"
 
 /** \page page_module_snapcast_discover Snapcast Discover
  *
@@ -63,18 +66,40 @@
  * - `stream.rules` = <rules>: match rules, use create-stream actions. See
  *   \ref page_module_protocol_simple for module properties.
  *
+ * ### stream.rules matches
+ *
+ *  - `snapcast.ip`: the IP address of the snapcast server
+ *  - `snapcast.port`: the port of the snapcast server
+ *  - `snapcast.ifindex`: the interface index where the snapcast announcement
+ *                        was received.
+ *  - `snapcast.ifname`: the interface name where the snapcast announcement
+ *                        was received.
+ *  - `snapcast.name`: the name of the snapcast server
+ *  - `snapcast.hostname`: the hostname of the snapcast server
+ *  - `snapcast.domain`: the domain of the snapcast server
+ *
+ * ### stream.rules create-stream
+ *
+ * In addition to all the properties that can be passed to
+ * \ref page_module_protocol_simple, you can also set:
+ *
+ * - `snapcast.stream-name`: The name of the stream on a snapcast server.
+ * - `node.name`: The name of the sink that is created on the sender.
+ *
  * ## Example configuration
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-snapcast-discover.conf
+ *
  * context.modules = [
- * {   name = libpipewire-snapcast-discover
+ * {   name = libpipewire-module-snapcast-discover
  *     args = {
  *         stream.rules = [
  *             {   matches = [
  *                     {    snapcast.ip = "~.*"
+ *                          #snapcast.port = 1000
  *                          #snapcast.ifindex = 1
  *                          #snapcast.ifname = eth0
- *                          #snapcast.port = 1000
  *                          #snapcast.name = ""
  *                          #snapcast.hostname = ""
  *                          #snapcast.domain = ""
@@ -87,11 +112,18 @@
  *                         #audio.channels = 2
  *                         #audio.position = [ FL FR ]
  *                         #
+ *                         # The stream name as is appears on the snapcast
+ *                         # server:
  *                         #snapcast.stream-name = "PipeWire"
  *                         #
+ *                         # The name of the sink on the sender:
+ *                         #node.name = "Snapcast Sink"
+ *                         #
  *                         #capture = true
+ *                         #server.address = [ "tcp:4711" ]
  *                         #capture.props = {
  *                             #target.object = ""
+ *                             #node.latency = 2048/48000
  *                             #media.class = "Audio/Sink"
  *                         #}
  *                     }
@@ -147,6 +179,7 @@ struct impl {
 	AvahiServiceBrowser *sink_browser;
 
 	struct spa_list tunnel_list;
+	uint32_t id;
 };
 
 struct tunnel_info {
@@ -285,6 +318,7 @@ static int handle_connect(struct tunnel *t, int fd)
 	int res;
 	socklen_t len;
 	char *str;
+	struct impl *impl = t->impl;
 
 	len = sizeof(res);
 	if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &res, &len) < 0) {
@@ -297,22 +331,23 @@ static int handle_connect(struct tunnel *t, int fd)
 	t->connecting = false;
 	pw_log_info("connected");
 
-	str = "{\"id\":8,\"jsonrpc\": \"2.0\",\"method\":\"Server.GetRPCVersion\"}\r\n";
-	res = write(t->source->fd, str, strlen(str));
-	pw_log_info("wrote %s: %d", str, res);
-
-	str = spa_aprintf("{\"id\":4,\"jsonrpc\":\"2.0\",\"method\":\"Stream.RemoveStream\","
-			"\"params\":{\"id\":\"%s\"}}\r\n", t->stream_name);
+	str = spa_aprintf("{\"id\":%u,\"jsonrpc\": \"2.0\",\"method\":\"Server.GetRPCVersion\"}\r\n",
+			impl->id++);
 	res = write(t->source->fd, str, strlen(str));
 	pw_log_info("wrote %s: %d", str, res);
 	free(str);
 
-	str = spa_aprintf("{\"id\":4,\"jsonrpc\":\"2.0\",\"method\":\"Stream.AddStream\""
+	str = spa_aprintf("{\"id\":%u,\"jsonrpc\":\"2.0\",\"method\":\"Stream.RemoveStream\","
+			"\"params\":{\"id\":\"%s\"}}\r\n", impl->id++, t->stream_name);
+	res = write(t->source->fd, str, strlen(str));
+	pw_log_info("wrote %s: %d", str, res);
+	free(str);
+
+	str = spa_aprintf("{\"id\":%u,\"jsonrpc\":\"2.0\",\"method\":\"Stream.AddStream\""
 		",\"params\":{\"streamUri\":\"tcp://%s?name=%s&mode=client&"
-		"sampleformat=%d:%d:%d&codec=pcm&chunk_ms=20\"}}\r\n",
+		"sampleformat=%d:%d:%d&codec=pcm&chunk_ms=20\"}}\r\n", impl->id++,
 		t->server_address, t->stream_name, t->audio_info.rate,
 		get_bps(t->audio_info.format), t->audio_info.channels);
-
 	res = write(t->source->fd, str, strlen(str));
 	pw_log_info("wrote %s: %d", str, res);
 	free(str);
@@ -327,7 +362,6 @@ static int process_input(struct tunnel *t)
 
 	while (true) {
 		res = read(t->source->fd, buffer, sizeof(buffer));
-		pw_log_info("%d", res);
 		if (res == 0)
 			return -EPIPE;
 		if (res < 0) {
@@ -340,7 +374,7 @@ static int process_input(struct tunnel *t)
 		}
 	}
 
-	pw_log_info("%s", buffer);
+	pw_log_info("received: %s", buffer);
 	return 0;
 }
 
@@ -455,82 +489,36 @@ static int snapcast_connect(struct tunnel *t)
 static int add_snapcast_stream(struct impl *impl, struct tunnel *t,
 		struct pw_properties *props, const char *servers)
 {
-	struct spa_json it[2];
+	struct spa_json it[1];
 	char v[256];
 
-	spa_json_init(&it[0], servers, strlen(servers));
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], servers, strlen(servers));
+        if (spa_json_begin_array_relax(&it[0], servers, strlen(servers)) <= 0)
+		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0) {
+	while (spa_json_get_string(&it[0], v, sizeof(v)) > 0) {
 		t->server_address = strdup(v);
 		snapcast_connect(t);
-		break;
+		return 0;
 	}
-	return 0;
-}
-
-static inline uint32_t format_from_name(const char *name, size_t len)
-{
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (strncmp(name, spa_debug_type_short_name(spa_type_audio_format[i].name), len) == 0)
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
-}
-
-static inline uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
+	return -ENOENT;
 }
 
 static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_FORMAT,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 
-	spa_zero(*info);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
-		str = DEFAULT_FORMAT;
-	info->format = format_from_name(str, strlen(str));
-	if (info->format == 0) {
-		str = DEFAULT_FORMAT;
-		info->format = format_from_name(str, strlen(str));
-	}
-	pw_properties_set(props, PW_KEY_AUDIO_FORMAT, str);
-
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
-	if (info->rate == 0)
-		info->rate = DEFAULT_RATE;
+	pw_properties_set(props, PW_KEY_AUDIO_FORMAT,
+			spa_type_audio_format_to_short_name(info->format));
 	pw_properties_setf(props, PW_KEY_AUDIO_RATE, "%d", info->rate);
-
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
 	pw_properties_setf(props, PW_KEY_AUDIO_CHANNELS, "%d", info->channels);
 }
 
@@ -631,7 +619,7 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	char hbuf[NI_MAXHOST];
 	char if_suffix[16] = "";
 	struct ifreq ifreq;
-	int fd, res, family;
+	int res, family;
 
 	if (event != AVAHI_RESOLVER_FOUND) {
 		pw_log_error("Resolving of '%s' failed: %s", name,
@@ -684,10 +672,10 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	family = protocol == AVAHI_PROTO_INET ? AF_INET : AF_INET6;
 
 	spa_zero(ifreq);
-	fd = socket(family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 	ifreq.ifr_ifindex = interface;
-	ioctl(fd, SIOCGIFNAME, &ifreq, sizeof(ifreq));
+	if_indextoname(interface, ifreq.ifr_name);
 	pw_properties_setf(props, "snapcast.ifname", "%s", ifreq.ifr_name);
+	pw_properties_setf(props, "local.ifname", "%s", ifreq.ifr_name);
 
 	struct ifaddrs *if_addr, *ifp;
 	if (getifaddrs(&if_addr) < 0)
@@ -711,12 +699,15 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 					family == AF_INET ? "" : "[",
 					hbuf,
 					family == AF_INET ? "" : "]");
+			pw_properties_setf(props, "local.ifaddress", "%s%s%s",
+					family == AF_INET ? "" : "[",
+					hbuf,
+					family == AF_INET ? "" : "]");
 		} else {
 			pw_log_warn("error: %m %d %s", res, gai_strerror(res));
 		}
 	}
 	freeifaddrs(if_addr);
-	close(fd);
 
 	for (l = txt; l; l = l->next) {
 		char *key, *value;

@@ -539,7 +539,7 @@ struct pw_node_target {
 	struct pw_node_activation *activation;
 	struct spa_system *system;
 	int fd;
-	void (*trigger)(struct pw_node_target *t, uint64_t nsec);
+	int (*trigger)(struct pw_node_target *t, uint64_t nsec);
 	unsigned int active:1;
 	unsigned int added:1;
 };
@@ -562,6 +562,8 @@ static inline void copy_target(struct pw_node_target *dst, const struct pw_node_
  *   transport with sync.group properties instead of client command
  */
 #define PW_VERSION_NODE_ACTIVATION	1
+
+#define PW_NODE_ACTIVATION_PENDING_TRIGGER(status) ((status) <= PW_NODE_ACTIVATION_AWAKE)
 
 /* nodes start as INACTIVE, when they are ready to be scheduled, they add their
  * fd to the loop and change status to FINISHED. When the node shuts down, the
@@ -591,10 +593,12 @@ struct pw_node_activation {
 
 	struct pw_node_activation_state state[2];	/* one current state and one next state,
 							 * as version flag */
-	uint64_t signal_time;
-	uint64_t awake_time;
-	uint64_t finish_time;
-	uint64_t prev_signal_time;
+	uint64_t signal_time;                           /* time at which the node was triggered (i.e. marked
+							 * as ready to start processing in the current loop
+							 * iteration) */
+	uint64_t awake_time;                            /* time at which processing actually started */
+	uint64_t finish_time;                           /* time at which processing was completed */
+	uint64_t prev_signal_time;                      /* previous time at which the node was triggered */
 
 	/* updates */
 	struct spa_io_segment reposition;		/* reposition info, used when driver reposition_owner
@@ -606,7 +610,10 @@ struct pw_node_activation {
 	uint32_t segment_owner[16];			/* id of owners for each segment info struct.
 							 * nodes that want to update segment info need to
 							 * CAS their node id in this array. */
-	uint32_t padding[11];				/* must be 0 */
+	uint64_t prev_awake_time;
+	uint64_t prev_finish_time;
+	uint32_t padding[7];				/* must be 0 */
+
 	uint32_t client_version;			/* verions of client, see above */
 	uint32_t server_version;			/* verions of server, see above */
 
@@ -614,6 +621,7 @@ struct pw_node_activation {
 	uint32_t driver_id;				/* the current node driver id */
 #define PW_NODE_ACTIVATION_FLAG_NONE		0
 #define PW_NODE_ACTIVATION_FLAG_PROFILER	(1<<0)	/* the profiler is running */
+#define PW_NODE_ACTIVATION_FLAG_ASYNC		(1<<1)	/* the node is async */
 	uint32_t flags;					/* extra flags */
 	struct spa_io_position position;		/* contains current position and segment info.
 							 * extra info is updated by nodes that have set
@@ -648,39 +656,53 @@ static inline uint64_t get_time_ns(struct spa_system *system)
 
 /* called from data-loop decrement the dependency counter of the target and when
  * there are no more dependencies, trigger the node. */
-static inline void trigger_target_v1(struct pw_node_target *t, uint64_t nsec)
+static inline int trigger_target_v1(struct pw_node_target *t, uint64_t nsec)
 {
 	struct pw_node_activation *a = t->activation;
 	struct pw_node_activation_state *state = &a->state[0];
+	int32_t pending = SPA_ATOMIC_DEC(state->pending);
+	int res = pending == 0, r;
 
 	pw_log_trace_fp("%p: (%s-%u) state:%p pending:%d/%d", t->node,
-			t->name, t->id, state, state->pending, state->required);
+				t->name, t->id, state, pending, state->required);
 
-	if (pw_node_activation_state_dec(state)) {
-		if (SPA_ATOMIC_CAS(a->status,
+	if (res) {
+		if (SPA_LIKELY(SPA_ATOMIC_CAS(a->status,
 					PW_NODE_ACTIVATION_NOT_TRIGGERED,
-					PW_NODE_ACTIVATION_TRIGGERED)) {
+					PW_NODE_ACTIVATION_TRIGGERED))) {
 			a->signal_time = nsec;
-			if (SPA_UNLIKELY(spa_system_eventfd_write(t->system, t->fd, 1) < 0))
-				pw_log_warn("%p: write failed %m", t->node);
+			if (SPA_UNLIKELY((r = spa_system_eventfd_write(t->system, t->fd, 1)) < 0)) {
+				pw_log_warn("%p: write failed %s", t->node, spa_strerror(r));
+				res = r;
+			}
+		} else {
+			pw_log_trace_fp("%p: (%s-%u) not ready %d", t->node,
+					t->name, t->id, a->status);
+			res = -EIO;
 		}
 	}
+	return res;
 }
 
-static inline void trigger_target_v0(struct pw_node_target *t, uint64_t nsec)
+static inline int trigger_target_v0(struct pw_node_target *t, uint64_t nsec)
 {
 	struct pw_node_activation *a = t->activation;
 	struct pw_node_activation_state *state = &a->state[0];
+	int32_t pending = SPA_ATOMIC_DEC(state->pending);
+	int res = pending == 0, r;
 
 	pw_log_trace_fp("%p: (%s-%u) state:%p pending:%d/%d", t->node,
-			t->name, t->id, state, state->pending, state->required);
+			t->name, t->id, state, pending, state->required);
 
-	if (pw_node_activation_state_dec(state)) {
+	if (res) {
 		SPA_ATOMIC_STORE(a->status, PW_NODE_ACTIVATION_TRIGGERED);
 		a->signal_time = nsec;
-		if (SPA_UNLIKELY(spa_system_eventfd_write(t->system, t->fd, 1) < 0))
-			pw_log_warn("%p: write failed %m", t->node);
+		if (SPA_UNLIKELY((r = spa_system_eventfd_write(t->system, t->fd, 1)) < 0)) {
+			res = r;
+			pw_log_warn("%p: write failed %s", t->node, spa_strerror(r));
+		}
 	}
+	return res;
 }
 
 struct pw_node_peer {
@@ -733,6 +755,9 @@ struct pw_impl_node {
 
 	char *name;				/** for debug */
 
+	uint32_t supports_lazy;		/**< lazy driver preference */
+	uint32_t supports_request;	/**< request follower preference */
+
 	uint32_t priority_driver;	/** priority for being driver */
 	char **groups;			/** groups to schedule this node in */
 	char **link_groups;		/** groups this node is linked to */
@@ -772,6 +797,7 @@ struct pw_impl_node {
 	unsigned int sync:1;		/**< the sync-groups are active */
 	unsigned int transport:1;	/**< the transport is active */
 	unsigned int async:1;		/**< async processing, one cycle latency */
+	unsigned int lazy:1;		/**< the graph is lazy scheduling */
 
 	uint32_t port_user_data_size;	/**< extra size for port user data */
 

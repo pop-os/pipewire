@@ -40,6 +40,7 @@ static void do_quit(void *userdata, int signal_number)
 int main(int argc, char *argv[])
 {
 	struct data data = { 0, };
+	struct pw_loop *loop;
 	struct pw_properties *props;
 	const char *dev = "hw:0";
 
@@ -47,16 +48,15 @@ int main(int argc, char *argv[])
 
 	data.loop = pw_main_loop_new(NULL);
 
+	loop = pw_main_loop_get_loop(data.loop);
+
 	if (argc > 1)
 		dev = argv[1];
 
-	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGINT, do_quit, &data);
-	pw_loop_add_signal(pw_main_loop_get_loop(data.loop), SIGTERM, do_quit, &data);
+	pw_loop_add_signal(loop, SIGINT, do_quit, &data);
+	pw_loop_add_signal(loop, SIGTERM, do_quit, &data);
 
-	data.context = pw_context_new(pw_main_loop_get_loop(data.loop),
-			pw_properties_new(
-				PW_KEY_CONFIG_NAME, "client-rt.conf",
-				NULL), 0);
+	data.context = pw_context_new(loop, NULL, 0);
 
 	pw_context_load_module(data.context, "libpipewire-module-spa-node-factory", NULL, NULL);
 	pw_context_load_module(data.context, "libpipewire-module-link-factory", NULL, NULL);
@@ -72,7 +72,7 @@ int main(int argc, char *argv[])
                         SPA_KEY_LIBRARY_NAME, "audiotestsrc/libspa-audiotestsrc",
                         SPA_KEY_FACTORY_NAME, "audiotestsrc",
                         PW_KEY_NODE_NAME, "test_source",
-			"Spa:Pod:Object:Param:Props:live", "false",
+			"node.param.Props", "{ live = false }",
                         NULL);
 	data.source = pw_core_create_object(data.core,
 			"spa-node-factory",
@@ -94,13 +94,15 @@ int main(int argc, char *argv[])
 			PW_VERSION_NODE,
 			&props->dict, 0);
 
+	pw_loop_enter(loop);
 	while (true) {
 		if (pw_proxy_get_bound_id(data.source) != SPA_ID_INVALID &&
 		    pw_proxy_get_bound_id(data.sink) != SPA_ID_INVALID)
 			break;
 
-		pw_loop_iterate(pw_main_loop_get_loop(data.loop), -1);
+		pw_loop_iterate(loop, -1);
         }
+	pw_loop_leave(loop);
 
 	pw_properties_clear(props);
 	pw_properties_setf(props,

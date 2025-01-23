@@ -127,6 +127,7 @@ extern "C" {
 #define SPA_BT_UUID_BAP_SOURCE  "00002bcb-0000-1000-8000-00805f9b34fb"
 #define SPA_BT_UUID_BAP_BROADCAST_SOURCE  "00001852-0000-1000-8000-00805f9b34fb"
 #define SPA_BT_UUID_BAP_BROADCAST_SINK    "00001851-0000-1000-8000-00805f9b34fb"
+#define SPA_BT_UUID_ASHA_SINK   "0000FDF0-0000-1000-8000-00805f9b34fb"
 
 #define PROFILE_HSP_AG	"/Profile/HSPAG"
 #define PROFILE_HSP_HS	"/Profile/HSPHS"
@@ -181,12 +182,13 @@ enum spa_bt_profile {
 	SPA_BT_PROFILE_BAP_SOURCE =	(1 << 1),
 	SPA_BT_PROFILE_A2DP_SINK =	(1 << 2),
 	SPA_BT_PROFILE_A2DP_SOURCE =	(1 << 3),
-	SPA_BT_PROFILE_HSP_HS =		(1 << 4),
-	SPA_BT_PROFILE_HSP_AG =		(1 << 5),
-	SPA_BT_PROFILE_HFP_HF =		(1 << 6),
-	SPA_BT_PROFILE_HFP_AG =		(1 << 7),
-	SPA_BT_PROFILE_BAP_BROADCAST_SOURCE =	(1 << 8),
-	SPA_BT_PROFILE_BAP_BROADCAST_SINK   =	(1 << 9),
+	SPA_BT_PROFILE_ASHA_SINK =      (1 << 4),
+	SPA_BT_PROFILE_HSP_HS =		(1 << 5),
+	SPA_BT_PROFILE_HSP_AG =		(1 << 6),
+	SPA_BT_PROFILE_HFP_HF =		(1 << 7),
+	SPA_BT_PROFILE_HFP_AG =		(1 << 8),
+	SPA_BT_PROFILE_BAP_BROADCAST_SOURCE =	(1 << 9),
+	SPA_BT_PROFILE_BAP_BROADCAST_SINK   =	(1 << 10),
 
 	SPA_BT_PROFILE_A2DP_DUPLEX =	(SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_A2DP_SOURCE),
 	SPA_BT_PROFILE_BAP_DUPLEX =     (SPA_BT_PROFILE_BAP_SINK | SPA_BT_PROFILE_BAP_SOURCE),
@@ -226,6 +228,8 @@ static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
 		return SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
 	else if (strcasecmp(uuid, SPA_BT_UUID_BAP_BROADCAST_SINK) == 0)
 		return SPA_BT_PROFILE_BAP_BROADCAST_SINK;
+	else if (strcasecmp(uuid, SPA_BT_UUID_ASHA_SINK) == 0)
+		return SPA_BT_PROFILE_ASHA_SINK;
 	else
 		return 0;
 }
@@ -252,13 +256,16 @@ enum spa_bt_hfp_ag_feature {
 };
 
 enum spa_bt_hfp_sdp_ag_features {
-	SPA_BT_HFP_SDP_AG_FEATURE_NONE =		(0),
-	SPA_BT_HFP_SDP_AG_FEATURE_3WAY =		(1 << 0),
-	SPA_BT_HFP_SDP_AG_FEATURE_ECNR =		(1 << 1),
-	SPA_BT_HFP_SDP_AG_FEATURE_VOICE_RECOG =		(1 << 2),
-	SPA_BT_HFP_SDP_AG_FEATURE_IN_BAND_RING_TONE =	(1 << 3),
-	SPA_BT_HFP_SDP_AG_FEATURE_ATTACH_VOICE_TAG =	(1 << 4),
-	SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
+	SPA_BT_HFP_SDP_AG_FEATURE_NONE =			(0),
+	SPA_BT_HFP_SDP_AG_FEATURE_3WAY =			(1 << 0),
+	SPA_BT_HFP_SDP_AG_FEATURE_ECNR =			(1 << 1),
+	SPA_BT_HFP_SDP_AG_FEATURE_VOICE_RECOG =			(1 << 2),
+	SPA_BT_HFP_SDP_AG_FEATURE_IN_BAND_RING_TONE =		(1 << 3),
+	SPA_BT_HFP_SDP_AG_FEATURE_ATTACH_VOICE_TAG =		(1 << 4),
+	SPA_BT_HFP_SDP_AG_FEATURE_WIDEBAND_SPEECH =		(1 << 5),
+	SPA_BT_HFP_SDP_AG_FEATURE_ENH_VOICE_RECOG_STATUS =	(1 << 6),
+	SPA_BT_HFP_SDP_AG_FEATURE_VOICE_RECOG_TEXT =		(1 << 7),
+	SPA_BT_HFP_SDP_AG_FEATURE_SUPER_WIDEBAND_SPEECH =	(1 << 8),
 };
 
 enum spa_bt_hfp_hf_feature {
@@ -299,17 +306,22 @@ enum spa_bt_hfp_hf_xapl_features {
 };
 
 enum spa_bt_hfp_sdp_hf_features {
-	SPA_BT_HFP_SDP_HF_FEATURE_NONE =		(0),
-	SPA_BT_HFP_SDP_HF_FEATURE_ECNR =		(1 << 0),
-	SPA_BT_HFP_SDP_HF_FEATURE_3WAY =		(1 << 1),
-	SPA_BT_HFP_SDP_HF_FEATURE_CLIP =		(1 << 2),
-	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION =	(1 << 3),
+	SPA_BT_HFP_SDP_HF_FEATURE_NONE =			(0),
+	SPA_BT_HFP_SDP_HF_FEATURE_ECNR =			(1 << 0),
+	SPA_BT_HFP_SDP_HF_FEATURE_3WAY =			(1 << 1),
+	SPA_BT_HFP_SDP_HF_FEATURE_CLIP =			(1 << 2),
+	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOGNITION =		(1 << 3),
 	SPA_BT_HFP_SDP_HF_FEATURE_REMOTE_VOLUME_CONTROL =	(1 << 4),
-	SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH =	(1 << 5),
+	SPA_BT_HFP_SDP_HF_FEATURE_WIDEBAND_SPEECH =		(1 << 5),
+	SPA_BT_HFP_SDP_HF_FEATURE_ENH_VOICE_RECOG_STATUS =	(1 << 6),
+	SPA_BT_HFP_SDP_HF_FEATURE_VOICE_RECOG_TEXT =		(1 << 7),
+	SPA_BT_HFP_SDP_HF_FEATURE_SUPER_WIDEBAND_SPEECH =	(1 << 8),
 };
 
 static inline const char *spa_bt_profile_name (enum spa_bt_profile profile) {
       switch (profile) {
+      case SPA_BT_PROFILE_ASHA_SINK:
+        return "asha-sink";
       case SPA_BT_PROFILE_A2DP_SOURCE:
         return "a2dp-source";
       case SPA_BT_PROFILE_A2DP_SINK:
@@ -462,7 +474,7 @@ struct spa_bt_device_events {
 	void (*codec_switched) (void *data, int status);
 
 	/** Profile configuration changed */
-	void (*profiles_changed) (void *data, uint32_t prev_profiles, uint32_t prev_connected);
+	void (*profiles_changed) (void *data, uint32_t connected_change);
 
 	/** Device set configuration changed */
 	void (*device_set_changed) (void *data);
@@ -610,6 +622,7 @@ struct spa_bt_transport_implementation {
 	int (*acquire) (void *data, bool optional);
 	int (*release) (void *data);
 	int (*set_volume) (void *data, int id, float volume);
+	int (*set_delay) (void *data, int64_t delay_nsec);
 	int (*destroy) (void *data);
 };
 
@@ -715,12 +728,13 @@ int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *
 
 #define spa_bt_transport_destroy(t)		spa_bt_transport_impl(t, destroy, 0)
 #define spa_bt_transport_set_volume(t,...)	spa_bt_transport_impl(t, set_volume, 0, __VA_ARGS__)
+#define spa_bt_transport_set_delay(t,...)	spa_bt_transport_impl(t, set_delay, 0, __VA_ARGS__)
 
 static inline enum spa_bt_transport_state spa_bt_transport_state_from_string(const char *value)
 {
 	if (strcasecmp("idle", value) == 0)
 		return SPA_BT_TRANSPORT_STATE_IDLE;
-	else if (strcasecmp("pending", value) == 0)
+	else if ((strcasecmp("pending", value) == 0) || (strcasecmp("broadcasting", value) == 0))
 		return SPA_BT_TRANSPORT_STATE_PENDING;
 	else if (strcasecmp("active", value) == 0)
 		return SPA_BT_TRANSPORT_STATE_ACTIVE;
@@ -772,6 +786,9 @@ int spa_bt_quirks_get_features(const struct spa_bt_quirks *quirks,
 		const struct spa_bt_adapter *adapter,
 		const struct spa_bt_device *device,
 		uint32_t *features);
+void spa_bt_quirks_log_features(const struct spa_bt_quirks *this,
+		const struct spa_bt_adapter *adapter,
+		const struct spa_bt_device *device);
 void spa_bt_quirks_destroy(struct spa_bt_quirks *quirks);
 
 int spa_bt_adapter_has_msbc(struct spa_bt_adapter *adapter);

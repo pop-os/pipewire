@@ -20,7 +20,15 @@ extern "C" {
 #include <spa/pod/pod.h>
 #include <spa/pod/iter.h>
 
-static inline int
+#ifndef SPA_API_DEBUG_POD
+ #ifdef SPA_API_IMPL
+  #define SPA_API_DEBUG_POD SPA_API_IMPL
+ #else
+  #define SPA_API_DEBUG_POD static inline
+ #endif
+#endif
+
+SPA_API_DEBUG_POD int
 spa_debugc_pod_value(struct spa_debug_context *ctx, int indent, const struct spa_type_info *info,
 		uint32_t type, void *body, uint32_t size)
 {
@@ -60,13 +68,13 @@ spa_debugc_pod_value(struct spa_debug_context *ctx, int indent, const struct spa
 	case SPA_TYPE_Rectangle:
 	{
 		struct spa_rectangle *r = (struct spa_rectangle *)body;
-		spa_debugc(ctx, "%*s" "Rectangle %dx%d", indent, "", r->width, r->height);
+		spa_debugc(ctx, "%*s" "Rectangle %" PRIu32 "x%" PRIu32 "", indent, "", r->width, r->height);
 		break;
 	}
 	case SPA_TYPE_Fraction:
 	{
 		struct spa_fraction *f = (struct spa_fraction *)body;
-		spa_debugc(ctx, "%*s" "Fraction %d/%d", indent, "", f->num, f->denom);
+		spa_debugc(ctx, "%*s" "Fraction %" PRIu32 "/%" PRIu32 "", indent, "", f->num, f->denom);
 		break;
 	}
 	case SPA_TYPE_Bitmap:
@@ -174,7 +182,7 @@ spa_debugc_pod_value(struct spa_debug_context *ctx, int indent, const struct spa
 	return 0;
 }
 
-static inline int spa_debugc_pod(struct spa_debug_context *ctx, int indent,
+SPA_API_DEBUG_POD int spa_debugc_pod(struct spa_debug_context *ctx, int indent,
 		const struct spa_type_info *info, const struct spa_pod *pod)
 {
 	return spa_debugc_pod_value(ctx, indent, info ? info : SPA_TYPE_ROOT,
@@ -183,14 +191,14 @@ static inline int spa_debugc_pod(struct spa_debug_context *ctx, int indent,
 			SPA_POD_BODY_SIZE(pod));
 }
 
-static inline int
+SPA_API_DEBUG_POD int
 spa_debug_pod_value(int indent, const struct spa_type_info *info,
 		uint32_t type, void *body, uint32_t size)
 {
 	return spa_debugc_pod_value(NULL, indent, info, type, body, size);
 }
 
-static inline int spa_debug_pod(int indent,
+SPA_API_DEBUG_POD int spa_debug_pod(int indent,
 		const struct spa_type_info *info, const struct spa_pod *pod)
 {
 	return spa_debugc_pod(NULL, indent, info, pod);

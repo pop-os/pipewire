@@ -11,6 +11,8 @@
 #include <malloc.h>
 #include <limits.h>
 
+#include "config.h"
+
 #include <spa/support/system.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/filter.h>
@@ -20,6 +22,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json-pod.h>
 
+#define PW_API_NODE_IMPL	SPA_EXPORT
 #include "pipewire/impl-node.h"
 #include "pipewire/private.h"
 
@@ -44,6 +47,8 @@ struct impl {
 
 	unsigned int cache_params:1;
 	unsigned int pending_play:1;
+
+	struct spa_command *pending_request_process;
 
 	char *group;
 	char *link_group;
@@ -112,13 +117,16 @@ static inline void activate_target(struct pw_impl_node *node, struct pw_node_tar
 {
 	struct pw_node_activation_state *state = &t->activation->state[0];
 	if (!t->active) {
-		if ((!node->async || node->driving) && !node->exported) {
-			SPA_ATOMIC_INC(state->required);
-			SPA_ATOMIC_INC(state->pending);
+		if (!node->async) {
+			if (!node->exported) {
+				SPA_ATOMIC_INC(state->required);
+				SPA_ATOMIC_INC(state->pending);
+			}
 		}
 		t->active = true;
-		pw_log_debug("%p: target state:%p id:%d pending:%d/%d",
-				node, state, t->id, state->pending, state->required);
+		pw_log_debug("%p: target state:%p id:%d pending:%d/%d %d:%d:%d",
+				node, state, t->id, state->pending, state->required,
+				node->async, node->driving, node->exported);
 	}
 }
 
@@ -126,7 +134,7 @@ static inline void deactivate_target(struct pw_impl_node *node, struct pw_node_t
 {
 	if (t->active) {
 		struct pw_node_activation_state *state = &t->activation->state[0];
-		if (!node->async || node->driving) {
+		if (!node->async) {
 			/* the driver copies the required to the pending state
 			 * so first try to resume the node and then decrement the
 			 * required state. This way we either resume with the old value
@@ -137,8 +145,9 @@ static inline void deactivate_target(struct pw_impl_node *node, struct pw_node_t
 				SPA_ATOMIC_DEC(state->required);
 		}
 		t->active = false;
-		pw_log_debug("%p: target state:%p id:%d pending:%d/%d trigger:%"PRIu64,
-				node, state, t->id, state->pending, state->required, trigger);
+		pw_log_debug("%p: target state:%p id:%d pending:%d/%d %d:%d:%d trigger:%"PRIu64,
+				node, state, t->id, state->pending, state->required,
+				node->async, node->driving, node->exported, trigger);
 	}
 }
 
@@ -173,7 +182,8 @@ do_node_prepare(struct spa_loop *loop, bool async, uint32_t seq,
 	uint64_t dummy;
 	int res;
 
-	pw_log_trace("%p: prepare %d remote:%d", this, this->rt.prepared, this->remote);
+	pw_log_trace("%p: prepare %d remote:%d exported:%d", this, this->rt.prepared,
+			this->remote, this->exported);
 
 	if (this->rt.prepared)
 		return 0;
@@ -212,20 +222,20 @@ do_node_unprepare(struct spa_loop *loop, bool async, uint32_t seq,
 	int old_state;
 	uint64_t trigger = 0;
 
-	pw_log_trace("%p: unprepare %d remote:%d", this, this->rt.prepared, this->remote);
+	pw_log_trace("%p: unprepare %d remote:%d exported:%d", this, this->rt.prepared,
+			this->remote, this->exported);
+
+	/* We mark ourself as finished now, this will avoid going further into the process loop
+	 * in case our fd was ready (removing ourselfs from the loop should avoid that as well).
+	 * If we were supposed to be scheduled make sure we continue the graph for the peers we
+	 * were supposed to trigger */
+	old_state = SPA_ATOMIC_XCHG(this->rt.target.activation->status, PW_NODE_ACTIVATION_INACTIVE);
+	if (PW_NODE_ACTIVATION_PENDING_TRIGGER(old_state))
+		trigger = get_time_ns(this->rt.target.system);
 
 	if (!this->rt.prepared)
 		return 0;
 
-	if (!this->remote || this->rt.target.activation->client_version < 1) {
-		/* We mark ourself as finished now, this will avoid going further into the process loop
-		 * in case our fd was ready (removing ourselfs from the loop should avoid that as well).
-		 * If we were supposed to be scheduled make sure we continue the graph for the peers we
-		 * were supposed to trigger */
-		old_state = SPA_ATOMIC_XCHG(this->rt.target.activation->status, PW_NODE_ACTIVATION_INACTIVE);
-		if (old_state != PW_NODE_ACTIVATION_FINISHED)
-			trigger = get_time_ns(this->rt.target.system);
-	}
 	if (!this->remote)
 		spa_loop_remove_source(loop, &this->source);
 
@@ -317,6 +327,9 @@ static int start_node(struct pw_impl_node *this)
 	pw_log_debug("%p: start node driving:%d driver:%d prepared:%d", this,
 			this->driving, this->driver, this->rt.prepared);
 
+	this->lazy = this->rt.position && SPA_FLAG_IS_SET(this->rt.position->clock.flags,
+			SPA_IO_CLOCK_FLAG_LAZY);
+
 	if (!(this->driving && this->driver)) {
 		impl->pending_play = true;
 		res = spa_node_send_command(this->node,
@@ -324,6 +337,7 @@ static int start_node(struct pw_impl_node *this)
 	} else {
 		/* driver nodes will wait until all other nodes are started before
 		 * they are started */
+		spa_clear_ptr(impl->pending_request_process, free);
 		res = EBUSY;
 	}
 
@@ -411,6 +425,7 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 {
 	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
 	enum pw_node_state old = node->info.state;
+	bool emit_pending_request_process = false;
 
 	switch (state) {
 	case PW_NODE_STATE_RUNNING:
@@ -427,6 +442,8 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 				state = PW_NODE_STATE_ERROR;
 				error = spa_aprintf("Start error: %s", spa_strerror(res));
 				remove_node_from_graph(node);
+			} else if (impl->pending_request_process != NULL) {
+				emit_pending_request_process = true;
 			}
 		}
 		break;
@@ -434,7 +451,8 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 	case PW_NODE_STATE_SUSPENDED:
 	case PW_NODE_STATE_ERROR:
 		if (state != PW_NODE_STATE_IDLE || node->pause_on_idle)
-			remove_node_from_graph(node);
+			if (old != PW_NODE_STATE_CREATING)
+				remove_node_from_graph(node);
 		break;
 	default:
 		break;
@@ -459,6 +477,12 @@ static void node_update_state(struct pw_impl_node *node, enum pw_node_state stat
 		     pw_node_state_as_string(old), pw_node_state_as_string(state));
 	}
 	pw_impl_node_emit_state_changed(node, old, state, error);
+
+	if (emit_pending_request_process) {
+		pw_log_debug("%p: request process:%p", node, impl->pending_request_process);
+		spa_node_send_command(node->node, impl->pending_request_process);
+		spa_clear_ptr(impl->pending_request_process, free);
+	}
 
 	node->info.change_mask |= PW_NODE_CHANGE_MASK_STATE;
 	emit_info_changed(node, false);
@@ -740,6 +764,14 @@ static inline void insert_driver(struct pw_context *context, struct pw_impl_node
 	spa_list_for_each_safe(n, t, &context->driver_list, driver_link) {
 		if (n->priority_driver < node->priority_driver)
 			break;
+		if (n->priority_driver == 0 && node->priority_driver == 0) {
+			/* no priority is set, we prefer the driver that does
+			 * lazy scheduling. */
+			if (n->supports_request > 0 && node->supports_lazy > 0) {
+				if (n->supports_request <= node->supports_lazy)
+					break;
+			}
+		}
 	}
 	spa_list_append(&n->driver_link, &node->driver_link);
 	pw_context_emit_driver_added(context, node);
@@ -805,7 +837,9 @@ int pw_impl_node_set_io(struct pw_impl_node *this, uint32_t id, void *data, size
 
 	res = spa_node_set_io(this->node, id, data, size);
 
-	if (res >= 0 && !SPA_RESULT_IS_ASYNC(res) && this->rt.position)
+	if (this->rt.position &&
+	    ((res >= 0 && !SPA_RESULT_IS_ASYNC(res)) ||
+	    this->rt.target.activation->client_version < 1))
 		this->rt.target.activation->active_driver_id = this->rt.position->clock.id;
 
 	pw_log_debug("%p: set io: %s", this, spa_strerror(res));
@@ -857,7 +891,7 @@ do_remove_target(struct spa_loop *loop,
 		if (node->rt.prepared) {
 			int old_state = SPA_ATOMIC_LOAD(node->rt.target.activation->status);
 			uint64_t trigger = 0;
-			if (old_state != PW_NODE_ACTIVATION_FINISHED)
+			if (PW_NODE_ACTIVATION_PENDING_TRIGGER(old_state))
 				trigger = get_time_ns(node->rt.target.system);
 			deactivate_target(node, t, trigger);
 		}
@@ -1009,17 +1043,7 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 
 	remove_segment_owner(old, node->info.id);
 
-	was_driving = node->driving;
-
-	/* When a node was driver (and is waiting for all nodes to complete
-	 * the Start command) cancel the pending state and let the new driver
-	 * calculate a new state so that the Start command is sent to the
-	 * node */
-	if (was_driving && !node->driving)
-		impl->pending_state = node->info.state;
-
-	pw_log_debug("%p: driver %p driving:%u", node,
-		driver, node->driving);
+	pw_log_debug("%p: driver %p driving:%u", node, driver, node->driving);
 	pw_log_info("(%s-%u) -> change driver (%s-%d -> %s-%d)",
 			node->name, node->info.id,
 			old->name, old->info.id, driver->name, driver->info.id);
@@ -1036,10 +1060,19 @@ int pw_impl_node_set_driver(struct pw_impl_node *node, struct pw_impl_node *driv
 	 * scheduled so it won't trigger yet */
 	node->to_driver_peer = pw_node_peer_ref(node, driver);
 
+	was_driving = node->driving;
+
 	/* then set the new driver node activation */
 	pw_impl_node_set_io(node, SPA_IO_Position,
 			&driver->rt.target.activation->position,
 			sizeof(struct spa_io_position));
+
+	/* When a node was driver (and is waiting for all nodes to complete
+	 * the Start command) cancel the pending state and let the new driver
+	 * calculate a new state so that the Start command is sent to the
+	 * node */
+	if (was_driving && !node->driving)
+		impl->pending_state = node->info.state;
 
 	/* and then make the driver trigger the node */
 	node->from_driver_peer = pw_node_peer_ref(driver, node);
@@ -1093,18 +1126,18 @@ static void check_properties(struct pw_impl_node *node)
 	pw_context_conf_section_match_rules(context, "node.rules",
 			&node->properties->dict, execute_match, &match);
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_PRIORITY_DRIVER))) {
-		value = pw_properties_parse_int(str);
-		if (value != node->priority_driver) {
-			pw_log_debug("%p: priority driver %d -> %d", node, node->priority_driver, value);
-			node->priority_driver = value;
-			if (node->registered && node->driver) {
-				remove_driver(context, node);
-				insert_driver(context, node);
-				recalc_reason = "driver priority changed";
-			}
+	value = pw_properties_get_uint32(node->properties, PW_KEY_PRIORITY_DRIVER, 0);
+	if (value != node->priority_driver) {
+		pw_log_debug("%p: priority driver %d -> %d", node, node->priority_driver, value);
+		node->priority_driver = value;
+		if (node->registered && node->driver) {
+			remove_driver(context, node);
+			insert_driver(context, node);
+			recalc_reason = "driver priority changed";
 		}
 	}
+	node->supports_lazy = pw_properties_get_uint32(node->properties, PW_KEY_NODE_SUPPORTS_LAZY, 0);
+	node->supports_request = pw_properties_get_uint32(node->properties, PW_KEY_NODE_SUPPORTS_REQUEST, 0);
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_NAME)) &&
 	    (node->name == NULL || !spa_streq(node->name, str))) {
@@ -1196,9 +1229,11 @@ static void check_properties(struct pw_impl_node *node)
 		recalc_reason = "transport changed";
 	}
 	async = pw_properties_get_bool(node->properties, PW_KEY_NODE_ASYNC, false);
+	async &= !node->driver;
 	if (async != node->async) {
 		pw_log_info("%p: async %d -> %d", node, node->async, async);
 		node->async = async;
+		SPA_FLAG_UPDATE(node->rt.target.activation->flags, PW_NODE_ACTIVATION_FLAG_ASYNC, async);
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_MEDIA_CLASS)) != NULL &&
@@ -1246,13 +1281,11 @@ static void check_properties(struct pw_impl_node *node)
 	}
 	node->lock_quantum = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_QUANTUM, false);
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_FORCE_QUANTUM))) {
-		if (spa_atou32(str, &value, 0) &&
-		    node->force_quantum != value) {
-		        node->force_quantum = value;
-			node->stamp = ++context->stamp;
-			recalc_reason = "force quantum changed";
-		}
+	value = pw_properties_get_uint32(node->properties, PW_KEY_NODE_FORCE_QUANTUM, 0);
+	if (node->force_quantum != value) {
+	        node->force_quantum = value;
+		node->stamp = ++context->stamp;
+		recalc_reason = "force quantum changed";
 	}
 
 	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_RATE))) {
@@ -1268,18 +1301,17 @@ static void check_properties(struct pw_impl_node *node)
 	}
 	node->lock_rate = pw_properties_get_bool(node->properties, PW_KEY_NODE_LOCK_RATE, false);
 
-	if ((str = pw_properties_get(node->properties, PW_KEY_NODE_FORCE_RATE))) {
-		if (spa_atou32(str, &value, 0)) {
-			if (value == 0)
-				value = node->rate.denom;
-			if (node->force_rate != value) {
-				pw_log_info("(%s-%u) force-rate:%u -> %u", node->name,
-							node->info.id, node->force_rate, value);
-				node->force_rate = value;
-				node->stamp = ++context->stamp;
-				recalc_reason = "force rate changed";
-			}
-		}
+	value = pw_properties_get_uint32(node->properties, PW_KEY_NODE_FORCE_RATE, SPA_ID_INVALID);
+	if (value == 0)
+		value = node->rate.denom;
+	if (value == SPA_ID_INVALID)
+		value = 0;
+	if (node->force_rate != value) {
+		pw_log_info("(%s-%u) force-rate:%u -> %u", node->name,
+					node->info.id, node->force_rate, value);
+		node->force_rate = value;
+		node->stamp = ++context->stamp;
+		recalc_reason = "force rate changed";
 	}
 
 	pw_log_debug("%p: driver:%d recalc:%s active:%d", node, node->driver,
@@ -1323,7 +1355,7 @@ static inline void debug_xrun_target(struct pw_impl_node *driver,
 	enum spa_log_level level = SPA_LOG_LEVEL_DEBUG;
 
 	if ((suppressed = spa_ratelimit_test(&driver->rt.rate_limit, nsec)) >= 0)
-		level = SPA_LOG_LEVEL_WARN;
+		level = SPA_LOG_LEVEL_INFO;
 
 	pw_log(level, "(%s-%u) xrun state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 		" waiting:%"PRIu64" process:%"PRIu64" status:%s (%d suppressed)",
@@ -1337,24 +1369,25 @@ static inline void debug_xrun_target(struct pw_impl_node *driver,
 		str_status(status), suppressed);
 }
 
-static inline void debug_xrun_graph(struct pw_impl_node *driver, uint64_t nsec)
+static inline void debug_xrun_graph(struct pw_impl_node *driver, uint64_t nsec, uint32_t old_status)
 {
 	int suppressed;
 	enum spa_log_level level = SPA_LOG_LEVEL_DEBUG;
 	struct pw_node_target *t;
 
 	if ((suppressed = spa_ratelimit_test(&driver->rt.rate_limit, nsec)) >= 0)
-		level = SPA_LOG_LEVEL_WARN;
+		level = SPA_LOG_LEVEL_INFO;
 
-	pw_log(level, "(%s-%u) graph xrun (%d suppressed)",
-			driver->name, driver->info.id, suppressed);
+	pw_log(level, "(%s-%u) graph xrun %s (%d suppressed)",
+			driver->name, driver->info.id, str_status(old_status), suppressed);
 
 	spa_list_for_each(t, &driver->rt.target_list, link) {
 		struct pw_node_activation *a = t->activation;
 		struct pw_node_activation_state *state = &a->state[0];
+		uint32_t status = SPA_ATOMIC_LOAD(a->status);
 
-		if (a->status == PW_NODE_ACTIVATION_TRIGGERED ||
-		    a->status == PW_NODE_ACTIVATION_AWAKE) {
+		if (status == PW_NODE_ACTIVATION_TRIGGERED ||
+		    status == PW_NODE_ACTIVATION_AWAKE) {
 			pw_log(level, "(%s-%u) xrun state:%p pending:%d/%d s:%"PRIu64" a:%"PRIu64" f:%"PRIu64
 					" waiting:%"PRIu64" process:%"PRIu64" status:%s",
 					t->name, t->id, state,
@@ -1364,7 +1397,7 @@ static inline void debug_xrun_graph(struct pw_impl_node *driver, uint64_t nsec)
 					a->finish_time,
 					a->awake_time - a->signal_time,
 					a->finish_time - a->awake_time,
-					str_status(a->status));
+					str_status(status));
 
 		}
 	}
@@ -1377,7 +1410,7 @@ static void debug_sync_timeout(struct pw_impl_node *driver, uint64_t nsec)
 	int suppressed;
 
 	if ((suppressed = spa_ratelimit_test(&driver->rt.rate_limit, nsec)) >= 0)
-		level = SPA_LOG_LEVEL_WARN;
+		level = SPA_LOG_LEVEL_INFO;
 
 	pw_log(level, "(%s-%u) sync timeout, going to RUNNING (%d suppressed)",
 				driver->name, driver->info.id, suppressed);
@@ -1385,6 +1418,7 @@ static void debug_sync_timeout(struct pw_impl_node *driver, uint64_t nsec)
 	spa_list_for_each(t, &driver->rt.target_list, link) {
 		struct pw_node_activation *a = t->activation;
 		struct pw_node_activation_state *state = &a->state[0];
+		uint32_t status = SPA_ATOMIC_LOAD(a->status);
 
 		if (!a->pending_sync)
 			continue;
@@ -1398,7 +1432,7 @@ static void debug_sync_timeout(struct pw_impl_node *driver, uint64_t nsec)
 				a->finish_time,
 				a->awake_time - a->signal_time,
 				a->finish_time - a->awake_time,
-				str_status(a->status));
+				str_status(status));
 	}
 }
 
@@ -1434,7 +1468,8 @@ static inline int process_node(void *data, uint64_t nsec)
 	struct pw_impl_port *p;
 	struct pw_node_activation *a = this->rt.target.activation;
 	struct spa_system *data_system = this->rt.target.system;
-	int status, old_status;
+	int status;
+	bool was_awake;
 
 	if (!SPA_ATOMIC_CAS(a->status,
 				PW_NODE_ACTIVATION_TRIGGERED,
@@ -1442,8 +1477,8 @@ static inline int process_node(void *data, uint64_t nsec)
 		return 0;
 
 	a->awake_time = nsec;
-	pw_log_trace_fp("%p: %s process remote:%u exported:%u %"PRIu64" %"PRIu64,
-			this, this->name, this->remote, this->exported,
+	pw_log_trace_fp("%p: %s-%d process remote:%u exported:%u %"PRIu64" %"PRIu64,
+			this, this->name, this->info.id, this->remote, this->exported,
 			a->signal_time, nsec);
 
 	/* when transport sync is not supported, just clear the flag */
@@ -1473,15 +1508,18 @@ static inline int process_node(void *data, uint64_t nsec)
 	a->state[0].status = status;
 
 	nsec = get_time_ns(data_system);
-	old_status = SPA_ATOMIC_XCHG(a->status, PW_NODE_ACTIVATION_FINISHED);
+	was_awake = SPA_ATOMIC_CAS(a->status,
+				PW_NODE_ACTIVATION_AWAKE,
+				PW_NODE_ACTIVATION_FINISHED);
 	a->finish_time = nsec;
 
-	pw_log_trace_fp("%p: finished status:%d %"PRIu64, this, status, nsec);
+	pw_log_trace_fp("%p: finished status:%d %"PRIu64" was_awake:%d",
+			this, status, nsec, was_awake);
 
 	/* we don't need to trigger targets when the node was driving the
 	 * graph because that means we finished the graph. */
 	if (SPA_LIKELY(!this->driving)) {
-		if ((!this->async || a->server_version < 1) && old_status == PW_NODE_ACTIVATION_AWAKE)
+		if ((!this->async || a->server_version < 1) && was_awake)
 			trigger_targets(this, status, nsec);
 	} else {
 		/* calculate CPU time when finished */
@@ -1500,8 +1538,7 @@ int pw_impl_node_trigger(struct pw_impl_node *node)
 {
 	uint64_t nsec = get_time_ns(node->rt.target.system);
 	struct pw_node_target *t = &node->rt.target;
-	t->trigger(t, nsec);
-	return 0;
+	return t->trigger(t, nsec);
 }
 
 static void node_on_fd_events(struct spa_source *source)
@@ -1527,8 +1564,9 @@ static void node_on_fd_events(struct spa_source *source)
 					nsec / 1000, 0);
 		}
 
-		pw_log_trace_fp("%p: remote:%u exported:%u %s got process %"PRIu64,
-				this, this->remote, this->exported, this->name, nsec);
+		pw_log_trace_fp("%p: remote:%u exported:%u %s-%d got process %"PRIu64,
+				this, this->remote, this->exported, this->name, this->info.id,
+				nsec);
 
 		process_node(this, nsec);
 	}
@@ -1863,6 +1901,20 @@ static void node_result(void *data, int seq, int res, uint32_t type, const void 
 	pw_impl_node_emit_result(node, seq, res, type, result);
 }
 
+static void handle_request_process_command(struct pw_impl_node *node, const struct spa_command *command)
+{
+	struct impl *impl = SPA_CONTAINER_OF(node, struct impl, this);
+	if (node->driving) {
+		pw_log_debug("request process %d %d", node->info.state, impl->pending_state);
+		if (node->info.state == PW_NODE_STATE_RUNNING) {
+			spa_node_send_command(node->driver_node->node, command);
+		} else if (impl->pending_state == PW_NODE_STATE_RUNNING) {
+			spa_clear_ptr(impl->pending_request_process, free);
+			impl->pending_request_process = (struct spa_command*)spa_pod_copy(&command->pod);
+		}
+	}
+}
+
 static void node_event(void *data, const struct spa_event *event)
 {
 	struct pw_impl_node *node = data;
@@ -1879,10 +1931,19 @@ static void node_event(void *data, const struct spa_event *event)
 				-EFAULT, strdup("Received error event"));
 		break;
 	case SPA_NODE_EVENT_RequestProcess:
-		pw_log_debug("request process");
-		if (!node->driving) {
-			pw_impl_node_send_command(node->driver_node,
-				    &SPA_NODE_COMMAND_INIT(SPA_NODE_COMMAND_RequestProcess));
+		if (!node->driving && !node->exported) {
+			struct spa_command *command;
+			size_t size = SPA_POD_SIZE(&event->pod);
+
+			/* turn the event and all the arguments into a command */
+			command = alloca(size);
+			memcpy(command, event, size);
+			command->body.body.type = SPA_TYPE_COMMAND_Node;
+			command->body.body.id = SPA_NODE_COMMAND_RequestProcess;
+
+			/* send the request process to the driver but only on the
+			 * server size */
+			handle_request_process_command(node->driver_node, command);
 		}
 		break;
 	default:
@@ -1996,10 +2057,14 @@ static int node_ready(void *data, int status)
 	struct pw_impl_node *node = data;
 	struct pw_impl_node *driver = node->driver_node;
 	struct pw_node_activation *a = node->rt.target.activation;
+	struct pw_node_activation_state *state = &a->state[0];
 	struct spa_system *data_system = node->rt.target.system;
 	struct pw_node_target *t, *reposition_target = NULL;;
 	struct pw_impl_port *p;
-	uint64_t nsec;
+	struct spa_io_clock *cl = &node->rt.position->clock;
+	int sync_type, all_ready, update_sync, target_sync, old_status;
+	uint32_t owner[2], reposition_owner, pending;
+	uint64_t min_timeout = UINT64_MAX, nsec;
 
 	pw_log_trace_fp("%p: ready driver:%d exported:%d %p status:%d prepared:%d", node,
 			node->driver, node->exported, driver, status, node->rt.prepared);
@@ -2012,129 +2077,129 @@ static int node_ready(void *data, int status)
 		pw_log_info("%p: ready non-active node %s in state %d", node, node->name, node->info.state);
 		return -EIO;
 	}
+	if (SPA_UNLIKELY(node != driver)) {
+		pw_log_warn("%p: ready non-driver node %s", node, node->name);
+		return -EIO;
+	}
 
 	nsec = get_time_ns(data_system);
 
-	if (SPA_LIKELY(node == driver)) {
-		struct pw_node_activation_state *state = &a->state[0];
-		struct spa_io_clock *cl = &node->rt.position->clock;
-		int sync_type, all_ready, update_sync, target_sync;
-		uint32_t owner[2], reposition_owner;
-		uint64_t min_timeout = UINT64_MAX;
-		int32_t pending;
-		int old_status;
-
-		if (SPA_UNLIKELY((pending = pw_node_activation_state_xchg(state)) > 0)) {
-			pw_impl_node_rt_emit_incomplete(driver);
-			old_status = SPA_ATOMIC_LOAD(a->status);
-			if (old_status != PW_NODE_ACTIVATION_FINISHED) {
-				SPA_ATOMIC_STORE(a->status, PW_NODE_ACTIVATION_TRIGGERED);
-				process_node(node, nsec);
-				debug_xrun_graph(node, nsec);
+	while (true) {
+		old_status = SPA_ATOMIC_LOAD(a->status);
+		if (SPA_LIKELY(old_status == PW_NODE_ACTIVATION_FINISHED))
+			/* all good, graph completed */
+			break;
+		if (SPA_ATOMIC_CAS(a->status, old_status, PW_NODE_ACTIVATION_TRIGGERED)) {
+			/* if we got triggered but did not run the processing yet we don't
+			 * really have an error so we can skip the error reporting. We need
+			 * to run recovery anyway because the ready callback is already
+			 * emitted */
+			if (old_status != PW_NODE_ACTIVATION_TRIGGERED) {
+				/* otherwise, something was wrong and we debug */
+				debug_xrun_graph(node, nsec, old_status);
+				pw_impl_node_rt_emit_incomplete(driver);
 			}
+			SPA_FLAG_SET(cl->flags, SPA_IO_CLOCK_FLAG_XRUN_RECOVER);
+			process_node(node, nsec);
+			SPA_FLAG_CLEAR(cl->flags, SPA_IO_CLOCK_FLAG_XRUN_RECOVER);
+			break;
 		}
+	}
 
-		/* This update is done too late, the driver should do this
-		 * before calling the ready callback so that it can use the new target
-		 * duration and rate to schedule the next update. We do this here to
-		 * help drivers that don't support this yet */
-		if (SPA_UNLIKELY(cl->duration != cl->target_duration ||
-		    cl->rate.denom != cl->target_rate.denom)) {
-			pw_log_warn("driver %s did not update duration/rate (%"PRIu64"/%"PRIu64" %u/%u)",
-					node->name,
-					cl->duration, cl->target_duration,
-					cl->rate.denom, cl->target_rate.denom);
-			cl->duration = cl->target_duration;
-			cl->rate = cl->target_rate;
-		}
-
-		sync_type = check_updates(node, &reposition_owner);
-		owner[0] = SPA_ATOMIC_LOAD(a->segment_owner[0]);
-		owner[1] = SPA_ATOMIC_LOAD(a->segment_owner[1]);
+	sync_type = check_updates(node, &reposition_owner);
+	owner[0] = SPA_ATOMIC_LOAD(a->segment_owner[0]);
+	owner[1] = SPA_ATOMIC_LOAD(a->segment_owner[1]);
 again:
-		all_ready = sync_type == SYNC_CHECK;
-		update_sync = !all_ready;
-		target_sync = sync_type == SYNC_START ? true : false;
+	all_ready = sync_type == SYNC_CHECK;
+	update_sync = !all_ready;
+	target_sync = sync_type == SYNC_START ? true : false;
+	pending = 0;
 
-		spa_list_for_each(t, &driver->rt.target_list, link) {
-			struct pw_node_activation *ta = t->activation;
-			uint32_t id = t->id;
+	spa_list_for_each(t, &driver->rt.target_list, link) {
+		struct pw_node_activation *ta = t->activation;
+		uint32_t id = t->id;
 
-			ta->driver_id = driver->info.id;
+		ta->driver_id = driver->info.id;
 retry_status:
-			pw_node_activation_state_reset(&ta->state[0]);
-			/* we don't change the state of inactive nodes and don't use them
-			 * for reposition. The pending will be at least 1 and they might
-			 * get decremented to 0 but since the status is inactive, we don't
-			 * do the atomic CAS from NOT_TRIGGERED to TRIGGERED and we don't
-			 * write the eventfd. */
-			old_status = SPA_ATOMIC_LOAD(ta->status);
-			if (SPA_UNLIKELY(old_status == PW_NODE_ACTIVATION_INACTIVE))
-				continue;
+		pw_node_activation_state_reset(&ta->state[0]);
 
-			/* if this fails, the node might just have stopped and we need to retry */
-			if (SPA_UNLIKELY(!SPA_ATOMIC_CAS(ta->status, old_status, PW_NODE_ACTIVATION_NOT_TRIGGERED)))
-				goto retry_status;
-
-			if (old_status == PW_NODE_ACTIVATION_TRIGGERED ||
-			    old_status == PW_NODE_ACTIVATION_AWAKE) {
-				update_xrun_stats(ta, 1, nsec / 1000, 0);
-				debug_xrun_target(node, t, old_status, nsec);
-			}
-
-			/* this is the node with reposition info */
-			if (SPA_UNLIKELY(id == reposition_owner))
-				reposition_target = t;
-
-			/* update extra segment info if it is the owner */
-			if (SPA_UNLIKELY(id == owner[0]))
-				a->position.segments[0].bar = ta->segment.bar;
-			if (SPA_UNLIKELY(id == owner[1]))
-				a->position.segments[0].video = ta->segment.video;
-
-			min_timeout = SPA_MIN(min_timeout, ta->sync_timeout);
-
-			if (SPA_UNLIKELY(update_sync)) {
-				ta->pending_sync = target_sync;
-				ta->pending_new_pos = target_sync;
-			} else {
-				all_ready &= ta->pending_sync == false;
-			}
+		if (ta->active_driver_id != ta->driver_id) {
+			pw_log_trace_fp("%p: (%s-%u) %d waiting for driver %d<>%d", t->node,
+					t->name, t->id, ta->status,
+					ta->active_driver_id, ta->driver_id);
+			continue;
 		}
 
-		a->prev_signal_time = a->signal_time;
-		node->driver_start = nsec;
+		/* we don't change the state of inactive nodes and don't use them
+		 * for reposition. The pending will be at least 1 and they might
+		 * get decremented to 0 but since the status is inactive, we don't
+		 * do the atomic CAS from NOT_TRIGGERED to TRIGGERED and we don't
+		 * write the eventfd. */
+		old_status = SPA_ATOMIC_LOAD(ta->status);
+		if (SPA_UNLIKELY(old_status == PW_NODE_ACTIVATION_INACTIVE))
+			continue;
 
-		a->sync_timeout = SPA_MIN(min_timeout, DEFAULT_SYNC_TIMEOUT);
+		/* if this fails, the node might just have stopped and we need to retry */
+		if (SPA_UNLIKELY(!SPA_ATOMIC_CAS(ta->status, old_status, PW_NODE_ACTIVATION_NOT_TRIGGERED)))
+			goto retry_status;
 
-		if (SPA_UNLIKELY(reposition_target != NULL)) {
-			do_reposition(node, reposition_target);
-			sync_type = SYNC_START;
-			reposition_owner = 0;
-			reposition_target = NULL;
-			goto again;
+		if (!SPA_FLAG_IS_SET(ta->flags, PW_NODE_ACTIVATION_FLAG_ASYNC))
+			pending++;
+
+		if (old_status == PW_NODE_ACTIVATION_TRIGGERED ||
+		    old_status == PW_NODE_ACTIVATION_AWAKE) {
+			update_xrun_stats(ta, 1, nsec / 1000, 0);
+			debug_xrun_target(node, t, old_status, nsec);
 		}
 
-		update_position(node, all_ready, nsec);
+		/* this is the node with reposition info */
+		if (SPA_UNLIKELY(id == reposition_owner))
+			reposition_target = t;
 
-		a->position.clock.cycle++;
-		pw_impl_node_rt_emit_start(node);
-	}
-	/* this should not happen, driver nodes that are not currently driving
-	 * should not emit the ready callback */
-	if (SPA_UNLIKELY(node->driver && !node->driving))
-		return 0;
+		/* update extra segment info if it is the owner */
+		if (SPA_UNLIKELY(id == owner[0]))
+			a->position.segments[0].bar = ta->segment.bar;
+		if (SPA_UNLIKELY(id == owner[1]))
+			a->position.segments[0].video = ta->segment.video;
 
-	if (SPA_UNLIKELY(!node->driver)) {
-		/* legacy, nodes should directly resume the graph by calling
-		 * the peer eventfd directly, node_ready is only for drivers */
-		a->status = PW_NODE_ACTIVATION_FINISHED;
-		a->finish_time = nsec;
+		min_timeout = SPA_MIN(min_timeout, ta->sync_timeout);
+
+		if (SPA_UNLIKELY(update_sync)) {
+			ta->pending_sync = target_sync;
+			ta->pending_new_pos = target_sync;
+		} else {
+			all_ready &= ta->pending_sync == false;
+		}
+		ta->prev_signal_time = ta->signal_time;
+		ta->prev_awake_time = ta->awake_time;
+		ta->prev_finish_time = ta->finish_time;
 	}
+
+	node->driver_start = nsec;
+
+	a->sync_timeout = SPA_MIN(min_timeout, DEFAULT_SYNC_TIMEOUT);
+
+	if (SPA_UNLIKELY(reposition_target != NULL)) {
+		do_reposition(node, reposition_target);
+		sync_type = SYNC_START;
+		reposition_owner = 0;
+		reposition_target = NULL;
+		goto again;
+	}
+	state->pending = pending;
+
+	update_position(node, all_ready, nsec);
+
+	/* move output with previous cycle, this makes the async nodes
+	 * pick up the new data immediately */
 	if (status & SPA_STATUS_HAVE_DATA) {
 		spa_list_for_each(p, &node->rt.output_mix, rt.node_link)
 			spa_node_process_fast(p->mix);
 	}
+
+	a->position.clock.cycle++;
+	pw_impl_node_rt_emit_start(node);
+
 	/* now signal all the nodes we drive */
 	trigger_targets(node, status, nsec);
 	return 0;
@@ -2394,6 +2459,7 @@ void pw_impl_node_destroy(struct pw_impl_node *node)
 	pw_work_queue_cancel(impl->work, node, SPA_ID_INVALID);
 
 	pw_properties_free(node->properties);
+	spa_clear_ptr(impl->pending_request_process, free);
 
 	clear_info(node);
 
@@ -2739,9 +2805,17 @@ int pw_impl_node_set_state(struct pw_impl_node *node, enum pw_node_state state)
 		 * will wait until all previous items in the work queue are
 		 * completed */
 		impl->pending_state = state;
-		impl->pending_id = pw_work_queue_add(impl->work,
-				node, res == EBUSY ? -EBUSY : res,
-				on_state_complete, SPA_INT_TO_PTR(state));
+		if (node->exported) {
+			/* exported nodes must complete immediately. This is important
+			 * because the server sends ping to check completion. The server
+			 * will only send Start to driver nodes when all clients are
+			 * ready for processing. */
+			on_state_complete(node, SPA_INT_TO_PTR(state), -EBUSY, 0);
+		} else {
+			impl->pending_id = pw_work_queue_add(impl->work,
+					node, res == EBUSY ? -EBUSY : res,
+					on_state_complete, SPA_INT_TO_PTR(state));
+		}
 	}
 	return res;
 }
@@ -2777,5 +2851,15 @@ bool pw_impl_node_is_active(struct pw_impl_node *node)
 SPA_EXPORT
 int pw_impl_node_send_command(struct pw_impl_node *node, const struct spa_command *command)
 {
-	return spa_node_send_command(node->node, command);
+	uint32_t id = SPA_NODE_COMMAND_ID(command);
+	int res = 0;
+
+	switch (id) {
+	case SPA_NODE_COMMAND_RequestProcess:
+		handle_request_process_command(node, command);
+		break;
+	default:
+		res = spa_node_send_command(node->node, command);
+	}
+	return res;
 }

@@ -95,6 +95,19 @@
  *
  * The PipeWire server processes are explicitly configured with a valid nice level.
  *
+ * ## Config override
+ *
+ * A `module.rt.args` config section can be added
+ * to override the module arguments.
+ *
+ *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-rt-args.conf
+ *
+ * module.rt.args = {
+ *     #nice.level = 22
+ * }
+ *\endcode
+ *
  * ## Example configuration
  *
  *\code{.unparsed}
@@ -747,6 +760,9 @@ static int impl_join(void *object, struct spa_thread *thread, void **retval)
 	struct impl *impl = object;
 	pthread_t pt = (pthread_t)thread;
 	struct thread *thr;
+	int res;
+
+	res = pthread_join(pt, retval);
 
 	pthread_mutex_lock(&impl->lock);
 	if ((thr = find_thread_by_pt(impl, pt)) != NULL) {
@@ -755,7 +771,7 @@ static int impl_join(void *object, struct spa_thread *thread, void **retval)
 	}
 	pthread_mutex_unlock(&impl->lock);
 
-	return pthread_join(pt, retval);
+	return res;
 }
 
 
@@ -1073,6 +1089,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		res = -errno;
 		goto error;
 	}
+	pw_context_conf_update_props(context, "module."NAME".args", props);
 
 	impl->context = context;
 	impl->nice_level = pw_properties_get_int32(props, "nice.level", DEFAULT_NICE_LEVEL);

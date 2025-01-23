@@ -68,7 +68,7 @@ struct port {
 	struct spa_port_info info;
 	struct spa_io_buffers *io;
 	struct spa_io_rate_match *rate_match;
-	struct spa_latency_info latency;
+	struct spa_latency_info latency[2];
 #define IDX_EnumFormat	0
 #define IDX_Meta	1
 #define IDX_IO		2
@@ -87,6 +87,18 @@ struct port {
 	struct spa_bt_decode_buffer buffer;
 };
 
+struct delay_info {
+	union {
+		struct {
+			int32_t buffer;
+			uint32_t duration;
+		};
+		uint64_t v;
+	};
+};
+
+SPA_STATIC_ASSERT(sizeof(struct delay_info) == sizeof(uint64_t));
+
 struct impl {
 	struct spa_handle handle;
 	struct spa_node node;
@@ -94,6 +106,7 @@ struct impl {
 	struct spa_log *log;
 	struct spa_loop *data_loop;
 	struct spa_system *data_system;
+	struct spa_loop_utils *loop_utils;
 
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
@@ -150,6 +163,10 @@ struct impl {
 	uint64_t sample_count;
 
 	uint32_t errqueue_count;
+
+	struct delay_info delay;
+	int64_t delay_sink;
+	struct spa_source *update_delay_event;
 };
 
 #define CHECK_PORT(this,d,p)    ((d) == SPA_DIRECTION_OUTPUT && (p) == 0)
@@ -504,6 +521,9 @@ static void media_on_ready_read(struct spa_source *source)
 
 	spa_log_trace(this->log, "socket poll");
 
+	/* update the current pts */
+	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
+
 	/* read */
 	size_read = read_data (this);
 	if (size_read == 0)
@@ -512,9 +532,6 @@ static void media_on_ready_read(struct spa_source *source)
 		spa_log_error(this->log, "failed to read data: %s", spa_strerror(size_read));
 		goto stop;
 	}
-
-	/* update the current pts */
-	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
 
 	if (this->codec_props_changed && this->codec_props
 			&& this->codec->update_props) {
@@ -539,7 +556,7 @@ static void media_on_ready_read(struct spa_source *source)
 	if (!this->started)
 		return;
 
-	spa_bt_decode_buffer_write_packet(&port->buffer, decoded);
+	spa_bt_decode_buffer_write_packet(&port->buffer, decoded, SPA_TIMESPEC_TO_NSEC(&now));
 
 	dt = SPA_TIMESPEC_TO_NSEC(&this->now);
 	this->now = now;
@@ -648,6 +665,52 @@ static void media_iso_pull(struct spa_bt_iso_io *iso_io)
 	 * iso-io whether this source is running or not. */
 }
 
+static void emit_port_info(struct impl *this, struct port *port, bool full);
+
+static void update_transport_delay(struct impl *this)
+{
+	struct port *port = &this->port;
+	struct delay_info info;
+	float latency;
+	int64_t latency_nsec;
+	int64_t delay_sink;
+
+	if (!this->transport || !port->have_format)
+		return;
+
+	info.v = __atomic_load_n(&this->delay.v, __ATOMIC_RELAXED);
+
+	/* Latency to sink */
+	latency = info.buffer
+		+ port->latency[SPA_DIRECTION_INPUT].min_rate
+		+ port->latency[SPA_DIRECTION_INPUT].min_quantum * info.duration;
+
+	latency_nsec = port->latency[SPA_DIRECTION_INPUT].min_ns
+		+ (int64_t)(latency * SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
+
+	spa_bt_transport_set_delay(this->transport, latency_nsec);
+
+	delay_sink =
+		port->latency[SPA_DIRECTION_INPUT].min_ns
+		+ (int64_t)((port->latency[SPA_DIRECTION_INPUT].min_rate
+						+ port->latency[SPA_DIRECTION_INPUT].min_quantum * info.duration)
+				* SPA_NSEC_PER_SEC / port->current_format.info.raw.rate);
+	__atomic_store_n(&this->delay_sink, delay_sink, __ATOMIC_RELAXED);
+
+	/* Latency from source */
+	port->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT,
+			.min_rate = info.buffer, .max_rate = info.buffer);
+	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+	port->params[IDX_Latency].user++;
+	emit_port_info(this, port, false);
+}
+
+static void update_delay_event(void *data, uint64_t count)
+{
+	/* in main loop */
+	update_transport_delay(data);
+}
+
 static int do_start_iso_io(struct spa_loop *loop, bool async, uint32_t seq,
 		const void *data, size_t size, void *user_data)
 {
@@ -709,10 +772,14 @@ static int transport_start(struct impl *this)
 		return res;
 
 	if (this->is_duplex) {
-		/* 80 ms max buffer */
-		spa_bt_decode_buffer_set_max_latency(&port->buffer,
+		/* 80 ms max extra buffer */
+		spa_bt_decode_buffer_set_max_extra_latency(&port->buffer,
 				port->current_format.info.raw.rate * 80 / 1000);
 	}
+
+	this->delay.buffer = -1;
+	this->delay.duration = 0;
+	this->update_delay_event = spa_loop_utils_add_event(this->loop_utils, update_delay_event, this);
 
 	this->sample_count = 0;
 	this->errqueue_count = 0;
@@ -789,6 +856,11 @@ static int do_remove_source(struct spa_loop *loop,
 	if (this->transport && this->transport->iso_io)
 		spa_bt_iso_io_set_cb(this->transport->iso_io, NULL, NULL);
 	set_timeout(this, 0);
+
+	if (this->update_delay_event) {
+		spa_loop_utils_destroy_source(this->loop_utils, this->update_delay_event);
+		this->update_delay_event = NULL;
+	}
 
 	return 0;
 }
@@ -1104,8 +1176,8 @@ impl_node_port_enum_params(void *object, int seq,
 
 	case SPA_PARAM_Latency:
 		switch (result.index) {
-		case 0:
-			param = spa_latency_build(&b, id, &port->latency);
+		case 0: case 1:
+			param = spa_latency_build(&b, id, &port->latency[result.index]);
 			break;
 		default:
 			return 0;
@@ -1224,8 +1296,28 @@ impl_node_port_set_param(void *object,
 		res = port_set_format(this, port, flags, param);
 		break;
 	case SPA_PARAM_Latency:
+	{
+		enum spa_direction other = SPA_DIRECTION_REVERSE(direction);
+		struct spa_latency_info info;
+
+		if (param == NULL)
+			info = SPA_LATENCY_INFO(other);
+		else if ((res = spa_latency_parse(param, &info)) < 0)
+			return res;
+		if (info.direction != other)
+			return -EINVAL;
+		if (memcmp(&port->latency[info.direction], &info, sizeof(info)) == 0)
+			return 0;
+
+		port->latency[info.direction] = info;
+		this->port.info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+		this->port.params[IDX_Latency].user++;
+
+		update_transport_delay(this);
+		emit_port_info(this, port, false);
 		res = 0;
 		break;
+	}
 	default:
 		res = -ENOENT;
 		break;
@@ -1354,7 +1446,8 @@ static uint32_t get_samples(struct impl *this, uint32_t *result_duration)
 static void update_target_latency(struct impl *this)
 {
 	struct port *port = &this->port;
-	uint32_t samples, duration;
+	uint32_t samples, duration, latency;
+	int64_t delay_sink;
 
 	if (this->transport == NULL || !port->have_format)
 		return;
@@ -1380,8 +1473,11 @@ static void update_target_latency(struct impl *this)
 	samples = (uint64_t)this->transport->delay_us *
 		port->current_format.info.raw.rate / SPA_USEC_PER_SEC;
 
-	if (samples > duration)
-		samples -= duration;
+	delay_sink = __atomic_load_n(&this->delay_sink, __ATOMIC_RELAXED);
+	latency = delay_sink * port->current_format.info.raw.rate / SPA_NSEC_PER_SEC;
+
+	if (samples > latency)
+		samples -= latency;
 	else
 		samples = 1;
 
@@ -1406,7 +1502,9 @@ static void process_buffering(struct impl *this)
 
 	update_target_latency(this);
 
-	spa_bt_decode_buffer_process(&port->buffer, samples, duration);
+	spa_bt_decode_buffer_process(&port->buffer, samples, duration,
+			this->position ? this->position->clock.rate_diff : 1.0,
+			this->position ? this->position->clock.next_nsec : 0);
 
 	setup_matching(this);
 
@@ -1458,6 +1556,23 @@ static void process_buffering(struct impl *this)
 		/* ready buffer if full */
 		spa_log_trace(this->log, "queue %d frames:%d", buffer->id, (int)samples);
 		spa_list_append(&port->ready, &buffer->link);
+	}
+
+	if (this->update_delay_event) {
+		int32_t target = spa_bt_decode_buffer_get_target_latency(&port->buffer);
+		uint32_t decoder_delay = 0;
+
+		if (this->codec->get_delay)
+			this->codec->get_delay(this->codec_data, NULL, &decoder_delay);
+
+		target += decoder_delay;
+
+		if (target != this->delay.buffer || duration != this->delay.duration) {
+			struct delay_info info = { .buffer = target, .duration = duration };
+
+			__atomic_store_n(&this->delay.v, info.v, __ATOMIC_RELAXED);
+			spa_loop_utils_signal_event(this->loop_utils, this->update_delay_event);
+		}
 	}
 }
 
@@ -1679,6 +1794,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
+	this->loop_utils = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_LoopUtils);
 
 	spa_log_topic_init(this->log, &log_topic);
 
@@ -1688,6 +1804,10 @@ impl_init(const struct spa_handle_factory *factory,
 	}
 	if (this->data_system == NULL) {
 		spa_log_error(this->log, "a data system is needed");
+		return -EINVAL;
+	}
+	if (this->loop_utils == NULL) {
+		spa_log_error(this->log, "loop utils are needed");
 		return -EINVAL;
 	}
 
@@ -1731,9 +1851,8 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = N_PORT_PARAMS;
 
-	port->latency = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
-	port->latency.min_quantum = 1.0f;
-	port->latency.max_quantum = 1.0f;
+	port->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	port->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	/* Init the buffer lists */
 	spa_list_init(&port->ready);

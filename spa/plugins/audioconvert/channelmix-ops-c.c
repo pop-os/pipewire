@@ -2,6 +2,9 @@
 /* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include <float.h>
+#include <math.h>
+
 #include "channelmix-ops.h"
 
 static inline void clear_c(float *d, uint32_t n_samples)
@@ -11,7 +14,8 @@ static inline void clear_c(float *d, uint32_t n_samples)
 
 static inline void copy_c(float *d, const float *s, uint32_t n_samples)
 {
-	spa_memcpy(d, s, n_samples * sizeof(float));
+	if (d != s)
+		spa_memcpy(d, s, n_samples * sizeof(float));
 }
 
 static inline void vol_c(float *d, const float *s, float vol, uint32_t n_samples)
@@ -62,6 +66,73 @@ channelmix_copy_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		vol_c(d[i], s[i], mix->matrix[i][i], n_samples);
 }
 
+static void lr4_process_c(struct lr4 *lr4, float *dst, const float *src, const float vol, int samples)
+{
+	float x1 = lr4->x1;
+	float x2 = lr4->x2;
+	float y1 = lr4->y1;
+	float y2 = lr4->y2;
+	float b0 = lr4->bq.b0;
+	float b1 = lr4->bq.b1;
+	float b2 = lr4->bq.b2;
+	float a1 = lr4->bq.a1;
+	float a2 = lr4->bq.a2;
+	float x, y, z;
+	int i;
+
+	if (vol == 0.0f || !lr4->active) {
+		vol_c(dst, src, vol, samples);
+		return;
+	}
+
+	for (i = 0; i < samples; i++) {
+		x  = src[i];
+		y  = b0 * x          + x1;
+		x1 = b1 * x - a1 * y + x2;
+		x2 = b2 * x - a2 * y;
+		z  = b0 * y          + y1;
+		y1 = b1 * y - a1 * z + y2;
+		y2 = b2 * y - a2 * z;
+		dst[i] = z * vol;
+	}
+#define F(x) (isnormal(x) ? (x) : 0.0f)
+	lr4->x1 = F(x1);
+	lr4->x2 = F(x2);
+	lr4->y1 = F(y1);
+	lr4->y2 = F(y2);
+#undef F
+}
+
+static inline void delay_convolve_run_c(float *buffer, uint32_t *pos,
+		uint32_t n_buffer, uint32_t delay,
+		const float *taps, uint32_t n_taps,
+		float *dst, const float *src, const float vol, uint32_t n_samples)
+{
+	uint32_t i, j;
+	uint32_t w = *pos;
+	uint32_t o = n_buffer - delay - n_taps-1;
+
+	if (n_taps == 1) {
+		for (i = 0; i < n_samples; i++) {
+			buffer[w] = buffer[w + n_buffer] = src[i];
+			dst[i] = buffer[w + o] * vol;
+			w = w + 1 >= n_buffer ? 0 : w + 1;
+		}
+	} else {
+		for (i = 0; i < n_samples; i++) {
+			float sum = 0.0f;
+
+			buffer[w] = buffer[w + n_buffer] = src[i];
+			for (j = 0; j < n_taps; j++)
+				sum += taps[j] * buffer[w+o+j];
+			dst[i] = sum * vol;
+
+			w = w + 1 >= n_buffer ? 0 : w + 1;
+		}
+	}
+	*pos = w;
+}
+
 #define _M(ch)		(1UL << SPA_AUDIO_CHANNEL_ ## ch)
 
 void
@@ -99,10 +170,10 @@ channelmix_f32_n_m_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 			if (n_j == 0) {
 				clear_c(di, n_samples);
 			} else if (n_j == 1) {
-				lr4_process(&mix->lr4[i], di, sj[0], mj[0], n_samples);
+				lr4_process_c(&mix->lr4[i], di, sj[0], mj[0], n_samples);
 			} else {
 				conv_c(di, sj, mj, n_j, n_samples);
-				lr4_process(&mix->lr4[i], di, di, 1.0f, n_samples);
+				lr4_process_c(&mix->lr4[i], di, di, 1.0f, n_samples);
 			}
 		}
 	}
@@ -199,9 +270,9 @@ channelmix_f32_2_4_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		} else {
 			sub_c(d[2], s[0], s[1], n_samples);
 
-			delay_convolve_run(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
 					   mix->taps, mix->n_taps, d[3], d[2], -v3, n_samples);
-			delay_convolve_run(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
 					   mix->taps, mix->n_taps, d[2], d[2], v2, n_samples);
 		}
 	}
@@ -238,8 +309,8 @@ channelmix_f32_2_3p1_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 				d[2][n] = c * 0.5f;
 			}
 		}
-		lr4_process(&mix->lr4[3], d[3], d[2], v3, n_samples);
-		lr4_process(&mix->lr4[2], d[2], d[2], v2, n_samples);
+		lr4_process_c(&mix->lr4[3], d[3], d[2], v3, n_samples);
+		lr4_process_c(&mix->lr4[2], d[2], d[2], v2, n_samples);
 	}
 }
 
@@ -267,9 +338,9 @@ channelmix_f32_2_5p1_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		} else {
 			sub_c(d[4], s[0], s[1], n_samples);
 
-			delay_convolve_run(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[5], d[4], -v5, n_samples);
-			delay_convolve_run(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[4], d[4], v4, n_samples);
 		}
 	}
@@ -303,9 +374,9 @@ channelmix_f32_2_7p1_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		} else {
 			sub_c(d[6], s[0], s[1], n_samples);
 
-			delay_convolve_run(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[1], &mix->pos[1], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[7], d[6], -v7, n_samples);
-			delay_convolve_run(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
+			delay_convolve_run_c(mix->buffer[0], &mix->pos[0], BUFFER_SIZE, mix->delay,
 					mix->taps, mix->n_taps, d[6], d[6], v6, n_samples);
 		}
 	}

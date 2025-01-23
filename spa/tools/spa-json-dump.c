@@ -82,14 +82,12 @@ static int dump(FILE *file, int indent, struct spa_json *it, const char *value, 
 			spa_json_enter(it, &sub);
 		else
 			sub = *it;
-		while (spa_json_get_string(&sub, key, sizeof(key)) > 0) {
+		while ((len = spa_json_object_next(&sub, key, sizeof(key), &value)) > 0) {
 			fprintf(file, "%s\n%*s",
 					count++ > 0 ? "," : "",
 					indent+2, "");
 			encode_string(file, key, strlen(key));
 			fprintf(file, ": ");
-			if ((len = spa_json_next(&sub, &value)) <= 0)
-				break;
 			res = dump(file, indent+2, &sub, value, len);
 			if (res < 0) {
 				if (toplevel)
@@ -123,8 +121,7 @@ static int process_json(const char *filename, void *buf, size_t size)
 	struct spa_json it;
 	const char *value;
 
-	spa_json_init(&it, buf, size);
-	if ((len = spa_json_next(&it, &value)) <= 0) {
+	if ((len = spa_json_begin(&it, buf, size, &value)) <= 0) {
                 fprintf(stderr, "not a valid file '%s': %s\n", filename, spa_strerror(len));
 		return -EINVAL;
 	}

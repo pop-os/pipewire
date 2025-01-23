@@ -19,6 +19,7 @@
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/utils/ringbuffer.h>
+#include <spa/utils/dll.h>
 #include <spa/monitor/device.h>
 #include <spa/node/node.h>
 #include <spa/node/io.h>
@@ -69,6 +70,7 @@ struct port {
 	StreamConfiguration streamConfig;
 
 	uint32_t memtype = 0;
+	uint32_t buffers_blocks = 1;
 
 	struct buffer buffers[MAX_BUFFERS];
 	uint32_t n_buffers = 0;
@@ -166,6 +168,8 @@ struct impl {
 
 	impl(spa_log *log, spa_loop *data_loop, spa_system *system,
 	     std::shared_ptr<CameraManager> manager, std::shared_ptr<Camera> camera, std::string device_id);
+
+	struct spa_dll dll;
 };
 
 }
@@ -359,6 +363,8 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	switch (id) {
 	case SPA_IO_Clock:
 		impl->clock = (struct spa_io_clock*)data;
+		if (impl->clock)
+			SPA_FLAG_SET(impl->clock->flags, SPA_IO_CLOCK_FLAG_NO_RATE);
 		break;
 	case SPA_IO_Position:
 		impl->position = (struct spa_io_position*)data;
@@ -553,7 +559,7 @@ next:
 		param = (struct spa_pod*)spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, id,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(n_buffers, n_buffers, n_buffers),
-			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
+			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(port->buffers_blocks),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_Int(port->streamConfig.frameSize),
 			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(port->streamConfig.stride));
 		break;

@@ -3,16 +3,9 @@
 /* SPDX-License-Identifier: MIT */
 
 #include <math.h>
-#if defined(__FreeBSD__) || defined(__MidnightBSD__)
-#include <sys/endian.h>
-#define bswap_16 bswap16
-#define bswap_32 bswap32
-#define bswap_64 bswap64
-#else
-#include <byteswap.h>
-#endif
 
 #include <spa/utils/defs.h>
+#include <spa/utils/endian.h>
 #include <spa/utils/string.h>
 
 #define f32_round(a)	lrintf(a)
@@ -22,7 +15,7 @@
 #define FTOI(type,v,scale,offs,noise,min,max) \
 	(type)f32_round(SPA_CLAMPF((v) * (scale) + (offs) + (noise), min, max))
 
-#define FMT_OPS_MAX_ALIGN	32
+#define FMT_OPS_MAX_ALIGN	32u
 
 #define U8_MIN			0u
 #define U8_MAX			255u
@@ -88,6 +81,18 @@
 
 #define U32_TO_U24_32(v)	(((uint32_t)(v)) >> 8)
 
+#define S25_MIN			-16777216
+#define S25_MAX			16777215
+#define S25_SCALE		16777216.0f
+#define S25_32_TO_F32(v)	ITOF(int32_t, v, S25_SCALE, 0.0f)
+#define S25_32S_TO_F32(v)	S25_32_TO_F32(bswap_32(v))
+#define F32_TO_S25_32_D(v,d)	FTOI(int32_t, v, S25_SCALE, 0.0f, d, S25_MIN, S25_MAX)
+#define F32_TO_S25_32(v)	F32_TO_S25_32_D(v, 0.0f)
+#define F32_TO_S25_32S(v)	bswap_32(F32_TO_S25_32(v))
+#define F32_TO_S25_32S_D(v,d)	bswap_32(F32_TO_S25_32_D(v,d))
+#define S25_32_TO_S32(v)	((int32_t)(((uint32_t)(v)) << 7))
+#define S32_TO_S25_32(v)	(((int32_t)(v)) >> 7)
+
 #define U32_MIN			0u
 #define U32_MAX			4294967295u
 #define U32_SCALE		2147483648.f
@@ -107,12 +112,17 @@
 
 #define S32_TO_S24_32(v)	(((int32_t)(v)) >> 8)
 
-#define S32_MIN			(S24_MIN * 256)
-#define S32_MAX			(S24_MAX * 256)
-#define S32_TO_F32(v)		ITOF(int32_t, S32_TO_S24_32(v), S24_SCALE, 0.0f)
+#define S32_MIN			-2147483648
+#define S32_MAX			2147483647
+#define S32_SCALE_I2F		2147483648.0f
+#define S32_TO_F32(v)		ITOF(int32_t, v, S32_SCALE_I2F, 0.0f)
 #define S32S_TO_F32(v)		S32_TO_F32(bswap_32(v))
-#define F32_TO_S32(v)		S24_32_TO_S32(F32_TO_S24_32(v))
-#define F32_TO_S32_D(v,d)	S24_32_TO_S32(F32_TO_S24_32_D(v,d))
+
+#define S32_MIN_F2I		((int32_t)(((uint32_t)(S25_MIN)) << 7))
+#define S32_MAX_F2I		((S25_MAX) << 7)
+#define S32_SCALE_F2I		(-((float)(S32_MIN_F2I)))
+#define F32_TO_S32_D(v,d)	FTOI(int32_t, v, S32_SCALE_F2I, 0.0f, d, S32_MIN_F2I, S32_MAX_F2I)
+#define F32_TO_S32(v)		F32_TO_S32_D(v, 0.0f)
 #define F32_TO_S32S(v)		bswap_32(F32_TO_S32(v))
 #define F32_TO_S32S_D(v,d)	bswap_32(F32_TO_S32_D(v,d))
 
@@ -429,6 +439,14 @@ DEFINE_FUNCTION(64sd_to_64s, c);
 DEFINE_FUNCTION(s16_to_f32d_2, neon);
 DEFINE_FUNCTION(s16_to_f32d, neon);
 DEFINE_FUNCTION(f32d_to_s16, neon);
+#endif
+#if defined(HAVE_RVV)
+DEFINE_FUNCTION(f32d_to_s32, rvv);
+DEFINE_FUNCTION(f32_to_s16, rvv);
+DEFINE_FUNCTION(f32d_to_s16d, rvv);
+DEFINE_FUNCTION(f32d_to_s16, rvv);
+DEFINE_FUNCTION(s16_to_f32d, rvv);
+DEFINE_FUNCTION(s32_to_f32d, rvv);
 #endif
 #if defined(HAVE_SSE2)
 DEFINE_FUNCTION(s16_to_f32d_2, sse2);

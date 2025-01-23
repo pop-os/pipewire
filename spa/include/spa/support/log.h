@@ -15,6 +15,14 @@ extern "C" {
 #include <spa/utils/defs.h>
 #include <spa/utils/hook.h>
 
+#ifndef SPA_API_LOG
+ #ifdef SPA_API_IMPL
+  #define SPA_API_LOG SPA_API_IMPL
+ #else
+  #define SPA_API_LOG static inline
+ #endif
+#endif
+
 /** \defgroup spa_log Log
  * Logging interface
  */
@@ -213,7 +221,7 @@ struct spa_log_methods {
 #define SPA_LOG_TOPIC(v, t) \
    (struct spa_log_topic){ .version = (v), .topic = (t)}
 
-static inline void spa_log_topic_init(struct spa_log *log, struct spa_log_topic *topic)
+SPA_API_LOG void spa_log_topic_init(struct spa_log *log, struct spa_log_topic *topic)
 {
 	if (SPA_UNLIKELY(!log))
 		return;
@@ -221,7 +229,7 @@ static inline void spa_log_topic_init(struct spa_log *log, struct spa_log_topic 
 	spa_interface_call(&log->iface, struct spa_log_methods, topic_init, 1, topic);
 }
 
-static inline bool spa_log_level_topic_enabled(const struct spa_log *log,
+SPA_API_LOG bool spa_log_level_topic_enabled(const struct spa_log *log,
 					       const struct spa_log_topic *topic,
 					       enum spa_log_level level)
 {
@@ -255,20 +263,22 @@ static inline bool spa_log_level_topic_enabled(const struct spa_log *log,
 })
 
 /* Transparently calls to version 0 logv if v1 is not supported */
-#define spa_log_logtv(l,lev,topic,...)					\
-({									\
-	struct spa_log *_l = l;						\
-	if (SPA_UNLIKELY(spa_log_level_topic_enabled(_l, topic, lev))) { \
-		struct spa_interface *_if = &_l->iface;			\
-		if (!spa_interface_call(_if,				\
-				struct spa_log_methods, logtv, 1,	\
-				lev, topic,				\
-				__VA_ARGS__))				\
-		    spa_interface_call(_if,				\
-				struct spa_log_methods, logv, 0,	\
-				lev, __VA_ARGS__);			\
-	}								\
-})
+SPA_PRINTF_FUNC(7, 0)
+SPA_API_LOG void spa_log_logtv(struct spa_log *l, enum spa_log_level level,
+		const struct spa_log_topic *topic, const char *file, int line,
+		const char *func, const char *fmt, va_list args)
+{
+	if (SPA_UNLIKELY(spa_log_level_topic_enabled(l, topic, level))) {
+		struct spa_interface *i = &l->iface;
+		if (!spa_interface_call(i,
+				struct spa_log_methods, logtv, 1,
+				level, topic,
+				file, line, func, fmt, args))
+		    spa_interface_call(i,
+				struct spa_log_methods, logv, 0,
+				level, file, line, func, fmt, args);
+	}
+}
 
 #define spa_logt_lev(l,lev,t,...)					\
 	spa_log_logt(l,lev,t,__FILE__,__LINE__,__func__,__VA_ARGS__)
@@ -369,7 +379,8 @@ static inline bool spa_log_level_topic_enabled(const struct spa_log *log,
 								  *  colors even when not logging to a terminal */
 #define SPA_KEY_LOG_FILE		"log.file"		/**< log to the specified file instead of
 								  *  stderr. */
-#define SPA_KEY_LOG_TIMESTAMP		"log.timestamp"		/**< log timestamps */
+#define SPA_KEY_LOG_TIMESTAMP		"log.timestamp"		/**< log timestamp type (local, realtime, monotonic, monotonic-raw).
+								 *   boolean true means local. */
 #define SPA_KEY_LOG_LINE		"log.line"		/**< log file and line numbers */
 #define SPA_KEY_LOG_PATTERNS		"log.patterns"		/**< Spa:String:JSON array of [ {"pattern" : level}, ... ] */
 

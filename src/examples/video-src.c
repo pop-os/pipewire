@@ -194,8 +194,13 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old, enum 
 		interval.tv_sec = 0;
 		interval.tv_nsec = 40 * SPA_NSEC_PER_MSEC;
 
-		pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
-				data->timer, &timeout, &interval, false);
+		printf("driving:%d lazy:%d\n",
+				pw_stream_is_driving(data->stream),
+				pw_stream_is_lazy(data->stream));
+
+		if (pw_stream_is_driving(data->stream) != pw_stream_is_lazy(data->stream))
+			pw_loop_update_timer(pw_main_loop_get_loop(data->loop),
+					data->timer, &timeout, &interval, false);
 		break;
 	}
 	default:
@@ -305,6 +310,7 @@ int main(int argc, char *argv[])
 	data.stream = pw_stream_new(data.core, "video-src",
 		pw_properties_new(
 			PW_KEY_MEDIA_CLASS, "Video/Source",
+			PW_KEY_NODE_SUPPORTS_REQUEST, "1",
 			NULL));
 
 	params[0] = spa_pod_builder_add_object(&b,
@@ -320,11 +326,11 @@ int main(int argc, char *argv[])
 
 	{
 		struct spa_pod_frame f;
-		struct spa_dict_item items[1];
 		/* send a tag, output tags travel downstream */
 		spa_tag_build_start(&b, &f, SPA_PARAM_Tag, SPA_DIRECTION_OUTPUT);
-		items[0] = SPA_DICT_ITEM_INIT("my-tag-key", "my-special-tag-value");
-		spa_tag_build_add_dict(&b, &SPA_DICT_INIT(items, 1));
+		spa_tag_build_add_dict(&b,
+				&SPA_DICT_ITEMS(
+					SPA_DICT_ITEM("my-tag-key", "my-special-tag-value")));
 		params[1] = spa_tag_build_end(&b, &f);
 	}
 

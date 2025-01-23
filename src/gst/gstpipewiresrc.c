@@ -435,6 +435,8 @@ gst_pipewire_src_init (GstPipeWireSrc * src)
   src->autoconnect = DEFAULT_AUTOCONNECT;
   src->min_latency = 0;
   src->max_latency = GST_CLOCK_TIME_NONE;
+
+  src->transform_value = UINT32_MAX;
 }
 
 static gboolean
@@ -538,7 +540,7 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
   GstPipeWirePoolData *data;
   struct spa_meta_header *h;
   struct spa_meta_region *crop;
-  struct spa_meta_videotransform *videotransform;
+  enum spa_meta_videotransform_value transform_value;
   struct pw_time time;
   guint i;
 
@@ -613,24 +615,22 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
     }
   }
 
-  videotransform = data->videotransform;
-  if (videotransform) {
-    if (pwsrc->transform_value != videotransform->transform) {
-      GstEvent *tag_event;
-      const char* tag_string;
+  transform_value = data->videotransform ? data->videotransform->transform :
+                                           SPA_META_TRANSFORMATION_None;
+  if (transform_value != pwsrc->transform_value) {
+    GstEvent *tag_event;
+    const char* tag_string;
 
-      tag_string =
-          spa_transform_value_to_gst_image_orientation(videotransform->transform);
+    tag_string = spa_transform_value_to_gst_image_orientation(transform_value);
 
-      GST_LOG_OBJECT (pwsrc, "got new videotransform: %u / %s",
-          videotransform->transform, tag_string);
+    GST_LOG_OBJECT (pwsrc, "got new videotransform: %u / %s",
+        transform_value, tag_string);
 
-      tag_event = gst_event_new_tag(gst_tag_list_new(GST_TAG_IMAGE_ORIENTATION,
-          tag_string, NULL));
-      gst_pad_push_event (GST_BASE_SRC_PAD (pwsrc), tag_event);
+    tag_event = gst_event_new_tag(gst_tag_list_new(GST_TAG_IMAGE_ORIENTATION,
+        tag_string, NULL));
+    gst_pad_push_event (GST_BASE_SRC_PAD (pwsrc), tag_event);
 
-      pwsrc->transform_value = videotransform->transform;
-    }
+    pwsrc->transform_value = transform_value;
   }
 
   if (pwsrc->is_video) {
@@ -655,6 +655,13 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
 
   for (i = 0; i < b->buffer->n_datas; i++) {
     struct spa_data *d = &b->buffer->datas[i];
+
+    if (d->chunk->size == 0) {
+      // Skip the 0 sized chunk, not adding to the buffer
+      GST_DEBUG_OBJECT(pwsrc, "Chunk size is 0, skipping");
+      continue;
+    }
+
     GstMemory *pmem = gst_buffer_peek_memory (data->buf, i);
     if (pmem) {
       GstMemory *mem;
@@ -664,12 +671,22 @@ static GstBuffer *dequeue_buffer(GstPipeWireSrc *pwsrc)
         mem = gst_memory_copy (pmem, d->chunk->offset, d->chunk->size);
       gst_buffer_insert_memory (buf, i, mem);
     }
-    if (d->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED)
+    if (d->chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) {
+      GST_DEBUG_OBJECT(pwsrc, "Buffer corrupted");
       GST_BUFFER_FLAG_SET (buf, GST_BUFFER_FLAG_CORRUPTED);
+    }
   }
   if (!pwsrc->always_copy)
     gst_buffer_add_parent_buffer_meta (buf, data->buf);
   gst_buffer_unref (data->buf);
+
+  if (gst_buffer_get_size(buf) == 0)
+  {
+    GST_ERROR_OBJECT(pwsrc, "Buffer is empty, dropping this");
+    gst_buffer_unref(buf);
+    buf = NULL;
+  }
+
   return buf;
 }
 
@@ -938,6 +955,9 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
   GST_DEBUG_OBJECT (basesrc, "connect capture with path %s, target-object %s",
                     pwsrc->stream->path, pwsrc->stream->target_object);
 
+  pwsrc->possible_caps = possible_caps;
+  pwsrc->negotiated = FALSE;
+
   enum pw_stream_flags flags;
   flags = PW_STREAM_FLAG_DONT_RECONNECT |
 	  PW_STREAM_FLAG_ASYNC;
@@ -952,9 +972,6 @@ gst_pipewire_src_negotiate (GstBaseSrc * basesrc)
 
   pw_thread_loop_get_time (pwsrc->stream->core->loop, &abstime,
                   GST_PIPEWIRE_DEFAULT_TIMEOUT * SPA_NSEC_PER_SEC);
-
-  pwsrc->possible_caps = possible_caps;
-  pwsrc->negotiated = FALSE;
 
   while (TRUE) {
     enum pw_stream_state state = pw_stream_get_state (pwsrc->stream->pwstream, &error);
@@ -1004,7 +1021,9 @@ no_caps:
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
         ("%s", error_string),
         ("This element did not produce valid caps"));
+    pw_thread_loop_lock (pwsrc->stream->core->loop);
     pw_stream_set_error (pwsrc->stream->pwstream, -EINVAL, "%s", error_string);
+    pw_thread_loop_unlock (pwsrc->stream->core->loop);
     return FALSE;
   }
 no_common_caps:
@@ -1014,7 +1033,9 @@ no_common_caps:
     GST_ELEMENT_ERROR (basesrc, STREAM, FORMAT,
         ("%s", error_string),
         ("This element does not have formats in common with the peer"));
+    pw_thread_loop_lock (pwsrc->stream->core->loop);
     pw_stream_set_error (pwsrc->stream->pwstream, -EPIPE, "%s", error_string);
+    pw_thread_loop_unlock (pwsrc->stream->core->loop);
     return FALSE;
   }
 connect_error:
@@ -1391,6 +1412,7 @@ gst_pipewire_src_stop (GstBaseSrc * basesrc)
   pwsrc->eos = false;
   gst_buffer_replace (&pwsrc->last_buffer, NULL);
   gst_caps_replace(&pwsrc->caps, NULL);
+  pwsrc->transform_value = UINT32_MAX;
   pw_thread_loop_unlock (pwsrc->stream->core->loop);
 
   return TRUE;

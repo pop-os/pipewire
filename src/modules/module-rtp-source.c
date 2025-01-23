@@ -32,10 +32,6 @@
 #include <module-rtp/stream.h>
 #include "network-utils.h"
 
-#ifdef __FreeBSD__
-#define ifr_ifindex ifr_index
-#endif
-
 /** \page page_module_rtp_source RTP source
  *
  * The `rtp-source` module creates a PipeWire source that receives audio
@@ -60,6 +56,7 @@
  * - `sess.latency.msec = <float>`: target network latency in milliseconds, default 100
  * - `sess.ignore-ssrc = <bool>`: ignore SSRC, default false
  * - `sess.media = <string>`: the media type audio|midi|opus, default audio
+ * - `stream.may-pause = <bool>`: pause the stream when no data is reveived, default false
  * - `stream.props = {}`: properties to be passed to the stream
  *
  * ## General options
@@ -81,6 +78,8 @@
  *
  * ## Example configuration
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-rtp-source.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-rtp-source
  *     args = {
@@ -164,30 +163,58 @@ struct impl {
 	socklen_t src_len;
 	struct spa_source *source;
 
-	unsigned receiving:1;
-	unsigned last_receiving:1;
+	uint8_t *buffer;
+	size_t buffer_size;
+
+	bool receiving;
+	bool may_pause;
+	bool standby;
+	bool waiting;
 };
+
+static int do_start(struct spa_loop *loop, bool async, uint32_t seq, const void *data,
+		size_t size, void *user_data)
+{
+	struct impl *impl = user_data;
+	if (impl->waiting) {
+		struct spa_dict_item item[1];
+
+		impl->waiting = false;
+		impl->standby = false;
+
+		pw_log_info("resume RTP source");
+
+		item[0] = SPA_DICT_ITEM_INIT("rtp.receiving", "true");
+		rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
+
+		if (impl->may_pause)
+			rtp_stream_set_active(impl->stream, true);
+	}
+	return 0;
+}
 
 static void
 on_rtp_io(void *data, int fd, uint32_t mask)
 {
 	struct impl *impl = data;
 	ssize_t len;
-	uint8_t buffer[2048];
 
 	if (mask & SPA_IO_IN) {
-		if ((len = recv(fd, buffer, sizeof(buffer), 0)) < 0)
+		if ((len = recv(fd, impl->buffer, impl->buffer_size, 0)) < 0)
 			goto receive_error;
 
 		if (len < 12)
 			goto short_packet;
 
 		if (SPA_LIKELY(impl->stream)) {
-			if (rtp_stream_receive_packet(impl->stream, buffer, len) < 0)
+			if (rtp_stream_receive_packet(impl->stream, impl->buffer, len) < 0)
 				goto receive_error;
 		}
 
-		impl->receiving = true;
+		if (!impl->receiving) {
+			impl->receiving = true;
+			pw_loop_invoke(impl->loop, do_start, 1, NULL, 0, false, impl);
+		}
 	}
 	return;
 
@@ -195,7 +222,7 @@ receive_error:
 	pw_log_warn("recv error: %m");
 	return;
 short_packet:
-	pw_log_warn("short packet received");
+	pw_log_warn("short packet of len %zd received", len);
 	return;
 }
 
@@ -353,7 +380,7 @@ static void stream_state_changed(void *data, bool started, const char *error)
 			rtp_stream_set_error(impl->stream, res, "Can't start RTP stream");
 		}
 	} else {
-		if (!impl->always_process)
+		if (!impl->always_process && !impl->standby)
 			stream_stop(impl);
 	}
 }
@@ -430,17 +457,22 @@ static void on_timer_event(void *data, uint64_t expirations)
 {
 	struct impl *impl = data;
 
-	if (impl->receiving != impl->last_receiving) {
-		struct spa_dict_item item[1];
-
-		impl->last_receiving = impl->receiving;
-
-		item[0] = SPA_DICT_ITEM_INIT("rtp.receiving", impl->receiving ? "true" : "false");
-		rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
-	}
+	pw_log_debug("timer %d", impl->receiving);
 
 	if (!impl->receiving) {
-		pw_log_info("timeout, inactive RTP source");
+		if (!impl->standby) {
+			struct spa_dict_item item[1];
+
+			pw_log_info("timeout, standby RTP source");
+			impl->standby = true;
+			impl->waiting = true;
+
+			item[0] = SPA_DICT_ITEM_INIT("rtp.receiving", "false");
+			rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
+
+			if (impl->may_pause)
+				rtp_stream_set_active(impl->stream, false);
+		}
 		//pw_impl_module_schedule_destroy(impl->module);
 	} else {
 		pw_log_debug("timeout, keeping active RTP source");
@@ -479,6 +511,7 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
+	free(impl->buffer);
 	free(impl->ifname);
 	free(impl);
 }
@@ -590,6 +623,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, "sess.latency.msec");
 	copy_props(impl, props, "sess.ts-direct");
 	copy_props(impl, props, "sess.ignore-ssrc");
+	copy_props(impl, props, "stream.may-pause");
 
 	str = pw_properties_get(props, "local.ifname");
 	impl->ifname = str ? strdup(str) : NULL;
@@ -617,6 +651,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->always_process = pw_properties_get_bool(stream_props,
 			PW_KEY_NODE_ALWAYS_PROCESS, true);
+	impl->may_pause = pw_properties_get_bool(stream_props,
+			"stream.may-pause", false);
+	impl->standby = false;
+	impl->waiting = true;
+	pw_properties_set(stream_props, "rtp.receiving", "false");
 
 	impl->cleanup_interval = pw_properties_get_uint32(props,
 			"cleanup.sec", DEFAULT_CLEANUP_SEC);
@@ -662,6 +701,14 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (impl->stream == NULL) {
 		res = -errno;
 		pw_log_error("can't create stream: %m");
+		goto out;
+	}
+
+	impl->buffer_size = rtp_stream_get_mtu(impl->stream);
+	impl->buffer = calloc(1, impl->buffer_size);
+	if (impl->buffer == NULL) {
+		res = -errno;
+		pw_log_error("can't create packet buffer of size %zd: %m", impl->buffer_size);
 		goto out;
 	}
 

@@ -6,12 +6,16 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <pthread.h>
+#ifdef __FreeBSD__
+#include <pthread_np.h>
+#endif
 
 #include <spa/utils/dict.h>
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 #include <spa/utils/json.h>
 
+#define PW_API_THREAD_IMPL SPA_EXPORT
 #include <pipewire/log.h>
 #include <pipewire/private.h>
 #include <pipewire/thread.h>
@@ -27,15 +31,14 @@ do {									\
 
 static int parse_affinity(const char *affinity, cpu_set_t *set)
 {
-	struct spa_json it[2];
+	struct spa_json it[1];
 	int v;
 
 	CPU_ZERO(set);
-	spa_json_init(&it[0], affinity, strlen(affinity));
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-		spa_json_init(&it[1], affinity, strlen(affinity));
+	if (spa_json_begin_array_relax(&it[0], affinity, strlen(affinity)) <= 0)
+		return 0;
 
-	while (spa_json_get_int(&it[1], &v) > 0) {
+	while (spa_json_get_int(&it[0], &v) > 0) {
 		if (v >= 0 && v < CPU_SETSIZE)
 			CPU_SET(v, set);
         }
@@ -90,10 +93,16 @@ static struct spa_thread *impl_create(void *object,
 	pthread_attr_t *attr = NULL, attributes;
 	const char *str;
 	int err;
+	int (*create_func)(pthread_t *, const pthread_attr_t *attr, void *(*start)(void*), void *) = NULL;
 
 	attr = pw_thread_fill_attr(props, &attributes);
 
-	err = pthread_create(&pt, attr, start, arg);
+	if (props == NULL ||
+	   (str = spa_dict_lookup(props, SPA_KEY_THREAD_CREATOR)) == NULL ||
+	   sscanf(str, "pointer:%p", &create_func) != 1)
+		create_func = pthread_create;
+
+	err = create_func(&pt, attr, start, arg);
 
 	if (attr)
 		pthread_attr_destroy(attr);
@@ -108,7 +117,7 @@ static struct spa_thread *impl_create(void *object,
 			pw_log_warn("pthread_setname error: %s", strerror(err));
 		if ((str = spa_dict_lookup(props, SPA_KEY_THREAD_AFFINITY)) != NULL &&
 		    (err = thread_setaffinity(pt, str)) != 0)
-			pw_log_warn("pthread_setaffinity error: %s", strerror(err));
+			pw_log_warn("pthread_setaffinity error: %s", strerror(-err));
 	}
 	return (struct spa_thread*)pt;
 }

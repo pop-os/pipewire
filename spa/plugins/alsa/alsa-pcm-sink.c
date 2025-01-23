@@ -27,6 +27,7 @@ static void reset_props(struct props *props)
 {
 	strncpy(props->device, default_device, 64);
 	props->use_chmap = DEFAULT_USE_CHMAP;
+	spa_scnprintf(props->media_class, sizeof(props->media_class), "%s", "Audio/Sink");
 }
 
 static int impl_node_enum_params(void *object, int seq,
@@ -326,11 +327,13 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		if (this->n_buffers == 0)
 			return -EIO;
 
+		this->want_started = true;
 		if ((res = spa_alsa_start(this)) < 0)
 			return res;
 		break;
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Pause:
+		this->want_started = false;
 		if ((res = spa_alsa_pause(this)) < 0)
 			return res;
 		break;
@@ -755,7 +758,8 @@ impl_node_port_set_io(void *object,
 		break;
 	case SPA_IO_RateMatch:
 		this->rate_match = data;
-		spa_alsa_update_rate_match(this);
+		if (this->rate_match)
+			spa_alsa_update_rate_match(this);
 		break;
 	default:
 		return -ENOENT;

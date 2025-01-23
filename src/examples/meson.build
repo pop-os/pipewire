@@ -1,6 +1,8 @@
 # Examples, in order from simple to complicated
 examples = [
   'audio-src',
+  'audio-src-ring',
+  'audio-src-ring2',
   'audio-dsp-src',
   'audio-dsp-filter',
   'audio-capture',
@@ -22,6 +24,7 @@ examples = [
   'export-spa-device',
   'bluez-session',
   'local-v4l2',
+  'gmain',
 ]
 
 if not get_option('examples').allowed()
@@ -37,6 +40,7 @@ examples_extra_deps = {
   'video-dsp-play': [sdl_dep],
   'local-v4l2': [sdl_dep],
   'export-sink': [sdl_dep],
+  'gmain': [glib2_dep],
 }
 
 foreach c : examples

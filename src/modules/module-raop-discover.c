@@ -55,8 +55,10 @@
  * ## Example configuration
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-raop-discover.conf
+ *
  * context.modules = [
- * {   name = libpipewire-raop-discover
+ * {   name = libpipewire-module-raop-discover
  *     args = {
  *         #roap.discover-local = false;
  *         #raop.latency.ms = 1000

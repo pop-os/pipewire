@@ -74,9 +74,6 @@ extern "C" {
 #define PW_KEY_LOOP_CLASS		"loop.class"		/**< the classes this loop handles, array of strings */
 #define PW_KEY_LOOP_RT_PRIO		"loop.rt-prio"		/**< realtime priority of the loop */
 #define PW_KEY_LOOP_CANCEL		"loop.cancel"		/**< if the loop can be canceled */
-#define PW_KEY_LOOP_RETRY_TIMEOUT	"loop.retry-timeout"	/**< when the loop invoke queue is full, the timeout
-								  *  in microseconds before retrying.
-								  *  default = 1 second, 0 = disable */
 
 /* context */
 #define PW_KEY_CONTEXT_PROFILE_MODULES	"context.profile.modules"	/**< a context profile for modules, deprecated */
@@ -190,7 +187,18 @@ extern "C" {
 #define PW_KEY_NODE_SUSPEND_ON_IDLE	"node.suspend-on-idle"	/**< suspend the node when idle */
 #define PW_KEY_NODE_CACHE_PARAMS	"node.cache-params"	/**< cache the node params */
 #define PW_KEY_NODE_TRANSPORT_SYNC	"node.transport.sync"	/**< the node handles transport sync */
-#define PW_KEY_NODE_DRIVER		"node.driver"		/**< node can drive the graph */
+#define PW_KEY_NODE_DRIVER		"node.driver"		/**< node can drive the graph. When the node is
+								  *  selected as the driver, it needs to start
+								  *  the graph periodically. */
+#define PW_KEY_NODE_SUPPORTS_LAZY	"node.supports-lazy"	/**< the node can be a lazy driver. It will listen
+								  *  to RequestProcess commands and take them into
+								  *  account when deciding to start the graph.
+								  *  A value of 0 disables support, a value of > 0
+								  *  enables with increasing preference. */
+#define PW_KEY_NODE_SUPPORTS_REQUEST	"node.supports-request"	/**< The node supports emiting RequestProcess events
+								  *  when it wants the graph to be scheduled.
+								  *  A value of 0 disables support, a value of > 0
+								  *  enables with increasing preference. */
 #define PW_KEY_NODE_DRIVER_ID		"node.driver-id"	/**< the node id of the node assigned as driver
 								  *   for this node */
 #define PW_KEY_NODE_ASYNC		"node.async"		/**< the node wants async scheduling */
@@ -210,12 +218,14 @@ extern "C" {
 #define PW_KEY_NODE_TRIGGER		"node.trigger"		/**< the node is not scheduled automatically
 								  *   based on the dependencies in the graph
 								  *   but it will be triggered explicitly. */
-#define PW_KEY_NODE_CHANNELNAMES		"node.channel-names"		/**< names of node's
-									*   channels (unrelated to positions) */
-#define PW_KEY_NODE_DEVICE_PORT_NAME_PREFIX			"node.device-port-name-prefix"		/** override
-									*		port name prefix for device ports, like capture and playback
-									*		or disable the prefix completely if an empty string is provided */
-
+#define PW_KEY_NODE_CHANNELNAMES	"node.channel-names"	/**< names of node's
+								*   channels (unrelated to positions) */
+#define PW_KEY_NODE_DEVICE_PORT_NAME_PREFIX	\
+					"node.device-port-name-prefix"	/**< override port name prefix for
+									  *  device ports, like capture and
+									  *  playback or disable the prefix
+									  *  completely if an empty string
+									  *  is provided */
 /** Port keys */
 #define PW_KEY_PORT_ID			"port.id"		/**< port id */
 #define PW_KEY_PORT_NAME		"port.name"		/**< port name */
@@ -368,9 +378,11 @@ extern "C" {
 # ifdef PW_ENABLE_DEPRECATED
 #  define PW_KEY_PRIORITY_MASTER	"priority.master"	/**< deprecated, use priority.driver */
 #  define PW_KEY_NODE_TARGET		"node.target"		/**< deprecated since 0.3.64, use target.object. */
+#  define PW_KEY_LOOP_RETRY_TIMEOUT	"loop.retry-timeout"	/**< deprecated since 1.3.0 */
 # else
 #  define PW_KEY_PRIORITY_MASTER	PW_DEPRECATED("priority.master")
 #  define PW_KEY_NODE_TARGET		PW_DEPRECATED("node.target")
+#  define PW_KEY_LOOP_RETRY_TIMEOUT	PW_DEPRECATED("loop.retry-timeout")
 # endif /* PW_ENABLE_DEPRECATED */
 #endif /* PW_REMOVE_DEPRECATED */
 

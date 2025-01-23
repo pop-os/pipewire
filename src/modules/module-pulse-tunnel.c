@@ -27,6 +27,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/audio/raw-json.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -83,6 +84,8 @@
  * ## Example configuration of a virtual sink
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-pulse-tunnel.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-pulse-tunnel
  *     args = {
@@ -184,9 +187,8 @@ struct impl {
 	uint32_t target_latency;
 	uint32_t current_latency;
 	uint32_t target_buffer;
-	struct spa_io_rate_match *rate_match;
 	struct spa_dll dll;
-	float max_error;
+	double max_error;
 	unsigned resync:1;
 
 	bool do_disconnect:1;
@@ -329,23 +331,19 @@ static void stream_param_changed(void *d, uint32_t id, const struct spa_pod *par
 
 static void update_rate(struct impl *impl, uint32_t filled)
 {
-	float error, corr;
+	double error, corr;
 	uint32_t current_latency;
 
-	if (impl->rate_match == NULL)
-		return;
-
 	current_latency = impl->current_latency + filled;
-	error = (float)impl->target_latency - (float)(current_latency);
-	error = SPA_CLAMP(error, -impl->max_error, impl->max_error);
+	error = (double)impl->target_latency - (double)(current_latency);
+	error = SPA_CLAMPD(error, -impl->max_error, impl->max_error);
 
-	corr = (float)spa_dll_update(&impl->dll, error);
+	corr = spa_dll_update(&impl->dll, error);
 	pw_log_debug("error:%f corr:%f current:%u target:%u",
 			error, corr,
 			current_latency, impl->target_latency);
 
-	SPA_FLAG_SET(impl->rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE);
-	impl->rate_match->rate = 1.0f / corr;
+	pw_stream_set_rate(impl->stream, 1.0 / corr);
 }
 
 static void playback_stream_process(void *d)
@@ -438,21 +436,10 @@ static void capture_stream_process(void *d)
 	pw_stream_queue_buffer(impl->stream, buf);
 }
 
-static void stream_io_changed(void *data, uint32_t id, void *area, uint32_t size)
-{
-	struct impl *impl = data;
-	switch (id) {
-	case SPA_IO_RateMatch:
-		impl->rate_match = area;
-		break;
-	}
-}
-
 static const struct pw_stream_events playback_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
-	.io_changed = stream_io_changed,
 	.param_changed = stream_param_changed,
 	.process = playback_stream_process
 };
@@ -461,7 +448,6 @@ static const struct pw_stream_events capture_stream_events = {
 	PW_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
-	.io_changed = stream_io_changed,
 	.param_changed = stream_param_changed,
 	.process = capture_stream_process
 };
@@ -750,7 +736,7 @@ static void stream_latency_update_cb(pa_stream *s, void *userdata)
 	pa_usec_t usec;
 	int negative;
 	pa_stream_get_latency(s, &usec, &negative);
-	pw_log_debug("latency %ld negative %d", usec, negative);
+	pw_log_debug("latency %" PRIu64 " negative %d", usec, negative);
 }
 
 static int create_pulse_stream(struct impl *impl)
@@ -1062,61 +1048,18 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
-static inline uint32_t format_from_name(const char *name, size_t len)
-{
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (strncmp(name, spa_debug_type_short_name(spa_type_audio_format[i].name), len) == 0)
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
-		str = DEFAULT_FORMAT;
-	info->format = format_from_name(str, strlen(str));
-
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
-	if (info->rate == 0)
-		info->rate = DEFAULT_RATE;
-
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_FORMAT,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static int calc_frame_size(struct spa_audio_info_raw *info)
@@ -1265,7 +1208,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		goto error;
 	}
 	spa_dll_set_bw(&impl->dll, SPA_DLL_BW_MIN, 128, impl->info.rate);
-	impl->max_error = 256.0f;
+	impl->max_error = 256.0;
 
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {

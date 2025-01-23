@@ -5,35 +5,42 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 #include <spa/support/cpu.h>
 #include <spa/utils/defs.h>
 #include <spa/param/audio/format-utils.h>
 
-#include "dsp-ops.h"
+#include "pffft.h"
+
+#include "audio-dsp-impl.h"
 
 struct dsp_info {
 	uint32_t cpu_flags;
 
-	struct dsp_ops_funcs funcs;
+	struct spa_fga_dsp_methods funcs;
 };
 
-static struct dsp_info dsp_table[] =
+static const struct dsp_info dsp_table[] =
 {
 #if defined (HAVE_AVX)
 	{ SPA_CPU_FLAG_AVX,
 		.funcs.clear = dsp_clear_c,
 		.funcs.copy = dsp_copy_c,
-		.funcs.mix_gain = dsp_mix_gain_sse,
-		.funcs.biquad_run = dsp_biquad_run_c,
+		.funcs.mix_gain = dsp_mix_gain_avx,
+		.funcs.biquad_run = dsp_biquad_run_sse,
 		.funcs.sum = dsp_sum_avx,
 		.funcs.linear = dsp_linear_c,
 		.funcs.mult = dsp_mult_c,
 		.funcs.fft_new = dsp_fft_new_c,
 		.funcs.fft_free = dsp_fft_free_c,
+		.funcs.fft_memalloc = dsp_fft_memalloc_c,
+		.funcs.fft_memfree = dsp_fft_memfree_c,
+		.funcs.fft_memclear = dsp_fft_memclear_c,
 		.funcs.fft_run = dsp_fft_run_c,
-		.funcs.fft_cmul = dsp_fft_cmul_c,
-		.funcs.fft_cmuladd = dsp_fft_cmuladd_c,
+		.funcs.fft_cmul = dsp_fft_cmul_avx,
+		.funcs.fft_cmuladd = dsp_fft_cmuladd_avx,
+		.funcs.delay = dsp_delay_sse,
 	},
 #endif
 #if defined (HAVE_SSE)
@@ -41,15 +48,19 @@ static struct dsp_info dsp_table[] =
 		.funcs.clear = dsp_clear_c,
 		.funcs.copy = dsp_copy_c,
 		.funcs.mix_gain = dsp_mix_gain_sse,
-		.funcs.biquad_run = dsp_biquad_run_c,
+		.funcs.biquad_run = dsp_biquad_run_sse,
 		.funcs.sum = dsp_sum_sse,
 		.funcs.linear = dsp_linear_c,
 		.funcs.mult = dsp_mult_c,
 		.funcs.fft_new = dsp_fft_new_c,
 		.funcs.fft_free = dsp_fft_free_c,
+		.funcs.fft_memalloc = dsp_fft_memalloc_c,
+		.funcs.fft_memfree = dsp_fft_memfree_c,
+		.funcs.fft_memclear = dsp_fft_memclear_c,
 		.funcs.fft_run = dsp_fft_run_c,
-		.funcs.fft_cmul = dsp_fft_cmul_c,
-		.funcs.fft_cmuladd = dsp_fft_cmuladd_c,
+		.funcs.fft_cmul = dsp_fft_cmul_sse,
+		.funcs.fft_cmuladd = dsp_fft_cmuladd_sse,
+		.funcs.delay = dsp_delay_sse,
 	},
 #endif
 	{ 0,
@@ -62,9 +73,13 @@ static struct dsp_info dsp_table[] =
 		.funcs.mult = dsp_mult_c,
 		.funcs.fft_new = dsp_fft_new_c,
 		.funcs.fft_free = dsp_fft_free_c,
+		.funcs.fft_memalloc = dsp_fft_memalloc_c,
+		.funcs.fft_memfree = dsp_fft_memfree_c,
+		.funcs.fft_memclear = dsp_fft_memclear_c,
 		.funcs.fft_run = dsp_fft_run_c,
 		.funcs.fft_cmul = dsp_fft_cmul_c,
 		.funcs.fft_cmuladd = dsp_fft_cmuladd_c,
+		.funcs.delay = dsp_delay_c,
 	},
 };
 
@@ -79,23 +94,31 @@ static const struct dsp_info *find_dsp_info(uint32_t cpu_flags)
 	return NULL;
 }
 
-static void impl_dsp_ops_free(struct dsp_ops *ops)
+void spa_fga_dsp_free(struct spa_fga_dsp *dsp)
 {
-	spa_zero(*ops);
+	free(dsp);
 }
 
-int dsp_ops_init(struct dsp_ops *ops, uint32_t cpu_flags)
+struct spa_fga_dsp * spa_fga_dsp_new(uint32_t cpu_flags)
 {
 	const struct dsp_info *info;
+	struct spa_fga_dsp *dsp;
 
 	info = find_dsp_info(cpu_flags);
-	if (info == NULL)
-		return -ENOTSUP;
+	if (info == NULL) {
+		errno = ENOTSUP;
+		return NULL;
+	}
+	dsp = calloc(1, sizeof(*dsp));
+	if (dsp == NULL)
+		return NULL;
 
-	ops->cpu_flags = cpu_flags;
-	ops->priv = info;
-	ops->free = impl_dsp_ops_free;
-	ops->funcs = info->funcs;
+	pffft_select_cpu(cpu_flags);
+	dsp->cpu_flags = cpu_flags;
+	dsp->iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_FILTER_GRAPH_AudioDSP,
+			SPA_VERSION_FGA_DSP,
+			&info->funcs, dsp);
 
-	return 0;
+	return dsp;
 }

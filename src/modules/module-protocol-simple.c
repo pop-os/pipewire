@@ -27,6 +27,7 @@
 #include <spa/debug/types.h>
 #include <spa/param/audio/type-info.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw-json.h>
 
 #include <pipewire/impl.h>
 
@@ -56,6 +57,8 @@
  *               sink for each connected client.
  *  - `playback`: boolean if playback is enabled. This will create a playback or
  *               source stream for each connected client.
+ *  - `local.ifname = <str>`: interface name to use
+ *  - `local.ifaddress = <str>`: interface address to use
  *  - `server.address = []`: an array of server addresses to listen on as
  *                            tcp:(<ip>:)<port>.
  *  - `capture.props`: optional properties for the capture stream
@@ -81,6 +84,8 @@
  * ## Example configuration
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-protocol-simple.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-protocol-simple
  *     args = {
@@ -208,6 +213,8 @@ struct impl {
 	struct pw_properties *capture_props;
 	struct pw_properties *playback_props;
 
+	char *ifname;
+	char *ifaddress;
 	bool capture;
 	bool playback;
 
@@ -654,47 +661,16 @@ error:
 	return;
 }
 
-static uint16_t parse_port(const char *str, uint16_t def)
-{
-	uint32_t val;
-	if (spa_atou32(str, &val, 0) && val <= 65535u)
-		return val;
-	return def;
-}
-
-static int make_tcp_socket(struct server *server, const char *name)
+static int make_tcp_socket(struct server *server, const char *name, const char *ifname,
+		const char *ifaddress)
 {
 	struct sockaddr_storage addr;
 	int res, fd, on;
-	uint16_t port;
-	char *br = NULL, *col, *n;
 	socklen_t len = 0;
 
-	n = strdupa(name);
-
-	col = strrchr(n, ':');
-	if (n[0] == '[') {
-		br = strchr(n, ']');
-		if (br == NULL)
-			return -EINVAL;
-		n++;
-		*br = 0;
-	} else {
-	}
-	if (br && col && col < br)
-		col = NULL;
-
-	if (col) {
-		*col = '\0';
-		port = parse_port(col+1, DEFAULT_PORT);
-	} else {
-		port = parse_port(n, DEFAULT_PORT);
-		n = strdupa("0.0.0.0");
-	}
-
-	if ((res = pw_net_parse_address(n, port, &addr, &len)) < 0) {
-		pw_log_error("%p: can't parse address:%s port:%d: %s", server,
-				n, port, spa_strerror(res));
+	if ((res = pw_net_parse_address_port(name, ifaddress, DEFAULT_PORT, &addr, &len)) < 0) {
+		pw_log_error("%p: can't parse address %s: %s", server,
+				name, spa_strerror(res));
 		goto error;
 	}
 
@@ -703,7 +679,13 @@ static int make_tcp_socket(struct server *server, const char *name)
 		pw_log_error("%p: socket() failed: %m", server);
 		goto error;
 	}
-
+#ifdef SO_BINDTODEVICE
+	if (ifname && setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, ifname, strlen(ifname)) < 0) {
+		res = -errno;
+		pw_log_error("%p: setsockopt(SO_BINDTODEVICE) failed: %m", server);
+		goto error;
+	}
+#endif
 	on = 1;
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *) &on, sizeof(on)) < 0)
 		pw_log_warn("%p: setsockopt(): %m", server);
@@ -764,7 +746,7 @@ static struct server *create_server(struct impl *impl, const char *address)
 	spa_list_append(&impl->server_list, &server->link);
 
 	if (spa_strstartswith(address, "tcp:")) {
-		fd = make_tcp_socket(server, address+4);
+		fd = make_tcp_socket(server, address+4, impl->ifname, impl->ifaddress);
 	} else {
 		pw_log_error("address %s does not start with tcp:", address);
 		fd = -EINVAL;
@@ -799,43 +781,9 @@ static void impl_free(struct impl *impl)
 	pw_properties_free(impl->capture_props);
 	pw_properties_free(impl->playback_props);
 	pw_properties_free(impl->props);
+	free(impl->ifname);
+	free(impl->ifaddress);
 	free(impl);
-}
-
-static inline uint32_t format_from_name(const char *name, size_t len)
-{
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (strncmp(name, spa_debug_type_short_name(spa_type_audio_format[i].name), len) == 0)
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
-}
-
-static inline uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
 }
 
 static int calc_frame_size(struct spa_audio_info_raw *info)
@@ -874,23 +822,16 @@ static int calc_frame_size(struct spa_audio_info_raw *info)
 
 static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
-		str = DEFAULT_FORMAT;
-	info->format = format_from_name(str, strlen(str));
-
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
-	if (info->rate == 0)
-		info->rate = DEFAULT_RATE;
-
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_FORMAT,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 
 	return calc_frame_size(info);
 }
@@ -909,7 +850,7 @@ static void copy_props(struct impl *impl, const char *key)
 static int parse_params(struct impl *impl)
 {
 	const char *str;
-	struct spa_json it[2];
+	struct spa_json it[1];
 	char value[512];
 
 	pw_properties_fetch_bool(impl->props, "capture", &impl->capture);
@@ -976,12 +917,16 @@ static int parse_params(struct impl *impl)
 		pw_properties_setf(impl->playback_props, PW_KEY_NODE_RATE,
 				"1/%u", impl->playback_info.rate);
 
+	str = pw_properties_get(impl->props, "local.ifname");
+	impl->ifname = str ? strdup(str) : NULL;
+	str = pw_properties_get(impl->props, "local.ifaddress");
+	impl->ifaddress = str ? strdup(str) : NULL;
+
 	if ((str = pw_properties_get(impl->props, "server.address")) == NULL)
 		str = DEFAULT_SERVER;
 
-        spa_json_init(&it[0], str, strlen(str));
-        if (spa_json_enter_array(&it[0], &it[1]) > 0) {
-                while (spa_json_get_string(&it[1], value, sizeof(value)) > 0) {
+        if (spa_json_begin_array_relax(&it[0], str, strlen(str)) > 0) {
+                while (spa_json_get_string(&it[0], value, sizeof(value)) > 0) {
                         if (create_server(impl, value) == NULL) {
 				pw_log_warn("%p: can't create server for %s: %m",
 					impl, value);
@@ -1056,9 +1001,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		uint16_t port = 0;
 		bool ipv4;
 
-		if (pw_net_get_ip(&s->addr, ip, sizeof(ip), &ipv4, &port) >= 0)
-			fprintf(f, " \"%s%s%s:%d\"", ipv4 ? "" : "[",
-					ip, ipv4 ? "" : "]", port);
+		if (pw_net_get_ip(&s->addr, ip, sizeof(ip), &ipv4, &port) < 0)
+			continue;
+
+		fprintf(f, " \"%s%s%s:%d\"", ipv4 ? "" : "[", ip, ipv4 ? "" : "]", port);
 	}
 	fprintf(f, " ]");
 	fclose(f);

@@ -17,6 +17,7 @@
 #include <spa/utils/json.h>
 #include <spa/utils/ringbuffer.h>
 #include <spa/param/latency-utils.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/debug/types.h>
 
 #include <pipewire/impl.h>
@@ -82,6 +83,8 @@
  * This Virtual sink routes stereo input to the rear channels of a 7.1 sink.
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-loopback-1.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-loopback
  *     args = {
@@ -111,6 +114,8 @@
  * This is useful for splitting up multi-channel inputs from USB audio interfaces that are not yet fully supported by alsa.
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-loopback-2.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-loopback
  *     args = {
@@ -137,6 +142,8 @@
  * using the PSD algorithm on the playback stream.
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-loopback-3.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-loopback
  *     args = {
@@ -156,6 +163,35 @@
  *             channelmix.lfe-cutoff = 150
  *             channelmix.fc-cutoff = 12000
  *             channelmix.rear-delay = 12.0
+ *         }
+ *     }
+ * }
+ * ]
+ *\endcode
+ *
+ * ## Example configuration of a downmix source
+ *
+ * This Virtual source has 2 input channels and a mono output channel. It will perform
+ * downmixing from the two first AUX channels of a pro-audio device.
+ *
+ *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-loopback-4.conf
+ *
+ * context.modules = [
+ * {   name = libpipewire-module-loopback
+ *     args = {
+ *         node.description = "Downmix Source"
+ *         audio.position = [ AUX0 AUX1 ]
+ *         capture.props = {
+ *             node.name = "effect_input.downmix"
+ *             target.object = "alsa_input.usb-BEHRINGER_UMC404HD_192k-00.pro-input-0"
+ *             node.passive = true
+ *             stream.dont-remix = true
+ *         }
+ *         playback.props = {
+ *             node.name = "effect_output.downmix"
+ *             media.class = Audio/Source
+ *             audio.position = [ MONO ]
  *         }
  *     }
  * }
@@ -224,6 +260,9 @@ struct impl {
 	struct spa_hook playback_listener;
 	struct spa_audio_info_raw playback_info;
 
+	struct spa_process_latency_info process_latency[2];
+	struct spa_latency_info latency[2];
+
 	unsigned int do_disconnect:1;
 	unsigned int recalc_delay:1;
 
@@ -271,7 +310,15 @@ static void recalculate_delay(struct impl *impl)
 static void capture_process(void *d)
 {
 	struct impl *impl = d;
-	pw_stream_trigger_process(impl->playback);
+	int res;
+	if ((res = pw_stream_trigger_process(impl->playback)) < 0) {
+		while (true) {
+			struct pw_buffer *t;
+			if ((t = pw_stream_dequeue_buffer(impl->capture)) == NULL)
+				break;
+			pw_stream_queue_buffer(impl->capture, t);
+		}
+	}
 }
 
 static void playback_process(void *d)
@@ -364,22 +411,97 @@ static void playback_process(void *d)
 		pw_stream_queue_buffer(impl->playback, out);
 }
 
+static void build_latency_params(struct impl *impl, struct spa_pod_builder *b,
+		const struct spa_pod *params[], uint32_t max_params)
+{
+	struct spa_latency_info latency;
+	latency = impl->latency[0];
+	spa_process_latency_info_add(&impl->process_latency[0], &latency);
+	params[0] = spa_latency_build(b, SPA_PARAM_Latency, &latency);
+	latency = impl->latency[1];
+	spa_process_latency_info_add(&impl->process_latency[1], &latency);
+	params[1] = spa_latency_build(b, SPA_PARAM_Latency, &latency);
+}
+
+static struct spa_pod *build_props(struct impl *impl, struct spa_pod_builder *b,
+		enum spa_direction direction)
+{
+	int64_t nsec = impl->process_latency[direction].ns;
+
+	return spa_pod_builder_add_object(b,
+			SPA_TYPE_OBJECT_Props, SPA_PARAM_Props,
+			SPA_PROP_latencyOffsetNsec, SPA_POD_Long(nsec));
+}
+
 static void param_latency_changed(struct impl *impl, const struct spa_pod *param,
-		struct pw_stream *other)
+		struct pw_stream *stream, struct pw_stream *other)
 {
 	struct spa_latency_info latency;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
-	const struct spa_pod *params[1];
+	const struct spa_pod *params[2];
 
 	if (param == NULL || spa_latency_parse(param, &latency) < 0)
 		return;
 
+	impl->latency[latency.direction] = latency;
+
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
-	pw_stream_update_params(other, params, 1);
+	build_latency_params(impl, &b, params, 2);
+
+	pw_stream_update_params(stream, params, 2);
+	pw_stream_update_params(other, params, 2);
 
 	impl->recalc_delay = true;
+}
+
+static void emit_process_latency_changed(struct impl *impl,
+		enum spa_direction direction, struct pw_stream *stream)
+{
+	uint8_t buffer[4096];
+	struct spa_pod_builder b;
+	const struct spa_pod *params[4];
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	params[0] = spa_process_latency_build(&b, SPA_PARAM_ProcessLatency,
+			&impl->process_latency[direction]);
+	if (stream == impl->capture)
+		params[1] = build_props(impl, &b, SPA_DIRECTION_INPUT);
+	else
+		params[1] = build_props(impl, &b, SPA_DIRECTION_OUTPUT);
+	build_latency_params(impl, &b, &params[2], 2);
+	pw_stream_update_params(stream, params, 4);
+}
+
+static void param_process_latency_changed(struct impl *impl, const struct spa_pod *param,
+		enum spa_direction direction, struct pw_stream *stream)
+{
+	struct spa_process_latency_info info;
+
+	if (param == NULL)
+		spa_zero(info);
+	else if (spa_process_latency_parse(param, &info) < 0)
+		return;
+
+	impl->process_latency[direction] = info;
+
+	emit_process_latency_changed(impl, direction, stream);
+}
+
+static void param_props_changed(struct impl *impl, const struct spa_pod *param,
+		enum spa_direction direction, struct pw_stream *stream)
+{
+	int64_t nsec;
+
+	if (!param)
+		nsec = 0;
+	else if (spa_pod_parse_object(param,
+					SPA_TYPE_OBJECT_Props, NULL,
+					SPA_PROP_latencyOffsetNsec, SPA_POD_Long(&nsec)) < 0)
+		return;
+
+	impl->process_latency[direction].ns = nsec;
+	emit_process_latency_changed(impl, direction, stream);
 }
 
 static void param_tag_changed(struct impl *impl, const struct spa_pod *param,
@@ -500,7 +622,13 @@ static void capture_param_changed(void *data, uint32_t id, const struct spa_pod 
 		param_format_changed(impl, param, impl->capture, true);
 		break;
 	case SPA_PARAM_Latency:
-		param_latency_changed(impl, param, impl->playback);
+		param_latency_changed(impl, param, impl->capture, impl->playback);
+		break;
+	case SPA_PARAM_Props:
+		param_props_changed(impl, param, SPA_DIRECTION_INPUT, impl->capture);
+		break;
+	case SPA_PARAM_ProcessLatency:
+		param_process_latency_changed(impl, param, SPA_DIRECTION_INPUT, impl->capture);
 		break;
 	case SPA_PARAM_Tag:
 		param_tag_changed(impl, param, impl->playback);
@@ -545,7 +673,13 @@ static void playback_param_changed(void *data, uint32_t id, const struct spa_pod
 		param_format_changed(impl, param, impl->playback, false);
 		break;
 	case SPA_PARAM_Latency:
-		param_latency_changed(impl, param, impl->capture);
+		param_latency_changed(impl, param, impl->playback, impl->capture);
+		break;
+	case SPA_PARAM_Props:
+		param_props_changed(impl, param, SPA_DIRECTION_OUTPUT, impl->playback);
+		break;
+	case SPA_PARAM_ProcessLatency:
+		param_process_latency_changed(impl, param, SPA_DIRECTION_OUTPUT, impl->playback);
 		break;
 	case SPA_PARAM_Tag:
 		param_tag_changed(impl, param, impl->capture);
@@ -688,43 +822,15 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	*info = SPA_AUDIO_INFO_RAW_INIT(
-			.format = SPA_AUDIO_FORMAT_F32P);
-	info->rate = pw_properties_get_int32(props, PW_KEY_AUDIO_RATE, 0);
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, 0);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P")),
+			&props->dict,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)
@@ -777,6 +883,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->module = module;
 	impl->context = context;
+	impl->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	impl->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_GROUP, "loopback-%u-%u", pid, id);

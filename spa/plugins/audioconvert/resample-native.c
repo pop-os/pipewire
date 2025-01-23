@@ -7,6 +7,9 @@
 #include <spa/param/audio/format.h>
 
 #include "resample-native-impl.h"
+#ifndef RESAMPLE_DISABLE_PRECOMP
+#include "resample-native-precomp.h"
+#endif
 
 struct quality {
 	uint32_t n_taps;
@@ -302,14 +305,36 @@ static void impl_native_reset (struct resample *r)
 	if (r->options & RESAMPLE_OPTION_PREFILL)
 		d->hist = d->n_taps - 1;
 	else
-		d->hist = (d->n_taps / 2) - 1;
+		d->hist = d->n_taps / 2;
 	d->phase = 0;
 }
 
 static uint32_t impl_native_delay (struct resample *r)
 {
 	struct native_data *d = r->data;
-	return d->n_taps / 2;
+	return d->n_taps / 2 - 1;
+}
+
+static float impl_native_phase (struct resample *r)
+{
+	struct native_data *d = r->data;
+	float pho = 0;
+
+	if (d->func == d->info->process_full) {
+		pho = -(float)((int32_t)d->phase) / d->out_rate;
+
+		/* XXX: this is how it seems to behave, but not clear why */
+		if (d->hist >= d->n_taps - 1)
+			pho += 1.0f;
+	} else if (d->func == d->info->process_inter) {
+		pho = -d->phase / d->out_rate;
+
+		/* XXX: this is how it seems to behave, but not clear why */
+		if (d->hist >= d->n_taps - 1)
+			pho += 1.0f;
+	}
+
+	return pho;
 }
 
 int resample_native_init(struct resample *r)
@@ -328,6 +353,7 @@ int resample_native_init(struct resample *r)
 	r->process = impl_native_process;
 	r->reset = impl_native_reset;
 	r->delay = impl_native_delay;
+	r->phase = impl_native_phase;
 
 	q = &window_qualities[r->quality];
 
@@ -375,7 +401,25 @@ int resample_native_init(struct resample *r)
 	for (c = 0; c < r->channels; c++)
 		d->history[c] = SPA_PTROFF(d->hist_mem, c * history_stride, float);
 
-	build_filter(d->filter, d->filter_stride, n_taps, n_phases, scale);
+#ifndef RESAMPLE_DISABLE_PRECOMP
+	/* See if we have precomputed coefficients */
+	for (c = 0; precomp_coeffs[c].filter; c++) {
+		if (precomp_coeffs[c].in_rate == r->i_rate &&
+				precomp_coeffs[c].out_rate == r->o_rate &&
+				precomp_coeffs[c].quality == r->quality)
+			break;
+	}
+
+	if (precomp_coeffs[c].filter) {
+		spa_log_debug(r->log, "using precomputed filter for %u->%u(%u)",
+				r->i_rate, r->o_rate, r->quality);
+		spa_memcpy(d->filter, precomp_coeffs[c].filter, filter_size);
+	} else {
+#endif
+		build_filter(d->filter, d->filter_stride, n_taps, n_phases, scale);
+#ifndef RESAMPLE_DISABLE_PRECOMP
+	}
+#endif
 
 	d->info = find_resample_info(SPA_AUDIO_FORMAT_F32, r->cpu_flags);
 	if (SPA_UNLIKELY(d->info == NULL)) {

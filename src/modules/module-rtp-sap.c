@@ -29,7 +29,6 @@
 #include "network-utils.h"
 
 #ifdef __FreeBSD__
-#define ifr_ifindex ifr_index
 #define SO_PASSCRED LOCAL_CREDS_PERSISTENT
 #endif
 
@@ -61,6 +60,7 @@
  * - `net.ttl = <int>`: TTL to use, default 1
  * - `net.loop = <bool>`: loopback multicast, default false
  * - `stream.rules` = <rules>: match rules, use create-stream and announce-stream actions
+ * - `sap.max-sessions = <int>`: maximum number of concurrent send/receive sessions to track
  * - `sap.preamble-extra = [strings]`: extra attributes to add to the atomic SDP preamble
  * - `sap.end-extra = [strings]`: extra attributes to add to the end of the SDP message
  *
@@ -72,6 +72,8 @@
  *
  * ## Example configuration
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-rtp-sap.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-rtp-sap
  *     args = {
@@ -134,7 +136,7 @@
 PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
-#define MAX_SESSIONS		64
+#define DEFAULT_MAX_SESSIONS		64
 
 #define DEFAULT_ANNOUNCE_RULES	\
 	"[ { matches = [ { sess.sap.announce = true } ] actions = { announce-stream = { } } } ]"
@@ -152,6 +154,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_SOURCE_IP6	"::"
 #define DEFAULT_TTL		1
 #define DEFAULT_LOOP		false
+
+#define MAX_SDP			2048
 
 #define USAGE	"( local.ifname=<local interface name to use> ) "					\
 		"( sap.ip=<SAP IP address to send announce, default:"DEFAULT_SAP_IP"> ) "		\
@@ -179,7 +183,8 @@ static const struct spa_dict_item module_info[] = {
 
 struct sdp_info {
 	uint16_t hash;
-	uint32_t ntp;
+	uint32_t session_id;
+	uint32_t session_version;
 	uint32_t t_ntp;
 
 	char *origin;
@@ -219,6 +224,8 @@ struct session {
 	struct sdp_info info;
 
 	unsigned has_sent_sap:1;
+	unsigned has_sdp:1;
+	char sdp[MAX_SDP];
 
 	struct pw_properties *props;
 
@@ -271,6 +278,7 @@ struct impl {
 	struct spa_source *sap_source;
 	uint32_t cleanup_interval;
 
+	uint32_t max_sessions;
 	uint32_t n_sessions;
 	struct spa_list sessions;
 
@@ -375,7 +383,7 @@ static bool is_multicast(struct sockaddr *sa, socklen_t salen)
 static int make_unix_socket(const char *path) {
 	struct sockaddr_un addr;
 
-	spa_autoclose int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+	spa_autoclose int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0) {
 		pw_log_warn("Failed to create PTP management socket");
 		return -1;
@@ -451,6 +459,8 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 {
 	int af, fd, val, res;
 	struct ifreq req;
+	struct sockaddr_storage ba = *sa;
+	bool do_connect = false;
 	char addr[128];
 
 	af = sa->ss_family;
@@ -484,7 +494,11 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 			pw_log_info("join IPv4 group: %s iface:%d", addr, req.ifr_ifindex);
 			res = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mr4, sizeof(mr4));
 		} else {
-			sa4->sin_addr.s_addr = INADDR_ANY;
+			struct sockaddr_in *ba4 = (struct sockaddr_in*)&ba;
+			if (ba4->sin_addr.s_addr != INADDR_ANY) {
+				ba4->sin_addr.s_addr = INADDR_ANY;
+				do_connect = true;
+			}
 		}
 	} else if (af == AF_INET6) {
 		struct sockaddr_in6 *sa6 = (struct sockaddr_in6*)sa;
@@ -497,7 +511,8 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 			pw_log_info("join IPv6 group: %s iface:%d", addr, req.ifr_ifindex);
 			res = setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mr6, sizeof(mr6));
 		} else {
-		        sa6->sin6_addr = in6addr_any;
+			struct sockaddr_in6 *ba6 = (struct sockaddr_in6*)&ba;
+			ba6->sin6_addr = in6addr_any;
 		}
 	} else {
 		res = -EINVAL;
@@ -510,10 +525,17 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 		goto error;
 	}
 
-	if (bind(fd, (struct sockaddr*)sa, salen) < 0) {
+	if (bind(fd, (struct sockaddr*)&ba, salen) < 0) {
 		res = -errno;
 		pw_log_error("bind() failed: %m");
 		goto error;
+	}
+	if (do_connect) {
+		if (connect(fd, (struct sockaddr*)sa, salen) < 0) {
+			res = -errno;
+			pw_log_error("connect() failed: %m");
+			goto error;
+		}
 	}
 	return fd;
 error:
@@ -528,9 +550,11 @@ static void update_ts_refclk(struct impl *impl)
 
 	// Read if something is left in the socket
 	int avail;
-	ioctl(impl->ptp_fd, FIONREAD, &avail);
 	uint8_t tmp;
-	while (avail--) read(impl->ptp_fd, &tmp, 1);
+
+	ioctl(impl->ptp_fd, FIONREAD, &avail);
+	pw_log_debug("Flushing stale data: %u bytes", avail);
+	while (avail-- && read(impl->ptp_fd, &tmp, 1));
 
 	struct ptp_management_msg req;
 	spa_zero(req);
@@ -633,43 +657,18 @@ static void update_ts_refclk(struct impl *impl)
 	memcpy(impl->gm_id, gmid, 8);
 }
 
-static int send_sap(struct impl *impl, struct session *sess, bool bye)
+static int make_sdp(struct impl *impl, struct session *sess, char *buffer, size_t buffer_size)
 {
-	char buffer[2048], src_addr[64], dst_addr[64], dst_ttl[8];
-	const char *user_name;
-	struct sockaddr *sa = (struct sockaddr*)&impl->src_addr;
-	struct sap_header header;
-	struct iovec iov[4];
-	struct msghdr msg;
-	struct spa_strbuf buf;
+	char src_addr[64], dst_addr[64], dst_ttl[8];
 	struct sdp_info *sdp = &sess->info;
 	bool src_ip4, dst_ip4;
+	bool multicast;
+	const char *user_name;
+	struct spa_strbuf buf;
 	int res;
-
-	if (!sess->has_sent_sap && bye)
-		return 0;
-
-	spa_zero(header);
-	header.v = 1;
-	header.t = bye;
-	header.msg_id_hash = sdp->hash;
-
-	iov[0].iov_base = &header;
-	iov[0].iov_len = sizeof(header);
 
 	if ((res = pw_net_get_ip(&impl->src_addr, src_addr, sizeof(src_addr), &src_ip4, NULL)) < 0)
 		return res;
-
-	if (src_ip4) {
-		iov[1].iov_base = &((struct sockaddr_in*) sa)->sin_addr;
-		iov[1].iov_len = 4U;
-	} else {
-		iov[1].iov_base = &((struct sockaddr_in6*) sa)->sin6_addr;
-		iov[1].iov_len = 16U;
-		header.a = 1;
-	}
-	iov[2].iov_base = SAP_MIME_TYPE;
-	iov[2].iov_len = sizeof(SAP_MIME_TYPE);
 
 	if ((res = pw_net_get_ip(&sdp->dst_addr, dst_addr, sizeof(dst_addr), &dst_ip4, NULL)) < 0)
 		return res;
@@ -677,24 +676,26 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	if ((user_name = pw_get_user_name()) == NULL)
 		user_name = "-";
 
+	multicast = is_multicast((struct sockaddr*)&sdp->dst_addr, sdp->dst_len);
+
 	spa_zero(dst_ttl);
-	if (is_multicast((struct sockaddr*)&sdp->dst_addr, sdp->dst_len))
+	if (multicast)
 		snprintf(dst_ttl, sizeof(dst_ttl), "/%d", sdp->ttl);
 
-	spa_strbuf_init(&buf, buffer, sizeof(buffer));
+	spa_strbuf_init(&buf, buffer, buffer_size);
 	/* Don't add any sdp records in between this definition or change the order
 	   it will break compatibility with Dante/AES67 devices. Add new records to
 	   the end. */
 	spa_strbuf_append(&buf,
 			"v=0\n"
-			"o=%s %u 0 IN %s %s\n"
+			"o=%s %u %u IN %s %s\n"
 			"s=%s\n"
 			"c=IN %s %s%s\n"
 			"t=%u 0\n"
 			"m=%s %u RTP/AVP %i\n",
-			user_name, sdp->ntp, src_ip4 ? "IP4" : "IP6", src_addr,
+			user_name, sdp->session_id, sdp->session_version, src_ip4 ? "IP4" : "IP6", src_addr,
 			sdp->session_name,
-			dst_ip4 ? "IP4" : "IP6", dst_addr, dst_ttl,
+			(multicast ? dst_ip4 : src_ip4) ? "IP4" : "IP6", multicast ? dst_addr : src_addr, dst_ttl,
 			sdp->t_ntp,
 			sdp->media_type, sdp->dst_port, sdp->payload);
 
@@ -753,10 +754,10 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 					impl->gm_id[6],
 					impl->gm_id[7],
 					0/* domain */);
-		} else {
-			spa_strbuf_append(&buf,	"a=ts-refclk:%s\n",	sdp->ts_refclk);
+		} else if (sdp->ts_refclk != NULL) {
+			spa_strbuf_append(&buf, "a=ts-refclk:%s\n", sdp->ts_refclk);
 		}
-		spa_strbuf_append(&buf,	"a=mediaclk:direct=%u\n",	sdp->ts_offset);
+		spa_strbuf_append(&buf, "a=mediaclk:direct=%u\n", sdp->ts_offset);
 	} else {
 		spa_strbuf_append(&buf, "a=mediaclk:sender\n");
 	}
@@ -769,10 +770,83 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	if (impl->extra_attrs_end)
 		spa_strbuf_append(&buf, "%s", impl->extra_attrs_end);
 
-	pw_log_debug("sending SAP for %u %s", sess->node->id, buffer);
+	return 0;
+}
 
-	iov[3].iov_base = buffer;
-	iov[3].iov_len = strlen(buffer);
+static int send_sap(struct impl *impl, struct session *sess, bool bye)
+{
+	struct sap_header header;
+	struct iovec iov[4];
+	struct msghdr msg;
+	struct sdp_info *sdp = &sess->info;
+	int res;
+
+	if (!sess->has_sent_sap && bye)
+		return 0;
+
+	if (impl->sap_fd == -1) {
+		int fd;
+		char addr[64];
+		const char *str;
+
+		if ((str = pw_properties_get(sess->props, "source.ip")) == NULL) {
+			if (impl->ifname) {
+				int fd = socket(impl->sap_addr.ss_family, SOCK_DGRAM, 0);
+				if (fd >= 0) {
+					struct ifreq req;
+					spa_zero(req);
+					req.ifr_addr.sa_family = impl->sap_addr.ss_family;
+					snprintf(req.ifr_name, sizeof(req.ifr_name), "%s", impl->ifname);
+					res = ioctl(fd, SIOCGIFADDR, &req);
+					if (res < 0)
+						pw_log_warn("SIOCGIFADDR %s failed: %m", impl->ifname);
+					str = inet_ntop(req.ifr_addr.sa_family,
+							&((struct sockaddr_in *)&req.ifr_addr)->sin_addr,
+							addr, sizeof(addr));
+					if (str == NULL) {
+						pw_log_warn("can't parse interface ip: %m");
+					} else {
+						pw_log_info("interface %s IP: %s", impl->ifname, str);
+					}
+					close(fd);
+				}
+			}
+			if (str == NULL)
+				str = impl->sap_addr.ss_family == AF_INET ?
+					DEFAULT_SOURCE_IP : DEFAULT_SOURCE_IP6;
+		}
+		if ((res = pw_net_parse_address(str, 0, &impl->src_addr, &impl->src_len)) < 0) {
+			pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));
+			return res;
+		}
+		if ((fd = make_send_socket(&impl->src_addr, impl->src_len,
+						&impl->sap_addr, impl->sap_len,
+						impl->mcast_loop, impl->ttl)) < 0)
+			return fd;
+
+		impl->sap_fd = fd;
+	}
+
+	spa_zero(header);
+	header.v = 1;
+	header.t = bye;
+	header.msg_id_hash = sdp->hash;
+
+	iov[0].iov_base = &header;
+	iov[0].iov_len = sizeof(header);
+
+	if (impl->src_addr.ss_family == AF_INET) {
+		iov[1].iov_base = &((struct sockaddr_in*) &impl->src_addr)->sin_addr;
+		iov[1].iov_len = 4U;
+	} else {
+		iov[1].iov_base = &((struct sockaddr_in6*) &impl->src_addr)->sin6_addr;
+		iov[1].iov_len = 16U;
+		header.a = 1;
+	}
+	iov[2].iov_base = SAP_MIME_TYPE;
+	iov[2].iov_len = sizeof(SAP_MIME_TYPE);
+	iov[3].iov_base = sess->sdp;
+	iov[3].iov_len = strlen(sess->sdp);
 
 	msg.msg_name = NULL;
 	msg.msg_namelen = 0;
@@ -781,6 +855,8 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 	msg.msg_flags = 0;
+
+	pw_log_debug("sending SAP for %u %s", sess->node->id, sess->sdp);
 
 	res = sendmsg(impl->sap_fd, &msg, MSG_NOSIGNAL);
 	if (res < 0)
@@ -826,37 +902,50 @@ static struct session *session_find(struct impl *impl, const struct sdp_info *in
 	return NULL;
 }
 
+static inline void replace_str(char **dst, const char *val)
+{
+	free(*dst);
+	*dst = val ? strdup(val) : NULL;
+}
+
 static struct session *session_new_announce(struct impl *impl, struct node *node,
 		struct pw_properties *props)
 {
+	char buffer[MAX_SDP];
 	struct session *sess = NULL;
 	struct sdp_info *sdp;
 	const char *str;
 	uint32_t port;
 	int res;
 
-	if (impl->n_sessions >= MAX_SESSIONS) {
-		pw_log_warn("too many sessions (%u >= %u)", impl->n_sessions, MAX_SESSIONS);
-		errno = EMFILE;
-		return NULL;
-	}
+	sess = node->session;
+	if (sess == NULL) {
+		if (impl->n_sessions >= impl->max_sessions) {
+			pw_log_warn("too many sessions (%u >= %u)", impl->n_sessions, impl->max_sessions);
+			errno = EMFILE;
+			return NULL;
+		}
+		sess = calloc(1, sizeof(struct session));
+		if (sess == NULL)
+			return NULL;
 
-	sess = calloc(1, sizeof(struct session));
-	if (sess == NULL)
-		return NULL;
+		pw_log_info("created new session for node:%u", node->id);
+		node->session = sess;
+		sess->node = node;
+		sess->impl = impl;
+		sess->announce = true;
+		spa_list_append(&impl->sessions, &sess->link);
+		impl->n_sessions++;
+	}
 
 	sdp = &sess->info;
 
-	sess->announce = true;
-
-	sdp->hash = pw_rand32();
-	sdp->ntp = (uint32_t) time(NULL) + 2208988800U + impl->n_sessions;
-	sdp->t_ntp = pw_properties_get_uint32(props, "rtp.ntp", sdp->ntp);
+	pw_properties_free(sess->props);
 	sess->props = props;
 
 	if ((str = pw_properties_get(props, "sess.name")) == NULL)
 		str = pw_get_host_name();
-	sdp->session_name = strdup(str);
+	replace_str(&sdp->session_name, str);
 
 	if ((str = pw_properties_get(props, "rtp.destination.port")) == NULL)
 		goto error_free;
@@ -881,44 +970,67 @@ static struct session *session_new_announce(struct impl *impl, struct node *node
 		if (!spa_atou32(str, &sdp->framecount, 0))
 			sdp->framecount = 0;
 
-	if ((str = pw_properties_get(props, "rtp.media")) != NULL)
-		sdp->media_type = strdup(str);
-	if ((str = pw_properties_get(props, "rtp.mime")) != NULL)
-		sdp->mime_type = strdup(str);
+	str = pw_properties_get(props, "rtp.media");
+	replace_str(&sdp->media_type, str);
+	str = pw_properties_get(props, "rtp.mime");
+	replace_str(&sdp->mime_type, str);
+
 	if ((str = pw_properties_get(props, "rtp.rate")) != NULL)
 		sdp->rate = atoi(str);
 	if ((str = pw_properties_get(props, "rtp.channels")) != NULL)
 		sdp->channels = atoi(str);
 	if ((str = pw_properties_get(props, "rtp.ts-offset")) != NULL)
 		sdp->ts_offset = atoi(str);
-	if ((str = pw_properties_get(props, "rtp.ts-refclk")) != NULL)
-		sdp->ts_refclk = strdup(str);
+	str = pw_properties_get(props, "rtp.ts-refclk");
+	replace_str(&sdp->ts_refclk, str);
+
 	sess->ts_refclk_ptp = pw_properties_get_bool(props, "rtp.fetch-ts-refclk", false);
 	if ((str = pw_properties_get(props, PW_KEY_NODE_CHANNELNAMES)) != NULL) {
 		struct spa_strbuf buf;
+		struct spa_json it[1];
+		char v[256];
+		int count = 0;
+
 		spa_strbuf_init(&buf, sdp->channelmap, sizeof(sdp->channelmap));
 
-		struct spa_json it[2];
-		char v[256];
-
-		spa_json_init(&it[0], str, strlen(str));
-		if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-			spa_json_init(&it[1], str, strlen(str));
-
-		if (spa_json_get_string(&it[1], v, sizeof(v)) > 0)
-			spa_strbuf_append(&buf, "%s", v);
-		while (spa_json_get_string(&it[1], v, sizeof(v)) > 0)
-			spa_strbuf_append(&buf, ", %s", v);
+		if (spa_json_begin_array_relax(&it[0], str, strlen(str)) > 0) {
+			while (spa_json_get_string(&it[0], v, sizeof(v)) > 0)
+				spa_strbuf_append(&buf, "%s%s", count++ > 0 ? ", " : "", v);
+		}
 	}
+	make_sdp(impl, sess, buffer, sizeof(buffer));
 
-	pw_log_info("created new session for node:%u", node->id);
-	node->session = sess;
-	sess->node = node;
+	/* we had no sdp or something changed */
+	if (!sess->has_sdp || strcmp(buffer, sess->sdp) != 0) {
+		/*  send bye on the old session */
+		send_sap(impl, sess, 1);
 
-	sess->impl = impl;
-	spa_list_append(&impl->sessions, &sess->link);
-	impl->n_sessions++;
+		/* update the version and hash */
+		sdp->hash = pw_rand32();
+		if ((str = pw_properties_get(props, "sess.id")) != NULL) {
+			if (!spa_atou32(str, &sdp->session_id, 10)) {
+				pw_log_error("Invalid session id: %s (must be a uint32)", str);
+				goto error_free;
+			}
+			sdp->t_ntp = pw_properties_get_uint32(props, "rtp.ntp",
+					(uint32_t) time(NULL) + 2208988800U + impl->n_sessions);
+		} else {
+			sdp->session_id = (uint32_t) time(NULL) + 2208988800U + impl->n_sessions;
+			sdp->t_ntp = pw_properties_get_uint32(props, "rtp.ntp", sdp->session_id);
+		}
+		if ((str = pw_properties_get(props, "sess.version")) != NULL) {
+			if (!spa_atou32(str, &sdp->session_version, 10)) {
+				pw_log_error("Invalid session version: %s (must be a uint32)", str);
+				goto error_free;
+			}
+		} else {
+			sdp->session_version = sdp->t_ntp;
+		}
 
+		/* make an updated SDP for sending */
+		make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp));
+		sess->has_sdp = true;
+	}
 	send_sap(impl, sess, 0);
 
 	return sess;
@@ -1079,8 +1191,8 @@ static struct session *session_new(struct impl *impl, struct sdp_info *info)
 	const char *str;
 	char dst_addr[64], tmp[64];
 
-	if (impl->n_sessions >= MAX_SESSIONS) {
-		pw_log_warn("too many sessions (%u >= %u)", impl->n_sessions, MAX_SESSIONS);
+	if (impl->n_sessions >= impl->max_sessions) {
+		pw_log_warn("too many sessions (%u >= %u)", impl->n_sessions, impl->max_sessions);
 		errno = EMFILE;
 		return NULL;
 	}
@@ -1438,7 +1550,7 @@ on_sap_io(void *data, int fd, uint32_t mask)
 	int res;
 
 	if (mask & SPA_IO_IN) {
-		uint8_t buffer[2048];
+		uint8_t buffer[MAX_SDP];
 		ssize_t len;
 
 		if ((len = recv(fd, buffer, sizeof(buffer), 0)) < 0) {
@@ -1456,16 +1568,9 @@ on_sap_io(void *data, int fd, uint32_t mask)
 
 static int start_sap(struct impl *impl)
 {
-	int fd, res;
+	int fd = -1, res;
 	struct timespec value, interval;
 	char addr[128] = "invalid";
-
-	if ((fd = make_send_socket(&impl->src_addr, impl->src_len,
-					&impl->sap_addr, impl->sap_len,
-					impl->mcast_loop, impl->ttl)) < 0)
-		return fd;
-
-	impl->sap_fd = fd;
 
 	pw_log_info("starting SAP timer");
 	impl->timer = pw_loop_add_timer(impl->loop, on_timer_event, impl);
@@ -1494,7 +1599,8 @@ static int start_sap(struct impl *impl)
 
 	return 0;
 error:
-	close(fd);
+	if (fd > 0)
+		close(fd);
 	return res;
 }
 
@@ -1504,7 +1610,12 @@ static void node_event_info(void *data, const struct pw_node_info *info)
 	struct impl *impl = n->impl;
 	const char *str;
 
-	if (n->session != NULL || info == NULL)
+	if (info == NULL)
+		return;
+
+	// We only really want to do anything here if properties are updated,
+	// or if we don't have a session for this node already
+	if (!(info->change_mask & PW_NODE_CHANGE_MASK_PROPS) && n->session != NULL)
 		return;
 
 	n->info = pw_node_info_merge(n->info, info, true);
@@ -1677,7 +1788,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	uint32_t port;
 	const char *str;
 	int res = 0;
-	char addr[64];
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 
@@ -1722,70 +1832,34 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->cleanup_interval = pw_properties_get_uint32(impl->props,
 			"sap.cleanup.sec", DEFAULT_CLEANUP_SEC);
 
-	if ((str = pw_properties_get(props, "source.ip")) == NULL) {
-		if (impl->ifname) {
-			int fd = socket(impl->sap_addr.ss_family, SOCK_DGRAM, 0);
-			if (fd >= 0) {
-				struct ifreq req;
-				spa_zero(req);
-				req.ifr_addr.sa_family = impl->sap_addr.ss_family;
-				snprintf(req.ifr_name, sizeof(req.ifr_name), "%s", impl->ifname);
-				res = ioctl(fd, SIOCGIFADDR, &req);
-				if (res < 0)
-					pw_log_warn("SIOCGIFADDR %s failed: %m", impl->ifname);
-				str = inet_ntop(req.ifr_addr.sa_family,
-						&((struct sockaddr_in *)&req.ifr_addr)->sin_addr,
-						addr, sizeof(addr));
-				if (str == NULL) {
-					pw_log_warn("can't parse interface ip: %m");
-				} else {
-					pw_log_info("interface %s IP: %s", impl->ifname, str);
-				}
-				close(fd);
-			}
-		}
-		if (str == NULL)
-			str = impl->sap_addr.ss_family == AF_INET ?
-				DEFAULT_SOURCE_IP : DEFAULT_SOURCE_IP6;
-	}
-	if ((res = pw_net_parse_address(str, 0, &impl->src_addr, &impl->src_len)) < 0) {
-		pw_log_error("invalid source.ip %s: %s", str, spa_strerror(res));
-		goto out;
-	}
-
 	impl->ttl = pw_properties_get_uint32(props, "net.ttl", DEFAULT_TTL);
 	impl->mcast_loop = pw_properties_get_bool(props, "net.loop", DEFAULT_LOOP);
+	impl->max_sessions = pw_properties_get_uint32(props, "sap.max-sessions", DEFAULT_MAX_SESSIONS);
 
 	impl->extra_attrs_preamble = NULL;
 	impl->extra_attrs_end = NULL;
-	char buffer[2048];
+	char buffer[MAX_SDP];
 	struct spa_strbuf buf;
 	if ((str = pw_properties_get(props, "sap.preamble-extra")) != NULL) {
 		spa_strbuf_init(&buf, buffer, sizeof(buffer));
-		struct spa_json it[2];
+		struct spa_json it[1];
 		char line[256];
 
-		spa_json_init(&it[0], str, strlen(str));
-		if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-			spa_json_init(&it[1], str, strlen(str));
-
-		while (spa_json_get_string(&it[1], line, sizeof(line)) > 0)
-			spa_strbuf_append(&buf, "%s\n", line);
-
+		if (spa_json_begin_array_relax(&it[0], str, strlen(str)) > 0) {
+			while (spa_json_get_string(&it[0], line, sizeof(line)) > 0)
+				spa_strbuf_append(&buf, "%s\n", line);
+		}
 		impl->extra_attrs_preamble = strdup(buffer);
 	}
 	if ((str = pw_properties_get(props, "sap.end-extra")) != NULL) {
 		spa_strbuf_init(&buf, buffer, sizeof(buffer));
-		struct spa_json it[2];
+		struct spa_json it[1];
 		char line[256];
 
-		spa_json_init(&it[0], str, strlen(str));
-		if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-			spa_json_init(&it[1], str, strlen(str));
-
-		while (spa_json_get_string(&it[1], line, sizeof(line)) > 0)
-			spa_strbuf_append(&buf, "%s\n", line);
-
+		if (spa_json_begin_array_relax(&it[0], str, strlen(str)) > 0) {
+			while (spa_json_get_string(&it[0], line, sizeof(line)) > 0)
+				spa_strbuf_append(&buf, "%s\n", line);
+		}
 		impl->extra_attrs_end = strdup(buffer);
 	}
 

@@ -19,11 +19,14 @@
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
+#include <spa/utils/ratelimit.h>
 #include <spa/debug/types.h>
 #include <spa/pod/builder.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/audio/raw-json.h>
+#include <spa/control/ump-utils.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -74,6 +77,8 @@
  * ## Example configuration of a duplex sink/source
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-jack-tunnel.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-jack-tunnel
  *     args = {
@@ -105,7 +110,6 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define MAX_PORTS	128
 
 #define DEFAULT_CLIENT_NAME	"PipeWire"
-#define DEFAULT_CHANNELS	2
 #define DEFAULT_POSITION	"[ FL FR ]"
 #define DEFAULT_MIDI_PORTS	1
 
@@ -182,6 +186,8 @@ struct impl {
 	struct spa_hook core_proxy_listener;
 	struct spa_hook core_listener;
 
+	struct spa_ratelimit rate_limit;
+
 	struct spa_io_position *position;
 
 	struct stream source;
@@ -190,7 +196,7 @@ struct impl {
 	uint32_t samplerate;
 
 	jack_client_t *client;
-	jack_nframes_t frame_time;
+	jack_nframes_t current_frames;
 
 	uint32_t pw_xrun;
 	uint32_t jack_xrun;
@@ -254,23 +260,23 @@ static void midi_to_jack(struct impl *impl, float *dst, float *src, uint32_t n_s
 	seq = (struct spa_pod_sequence*)pod;
 
 	SPA_POD_SEQUENCE_FOREACH(seq, c) {
-		switch(c->type) {
-		case SPA_CONTROL_Midi:
-		{
-			uint8_t *data = SPA_POD_BODY(&c->value);
-			size_t size = SPA_POD_BODY_SIZE(&c->value);
+		uint8_t data[16];
+		int size;
 
-			if (impl->fix_midi)
-				fix_midi_event(data, size);
+		if (c->type != SPA_CONTROL_UMP)
+			continue;
 
-			if ((res = jack.midi_event_write(dst, c->offset, data, size)) < 0)
-				pw_log_warn("midi %p: can't write event: %s", dst,
-						spa_strerror(res));
-			break;
-		}
-		default:
-			break;
-		}
+		size = spa_ump_to_midi(SPA_POD_BODY(&c->value),
+				SPA_POD_BODY_SIZE(&c->value), data, sizeof(data));
+		if (size <= 0)
+			continue;
+
+		if (impl->fix_midi)
+			fix_midi_event(data, size);
+
+		if ((res = jack.midi_event_write(dst, c->offset, data, size)) < 0)
+			pw_log_warn("midi %p: can't write event: %s", dst,
+					spa_strerror(res));
 	}
 }
 
@@ -286,9 +292,19 @@ static void jack_to_midi(float *dst, float *src, uint32_t size)
 	spa_pod_builder_push_sequence(&b, &f, 0);
 	for (i = 0; i < count; i++) {
 		jack_midi_event_t ev;
+		uint64_t state = 0;
+
 		jack.midi_event_get(&ev, src, i);
-		spa_pod_builder_control(&b, ev.time, SPA_CONTROL_Midi);
-		spa_pod_builder_bytes(&b, ev.buffer, ev.size);
+
+		while (ev.size > 0) {
+			uint32_t ump[4];
+			int ump_size = spa_ump_from_midi(&ev.buffer, &ev.size, ump, sizeof(ump), 0, &state);
+			if (ump_size <= 0)
+				break;
+
+			spa_pod_builder_control(&b, ev.time, SPA_CONTROL_UMP);
+	                spa_pod_builder_bytes(&b, ump, ump_size);
+		}
 	}
 	spa_pod_builder_pop(&b, &f);
 }
@@ -306,9 +322,11 @@ static void stream_state_changed(void *d, enum pw_filter_state old,
 	struct stream *s = d;
 	struct impl *impl = s->impl;
 	switch (state) {
-	case PW_FILTER_STATE_ERROR:
 	case PW_FILTER_STATE_UNCONNECTED:
 		pw_impl_module_schedule_destroy(impl->module);
+		break;
+	case PW_FILTER_STATE_ERROR:
+		pw_log_warn("stream %p: error: %s", s, error);
 		break;
 	case PW_FILTER_STATE_PAUSED:
 		s->running = false;
@@ -351,7 +369,7 @@ static void sink_process(void *d, struct spa_io_position *position)
 		else
 			do_volume(dst, src, &s->volume, i, n_samples);
 	}
-	pw_log_trace_fp("done %u %u", impl->frame_time, n_samples);
+	pw_log_trace_fp("done %u %u", impl->current_frames, n_samples);
 	if (impl->mode & MODE_SINK) {
 		impl->done = true;
 		jack.cycle_signal(impl->client, 0);
@@ -365,7 +383,7 @@ static void source_process(void *d, struct spa_io_position *position)
 	uint32_t i, n_samples = position->clock.duration;
 
 	if (impl->mode == MODE_SOURCE && !impl->triggered) {
-		pw_log_trace_fp("done %u", impl->frame_time);
+		pw_log_trace_fp("done %u", impl->current_frames);
 		impl->done = true;
 		jack.cycle_signal(impl->client, 0);
 		return;
@@ -485,7 +503,7 @@ static void make_stream_ports(struct stream *s)
 		} else {
 			snprintf(name, sizeof(name), "%s_%d", prefix, i - s->info.channels);
 			props = pw_properties_new(
-					PW_KEY_FORMAT_DSP, "8 bit raw midi",
+					PW_KEY_FORMAT_DSP, "32 bit raw UMP",
 					PW_KEY_PORT_NAME, name,
 					PW_KEY_PORT_PHYSICAL, "true",
 					NULL);
@@ -683,34 +701,39 @@ static void *jack_process_thread(void *arg)
 	jack_nframes_t nframes;
 
 	while (true) {
+		jack_nframes_t current_frames;
+		jack_time_t current_usecs;
+		jack_time_t next_usecs;
+		float period_usecs;
+
 		nframes = jack.cycle_wait (impl->client);
+
+		jack.get_cycle_times(impl->client,
+				&current_frames, &current_usecs,
+				&next_usecs, &period_usecs);
+
+		impl->current_frames = current_frames;
 
 		source_running = impl->source.running;
 		sink_running = impl->sink.running;
 
-		impl->frame_time = jack.frame_time(impl->client);
-
 		pw_log_trace_fp("process %d %u %u %p %d", nframes, source_running,
-				sink_running, impl->position, impl->frame_time);
+				sink_running, impl->position, current_frames);
 
 		if (impl->new_xrun) {
-			pw_log_warn("Xrun JACK:%u PipeWire:%u", impl->jack_xrun, impl->pw_xrun);
+			int suppressed;
+			if ((suppressed = spa_ratelimit_test(&impl->rate_limit, current_usecs)) >= 0) {
+				pw_log_warn("Xrun: current_frames:%u JACK:%u PipeWire:%u (%d suppressed)",
+						current_frames, impl->jack_xrun, impl->pw_xrun, suppressed);
+			}
 			impl->new_xrun = false;
 		}
 
 		if (impl->position) {
 			struct spa_io_clock *c = &impl->position->clock;
-			jack_nframes_t current_frames;
-			jack_time_t current_usecs;
-			jack_time_t next_usecs;
-			float period_usecs;
 			jack_position_t pos;
 			uint64_t t1, t2, t3;
 			int64_t d1;
-
-			jack.get_cycle_times(impl->client,
-					&current_frames, &current_usecs,
-					&next_usecs, &period_usecs);
 
 			/* convert from JACK (likely MONOTONIC_RAW) to MONOTONIC */
 			t1 = get_time_nsec(impl) / 1000;
@@ -976,45 +999,15 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	info->format = SPA_AUDIO_FORMAT_F32P;
-	info->rate = 0;
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)
@@ -1076,6 +1069,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->main_loop = pw_context_get_main_loop(context);
 	impl->system = impl->main_loop->system;
+
+	impl->rate_limit.interval = 2 * SPA_USEC_PER_SEC;
+	impl->rate_limit.burst = 1;
 
 	impl->source.impl = impl;
 	impl->source.direction = PW_DIRECTION_OUTPUT;

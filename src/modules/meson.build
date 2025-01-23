@@ -71,101 +71,14 @@ pipewire_module_loopback = shared_library('pipewire-module-loopback',
   dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
 
-plugin_dependencies = []
-if get_option('spa-plugins').allowed()
-  plugin_dependencies += audioconvert_dep
-endif
-
-simd_cargs = []
-simd_dependencies = []
-
-if have_sse
-  filter_chain_sse = static_library('filter_chain_sse',
-    ['module-filter-chain/pffft.c',
-     'module-filter-chain/dsp-ops-sse.c' ],
-    c_args : [sse_args, '-O3', '-DHAVE_SSE'],
-    dependencies : [ spa_dep ],
-    install : false
-    )
-  simd_cargs += ['-DHAVE_SSE']
-  simd_dependencies += filter_chain_sse
-endif
-if have_avx
-  filter_chain_avx = static_library('filter_chain_avx',
-    ['module-filter-chain/dsp-ops-avx.c' ],
-    c_args : [avx_args, fma_args,'-O3', '-DHAVE_AVX'],
-    dependencies : [ spa_dep ],
-    install : false
-    )
-  simd_cargs += ['-DHAVE_AVX']
-  simd_dependencies += filter_chain_avx
-endif
-if have_neon
-  filter_chain_neon = static_library('filter_chain_neon',
-    ['module-filter-chain/pffft.c' ],
-    c_args : [neon_args, '-O3', '-DHAVE_NEON'],
-    dependencies : [ spa_dep ],
-    install : false
-    )
-  simd_cargs += ['-DHAVE_NEON']
-  simd_dependencies += filter_chain_neon
-endif
-
-filter_chain_c = static_library('filter_chain_c',
-  ['module-filter-chain/pffft.c',
-   'module-filter-chain/dsp-ops.c',
-   'module-filter-chain/dsp-ops-c.c' ],
-  c_args : [simd_cargs, '-O3', '-DPFFFT_SIMD_DISABLE'],
-  dependencies : [ spa_dep ],
-  install : false
-)
-simd_dependencies += filter_chain_c
-
-filter_chain_sources = [
-  'module-filter-chain.c',
-  'module-filter-chain/biquad.c',
-  'module-filter-chain/ladspa_plugin.c',
-  'module-filter-chain/builtin_plugin.c',
-  'module-filter-chain/convolver.c'
-]
-filter_chain_dependencies = [
-  mathlib, dl_lib, pipewire_dep, sndfile_dep, plugin_dependencies
-]
-
 pipewire_module_filter_chain = shared_library('pipewire-module-filter-chain',
-  filter_chain_sources,
+  [ 'module-filter-chain.c' ],
   include_directories : [configinc],
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  link_with : simd_dependencies,
-  dependencies : filter_chain_dependencies,
+  dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
-
-if libmysofa_dep.found()
-pipewire_module_filter_chain_sofa = shared_library('pipewire-module-filter-chain-sofa',
-  [ 'module-filter-chain/sofa_plugin.c',
-    'module-filter-chain/convolver.c' ],
-  include_directories : [configinc],
-  install : true,
-  install_dir : modules_install_dir,
-  install_rpath: modules_install_dir,
-  link_with : simd_dependencies,
-  dependencies : [ filter_chain_dependencies, libmysofa_dep ]
-)
-endif
-
-if lilv_lib.found()
-pipewire_module_filter_chain_lv2 = shared_library('pipewire-module-filter-chain-lv2',
-  [ 'module-filter-chain/lv2_plugin.c' ],
-  include_directories : [configinc],
-  install : true,
-  install_dir : modules_install_dir,
-  install_rpath: modules_install_dir,
-  dependencies : [ filter_chain_dependencies, lilv_lib ]
-)
-endif
-
 
 pipewire_module_combine_stream = shared_library('pipewire-module-combine-stream',
   [ 'module-combine-stream.c' ],
@@ -259,7 +172,7 @@ pipewire_module_parametric_equalizer = shared_library('pipewire-module-parametri
   install : true,
   install_dir : modules_install_dir,
   install_rpath: modules_install_dir,
-  dependencies : [filter_chain_dependencies],
+  dependencies : [spa_dep, mathlib, dl_lib, pipewire_dep],
 )
 
 pipewire_module_profiler = shared_library('pipewire-module-profiler',
@@ -433,11 +346,11 @@ if avahi_dep.found()
   cdata.set('HAVE_AVAHI', true)
 endif
 
-if gio_dep.found()
+if gsettings_gio_dep.found()
   pipewire_module_protocol_pulse_sources += [
     'module-protocol-pulse/modules/module-gsettings.c',
   ]
-  pipewire_module_protocol_pulse_deps += gio_dep
+  pipewire_module_protocol_pulse_deps += gsettings_gio_dep
   cdata.set('HAVE_GIO', true)
   if get_option('gsettings-pulse-schema').enabled()
     install_data(['module-protocol-pulse/modules/org.freedesktop.pulseaudio.gschema.xml'],

@@ -26,6 +26,7 @@
 #include <spa/debug/types.h>
 #include <spa/pod/builder.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/raw.h>
 
@@ -55,10 +56,12 @@
  * - `driver.mode`: the driver mode, sink|source|duplex, default duplex
  * - `local.ifname = <str>`: interface name to use
  * - `net.ip =<str>`: multicast IP address, default "225.3.19.154"
- * - `net.port =<int>`: control port, default "19000"
+ * - `net.port =<int>`: control port, default 19000
  * - `net.mtu = <int>`: MTU to use, default 1500
  * - `net.ttl = <int>`: TTL to use, default 1
  * - `net.loop = <bool>`: loopback multicast, default false
+ * - `source.ip =<str>`: IP address to bind to, default "0.0.0.0"
+ * - `source.port =<int>`: port to bind to, default 0 (allocate)
  * - `netjack2.client-name`: the name of the NETJACK2 client.
  * - `netjack2.save`: if jack port connections should be save automatically. Can also be
  *                   placed per stream.
@@ -85,6 +88,8 @@
  * ## Example configuration of a duplex sink/source
  *
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-netjack2-driver.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-netjack2-driver
  *     args = {
@@ -121,6 +126,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_NET_LOOP	false
 #define DEFAULT_NET_DSCP	34 /* Default to AES-67 AF41 (34) */
 #define MAX_MTU			9000
+#define DEFAULT_SOURCE_IP	"0.0.0.0"
+#define DEFAULT_SOURCE_PORT	0
 
 #define DEFAULT_NETWORK_LATENCY	2
 #define NETWORK_MAX_LATENCY	30
@@ -141,6 +148,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"( net.mtu=<MTU to use, default 1500> ) "		\
 			"( net.ttl=<TTL to use, default 1> ) "			\
 			"( net.loop=<loopback, default false> ) "		\
+			"( source.ip=<ip address to bind, default 0.0.0.0> ) "	\
+			"( source.port=<port to bind, default 0> ) "		\
 			"( netjack2.client-name=<name of the NETJACK2 client> ) "	\
 			"( netjack2.save=<bool, save ports> ) "			\
 			"( netjack2.latency=<latency in cycles, default 2> ) "	\
@@ -274,6 +283,8 @@ static void stream_state_changed(void *d, enum pw_filter_state old,
 	struct impl *impl = s->impl;
 	switch (state) {
 	case PW_FILTER_STATE_ERROR:
+		pw_log_warn("stream %p: error: %s", s, error);
+		break;
 	case PW_FILTER_STATE_UNCONNECTED:
 		pw_impl_module_schedule_destroy(impl->module);
 		break;
@@ -391,21 +402,13 @@ static void make_stream_ports(struct stream *s)
 	struct impl *impl = s->impl;
 	uint32_t i;
 	struct pw_properties *props;
-	const char *str, *prefix;
+	const char *str;
 	char name[256];
 	bool is_midi;
 	uint8_t buffer[512];
 	struct spa_pod_builder b;
 	struct spa_latency_info latency;
 	const struct spa_pod *params[1];
-
-	if (s->direction == PW_DIRECTION_INPUT) {
-		/* sink */
-		prefix = "playback";
-	} else {
-		/* source */
-		prefix = "capture";
-	}
 
 	for (i = 0; i < s->n_ports; i++) {
 		struct port *port = s->ports[i];
@@ -418,24 +421,18 @@ static void make_stream_ports(struct stream *s)
 		if (i < s->info.channels) {
 			str = spa_debug_type_find_short_name(spa_type_audio_channel,
 					s->info.position[i % SPA_AUDIO_MAX_CHANNELS]);
-			if (str)
-				snprintf(name, sizeof(name), "%s_%s", prefix, str);
-			else
-				snprintf(name, sizeof(name), "%s_%d", prefix, i);
-
 			props = pw_properties_new(
 					PW_KEY_FORMAT_DSP, "32 bit float mono audio",
 					PW_KEY_AUDIO_CHANNEL, str ? str : "UNK",
 					PW_KEY_PORT_PHYSICAL, "true",
-					PW_KEY_PORT_NAME, name,
 					NULL);
 
 			is_midi = false;
 		} else {
-			snprintf(name, sizeof(name), "%s_%d", prefix, i - s->info.channels);
+			snprintf(name, sizeof(name), "midi%d", i - s->info.channels);
 			props = pw_properties_new(
-					PW_KEY_FORMAT_DSP, "8 bit raw midi",
-					PW_KEY_PORT_NAME, name,
+					PW_KEY_FORMAT_DSP, "32 bit raw UMP",
+					PW_KEY_AUDIO_CHANNEL, name,
 					PW_KEY_PORT_PHYSICAL, "true",
 					NULL);
 
@@ -969,11 +966,15 @@ static int create_netjack2_socket(struct impl *impl)
 	if ((str = pw_properties_get(impl->props, "net.ip")) == NULL)
 		str = DEFAULT_NET_IP;
 	if ((res = pw_net_parse_address(str, port, &impl->dst_addr, &impl->dst_len)) < 0) {
-		pw_log_error("invalid net.ip %s: %s", str, spa_strerror(res));
+		pw_log_error("invalid net.ip:%s port:%d: %s", str, port, spa_strerror(res));
 		goto out;
 	}
-	if ((res = pw_net_parse_address("0.0.0.0", 0, &impl->src_addr, &impl->src_len)) < 0) {
-		pw_log_error("invalid source.ip: %s", spa_strerror(res));
+
+	port = pw_properties_get_uint32(impl->props, "source.port", DEFAULT_SOURCE_PORT);
+	if ((str = pw_properties_get(impl->props, "source.ip")) == NULL)
+		str = DEFAULT_SOURCE_IP;
+	if ((res = pw_net_parse_address(str, port, &impl->src_addr, &impl->src_len)) < 0) {
+		pw_log_error("invalid source.ip:%s port:%d: %s", str, port, spa_strerror(res));
 		goto out;
 	}
 
@@ -1146,45 +1147,15 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	info->format = SPA_AUDIO_FORMAT_F32P;
-	info->rate = 0;
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)

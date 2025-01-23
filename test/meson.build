@@ -79,7 +79,7 @@ test('test-loop',
     executable('test-loop',
                'test-loop.c',
                include_directories: pwtest_inc,
-               dependencies: [ spa_dep ],
+               dependencies: [ spa_dep, epoll_shim_dep ],
                link_with: pwtest_lib)
 )
 
@@ -111,6 +111,7 @@ endif
 test('test-spa',
     executable('test-spa',
                'test-spa-buffer.c',
+               'test-spa-control.c',
                'test-spa-json.c',
                'test-spa-utils.c',
                'test-spa-log.c',

@@ -8,6 +8,7 @@
 
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
+#include <spa/param/audio/iec958-types.h>
 
 int _acp_log_level = 1;
 acp_log_func _acp_log_func;
@@ -228,6 +229,25 @@ static void init_device(pa_card *impl, pa_alsa_device *dev, pa_alsa_direction_t 
 		dev->pcm_handle = m->input_pcm;
 		dev->device.direction = ACP_DIRECTION_CAPTURE;
 		pa_proplist_update(dev->proplist, PA_UPDATE_REPLACE, m->input_proplist);
+	}
+	if (m->split) {
+		char pos[2048];
+		struct spa_strbuf b;
+		int i;
+
+		spa_strbuf_init(&b, pos, sizeof(pos));
+		spa_strbuf_append(&b, "[");
+		for (i = 0; i < m->split->channels; ++i)
+			spa_strbuf_append(&b, "%sAUX%d", ((i == 0) ? "" : ","), m->split->idx[i]);
+		spa_strbuf_append(&b, "]");
+		pa_proplist_sets(dev->proplist, "api.alsa.split.position", pos);
+
+		spa_strbuf_init(&b, pos, sizeof(pos));
+		spa_strbuf_append(&b, "[");
+		for (i = 0; i < m->split->hw_channels; ++i)
+			spa_strbuf_append(&b, "%sAUX%d", ((i == 0) ? "" : ","), i);
+		spa_strbuf_append(&b, "]");
+		pa_proplist_sets(dev->proplist, "api.alsa.split.hw-position", pos);
 	}
 	pa_proplist_sets(dev->proplist, PA_PROP_DEVICE_PROFILE_NAME, m->name);
 	pa_proplist_sets(dev->proplist, PA_PROP_DEVICE_PROFILE_DESCRIPTION, m->description);
@@ -452,17 +472,16 @@ static int add_pro_profile(pa_card *impl, uint32_t index)
 
 static bool contains_string(const char *arr, const char *str)
 {
-	struct spa_json it[2];
+	struct spa_json it[1];
 	char v[256];
 
 	if (arr == NULL || str == NULL)
 		return false;
 
-	spa_json_init(&it[0], arr, strlen(arr));
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], arr, strlen(arr));
+        if (spa_json_begin_array_relax(&it[0], arr, strlen(arr)) <= 0)
+		return false;
 
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0) {
+	while (spa_json_get_string(&it[0], v, sizeof(v)) > 0) {
 		if (spa_streq(v, str))
 			return true;
 	}
@@ -952,12 +971,58 @@ static pa_device_port* find_port_with_eld_device(pa_card *impl, int device)
 	return NULL;
 }
 
+static void acp_iec958_codec_mask_to_json(uint64_t codecs, char *buf, size_t maxsize)
+{
+	struct spa_strbuf b;
+	const struct spa_type_info *info;
+
+	spa_strbuf_init(&b, buf, maxsize);
+	for (info = spa_type_audio_iec958_codec; info->name; ++info)
+		if ((codecs & (1ULL << info->type)) && info->type != SPA_AUDIO_IEC958_CODEC_UNKNOWN)
+			spa_strbuf_append(&b, "%s\"%s\"", (b.pos ? "," : "["),
+					spa_type_audio_iec958_codec_to_short_name(info->type));
+	if (b.pos)
+		spa_strbuf_append(&b, "]");
+}
+
+void acp_iec958_codecs_to_json(const uint32_t *codecs, size_t n_codecs, char *buf, size_t maxsize)
+{
+	struct spa_strbuf b;
+
+	spa_strbuf_init(&b, buf, maxsize);
+	spa_strbuf_append(&b, "[");
+	for (size_t i = 0; i < n_codecs; ++i)
+		spa_strbuf_append(&b, "%s\"%s\"", (i ? "," : ""),
+				spa_type_audio_iec958_codec_to_short_name(codecs[i]));
+	spa_strbuf_append(&b, "]");
+}
+
+size_t acp_iec958_codecs_from_json(const char *str, uint32_t *codecs, size_t max_codecs)
+{
+	struct spa_json it;
+	char v[256];
+	size_t n_codecs = 0;
+
+	if (spa_json_begin_array_relax(&it, str, strlen(str)) <= 0)
+		return 0;
+
+	while (spa_json_get_string(&it, v, sizeof(v)) > 0) {
+		uint32_t type = spa_type_audio_iec958_codec_from_short_name(v);
+		if (type != SPA_AUDIO_IEC958_CODEC_UNKNOWN)
+			codecs[n_codecs++] = type;
+		if (n_codecs >= max_codecs)
+			break;
+	}
+
+	return n_codecs;
+}
+
 static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 {
 	pa_card *impl = snd_mixer_elem_get_callback_private(melem);
 	snd_hctl_elem_t **_elem = snd_mixer_elem_get_private(melem), *elem;
-	int device;
-	const char *old_monitor_name;
+	int device, i;
+	const char *old_monitor_name, *old_iec958_codec_list;
 	pa_device_port *p;
 	pa_hdmi_eld eld;
 	bool changed = false;
@@ -978,6 +1043,15 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 	if (pa_alsa_get_hdmi_eld(elem, &eld) < 0)
 		memset(&eld, 0, sizeof(eld));
 
+	// Strip trailing whitespace from monitor_name (primarily an NVidia driver bug for now)
+	for (i = strlen(eld.monitor_name) - 1; i >= 0; i--) {
+		if (eld.monitor_name[i] == '\n' || eld.monitor_name[i] == '\r' || eld.monitor_name[i] == '\t' ||
+				eld.monitor_name[i] == ' ')
+			eld.monitor_name[i] = 0;
+		else
+			break;
+	}
+
 	old_monitor_name = pa_proplist_gets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME);
 	if (eld.monitor_name[0] == '\0') {
 		changed |= old_monitor_name != NULL;
@@ -986,6 +1060,18 @@ static int hdmi_eld_changed(snd_mixer_elem_t *melem, unsigned int mask)
 		changed |= (old_monitor_name == NULL) || (!spa_streq(old_monitor_name, eld.monitor_name));
 		pa_proplist_sets(p->proplist, PA_PROP_DEVICE_PRODUCT_NAME, eld.monitor_name);
 	}
+
+	old_iec958_codec_list = pa_proplist_gets(p->proplist, ACP_KEY_IEC958_CODECS_DETECTED);
+	if (eld.iec958_codecs == 0) {
+		changed |= old_iec958_codec_list != NULL;
+		pa_proplist_unset(p->proplist, ACP_KEY_IEC958_CODECS_DETECTED);
+	} else {
+		char codecs[512];
+		acp_iec958_codec_mask_to_json(eld.iec958_codecs, codecs, sizeof(codecs));
+		changed |= (old_iec958_codec_list == NULL) || (!spa_streq(old_iec958_codec_list, codecs));
+		pa_proplist_sets(p->proplist, ACP_KEY_IEC958_CODECS_DETECTED, codecs);
+	}
+
 	pa_proplist_as_dict(p->proplist, &p->port.props);
 
 	if (changed && mask != 0 && impl->events && impl->events->props_changed)
@@ -1378,7 +1464,8 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 			data = PA_DEVICE_PORT_DATA(dev->active_port);
 			dev->mixer_path = data->path;
 
-			pa_alsa_path_select(data->path, data->setting, dev->mixer_handle, dev->muted);
+			if (!impl->disable_mixer_path)
+				pa_alsa_path_select(data->path, data->setting, dev->mixer_handle, dev->muted);
 		} else {
 			pa_alsa_ucm_port_data *data;
 
@@ -1387,7 +1474,8 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 			/* Now activate volume controls, if any */
 			if (data->path) {
 				dev->mixer_path = data->path;
-				pa_alsa_path_select(dev->mixer_path, NULL, dev->mixer_handle, dev->muted);
+				if (!impl->disable_mixer_path)
+					pa_alsa_path_select(dev->mixer_path, NULL, dev->mixer_handle, dev->muted);
 			}
 		}
 	} else {
@@ -1396,8 +1484,9 @@ static int setup_mixer(pa_card *impl, pa_alsa_device *dev, bool ignore_dB)
 
 		if (dev->mixer_path) {
 			/* Hmm, we have only a single path, then let's activate it */
-			pa_alsa_path_select(dev->mixer_path, dev->mixer_path->settings,
-					dev->mixer_handle, dev->muted);
+			if (!impl->disable_mixer_path)
+				pa_alsa_path_select(dev->mixer_path, dev->mixer_path->settings,
+						dev->mixer_handle, dev->muted);
 		} else
 			return 0;
 	}
@@ -1441,6 +1530,9 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 {
 	const char *mod_name;
 	uint32_t i, port_index;
+	const char *codecs;
+	pa_device_port *p;
+	void *state = NULL;
 	int res;
 
 	if (impl->use_ucm &&
@@ -1460,7 +1552,7 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 
 	/* Synchronize priority values, as it may have changed when setting the profile */
 	for (i = 0; i < impl->card.n_ports; i++) {
-		pa_device_port *p = (pa_device_port *)impl->card.ports[i];
+		p = (pa_device_port *)impl->card.ports[i];
 		p->port.priority = p->priority;
 	}
 
@@ -1490,6 +1582,15 @@ static int device_enable(pa_card *impl, pa_alsa_mapping *mapping, pa_alsa_device
 		dev->read_mute(dev);
 	else
 		dev->muted = false;
+
+	while ((p = pa_hashmap_iterate(dev->ports, &state, NULL))) {
+		codecs = pa_proplist_gets(p->proplist, ACP_KEY_IEC958_CODECS_DETECTED);
+		if (codecs) {
+			dev->device.n_codecs = acp_iec958_codecs_from_json(codecs, dev->device.codecs,
+									   ACP_N_ELEMENTS(dev->device.codecs));
+			break;
+		}
+	}
 
 	return 0;
 }
@@ -1660,6 +1761,8 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 			impl->use_ucm = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.soft-mixer")) != NULL)
 			impl->soft_mixer = spa_atob(s);
+		if ((s = acp_dict_lookup(props, "api.alsa.disable-mixer-path")) != NULL)
+			impl->disable_mixer_path = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "api.alsa.ignore-dB")) != NULL)
 			impl->ignore_dB = spa_atob(s);
 		if ((s = acp_dict_lookup(props, "device.profile-set")) != NULL)
@@ -1674,7 +1777,16 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 			impl->rate = atoi(s);
 		if ((s = acp_dict_lookup(props, "api.acp.pro-channels")) != NULL)
 			impl->pro_channels = atoi(s);
+		if ((s = acp_dict_lookup(props, "api.alsa.split-enable")) != NULL)
+			impl->ucm.split_enable = spa_atob(s);
 	}
+
+#if SND_LIB_VERSION < 0x10207
+	if (impl->ucm.split_enable)
+		pa_log_info("alsa-lib too old for PipeWire-side UCM SplitPCM");
+
+	impl->ucm.split_enable = false;		/* API addition in 1.2.7 */
+#endif
 
 	impl->ucm.default_sample_spec.format = PA_SAMPLE_S16NE;
 	impl->ucm.default_sample_spec.rate = impl->rate;
@@ -1744,10 +1856,10 @@ struct acp_card *acp_card_new(uint32_t index, const struct acp_dict *props)
 	if (!impl->auto_profile && profile == NULL)
 		profile = "off";
 
+	init_eld_ctls(impl);
+
 	profile_index = acp_card_find_best_profile_index(&impl->card, profile);
 	acp_card_set_profile(&impl->card, profile_index, 0);
-
-	init_eld_ctls(impl);
 
 	return &impl->card;
 error:
@@ -1865,6 +1977,7 @@ int acp_card_handle_events(struct acp_card *card)
 static void sync_mixer(pa_alsa_device *d, pa_device_port *port)
 {
 	pa_alsa_setting *setting = NULL;
+	pa_card *impl = d->card;
 
 	if (!d->mixer_path)
 		return;
@@ -1877,7 +1990,7 @@ static void sync_mixer(pa_alsa_device *d, pa_device_port *port)
 		setting = data->setting;
 	}
 
-	if (d->mixer_handle)
+	if (d->mixer_handle && !impl->disable_mixer_path)
 		pa_alsa_path_select(d->mixer_path, setting, d->mixer_handle, d->muted);
 
 	if (d->set_mute)
@@ -1957,8 +2070,8 @@ int acp_device_set_port(struct acp_device *dev, uint32_t port_index, uint32_t fl
 		d->mixer_path = data->path;
 		mixer_volume_init(impl, d);
 
-		sync_mixer(d, p);
 		res = pa_alsa_ucm_set_port(d->ucm_context, p);
+		sync_mixer(d, p);
 	} else {
 		pa_alsa_port_data *data;
 

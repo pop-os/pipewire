@@ -30,16 +30,16 @@
 #include <pipewire/impl.h>
 
 #include <module-vban/stream.h>
+#include <module-vban/vban.h>
 #include "network-utils.h"
-
-#ifdef __FreeBSD__
-#define ifr_ifindex ifr_index
-#endif
 
 /** \page page_module_vban_recv VBAN receiver
  *
  * The `vban-recv` module creates a PipeWire source that receives audio
  * and midi [VBAN](https://vb-audio.com) packets.
+ *
+ * The receive will listen on a specific port (6980) and create a stream for each
+ * VBAN stream received on the port.
  *
  * ## Module Name
  *
@@ -50,22 +50,31 @@
  * Options specific to the behavior of this module
  *
  * - `local.ifname = <str>`: interface name to use
- * - `source.ip = <str>`: the source ip address, default 127.0.0.1
- * - `source.port = <int>`: the source port
+ * - `source.ip = <str>`: the source ip address to listen on, default 127.0.0.1
+ * - `source.port = <int>`: the source port to listen on, default 6980
  * - `node.always-process = <bool>`: true to receive even when not running
  * - `sess.latency.msec = <str>`: target network latency in milliseconds, default 100
- * - `sess.ignore-ssrc = <bool>`: ignore SSRC, default false
- * - `sess.media = <string>`: the media type audio|midi|opus, default audio
- * - `stream.props = {}`: properties to be passed to the stream
+ * - `stream.props = {}`: properties to be passed to all the stream
+ * - `stream.rules` = <rules>: match rules, use create-stream actions.
+ *
+ * ### stream.rules matches
+ *
+ *  - `vban.ip`: the IP address of the VBAN sender
+ *  - `vban.port`: the port of the VBAN sender
+ *  - `sess.name`: the name of the VBAN stream
+ *
+ * ### stream.rules create-stream
+ *
+ * In addition to all the properties that can be passed to a stream,
+ * you can also set:
+ *
+ * - `sess.latency.msec = <str>`: target network latency in milliseconds, default 100
  *
  * ## General options
  *
  * Options with well-known behavior:
  *
  * - \ref PW_KEY_REMOTE_NAME
- * - \ref PW_KEY_AUDIO_FORMAT
- * - \ref PW_KEY_AUDIO_RATE
- * - \ref PW_KEY_AUDIO_CHANNELS
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_MEDIA_NAME
  * - \ref PW_KEY_MEDIA_CLASS
@@ -77,6 +86,8 @@
  *
  * ## Example configuration
  *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-vban-recv.conf
+ *
  * context.modules = [
  * {   name = libpipewire-module-vban-recv
  *     args = {
@@ -84,17 +95,36 @@
  *         #source.ip = 127.0.0.1
  *         #source.port = 6980
  *         sess.latency.msec = 100
- *         #sess.ignore-ssrc = false
  *         #node.always-process = false
- *         #sess.media = "audio"
- *         #audio.format = "S16LE"
- *         #audio.rate = 44100
- *         #audio.channels = 2
  *         #audio.position = [ FL FR ]
  *         stream.props = {
  *            #media.class = "Audio/Source"
- *            node.name = "vban-receiver"
+ *            #node.name = "vban-receiver"
  *         }
+ *         stream.rules = [
+ *             {   matches = [
+ *                     {    sess.name = "~.*"
+ *                          #sess.media = "audio" | "midi"
+ *                          #vban.ip = ""
+ *                          #vban.port = 1000
+ *                          #audio.channels = 2
+ *                          #audio.format = "U8" | "S16LE" | "S24LE" | "S32LE" | "F32LE" | "F64LE"
+ *                          #audio.rate = 44100
+ *                     }
+ *                 ]
+ *                 actions = {
+ *                     create-stream = {
+ *                         stream.props = {
+ *                             #sess.latency.msec = 100
+ *                             #target.object = ""
+ *                             #audio.position = [ FL FR ]
+ *                             #media.class = "Audio/Source"
+ *                             #node.name = "vban-receiver"
+ *                         }
+ *                     }
+ *                 }
+ *             }
+ *         ]
  *     }
  * }
  * ]
@@ -112,16 +142,16 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_SOURCE_IP		"127.0.0.1"
 #define DEFAULT_SOURCE_PORT		6980
 
+#define DEFAULT_CREATE_RULES	\
+        "[ { matches = [ { sess.name = \"~.*\" } ] actions = { create-stream = { } } } ] "
+
 #define USAGE   "( local.ifname=<local interface name to use> ) "						\
 		"( source.ip=<source IP address, default:"DEFAULT_SOURCE_IP"> ) "				\
  		"( source.port=<int, source port, default:"SPA_STRINGIFY(DEFAULT_SOURCE_PORT)"> "		\
 		"( sess.latency.msec=<target network latency, default "SPA_STRINGIFY(DEFAULT_SESS_LATENCY)"> ) "\
- 		"( sess.media=<string, the media type audio|midi, default audio> ) "				\
-		"( audio.format=<format, default:"DEFAULT_FORMAT"> ) "						\
-		"( audio.rate=<sample rate, default:"SPA_STRINGIFY(DEFAULT_RATE)"> ) "				\
-		"( audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS)"> ) "		\
 		"( audio.position=<channel map, default:"DEFAULT_POSITION"> ) "					\
-		"( stream.props= { key=value ... } ) "
+		"( stream.props= { key=value ... } ) "								\
+		"( stream.rules=<rules>, use create-stream actions )"
 
 static const struct spa_dict_item module_info[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -148,47 +178,31 @@ struct impl {
 	bool always_process;
 	uint32_t cleanup_interval;
 
-	struct spa_source *timer;
-
 	struct pw_properties *stream_props;
-	struct vban_stream *stream;
+
+	struct spa_source *timer;
 
 	uint16_t src_port;
 	struct sockaddr_storage src_addr;
 	socklen_t src_len;
 	struct spa_source *source;
 
-	unsigned receiving:1;
+	struct spa_list streams;
 };
 
-static void
-on_vban_io(void *data, int fd, uint32_t mask)
-{
-	struct impl *impl = data;
-	ssize_t len;
-	uint8_t buffer[2048];
+struct stream {
+	struct spa_list link;
+	struct impl *impl;
 
-	if (mask & SPA_IO_IN) {
-		if ((len = recv(fd, buffer, sizeof(buffer), 0)) < 0)
-			goto receive_error;
+	struct vban_header header;
+	struct sockaddr_storage sa;
+	socklen_t salen;
 
-		if (len < 12)
-			goto short_packet;
+	struct vban_stream *stream;
 
-		if (SPA_LIKELY(impl->stream))
-			vban_stream_receive_packet(impl->stream, buffer, len);
-
-		impl->receiving = true;
-	}
-	return;
-
-receive_error:
-	pw_log_warn("recv error: %m");
-	return;
-short_packet:
-	pw_log_warn("short packet received");
-	return;
-}
+	bool active;
+	bool receiving;
+};
 
 static int make_socket(const struct sockaddr* sa, socklen_t salen, char *ifname)
 {
@@ -268,7 +282,242 @@ error:
 	return res;
 }
 
-static int stream_start(struct impl *impl)
+static void stream_destroy(void *d)
+{
+	struct stream *s = d;
+	s->stream = NULL;
+}
+
+static void stream_state_changed(void *data, bool started, const char *error)
+{
+	struct stream *s = data;
+	struct impl *impl = s->impl;
+
+	if (error) {
+		pw_log_error("stream error: %s", error);
+		pw_impl_module_schedule_destroy(impl->module);
+	} else if (started) {
+		s->active = true;
+	} else {
+		s->active = false;
+	}
+}
+
+static const struct vban_stream_events stream_events = {
+	VBAN_VERSION_STREAM_EVENTS,
+	.destroy = stream_destroy,
+	.state_changed = stream_state_changed,
+};
+
+static int create_stream(struct stream *s, struct pw_properties *props)
+{
+	struct impl *impl = s->impl;
+	const char *sess_name, *ip, *port;
+
+	ip = pw_properties_get(props, "vban.ip");
+	port = pw_properties_get(props, "vban.port");
+	sess_name = pw_properties_get(props, "sess.name");
+
+	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_NAME, "vban_session.%s.%s.%s", sess_name, ip, port);
+	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
+		pw_properties_setf(props, PW_KEY_NODE_DESCRIPTION, "%s from %s", sess_name, ip);
+	if (pw_properties_get(props, PW_KEY_MEDIA_NAME) == NULL)
+		pw_properties_setf(props, PW_KEY_MEDIA_NAME, "VBAN %s from %s",
+				sess_name, ip);
+
+	s->stream = vban_stream_new(impl->core,
+			PW_DIRECTION_OUTPUT, spa_steal_ptr(props),
+			&stream_events, s);
+	if (s->stream == NULL) {
+		pw_log_error("can't create stream: %m");
+		return -errno;
+	}
+	return 0;
+}
+
+struct match_info {
+	struct stream *stream;
+	const struct pw_properties *props;
+	bool matched;
+};
+
+static int rule_matched(void *data, const char *location, const char *action,
+                        const char *str, size_t len)
+{
+	struct match_info *i = data;
+	int res = 0;
+
+	i->matched = true;
+	if (spa_streq(action, "create-stream")) {
+		struct pw_properties *p = pw_properties_copy(i->props);
+		pw_properties_update_string(p, str, len);
+		create_stream(i->stream, p);
+	}
+	return res;
+}
+
+
+static int
+do_setup_stream(struct spa_loop *loop,
+	bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+        struct stream *s = user_data;
+	struct impl *impl = s->impl;
+	struct pw_properties *props;
+	int res;
+	const char *str;
+	char addr[128];
+	uint16_t port = 0;
+
+	props = pw_properties_copy(impl->stream_props);
+
+	pw_net_get_ip(&s->sa, addr, sizeof(addr), NULL, &port);
+
+	pw_properties_setf(props, "sess.name", "%s", s->header.stream_name);
+	pw_properties_setf(props, "vban.ip", "%s", addr);
+	pw_properties_setf(props, "vban.port", "%u", port);
+
+	if ((s->header.format_SR & 0xE0) == VBAN_PROTOCOL_AUDIO &&
+	    (s->header.format_bit & 0xF0) == VBAN_CODEC_PCM) {
+		const char *fmt;
+		pw_properties_set(props, "sess.media", "audio");
+		pw_properties_setf(props, PW_KEY_AUDIO_CHANNELS, "%u",s->header.format_nbc + 1);
+		pw_properties_setf(props, PW_KEY_AUDIO_RATE, "%u", vban_SR[s->header.format_SR & 0x1f]);
+		switch(s->header.format_bit & 0x07) {
+		case VBAN_DATATYPE_BYTE8:
+			fmt = "U8";
+			break;
+		case VBAN_DATATYPE_INT16:
+			fmt = "S16LE";
+			break;
+		case VBAN_DATATYPE_INT24:
+			fmt = "S24LE";
+			break;
+		case VBAN_DATATYPE_INT32:
+			fmt = "S32LE";
+			break;
+		case VBAN_DATATYPE_FLOAT32:
+			fmt = "F32LE";
+			break;
+		case VBAN_DATATYPE_FLOAT64:
+			fmt = "F64LE";
+			break;
+			break;
+		case VBAN_DATATYPE_12BITS:
+		case VBAN_DATATYPE_10BITS:
+		default:
+			pw_log_error("stream format %08x:%08x not supported",
+					s->header.format_SR, s->header.format_bit);
+			res = -ENOTSUP;
+			goto error;
+		}
+		pw_properties_set(props, PW_KEY_AUDIO_FORMAT, fmt);
+	} else if ((s->header.format_SR & 0xE0) == VBAN_PROTOCOL_SERIAL &&
+	    (s->header.format_bit & 0xF0) == VBAN_SERIAL_MIDI) {
+		pw_properties_set(props, "sess.media", "midi");
+	} else {
+		pw_log_error("stream format %08x:%08x not supported",
+				s->header.format_SR, s->header.format_bit);
+		res = -ENOTSUP;
+		goto error;
+	}
+
+	if ((str = pw_properties_get(impl->props, "stream.rules")) == NULL)
+		str = DEFAULT_CREATE_RULES;
+	if (str != NULL) {
+		struct match_info minfo = {
+			.stream = s,
+			.props = props,
+		};
+		pw_conf_match_rules(str, strlen(str), NAME, &props->dict,
+				rule_matched, &minfo);
+
+		if (!minfo.matched)
+			pw_log_info("unmatched stream found %s", str);
+	}
+	res = 0;
+error:
+	pw_properties_free(props);
+	return res;
+}
+
+static struct stream *make_stream(struct impl *impl, const struct vban_header *hdr,
+		struct sockaddr_storage *sa, socklen_t salen)
+{
+	struct stream *stream;
+
+	stream = calloc(1, sizeof(*stream));
+	if (stream == NULL)
+		return NULL;
+
+	stream->impl = impl;
+	stream->header = *hdr;
+	stream->sa = *sa;
+	stream->salen = salen;
+	spa_list_append(&impl->streams, &stream->link);
+
+	pw_loop_invoke(impl->loop, do_setup_stream, 1, NULL, 0, false, stream);
+
+	return stream;
+}
+
+static struct stream *find_stream(struct impl *impl, const char *name)
+{
+	struct stream *s;
+	spa_list_for_each(s, &impl->streams, link) {
+		if (strncmp(s->header.stream_name, name, VBAN_STREAM_NAME_SIZE) == 0)
+			return s;
+	}
+	return NULL;
+}
+
+static void
+on_vban_io(void *data, int fd, uint32_t mask)
+{
+	struct impl *impl = data;
+	ssize_t len;
+	uint8_t buffer[2048];
+
+	if (mask & SPA_IO_IN) {
+		struct vban_header *hdr;
+		struct stream *s;
+		struct sockaddr_storage sa;
+		socklen_t salen = sizeof(sa);
+
+		if ((len = recvfrom(fd, buffer, sizeof(buffer), 0,
+						(struct sockaddr*)&sa, &salen)) < 0)
+			goto receive_error;
+
+		if (len < VBAN_HEADER_SIZE)
+			goto short_packet;
+
+		hdr = (struct vban_header *)buffer;
+		if (strncmp(hdr->vban, "VBAN", 4))
+			goto invalid_version;
+
+		s = find_stream(impl, hdr->stream_name);
+		if (SPA_UNLIKELY(s == NULL))
+			s = make_stream(impl, hdr, &sa, salen);
+		if (SPA_LIKELY(s != NULL && s->active)) {
+			s->receiving = true;
+			vban_stream_receive_packet(s->stream, buffer, len);
+		}
+	}
+	return;
+
+receive_error:
+	pw_log_warn("recv error: %m");
+	return;
+short_packet:
+	pw_log_warn("short packet received");
+	return;
+invalid_version:
+	pw_log_warn("invalid VBAN version");
+	return;
+}
+
+static int listen_start(struct impl *impl)
 {
 	int fd;
 
@@ -293,7 +542,7 @@ static int stream_start(struct impl *impl)
 	return 0;
 }
 
-static void stream_stop(struct impl *impl)
+static void listen_stop(struct impl *impl)
 {
 	if (!impl->source)
 		return;
@@ -304,45 +553,29 @@ static void stream_stop(struct impl *impl)
 	impl->source = NULL;
 }
 
-static void stream_destroy(void *d)
+
+static void destroy_stream(struct stream *s)
 {
-	struct impl *impl = d;
-	impl->stream = NULL;
+	spa_list_remove(&s->link);
+	if (s->stream)
+		vban_stream_destroy(s->stream);
+	free(s);
 }
-
-static void stream_state_changed(void *data, bool started, const char *error)
-{
-	struct impl *impl = data;
-
-	if (error) {
-		pw_log_error("stream error: %s", error);
-		pw_impl_module_schedule_destroy(impl->module);
-	} else if (started) {
-		if ((errno = -stream_start(impl)) < 0)
-			pw_log_error("failed to start VBAN stream: %m");
-	} else {
-		if (!impl->always_process)
-			stream_stop(impl);
-	}
-}
-
-static const struct vban_stream_events stream_events = {
-	VBAN_VERSION_STREAM_EVENTS,
-	.destroy = stream_destroy,
-	.state_changed = stream_state_changed,
-};
 
 static void on_timer_event(void *data, uint64_t expirations)
 {
 	struct impl *impl = data;
+	struct stream *s;
 
-	if (!impl->receiving) {
-		pw_log_info("timeout, inactive VBAN source");
-		//pw_impl_module_schedule_destroy(impl->module);
-	} else {
-		pw_log_debug("timeout, keeping active VBAN source");
+	spa_list_for_each(s, &impl->streams, link) {
+		if (!s->receiving) {
+			pw_log_info("timeout, inactive VBAN source");
+			//pw_impl_module_schedule_destroy(impl->module);
+		} else {
+			pw_log_debug("timeout, keeping active VBAN source");
+		}
+		s->receiving = false;
 	}
-	impl->receiving = false;
 }
 
 static void core_destroy(void *d)
@@ -359,10 +592,12 @@ static const struct pw_proxy_events core_proxy_events = {
 
 static void impl_destroy(struct impl *impl)
 {
-	if (impl->stream)
-		vban_stream_destroy(impl->stream);
-	if (impl->source)
-		pw_loop_destroy_source(impl->data_loop, impl->source);
+	struct stream *s;
+
+	listen_stop(impl);
+
+	spa_list_consume(s, &impl->streams, link)
+		destroy_stream(s);
 
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
@@ -422,7 +657,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 {
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct impl *impl;
-	const char *str, *sess_name;
+	const char *str;
 	struct timespec value, interval;
 	struct pw_properties *props, *stream_props;
 	int res = 0;
@@ -448,26 +683,14 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
 	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
-
-	if ((sess_name = pw_properties_get(props, "sess.name")) == NULL)
-		sess_name = pw_get_host_name();
+	spa_list_init(&impl->streams);
 
 	pw_properties_set(props, PW_KEY_NODE_LOOP_NAME, impl->data_loop->name);
-	if (pw_properties_get(props, PW_KEY_NODE_NAME) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_NAME, "vban_session.%s", sess_name);
-	if (pw_properties_get(props, PW_KEY_NODE_DESCRIPTION) == NULL)
-		pw_properties_setf(props, PW_KEY_NODE_DESCRIPTION, "%s", sess_name);
-	if (pw_properties_get(props, PW_KEY_MEDIA_NAME) == NULL)
-		pw_properties_setf(props, PW_KEY_MEDIA_NAME, "VBAN Session with %s",
-				sess_name);
 
 	if ((str = pw_properties_get(props, "stream.props")) != NULL)
 		pw_properties_update_string(stream_props, str, strlen(str));
 
 	copy_props(impl, props, PW_KEY_NODE_LOOP_NAME);
-	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
-	copy_props(impl, props, PW_KEY_AUDIO_RATE);
-	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
@@ -478,10 +701,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_MEDIA_NAME);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
 	copy_props(impl, props, "net.mtu");
-	copy_props(impl, props, "sess.media");
-	copy_props(impl, props, "sess.name");
-	copy_props(impl, props, "sess.min-ptime");
-	copy_props(impl, props, "sess.max-ptime");
 	copy_props(impl, props, "sess.latency.msec");
 
 	str = pw_properties_get(props, "local.ifname");
@@ -540,12 +759,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	interval.tv_nsec = 0;
 	pw_loop_update_timer(impl->loop, impl->timer, &value, &interval, false);
 
-	impl->stream = vban_stream_new(impl->core,
-			PW_DIRECTION_OUTPUT, pw_properties_copy(stream_props),
-			&stream_events, impl);
-	if (impl->stream == NULL) {
-		res = -errno;
-		pw_log_error("can't create stream: %m");
+	if ((res = listen_start(impl)) < 0) {
+		pw_log_error("failed to start VBAN stream: %s", spa_strerror(res));
 		goto out;
 	}
 

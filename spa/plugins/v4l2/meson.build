@@ -1,11 +1,14 @@
 v4l2_sources = ['v4l2.c',
                 'v4l2-device.c',
                 'v4l2-source.c']
-v4l2_dependencies = [ spa_dep, libinotify_dep ]
+v4l2_dependencies = [ spa_dep, libinotify_dep, mathlib ]
 
 if libudev_dep.found()
-v4l2_sources += [ 'v4l2-udev.c' ]
-v4l2_dependencies += [ libudev_dep ]
+  v4l2_sources += [ 'v4l2-udev.c' ]
+  v4l2_dependencies += [ libudev_dep ]
+  if logind_dep.found()
+    v4l2_dependencies += [ logind_dep ]
+  endif
 endif
 
 v4l2lib = shared_library('spa-v4l2',
