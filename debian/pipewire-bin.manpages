@@ -11,8 +11,8 @@ usr/share/man/man1/pw-metadata.*
 usr/share/man/man1/pw-mididump.*
 usr/share/man/man1/pw-mon.*
 usr/share/man/man1/pw-profiler.*
-usr/share/man/man1/pw-top.*
 usr/share/man/man1/pw-reserve.*
+usr/share/man/man1/pw-top.*
 usr/share/man/man1/spa-acp-tool.*
 usr/share/man/man1/spa-inspect.*
 usr/share/man/man1/spa-json-dump.*

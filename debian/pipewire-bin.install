@@ -1,13 +1,6 @@
-usr/share/pipewire/client-rt.conf
-usr/share/pipewire/client.conf
-usr/share/pipewire/filter-chain.conf
-usr/share/pipewire/filter-chain/*.conf
-usr/share/pipewire/jack.conf
-usr/share/pipewire/pipewire.conf
-usr/share/pipewire/pipewire-aes67.conf
-usr/share/pipewire/pipewire-avb.conf
-usr/share/pipewire/minimal.conf
 ${env:UDEVRULESDIR}
+debian/9999-custom.conf.README	/usr/share/alsa-card-profile/mixer/profile-sets/
+etc/security/limits.d/25-pw-rlimits.conf
 usr/bin/pipewire
 usr/bin/pipewire-aes67
 usr/bin/pipewire-avb
@@ -33,5 +26,12 @@ usr/bin/pw-reserve
 usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
-debian/9999-custom.conf.README	/usr/share/alsa-card-profile/mixer/profile-sets/
-etc/security/limits.d/25-pw-rlimits.conf
+usr/share/pipewire/client-rt.conf
+usr/share/pipewire/client.conf
+usr/share/pipewire/filter-chain.conf
+usr/share/pipewire/filter-chain/*.conf
+usr/share/pipewire/jack.conf
+usr/share/pipewire/minimal.conf
+usr/share/pipewire/pipewire-aes67.conf
+usr/share/pipewire/pipewire-avb.conf
+usr/share/pipewire/pipewire.conf

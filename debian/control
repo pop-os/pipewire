@@ -4,14 +4,16 @@ Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.net>
 Uploaders: Jeremy Bicha <jbicha@debian.org>,
            Dylan Aïssi <daissi@debian.org>
-Build-Depends: dpkg-dev (>= 1.22.5), debhelper-compat (= 13),
+Build-Depends: debhelper-compat (= 13),
                doxygen <!nodoc>,
+               dpkg-dev (>= 1.22.5),
                graphviz <!nodoc>,
                libapparmor-dev [linux-any],
                libasound2-dev (>= 1.2.5),
                libavahi-client-dev,
                libbluetooth-dev [linux-any],
                libcamera-dev (>= 0.2.0) [!m68k !hurd-any],
+               libcanberra-dev,
                libdbus-1-dev,
                libffado-dev,
                libfreeaptx-dev,
@@ -19,7 +21,6 @@ Build-Depends: dpkg-dev (>= 1.22.5), debhelper-compat (= 13),
                libgstreamer-plugins-base1.0-dev,
                libgstreamer1.0-dev,
                libjack-jackd2-dev,
-               libcanberra-dev,
                liblc3-dev,
                libldacbt-abr-dev [!s390x !hppa !m68k !powerpc !ppc64 !sparc64],
                libldacbt-enc-dev [!s390x !hppa !m68k !powerpc !ppc64 !sparc64],
@@ -76,7 +77,8 @@ Description: libraries for the PipeWire multimedia server
 Package: libpipewire-0.3-common
 Architecture: all
 Multi-Arch: foreign
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Description: libraries for the PipeWire multimedia server - common files
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -111,7 +113,8 @@ Description: libraries for the PipeWire multimedia server - development
 Package: libpipewire-0.3-modules
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: libraries for the PipeWire multimedia server - modules
@@ -130,9 +133,9 @@ Description: libraries for the PipeWire multimedia server - modules
 Package: libpipewire-0.3-modules-x11
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends},
-         ${shlibs:Depends},
-         libcanberra-pulse
+Depends: libcanberra-pulse,
+         ${misc:Depends},
+         ${shlibs:Depends}
 Breaks: libpipewire-0.3-modules (<< 0.3.63-3~)
 Replaces: libpipewire-0.3-modules (<< 0.3.63-3~)
 Description: libraries for the PipeWire multimedia server - X11 modules
@@ -166,7 +169,8 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
 Package: libspa-0.2-modules
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends},
+         ${shlibs:Depends}
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: libraries for the PipeWire multimedia server Simple Plugin API - modules
@@ -206,11 +210,11 @@ Package: pipewire
 Section: video
 Architecture: any
 Multi-Arch: same
-Depends: libpipewire-0.3-modules (= ${binary:Version}),
+Depends: adduser,
+         libpipewire-0.3-modules (= ${binary:Version}),
          pipewire-bin (= ${binary:Version}),
          ${misc:Depends},
-         ${shlibs:Depends},
-         adduser
+         ${shlibs:Depends}
 Description: audio and video processing engine multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -232,8 +236,8 @@ Depends: libpipewire-0.3-modules (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
 Recommends: dbus-user-session,
-            wireplumber,
-            rtkit
+            rtkit,
+            wireplumber
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: PipeWire multimedia server - programs
@@ -318,10 +322,10 @@ Package: pipewire-v4l2
 Section: video
 Architecture: any
 Multi-Arch: same
-Replaces: pipewire-bin (<< 0.3.54-1),
-          libpipewire-0.3-modules (<< 0.3.54-1)
-Breaks: pipewire-bin (<< 0.3.54-1),
-        libpipewire-0.3-modules (<< 0.3.54-1)
+Replaces: libpipewire-0.3-modules (<< 0.3.54-1),
+          pipewire-bin (<< 0.3.54-1)
+Breaks: libpipewire-0.3-modules (<< 0.3.54-1),
+        pipewire-bin (<< 0.3.54-1)
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -339,7 +343,9 @@ Description: PipeWire V4L2 plugin
 Package: pipewire-tests
 Build-Profiles: <!noinsttest>
 Architecture: any
-Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
+Depends: pipewire (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
 Section: misc
 Description: PipeWire multimedia server - tests and examples
  PipeWire is a server and user space API to deal with multimedia
@@ -355,7 +361,9 @@ Description: PipeWire multimedia server - tests and examples
 Package: gstreamer1.0-pipewire
 Architecture: any
 Multi-Arch: same
-Depends: pipewire (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
+Depends: pipewire (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends}
 Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -406,7 +414,7 @@ Description: libraries for the PipeWire multimedia server - JACK client
 
 Package: libspa-0.2-libcamera
 Section: video
-Architecture: amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x alpha hppa ia64 powerpc ppc64 riscv64 sh4 sparc64 x32
+Architecture: alpha amd64 arm64 armel armhf hppa i386 ia64 mips64el mipsel powerpc ppc64 ppc64el riscv64 s390x sh4 sparc64 x32
 Multi-Arch: same
 Replaces: pipewire-libcamera (<< 0.3.72-1~)
 Breaks: pipewire-libcamera (<< 0.3.72-1~)
@@ -442,11 +450,11 @@ Description: transitional package for pipewire-alsa and pipewire-jack
 Package: pipewire-audio
 Section: sound
 Architecture: all
-Depends: ${misc:Depends},
-         libspa-0.2-bluetooth,
+Depends: libspa-0.2-bluetooth,
          pipewire-alsa,
          pipewire-pulse,
-         wireplumber
+         wireplumber,
+         ${misc:Depends}
 Conflicts: pulseaudio,
            pulseaudio-module-bluetooth
 Replaces: pulseaudio,

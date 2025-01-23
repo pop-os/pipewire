@@ -1,4 +1,3 @@
+debian/ld.so.conf.d/* usr/share/doc/pipewire/examples/ld.so.conf.d
 usr/bin/pw-jack
 usr/lib/*/pipewire-0.3/jack
-debian/ld.so.conf.d/* usr/share/doc/pipewire/examples/ld.so.conf.d
-
