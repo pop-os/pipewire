@@ -16,6 +16,8 @@
 #include "gstpipewirepool.h"
 
 #include <spa/debug/types.h>
+#include <spa/utils/result.h>
+
 
 GST_DEBUG_CATEGORY_STATIC (gst_pipewire_pool_debug_category);
 #define GST_CAT_DEFAULT gst_pipewire_pool_debug_category
@@ -161,21 +163,31 @@ acquire_buffer (GstBufferPool * pool, GstBuffer ** buffer,
     if (G_UNLIKELY (GST_BUFFER_POOL_IS_FLUSHING (pool)))
       goto flushing;
 
-    if ((b = pw_stream_dequeue_buffer(s->pwstream)))
+    if ((b = pw_stream_dequeue_buffer(s->pwstream))) {
+      GST_LOG_OBJECT (pool, "dequeued buffer %p", b);
       break;
+    }
 
-    if (params && (params->flags & GST_BUFFER_POOL_ACQUIRE_FLAG_DONTWAIT))
-      goto no_more_buffers;
+    if (params) {
+      if (params->flags & GST_BUFFER_POOL_ACQUIRE_FLAG_DONTWAIT)
+        goto no_more_buffers;
 
-    GST_WARNING ("queue empty");
+      if ((params->flags & GST_BUFFER_POOL_ACQUIRE_FLAG_LAST) &&
+	      p->paused)
+        goto paused;
+    }
+
+    GST_WARNING_OBJECT (pool, "failed to dequeue buffer: %s", strerror(errno));
     g_cond_wait (&p->cond, GST_OBJECT_GET_LOCK (pool));
   }
 
   data = b->user_data;
+  data->queued = FALSE;
+
   *buffer = data->buf;
 
   GST_OBJECT_UNLOCK (pool);
-  GST_LOG_OBJECT (pool, "acquire buffer %p", *buffer);
+  GST_LOG_OBJECT (pool, "acquired gstbuffer %p", *buffer);
 
   return GST_FLOW_OK;
 
@@ -183,6 +195,11 @@ flushing:
   {
     GST_OBJECT_UNLOCK (pool);
     return GST_FLOW_FLUSHING;
+  }
+paused:
+  {
+    GST_OBJECT_UNLOCK (pool);
+    return GST_FLOW_CUSTOM_ERROR_1;
   }
 no_more_buffers:
   {
@@ -238,6 +255,16 @@ set_config (GstBufferPool * pool, GstStructure * config)
   return GST_BUFFER_POOL_CLASS (gst_pipewire_pool_parent_class)->set_config (pool, config);
 }
 
+
+void gst_pipewire_pool_set_paused (GstPipeWirePool *pool, gboolean paused)
+{
+  GST_DEBUG ("flush start");
+  GST_OBJECT_LOCK (pool);
+  pool->paused = paused;
+  g_cond_signal (&pool->cond);
+  GST_OBJECT_UNLOCK (pool);
+}
+
 static void
 flush_start (GstBufferPool * pool)
 {
@@ -253,6 +280,28 @@ static void
 release_buffer (GstBufferPool * pool, GstBuffer *buffer)
 {
   GST_LOG_OBJECT (pool, "release buffer %p", buffer);
+
+  GstPipeWirePoolData *data = gst_pipewire_pool_get_data(buffer);
+
+  if (!data->queued && data->b != NULL)
+  {
+    GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
+    GST_OBJECT_LOCK (pool);
+
+    g_autoptr (GstPipeWireStream) s = g_weak_ref_get (&p->stream);
+    int res;
+
+    pw_thread_loop_lock (s->core->loop);
+    if ((res = pw_stream_return_buffer (s->pwstream, data->b)) < 0) {
+      GST_ERROR_OBJECT (pool,"can't return buffer %p; gstbuffer : %p, %s",data->b, buffer, spa_strerror(res));
+    } else {
+      data->queued = TRUE;
+      GST_DEBUG_OBJECT (pool, "returned buffer %p; gstbuffer:%p", data->b, buffer);
+    }
+    pw_thread_loop_unlock (s->core->loop);
+    GST_OBJECT_UNLOCK (pool);
+
+  }
 }
 
 static gboolean

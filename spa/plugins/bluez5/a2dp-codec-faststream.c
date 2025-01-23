@@ -7,12 +7,10 @@
 #include <stddef.h>
 #include <errno.h>
 #include <arpa/inet.h>
-#if __BYTE_ORDER != __LITTLE_ENDIAN
-#include <byteswap.h>
-#endif
 
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/utils/endian.h>
 
 #include <sbc/sbc.h>
 
@@ -32,7 +30,7 @@ struct duplex_impl {
 };
 
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	const a2dp_faststream_t a2dp_faststream = {
 		.info = codec->vendor,
@@ -556,6 +554,14 @@ static int duplex_decode(void *data,
 	return res;
 }
 
+static void codec_get_delay(void *data, uint32_t *encoder, uint32_t *decoder)
+{
+	if (encoder)
+		*encoder = 73;
+	if (decoder)
+		*decoder = 0;
+}
+
 /* Voice channel SBC, not a real A2DP codec */
 static const struct media_codec duplex_codec = {
 	.codec_id = A2DP_CODEC_VENDOR,
@@ -592,7 +598,8 @@ static const struct media_codec duplex_codec = {
 	.start_encode = codec_start_encode,		\
 	.encode = codec_encode,				\
 	.reduce_bitpool = codec_reduce_bitpool,		\
-	.increase_bitpool = codec_increase_bitpool
+	.increase_bitpool = codec_increase_bitpool,	\
+	.get_delay = codec_get_delay
 
 const struct media_codec a2dp_codec_faststream = {
 	FASTSTREAM_COMMON_DEFS,

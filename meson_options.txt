@@ -93,6 +93,10 @@ option('audioconvert',
        description: 'Enable audioconvert spa plugin integration',
        type: 'feature',
        value: 'enabled')
+option('resampler-precomp-tuples',
+	description: 'Array of "inrate,outrate[,quality]" tuples to precompute resampler coefficients for',
+	type: 'array',
+	value: [ '32000,44100', '32000,48000', '48000,44100', '44100,48000' ])
 option('bluez5',
        description: 'Enable bluez5 spa plugin integration',
        type: 'feature',
@@ -139,6 +143,10 @@ option('bluez5-codec-opus',
         value: 'auto')
 option('bluez5-codec-lc3',
         description: 'Enable LC3 open source codec implementation',
+        type: 'feature',
+        value: 'auto')
+option('bluez5-codec-g722',
+        description: 'Enable G722 open source codec implementation',
         type: 'feature',
         value: 'auto')
 option('control',
@@ -367,3 +375,7 @@ option('doc-sysconfdir-value',
        description : 'Sysconf data directory to show in documentation instead of the actual value.',
        type : 'string',
        value : '')
+option('ebur128',
+       description: 'Enable code that depends on ebur128',
+       type: 'feature',
+       value: 'auto')

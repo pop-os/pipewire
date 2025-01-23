@@ -130,6 +130,22 @@ PW_LOG_TOPIC(mod_topic_connection, "conn." NAME);
  * local context. This can be done even when the server is not a daemon. It can
  * be used to treat a local context as if it was a server.
  *
+ * ## Config override
+ *
+ * A `module.protocol-native.args` config section can be added
+ * to override the module arguments.
+ *
+ *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-protocol-native-args.conf
+ *
+ * module.protocol-native.args = {
+ *        sockets = [
+ *            { name = "pipewire-0" }
+ *            { name = "pipewire-0-manager" }
+ *        ]
+ * }
+ *\endcode
+ *
  * ## Example configuration
  *
  *\code{.unparsed}
@@ -959,12 +975,6 @@ static int add_socket(struct pw_protocol *protocol, struct server *s, struct soc
 					s, info->name);
 	}
 
-	res = write_socket_address(s);
-	if (res < 0) {
-		pw_log_error("server %p: failed to write socket address: %s", s,
-				spa_strerror(res));
-		goto error_close;
-	}
 	s->activated = activated;
 	s->loop = pw_context_get_main_loop(protocol->context);
 	if (s->loop == NULL) {
@@ -975,6 +985,11 @@ static int add_socket(struct pw_protocol *protocol, struct server *s, struct soc
 	if (s->source == NULL) {
 		res = -errno;
 		goto error_close;
+	}
+	res = write_socket_address(s);
+	if (res < 0) {
+		pw_log_warn("server %p: failed to write socket address: %s", s,
+				spa_strerror(res));
 	}
 	return 0;
 
@@ -1659,7 +1674,7 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 		const struct pw_properties *props, const struct pw_properties *args)
 {
 	const char *sockets = args ? pw_properties_get(args, "sockets") : NULL;
-	struct spa_json it[3];
+	struct spa_json it[2];
 	spa_autoptr(pw_properties) p = pw_properties_copy(props);
 
 	if (sockets == NULL) {
@@ -1681,16 +1696,16 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 		return 0;
 	}
 
-	spa_json_init(&it[0], sockets, strlen(sockets));
-
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
+	if (spa_json_begin_array(&it[0], sockets, strlen(sockets)) <= 0)
 		goto error_invalid;
 
-	while (spa_json_enter_object(&it[1], &it[2]) > 0) {
+	while (spa_json_enter_object(&it[0], &it[1]) > 0) {
 		struct socket_info info = {0};
 		char key[256];
 		char name[PATH_MAX];
 		char selinux_context[PATH_MAX];
+		const char *value;
+		int len;
 
 		info.uid = getuid();
 		info.gid = getgid();
@@ -1698,13 +1713,7 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 		pw_properties_clear(p);
 		pw_properties_update(p, &props->dict);
 
-		while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-			const char *value;
-			int len;
-
-			if ((len = spa_json_next(&it[2], &value)) <= 0)
-				goto error_invalid;
-
+		while ((len = spa_json_object_next(&it[1], key, sizeof(key), &value)) > 0) {
 			if (spa_streq(key, "name")) {
 				if (spa_json_parse_stringn(value, len, name, sizeof(name)) < 0)
 					goto error_invalid;
@@ -1762,7 +1771,7 @@ static int create_servers(struct pw_protocol *this, struct pw_impl_core *core,
 				info.has_mode = true;
 			} else if (spa_streq(key, "props")) {
 				if (spa_json_is_container(value, len))
-	                                len = spa_json_container_len(&it[2], value, len);
+	                                len = spa_json_container_len(&it[1], value, len);
 
 				pw_properties_update_string(p, value, len);
 			}
@@ -1805,7 +1814,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args_str)
 		return -EEXIST;
 	}
 
-	args = args_str ? pw_properties_new_string(args_str) : NULL;
+	args = args_str ? pw_properties_new_string(args_str) : pw_properties_new(NULL, NULL);
+	if (!args)
+		return -errno;
+
+	pw_context_conf_update_props(context, "module."NAME".args", args);
 
 	this = pw_protocol_new(context, PW_TYPE_INFO_PROTOCOL_Native, sizeof(struct protocol_data));
 	if (this == NULL)

@@ -7,6 +7,7 @@
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/utils/json.h>
 
 #include "format.h"
@@ -130,22 +131,12 @@ uint32_t format_pa2id(enum sample_format format)
 
 const char *format_id2name(uint32_t format)
 {
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (spa_type_audio_format[i].type == format)
-			return spa_debug_type_short_name(spa_type_audio_format[i].name);
-	}
-	return "UNKNOWN";
+	return spa_type_audio_format_to_short_name(format);
 }
 
 uint32_t format_name2id(const char *name)
 {
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_format[i].name)))
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
+	return spa_type_audio_format_from_short_name(name);
 }
 
 uint32_t format_paname2id(const char *name, size_t size)
@@ -230,6 +221,24 @@ uint32_t sample_spec_frame_size(const struct sample_spec *ss)
 	}
 }
 
+void sample_spec_silence(const struct sample_spec *ss, void *data, size_t size)
+{
+	switch (ss->format) {
+	case SPA_AUDIO_FORMAT_U8:
+		memset(data, 0x80, size);
+		break;
+	case SPA_AUDIO_FORMAT_ALAW:
+		memset(data, 0x80 ^ 0x55, size);
+		break;
+	case SPA_AUDIO_FORMAT_ULAW:
+		memset(data, 0x00 ^ 0xff, size);
+		break;
+	default:
+		memset(data, 0, size);
+		break;
+	}
+}
+
 bool sample_spec_valid(const struct sample_spec *ss)
 {
 	return (sample_spec_frame_size(ss) > 0 &&
@@ -289,22 +298,12 @@ uint32_t channel_pa2id(enum channel_position channel)
 
 const char *channel_id2name(uint32_t channel)
 {
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_type_audio_channel[i].type == channel)
-			return spa_debug_type_short_name(spa_type_audio_channel[i].name);
-	}
-	return "UNK";
+	return spa_type_audio_channel_to_short_name(channel);
 }
 
 uint32_t channel_name2id(const char *name)
 {
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (strcmp(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)) == 0)
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
+	return spa_type_audio_channel_from_short_name(name);
 }
 
 enum channel_position channel_id2pa(uint32_t id, uint32_t *aux)
@@ -352,6 +351,14 @@ void channel_map_to_positions(const struct channel_map *map, uint32_t *pos)
 	int i;
 	for (i = 0; i < map->channels; i++)
 		pos[i] = map->map[i];
+}
+
+void positions_to_channel_map(const uint32_t *pos, uint32_t channels, struct channel_map *map)
+{
+	uint32_t i;
+	for (i = 0; i < channels; i++)
+		map->map[i] = pos[i];
+	map->channels = channels;
 }
 
 void channel_map_parse(const char *str, struct channel_map *map)
@@ -440,18 +447,9 @@ void channel_map_parse(const char *str, struct channel_map *map)
 
 void channel_map_parse_position(const char *str, struct channel_map *map)
 {
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], str, strlen(str));
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-		spa_json_init(&it[1], str, strlen(str));
-
-	map->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    map->channels < SPA_AUDIO_MAX_CHANNELS) {
-		map->map[map->channels++] = channel_name2id(v);
-	}
+	uint32_t channels = 0, position[SPA_AUDIO_MAX_CHANNELS];
+	spa_audio_parse_position(str, strlen(str), position, &channels);
+	positions_to_channel_map(position, channels, map);
 }
 
 bool channel_map_valid(const struct channel_map *map)
@@ -806,8 +804,7 @@ static uint32_t format_info_get_format(const struct format_info *info)
 	if ((str = pw_properties_get(info->props, "format.sample_format")) == NULL)
 		return SPA_AUDIO_FORMAT_UNKNOWN;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if ((len = spa_json_next(&it[0], &val)) <= 0)
+	if ((len = spa_json_begin(&it[0], str, strlen(str), &val)) <= 0)
 		return SPA_AUDIO_FORMAT_UNKNOWN;
 
 	if (spa_json_is_string(val, len))
@@ -825,8 +822,7 @@ static int format_info_get_rate(const struct format_info *info)
 	if ((str = pw_properties_get(info->props, "format.rate")) == NULL)
 		return -ENOENT;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if ((len = spa_json_next(&it[0], &val)) <= 0)
+	if ((len = spa_json_begin(&it[0], str, strlen(str), &val)) <= 0)
 		return -EINVAL;
 	if (spa_json_is_int(val, len)) {
 		if (spa_json_parse_int(val, len, &v) <= 0)
@@ -862,8 +858,7 @@ int format_info_to_spec(const struct format_info *info, struct sample_spec *ss,
 	if ((str = pw_properties_get(info->props, "format.channels")) == NULL)
 		return -ENOENT;
 
-	spa_json_init(&it[0], str, strlen(str));
-	if ((len = spa_json_next(&it[0], &val)) <= 0)
+	if ((len = spa_json_begin(&it[0], str, strlen(str), &val)) <= 0)
 		return -EINVAL;
 	if (spa_json_is_float(val, len)) {
 		if (spa_json_parse_float(val, len, &f) <= 0)
@@ -877,8 +872,7 @@ int format_info_to_spec(const struct format_info *info, struct sample_spec *ss,
 		return -ENOTSUP;
 
 	if ((str = pw_properties_get(info->props, "format.channel_map")) != NULL) {
-		spa_json_init(&it[0], str, strlen(str));
-		if ((len = spa_json_next(&it[0], &val)) <= 0)
+		if ((len = spa_json_begin(&it[0], str, strlen(str), &val)) <= 0)
 			return -EINVAL;
 		if (!spa_json_is_string(val, len))
 			return -EINVAL;

@@ -40,6 +40,9 @@ struct impl {
 	uint32_t rate;
 	uint32_t channels;
 	int samplesize;
+
+	uint32_t enc_delay;
+	uint32_t dec_delay;
 };
 
 static bool eld_supported(void)
@@ -68,7 +71,7 @@ done:
 }
 
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	const a2dp_aac_t a2dp_aac = {
 		.object_type =
@@ -364,17 +367,20 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	if (res != AACENC_OK)
 		goto error;
 
-	if (conf->object_type & AAC_OBJECT_TYPE_MPEG4_AAC_ELD) {
+	/* If object type has multiple bits set (invalid per spec, see above),
+	 * assume the device usually means AAC-LC.
+	 */
+	if (conf->object_type & (AAC_OBJECT_TYPE_MPEG2_AAC_LC |
+						AAC_OBJECT_TYPE_MPEG4_AAC_LC)) {
+		res = aacEncoder_SetParam(this->aacenc, AACENC_AOT, AOT_AAC_LC);
+		if (res != AACENC_OK)
+			goto error;
+	} else if (conf->object_type & AAC_OBJECT_TYPE_MPEG4_AAC_ELD) {
 		res = aacEncoder_SetParam(this->aacenc, AACENC_AOT, AOT_ER_AAC_ELD);
 		if (res != AACENC_OK)
 			goto error;
 
 		res = aacEncoder_SetParam(this->aacenc,  AACENC_SBR_MODE, 1);
-		if (res != AACENC_OK)
-			goto error;
-	} else if (conf->object_type & (AAC_OBJECT_TYPE_MPEG2_AAC_LC |
-						AAC_OBJECT_TYPE_MPEG4_AAC_LC)) {
-		res = aacEncoder_SetParam(this->aacenc, AACENC_AOT, AOT_AAC_LC);
 		if (res != AACENC_OK)
 			goto error;
 	} else {		
@@ -440,6 +446,8 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	if (res != AACENC_OK)
 		goto error;
 
+	this->enc_delay = enc_info.nDelay;
+
 	this->codesize = enc_info.frameLength * this->channels * this->samplesize;
 
 	this->aacdec = aacDecoder_Open(TT_MP4_LATM_MCP1, 1);
@@ -467,6 +475,8 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 		goto error;
 	}
 #endif
+
+	this->dec_delay = 0;
 
 	return this;
 
@@ -647,6 +657,21 @@ static int codec_increase_bitpool(void *data)
 	return codec_change_bitrate(this, (this->cur_bitrate * 4) / 3);
 }
 
+static void codec_get_delay(void *data, uint32_t *encoder, uint32_t *decoder)
+{
+	struct impl *this = data;
+
+	if (encoder)
+		*encoder = this->enc_delay;
+
+	if (decoder) {
+		CStreamInfo *info = aacDecoder_GetStreamInfo(this->aacdec);
+		if (info)
+			this->dec_delay = info->outputDelay;
+		*decoder = this->dec_delay;
+	}
+}
+
 static void codec_set_log(struct spa_log *global_log)
 {
 	log = global_log;
@@ -675,6 +700,7 @@ const struct media_codec a2dp_codec_aac = {
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,
 	.set_log = codec_set_log,
+	.get_delay = codec_get_delay,
 };
 
 const struct media_codec a2dp_codec_aac_eld = {
@@ -700,6 +726,7 @@ const struct media_codec a2dp_codec_aac_eld = {
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,
 	.set_log = codec_set_log,
+	.get_delay = codec_get_delay,
 };
 
 MEDIA_CODEC_EXPORT_DEF(

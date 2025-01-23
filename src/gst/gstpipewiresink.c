@@ -26,6 +26,7 @@
 
 #include <spa/pod/builder.h>
 #include <spa/utils/result.h>
+#include <spa/utils/dll.h>
 
 #include <gst/video/video.h>
 
@@ -36,6 +37,7 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_sink_debug);
 #define GST_CAT_DEFAULT pipewire_sink_debug
 
 #define DEFAULT_PROP_MODE GST_PIPEWIRE_SINK_MODE_DEFAULT
+#define DEFAULT_PROP_SLAVE_METHOD GST_PIPEWIRE_SINK_SLAVE_METHOD_NONE
 
 #define MIN_BUFFERS     8u
 
@@ -48,7 +50,8 @@ enum
   PROP_CLIENT_PROPERTIES,
   PROP_STREAM_PROPERTIES,
   PROP_MODE,
-  PROP_FD
+  PROP_FD,
+  PROP_SLAVE_METHOD
 };
 
 GType
@@ -70,6 +73,26 @@ gst_pipewire_sink_mode_get_type (void)
 
   return (GType) mode_type;
 }
+
+GType
+gst_pipewire_sink_slave_method_get_type (void)
+{
+  static gsize method_type = 0;
+  static const GEnumValue method[] = {
+    {GST_PIPEWIRE_SINK_SLAVE_METHOD_NONE, "GST_PIPEWIRE_SINK_SLAVE_METHOD_NONE", "none"},
+    {GST_PIPEWIRE_SINK_SLAVE_METHOD_RESAMPLE, "GST_PIPEWIRE_SINK_SLAVE_METHOD_RESAMPLE", "resample"},
+    {0, NULL, NULL},
+  };
+
+  if (g_once_init_enter (&method_type)) {
+    GType tmp =
+        g_enum_register_static ("GstPipeWireSinkSlaveMethod", method);
+    g_once_init_leave (&method_type, tmp);
+  }
+
+  return (GType) method_type;
+}
+
 
 
 static GstStaticPadTemplate gst_pipewire_sink_template =
@@ -96,6 +119,8 @@ static GstCaps *gst_pipewire_sink_sink_fixate (GstBaseSink * bsink,
 
 static GstFlowReturn gst_pipewire_sink_render (GstBaseSink * psink,
     GstBuffer * buffer);
+
+static  gboolean gst_pipewire_sink_event (GstBaseSink *sink, GstEvent *event);
 
 static GstClock *
 gst_pipewire_sink_provide_clock (GstElement * elem)
@@ -224,6 +249,17 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
                                                       G_PARAM_READWRITE |
                                                       G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class,
+                                   PROP_SLAVE_METHOD,
+                                   g_param_spec_enum ("slave-method",
+                                                      "Slave Method",
+                                                      "Algorithm used to match the rate of the masterclock",
+                                                      GST_TYPE_PIPEWIRE_SINK_SLAVE_METHOD,
+                                                      DEFAULT_PROP_SLAVE_METHOD,
+                                                      G_PARAM_READWRITE |
+                                                      G_PARAM_STATIC_STRINGS));
+
+
   gstelement_class->provide_clock = gst_pipewire_sink_provide_clock;
   gstelement_class->change_state = gst_pipewire_sink_change_state;
 
@@ -238,6 +274,7 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
   gstbasesink_class->fixate = gst_pipewire_sink_sink_fixate;
   gstbasesink_class->propose_allocation = gst_pipewire_sink_propose_allocation;
   gstbasesink_class->render = gst_pipewire_sink_render;
+  gstbasesink_class->event = gst_pipewire_sink_event;
 
   GST_DEBUG_CATEGORY_INIT (pipewire_sink_debug, "pipewiresink", 0,
       "PipeWire Sink");
@@ -407,6 +444,10 @@ gst_pipewire_sink_set_property (GObject * object, guint prop_id,
       pwsink->stream->fd = g_value_get_int (value);
       break;
 
+    case PROP_SLAVE_METHOD:
+      pwsink->slave_method = g_value_get_enum (value);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
@@ -448,10 +489,64 @@ gst_pipewire_sink_get_property (GObject * object, guint prop_id,
       g_value_set_int (value, pwsink->stream->fd);
       break;
 
+    case PROP_SLAVE_METHOD:
+      g_value_set_enum (value, pwsink->slave_method);
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
       break;
   }
+}
+
+static void rate_match_resample(GstPipeWireSink *pwsink)
+{
+  GstPipeWireStream *stream = pwsink->stream;
+  double err, corr;
+  struct pw_time ts;
+  guint64 queued, now, elapsed, target;
+
+  if (!pwsink->rate_match)
+    return;
+
+  pw_stream_get_time_n(stream->pwstream, &ts, sizeof(ts));
+  now = pw_stream_get_nsec(stream->pwstream);
+  if (ts.now != 0)
+    elapsed = gst_util_uint64_scale_int (now - ts.now, ts.rate.denom, GST_SECOND * ts.rate.num);
+  else
+    elapsed = 0;
+
+  queued = ts.queued - ts.size;
+  target = elapsed;
+  err = ((gint64)queued - ((gint64)target));
+
+  corr = spa_dll_update(&stream->dll, SPA_CLAMPD(err, -128.0, 128.0));
+
+  stream->err_wdw = (double)ts.rate.denom/ts.size;
+
+  double avg = (stream->err_avg * stream->err_wdw + (err - stream->err_avg)) / (stream->err_wdw + 1.0);
+  stream->err_var = (stream->err_var * stream->err_wdw +
+                    (err - stream->err_avg) * (err - avg)) / (stream->err_wdw + 1.0);
+  stream->err_avg = avg;
+
+  if (stream->last_ts == 0 || stream->last_ts + SPA_NSEC_PER_SEC < now) {
+    double bw;
+
+    stream->last_ts = now;
+
+    if (stream->err_var == 0.0)
+      bw = 0.0;
+    else
+      bw = fabs(stream->err_avg) / sqrt(fabs(stream->err_var));
+
+    spa_dll_set_bw(&stream->dll, SPA_CLAMPD(bw, 0.001, SPA_DLL_BW_MAX), ts.size, ts.rate.denom);
+
+    GST_INFO_OBJECT (pwsink, "q:%"PRIi64"/%"PRIi64" e:%"PRIu64" err:%+03f corr:%f %f %f %f",
+                    ts.queued, ts.size, elapsed, err, corr,
+		    stream->err_avg, stream->err_var, stream->dll.bw);
+  }
+
+  pw_stream_set_rate (stream->pwstream, corr);
 }
 
 static void
@@ -481,13 +576,12 @@ static void
 do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
 {
   GstPipeWirePoolData *data;
+  GstPipeWireStream *stream = pwsink->stream;
   gboolean res;
   guint i;
   struct spa_buffer *b;
 
   data = gst_pipewire_pool_get_data(buffer);
-
-  GST_LOG_OBJECT (pwsink, "queue buffer %p, pw_buffer %p", buffer, data->b);
 
   b = data->b->buffer;
 
@@ -508,12 +602,15 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
       data->crop->region.size.height = meta->width;
     }
   }
+  data->b->size = 0;
   for (i = 0; i < b->n_datas; i++) {
     struct spa_data *d = &b->datas[i];
     GstMemory *mem = gst_buffer_peek_memory (buffer, i);
     d->chunk->offset = mem->offset;
     d->chunk->size = mem->size;
-    d->chunk->stride = pwsink->stream->pool->video_info.stride[i];
+    d->chunk->stride = stream->pool->video_info.stride[i];
+
+    data->b->size += mem->size / 4;
   }
 
   GstVideoMeta *meta = gst_buffer_get_video_meta (buffer);
@@ -532,8 +629,19 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
     }
   }
 
-  if ((res = pw_stream_queue_buffer (pwsink->stream->pwstream, data->b)) < 0) {
-    g_warning ("can't send buffer %s", spa_strerror(res));
+  if ((res = pw_stream_queue_buffer (stream->pwstream, data->b)) < 0) {
+    GST_WARNING_OBJECT (pwsink, "can't send buffer %s", spa_strerror(res));
+  } else {
+    data->queued = TRUE;
+    GST_LOG_OBJECT(pwsink, "queued pwbuffer: %p; gstbuffer %p ",data->b, buffer);
+  }
+
+  switch (pwsink->slave_method) {
+    case GST_PIPEWIRE_SINK_SLAVE_METHOD_NONE:
+      break;
+    case GST_PIPEWIRE_SINK_SLAVE_METHOD_RESAMPLE:
+      rate_match_resample(pwsink);
+      break;
   }
 }
 
@@ -602,7 +710,6 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   g_autoptr(GPtrArray) possible = NULL;
   enum pw_stream_state state;
   const char *error = NULL;
-  gboolean res = FALSE;
   GstStructure *config, *s;
   guint size;
   guint min_buffers;
@@ -613,9 +720,16 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   pwsink = GST_PIPEWIRE_SINK (bsink);
 
   s = gst_caps_get_structure (caps, 0);
-  rate = 0;
-  if (gst_structure_has_name (s, "audio/x-raw"))
+  if (gst_structure_has_name (s, "audio/x-raw")) {
     gst_structure_get_int (s, "rate", &rate);
+    pwsink->rate = rate;
+    pwsink->rate_match = true;
+  } else {
+    pwsink->rate = rate = 0;
+    pwsink->rate_match = false;
+  }
+
+  spa_dll_set_bw(&pwsink->stream->dll, SPA_DLL_BW_MIN, 4096, rate);
 
   possible = gst_caps_to_format_all (caps);
 
@@ -633,6 +747,7 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
     char buf[64];
 
     flags = PW_STREAM_FLAG_ASYNC;
+    flags |= PW_STREAM_FLAG_EARLY_PROCESS;
     if (pwsink->mode != GST_PIPEWIRE_SINK_MODE_PROVIDE)
       flags |= PW_STREAM_FLAG_AUTOCONNECT;
     else
@@ -685,7 +800,6 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
       }
     }
   }
-  res = TRUE;
 
   gst_pipewire_clock_reset (GST_PIPEWIRE_CLOCK (pwsink->stream->clock), 0);
 
@@ -696,9 +810,9 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
 
   pw_thread_loop_unlock (pwsink->stream->core->loop);
 
-  pwsink->negotiated = res;
+  pwsink->negotiated = TRUE;
 
-  return res;
+  return TRUE;
 
 start_error:
   {
@@ -714,7 +828,6 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
   GstPipeWireSink *pwsink;
   GstFlowReturn res = GST_FLOW_OK;
   const char *error = NULL;
-  gboolean unref_buffer = FALSE;
 
   pwsink = GST_PIPEWIRE_SINK (bsink);
 
@@ -747,34 +860,58 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     goto done_unlock;
 
   if (buffer->pool != GST_BUFFER_POOL_CAST (pwsink->stream->pool)) {
-    GstBuffer *b = NULL;
-    GstMapInfo info = { 0, };
-    GstBufferPoolAcquireParams params = { 0, };
+    gsize offset = 0;
+    gsize buf_size = gst_buffer_get_size (buffer);
 
-    pw_thread_loop_unlock (pwsink->stream->core->loop);
+    /* For some streams, the buffer size is changed and may exceed the acquired
+     * buffer size which is acquired from the pool of pipewiresink. Need split
+     * the buffer and send them in turn for this case */
+    while (buf_size) {
+      GstBuffer *b = NULL;
+      GstMapInfo info = { 0, };
+      GstBufferPoolAcquireParams params = { 0, };
 
-    if ((res = gst_buffer_pool_acquire_buffer (GST_BUFFER_POOL_CAST (pwsink->stream->pool), &b, &params)) != GST_FLOW_OK)
-      goto done;
+      pw_thread_loop_unlock (pwsink->stream->core->loop);
 
-    gst_buffer_map (b, &info, GST_MAP_WRITE);
-    gst_buffer_extract (buffer, 0, info.data, info.maxsize);
-    gst_buffer_unmap (b, &info);
-    gst_buffer_resize (b, 0, gst_buffer_get_size (buffer));
-    gst_buffer_copy_into(b, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
-    buffer = b;
-    unref_buffer = TRUE;
+      params.flags = GST_BUFFER_POOL_ACQUIRE_FLAG_LAST;
+      res = gst_buffer_pool_acquire_buffer (GST_BUFFER_POOL_CAST (pwsink->stream->pool),
+          &b, &params);
+      if (res == GST_FLOW_CUSTOM_ERROR_1) {
+	res = gst_base_sink_wait_preroll (bsink);
+	if (res != GST_FLOW_OK)
+          goto done;
+        continue;
+      }
+      if (res != GST_FLOW_OK)
+        goto done;
 
-    pw_thread_loop_lock (pwsink->stream->core->loop);
-    if (pw_stream_get_state (pwsink->stream->pwstream, &error) != PW_STREAM_STATE_STREAMING)
-      goto done_unlock;
+      gst_buffer_map (b, &info, GST_MAP_WRITE);
+      gsize extract_size = (buf_size <= info.maxsize) ? buf_size: info.maxsize;
+      gst_buffer_extract (buffer, offset, info.data, info.maxsize);
+      gst_buffer_unmap (b, &info);
+      gst_buffer_resize (b, 0, extract_size);
+      gst_buffer_copy_into(b, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
+      buf_size -= extract_size;
+      offset += extract_size;
+
+      pw_thread_loop_lock (pwsink->stream->core->loop);
+      if (pw_stream_get_state (pwsink->stream->pwstream, &error) != PW_STREAM_STATE_STREAMING) {
+        gst_buffer_unref (b);
+        goto done_unlock;
+      }
+
+      do_send_buffer (pwsink, b);
+      gst_buffer_unref (b);
+
+      if (pw_stream_is_driving (pwsink->stream->pwstream))
+        pw_stream_trigger_process (pwsink->stream->pwstream);
+    }
+  } else {
+    do_send_buffer (pwsink, buffer);
+
+    if (pw_stream_is_driving (pwsink->stream->pwstream))
+      pw_stream_trigger_process (pwsink->stream->pwstream);
   }
-
-  do_send_buffer (pwsink, buffer);
-  if (unref_buffer)
-    gst_buffer_unref (buffer);
-
-  if (pw_stream_is_driving (pwsink->stream->pwstream))
-    pw_stream_trigger_process (pwsink->stream->pwstream);
 
 done_unlock:
   pw_thread_loop_unlock (pwsink->stream->core->loop);
@@ -817,20 +954,14 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
       pw_thread_loop_lock (this->stream->core->loop);
       pw_stream_set_active(this->stream->pwstream, false);
       pw_thread_loop_unlock (this->stream->core->loop);
-      break;
-    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
-      /* uncork and start play */
-      pw_thread_loop_lock (this->stream->core->loop);
-      pw_stream_set_active(this->stream->pwstream, true);
-      pw_thread_loop_unlock (this->stream->core->loop);
-      gst_buffer_pool_set_flushing(GST_BUFFER_POOL_CAST(this->stream->pool), FALSE);
+      gst_pipewire_pool_set_paused(this->stream->pool, TRUE);
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       /* stop play ASAP by corking */
+      gst_pipewire_pool_set_paused(this->stream->pool, TRUE);
       pw_thread_loop_lock (this->stream->core->loop);
       pw_stream_set_active(this->stream->pwstream, false);
       pw_thread_loop_unlock (this->stream->core->loop);
-      gst_buffer_pool_set_flushing(GST_BUFFER_POOL_CAST(this->stream->pool), TRUE);
       break;
     default:
       break;
@@ -839,6 +970,16 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
   ret = GST_ELEMENT_CLASS (parent_class)->change_state (element, transition);
 
   switch (transition) {
+    case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
+      /* For some cases, the param_changed event is earlier than the state switch
+       * from paused state to playing state which will wait until buffer pool is ready.
+       * Guarantee to finish preoll if needed to active buffer pool before uncorking and
+       * starting play */
+      gst_pipewire_pool_set_paused(this->stream->pool, FALSE);
+      pw_thread_loop_lock (this->stream->core->loop);
+      pw_stream_set_active(this->stream->pwstream, true);
+      pw_thread_loop_unlock (this->stream->core->loop);
+      break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
@@ -858,4 +999,43 @@ open_failed:
   {
     return GST_STATE_CHANGE_FAILURE;
   }
+}
+
+static  gboolean gst_pipewire_sink_event (GstBaseSink *sink, GstEvent *event) {
+  GstPipeWireSink *pw_sink = GST_PIPEWIRE_SINK(sink);
+  GstState current_state = GST_ELEMENT(sink)->current_state;
+
+  switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_FLUSH_START:
+    {
+      GST_DEBUG_OBJECT (pw_sink, "flush-start");
+      pw_thread_loop_lock (pw_sink->stream->core->loop);
+
+      /* The stream would be already inactive if the sink is not PLAYING */
+      if (current_state == GST_STATE_PLAYING)
+        pw_stream_set_active(pw_sink->stream->pwstream, false);
+
+      gst_buffer_pool_set_flushing(GST_BUFFER_POOL_CAST(pw_sink->stream->pool), TRUE);
+      pw_stream_flush(pw_sink->stream->pwstream, false);
+      pw_thread_loop_unlock (pw_sink->stream->core->loop);
+      break;
+    }
+    case GST_EVENT_FLUSH_STOP:
+    {
+      GST_DEBUG_OBJECT (pw_sink, "flush-stop");
+      pw_thread_loop_lock (pw_sink->stream->core->loop);
+
+      /* The stream needs to remain inactive if the sink is not PLAYING */
+      if (current_state == GST_STATE_PLAYING)
+        pw_stream_set_active(pw_sink->stream->pwstream, true);
+
+      gst_buffer_pool_set_flushing(GST_BUFFER_POOL_CAST(pw_sink->stream->pool), FALSE);
+      pw_thread_loop_unlock (pw_sink->stream->core->loop);
+      break;
+    }
+    default:
+      break;
+  }
+
+  return GST_BASE_SINK_CLASS (parent_class)->event (sink, event);
 }

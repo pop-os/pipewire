@@ -36,6 +36,11 @@ extern "C" {
 #define PW_VERSION_LINK		3
 struct pw_link;
 
+#ifndef PW_API_LINK_IMPL
+#define PW_API_LINK_IMPL static inline
+#endif
+
+
 /** \enum pw_link_state The different link states */
 enum pw_link_state {
 	PW_LINK_STATE_ERROR = -2,	/**< the link is in error */
@@ -108,16 +113,17 @@ struct pw_link_methods {
 			void *data);
 };
 
-#define pw_link_method(o,method,version,...)				\
-({									\
-	int _res = -ENOTSUP;						\
-	spa_interface_call_res((struct spa_interface*)o,		\
-			struct pw_link_methods, _res,			\
-			method, version, ##__VA_ARGS__);		\
-	_res;								\
-})
-
-#define pw_link_add_listener(c,...)		pw_link_method(c,add_listener,0,__VA_ARGS__)
+/** \copydoc pw_link_methods.add_listener
+ * \sa pw_link_methods.add_listener */
+PW_API_LINK_IMPL int pw_link_add_listener(struct pw_link *object,
+			struct spa_hook *listener,
+			const struct pw_link_events *events,
+			void *data)
+{
+	return spa_api_method_r(int, -ENOTSUP,
+			pw_link, (struct spa_interface*)object, add_listener, 0,
+			listener, events, data);
+}
 
 /**
  * \}

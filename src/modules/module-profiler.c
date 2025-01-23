@@ -18,6 +18,7 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/param/profiler.h>
 
+#define PW_API_PROFILER		SPA_EXPORT
 #include <pipewire/private.h>
 #include <pipewire/impl.h>
 #include <pipewire/extensions/profiler.h>
@@ -34,6 +35,25 @@
  *
  * `libpipewire-module-profiler`
  *
+ * ## Module Options
+ *
+ * - `profile.interval.ms`: Can be used to avoid gathering profiling information
+ *			    on every processing cycle. This allows trading off
+ *			    CPU usage for profiling accuracy. Default 0
+ *
+ * ## Config override
+ *
+ * A `module.profiler.args` config section can be added
+ * to override the module arguments.
+ *
+ *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-profiler-args.conf
+ *
+ * module.profiler.args = {
+ *     #profile.interval.ms = 10
+ * }
+ *\endcode
+ *
  * ## Example configuration
  *
  * The module has no arguments and is usually added to the config file of
@@ -41,7 +61,11 @@
  *
  *\code{.unparsed}
  * context.modules = [
- * { name = libpipewire-module-profiler }
+ * { name = libpipewire-module-profiler
+ *   args = {
+ *       #profile.interval.ms = 0
+ *   }
+ * }
  * ]
  *\endcode
  *
@@ -68,9 +92,14 @@ int pw_protocol_native_ext_profiler_init(struct pw_context *context);
 #define pw_profiler_resource_profile(r,...)        \
         pw_profiler_resource(r,profile,0,__VA_ARGS__)
 
+#define DEFAULT_INTERVAL	0
+
+#define MODULE_USAGE	"( profile.interval.ms=<minimum interval for sampling data (in ms) ) "
+
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
 	{ PW_KEY_MODULE_DESCRIPTION, "Generate Profiling data" },
+	{ PW_KEY_MODULE_USAGE, MODULE_USAGE },
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
@@ -109,6 +138,9 @@ struct impl {
 
 	uint8_t *flush;
 	size_t flush_size;
+
+	uint32_t interval;
+	uint64_t last_signal_time;
 };
 
 struct resource_data {
@@ -182,6 +214,11 @@ static void context_do_profile(void *data)
 	if (SPA_FLAG_IS_SET(pos->clock.flags, SPA_IO_CLOCK_FLAG_FREEWHEEL))
 		return;
 
+	if (a->signal_time - impl->last_signal_time < impl->interval)
+		goto done;
+
+	impl->last_signal_time = a->signal_time;
+
 	spa_pod_builder_init(&b, n->tmp, sizeof(n->tmp));
 	spa_pod_builder_push_object(&b, &f[0],
 			SPA_TYPE_OBJECT_Profiler, 0);
@@ -206,7 +243,9 @@ static void context_do_profile(void *data)
 			SPA_POD_Long(pos->clock.delay),
 			SPA_POD_Double(pos->clock.rate_diff),
 			SPA_POD_Long(pos->clock.next_nsec),
-			SPA_POD_Int(pos->state));
+			SPA_POD_Int(pos->state),
+			SPA_POD_Int(pos->clock.cycle),
+			SPA_POD_Long(pos->clock.xrun));
 
 	spa_pod_builder_prop(&b, SPA_PROFILER_driverBlock, 0);
 	spa_pod_builder_add_struct(&b,
@@ -224,6 +263,8 @@ static void context_do_profile(void *data)
 		struct pw_impl_node *n = t->node;
 		struct pw_node_activation *na;
 		struct spa_fraction latency;
+		struct pw_node_activation *a = n->rt.target.activation;
+		struct spa_io_position *pos = &a->position;
 
 		if (t->id == id)
 			continue;
@@ -252,6 +293,21 @@ static void context_do_profile(void *data)
 			SPA_POD_Int(na->status),
 			SPA_POD_Fraction(&latency),
 			SPA_POD_Int(na->xrun_count));
+
+		if (n->driver) {
+			spa_pod_builder_prop(&b, SPA_PROFILER_followerClock, 0);
+			spa_pod_builder_add_struct(&b,
+				SPA_POD_Int(pos->clock.id),
+				SPA_POD_String(pos->clock.name),
+				SPA_POD_Long(pos->clock.nsec),
+				SPA_POD_Fraction(&pos->clock.rate),
+				SPA_POD_Long(pos->clock.position),
+				SPA_POD_Long(pos->clock.duration),
+				SPA_POD_Long(pos->clock.delay),
+				SPA_POD_Double(pos->clock.rate_diff),
+				SPA_POD_Long(pos->clock.next_nsec),
+				SPA_POD_Long(pos->clock.xrun));
+		}
 	}
 	spa_pod_builder_pop(&b, &f[0]);
 
@@ -474,6 +530,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->context = context;
 	impl->properties = props;
 	impl->main_loop = pw_context_get_main_loop(impl->context);
+
+	pw_context_conf_update_props(context, "module."NAME".args", props);
+
+	impl->interval = SPA_NSEC_PER_MSEC *
+		pw_properties_get_uint32(props, "profile.interval.ms", DEFAULT_INTERVAL);
+	impl->last_signal_time = 0;
 
 	impl->global = pw_global_new(context,
 			PW_TYPE_INTERFACE_Profiler,

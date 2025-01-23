@@ -10,7 +10,9 @@
 #include <spa/utils/ringbuffer.h>
 #include <spa/utils/dll.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/control/control.h>
+#include <spa/control/ump-utils.h>
 #include <spa/debug/types.h>
 #include <spa/debug/mem.h>
 #include <spa/debug/log.h>
@@ -73,13 +75,14 @@ struct impl {
 
 	struct spa_ringbuffer ring;
 	uint8_t buffer[BUFFER_SIZE];
+	uint64_t last_recv_timestamp;
 
 	struct spa_io_rate_match *io_rate_match;
 	struct spa_io_position *io_position;
 	struct spa_dll dll;
 	double corr;
 	uint32_t target_buffer;
-	float max_error;
+	double max_error;
 
 	float last_timestamp;
 	float last_time;
@@ -98,6 +101,27 @@ struct impl {
 
 	int (*receive_rtp)(struct impl *impl, uint8_t *buffer, ssize_t len);
 	void (*flush_timeout)(struct impl *impl, uint64_t expirations);
+
+	/*
+	 * pw_filter where the filter would be driven at the PTP clock
+	 * rate with RTP sink being driven at the sink driver clock rate
+	 * or some ALSA clock rate.
+	 */
+	struct pw_filter *ptp_sender;
+	struct spa_hook ptp_sender_listener;
+	struct spa_dll ptp_dll;
+	double ptp_corr;
+	bool separate_sender;
+	bool refilling;
+
+	/* Track some variables we need from the sink driver */
+	uint64_t sink_next_nsec;
+	uint64_t sink_nsec;
+	uint64_t sink_resamp_delay;
+	uint64_t sink_quantum;
+	/* And some bookkeping for the sender processing */
+	uint64_t rtp_base_ts;
+	uint32_t rtp_last_ts;
 };
 
 static int do_emit_state_changed(struct spa_loop *loop, bool async, uint32_t seq, const void *data, size_t size, void *user_data)
@@ -161,7 +185,18 @@ static int stream_start(struct impl *impl)
 
 	rtp_stream_emit_state_changed(impl, true, NULL);
 
+	if (impl->separate_sender) {
+		struct spa_dict_item items[1];
+		items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_ALWAYS_PROCESS, "true");
+
+		pw_filter_set_active(impl->ptp_sender, true);
+		pw_filter_update_properties(impl->ptp_sender, NULL, &SPA_DICT_INIT(items, 1));
+
+		pw_log_info("activated pw_filter for separate sender");
+	}
+
 	impl->started = true;
+
 	return 0;
 }
 
@@ -173,6 +208,16 @@ static int stream_stop(struct impl *impl)
 	/* if timer is running, the state changed event must be emitted by the timer after all packets have been sent */
 	if (!impl->timer_running)
 		rtp_stream_emit_state_changed(impl, false, NULL);
+
+	if (impl->separate_sender) {
+		struct spa_dict_item items[1];
+		items[0] = SPA_DICT_ITEM_INIT(PW_KEY_NODE_ALWAYS_PROCESS, "false");
+
+		pw_filter_update_properties(impl->ptp_sender, NULL, &SPA_DICT_INIT(items, 1));
+
+		pw_log_info("deactivating pw_filter for separate sender");
+		pw_filter_set_active(impl->ptp_sender, false);
+	}
 
 	impl->started = false;
 	return 0;
@@ -227,61 +272,18 @@ static const struct format_info *find_audio_format_info(const struct spa_audio_i
 	return NULL;
 }
 
-static inline uint32_t format_from_name(const char *name, size_t len)
-{
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (strncmp(name, spa_debug_type_short_name(spa_type_audio_format[i].name), len) == 0)
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
-}
-
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
-		str = DEFAULT_FORMAT;
-	info->format = format_from_name(str, strlen(str));
-
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
-	if (info->rate == 0)
-		info->rate = DEFAULT_RATE;
-
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_FORMAT,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static uint32_t msec_to_samples(struct impl *impl, float msec)
@@ -304,7 +306,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 		const struct rtp_stream_events *events, void *data)
 {
 	struct impl *impl;
-	const char *str;
+	const char *str, *aes67_driver;
 	char tmp[64];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
@@ -386,7 +388,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 			res = -EINVAL;
 			goto out;
 		}
-		pw_properties_set(props, PW_KEY_FORMAT_DSP, "8 bit raw midi");
+		pw_properties_set(props, PW_KEY_FORMAT_DSP, "32 bit raw UMP");
 		impl->stride = impl->format_info->size;
 		impl->rate = pw_properties_get_uint32(props, "midi.rate", 10000);
 		if (impl->rate == 0)
@@ -518,14 +520,21 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 	if (fmodf(impl->target_buffer, impl->psamples) != 0) {
 		pw_log_warn("sess.latency.msec %f should be an integer multiple of rtp.ptime %f",
 				latency_msec, ptime);
-		impl->target_buffer = (uint32_t)((impl->target_buffer / ptime) * impl->psamples);
+		impl->target_buffer = SPA_ROUND_DOWN(impl->target_buffer, impl->psamples);
 	}
 
+	aes67_driver = pw_properties_get(props, "aes67.driver-group");
+
 	pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%d", impl->rate);
-	if (direction == PW_DIRECTION_INPUT) {
+	if (direction == PW_DIRECTION_INPUT && !aes67_driver) {
+		/* While sending, we accept latency-sized buffers, and break it
+		 * up and send in ptime intervals using a timer */
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d",
 				impl->target_buffer, impl->rate);
 	} else {
+		/* For receive, and with split sending, we break up the latency
+		 * as half being in stream latency, and the rest in our own
+		 * ringbuffer latency */
 		pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%d/%d",
 				impl->target_buffer / 2, impl->rate);
 	}
@@ -564,7 +573,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 		params[n_params++] = spa_format_audio_build(&b,
 				SPA_PARAM_EnumFormat, &impl->stream_info);
 		flags |= PW_STREAM_FLAG_AUTOCONNECT;
-		rtp_audio_init(impl, direction);
+		rtp_audio_init(impl, core, direction, aes67_driver);
 		break;
 	case SPA_MEDIA_SUBTYPE_control:
 		params[n_params++] = spa_pod_builder_add_object(&b,
@@ -684,6 +693,12 @@ enum pw_stream_state rtp_stream_get_state(struct rtp_stream *s, const char **err
 	struct impl *impl = (struct impl*)s;
 
 	return pw_stream_get_state(impl->stream, error);
+}
+int rtp_stream_set_active(struct rtp_stream *s, bool active)
+{
+	struct impl *impl = (struct impl*)s;
+
+	return pw_stream_set_active(impl->stream, active);
 }
 
 int rtp_stream_set_param(struct rtp_stream *s, uint32_t id, const struct spa_pod *param)

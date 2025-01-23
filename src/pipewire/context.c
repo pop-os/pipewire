@@ -49,7 +49,7 @@ struct data_loop {
 	struct pw_data_loop *impl;
 	bool autostart;
 	bool started;
-	int ref;
+	uint64_t last_used;
 };
 
 /** \cond */
@@ -204,20 +204,21 @@ static int setup_data_loops(struct impl *impl)
 	lib_name = pw_properties_get(this->properties, "context.data-loop." PW_KEY_LIBRARY_NAME_SYSTEM);
 
 	if ((str = pw_properties_get(this->properties, "context.data-loops")) != NULL) {
-		struct spa_json it[4];
+		struct spa_json it[2];
 		char key[512];
 		int r, len = strlen(str);
 		spa_autofree char *s = strndup(str, len);
 
 		i = 0;
-		spa_json_init(&it[0], s, len);
-		if (spa_json_enter_array(&it[0], &it[1]) < 0) {
+		if (spa_json_begin_array(&it[0], s, len) < 0) {
 			pw_log_error("context.data-loops is not an array in '%s'", str);
 			res = -EINVAL;
 			goto exit;
 		}
-		while ((r = spa_json_enter_object(&it[1], &it[2])) > 0) {
+		while ((r = spa_json_enter_object(&it[0], &it[1])) > 0) {
 			char *props = NULL;
+			const char *val;
+			int l;
 
 			if (i >= MAX_LOOPS) {
 				pw_log_warn("too many context.data-loops, using first %d",
@@ -229,17 +230,9 @@ static int setup_data_loops(struct impl *impl)
 			pw_properties_update(pr, &this->properties->dict);
 			pw_properties_set(pr, PW_KEY_LIBRARY_NAME_SYSTEM, lib_name);
 
-			while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-				const char *val;
-				int l;
-
-				if ((l = spa_json_next(&it[2], &val)) <= 0) {
-					pw_log_warn("malformed data-loop: key '%s' has no "
-							"value in '%.*s'", key, (int)len, str);
-					break;
-				}
+			while ((l = spa_json_object_next(&it[1], key, sizeof(key), &val)) > 0) {
 				if (spa_json_is_container(val, l))
-					l = spa_json_container_len(&it[2], val, l);
+					l = spa_json_container_len(&it[1], val, l);
 
 				props = (char*)val;
 				spa_json_parse_stringn(val, l, props, l+1);
@@ -679,12 +672,12 @@ static struct pw_data_loop *acquire_data_loop(struct impl *impl, const char *nam
 			}
 		}
 
-		pw_log_debug("%d: name:'%s' class:'%s' score:%d ref:%d", i,
-				ln, l->impl->class, score, l->ref);
+		pw_log_debug("%d: name:'%s' class:'%s' score:%d last_used:%"PRIu64, i,
+				ln, l->impl->class, score, l->last_used);
 
 		if ((best_loop == NULL) ||
 		    (score > best_score) ||
-		    (score == best_score && l->ref < best_loop->ref)) {
+		    (score == best_score && l->last_used < best_loop->last_used)) {
 			best_loop = l;
 			best_score = score;
 		}
@@ -692,15 +685,15 @@ static struct pw_data_loop *acquire_data_loop(struct impl *impl, const char *nam
 	if (best_loop == NULL)
 		return NULL;
 
-	best_loop->ref++;
+	best_loop->last_used = get_time_ns(impl->this.main_loop->system);
 	if ((res = data_loop_start(impl, best_loop)) < 0) {
 		errno = -res;
 		return NULL;
 	}
 
-	pw_log_info("%p: using name:'%s' class:'%s' ref:%d", impl,
+	pw_log_info("%p: using name:'%s' class:'%s' last_used:%"PRIu64, impl,
 			best_loop->impl->loop->name,
-			best_loop->impl->class, best_loop->ref);
+			best_loop->impl->class, best_loop->last_used);
 
 	return best_loop->impl;
 }
@@ -744,9 +737,8 @@ void pw_context_release_loop(struct pw_context *context, struct pw_loop *loop)
 	for (i = 0; i < impl->n_data_loops; i++) {
 		struct data_loop *l = &impl->data_loops[i];
 		if (l->impl->loop == loop) {
-			l->ref--;
-			pw_log_info("release name:'%s' class:'%s' ref:%d", l->impl->loop->name,
-					l->impl->class, l->ref);
+			pw_log_info("release name:'%s' class:'%s' last_used:%"PRIu64,
+					l->impl->loop->name, l->impl->class, l->last_used);
 			return;
 		}
 	}
@@ -982,7 +974,15 @@ int pw_context_find_format(struct pw_context *context,
 			if (res == -ENOENT || res == 0) {
 				pw_log_debug("%p: no input format filter, using output format: %s",
 						context, spa_strerror(res));
-				*format = filter;
+
+				uint32_t offset = builder->state.offset;
+				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
+				if (res < 0) {
+					*error = spa_aprintf("failed to add pod");
+					goto error;
+				}
+
+				*format = spa_pod_builder_deref(builder, offset);
 			} else {
 				*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
 				goto error;
@@ -1011,7 +1011,15 @@ int pw_context_find_format(struct pw_context *context,
 			if (res == -ENOENT || res == 0) {
 				pw_log_debug("%p: no output format filter, using input format: %s",
 						context, spa_strerror(res));
-				*format = filter;
+
+				uint32_t offset = builder->state.offset;
+				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
+				if (res < 0) {
+					*error = spa_aprintf("failed to add pod");
+					goto error;
+				}
+
+				*format = spa_pod_builder_deref(builder, offset);
 			} else {
 				*error = spa_aprintf("error output enum formats: %s", spa_strerror(res));
 				goto error;
@@ -1799,7 +1807,7 @@ again:
 		/* calculate desired quantum. Don't limit to the max_latency when we are
 		 * going to force a quantum or rate and reconfigure the nodes. */
 		if (max_latency.denom != 0 && !force_quantum && !force_rate) {
-			uint32_t tmp = (max_latency.num * current_rate / max_latency.denom);
+			uint32_t tmp = ((uint64_t)max_latency.num * current_rate / max_latency.denom);
 			if (tmp < node_max_quantum)
 				node_max_quantum = tmp;
 		}

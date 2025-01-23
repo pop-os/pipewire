@@ -109,6 +109,30 @@ static int allocBuffers(struct impl *impl, struct port *port, unsigned int count
 		}
 		impl->requestPool.push_back(std::move(request));
 	}
+
+	/* Some devices require data for each output video frame to be
+	 * placed in discontiguous memory buffers. In such cases, one
+	 * video frame has to be addressed using more than one memory.
+	 * address. Therefore, need calculate the number of discontiguous
+	 * memory and allocate the specified amount of memory */
+	Stream *stream = impl->config->at(0).stream();
+	const std::vector<std::unique_ptr<FrameBuffer>> &bufs =
+			impl->allocator->buffers(stream);
+	const std::vector<libcamera::FrameBuffer::Plane> &planes = bufs[0]->planes();
+	int fd = -1;
+	uint32_t buffers_blocks = 0;
+
+	for (const FrameBuffer::Plane &plane : planes) {
+		const int current_fd = plane.fd.get();
+		if (current_fd >= 0 && current_fd != fd) {
+			buffers_blocks += 1;
+			fd = current_fd;
+		}
+	}
+
+	if (buffers_blocks > 0) {
+		port->buffers_blocks = buffers_blocks;
+	}
 	return res;
 }
 
@@ -599,7 +623,7 @@ static int do_update_ctrls(struct spa_loop *loop,
 		impl->ctrls.set(d->id, d->f_val);
 		break;
 	case ControlTypeInteger32:
-		//impl->ctrls.set(d->id, (int32_t)d->i_val);
+		impl->ctrls.set(d->id, (int32_t)d->i_val);
 		break;
 	default:
 		break;
@@ -798,17 +822,40 @@ mmap_init(struct impl *impl, struct port *port,
 			d[j].type = port->memtype;
 			d[j].flags = SPA_DATA_FLAG_READABLE;
 			d[j].mapoffset = 0;
-			d[j].maxsize = port->streamConfig.frameSize;
-			d[j].chunk->offset = 0;
-			d[j].chunk->size = port->streamConfig.frameSize;
 			d[j].chunk->stride = port->streamConfig.stride;
 			d[j].chunk->flags = 0;
+			/* Update parameters according to the plane information */
+			unsigned int numPlanes = bufs[i]->planes().size();
+			if (buffers[i]->n_datas < numPlanes) {
+				if (j < buffers[i]->n_datas - 1) {
+					d[j].maxsize = bufs[i]->planes()[j].length;
+					d[j].chunk->offset = bufs[i]->planes()[j].offset;
+					d[j].chunk->size = bufs[i]->planes()[j].length;
+				} else {
+					d[j].chunk->offset = bufs[i]->planes()[j].offset;
+					for (uint8_t k = j; k < numPlanes; k++) {
+						d[j].maxsize += bufs[i]->planes()[k].length;
+						d[j].chunk->size += bufs[i]->planes()[k].length;
+					}
+				}
+			} else if (buffers[i]->n_datas == numPlanes) {
+				d[j].maxsize = bufs[i]->planes()[j].length;
+				d[j].chunk->offset = bufs[i]->planes()[j].offset;
+				d[j].chunk->size = bufs[i]->planes()[j].length;
+			} else {
+				spa_log_warn(impl->log, "buffer index: i: %d, data member "
+					"numbers: %d is greater than plane number: %d",
+					i, buffers[i]->n_datas, numPlanes);
+				d[j].maxsize = port->streamConfig.frameSize;
+				d[j].chunk->offset = 0;
+				d[j].chunk->size = port->streamConfig.frameSize;
+			}
 
 			if (port->memtype == SPA_DATA_DmaBuf ||
 			    port->memtype == SPA_DATA_MemFd) {
 				d[j].flags |= SPA_DATA_FLAG_MAPPABLE;
 				d[j].fd = bufs[i]->planes()[j].fd.get();
-				spa_log_debug(impl->log, "Got fd = %ld for buffer: #%d", d[j].fd, i);
+				spa_log_debug(impl->log, "Got fd = %" PRId64 " for buffer: #%d", d[j].fd, i);
 				d[j].data = NULL;
 				SPA_FLAG_SET(b->flags, BUFFER_FLAG_ALLOCATED);
 			}
@@ -884,6 +931,18 @@ void impl::requestComplete(libcamera::Request *request)
 	const FrameMetadata &fmd = buffer->metadata();
 
 	if (impl->clock) {
+		double target = (double)port->info.rate.num / port->info.rate.denom;
+		double corr;
+
+		if (impl->dll.bw == 0.0) {
+			spa_dll_set_bw(&impl->dll, SPA_DLL_BW_MAX, port->info.rate.denom, port->info.rate.denom);
+			impl->clock->next_nsec = fmd.timestamp;
+			corr = 1.0;
+		} else {
+			double diff = ((double)impl->clock->next_nsec - (double)fmd.timestamp) / SPA_NSEC_PER_SEC;
+			double error = port->info.rate.denom * (diff - target);
+			corr = spa_dll_update(&impl->dll, SPA_CLAMPD(error, -128., 128.));
+		}
 		/* FIXME, we should follow the driver clock and target_ values.
 		 * for now we ignore and use our own. */
 		impl->clock->target_rate = port->rate;
@@ -894,8 +953,8 @@ void impl::requestComplete(libcamera::Request *request)
 		impl->clock->position = fmd.sequence;
 		impl->clock->duration = 1;
 		impl->clock->delay = 0;
-		impl->clock->rate_diff = 1.0;
-		impl->clock->next_nsec = fmd.timestamp;
+		impl->clock->rate_diff = corr;
+		impl->clock->next_nsec += (uint64_t) (target * SPA_NSEC_PER_SEC * corr);
 	}
 	if (b->h) {
 		b->h->flags = 0;
@@ -939,6 +998,8 @@ static int spa_libcamera_stream_on(struct impl *impl)
 			goto error_stop;
 	}
 	impl->pendingRequests.clear();
+
+	impl->dll.bw = 0.0;
 
 	impl->source.func = libcamera_on_fd_events;
 	impl->source.data = impl;

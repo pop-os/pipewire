@@ -7,12 +7,10 @@
 #include <stddef.h>
 #include <errno.h>
 #include <arpa/inet.h>
-#if __BYTE_ORDER != __LITTLE_ENDIAN
-#include <byteswap.h>
-#endif
 
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/utils/endian.h>
 
 #ifdef HAVE_LC3PLUS_H
 #include <lc3plus.h>
@@ -67,7 +65,7 @@ struct impl {
 };
 
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	const a2dp_lc3plus_hr_t a2dp_lc3plus_hr = {
 		.info = codec->vendor,

@@ -476,17 +476,17 @@ filter_framerate(struct v4l2_frmivalenum *frmival,
 		frmival->stepwise.step.denominator *= step->num;
 		frmival->stepwise.step.numerator *= step->denom;
 
-		if (compare_fraction(&frmival->stepwise.max, min) < 0 ||
-		    compare_fraction(&frmival->stepwise.min, max) > 0)
+		if (compare_fraction(&frmival->stepwise.min, min) < 0 ||
+		    compare_fraction(&frmival->stepwise.max, max) > 0)
 			return false;
 
-		if (compare_fraction(&frmival->stepwise.min, min) < 0) {
-			frmival->stepwise.min.denominator = min->num;
-			frmival->stepwise.min.numerator = min->denom;
+		if (compare_fraction(&frmival->stepwise.max, min) < 0) {
+			frmival->stepwise.max.denominator = min->num;
+			frmival->stepwise.max.numerator = min->denom;
 		}
-		if (compare_fraction(&frmival->stepwise.max, max) > 0) {
-			frmival->stepwise.max.denominator = max->num;
-			frmival->stepwise.max.numerator = max->denom;
+		if (compare_fraction(&frmival->stepwise.min, max) > 0) {
+			frmival->stepwise.min.denominator = max->num;
+			frmival->stepwise.min.numerator = max->denom;
 		}
 	} else
 		return false;
@@ -778,9 +778,9 @@ do_frmsize_filter:
 			if (errno == EINVAL || errno == ENOTTY) {
 				if (port->frmival.index == 0) {
 					port->frmival.type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
-					port->frmival.stepwise.min.denominator = 1;
+					port->frmival.stepwise.min.denominator = 120;
 					port->frmival.stepwise.min.numerator = 1;
-					port->frmival.stepwise.max.denominator = 120;
+					port->frmival.stepwise.max.denominator = 1;
 					port->frmival.stepwise.max.numerator = 1;
 					goto do_frminterval_filter;
 				}
@@ -853,14 +853,25 @@ do_frminterval_filter:
 			n_fractions++;
 		} else if (port->frmival.type == V4L2_FRMIVAL_TYPE_CONTINUOUS ||
 			   port->frmival.type == V4L2_FRMIVAL_TYPE_STEPWISE) {
-			if (n_fractions == 0)
-				spa_pod_builder_fraction(&b.b, 25, 1);
-			spa_pod_builder_fraction(&b.b,
-						 port->frmival.stepwise.min.denominator,
-						 port->frmival.stepwise.min.numerator);
+			if (n_fractions == 0) {
+				struct spa_fraction f = { 25, 1 };
+				if (compare_fraction(&port->frmival.stepwise.max, &f) > 0) {
+					f.denom = port->frmival.stepwise.max.numerator;
+					f.num = port->frmival.stepwise.max.denominator;
+				}
+				if (compare_fraction(&port->frmival.stepwise.min, &f) < 0) {
+					f.denom = port->frmival.stepwise.min.numerator;
+					f.num = port->frmival.stepwise.min.denominator;
+				}
+
+				spa_pod_builder_fraction(&b.b, f.num, f.denom);
+			}
 			spa_pod_builder_fraction(&b.b,
 						 port->frmival.stepwise.max.denominator,
 						 port->frmival.stepwise.max.numerator);
+			spa_pod_builder_fraction(&b.b,
+						 port->frmival.stepwise.min.denominator,
+						 port->frmival.stepwise.min.numerator);
 
 			if (port->frmival.type == V4L2_FRMIVAL_TYPE_CONTINUOUS) {
 				choice->body.type = SPA_CHOICE_Range;
@@ -1072,7 +1083,7 @@ static int query_ext_ctrl_ioctl(struct port *port, struct v4l2_query_ext_ctrl *q
 
 	if (port->have_query_ext_ctrl) {
 		res = xioctl(dev->fd, VIDIOC_QUERY_EXT_CTRL, qctrl);
-		if (errno != ENOTTY)
+		if (res == 0 || errno != ENOTTY)
 			return res;
 		port->have_query_ext_ctrl = false;
 	}
@@ -1368,6 +1379,14 @@ spa_v4l2_set_control(struct impl *this, uint32_t id,
 		control.value = val;
 		break;
 	}
+	case SPA_TYPE_Float:
+	{
+		float val;
+		if ((res = spa_pod_get_float(&prop->value, &val)) < 0)
+			goto done;
+		control.value = (int32_t) val;
+		break;
+	}
 	case SPA_TYPE_Int:
 	{
 		int32_t val;
@@ -1421,7 +1440,21 @@ static int mmap_read(struct impl *this)
 
 	pts = SPA_TIMEVAL_TO_NSEC(&buf.timestamp);
 
+
 	if (this->clock) {
+		double target = (double)port->info.rate.num / port->info.rate.denom;
+		double corr;
+
+		if (this->dll.bw == 0.0) {
+			spa_dll_set_bw(&this->dll, SPA_DLL_BW_MAX, port->info.rate.denom, port->info.rate.denom);
+			this->clock->next_nsec = pts;
+			corr = 1.0;
+		} else {
+			double diff = ((double)this->clock->next_nsec - (double)pts) / SPA_NSEC_PER_SEC;
+			double error = port->info.rate.denom * (diff - target);
+			corr = spa_dll_update(&this->dll, SPA_CLAMPD(error, -128., 128.));
+		}
+
 		/* FIXME, we should follow the driver clock and target_ values.
 		 * for now we ignore and use our own. */
 		this->clock->target_rate = port->info.rate;
@@ -1432,8 +1465,8 @@ static int mmap_read(struct impl *this)
 		this->clock->position = buf.sequence;
 		this->clock->duration = 1;
 		this->clock->delay = 0;
-		this->clock->rate_diff = 1.0;
-		this->clock->next_nsec = pts + port->info.rate.num * SPA_NSEC_PER_SEC / port->info.rate.denom;
+		this->clock->rate_diff = corr;
+		this->clock->next_nsec += (uint64_t) (target * SPA_NSEC_PER_SEC * corr);
 	}
 
 	b = &port->buffers[buf.index];
@@ -1848,6 +1881,7 @@ static int spa_v4l2_stream_on(struct impl *this)
 		spa_log_error(this->log, "'%s' VIDIOC_STREAMON: %m", this->props.device);
 		return -errno;
 	}
+	this->dll.bw = 0.0;
 
 	port->source.func = v4l2_on_fd_events;
 	port->source.data = this;

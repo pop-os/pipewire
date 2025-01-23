@@ -15,6 +15,14 @@ extern "C" {
 #include <spa/pod/builder.h>
 #include <spa/debug/types.h>
 
+#ifndef SPA_API_JSON_POD
+ #ifdef SPA_API_IMPL
+  #define SPA_API_JSON_POD SPA_API_IMPL
+ #else
+  #define SPA_API_JSON_POD static inline
+ #endif
+#endif
+
 /** \defgroup spa_json_pod JSON to POD
  * JSON to POD conversion
  */
@@ -24,7 +32,7 @@ extern "C" {
  * \{
  */
 
-static inline int spa_json_to_pod_part(struct spa_pod_builder *b, uint32_t flags, uint32_t id,
+SPA_API_JSON_POD int spa_json_to_pod_part(struct spa_pod_builder *b, uint32_t flags, uint32_t id,
 		const struct spa_type_info *info, struct spa_json *iter, const char *value, int len)
 {
 	const struct spa_type_info *ti;
@@ -42,10 +50,8 @@ static inline int spa_json_to_pod_part(struct spa_pod_builder *b, uint32_t flags
 		spa_pod_builder_push_object(b, &f[0], info->parent, id);
 
 		spa_json_enter(iter, &it[0]);
-		while (spa_json_get_string(&it[0], key, sizeof(key)) > 0) {
+		while ((l = spa_json_object_next(&it[0], key, sizeof(key), &v)) > 0) {
 			const struct spa_type_info *pi;
-			if ((l = spa_json_next(&it[0], &v)) <= 0)
-				break;
 			if ((pi = spa_debug_type_find_short(ti->values, key)) != NULL)
 				type = pi->type;
 			else if (!spa_atou32(key, &type, 0))
@@ -137,17 +143,32 @@ static inline int spa_json_to_pod_part(struct spa_pod_builder *b, uint32_t flags
 	return 0;
 }
 
-static inline int spa_json_to_pod(struct spa_pod_builder *b, uint32_t flags,
-		const struct spa_type_info *info, const char *value, int len)
+SPA_API_JSON_POD int spa_json_to_pod_checked(struct spa_pod_builder *b, uint32_t flags,
+		const struct spa_type_info *info, const char *value, int len,
+		struct spa_error_location *loc)
 {
 	struct spa_json iter;
 	const char *val;
+	int res;
 
-	spa_json_init(&iter, value, len);
-	if ((len = spa_json_next(&iter, &val)) <= 0)
-		return -EINVAL;
+	if (loc)
+		spa_zero(*loc);
 
-	return spa_json_to_pod_part(b, flags, info->type, info, &iter, val, len);
+	if ((res = spa_json_begin(&iter, value, len, &val)) <= 0)
+		goto error;
+
+	res = spa_json_to_pod_part(b, flags, info->type, info, &iter, val, len);
+
+error:
+	if (res < 0 && loc)
+		spa_json_get_error(&iter, value, loc);
+	return res;
+}
+
+SPA_API_JSON_POD int spa_json_to_pod(struct spa_pod_builder *b, uint32_t flags,
+		const struct spa_type_info *info, const char *value, int len)
+{
+	return spa_json_to_pod_checked(b, flags, info, value, len, NULL);
 }
 
 /**

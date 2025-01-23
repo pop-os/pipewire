@@ -67,7 +67,7 @@ static void vban_midi_process_playback(void *data)
 			} else {
 				timestamp = target;
 			}
-			spa_pod_builder_control(&b, target - timestamp, SPA_CONTROL_Midi);
+			spa_pod_builder_control(&b, target - timestamp, c->type);
 			spa_pod_builder_bytes(&b,
 					SPA_POD_BODY(&c->value),
 					SPA_POD_BODY_SIZE(&c->value));
@@ -162,19 +162,29 @@ static int vban_midi_receive_midi(struct impl *impl, uint8_t *packet,
 
 	while (offs < plen) {
 		int size;
-
-		spa_pod_builder_control(&b, timestamp, SPA_CONTROL_Midi);
+		uint8_t *midi_data;
+		size_t midi_size;
+		uint64_t midi_state = 0;
 
 		size = get_midi_size(&packet[offs], plen - offs);
-
 		if (size <= 0 || offs + size > plen) {
 			pw_log_warn("invalid size (%08x) %d (%u %u)",
 					packet[offs], size, offs, plen);
 			break;
 		}
 
-		spa_pod_builder_bytes(&b, &packet[offs], size);
+		midi_data = &packet[offs];
+		midi_size = size;
+		while (midi_size > 0) {
+			uint32_t ump[4];
+			int ump_size = spa_ump_from_midi(&midi_data, &midi_size,
+					ump, sizeof(ump), 0, &midi_state);
+			if (ump_size <= 0)
+				break;
 
+			spa_pod_builder_control(&b, timestamp, SPA_CONTROL_UMP);
+	                spa_pod_builder_bytes(&b, ump, ump_size);
+		}
 		offs += size;
 	}
 	spa_pod_builder_pop(&b, &f[0]);
@@ -191,13 +201,7 @@ static int vban_midi_receive(struct impl *impl, uint8_t *buffer, ssize_t len)
 	ssize_t hlen;
 	uint32_t n_frames;
 
-	if (len < VBAN_HEADER_SIZE)
-		goto short_packet;
-
 	hdr = (struct vban_header*)buffer;
-	if (strncmp(hdr->vban, "VBAN", 3))
-		goto invalid_version;
-
 	hlen = VBAN_HEADER_SIZE;
 
 	n_frames = hdr->n_frames;
@@ -211,14 +215,6 @@ static int vban_midi_receive(struct impl *impl, uint8_t *buffer, ssize_t len)
 	impl->receiving = true;
 
 	return vban_midi_receive_midi(impl, buffer, hlen, len);
-
-short_packet:
-	pw_log_warn("short packet received");
-	return -EINVAL;
-invalid_version:
-	pw_log_warn("invalid RTP version");
-	spa_debug_log_mem(pw_log_get(), SPA_LOG_LEVEL_INFO, 0, buffer, len);
-	return -EPROTO;
 }
 
 static void vban_midi_flush_packets(struct impl *impl,
@@ -239,14 +235,17 @@ static void vban_midi_flush_packets(struct impl *impl,
 	len = 0;
 
 	SPA_POD_SEQUENCE_FOREACH(sequence, c) {
-		void *ev;
-		uint32_t size;
+		int size;
+		uint8_t event[16];
 
-		if (c->type != SPA_CONTROL_Midi)
+		if (c->type != SPA_CONTROL_UMP)
 			continue;
 
-		ev = SPA_POD_BODY(&c->value),
-                size = SPA_POD_BODY_SIZE(&c->value);
+		size = spa_ump_to_midi(SPA_POD_BODY(&c->value),
+				SPA_POD_BODY_SIZE(&c->value), event, sizeof(event));
+		if (size <= 0)
+			continue;
+
 		if (len == 0) {
 			/* start new packet */
 			header.n_frames++;
@@ -258,7 +257,7 @@ static void vban_midi_flush_packets(struct impl *impl,
 			vban_stream_emit_send_packet(impl, iov, 2);
 			len = 0;
 		}
-		memcpy(&impl->buffer[len], ev, size);
+		memcpy(&impl->buffer[len], event, size);
 		len += size;
 	}
 	if (len > 0) {

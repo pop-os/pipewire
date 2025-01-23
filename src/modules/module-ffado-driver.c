@@ -24,6 +24,8 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/audio/raw-json.h>
+#include <spa/control/ump-utils.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -341,30 +343,30 @@ static void midi_to_ffado(struct port *p, float *src, uint32_t n_samples)
 	p->event_pos = 0;
 
 	SPA_POD_SEQUENCE_FOREACH(seq, c) {
-		switch(c->type) {
-		case SPA_CONTROL_Midi:
-		{
-			uint8_t *data = SPA_POD_BODY(&c->value);
-			size_t size = SPA_POD_BODY_SIZE(&c->value);
+		uint8_t data[16];
+		int j, size;
 
-			if (index < c->offset)
-				index = SPA_ROUND_UP_N(c->offset, 8);
-			for (i = 0; i < size; i++) {
-				if (index >= n_samples) {
-					/* keep events that don't fit for the next cycle */
-					if (p->event_pos < sizeof(p->event_buffer))
-						p->event_buffer[p->event_pos++] = data[i];
-					else
-						unhandled++;
-				}
+		if (c->type != SPA_CONTROL_UMP)
+			continue;
+
+		size = spa_ump_to_midi(SPA_POD_BODY(&c->value),
+				SPA_POD_BODY_SIZE(&c->value), data, sizeof(data));
+		if (size <= 0)
+			continue;
+
+		if (index < c->offset)
+			index = SPA_ROUND_UP_N(c->offset, 8);
+		for (j = 0; j < size; j++) {
+			if (index >= n_samples) {
+				/* keep events that don't fit for the next cycle */
+				if (p->event_pos < sizeof(p->event_buffer))
+					p->event_buffer[p->event_pos++] = data[j];
 				else
-					dst[index] = 0x01000000 | (uint32_t) data[i];
-				index += 8;
+					unhandled++;
 			}
-			break;
-		}
-		default:
-			break;
+			else
+				dst[index] = 0x01000000 | (uint32_t) data[j];
+			index += 8;
 		}
 	}
 	if (unhandled > 0)
@@ -489,8 +491,16 @@ static void ffado_to_midi(struct port *p, float *dst, uint32_t *src, uint32_t si
 			continue;
 
 		if (process_byte(p, i, data & 0xff, &frame, &bytes, &size)) {
-			spa_pod_builder_control(&b, frame, SPA_CONTROL_Midi);
-	                spa_pod_builder_bytes(&b, bytes, size);
+			uint64_t state = 0;
+			while (size > 0) {
+				uint32_t ev[4];
+				int ev_size = spa_ump_from_midi(&bytes, &size, ev, sizeof(ev), 0, &state);
+				if (ev_size <= 0)
+					break;
+
+				spa_pod_builder_control(&b, frame, SPA_CONTROL_UMP);
+		                spa_pod_builder_bytes(&b, ev, ev_size);
+			}
 		}
         }
 	spa_pod_builder_pop(&b, &f);
@@ -762,7 +772,7 @@ static int make_stream_ports(struct stream *s)
 			break;
 		case ffado_stream_type_midi:
 			props = pw_properties_new(
-					PW_KEY_FORMAT_DSP, "8 bit raw midi",
+					PW_KEY_FORMAT_DSP, "32 bit raw UMP",
 					PW_KEY_PORT_NAME, port->name,
 					PW_KEY_PORT_PHYSICAL, "true",
 					PW_KEY_PORT_TERMINAL, "true",
@@ -1397,61 +1407,30 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
 static void parse_devices(struct impl *impl, const char *val, size_t len)
 {
-	struct spa_json it[2];
+	struct spa_json it[1];
 	char v[FFADO_MAX_SPECSTRING_LENGTH];
 
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
+        if (spa_json_begin_array_relax(&it[0], val, len) <= 0)
+		return;
 
 	impl->n_devices = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
+	while (spa_json_get_string(&it[0], v, sizeof(v)) > 0 &&
 	    impl->n_devices < FFADO_MAX_SPECSTRINGS) {
 		impl->devices[impl->n_devices++] = strdup(v);
 	}
 }
 
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	info->format = SPA_AUDIO_FORMAT_F32P;
-	info->rate = 0;
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)

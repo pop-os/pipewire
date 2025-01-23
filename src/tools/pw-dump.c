@@ -1126,11 +1126,8 @@ static void json_dump_val(struct data *d, const char *key, struct spa_json *it, 
 		char val[1024];
 		put_begin(d, key, "{", STATE_SIMPLE);
 		spa_json_enter(it, &sub);
-		while (spa_json_get_string(&sub, val, sizeof(val)) > 0) {
-			if ((len = spa_json_next(&sub, &value)) <= 0)
-				break;
+		while ((len = spa_json_object_next(&sub, val, sizeof(val), &value)) > 0)
 			json_dump_val(d, val, &sub, value, len);
-		}
 		put_end(d, "}", STATE_SIMPLE);
 	} else if (spa_json_is_string(value, len)) {
 		put_encoded_string(d, key, strndupa(value, len));
@@ -1144,8 +1141,7 @@ static void json_dump(struct data *d, const char *key, const char *value)
 	struct spa_json it[1];
 	int len;
 	const char *val;
-	spa_json_init(&it[0], value, strlen(value));
-	if ((len = spa_json_next(&it[0], &val)) >= 0)
+	if ((len = spa_json_begin(&it[0], value, strlen(value), &val)) >= 0)
 		json_dump_val(d, key, &it[0], val, len);
 }
 

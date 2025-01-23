@@ -11,6 +11,7 @@
 #include <spa/support/cpu.h>
 #include <spa/support/loop.h>
 #include <spa/support/log.h>
+#include <spa/support/plugin-loader.h>
 #include <spa/utils/result.h>
 #include <spa/utils/list.h>
 #include <spa/utils/json.h>
@@ -22,12 +23,15 @@
 #include <spa/node/utils.h>
 #include <spa/node/keys.h>
 #include <spa/param/audio/format-utils.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/param/param.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/tag-utils.h>
 #include <spa/pod/filter.h>
 #include <spa/pod/dynamic.h>
 #include <spa/debug/types.h>
+#include <spa/control/ump-utils.h>
+#include <spa/filter-graph/filter-graph.h>
 
 #include "volume-ops.h"
 #include "fmt-ops.h"
@@ -46,6 +50,8 @@ SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioconvert");
 #define MAX_BUFFERS	32
 #define MAX_DATAS	SPA_AUDIO_MAX_CHANNELS
 #define MAX_PORTS	(SPA_AUDIO_MAX_CHANNELS+1)
+#define MAX_STAGES	64
+#define MAX_GRAPH	9	/* 8 active + 1 replacement slot */
 
 #define DEFAULT_MUTE		false
 #define DEFAULT_VOLUME		VOLUME_NORM
@@ -93,6 +99,7 @@ struct props {
 	double rate;
 	char wav_path[512];
 	unsigned int lock_volumes:1;
+	unsigned int filter_graph_disabled:1;
 };
 
 static void props_reset(struct props *props)
@@ -114,6 +121,7 @@ static void props_reset(struct props *props)
 	props->rate = 1.0;
 	spa_zero(props->wav_path);
 	props->lock_volumes = false;
+	props->filter_graph_disabled = false;
 }
 
 struct buffer {
@@ -187,6 +195,47 @@ struct dir {
 	unsigned int control:1;
 };
 
+struct stage_context {
+#define CTX_DATA_SRC		0
+#define CTX_DATA_DST		1
+#define CTX_DATA_REMAP_DST	2
+#define CTX_DATA_REMAP_SRC	3
+#define CTX_DATA_TMP_0		4
+#define CTX_DATA_TMP_1		5
+#define CTX_DATA_MAX		6
+	void **datas[CTX_DATA_MAX];
+	uint32_t in_samples;
+	uint32_t n_samples;
+	uint32_t n_out;
+	uint32_t src_idx;
+	uint32_t dst_idx;
+	uint32_t final_idx;
+	uint32_t n_datas;
+	struct port *ctrlport;
+};
+
+struct stage {
+	struct impl *impl;
+	bool passthrough;
+	uint32_t in_idx;
+	uint32_t out_idx;
+	uint32_t n_in;
+	uint32_t n_out;
+	void *data;
+	void (*run) (struct stage *stage, struct stage_context *c);
+};
+
+struct filter_graph {
+	struct impl *impl;
+	int order;
+	struct spa_handle *handle;
+	struct spa_filter_graph *graph;
+	struct spa_hook listener;
+	uint32_t n_inputs;
+	uint32_t n_outputs;
+	bool active;
+};
+
 struct impl {
 	struct spa_handle handle;
 	struct spa_node node;
@@ -194,6 +243,17 @@ struct impl {
 	struct spa_log *log;
 	struct spa_cpu *cpu;
 	struct spa_loop *data_loop;
+	struct spa_plugin_loader *loader;
+
+	uint32_t n_graph;
+	uint32_t graph_index[MAX_GRAPH];
+
+	struct filter_graph filter_graph[MAX_GRAPH];
+	int in_filter_props;
+	int filter_props_count;
+
+	struct stage stages[MAX_STAGES];
+	uint32_t n_stages;
 
 	uint32_t cpu_flags;
 	uint32_t max_align;
@@ -240,6 +300,9 @@ struct impl {
 	unsigned int rate_adjust:1;
 	unsigned int port_ignore_latency:1;
 	unsigned int monitor_passthrough:1;
+	unsigned int resample_passthrough:1;
+
+	bool recalc;
 
 	char group_name[128];
 
@@ -302,7 +365,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 				items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_IGNORE_LATENCY, "true");
 		} else if (PORT_IS_CONTROL(this, port->direction, port->id)) {
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, "control");
-			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
+			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "32 bit raw UMP");
 		}
 		if (this->group_name[0] != '\0')
 			items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_GROUP, this->group_name);
@@ -408,6 +471,7 @@ static int impl_node_enum_params(void *object, int seq,
 	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
+	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
@@ -738,8 +802,30 @@ static int impl_node_enum_params(void *object, int seq,
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->lock_volumes),
 				SPA_PROP_INFO_params, SPA_POD_Bool(true));
 			break;
+		case 28:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("audioconvert.filter-graph.disable"),
+				SPA_PROP_INFO_description, SPA_POD_String("Disable Filter graph updates"),
+				SPA_PROP_INFO_type, SPA_POD_CHOICE_Bool(p->filter_graph_disabled),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
+		case 29:
+			param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_PropInfo, id,
+				SPA_PROP_INFO_name, SPA_POD_String("audioconvert.filter-graph"),
+				SPA_PROP_INFO_description, SPA_POD_String("A filter graph to load"),
+				SPA_PROP_INFO_type, SPA_POD_String(""),
+				SPA_PROP_INFO_params, SPA_POD_Bool(true));
+			break;
 		default:
-			return 0;
+			if (this->filter_graph[0].graph) {
+				res = spa_filter_graph_enum_prop_info(this->filter_graph[0].graph,
+						result.index - 30, &b, &param);
+				if (res <= 0)
+					return res;
+			} else
+				return 0;
 		}
 		break;
 	}
@@ -818,11 +904,27 @@ static int impl_node_enum_params(void *object, int seq,
 			spa_pod_builder_string(&b, p->wav_path);
 			spa_pod_builder_string(&b, "channelmix.lock-volumes");
 			spa_pod_builder_bool(&b, p->lock_volumes);
+			spa_pod_builder_string(&b, "audioconvert.filter-graph.disable");
+			spa_pod_builder_bool(&b, p->filter_graph_disabled);
+			spa_pod_builder_string(&b, "audioconvert.filter-graph");
+			spa_pod_builder_string(&b, "");
 			spa_pod_builder_pop(&b, &f[1]);
 			param = spa_pod_builder_pop(&b, &f[0]);
 			break;
 		default:
-			return 0;
+			if (result.index > MAX_GRAPH)
+				return 0;
+
+			if (this->filter_graph[result.index-1].graph == NULL)
+				goto next;
+
+			res = spa_filter_graph_get_props(this->filter_graph[result.index-1].graph,
+						&b, &param);
+			if (res < 0)
+				return res;
+			if (res == 0)
+				goto next;
+			break;
 		}
 		break;
 	}
@@ -859,8 +961,197 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	return 0;
 }
 
+static void graph_info(void *object, const struct spa_filter_graph_info *info)
+{
+	struct filter_graph *g = object;
+	if (!g->active)
+		return;
+	g->n_inputs = info->n_inputs;
+	g->n_outputs = info->n_outputs;
+}
+
+static int apply_props(struct impl *impl, const struct spa_pod *props);
+
+static void graph_apply_props(void *object, enum spa_direction direction, const struct spa_pod *props)
+{
+	struct filter_graph *g = object;
+	struct impl *impl = g->impl;
+	if (!g->active)
+		return;
+	if (apply_props(impl, props) > 0)
+		emit_node_info(impl, false);
+}
+
+static void graph_props_changed(void *object, enum spa_direction direction)
+{
+	struct filter_graph *g = object;
+	struct impl *impl = g->impl;
+	if (!g->active)
+		return;
+	impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+	impl->params[IDX_Props].user++;
+}
+
+struct spa_filter_graph_events graph_events = {
+	SPA_VERSION_FILTER_GRAPH_EVENTS,
+	.info = graph_info,
+	.apply_props = graph_apply_props,
+	.props_changed = graph_props_changed,
+};
+
+static int setup_filter_graph(struct impl *this, struct spa_filter_graph *graph)
+{
+	int res;
+	char rate_str[64];
+	struct dir *in;
+
+	if (graph == NULL)
+		return 0;
+
+	in = &this->dir[SPA_DIRECTION_INPUT];
+	snprintf(rate_str, sizeof(rate_str), "%d", in->format.info.raw.rate);
+
+	spa_filter_graph_deactivate(graph);
+	res = spa_filter_graph_activate(graph,
+				     &SPA_DICT_ITEMS(
+					     SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, rate_str)));
+	return res;
+}
+
+static int do_sync_filter_graph(struct spa_loop *loop, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
+{
+	struct impl *impl = user_data;
+	uint32_t i, j;
+	impl->n_graph = 0;
+	for (i = 0; i < MAX_GRAPH; i++) {
+		struct filter_graph *g = &impl->filter_graph[i];
+		if (g->graph == NULL || !g->active)
+			continue;
+		impl->graph_index[impl->n_graph++] = i;
+
+		for (j = impl->n_graph-1; j > 0; j--) {
+			if (impl->filter_graph[impl->graph_index[j]].order >=
+			    impl->filter_graph[impl->graph_index[j-1]].order)
+				break;
+			SPA_SWAP(impl->graph_index[j], impl->graph_index[j-1]);
+		}
+	}
+	impl->recalc = true;
+	return 0;
+}
+
+static void clean_filter_handles(struct impl *impl, bool force)
+{
+	uint32_t i;
+	for (i = 0; i < MAX_GRAPH; i++) {
+		struct filter_graph *g = &impl->filter_graph[i];
+		if (!g->active || force) {
+			if (g->graph)
+				spa_hook_remove(&g->listener);
+			if (g->handle)
+				spa_plugin_loader_unload(impl->loader, g->handle);
+			spa_zero(*g);
+		}
+	}
+}
+
+static int load_filter_graph(struct impl *impl, const char *graph, int order)
+{
+	char qlimit[64];
+	int res;
+	void *iface;
+	struct spa_handle *new_handle = NULL;
+	uint32_t i, idx, n_graph;
+	struct filter_graph *pending, *old_active = NULL;
+
+	if (impl->props.filter_graph_disabled)
+		return -EPERM;
+
+	/* find graph spot */
+	idx = SPA_ID_INVALID;
+	n_graph = 0;
+	for (i = 0; i < MAX_GRAPH; i++) {
+		pending = &impl->filter_graph[i];
+		/* find the first free spot for our new filter */
+		if (!pending->active && idx == SPA_ID_INVALID)
+			idx = i;
+		/* deactivate an existing filter of the same order */
+		if (pending->active) {
+			if (pending->order == order)
+				old_active = pending;
+			else
+				n_graph++;
+		}
+	}
+	/* we can at most have MAX_GRAPH-1 active filters */
+	if (n_graph >= MAX_GRAPH-1)
+		return -ENOSPC;
+
+	pending = &impl->filter_graph[idx];
+	pending->impl = impl;
+	pending->order = order;
+
+	if (graph != NULL && graph[0] != '\0') {
+		snprintf(qlimit, sizeof(qlimit), "%u", impl->quantum_limit);
+
+		new_handle = spa_plugin_loader_load(impl->loader, "filter.graph",
+				&SPA_DICT_ITEMS(
+					SPA_DICT_ITEM(SPA_KEY_LIBRARY_NAME, "filter-graph/libspa-filter-graph"),
+					SPA_DICT_ITEM("clock.quantum-limit", qlimit),
+					SPA_DICT_ITEM("filter.graph", graph)));
+		if (new_handle == NULL)
+			goto error;
+
+		res = spa_handle_get_interface(new_handle, SPA_TYPE_INTERFACE_FilterGraph, &iface);
+		if (res < 0 || iface == NULL)
+			goto error;
+
+		/* prepare new filter and swap it */
+		res = setup_filter_graph(impl, iface);
+		if (res < 0)
+			goto error;
+		pending->graph = iface;
+		pending->active = true;
+		spa_log_info(impl->log, "loading filter-graph order:%d in %d active:%d",
+				order, idx, n_graph + 1);
+	} else {
+		pending->active = false;
+		spa_log_info(impl->log, "removing filter-graph order:%d active:%d",
+				order, n_graph);
+	}
+	if (old_active)
+		old_active->active = false;
+
+	/* we call this here on the pending_graph so that the n_input/n_output is updated
+	 * before we switch */
+	if (pending->active)
+		spa_filter_graph_add_listener(pending->graph,
+				&pending->listener, &graph_events, pending);
+
+	spa_loop_invoke(impl->data_loop, do_sync_filter_graph, 0, NULL, 0, true, impl);
+
+	if (pending->active)
+		pending->handle = new_handle;
+
+	if (impl->in_filter_props == 0)
+		clean_filter_handles(impl, false);
+
+	impl->info.change_mask |= SPA_NODE_CHANGE_MASK_PARAMS;
+	impl->params[IDX_PropInfo].user++;
+	impl->params[IDX_Props].user++;
+
+	return 0;
+error:
+	if (new_handle != NULL)
+		spa_plugin_loader_unload(impl->loader, new_handle);
+	return -ENOTSUP;
+}
+
 static int audioconvert_set_param(struct impl *this, const char *k, const char *s)
 {
+	int res;
+
 	if (spa_streq(k, "monitor.channel-volumes"))
 		this->monitor_channel_volumes = spa_atob(s);
 	else if (spa_streq(k, "channelmix.disable"))
@@ -901,6 +1192,13 @@ static int audioconvert_set_param(struct impl *this, const char *k, const char *
 	}
 	else if (spa_streq(k, "channelmix.lock-volumes"))
 		this->props.lock_volumes = spa_atob(s);
+	else if (spa_strstartswith(k, "audioconvert.filter-graph")) {
+		int order = atoi(k+ strlen("audioconvert.filter-graph."));
+		if ((res = load_filter_graph(this, s, order)) < 0) {
+			spa_log_warn(this->log, "Can't load filter-graph %d: %s",
+					order, spa_strerror(res));
+		}
+	}
 	else
 		return 0;
 	return 1;
@@ -1224,7 +1522,8 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 			}
 			break;
 		case SPA_PROP_params:
-			changed += parse_prop_params(this, &prop->value);
+			if (this->filter_props_count == 0)
+				changed += parse_prop_params(this, &prop->value);
 			break;
 		default:
 			break;
@@ -1237,6 +1536,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 			p->have_soft_volume = false;
 
 		set_volume(this);
+		this->recalc = true;
 	}
 
 	if (!p->lock_volumes && vol_ramp_params_changed) {
@@ -1253,23 +1553,26 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 
 		this->vol_ramp_sequence = (struct spa_pod_sequence *) sequence;
 		this->vol_ramp_offset = 0;
+		this->recalc = true;
 	}
 	return changed;
 }
 
 static int apply_midi(struct impl *this, const struct spa_pod *value)
 {
-	const uint8_t *val = SPA_POD_BODY(value);
-	uint32_t size = SPA_POD_BODY_SIZE(value);
 	struct props *p = &this->props;
+	uint8_t data[8];
+	int size;
 
+	size = spa_ump_to_midi(SPA_POD_BODY(value), SPA_POD_BODY_SIZE(value),
+			data, sizeof(data));
 	if (size < 3)
 		return -EINVAL;
 
-	if ((val[0] & 0xf0) != 0xb0 || val[1] != 7)
+	if ((data[0] & 0xf0) != 0xb0 || data[1] != 7)
 		return 0;
 
-	p->volume = val[2] / 127.0f;
+	p->volume = data[2] / 127.0f;
 	set_volume(this);
 	return 1;
 }
@@ -1343,11 +1646,6 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 		i = dir->n_ports++;
 		init_port(this, direction, i, 0, false, false, true);
 	}
-	/* when output is convert mode, we are in OUTPUT (merge) mode, we always output all
-	 * the incoming data to output. When output is DSP, we need to output quantum size
-	 * chunks. */
-	this->direction = this->dir[SPA_DIRECTION_OUTPUT].mode == SPA_PARAM_PORT_CONFIG_MODE_convert ?
-		SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS | SPA_NODE_CHANGE_MASK_PARAMS;
 	this->info.flags &= ~SPA_NODE_FLAG_NEED_CONFIGURE;
@@ -1415,9 +1713,29 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 		break;
 	}
 	case SPA_PARAM_Props:
-		if (apply_props(this, param) > 0)
+	{
+		uint32_t i;
+		bool have_graph = false;
+		this->filter_props_count = 0;
+		for (i = 0; i < MAX_GRAPH; i++) {
+			struct filter_graph *g = &this->filter_graph[i];
+			if (!g->active)
+				continue;
+
+			have_graph = true;
+
+			this->in_filter_props++;
+			spa_filter_graph_set_props(g->graph,
+					SPA_DIRECTION_INPUT, param);
+			this->filter_props_count++;
+			this->in_filter_props--;
+		}
+		if (!have_graph && apply_props(this, param) > 0)
 			emit_node_info(this, false);
+
+		clean_filter_handles(this, false);
 		break;
+	}
 	default:
 		return -ENOENT;
 	}
@@ -1839,21 +2157,33 @@ static int ensure_tmp(struct impl *this, uint32_t maxsize, uint32_t maxports)
 static uint32_t resample_update_rate_match(struct impl *this, bool passthrough, uint32_t size, uint32_t queued)
 {
 	uint32_t delay, match_size;
+	int32_t delay_frac;
 
 	if (passthrough) {
 		delay = 0;
+		delay_frac = 0;
 		match_size = size;
 	} else {
-		double rate = this->rate_scale / this->props.rate;
+		/* Only apply rate_scale if we're working in DSP mode (i.e. in driver rate) */
+		double scale = this->dir[SPA_DIRECTION_OUTPUT].mode == SPA_PARAM_PORT_CONFIG_MODE_dsp ?
+			this->rate_scale : 1.0;
+		double rate = scale / this->props.rate;
+		double fdelay;
+
 		if (this->io_rate_match &&
 		    SPA_FLAG_IS_SET(this->io_rate_match->flags, SPA_IO_RATE_MATCH_FLAG_ACTIVE))
 			rate *= this->io_rate_match->rate;
 		resample_update_rate(&this->resample, rate);
-		delay = resample_delay(&this->resample);
-		if (this->direction == SPA_DIRECTION_INPUT)
+		fdelay = resample_delay(&this->resample) + resample_phase(&this->resample);
+		if (this->direction == SPA_DIRECTION_INPUT) {
 			match_size = resample_in_len(&this->resample, size);
-		else
+		} else {
+			fdelay *= rate * this->resample.o_rate / this->resample.i_rate;
 			match_size = resample_out_len(&this->resample, size);
+		}
+
+		delay = (uint32_t)round(fdelay);
+		delay_frac = (int32_t)((fdelay - delay) * 1e9);
 	}
 	match_size -= SPA_MIN(match_size, queued);
 
@@ -1861,6 +2191,7 @@ static uint32_t resample_update_rate_match(struct impl *this, bool passthrough, 
 
 	if (this->io_rate_match) {
 		this->io_rate_match->delay = delay + queued;
+		this->io_rate_match->delay_frac = delay_frac;
 		this->io_rate_match->size = match_size;
 	}
 	return match_size;
@@ -1934,6 +2265,13 @@ static int setup_convert(struct impl *this)
 
 	if ((res = setup_in_convert(this)) < 0)
 		return res;
+	for (i = 0; i < MAX_GRAPH; i++) {
+		struct filter_graph *g = &this->filter_graph[i];
+		if (!g->active)
+			continue;
+		if ((res = setup_filter_graph(this, g->graph)) < 0)
+			return res;
+	}
 	if ((res = setup_channelmix(this)) < 0)
 		return res;
 	if ((res = setup_resample(this)) < 0)
@@ -1957,6 +2295,7 @@ static int setup_convert(struct impl *this)
 	resample_update_rate_match(this, resample_is_passthrough(this), duration, 0);
 
 	this->setup = true;
+	this->recalc = true;
 
 	emit_node_info(this, false);
 
@@ -1965,6 +2304,12 @@ static int setup_convert(struct impl *this)
 
 static void reset_node(struct impl *this)
 {
+	uint32_t i;
+	for (i = 0; i < MAX_GRAPH; i++) {
+		struct filter_graph *g = &this->filter_graph[i];
+		if (g->graph)
+			spa_filter_graph_deactivate(g->graph);
+	}
 	if (this->resample.reset)
 		resample_reset(&this->resample);
 	this->in_offset = 0;
@@ -2071,7 +2416,9 @@ static int port_enum_formats(void *object,
 			*param = spa_pod_builder_add_object(builder,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+				SPA_FORMAT_CONTROL_types,  SPA_POD_CHOICE_FLAGS_Int(
+					(1u<<SPA_CONTROL_UMP) | (1u<<SPA_CONTROL_Properties)));
 		} else {
 			struct spa_pod_frame f[1];
 			uint32_t rate = this->io_position ?
@@ -2177,7 +2524,9 @@ impl_node_port_enum_params(void *object, int seq,
 			param = spa_pod_builder_add_object(&b,
 				SPA_TYPE_OBJECT_Format,  id,
 				SPA_FORMAT_mediaType,    SPA_POD_Id(SPA_MEDIA_TYPE_application),
-				SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+				SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+				SPA_FORMAT_CONTROL_types,  SPA_POD_Int(
+					(1u<<SPA_CONTROL_UMP) | (1u<<SPA_CONTROL_Properties)));
 		else
 			param = spa_format_audio_raw_build(&b, id, &port->format.info.raw);
 		break;
@@ -2190,29 +2539,30 @@ impl_node_port_enum_params(void *object, int seq,
 		if (result.index > 0)
 			return 0;
 
-		if (PORT_IS_DSP(this, direction, port_id)) {
-			/* DSP ports always use the quantum_limit as the buffer
-			 * size. */
-			size = this->quantum_limit;
-		} else {
+		size = this->quantum_limit;
+
+		if (!PORT_IS_DSP(this, direction, port_id)) {
 			uint32_t irate, orate;
 			struct dir *dir = &this->dir[direction];
 
 			/* Convert ports are scaled so that they can always
-			 * provide one quantum of data */
+			 * provide one quantum of data. irate is the rate of the
+			 * data before it goes into the resampler. */
 			irate = dir->format.info.raw.rate;
+			/* scale the size for adaptive resampling */
+			size += size/2;
 
-			/* collect the other port rate */
+			/* collect the other port rate. This is the output of the resampler
+			 * and is usually one quantum. */
 			dir = &this->dir[SPA_DIRECTION_REVERSE(direction)];
 			if (dir->mode == SPA_PARAM_PORT_CONFIG_MODE_dsp)
-				orate = this->io_position ?  this->io_position->clock.target_rate.denom : DEFAULT_RATE;
+				orate = this->io_position ? this->io_position->clock.target_rate.denom : DEFAULT_RATE;
 			else
 				orate = dir->format.info.raw.rate;
 
-			/* always keep some extra room for adaptive resampling */
-			size = this->quantum_limit * 2;
-			/*  scale the buffer size when we can. */
-			if (irate != 0 && orate != 0)
+			/* scale the buffer size when we can. Only do this when we downsample because
+			 * then we need to ask more input data for one quantum. */
+			if (irate != 0 && orate != 0 && irate > orate)
 				size = SPA_SCALE32_UP(size, irate, orate);
 		}
 
@@ -2741,30 +3091,6 @@ static int impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t 
 	return 0;
 }
 
-static void handle_wav(struct impl *this, const void **src, uint32_t n_samples)
-{
-	if (SPA_UNLIKELY(this->props.wav_path[0])) {
-		if (this->wav_file == NULL) {
-			struct wav_file_info info;
-
-			info.info = this->dir[this->direction].format;
-
-			this->wav_file = wav_file_open(this->props.wav_path,
-					"w", &info);
-			if (this->wav_file == NULL)
-				spa_log_warn(this->log, "can't open wav path: %m");
-		}
-		if (this->wav_file) {
-			wav_file_write(this->wav_file, src, n_samples);
-		} else {
-			spa_zero(this->props.wav_path);
-		}
-	} else if (this->wav_file != NULL) {
-		wav_file_close(this->wav_file);
-		this->wav_file = NULL;
-	}
-}
-
 static int channelmix_process_apply_sequence(struct impl *this,
 			const struct spa_pod_sequence *sequence, uint32_t *processed_offset,
 			void *SPA_RESTRICT dst[], const void *SPA_RESTRICT src[],
@@ -2808,7 +3134,7 @@ static int channelmix_process_apply_sequence(struct impl *this,
 
 		if (prev) {
 			switch (prev->type) {
-			case SPA_CONTROL_Midi:
+			case SPA_CONTROL_UMP:
 				apply_midi(this, &prev->value);
 				break;
 			case SPA_CONTROL_Properties:
@@ -2856,25 +3182,385 @@ static uint64_t get_time_ns(struct impl *impl)
 	return SPA_TIMESPEC_TO_NSEC(&now);
 }
 
+static void run_wav_stage(struct stage *stage, struct stage_context *c)
+{
+	struct impl *impl = stage->impl;
+	const void **src = (const void **)c->datas[stage->in_idx];
+
+	if (SPA_UNLIKELY(impl->props.wav_path[0])) {
+		if (impl->wav_file == NULL) {
+			struct wav_file_info info;
+
+			info.info = impl->dir[impl->direction].format;
+
+			impl->wav_file = wav_file_open(impl->props.wav_path,
+					"w", &info);
+			if (impl->wav_file == NULL)
+				spa_log_warn(impl->log, "can't open wav path: %m");
+		}
+		if (impl->wav_file) {
+			wav_file_write(impl->wav_file, src, c->n_samples);
+		} else {
+			spa_zero(impl->props.wav_path);
+		}
+	} else if (impl->wav_file != NULL) {
+		wav_file_close(impl->wav_file);
+		impl->wav_file = NULL;
+		impl->recalc = true;
+	}
+}
+
+static void add_wav_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->src_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_wav_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+}
+
+static void run_dst_remap_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	struct dir *dir = &impl->dir[SPA_DIRECTION_OUTPUT];
+	uint32_t i;
+	for (i = 0; i < s->n_in; i++) {
+		c->datas[s->out_idx][i] = c->datas[s->in_idx][dir->remap[i]];
+		spa_log_trace_fp(impl->log, "%p: output remap %d -> %d", impl, i, dir->remap[i]);
+	}
+}
+static void add_dst_remap_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->dst_idx;
+	s->out_idx = CTX_DATA_REMAP_DST;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_dst_remap_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->dst_idx = CTX_DATA_REMAP_DST;
+	ctx->final_idx = CTX_DATA_REMAP_DST;
+}
+
+static void run_src_remap_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	struct dir *dir = &impl->dir[SPA_DIRECTION_INPUT];
+	uint32_t i;
+	for (i = 0; i < dir->conv.n_channels; i++) {
+		c->datas[s->out_idx][dir->remap[i]] = c->datas[s->in_idx][i];
+		spa_log_trace_fp(impl->log, "%p: input remap %d -> %d", impl, dir->remap[i], i);
+	}
+}
+static void add_src_remap_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = CTX_DATA_REMAP_SRC;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_src_remap_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = CTX_DATA_REMAP_SRC;
+}
+
+static void run_src_convert_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	struct dir *dir = &impl->dir[SPA_DIRECTION_INPUT];
+	void *remap_src_datas[MAX_PORTS], **dst;
+
+	spa_log_trace_fp(impl->log, "%p: input convert %d", impl, c->n_samples);
+	if (dir->need_remap) {
+		uint32_t i;
+		for (i = 0; i < dir->conv.n_channels; i++) {
+			remap_src_datas[i] = c->datas[s->out_idx][dir->remap[i]];
+			spa_log_trace_fp(impl->log, "%p: input remap %d -> %d", impl, dir->remap[i], i);
+		}
+		dst = remap_src_datas;
+	} else {
+		dst = c->datas[s->out_idx];
+	}
+	convert_process(&dir->conv, dst, (const void**)c->datas[s->in_idx], c->n_samples);
+}
+static void add_src_convert_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->dst_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_src_convert_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = ctx->dst_idx;
+}
+
+static void run_resample_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	uint32_t in_len = c->n_samples;
+	uint32_t out_len = c->n_out;
+
+	resample_process(&impl->resample, (const void**)c->datas[s->in_idx], &in_len,
+			c->datas[s->out_idx], &out_len);
+
+	spa_log_trace_fp(impl->log, "%p: resample %d/%d -> %d/%d", impl,
+				c->n_samples, in_len, c->n_out, out_len);
+	c->in_samples = in_len;
+	c->n_samples = out_len;
+}
+static void add_resample_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->dst_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_resample_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = ctx->dst_idx;
+}
+
+static void run_channelmix_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	void **out_datas = c->datas[s->out_idx];
+	const void **in_datas = (const void**)c->datas[s->in_idx];
+	struct port *ctrlport = c->ctrlport;
+
+	spa_log_trace_fp(impl->log, "%p: channelmix %d", impl, c->n_samples);
+	if (ctrlport != NULL && ctrlport->ctrl != NULL) {
+		if (channelmix_process_apply_sequence(impl, ctrlport->ctrl,
+					&ctrlport->ctrl_offset, out_datas, in_datas, c->n_samples) == 1) {
+			ctrlport->io->status = SPA_STATUS_OK;
+			ctrlport->ctrl = NULL;
+		}
+	} else if (impl->vol_ramp_sequence) {
+		if (channelmix_process_apply_sequence(impl, impl->vol_ramp_sequence,
+				&impl->vol_ramp_offset, out_datas, in_datas, c->n_samples) == 1) {
+			free(impl->vol_ramp_sequence);
+			impl->vol_ramp_sequence = NULL;
+		}
+	} else {
+		channelmix_process(&impl->mix, out_datas, in_datas, c->n_samples);
+	}
+}
+
+static void run_filter_stage(struct stage *s, struct stage_context *c)
+{
+	struct filter_graph *fg = s->data;
+
+	spa_log_trace_fp(s->impl->log, "%p: filter-graph %d", s->impl, c->n_samples);
+	spa_filter_graph_process(fg->graph, (const void **)c->datas[s->in_idx],
+			c->datas[s->out_idx], c->n_samples);
+}
+static void add_filter_stage(struct impl *impl, uint32_t i, struct filter_graph *fg, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->dst_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = fg;
+	s->run = run_filter_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = ctx->dst_idx;
+}
+
+static void add_channelmix_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->dst_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_channelmix_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = ctx->dst_idx;
+}
+
+static void run_dst_convert_stage(struct stage *s, struct stage_context *c)
+{
+	struct impl *impl = s->impl;
+	struct dir *dir = &impl->dir[SPA_DIRECTION_OUTPUT];
+	void *remap_datas[MAX_PORTS], **src;
+
+	spa_log_trace_fp(impl->log, "%p: output convert %d", impl, c->n_samples);
+	if (dir->need_remap) {
+		uint32_t i;
+		for (i = 0; i < dir->conv.n_channels; i++) {
+			remap_datas[dir->remap[i]] = c->datas[s->in_idx][i];
+			spa_log_trace_fp(impl->log, "%p: output remap %d -> %d", impl, i, dir->remap[i]);
+		}
+		src = remap_datas;
+	} else {
+		src = c->datas[s->in_idx];
+	}
+	convert_process(&dir->conv, c->datas[s->out_idx], (const void **)src, c->n_samples);
+}
+static void add_dst_convert_stage(struct impl *impl, struct stage_context *ctx)
+{
+	struct stage *s = &impl->stages[impl->n_stages];
+	s->impl = impl;
+	s->passthrough = false;
+	s->in_idx = ctx->src_idx;
+	s->out_idx = ctx->final_idx;
+	s->n_in = ctx->n_datas;
+	s->n_out = ctx->n_datas;
+	s->data = NULL;
+	s->run = run_dst_convert_stage;
+	spa_log_trace(impl->log, "%p: stage %d", impl, impl->n_stages);
+	impl->n_stages++;
+	ctx->src_idx = s->out_idx;
+}
+
+static void recalc_stages(struct impl *this, struct stage_context *ctx)
+{
+	struct dir *dir;
+	bool filter_passthrough, in_passthrough, mix_passthrough, resample_passthrough, out_passthrough;
+	int tmp = 0;
+	struct port *ctrlport = ctx->ctrlport;
+	bool in_need_remap, out_need_remap;
+	uint32_t i;
+
+	this->recalc = false;
+	this->n_stages = 0;
+
+	dir = &this->dir[SPA_DIRECTION_INPUT];
+	in_passthrough = dir->conv.is_passthrough;
+	in_need_remap = dir->need_remap;
+
+	dir = &this->dir[SPA_DIRECTION_OUTPUT];
+	out_passthrough = dir->conv.is_passthrough;
+	out_need_remap = dir->need_remap;
+
+	resample_passthrough = resample_is_passthrough(this);
+	filter_passthrough = this->n_graph == 0;
+	this->resample_passthrough = resample_passthrough;
+	mix_passthrough = SPA_FLAG_IS_SET(this->mix.flags, CHANNELMIX_FLAG_IDENTITY) &&
+		(ctrlport == NULL || ctrlport->ctrl == NULL) && (this->vol_ramp_sequence == NULL);
+
+	if (in_passthrough && filter_passthrough && mix_passthrough && resample_passthrough)
+		out_passthrough = false;
+
+	if (out_passthrough && out_need_remap)
+		add_dst_remap_stage(this, ctx);
+
+	if (this->direction == SPA_DIRECTION_INPUT &&
+	    (this->props.wav_path[0] || this->wav_file != NULL))
+		add_wav_stage(this, ctx);
+
+	if (!in_passthrough) {
+		if (filter_passthrough && mix_passthrough && resample_passthrough && out_passthrough)
+			ctx->dst_idx = ctx->final_idx;
+		else
+			ctx->dst_idx = CTX_DATA_TMP_0 + ((tmp++) & 1);
+
+		add_src_convert_stage(this, ctx);
+	} else {
+		if (in_need_remap)
+			add_src_remap_stage(this, ctx);
+	}
+
+	if (this->direction == SPA_DIRECTION_INPUT) {
+		if (!resample_passthrough) {
+			if (filter_passthrough && mix_passthrough && out_passthrough)
+				ctx->dst_idx = ctx->final_idx;
+			else
+				ctx->dst_idx = CTX_DATA_TMP_0 + ((tmp++) & 1);
+
+			add_resample_stage(this, ctx);
+			resample_passthrough = true;
+		}
+	}
+	if (!filter_passthrough) {
+		for (i = 0; i < this->n_graph; i++) {
+			struct filter_graph *fg = &this->filter_graph[this->graph_index[i]];
+
+			if (mix_passthrough && resample_passthrough && out_passthrough &&
+			    i + 1 == this->n_graph)
+				ctx->dst_idx = ctx->final_idx;
+			else
+				ctx->dst_idx = CTX_DATA_TMP_0 + ((tmp++) & 1);
+
+			add_filter_stage(this, i, fg, ctx);
+		}
+	}
+	if (!mix_passthrough) {
+		if (resample_passthrough && out_passthrough)
+			ctx->dst_idx = ctx->final_idx;
+		else
+			ctx->dst_idx = CTX_DATA_TMP_0 + ((tmp++) & 1);
+
+		add_channelmix_stage(this, ctx);
+	}
+	if (this->direction == SPA_DIRECTION_OUTPUT) {
+		if (!resample_passthrough) {
+			if (out_passthrough)
+				ctx->dst_idx = ctx->final_idx;
+			else
+				ctx->dst_idx = CTX_DATA_TMP_0 + ((tmp++) & 1);
+
+			add_resample_stage(this, ctx);
+		}
+	}
+	if (!out_passthrough) {
+		add_dst_convert_stage(this, ctx);
+	}
+	if (this->direction == SPA_DIRECTION_OUTPUT &&
+	    (this->props.wav_path[0] || this->wav_file != NULL))
+		add_wav_stage(this, ctx);
+
+	spa_log_trace(this->log, "got %u processing stages", this->n_stages);
+}
+
 static int impl_node_process(void *object)
 {
 	struct impl *this = object;
-	const void *src_datas[MAX_PORTS], **in_datas;
+	const void *src_datas[MAX_PORTS];
 	void *dst_datas[MAX_PORTS], *remap_src_datas[MAX_PORTS], *remap_dst_datas[MAX_PORTS];
-	void **out_datas, **dst_remap;
 	uint32_t i, j, n_src_datas = 0, n_dst_datas = 0, n_mon_datas = 0, remap;
 	uint32_t n_samples, max_in, n_out, max_out, quant_samples;
 	struct port *port, *ctrlport = NULL;
 	struct buffer *buf, *out_bufs[MAX_PORTS];
 	struct spa_data *bd;
 	struct dir *dir;
-	int tmp = 0, res = 0, suppressed;
-	bool in_passthrough, mix_passthrough, resample_passthrough, out_passthrough;
+	int res = 0, suppressed;
 	bool in_avail = false, flush_in = false, flush_out = false;
 	bool draining = false, in_empty = this->out_offset == 0;
-	struct spa_io_buffers *io, *ctrlio = NULL;
+	struct spa_io_buffers *io;
 	const struct spa_pod_sequence *ctrl = NULL;
 	uint64_t current_time;
+	struct stage_context ctx;
 
 	/* calculate quantum scale, this is how many samples we need to produce or
 	 * consume. Also update the rate scale, this is sent to the resampler to adjust
@@ -2910,7 +3596,6 @@ static int impl_node_process(void *object)
 	}
 
 	dir = &this->dir[SPA_DIRECTION_INPUT];
-	in_passthrough = dir->conv.is_passthrough;
 	max_in = UINT32_MAX;
 
 	/* collect input port data */
@@ -2974,7 +3659,6 @@ static int impl_node_process(void *object)
 					spa_log_trace_fp(this->log, "%p: control %d", this,
 							i * port->blocks + j);
 					ctrlport = port;
-					ctrlio = io;
 					ctrl = spa_pod_from_data(bd->data, bd->maxsize,
 							bd->chunk->offset, bd->chunk->size);
 					if (ctrl && !spa_pod_is_sequence(&ctrl->pod))
@@ -2982,6 +3666,7 @@ static int impl_node_process(void *object)
 					if (ctrl != ctrlport->ctrl) {
 						ctrlport->ctrl = ctrl;
 						ctrlport->ctrl_offset = 0;
+						this->recalc = true;
 					}
 				} else  {
 					max_in = SPA_MIN(max_in, size / port->stride);
@@ -2997,8 +3682,9 @@ static int impl_node_process(void *object)
 			}
 		}
 	}
-
-	resample_passthrough = resample_is_passthrough(this);
+	bool resample_passthrough = resample_is_passthrough(this);
+	if (this->resample_passthrough != resample_passthrough)
+		this->recalc = true;
 
 	/* calculate how many samples we are going to produce. */
 	if (this->direction == SPA_DIRECTION_INPUT) {
@@ -3133,122 +3819,30 @@ static int impl_node_process(void *object)
 		flush_in = true;
 	}
 
-	mix_passthrough = SPA_FLAG_IS_SET(this->mix.flags, CHANNELMIX_FLAG_IDENTITY) &&
-		(ctrlport == NULL || ctrlport->ctrl == NULL) && (this->vol_ramp_sequence == NULL);
+	ctx.datas[CTX_DATA_SRC] = (void **)src_datas;
+	ctx.datas[CTX_DATA_DST] = dst_datas;
+	ctx.datas[CTX_DATA_REMAP_DST] = remap_dst_datas;
+	ctx.datas[CTX_DATA_REMAP_SRC] = remap_src_datas;
+	ctx.datas[CTX_DATA_TMP_0] = (void**)this->tmp_datas[0];
+	ctx.datas[CTX_DATA_TMP_1] = (void**)this->tmp_datas[1];
+	ctx.in_samples = n_samples;
+	ctx.n_samples = n_samples;
+	ctx.n_out = n_out;
+	ctx.src_idx = CTX_DATA_SRC;
+	ctx.dst_idx = CTX_DATA_DST;
+	ctx.final_idx = CTX_DATA_DST;
+	ctx.n_datas = dir->conv.n_channels;
+	ctx.ctrlport = ctrlport;
 
-	out_passthrough = dir->conv.is_passthrough;
-	if (in_passthrough && mix_passthrough && resample_passthrough)
-		out_passthrough = false;
+	if (this->recalc)
+		recalc_stages(this, &ctx);
 
-	if (out_passthrough && dir->need_remap) {
-		for (i = 0; i < dir->conv.n_channels; i++) {
-			remap_dst_datas[i] = dst_datas[dir->remap[i]];
-			spa_log_trace_fp(this->log, "%p: output remap %d -> %d", this, i, dir->remap[i]);
-		}
-		dst_remap = (void **)remap_dst_datas;
-	} else {
-		dst_remap = (void **)dst_datas;
+	for (i = 0; i < this->n_stages; i++) {
+		struct stage *s = &this->stages[i];
+		s->run(s, &ctx);
 	}
-
-	if (this->direction == SPA_DIRECTION_INPUT)
-		handle_wav(this, src_datas, n_samples);
-
-	dir = &this->dir[SPA_DIRECTION_INPUT];
-	if (!in_passthrough) {
-		if (mix_passthrough && resample_passthrough && out_passthrough)
-			out_datas = (void **)dst_remap;
-		else
-			out_datas = (void **)this->tmp_datas[(tmp++) & 1];
-
-		if (dir->need_remap) {
-			for (i = 0; i < dir->conv.n_channels; i++) {
-				remap_src_datas[i] = out_datas[dir->remap[i]];
-				spa_log_trace_fp(this->log, "%p: input remap %d -> %d", this, dir->remap[i], i);
-			}
-		} else {
-			for (i = 0; i < dir->conv.n_channels; i++)
-				remap_src_datas[i] = out_datas[i];
-		}
-
-		spa_log_trace_fp(this->log, "%p: input convert %d", this, n_samples);
-		convert_process(&dir->conv, remap_src_datas, src_datas, n_samples);
-	} else {
-		if (dir->need_remap) {
-			for (i = 0; i < dir->conv.n_channels; i++) {
-				remap_src_datas[dir->remap[i]] = (void *)src_datas[i];
-				spa_log_trace_fp(this->log, "%p: input remap %d -> %d", this, dir->remap[i], i);
-			}
-			out_datas = (void **)remap_src_datas;
-		} else {
-			out_datas = (void **)src_datas;
-		}
-	}
-
-	if (!mix_passthrough) {
-		in_datas = (const void**)out_datas;
-		if (resample_passthrough && out_passthrough) {
-			out_datas = (void **)dst_remap;
-			n_samples = SPA_MIN(n_samples, n_out);
-		} else {
-			out_datas = (void **)this->tmp_datas[(tmp++) & 1];
-		}
-		spa_log_trace_fp(this->log, "%p: channelmix %d %d %d", this, n_samples,
-				resample_passthrough, out_passthrough);
-		if (ctrlport != NULL && ctrlport->ctrl != NULL) {
-			if (channelmix_process_apply_sequence(this, ctrlport->ctrl,
-						&ctrlport->ctrl_offset, out_datas, in_datas, n_samples) == 1) {
-				ctrlio->status = SPA_STATUS_OK;
-				ctrlport->ctrl = NULL;
-			}
-		} else if (this->vol_ramp_sequence) {
-			if (channelmix_process_apply_sequence(this, this->vol_ramp_sequence,
-					&this->vol_ramp_offset, out_datas, in_datas, n_samples) == 1) {
-				free(this->vol_ramp_sequence);
-				this->vol_ramp_sequence = NULL;
-			}
-		}
-		else {
-			channelmix_process(&this->mix, out_datas, in_datas, n_samples);
-		}
-	}
-	if (!resample_passthrough) {
-		uint32_t in_len, out_len;
-
-		in_datas = (const void**)out_datas;
-		if (out_passthrough)
-			out_datas = (void **)dst_remap;
-		else
-			out_datas = (void **)this->tmp_datas[(tmp++) & 1];
-
-		in_len = n_samples;
-		out_len = n_out;
-		resample_process(&this->resample, in_datas, &in_len, out_datas, &out_len);
-		spa_log_trace_fp(this->log, "%p: resample %d/%d -> %d/%d %d", this,
-				n_samples, in_len, n_out, out_len, out_passthrough);
-		this->in_offset += in_len;
-		n_samples = out_len;
-	} else {
-		n_samples = SPA_MIN(n_samples, n_out);
-		this->in_offset += n_samples;
-	}
-	this->out_offset += n_samples;
-
-	if (!out_passthrough) {
-		dir = &this->dir[SPA_DIRECTION_OUTPUT];
-		if (dir->need_remap) {
-			for (i = 0; i < dir->conv.n_channels; i++) {
-				remap_dst_datas[dir->remap[i]] = out_datas[i];
-				spa_log_trace_fp(this->log, "%p: output remap %d -> %d", this, i, dir->remap[i]);
-			}
-			in_datas = (const void**)remap_dst_datas;
-		} else {
-			in_datas = (const void**)out_datas;
-		}
-		spa_log_trace_fp(this->log, "%p: output convert %d", this, n_samples);
-		convert_process(&dir->conv, dst_datas, in_datas, n_samples);
-	}
-	if (this->direction == SPA_DIRECTION_OUTPUT)
-		handle_wav(this, (const void**)dst_datas, n_samples);
+	this->in_offset += ctx.in_samples;
+	this->out_offset += ctx.n_samples;
 
 	spa_log_trace_fp(this->log, "%d/%d  %d/%d %d->%d", this->in_offset, max_in,
 			this->out_offset, max_out, n_samples, n_out);
@@ -3391,6 +3985,8 @@ static int impl_clear(struct spa_handle *handle)
 
 	free_tmp(this);
 
+	clean_filter_handles(this, true);
+
 	if (this->resample.free)
 		resample_free(&this->resample);
 	if (this->wav_file != NULL)
@@ -3406,34 +4002,6 @@ impl_get_size(const struct spa_handle_factory *factory,
 	return sizeof(struct impl);
 }
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static inline uint32_t parse_position(uint32_t *pos, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-	uint32_t i = 0;
-
-	spa_json_init(&it[0], val, len);
-	if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-		spa_json_init(&it[1], val, len);
-
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-			i < SPA_AUDIO_MAX_CHANNELS) {
-		pos[i++] = channel_from_name(v);
-	}
-	return i;
-}
-
-
 static int
 impl_init(const struct spa_handle_factory *factory,
 	  struct spa_handle *handle,
@@ -3443,6 +4011,8 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	uint32_t i;
+	const char *str;
+	bool filter_graph_disabled;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -3461,7 +4031,10 @@ impl_init(const struct spa_handle_factory *factory,
 		this->cpu_flags = spa_cpu_get_flags(this->cpu);
 		this->max_align = SPA_MIN(MAX_ALIGN, spa_cpu_get_max_align(this->cpu));
 	}
+	this->loader = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_PluginLoader);
+
 	props_reset(&this->props);
+	filter_graph_disabled = this->props.filter_graph_disabled;
 
 	this->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
 	this->rate_limit.burst = 1;
@@ -3474,19 +4047,27 @@ impl_init(const struct spa_handle_factory *factory,
 	this->mix.rear_delay = 0.0f;
 	this->mix.widen = 0.0f;
 
+	if (info && (str = spa_dict_lookup(info, "clock.quantum-limit")) != NULL)
+		spa_atou32(str, &this->quantum_limit, 0);
+
 	for (i = 0; info && i < info->n_items; i++) {
 		const char *k = info->items[i].key;
 		const char *s = info->items[i].value;
-		if (spa_streq(k, "clock.quantum-limit"))
-			spa_atou32(s, &this->quantum_limit, 0);
-		else if (spa_streq(k, "resample.peaks"))
+		if (spa_streq(k, "resample.peaks"))
 			this->resample_peaks = spa_atob(s);
 		else if (spa_streq(k, "resample.prefill"))
 			SPA_FLAG_UPDATE(this->resample.options,
 				RESAMPLE_OPTION_PREFILL, spa_atob(s));
+		else if (spa_streq(k, "convert.direction")) {
+			if (spa_streq(s, "output"))
+				this->direction = SPA_DIRECTION_OUTPUT;
+			else
+				this->direction = SPA_DIRECTION_INPUT;
+		}
 		else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
 			if (s != NULL)
-	                        this->props.n_channels = parse_position(this->props.channel_map, s, strlen(s));
+				spa_audio_parse_position(s, strlen(s), this->props.channel_map,
+						&this->props.n_channels);
 		}
 		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
 			this->port_ignore_latency = spa_atob(s);
@@ -3494,10 +4075,12 @@ impl_init(const struct spa_handle_factory *factory,
 			spa_scnprintf(this->group_name, sizeof(this->group_name), "%s", s);
 		else if (spa_streq(k, "monitor.passthrough"))
 			this->monitor_passthrough = spa_atob(s);
+		else if (spa_streq(k, "audioconvert.filter-graph.disable"))
+			filter_graph_disabled = spa_atob(s);
 		else
 			audioconvert_set_param(this, k, s);
 	}
-
+	this->props.filter_graph_disabled = filter_graph_disabled;
 	this->props.channel.n_volumes = this->props.n_channels;
 	this->props.soft.n_volumes = this->props.n_channels;
 	this->props.monitor.n_volumes = this->props.n_channels;

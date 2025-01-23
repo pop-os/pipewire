@@ -177,7 +177,7 @@ static int do_extension_stream_restore_read(struct module *module, struct client
 	reply = reply_new(client, tag);
 
 	spa_dict_for_each(item, &client->routes->dict) {
-		struct spa_json it[3];
+		struct spa_json it[2];
 		const char *value;
 		char name[1024], key[128];
 		char device_name[1024] = "\0";
@@ -185,52 +185,52 @@ static int do_extension_stream_restore_read(struct module *module, struct client
 		struct volume vol = VOLUME_INIT;
 		struct channel_map map = CHANNEL_MAP_INIT;
 		float volume = 0.0f;
+		int len;
 
 		if (key_to_name(item->key, name, sizeof(name)) < 0)
 			continue;
 
 		pw_log_debug("%s -> %s: %s", item->key, name, item->value);
 
-		spa_json_init(&it[0], item->value, strlen(item->value));
-		if (spa_json_enter_object(&it[0], &it[1]) <= 0)
+		if (spa_json_begin_object(&it[0], item->value, strlen(item->value)) <= 0)
 			continue;
 
-		while (spa_json_get_string(&it[1], key, sizeof(key)) > 0) {
+		while ((len = spa_json_object_next(&it[0], key, sizeof(key), &value)) > 0) {
 			if (spa_streq(key, "volume")) {
-				if (spa_json_get_float(&it[1], &volume) <= 0)
+				if (spa_json_parse_float(value, len, &volume) <= 0)
 					continue;
 			}
 			else if (spa_streq(key, "mute")) {
-				if (spa_json_get_bool(&it[1], &mute) <= 0)
+				if (spa_json_parse_bool(value, len, &mute) <= 0)
 					continue;
 			}
 			else if (spa_streq(key, "volumes")) {
 				vol = VOLUME_INIT;
-				if (spa_json_enter_array(&it[1], &it[2]) <= 0)
+				if (!spa_json_is_array(value, len))
 					continue;
 
+				spa_json_enter(&it[0], &it[1]);
 				for (vol.channels = 0; vol.channels < CHANNELS_MAX; vol.channels++) {
-					if (spa_json_get_float(&it[2], &vol.values[vol.channels]) <= 0)
+					if (spa_json_get_float(&it[1], &vol.values[vol.channels]) <= 0)
 						break;
 				}
 			}
 			else if (spa_streq(key, "channels")) {
-				if (spa_json_enter_array(&it[1], &it[2]) <= 0)
+				if (!spa_json_is_array(value, len))
 					continue;
 
+				spa_json_enter(&it[0], &it[1]);
 				for (map.channels = 0; map.channels < CHANNELS_MAX; map.channels++) {
 					char chname[16];
-					if (spa_json_get_string(&it[2], chname, sizeof(chname)) <= 0)
+					if (spa_json_get_string(&it[1], chname, sizeof(chname)) <= 0)
 						break;
 					map.map[map.channels] = channel_name2id(chname);
 				}
 			}
 			else if (spa_streq(key, "target-node")) {
-				if (spa_json_get_string(&it[1], device_name, sizeof(device_name)) <= 0)
+				if (spa_json_parse_stringn(value, len, device_name, sizeof(device_name)) <= 0)
 					continue;
 			}
-			else if (spa_json_next(&it[1], &value) <= 0)
-				break;
 		}
 		message_put(reply,
 			TAG_STRING, name,

@@ -16,6 +16,14 @@ extern "C" {
 #include <spa/utils/hook.h>
 #include <spa/utils/dict.h>
 
+#ifndef SPA_API_THREAD
+ #ifdef SPA_API_IMPL
+  #define SPA_API_THREAD SPA_API_IMPL
+ #else
+  #define SPA_API_THREAD static inline
+ #endif
+#endif
+
 /** \defgroup spa_thread Thread
  * Threading utility interfaces
  */
@@ -58,61 +66,51 @@ struct spa_thread_utils_methods {
 
 /** \copydoc spa_thread_utils_methods.create
  * \sa spa_thread_utils_methods.create */
-static inline struct spa_thread *spa_thread_utils_create(struct spa_thread_utils *o,
+SPA_API_THREAD struct spa_thread *spa_thread_utils_create(struct spa_thread_utils *o,
 		const struct spa_dict *props, void *(*start_routine)(void*), void *arg)
 {
-	struct spa_thread *res = NULL;
-	spa_interface_call_res(&o->iface,
-			struct spa_thread_utils_methods, res, create, 0,
+	return spa_api_method_r(struct spa_thread *, NULL,
+			spa_thread_utils, &o->iface, create, 0,
 			props, start_routine, arg);
-	return res;
 }
 
 /** \copydoc spa_thread_utils_methods.join
  * \sa spa_thread_utils_methods.join */
-static inline int spa_thread_utils_join(struct spa_thread_utils *o,
+SPA_API_THREAD int spa_thread_utils_join(struct spa_thread_utils *o,
 		struct spa_thread *thread, void **retval)
 {
-	int res = -ENOTSUP;
-	spa_interface_call_res(&o->iface,
-			struct spa_thread_utils_methods, res, join, 0,
+	return spa_api_method_r(int, -ENOTSUP,
+			spa_thread_utils, &o->iface, join, 0,
 			thread, retval);
-	return res;
 }
 
 /** \copydoc spa_thread_utils_methods.get_rt_range
  * \sa spa_thread_utils_methods.get_rt_range */
-static inline int spa_thread_utils_get_rt_range(struct spa_thread_utils *o,
+SPA_API_THREAD int spa_thread_utils_get_rt_range(struct spa_thread_utils *o,
 		const struct spa_dict *props, int *min, int *max)
 {
-	int res = -ENOTSUP;
-	spa_interface_call_res(&o->iface,
-			struct spa_thread_utils_methods, res, get_rt_range, 0,
+	return spa_api_method_r(int, -ENOTSUP,
+			spa_thread_utils, &o->iface, get_rt_range, 0,
 			props, min, max);
-	return res;
 }
 
 /** \copydoc spa_thread_utils_methods.acquire_rt
  * \sa spa_thread_utils_methods.acquire_rt */
-static inline int spa_thread_utils_acquire_rt(struct spa_thread_utils *o,
+SPA_API_THREAD int spa_thread_utils_acquire_rt(struct spa_thread_utils *o,
 		struct spa_thread *thread, int priority)
 {
-	int res = -ENOTSUP;
-	spa_interface_call_res(&o->iface,
-			struct spa_thread_utils_methods, res, acquire_rt, 0,
+	return spa_api_method_r(int, -ENOTSUP,
+			spa_thread_utils, &o->iface, acquire_rt, 0,
 			thread, priority);
-	return res;
 }
 
 /** \copydoc spa_thread_utils_methods.drop_rt
  * \sa spa_thread_utils_methods.drop_rt */
-static inline int spa_thread_utils_drop_rt(struct spa_thread_utils *o,
+SPA_API_THREAD int spa_thread_utils_drop_rt(struct spa_thread_utils *o,
 		struct spa_thread *thread)
 {
-	int res = -ENOTSUP;
-	spa_interface_call_res(&o->iface,
-			struct spa_thread_utils_methods, res, drop_rt, 0, thread);
-	return res;
+	return spa_api_method_r(int, -ENOTSUP,
+			spa_thread_utils, &o->iface, drop_rt, 0, thread);
 }
 
 #define SPA_KEY_THREAD_NAME		"thread.name"		/* the thread name */

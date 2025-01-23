@@ -26,6 +26,10 @@ extern "C" {
 #define PW_VERSION_SECURITY_CONTEXT			3
 struct pw_security_context;
 
+#ifndef PW_API_SECURITY_CONTEXT
+#define PW_API_SECURITY_CONTEXT static inline
+#endif
+
 #define PW_EXTENSION_MODULE_SECURITY_CONTEXT		PIPEWIRE_MODULE_PREFIX "module-security-context"
 
 #define PW_SECURITY_CONTEXT_EVENT_NUM			0
@@ -94,18 +98,27 @@ struct pw_security_context_methods {
 			const struct spa_dict *props);
 };
 
+/** \copydoc pw_security_context_methods.add_listener
+ * \sa pw_security_context_methods.add_listener */
+PW_API_SECURITY_CONTEXT int pw_security_context_add_listener(struct pw_security_context *object,
+			struct spa_hook *listener,
+			const struct pw_security_context_events *events,
+			void *data)
+{
+	return spa_api_method_r(int, -ENOTSUP,
+			pw_security_context, (struct spa_interface*)object, add_listener, 0,
+			listener, events, data);
+}
 
-#define pw_security_context_method(o,method,version,...)		\
-({									\
-	int _res = -ENOTSUP;						\
-	spa_interface_call_res((struct spa_interface*)o,		\
-			struct pw_security_context_methods, _res,	\
-			method, version, ##__VA_ARGS__);		\
-	_res;								\
-})
-
-#define pw_security_context_add_listener(c,...)	pw_security_context_method(c,add_listener,0,__VA_ARGS__)
-#define pw_security_context_create(c,...)	pw_security_context_method(c,create,0,__VA_ARGS__)
+/** \copydoc pw_security_context_methods.create
+ * \sa pw_security_context_methods.create */
+PW_API_SECURITY_CONTEXT int pw_security_context_create(struct pw_security_context *object,
+			int listen_fd, int close_fd, const struct spa_dict *props)
+{
+	return spa_api_method_r(int, -ENOTSUP,
+			pw_security_context, (struct spa_interface*)object, create, 0,
+			listen_fd, close_fd, props);
+}
 
 /**
  * \}

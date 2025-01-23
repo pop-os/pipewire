@@ -65,6 +65,8 @@
  * - `sess.ts-refclk = <string>`: the name of a reference clock
  * - `sess.media = <string>`: the media type audio|midi|opus, default audio
  * - `stream.props = {}`: properties to be passed to the stream
+ * - `aes67.driver-group = <string>`: for AES67 streams, can be specified in order to allow
+ *       the sink to be driven by a different node than the PTP driver.
  *
  * ## General options
  *
@@ -147,6 +149,7 @@ PW_LOG_TOPIC(mod_topic, "mod." NAME);
 		"( audio.rate=<sample rate, default:"SPA_STRINGIFY(DEFAULT_RATE)"> ) "			\
 		"( audio.channels=<number of channels, default:"SPA_STRINGIFY(DEFAULT_CHANNELS)"> ) "	\
 		"( audio.position=<channel map, default:"DEFAULT_POSITION"> ) "				\
+		"( aes67.driver-group=<driver driving the PTP send> ) "					\
 		"( stream.props= { key=value ... } ) "
 
 static const struct spa_dict_item module_info[] = {
@@ -334,7 +337,8 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 			struct spa_pod_frame f;
 			const char *key;
 			struct spa_pod *pod;
-			const char *value;
+			struct spa_dict_item items[4];
+			unsigned int n_items = 0;
 
 			if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_Props, NULL, SPA_PROP_params,
 					SPA_POD_OPT_Pod(&params)) < 0)
@@ -343,27 +347,44 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 			if (spa_pod_parser_push_struct(&prs, &f) < 0)
 				return;
 
-			while (true) {
+			while (n_items < SPA_N_ELEMENTS(items)) {
+				const char *value_str = NULL;
+				int value_int = -1;
+
 				if (spa_pod_parser_get_string(&prs, &key) < 0)
 					break;
 				if (spa_pod_parser_get_pod(&prs, &pod) < 0)
 					break;
-				if (spa_pod_get_string(pod, &value) < 0)
+				if (spa_pod_get_string(pod, &value_str) < 0 &&
+						spa_pod_get_int(pod, &value_int) < 0)
 					continue;
-				pw_log_info("key '%s', value '%s'", key, value);
-				if (!spa_streq(key, "destination.ip"))
-					continue;
-				if (pw_net_parse_address(value, impl->dst_port, &impl->dst_addr,
-						&impl->dst_len) < 0) {
-					pw_log_error("invalid destination.ip: '%s'", value);
-					break;
+				pw_log_info("key '%s', value '%s'/%u", key, value_str, value_int);
+				if (spa_streq(key, "destination.ip")) {
+					if (!value_str || pw_net_parse_address(value_str, impl->dst_port, &impl->dst_addr,
+								&impl->dst_len) < 0) {
+						pw_log_error("invalid destination.ip: '%s'", value_str);
+						break;
+					}
+					pw_properties_set(impl->stream_props, "rtp.destination.ip", value_str);
+					items[n_items++] = SPA_DICT_ITEM_INIT("rtp.destination.ip", value_str);
+				} else if (spa_streq(key, "sess.name")) {
+					if (!value_str) {
+						pw_log_error("invalid sess.name");
+						break;
+					}
+					pw_properties_set(impl->stream_props, "sess.name", value_str);
+					items[n_items++] = SPA_DICT_ITEM_INIT("sess.name", value_str);
+				} else if (spa_streq(key, "sess.id") || spa_streq(key, "sess.version")) {
+					if (value_int < 0 || (unsigned int)value_int > UINT32_MAX) {
+						pw_log_error("invalid %s: '%d'", key, value_int);
+						break;
+					}
+					pw_properties_setf(impl->stream_props, key, "%d", value_int);
+					items[n_items++] = SPA_DICT_ITEM_INIT(key, pw_properties_get(impl->stream_props, key));
 				}
-				pw_properties_set(impl->stream_props, "rtp.destination.ip", value);
-				struct spa_dict_item item[1];
-				item[0] = SPA_DICT_ITEM_INIT("rtp.destination.ip", value);
-				rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(item, 1));
-				break;
 			}
+
+			rtp_stream_update_properties(impl->stream, &SPA_DICT_INIT(items, n_items));
 		}
 	}
 }
@@ -527,10 +548,13 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, "net.mtu");
 	copy_props(impl, props, "sess.media");
 	copy_props(impl, props, "sess.name");
+	copy_props(impl, props, "sess.id");
+	copy_props(impl, props, "sess.version");
 	copy_props(impl, props, "sess.min-ptime");
 	copy_props(impl, props, "sess.max-ptime");
 	copy_props(impl, props, "sess.latency.msec");
 	copy_props(impl, props, "sess.ts-refclk");
+	copy_props(impl, props, "aes67.driver-group");
 
 	str = pw_properties_get(props, "local.ifname");
 	impl->ifname = str ? strdup(str) : NULL;

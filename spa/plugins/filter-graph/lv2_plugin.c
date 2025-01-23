@@ -5,16 +5,13 @@
 #include <dlfcn.h>
 #include <math.h>
 
+#include <lilv/lilv.h>
+
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 #include <spa/utils/string.h>
 #include <spa/support/loop.h>
-
-#include <pipewire/log.h>
-#include <pipewire/utils.h>
-#include <pipewire/array.h>
-
-#include <lilv/lilv.h>
+#include <spa/support/log.h>
 
 #if defined __has_include
 #	if __has_include (<lv2/atom/atom.h>)
@@ -37,59 +34,59 @@
 
 #endif
 
-#include "plugin.h"
+#include "audio-plugin.h"
 
 static struct context *_context;
 
 typedef struct URITable {
-	struct pw_array array;
+	char **data;
+	size_t alloc;
+	size_t len;
 } URITable;
 
 static void uri_table_init(URITable *table)
 {
-	pw_array_init(&table->array, 1024);
+	table->data = NULL;
+	table->len = table->alloc = 0;
 }
 
 static void uri_table_destroy(URITable *table)
 {
-	char **p;
-	pw_array_for_each(p, &table->array)
-		free(*p);
-	pw_array_clear(&table->array);
+	size_t i;
+	for (i = 0; i < table->len; i++)
+		free(table->data[i]);
+	free(table->data);
+	uri_table_init(table);
 }
 
 static LV2_URID uri_table_map(LV2_URID_Map_Handle handle, const char *uri)
 {
 	URITable *table = (URITable*)handle;
-	char **p;
-	size_t i = 0;
+	size_t i;
 
-	pw_array_for_each(p, &table->array) {
-		i++;
-		if (spa_streq(*p, uri))
-			goto done;
-	}
-	pw_array_add_ptr(&table->array, strdup(uri));
-	i =  pw_array_get_len(&table->array, char*);
-done:
-	return i;
+	for (i = 0; i < table->len; i++)
+		if (spa_streq(table->data[i], uri))
+			return i+1;
+
+	if (table->len == table->alloc) {
+		table->alloc += 64;
+		table->data = realloc(table->data, table->alloc * sizeof(char *));
+ 	}
+	table->data[table->len++] = strdup(uri);
+	return table->len;
 }
 
 static const char *uri_table_unmap(LV2_URID_Map_Handle handle, LV2_URID urid)
 {
 	URITable *table = (URITable*)handle;
-
-	if (urid > 0 && urid <= pw_array_get_len(&table->array, char*))
-		return *pw_array_get_unchecked(&table->array, urid - 1, char*);
+	if (urid > 0 && urid <= table->len)
+		return table->data[urid-1];
 	return NULL;
 }
 
 struct context {
 	int ref;
 	LilvWorld *world;
-
-	struct spa_loop *data_loop;
-	struct spa_loop *main_loop;
 
 	LilvNode *lv2_InputPort;
 	LilvNode *lv2_OutputPort;
@@ -144,7 +141,7 @@ static const LV2_Feature buf_size_features[3] = {
 	{ LV2_BUF_SIZE__boundedBlockLength,  NULL },
 };
 
-static struct context *context_new(const struct spa_support *support, uint32_t n_support)
+static struct context *context_new(void)
 {
 	struct context *c;
 
@@ -185,19 +182,16 @@ static struct context *context_new(const struct spa_support *support, uint32_t n
 	c->atom_Int = context_map(c, LV2_ATOM__Int);
 	c->atom_Float = context_map(c, LV2_ATOM__Float);
 
-	c->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
-	c->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
-
 	return c;
 error:
 	context_free(c);
 	return NULL;
 }
 
-static struct context *context_ref(const struct spa_support *support, uint32_t n_support)
+static struct context *context_ref(void)
 {
 	if (_context == NULL) {
-		_context = context_new(support, n_support);
+		_context = context_new();
 		if (_context == NULL)
 			return NULL;
 	}
@@ -214,18 +208,26 @@ static void context_unref(struct context *context)
 }
 
 struct plugin {
-	struct fc_plugin plugin;
+	struct spa_handle handle;
+	struct spa_fga_plugin plugin;
+
+	struct spa_log *log;
+	struct spa_loop *data_loop;
+	struct spa_loop *main_loop;
+
 	struct context *c;
 	const LilvPlugin *p;
 };
 
 struct descriptor {
-	struct fc_descriptor desc;
+	struct spa_fga_descriptor desc;
 	struct plugin *p;
 };
 
 struct instance {
 	struct descriptor *desc;
+	struct plugin *p;
+
 	LilvInstance *instance;
 	LV2_Worker_Schedule work_schedule;
 	LV2_Feature work_schedule_feature;
@@ -254,8 +256,7 @@ static LV2_Worker_Status
 work_respond(LV2_Worker_Respond_Handle handle, uint32_t size, const void *data)
 {
 	struct instance *i = (struct instance*)handle;
-	struct context *c = i->desc->p->c;
-	spa_loop_invoke(c->data_loop, do_respond, 1, data, size, false, i);
+	spa_loop_invoke(i->p->data_loop, do_respond, 1, data, size, false, i);
 	return LV2_WORKER_SUCCESS;
 }
 
@@ -273,12 +274,11 @@ static LV2_Worker_Status
 work_schedule(LV2_Worker_Schedule_Handle handle, uint32_t size, const void *data)
 {
 	struct instance *i = (struct instance*)handle;
-	struct context *c = i->desc->p->c;
-	spa_loop_invoke(c->main_loop, do_schedule, 1, data, size, false, i);
+	spa_loop_invoke(i->p->main_loop, do_schedule, 1, data, size, false, i);
 	return LV2_WORKER_SUCCESS;
 }
 
-static void *lv2_instantiate(const struct fc_plugin *plugin, const struct fc_descriptor *desc,
+static void *lv2_instantiate(const struct spa_fga_plugin *plugin, const struct spa_fga_descriptor *desc,
                         unsigned long SampleRate, int index, const char *config)
 {
 	struct descriptor *d = (struct descriptor*)desc;
@@ -297,6 +297,7 @@ static void *lv2_instantiate(const struct fc_plugin *plugin, const struct fc_des
 
 	i->block_length = 1024;
 	i->desc = d;
+	i->p = p;
 	i->features[n_features++] = &c->map_feature;
 	i->features[n_features++] = &c->unmap_feature;
 	i->features[n_features++] = &buf_size_features[0];
@@ -383,7 +384,7 @@ static void lv2_run(void *instance, unsigned long SampleCount)
 		i->work_iface->end_run(i->instance);
 }
 
-static void lv2_free(const struct fc_descriptor *desc)
+static void lv2_free(const struct spa_fga_descriptor *desc)
 {
 	struct descriptor *d = (struct descriptor*)desc;
 	free((char*)d->desc.name);
@@ -391,7 +392,7 @@ static void lv2_free(const struct fc_descriptor *desc)
 	free(d);
 }
 
-static const struct fc_descriptor *lv2_make_desc(struct fc_plugin *plugin, const char *name)
+static const struct spa_fga_descriptor *lv2_plugin_make_desc(void *plugin, const char *name)
 {
 	struct plugin *p = (struct plugin *)plugin;
 	struct context *c = p->c;
@@ -417,7 +418,7 @@ static const struct fc_descriptor *lv2_make_desc(struct fc_plugin *plugin, const
 	desc->desc.flags = 0;
 
 	desc->desc.n_ports = lilv_plugin_get_num_ports(p->p);
-	desc->desc.ports = calloc(desc->desc.n_ports, sizeof(struct fc_port));
+	desc->desc.ports = calloc(desc->desc.n_ports, sizeof(struct spa_fga_port));
 
 	mins = alloca(desc->desc.n_ports * sizeof(float));
 	maxes = alloca(desc->desc.n_ports * sizeof(float));
@@ -428,20 +429,20 @@ static const struct fc_descriptor *lv2_make_desc(struct fc_plugin *plugin, const
 	for (i = 0; i < desc->desc.n_ports; i++) {
 		const LilvPort *port = lilv_plugin_get_port_by_index(p->p, i);
                 const LilvNode *symbol = lilv_port_get_symbol(p->p, port);
-		struct fc_port *fp = &desc->desc.ports[i];
+		struct spa_fga_port *fp = &desc->desc.ports[i];
 
 		fp->index = i;
 		fp->name = strdup(lilv_node_as_string(symbol));
 
 		fp->flags = 0;
 		if (lilv_port_is_a(p->p, port, c->lv2_InputPort))
-			fp->flags |= FC_PORT_INPUT;
+			fp->flags |= SPA_FGA_PORT_INPUT;
 		if (lilv_port_is_a(p->p, port, c->lv2_OutputPort))
-			fp->flags |= FC_PORT_OUTPUT;
+			fp->flags |= SPA_FGA_PORT_OUTPUT;
 		if (lilv_port_is_a(p->p, port, c->lv2_ControlPort))
-			fp->flags |= FC_PORT_CONTROL;
+			fp->flags |= SPA_FGA_PORT_CONTROL;
 		if (lilv_port_is_a(p->p, port, c->lv2_AudioPort))
-			fp->flags |= FC_PORT_AUDIO;
+			fp->flags |= SPA_FGA_PORT_AUDIO;
 
 		fp->hint = 0;
 		fp->min = mins[i];
@@ -451,60 +452,153 @@ static const struct fc_descriptor *lv2_make_desc(struct fc_plugin *plugin, const
 	return &desc->desc;
 }
 
-static void lv2_unload(struct fc_plugin *plugin)
+static struct spa_fga_plugin_methods impl_plugin = {
+	SPA_VERSION_FGA_PLUGIN_METHODS,
+	.make_desc = lv2_plugin_make_desc,
+};
+
+static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
 {
-	struct plugin *p = (struct plugin *)plugin;
-	context_unref(p->c);
-	free(p);
+	struct plugin *impl;
+
+	spa_return_val_if_fail(handle != NULL, -EINVAL);
+	spa_return_val_if_fail(interface != NULL, -EINVAL);
+
+	impl = (struct plugin *) handle;
+
+	if (spa_streq(type, SPA_TYPE_INTERFACE_FILTER_GRAPH_AudioPlugin))
+		*interface = &impl->plugin;
+	else
+		return -ENOENT;
+
+	return 0;
 }
 
-SPA_EXPORT
-struct fc_plugin *pipewire__filter_chain_plugin_load(const struct spa_support *support, uint32_t n_support,
-		struct dsp_ops *dsp, const char *plugin_uri, const struct spa_dict *info)
+static int impl_clear(struct spa_handle *handle)
 {
-	struct context *c;
-	const LilvPlugins *plugins;
-	const LilvPlugin *plugin;
-	LilvNode *uri;
+	struct plugin *p = (struct plugin *)handle;
+	context_unref(p->c);
+	return 0;
+}
+
+static size_t
+impl_get_size(const struct spa_handle_factory *factory,
+	      const struct spa_dict *params)
+{
+	return sizeof(struct plugin);
+}
+
+static int
+impl_init(const struct spa_handle_factory *factory,
+	  struct spa_handle *handle,
+	  const struct spa_dict *info,
+	  const struct spa_support *support,
+	  uint32_t n_support)
+{
+	struct plugin *impl;
+	uint32_t i;
 	int res;
-	struct plugin *p;
+	const char *path = NULL;
+	const LilvPlugins *plugins;
+	LilvNode *uri;
 
-	c = context_ref(support, n_support);
-	if (c == NULL)
-		return NULL;
+	handle->get_interface = impl_get_interface;
+	handle->clear = impl_clear;
 
-	uri = lilv_new_uri(c->world, plugin_uri);
+	impl = (struct plugin *) handle;
+	impl->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	impl->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
+	impl->main_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Loop);
+
+	for (i = 0; info && i < info->n_items; i++) {
+		const char *k = info->items[i].key;
+		const char *s = info->items[i].value;
+		if (spa_streq(k, "filter.graph.path"))
+			path = s;
+	}
+	if (path == NULL)
+		return -EINVAL;
+
+	impl->c = context_ref();
+	if (impl->c == NULL)
+		return -EINVAL;
+
+	uri = lilv_new_uri(impl->c->world, path);
 	if (uri == NULL) {
-		pw_log_warn("invalid URI %s", plugin_uri);
+		spa_log_warn(impl->log, "invalid URI %s", path);
 		res = -EINVAL;
-		goto error_unref;
+		goto error_cleanup;
 	}
 
-	plugins = lilv_world_get_all_plugins(c->world);
-	plugin = lilv_plugins_get_by_uri(plugins, uri);
+	plugins = lilv_world_get_all_plugins(impl->c->world);
+	impl->p = lilv_plugins_get_by_uri(plugins, uri);
 	lilv_node_free(uri);
 
-	if (plugin == NULL) {
-		pw_log_warn("can't load plugin %s", plugin_uri);
+	if (impl->p == NULL) {
+		spa_log_warn(impl->log, "can't load plugin %s", path);
 		res = -EINVAL;
-		goto error_unref;
+		goto error_cleanup;
 	}
+	impl->plugin.iface = SPA_INTERFACE_INIT(
+			SPA_TYPE_INTERFACE_FILTER_GRAPH_AudioPlugin,
+			SPA_VERSION_FGA_PLUGIN,
+			&impl_plugin, impl);
 
-	p = calloc(1, sizeof(*p));
-	if (!p) {
-		res = -errno;
-		goto error_unref;
+	return 0;
+
+error_cleanup:
+	if (impl->c)
+		context_unref(impl->c);
+	return res;
+}
+
+
+static const struct spa_interface_info impl_interfaces[] = {
+	{ SPA_TYPE_INTERFACE_FILTER_GRAPH_AudioPlugin },
+};
+
+static int
+impl_enum_interface_info(const struct spa_handle_factory *factory,
+			 const struct spa_interface_info **info,
+			 uint32_t *index)
+{
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(info != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
+
+	switch (*index) {
+	case 0:
+		*info = &impl_interfaces[*index];
+		break;
+	default:
+		return 0;
 	}
-	p->p = plugin;
-	p->c = c;
+	(*index)++;
+	return 1;
+}
 
-	p->plugin.make_desc = lv2_make_desc;
-	p->plugin.unload = lv2_unload;
+static struct spa_handle_factory spa_fga_plugin_lv2_factory = {
+	SPA_VERSION_HANDLE_FACTORY,
+	"filter.graph.plugin.lv2",
+	NULL,
+	impl_get_size,
+	impl_init,
+	impl_enum_interface_info,
+};
 
-	return &p->plugin;
+SPA_EXPORT
+int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
+{
+	spa_return_val_if_fail(factory != NULL, -EINVAL);
+	spa_return_val_if_fail(index != NULL, -EINVAL);
 
-error_unref:
-	context_unref(c);
-	errno = -res;
-	return NULL;
+	switch (*index) {
+	case 0:
+		*factory = &spa_fga_plugin_lv2_factory;
+		break;
+	default:
+		return 0;
+	}
+	(*index)++;
+	return 1;
 }

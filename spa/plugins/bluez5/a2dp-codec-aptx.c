@@ -74,7 +74,7 @@ static inline size_t codec_get_caps_size(const struct media_codec *codec)
 }
 
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	size_t actual_conf_size = codec_get_caps_size(codec);
 	const a2dp_aptx_t a2dp_aptx = {
@@ -449,6 +449,14 @@ static int codec_decode(void *data,
 	return res;
 }
 
+static void codec_get_delay(void *data, uint32_t *encoder, uint32_t *decoder)
+{
+	if (encoder)
+		*encoder = 90;
+	if (decoder)
+		*decoder = 0;
+}
+
 /*
  * mSBC duplex codec
  *
@@ -627,6 +635,7 @@ const struct media_codec a2dp_codec_aptx = {
 	.decode = codec_decode,
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,
+	.get_delay = codec_get_delay,
 };
 
 
@@ -650,6 +659,7 @@ const struct media_codec a2dp_codec_aptx_hd = {
 	.decode = codec_decode,
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,
+	.get_delay = codec_get_delay,
 };
 
 #define APTX_LL_COMMON_DEFS				\
@@ -665,7 +675,8 @@ const struct media_codec a2dp_codec_aptx_hd = {
 	.start_encode = codec_start_encode,		\
 	.encode = codec_encode,				\
 	.reduce_bitpool = codec_reduce_bitpool,		\
-	.increase_bitpool = codec_increase_bitpool
+	.increase_bitpool = codec_increase_bitpool,	\
+	.get_delay = codec_get_delay
 
 
 const struct media_codec a2dp_codec_aptx_ll_0 = {

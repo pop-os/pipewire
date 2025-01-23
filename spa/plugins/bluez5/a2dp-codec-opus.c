@@ -8,13 +8,11 @@
 #include <stddef.h>
 #include <errno.h>
 #include <arpa/inet.h>
-#if __BYTE_ORDER != __LITTLE_ENDIAN
-#include <byteswap.h>
-#endif
 
 #include <spa/debug/types.h>
 #include <spa/param/audio/type-info.h>
 #include <spa/param/audio/raw.h>
+#include <spa/utils/endian.h>
 #include <spa/utils/string.h>
 #include <spa/utils/dict.h>
 #include <spa/param/audio/format.h>
@@ -82,6 +80,8 @@ struct dec_data {
 	int fragment_size;
 	int fragment_count;
 	uint8_t fragment[OPUS_05_MAX_BYTES];
+
+	int32_t delay;
 };
 
 struct abr {
@@ -121,6 +121,8 @@ struct enc_data {
 
 	int frame_dms;
 	int application;
+
+	int32_t delay;
 };
 
 struct impl {
@@ -554,7 +556,7 @@ static int get_mapping(const struct media_codec *codec, const a2dp_opus_05_direc
 }
 
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	a2dp_opus_05_t a2dp_opus_05 = {
 		.info = codec->vendor,
@@ -1007,6 +1009,7 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	this->e.samples = this->e.frame_dms * this->samplerate / 10000;
 	this->e.codesize = this->e.samples * (int)this->channels * sizeof(float);
 
+	opus_multistream_encoder_ctl(this->enc, OPUS_GET_LOOKAHEAD(&this->e.delay));
 
 	/*
 	 * Setup decoder
@@ -1021,6 +1024,8 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 		res = -EINVAL;
 		goto error;
 	}
+
+	opus_multistream_decoder_ctl(this->dec, OPUS_GET_LOOKAHEAD(&this->d.delay));
 
 	return this;
 
@@ -1327,6 +1332,16 @@ static int codec_increase_bitpool(void *data)
 	return 0;
 }
 
+static void codec_get_delay(void *data, uint32_t *encoder, uint32_t *decoder)
+{
+	struct impl *this = data;
+
+	if (encoder)
+		*encoder = this->e.delay;
+	if (decoder)
+		*decoder = this->d.delay;
+}
+
 static void codec_set_log(struct spa_log *global_log)
 {
 	log = global_log;
@@ -1349,7 +1364,8 @@ static void codec_set_log(struct spa_log *global_log)
 	.encode = codec_encode,					\
 	.reduce_bitpool = codec_reduce_bitpool,			\
 	.increase_bitpool = codec_increase_bitpool,		\
-	.set_log = codec_set_log
+	.set_log = codec_set_log,				\
+	.get_delay = codec_get_delay
 
 #define OPUS_05_COMMON_FULL_DEFS				\
 	OPUS_05_COMMON_DEFS,					\

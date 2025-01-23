@@ -664,8 +664,19 @@ This option does nothing if `api.alsa.use-acp` is set to `false`.
 @PAR@ device-prop  api.alsa.soft-mixer = false  # boolean
 Setting this option to `true` will disable the hardware mixer for volume
 control and mute. All volume handling will then use software volume and mute,
-leaving the hardware mixer untouched. The hardware mixer will still be used
-to mute unused audio paths in the device.
+leaving the hardware mixer untouched. This can be interesting to work around
+bugs in the mixer detection or decibel reporting. The hardware mixer will still
+be used to mute unused audio paths in the device. Use `api.alsa.disable-mixer-path`
+to also disable mixer path selection.
+
+@PAR@ device-prop  api.alsa.disable-mixer-path = false  # boolean
+Setting this option to `true` will disable the hardware mixer path selection.
+The hardware mixer path is the configuration of the mixer depending on the
+jacks that are inserted in the card. If this is disabled, you will have to
+manually enable and disable mixer controls but it can be used to work around
+bugs in the mixer. The hardware mixer will still be used for
+volume and mute. Use `api.alsa.soft-mixer` to also disable hardware volume
+and mute.
 
 @PAR@ device-prop  api.alsa.ignore-dB = false  # boolean
 Setting this option to `true` will ignore the decibel setting configured by
@@ -701,6 +712,11 @@ Sets the number of channels to use when probing the "Pro Audio" profile.
 Normally, the maximum amount of channels will be used but with this setting
 this can be reduced, which can make it possible to use other samplerates on
 some devices.
+
+@PAR@ device-prop  api.alsa.split-enable    # boolean
+\parblock
+\copydoc SPA_KEY_API_ALSA_SPLIT_ENABLE
+\endparblock
 
 ## Node properties
 
@@ -784,6 +800,24 @@ UNDOCUMENTED
 @PAR@ node-prop  iec958.codecs    # JSON array of string
 Enable only specific IEC958 codecs. This can be used to disable some codecs the hardware supports.
 Available values: PCM, AC3, DTS, MPEG, MPEG2-AAC, EAC3, TRUEHD, DTSHD
+
+@PAR@ device-prop  api.alsa.split.parent    # boolean
+\parblock
+\copydoc SPA_KEY_API_ALSA_SPLIT_PARENT
+\endparblock
+
+@PAR@ node-prop  api.alsa.split.position  # JSON
+\parblock
+\copybrief SPA_KEY_API_ALSA_SPLIT_POSITION
+Informative property.
+\endparblock
+
+@PAR@ node-prop  api.alsa.split.hw-position  # JSON
+\parblock
+\copybrief SPA_KEY_API_ALSA_SPLIT_HW_POSITION
+Informative property.
+\endparblock
+
 
 # BLUETOOTH PROPERTIES  @IDX@ props
 
@@ -890,6 +924,7 @@ bluez5.bcast_source.config = [
   {
     "broadcast_code": "Børne House",
     "encryption: false,
+    "sync_factor": 2,
     "bis": [
       { # BIS configuration
         "qos_preset": "16_2_1", # QOS preset name from table Table 6.4 from BAP_v1.0.1.
@@ -903,6 +938,30 @@ bluez5.bcast_source.config = [
 ]
 ```
 \endparblock
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.rates		# Array of integers
+Supported sampling frequencies for the LC3 codec (default: all).
+Possible values:
+`8000`, `16000`, `24000`, `32000`, `44100`, `48000`
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.durations	# Array of doubles
+Supported frame durations for the LC3 codec (default: all).
+Possible values:
+`7.5`, `10`
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.channels	# Array of integers
+Supported audio channel counts for the LC3 codec (default: [1, 2]).
+Possible values:
+`1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.framelen_min		# integer
+Minimum number of octets supported per codec frame for the LC3 codec (default: 20).
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.framelen_max		# integer
+Maximum number of octets supported per codec frame for the LC3 codec (default: 400).
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.max_frames		# integer
+Maximum number of codec frames supported per SDU for the LC3 codec (default: 2).
 
 ## Device properties
 

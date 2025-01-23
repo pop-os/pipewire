@@ -95,6 +95,19 @@
  *
  * The PipeWire server processes are explicitly configured with a valid nice level.
  *
+ * ## Config override
+ *
+ * A `module.rt.args` config section can be added
+ * to override the module arguments.
+ *
+ *\code{.unparsed}
+ * # ~/.config/pipewire/pipewire.conf.d/my-rt-args.conf
+ *
+ * module.rt.args = {
+ *     #nice.level = 22
+ * }
+ *\endcode
+ *
  * ## Example configuration
  *
  *\code{.unparsed}
@@ -1076,6 +1089,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		res = -errno;
 		goto error;
 	}
+	pw_context_conf_update_props(context, "module."NAME".args", props);
 
 	impl->context = context;
 	impl->nice_level = pw_properties_get_int32(props, "nice.level", DEFAULT_NICE_LEVEL);

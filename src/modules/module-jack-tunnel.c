@@ -25,6 +25,8 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/audio/raw.h>
+#include <spa/param/audio/raw-json.h>
+#include <spa/control/ump-utils.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -108,7 +110,6 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define MAX_PORTS	128
 
 #define DEFAULT_CLIENT_NAME	"PipeWire"
-#define DEFAULT_CHANNELS	2
 #define DEFAULT_POSITION	"[ FL FR ]"
 #define DEFAULT_MIDI_PORTS	1
 
@@ -259,23 +260,23 @@ static void midi_to_jack(struct impl *impl, float *dst, float *src, uint32_t n_s
 	seq = (struct spa_pod_sequence*)pod;
 
 	SPA_POD_SEQUENCE_FOREACH(seq, c) {
-		switch(c->type) {
-		case SPA_CONTROL_Midi:
-		{
-			uint8_t *data = SPA_POD_BODY(&c->value);
-			size_t size = SPA_POD_BODY_SIZE(&c->value);
+		uint8_t data[16];
+		int size;
 
-			if (impl->fix_midi)
-				fix_midi_event(data, size);
+		if (c->type != SPA_CONTROL_UMP)
+			continue;
 
-			if ((res = jack.midi_event_write(dst, c->offset, data, size)) < 0)
-				pw_log_warn("midi %p: can't write event: %s", dst,
-						spa_strerror(res));
-			break;
-		}
-		default:
-			break;
-		}
+		size = spa_ump_to_midi(SPA_POD_BODY(&c->value),
+				SPA_POD_BODY_SIZE(&c->value), data, sizeof(data));
+		if (size <= 0)
+			continue;
+
+		if (impl->fix_midi)
+			fix_midi_event(data, size);
+
+		if ((res = jack.midi_event_write(dst, c->offset, data, size)) < 0)
+			pw_log_warn("midi %p: can't write event: %s", dst,
+					spa_strerror(res));
 	}
 }
 
@@ -291,9 +292,19 @@ static void jack_to_midi(float *dst, float *src, uint32_t size)
 	spa_pod_builder_push_sequence(&b, &f, 0);
 	for (i = 0; i < count; i++) {
 		jack_midi_event_t ev;
+		uint64_t state = 0;
+
 		jack.midi_event_get(&ev, src, i);
-		spa_pod_builder_control(&b, ev.time, SPA_CONTROL_Midi);
-		spa_pod_builder_bytes(&b, ev.buffer, ev.size);
+
+		while (ev.size > 0) {
+			uint32_t ump[4];
+			int ump_size = spa_ump_from_midi(&ev.buffer, &ev.size, ump, sizeof(ump), 0, &state);
+			if (ump_size <= 0)
+				break;
+
+			spa_pod_builder_control(&b, ev.time, SPA_CONTROL_UMP);
+	                spa_pod_builder_bytes(&b, ump, ump_size);
+		}
 	}
 	spa_pod_builder_pop(&b, &f);
 }
@@ -492,7 +503,7 @@ static void make_stream_ports(struct stream *s)
 		} else {
 			snprintf(name, sizeof(name), "%s_%d", prefix, i - s->info.channels);
 			props = pw_properties_new(
-					PW_KEY_FORMAT_DSP, "8 bit raw midi",
+					PW_KEY_FORMAT_DSP, "32 bit raw UMP",
 					PW_KEY_PORT_NAME, name,
 					PW_KEY_PORT_PHYSICAL, "true",
 					NULL);
@@ -988,45 +999,15 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
-
-	spa_zero(*info);
-	info->format = SPA_AUDIO_FORMAT_F32P;
-	info->rate = 0;
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
 static void copy_props(struct impl *impl, struct pw_properties *props, const char *key)

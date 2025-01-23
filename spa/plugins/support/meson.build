@@ -19,6 +19,7 @@ stdthreads_lib = cc.find_library('stdthreads', required: false)
 spa_support_lib = shared_library('spa-support',
   spa_support_sources,
   c_args : [ simd_cargs ],
+  include_directories : [ configinc ],
   dependencies : [ spa_dep, pthread_lib, epoll_shim_dep, mathlib, stdthreads_lib ],
   install : true,
   install_dir : spa_plugindir / 'support')

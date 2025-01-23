@@ -96,8 +96,8 @@ static void core_event_done(void *object, uint32_t id, int seq)
 static int roundtrip(struct data *data)
 {
 	struct spa_hook core_listener;
-	const struct pw_core_events core_events = {
-	PW_VERSION_CORE_EVENTS,
+	static const struct pw_core_events core_events = {
+		PW_VERSION_CORE_EVENTS,
 		.done = core_event_done,
 	};
 	spa_zero(core_listener);
@@ -150,7 +150,7 @@ int main(int argc, char *argv[])
 	};
 	struct spa_error_location loc;
 	int c, res, listen_fd, close_fd[2];
-	char temp[PATH_MAX] = "/tmp/pipewire-XXXXXX";
+	char temp[] = "/tmp/pipewire-XXXXXX";
 	struct sockaddr_un sockaddr = {0};
 
 	data.props = pw_properties_new(

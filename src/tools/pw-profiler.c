@@ -9,6 +9,7 @@
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
+#include <spa/utils/json.h>
 #include <spa/pod/parser.h>
 #include <spa/debug/types.h>
 
@@ -36,6 +37,8 @@ struct data {
 
 	const char *filename;
 	FILE *output;
+	bool json_dump;
+	uint32_t iterations;
 
 	int64_t count;
 	int64_t start_status;
@@ -58,28 +61,74 @@ struct measurement {
 	int64_t awake;
 	int64_t finish;
 	int32_t status;
+	struct spa_fraction latency;
+	int32_t xrun_count;
 };
 
 struct point {
 	int64_t count;
 	float cpu_load[3];
 	struct spa_io_clock clock;
+	int transport_state;
 	struct measurement driver;
 	struct measurement follower[MAX_FOLLOWERS];
 };
 
+static const char *status_to_string(int status)
+{
+	switch (status) {
+	case 0:
+		return "not-triggered";
+	case 1:
+		return "triggered";
+	case 2:
+		return "awake";
+	case 3:
+		return "finished";
+	case 4:
+		return "inactive";
+	}
+	return "unknown";
+}
+static const char *transport_to_string(int state)
+{
+	switch(state) {
+	case SPA_IO_POSITION_STATE_STOPPED:
+		return "stopped";
+	case SPA_IO_POSITION_STATE_STARTING:
+		return "starting";
+	case SPA_IO_POSITION_STATE_RUNNING:
+		return "running";
+	}
+	return "unknown";
+}
+
 static int process_info(struct data *d, const struct spa_pod *pod, struct point *point)
 {
-	return spa_pod_parse_struct(pod,
+	int res;
+	char cpu_load0[128], cpu_load1[128], cpu_load2[128];
+
+	res = spa_pod_parse_struct(pod,
 			SPA_POD_Long(&point->count),
 			SPA_POD_Float(&point->cpu_load[0]),
 			SPA_POD_Float(&point->cpu_load[1]),
 			SPA_POD_Float(&point->cpu_load[2]));
+	if (d->json_dump) {
+		fprintf(stdout, "{ \"type\": \"info\", \"count\": %"PRIu64", "
+				"\"cpu_load0\": %s, \"cpu_load1\": %s, \"cpu_load2\": %s },\n",
+				point->count,
+				spa_json_format_float(cpu_load0, sizeof(cpu_load0), point->cpu_load[0]),
+				spa_json_format_float(cpu_load1, sizeof(cpu_load1), point->cpu_load[1]),
+				spa_json_format_float(cpu_load2, sizeof(cpu_load2), point->cpu_load[2]));
+	}
+	return res;
 }
 
 static int process_clock(struct data *d, const struct spa_pod *pod, struct point *point)
 {
-	return spa_pod_parse_struct(pod,
+	int res;
+	char val[128];
+	res = spa_pod_parse_struct(pod,
 			SPA_POD_Int(&point->clock.flags),
 			SPA_POD_Int(&point->clock.id),
 			SPA_POD_Stringn(point->clock.name, sizeof(point->clock.name)),
@@ -89,7 +138,25 @@ static int process_clock(struct data *d, const struct spa_pod *pod, struct point
 			SPA_POD_Long(&point->clock.duration),
 			SPA_POD_Long(&point->clock.delay),
 			SPA_POD_Double(&point->clock.rate_diff),
-			SPA_POD_Long(&point->clock.next_nsec));
+			SPA_POD_Long(&point->clock.next_nsec),
+			SPA_POD_Int(&point->transport_state),
+			SPA_POD_OPT_Int(&point->clock.cycle),
+			SPA_POD_OPT_Long(&point->clock.xrun));
+	if (d->json_dump) {
+		fprintf(stdout, "{ \"type\": \"clock\", \"flags\": %u, \"id\": %u, "
+				"\"name\": \"%s\", \"nsec\": %"PRIu64", \"rate\": \"%u/%u\", "
+				"\"position\": %"PRIu64", \"duration\": %"PRIu64", "
+				"\"delay\": %"PRIu64", \"diff\": %s, \"next_nsec\": %"PRIu64", "
+				"\"transport\": \"%s\", \"cycle\": %u, \"xrun\": %"PRIu64" },\n",
+				point->clock.flags, point->clock.id, point->clock.name,
+				point->clock.nsec, point->clock.rate.num, point->clock.rate.denom,
+				point->clock.position, point->clock.duration,
+				point->clock.delay,
+				spa_json_format_float(val, sizeof(val), (float)point->clock.rate_diff),
+				point->clock.next_nsec, transport_to_string(point->transport_state),
+				point->clock.cycle, point->clock.xrun);
+	}
+	return res;
 }
 
 static int process_driver_block(struct data *d, const struct spa_pod *pod, struct point *point)
@@ -107,14 +174,27 @@ static int process_driver_block(struct data *d, const struct spa_pod *pod, struc
 			SPA_POD_Long(&driver.signal),
 			SPA_POD_Long(&driver.awake),
 			SPA_POD_Long(&driver.finish),
-			SPA_POD_Int(&driver.status))) < 0)
+			SPA_POD_Int(&driver.status),
+			SPA_POD_Fraction(&driver.latency),
+			SPA_POD_Int(&driver.xrun_count))) < 0)
 		return res;
+
+	if (d->json_dump) {
+		fprintf(stdout, "{ \"type\": \"driver\", \"id\": %u, \"name\": \"%s\", \"prev\": %"PRIu64", "
+				"\"signal\": %"PRIu64", \"awake\": %"PRIu64", "
+				"\"finish\": %"PRIu64", \"status\": \"%s\", \"latency\": \"%u/%u\", "
+				"\"xrun_count\": %u },\n",
+				driver_id, name, driver.prev_signal, driver.signal,
+				driver.awake, driver.finish, status_to_string(driver.status),
+				driver.latency.num, driver.latency.denom,
+				driver.xrun_count);
+	}
 
 	if (d->driver_id == 0) {
 		d->driver_id = driver_id;
-		printf("logging driver %u\n", driver_id);
+		pw_log_info("logging driver %u", driver_id);
 	}
-	else if (d->driver_id != driver_id)
+	else if (d->driver_id != driver_id && !d->json_dump)
 		return -1;
 
 	point->driver = driver;
@@ -143,7 +223,8 @@ static int add_follower(struct data *d, uint32_t id, const char *name)
 	strncpy(d->followers[idx].name, name, MAX_NAME);
 	d->followers[idx].name[MAX_NAME-1] = '\0';
 	d->followers[idx].id = id;
-	printf("logging follower %u (\"%s\")\n", id, name);
+
+	pw_log_info("logging follower %u (\"%s\")", id, name);
 
 	return idx;
 }
@@ -163,8 +244,22 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 			SPA_POD_Long(&m.signal),
 			SPA_POD_Long(&m.awake),
 			SPA_POD_Long(&m.finish),
-			SPA_POD_Int(&m.status))) < 0)
+			SPA_POD_Int(&m.status),
+			SPA_POD_Fraction(&m.latency),
+			SPA_POD_Int(&m.xrun_count))) < 0)
 		return res;
+
+	if (d->json_dump) {
+		fprintf(stdout, "{ \"type\": \"follower\", \"id\": %u, \"name\": \"%s\", \"prev\": %"PRIu64", "
+				"\"signal\": %"PRIu64", \"awake\": %"PRIu64", "
+				"\"finish\": %"PRIu64", \"status\": \"%s\", \"latency\": \"%u/%u\", "
+				"\"xrun_count\": %u },\n",
+				id, name, m.prev_signal, m.signal,
+				m.awake, m.finish, status_to_string(m.status),
+				m.latency.num, m.latency.denom,
+				m.xrun_count);
+	}
+
 
 	if ((idx = find_follower(d, id, name)) < 0) {
 		if ((idx = add_follower(d, id, name)) < 0) {
@@ -174,6 +269,39 @@ static int process_follower_block(struct data *d, const struct spa_pod *pod, str
 	}
 	point->follower[idx] = m;
 	return 0;
+}
+
+static int process_follower_clock(struct data *d, const struct spa_pod *pod, struct point *point)
+{
+	int res;
+	char val[128];
+	struct spa_io_clock clock;
+
+	res = spa_pod_parse_struct(pod,
+			SPA_POD_Int(&clock.id),
+			SPA_POD_Stringn(clock.name, sizeof(clock.name)),
+			SPA_POD_Long(&clock.nsec),
+			SPA_POD_Fraction(&clock.rate),
+			SPA_POD_Long(&clock.position),
+			SPA_POD_Long(&clock.duration),
+			SPA_POD_Long(&clock.delay),
+			SPA_POD_Double(&clock.rate_diff),
+			SPA_POD_Long(&clock.next_nsec),
+			SPA_POD_Long(&clock.xrun));
+	if (d->json_dump) {
+		fprintf(stdout, "{ \"type\": \"followerClock\", \"id\": %u, "
+				"\"name\": \"%s\", \"nsec\": %"PRIu64", \"rate\": \"%u/%u\", "
+				"\"position\": %"PRIu64", \"duration\": %"PRIu64", "
+				"\"delay\": %"PRIu64", \"diff\": %s, \"next_nsec\": %"PRIu64", "
+				"\"xrun\": %"PRIu64" },\n",
+				clock.id, clock.name,
+				clock.nsec, clock.rate.num, clock.rate.denom,
+				clock.position, clock.duration,
+				clock.delay,
+				spa_json_format_float(val, sizeof(val), (float)clock.rate_diff),
+				clock.next_nsec, clock.xrun);
+	}
+	return res;
 }
 
 static void dump_point(struct data *d, struct point *point)
@@ -224,7 +352,7 @@ static void dump_point(struct data *d, struct point *point)
 		d->last_status = point->clock.nsec;
 	}
 	else if (point->clock.nsec - d->last_status > SPA_NSEC_PER_SEC) {
-		printf("logging %"PRIi64" samples  %"PRIi64" seconds [CPU %f %f %f]\r",
+		fprintf(stderr, "logging %"PRIi64" samples  %"PRIi64" seconds [CPU %f %f %f]\r",
 				d->count, (int64_t) ((d->last_status - d->start_status) / SPA_NSEC_PER_SEC),
 				point->cpu_load[0], point->cpu_load[1], point->cpu_load[2]);
 		d->last_status = point->clock.nsec;
@@ -240,7 +368,7 @@ static void dump_scripts(struct data *d)
 	if (d->driver_id == 0)
 		return;
 
-	printf("\ndumping scripts for %d followers\n", d->n_followers);
+	fprintf(stderr, "\ndumping scripts for %d followers\n", d->n_followers);
 
 	out = fopen("Timing1.plot", "we");
 	if (out == NULL) {
@@ -254,9 +382,9 @@ static void dump_scripts(struct data *d)
 			"set title \"Audio driver timing\"\n"
 			"set xlabel \"audio cycles\"\n"
 			"set ylabel \"usec\"\n"
-			"plot \"%1$s\" using 3 title \"Audio driver delay\" with lines, "
-			"\"%1$s\" using 1 title \"Audio period\" with lines,"
-			"\"%1$s\" using 4 title \"Audio estimated\" with lines\n"
+			"plot \"%1$s\" using 3 title \"Audio driver delay (h/w ptr - wakeup time)\" with lines, "
+			"\"%1$s\" using 1 title \"Audio period (current wakeup - prev wakeup)\" with lines,"
+			"\"%1$s\" using 4 title \"Audio estimated (cycle period or quantum)\" with lines\n"
 			"unset multiplot\n"
 			"unset output\n", d->filename);
 		fclose(out);
@@ -270,7 +398,7 @@ static void dump_scripts(struct data *d)
 			"set output 'Timing2.svg\n"
 			"set terminal svg\n"
 			"set grid\n"
-			"set title \"Driver end date\"\n"
+			"set title \"Driver end date (total cycle processing time)\"\n"
 			"set xlabel \"audio cycles\"\n"
 			"set ylabel \"usec\"\n"
 			"plot  \"%s\" using 2 title \"Driver end date\" with lines \n"
@@ -287,7 +415,8 @@ static void dump_scripts(struct data *d)
 			"set terminal svg\n"
 			"set multiplot\n"
 			"set grid\n"
-			"set title \"Clients end date\"\n"
+			"set key tmargin\n"
+			"set title \"Clients end date (scheduled -> finished)\"\n"
 			"set xlabel \"audio cycles\"\n"
 			"set ylabel \"usec\"\n"
 			"plot "
@@ -317,7 +446,8 @@ static void dump_scripts(struct data *d)
 			"set terminal svg\n"
 			"set multiplot\n"
 			"set grid\n"
-			"set title \"Clients scheduling latency\"\n"
+			"set key tmargin\n"
+			"set title \"Clients scheduling latency (scheduled -> active)\"\n"
 			"set xlabel \"audio cycles\"\n"
 			"set ylabel \"usec\"\n"
 			"plot ");
@@ -344,7 +474,8 @@ static void dump_scripts(struct data *d)
 			"set terminal svg\n"
 			"set multiplot\n"
 			"set grid\n"
-			"set title \"Clients duration\"\n"
+			"set key tmargin\n"
+			"set title \"Clients duration (active -> finished)\"\n"
 			"set xlabel \"audio cycles\"\n"
 			"set ylabel \"usec\"\n"
 			"plot ");
@@ -431,6 +562,9 @@ static void profiler_profile(void *data, const struct spa_pod *pod)
 			case SPA_PROFILER_followerBlock:
 				process_follower_block(d, &p->value, &point);
 				break;
+			case SPA_PROFILER_followerClock:
+				process_follower_clock(d, &p->value, &point);
+				break;
 			default:
 				break;
 			}
@@ -440,7 +574,13 @@ static void profiler_profile(void *data, const struct spa_pod *pod)
 		if (res < 0)
 			continue;
 
-		dump_point(d, &point);
+		if (!d->json_dump)
+			dump_point(d, &point);
+
+		if (d->iterations > 0 && --d->iterations == 0) {
+			pw_main_loop_quit(d->loop);
+			break;
+		}
 	}
 }
 
@@ -468,7 +608,7 @@ static void registry_event_global(void *data, uint32_t id,
 	if (proxy == NULL)
 		goto error_proxy;
 
-	printf("Attaching to Profiler id:%d\n", id);
+	pw_log_info("Attaching to Profiler id:%d", id);
 	d->profiler = proxy;
 	pw_proxy_add_object_listener(proxy, &d->profiler_listener, &profiler_events, d);
 
@@ -526,7 +666,9 @@ static void show_help(const char *name, bool error)
 		"  -h, --help                            Show this help\n"
 		"      --version                         Show version\n"
 		"  -r, --remote                          Remote daemon name\n"
-		"  -o, --output                          Profiler output name (default \"%s\")\n",
+		"  -o, --output                          Profiler output name (default \"%s\")\n"
+		"  -J, --json                            Dump raw data as JSON\n"
+		"  -n, --iterations                      Collect this many samples\n",
 		name,
 		DEFAULT_FILENAME);
 }
@@ -542,6 +684,8 @@ int main(int argc, char *argv[])
 		{ "version",	no_argument,		NULL, 'V' },
 		{ "remote",	required_argument,	NULL, 'r' },
 		{ "output",	required_argument,	NULL, 'o' },
+		{ "json",	no_argument,		NULL, 'J' },
+		{ "iterations",	required_argument,	NULL, 'n' },
 		{ NULL, 0, NULL, 0}
 	};
 	int c;
@@ -549,7 +693,7 @@ int main(int argc, char *argv[])
 	setlocale(LC_ALL, "");
 	pw_init(&argc, &argv);
 
-	while ((c = getopt_long(argc, argv, "hVr:o:", long_options, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "hVr:o:Jn:", long_options, NULL)) != -1) {
 		switch (c) {
 		case 'h':
 			show_help(argv[0], false);
@@ -567,6 +711,12 @@ int main(int argc, char *argv[])
 			break;
 		case 'r':
 			opt_remote = optarg;
+			break;
+		case 'J':
+			data.json_dump = true;
+			break;
+		case 'n':
+			spa_atou32(optarg, &data.iterations, 10);
 			break;
 		default:
 			show_help(argv[0], true);
@@ -604,13 +754,16 @@ int main(int argc, char *argv[])
 
 	data.filename = opt_output;
 
-	data.output = fopen(data.filename, "we");
-	if (data.output == NULL) {
-		fprintf(stderr, "Can't open file %s: %m\n", data.filename);
-		return -1;
+	if (!data.json_dump) {
+		data.output = fopen(data.filename, "we");
+		if (data.output == NULL) {
+			fprintf(stderr, "Can't open file %s: %m\n", data.filename);
+			return -1;
+		}
+		fprintf(stderr, "Logging to %s\n", data.filename);
+	} else {
+		printf("[");
 	}
-
-	printf("Logging to %s\n", data.filename);
 
 	pw_core_add_listener(data.core,
 				   &data.core_listener,
@@ -635,9 +788,12 @@ int main(int argc, char *argv[])
 	pw_context_destroy(data.context);
 	pw_main_loop_destroy(data.loop);
 
-	fclose(data.output);
-
-	dump_scripts(&data);
+	if (!data.json_dump) {
+		fclose(data.output);
+		dump_scripts(&data);
+	} else {
+		printf("{ } ]\n");
+	}
 
 	pw_deinit();
 

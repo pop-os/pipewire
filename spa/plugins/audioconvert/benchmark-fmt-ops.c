@@ -133,6 +133,13 @@ static void test_f32_s16(void)
 		run_testc("test_f32d_s16_4", "avx2", false, true, conv_f32d_to_s16_4_avx2, 4);
 	}
 #endif
+#if defined (HAVE_RVV)
+	if (cpu_flags & SPA_CPU_FLAG_RISCV_V) {
+		run_test("test_f32_s16", "rvv", true, true, conv_f32_to_s16_rvv);
+		run_test("test_f32d_s16d", "rvv", false, false, conv_f32d_to_s16d_rvv);
+		run_test("test_f32d_s16", "rvv", false, true, conv_f32d_to_s16_rvv);
+	}
+#endif
 	run_test("test_f32_s16d", "c", true, false, conv_f32_to_s16d_c);
 	run_test("test_f32d_s16d", "c", false, false, conv_f32d_to_s16d_c);
 }
@@ -154,6 +161,11 @@ static void test_s16_f32(void)
 		run_testc("test_s16_f32d_2", "avx2", true, false, conv_s16_to_f32d_2_avx2, 2);
 	}
 #endif
+#if defined (HAVE_RVV)
+	if (cpu_flags & SPA_CPU_FLAG_RISCV_V) {
+		run_test("test_s16_f32d", "rvv", true, false, conv_s16_to_f32d_rvv);
+	}
+#endif
 	run_test("test_s16d_f32d", "c", false, false, conv_s16d_to_f32d_c);
 }
 
@@ -169,6 +181,11 @@ static void test_f32_s32(void)
 #if defined (HAVE_AVX2)
 	if (cpu_flags & SPA_CPU_FLAG_AVX2) {
 		run_test("test_f32d_s32", "avx2", false, true, conv_f32d_to_s32_avx2);
+	}
+#endif
+#if defined (HAVE_RVV)
+	if (cpu_flags & SPA_CPU_FLAG_RISCV_V) {
+		run_test("test_f32d_s32", "rvv", false, true, conv_f32d_to_s32_rvv);
 	}
 #endif
 	run_test("test_f32_s32d", "c", true, false, conv_f32_to_s32d_c);
@@ -187,6 +204,11 @@ static void test_s32_f32(void)
 #if defined (HAVE_AVX2)
 	if (cpu_flags & SPA_CPU_FLAG_AVX2) {
 		run_test("test_s32_f32d", "avx2", true, false, conv_s32_to_f32d_avx2);
+	}
+#endif
+#if defined (HAVE_RVV)
+	if (cpu_flags & SPA_CPU_FLAG_RISCV_V) {
+		run_test("test_s32_f32d", "rvv", true, false, conv_s32_to_f32d_rvv);
 	}
 #endif
 	run_test("test_s32_f32d", "c", true, false, conv_s32_to_f32d_c);

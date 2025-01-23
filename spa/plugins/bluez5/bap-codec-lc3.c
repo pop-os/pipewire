@@ -14,6 +14,7 @@
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/string.h>
+#include <spa/utils/json.h>
 #include <spa/debug/log.h>
 
 #include <lc3.h>
@@ -23,7 +24,7 @@
 
 #define MAX_PACS	64
 
-static struct spa_log *log;
+static struct spa_log *log_;
 
 struct impl {
 	lc3_encoder_t enc[LC3_MAX_CHANNELS];
@@ -238,20 +239,153 @@ static int write_ltv_uint32(uint8_t *dest, uint8_t type, uint32_t value)
 	return write_ltv(dest, type, &value, sizeof(value));
 }
 
+static uint16_t parse_rates(const char *str)
+{
+	struct spa_json it;
+	uint16_t rate_mask = 0;
+	int value;
+
+	if (spa_json_begin_array_relax(&it, str, strlen(str)) <= 0)
+		return rate_mask;
+
+	while (spa_json_get_int(&it, &value) > 0) {
+		switch (value) {
+		case LC3_VAL_FREQ_8KHZ:
+			rate_mask |= LC3_FREQ_8KHZ;
+			break;
+		case LC3_VAL_FREQ_16KHZ:
+			rate_mask |= LC3_FREQ_16KHZ;
+			break;
+		case LC3_VAL_FREQ_24KHZ:
+			rate_mask |=  LC3_FREQ_24KHZ;
+			break;
+		case LC3_VAL_FREQ_32KHZ:
+			rate_mask |=  LC3_FREQ_32KHZ;
+			break;
+		case LC3_VAL_FREQ_44KHZ:
+			rate_mask |=  LC3_FREQ_44KHZ;
+			break;
+		case LC3_VAL_FREQ_48KHZ:
+			rate_mask |=  LC3_FREQ_48KHZ;
+			break;
+		default:
+			break;
+		}
+	}
+
+	return rate_mask;
+}
+
+static uint8_t parse_durations(const char *str)
+{
+	struct spa_json it;
+	uint8_t duration_mask = 0;
+	float value;
+
+	if (spa_json_begin_array_relax(&it, str, strlen(str)) <= 0)
+		return duration_mask;
+
+	while (spa_json_get_float(&it, &value) > 0) {
+		if (value == (float)LC3_VAL_DUR_7_5)
+			duration_mask |= LC3_DUR_7_5;
+		else if (value == (float)LC3_VAL_DUR_10)
+			duration_mask |= LC3_DUR_10;
+	}
+
+	return duration_mask;
+}
+
+static uint8_t parse_channel_counts(const char *str)
+{
+	struct spa_json it;
+	uint8_t channel_counts = 0;
+	int value;
+
+	if (spa_json_begin_array_relax(&it, str, strlen(str)) <= 0)
+		return channel_counts;
+
+	while (spa_json_get_int(&it, &value) > 0) {
+		switch (value) {
+		case LC3_VAL_CHAN_1:
+			channel_counts |= LC3_CHAN_1;
+			break;
+		case LC3_VAL_CHAN_2:
+			channel_counts |= LC3_CHAN_2;
+			break;
+		case LC3_VAL_CHAN_3:
+			channel_counts |= LC3_CHAN_3;
+			break;
+		case LC3_VAL_CHAN_4:
+			channel_counts |= LC3_CHAN_4;
+			break;
+		case LC3_VAL_CHAN_5:
+			channel_counts |= LC3_CHAN_5;
+			break;
+		case LC3_VAL_CHAN_6:
+			channel_counts |= LC3_CHAN_6;
+			break;
+		case LC3_VAL_CHAN_7:
+			channel_counts |= LC3_CHAN_7;
+			break;
+		case LC3_VAL_CHAN_8:
+			channel_counts |= LC3_CHAN_8;
+			break;
+		default:
+			break;
+		}
+	}
+
+	return channel_counts;
+}
+
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
-		uint8_t caps[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
 	uint8_t *data = caps;
-	uint16_t framelen[2] = {htobs(LC3_MIN_FRAME_BYTES), htobs(LC3_MAX_FRAME_BYTES)};
+	const char *str;
+	uint16_t framelen[2];
+	uint16_t rate_mask = LC3_FREQ_48KHZ | LC3_FREQ_32KHZ | \
+				LC3_FREQ_24KHZ | LC3_FREQ_16KHZ | LC3_FREQ_8KHZ;
+	uint8_t duration_mask = LC3_DUR_ANY;
+	uint8_t channel_counts = LC3_CHAN_1 | LC3_CHAN_2;
+	uint16_t framelen_min = LC3_MIN_FRAME_BYTES;
+	uint16_t framelen_max = LC3_MAX_FRAME_BYTES;
+	uint8_t max_frames = 2;
+	uint32_t value;
 
-	data += write_ltv_uint16(data, LC3_TYPE_FREQ,
-	                         htobs(LC3_FREQ_48KHZ | LC3_FREQ_32KHZ | \
-					 LC3_FREQ_24KHZ | LC3_FREQ_16KHZ | LC3_FREQ_8KHZ));
-	data += write_ltv_uint8(data, LC3_TYPE_DUR, LC3_DUR_ANY);
-	data += write_ltv_uint8(data, LC3_TYPE_CHAN, LC3_CHAN_1 | LC3_CHAN_2);
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.rates")))
+		rate_mask = parse_rates(str);
+
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.durations")))
+		duration_mask = parse_durations(str);
+
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.channels")))
+		channel_counts = parse_channel_counts(str);
+
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.framelen_min")))
+		if (spa_atou32(str, &value, 0))
+			framelen_min = value;
+
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.framelen_max")))
+		if (spa_atou32(str, &value, 0))
+			framelen_max = value;
+
+	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.max_frames")))
+		if (spa_atou32(str, &value, 0))
+			max_frames = value;
+
+	framelen[0] = htobs(framelen_min);
+	framelen[1] = htobs(framelen_max);
+
+	data += write_ltv_uint16(data, LC3_TYPE_FREQ, htobs(rate_mask));
+	data += write_ltv_uint8(data, LC3_TYPE_DUR, duration_mask);
+	data += write_ltv_uint8(data, LC3_TYPE_CHAN, channel_counts);
 	data += write_ltv(data, LC3_TYPE_FRAMELEN, framelen, sizeof(framelen));
 	/* XXX: we support only one frame block -> max 2 frames per SDU */
-	data += write_ltv_uint8(data, LC3_TYPE_BLKS, 2);
+	if (max_frames > 2)
+		max_frames = 2;
+
+	data += write_ltv_uint8(data, LC3_TYPE_BLKS, max_frames);
 
 	return data - caps;
 }
@@ -633,7 +767,7 @@ static int pac_cmp(const void *p1, const void *p2)
 {
 	const struct pac_data *pac1 = p1;
 	const struct pac_data *pac2 = p2;
-	struct spa_debug_log_ctx debug_ctx = SPA_LOG_DEBUG_INIT(log, SPA_LOG_LEVEL_TRACE);
+	struct spa_debug_log_ctx debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_TRACE);
 	bap_lc3_t conf1, conf2;
 	int res1, res2;
 
@@ -655,7 +789,7 @@ static int codec_select_config(const struct media_codec *codec, uint32_t flags,
 	uint32_t locations = 0;
 	uint32_t channel_allocation = 0;
 	bool sink = false, duplex = false;
-	struct spa_debug_log_ctx debug_ctx = SPA_LOG_DEBUG_INIT(log, SPA_LOG_LEVEL_TRACE);
+	struct spa_debug_log_ctx debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_TRACE);
 	int i;
 
 	if (caps == NULL)
@@ -670,7 +804,7 @@ static int codec_select_config(const struct media_codec *codec, uint32_t flags,
 		}
 
 		if (spa_atob(spa_dict_lookup(settings, "bluez5.bap.debug")))
-			debug_ctx = SPA_LOG_DEBUG_INIT(log, SPA_LOG_LEVEL_DEBUG);
+			debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_DEBUG);
 
 		/* Is remote endpoint sink or source */
 		sink = spa_atob(spa_dict_lookup(settings, "bluez5.bap.sink"));
@@ -897,7 +1031,7 @@ static int codec_get_qos(const struct media_codec *codec,
 			conf.framelen, conf.framelen);
 	if (!bap_qos) {
 		/* shouldn't happen: select_config should pick existing one */
-		spa_log_error(log, "no QoS settings found");
+		spa_log_error(log_, "no QoS settings found");
 		return -EINVAL;
 	}
 
@@ -955,7 +1089,7 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 		goto error;
 
 	if (!parse_conf(&conf, config, config_len)) {
-		spa_log_error(log, "invalid LC3 config");
+		spa_log_error(log_, "invalid LC3 config");
 		res = -ENOTSUP;
 		goto error;
 	}
@@ -976,12 +1110,12 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 		goto error;
 	}
 
-	spa_log_info(log, "LC3 rate:%d frame_duration:%d channels:%d framelen:%d nblks:%d",
+	spa_log_info(log_, "LC3 rate:%d frame_duration:%d channels:%d framelen:%d nblks:%d",
 			this->samplerate, this->frame_dus, this->channels, this->framelen, conf.n_blks);
 
 	res = lc3_frame_samples(this->frame_dus, this->samplerate);
 	if (res < 0) {
-		spa_log_error(log, "invalid LC3 frame samples");
+		spa_log_error(log_, "invalid LC3 frame samples");
 		res = -EINVAL;
 		goto error;
 	}
@@ -1146,8 +1280,8 @@ static int codec_increase_bitpool(void *data)
 
 static void codec_set_log(struct spa_log *global_log)
 {
-	log = global_log;
-	spa_log_topic_init(log, &codec_plugin_log_topic);
+	log_ = global_log;
+	spa_log_topic_init(log_, &codec_plugin_log_topic);
 }
 
 static int codec_get_bis_config(const struct media_codec *codec, uint8_t *caps,

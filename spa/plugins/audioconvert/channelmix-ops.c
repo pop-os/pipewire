@@ -673,7 +673,7 @@ done:
 			spa_log_info(mix->log, "channel %d is FC cutoff:%f", ic, mix->fc_cutoff);
 			lr4_set(&mix->lr4[ic], BQ_LOWPASS, mix->fc_cutoff / mix->freq);
 		} else {
-			mix->lr4[ic].active = false;
+			lr4_set(&mix->lr4[ic], BQ_NONE, mix->fc_cutoff / mix->freq);
 		}
 		ic++;
 	}
@@ -775,16 +775,25 @@ int channelmix_init(struct channelmix *mix)
 	mix->delay = (uint32_t)(mix->rear_delay * mix->freq / 1000.0f);
 	mix->func_name = info->name;
 
-	spa_log_debug(mix->log, "selected %s delay:%d options:%08x", info->name, mix->delay,
-			mix->options);
+	spa_zero(mix->taps_mem);
+	mix->taps = SPA_PTR_ALIGN(mix->taps_mem, CHANNELMIX_OPS_MAX_ALIGN, float);
+	mix->buffer[0] = SPA_PTR_ALIGN(&mix->buffer_mem[0], CHANNELMIX_OPS_MAX_ALIGN, float);
+	mix->buffer[1] = SPA_PTR_ALIGN(&mix->buffer_mem[2*BUFFER_SIZE], CHANNELMIX_OPS_MAX_ALIGN, float);
 
 	if (mix->hilbert_taps > 0) {
-		mix->n_taps = SPA_CLAMP(mix->hilbert_taps, 15u, 255u) | 1;
+		mix->n_taps = SPA_CLAMP(mix->hilbert_taps, 15u, MAX_TAPS) | 1;
 		blackman_window(mix->taps, mix->n_taps);
 		hilbert_generate(mix->taps, mix->n_taps);
+		reverse_taps(mix->taps, mix->n_taps);
 	} else {
 		mix->n_taps = 1;
 		mix->taps[0] = 1.0f;
 	}
+	if (mix->delay + mix->n_taps > BUFFER_SIZE)
+		mix->delay = BUFFER_SIZE - mix->n_taps;
+
+	spa_log_debug(mix->log, "selected %s delay:%d options:%08x", info->name, mix->delay,
+			mix->options);
+
 	return make_matrix(mix);
 }

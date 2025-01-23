@@ -103,6 +103,15 @@ finish:
 	return 0;
 }
 
+static void stream_clear_data(struct stream *stream,
+		uint32_t offset, uint32_t len)
+{
+	uint32_t l0 = SPA_MIN(len, MAXLENGTH - offset), l1 = len - l0;
+	sample_spec_silence(&stream->ss, SPA_PTROFF(stream->buffer, offset, void), l0);
+	if (SPA_UNLIKELY(l1 > 0))
+		sample_spec_silence(&stream->ss, stream->buffer, l1);
+}
+
 static int handle_memblock(struct client *client, struct message *msg)
 {
 	struct stream *stream;
@@ -147,6 +156,15 @@ static int handle_memblock(struct client *client, struct message *msg)
 			    client, client->name, (uint32_t)(flags & FLAG_SEEKMASK));
 		res = -EPROTO;
 		goto finish;
+	}
+
+	if (diff > 0) {
+		pw_log_debug("clear gap of %"PRIu64, diff);
+		/* if we jump forwards, clear the data we skipped because we might otherwise
+		 * play back old data. FIXME, if the write pointer goes backwards and
+		 * forwards, this might clear valid data. We should probably keep track of
+		 * the highest write pointer and only clear when we go past that one. */
+		stream_clear_data(stream, index % MAXLENGTH, SPA_MIN(diff, MAXLENGTH));
 	}
 
 	index += diff;
@@ -981,31 +999,27 @@ int servers_create_and_start(struct impl *impl, const char *addresses, struct pw
 {
 	int len, res, count = 0, err = 0; /* store the first error to return when no servers could be created */
 	const char *v;
-	struct spa_json it[3];
+	struct spa_json it[2];
 
 	/* update `err` if it hasn't been set to an errno */
 #define UPDATE_ERR(e) do { if (err == 0) err = (e); } while (false)
 
 	/* collect addresses into an array of `struct sockaddr_storage` */
-	spa_json_init(&it[0], addresses, strlen(addresses));
 
 	/* [ <server-spec> ... ] */
-	if (spa_json_enter_array(&it[0], &it[1]) < 0)
+	if (spa_json_begin_array(&it[0], addresses, strlen(addresses)) < 0)
 		return -EINVAL;
 
 	/* a server-spec is either an address or an object */
-	while ((len = spa_json_next(&it[1], &v)) > 0) {
+	while ((len = spa_json_next(&it[0], &v)) > 0) {
 		char addr_str[FORMATTED_SOCKET_ADDR_STRLEN] = { 0 };
 		char key[128], client_access[64] = { 0 };
 		struct sockaddr_storage addrs[2];
 		int i, max_clients = MAX_CLIENTS, listen_backlog = LISTEN_BACKLOG, n_addr;
 
 		if (spa_json_is_object(v, len)) {
-			spa_json_enter(&it[1], &it[2]);
-			while (spa_json_get_string(&it[2], key, sizeof(key)) > 0) {
-				if ((len = spa_json_next(&it[2], &v)) <= 0)
-					break;
-
+			spa_json_enter(&it[0], &it[1]);
+			while ((len = spa_json_object_next(&it[1], key, sizeof(key), &v)) > 0) {
 				if (spa_streq(key, "address")) {
 					spa_json_parse_stringn(v, len, addr_str, sizeof(addr_str));
 				} else if (spa_streq(key, "max-clients")) {

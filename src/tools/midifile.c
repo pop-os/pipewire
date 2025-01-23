@@ -10,6 +10,7 @@
 #include <math.h>
 
 #include <spa/utils/string.h>
+#include <spa/control/ump-utils.h>
 
 #include "midifile.h"
 
@@ -18,27 +19,28 @@
 struct midi_track {
 	uint16_t id;
 
-	uint8_t *data;
+	long start;
 	uint32_t size;
+	long pos;
 
-	uint8_t *p;
 	int64_t tick;
 	unsigned int eof:1;
 	uint8_t event[4];
 };
 
 struct midi_file {
-	uint8_t *data;
-	size_t size;
-
 	int mode;
-	int fd;
+	FILE *file;
+	bool close;
+	long pos;
+
+	uint8_t *buffer;
+	size_t buffer_size;
 
 	struct midi_file_info info;
 	uint32_t length;
 	uint32_t tempo;
 
-	uint8_t *p;
 	int64_t tick;
 	double tick_sec;
 	double tick_start;
@@ -56,138 +58,157 @@ static inline uint32_t parse_be32(const uint8_t *in)
 	return (in[0] << 24) | (in[1] << 16) | (in[2] << 8) | in[3];
 }
 
-static inline int mf_avail(struct midi_file *mf)
+static inline int mf_read(struct midi_file *mf, void *data, size_t size)
 {
-	if (mf->p < mf->data + mf->size)
-		return mf->size + mf->data - mf->p;
-	return 0;
+	if (fread(data, size, 1, mf->file) != 1)
+		return 0;
+	mf->pos += size;
+	return 1;
 }
 
 static inline int tr_avail(struct midi_track *tr)
 {
 	if (tr->eof)
 		return 0;
-	if (tr->p < tr->data + tr->size)
-		return tr->size + tr->data - tr->p;
+	if (tr->size == 0)
+		return 1;
+	if (tr->pos < tr->start + tr->size)
+		return tr->size + tr->start - tr->pos;
 	tr->eof = true;
 	return 0;
 }
 
 static int read_mthd(struct midi_file *mf)
 {
-	if (mf_avail(mf) < 14 ||
-	    memcmp(mf->p, "MThd", 4) != 0)
+	uint8_t data[14];
+
+	if (mf_read(mf, data, sizeof(data)) != 1 ||
+	    memcmp(data, "MThd", 4) != 0)
 		return -EINVAL;
 
-	mf->length = parse_be32(mf->p + 4);
-	mf->info.format = parse_be16(mf->p + 8);
-	mf->info.ntracks = parse_be16(mf->p + 10);
-	mf->info.division = parse_be16(mf->p + 12);
-
-	mf->p += 14;
-	return 0;
-}
-
-static int read_mtrk(struct midi_file *mf, struct midi_track *track)
-{
-	if (mf_avail(mf) < 8 ||
-	    memcmp(mf->p, "MTrk", 4) != 0)
-		return -EINVAL;
-
-	track->data = track->p = mf->p + 8;
-	track->size = parse_be32(mf->p + 4);
-
-	mf->p = track->data + track->size;
-	if (mf->p > mf->data + mf->size)
-		return -EINVAL;
-
+	mf->length = parse_be32(data + 4);
+	mf->info.format = parse_be16(data + 8);
+	mf->info.ntracks = parse_be16(data + 10);
+	mf->info.division = parse_be16(data + 12);
 	return 0;
 }
 
 static int parse_varlen(struct midi_file *mf, struct midi_track *tr, uint32_t *result)
 {
 	uint32_t value = 0;
+	uint8_t data[1];
 
-	while (tr_avail(tr) > 0) {
-		uint8_t b = *tr->p++;
-		value = (value << 7) | (b & 0x7f);
-		if ((b & 0x80) == 0)
+	while (mf_read(mf, data, 1) == 1) {
+		value = (value << 7) | (data[0] & 0x7f);
+		if ((data[0] & 0x80) == 0)
 			break;
 	}
 	*result = value;
 	return 0;
 }
 
+static int read_delta_time(struct midi_file *mf, struct midi_track *tr)
+{
+	int res;
+	uint32_t delta_time;
+
+	if ((res = parse_varlen(mf, tr, &delta_time)) < 0)
+		return res;
+
+	tr->tick += delta_time;
+	tr->pos = mf->pos;
+	return 0;
+
+}
+
+static int read_mtrk(struct midi_file *mf, struct midi_track *track)
+{
+	uint8_t data[8];
+
+	if (mf_read(mf, data, sizeof(data)) != 1 ||
+	    memcmp(data, "MTrk", 4) != 0)
+		return -EINVAL;
+
+	track->start = track->pos = mf->pos;
+	track->size = parse_be32(data + 4);
+
+	return read_delta_time(mf, track);
+}
+
+static uint8_t *ensure_buffer(struct midi_file *mf, struct midi_track *tr, size_t size)
+{
+	if (size <= 4)
+		return tr->event;
+
+	if (size > mf->buffer_size) {
+		mf->buffer = realloc(mf->buffer, size);
+		mf->buffer_size = size;
+	}
+	return mf->buffer;
+}
+
 static int open_read(struct midi_file *mf, const char *filename, struct midi_file_info *info)
 {
 	int res;
 	uint16_t i;
-	struct stat st;
 
-	if ((mf->fd = open(filename, O_RDONLY)) < 0) {
-		res = -errno;
-		goto exit;
+	if (strcmp(filename, "-") != 0) {
+		if ((mf->file = fopen(filename, "r")) == NULL) {
+			res = -errno;
+			goto exit;
+		}
+		mf->close = true;
+	} else {
+		mf->file = stdin;
+		mf->close = false;
 	}
-	if (fstat(mf->fd, &st) < 0) {
-		res = -errno;
-		goto exit_close;
-	}
-	mf->size = st.st_size;
-
-	mf->data = mmap(NULL, mf->size, PROT_READ, MAP_SHARED, mf->fd, 0);
-	if (mf->data == MAP_FAILED) {
-		res = -errno;
-		goto exit_close;
-	}
-
-	mf->p = mf->data;
 
 	if ((res = read_mthd(mf)) < 0)
-		goto exit_unmap;
+		goto exit_close;
 
 	mf->tempo = DEFAULT_TEMPO;
 	mf->tick = 0;
 
 	for (i = 0; i < mf->info.ntracks; i++) {
 		struct midi_track *tr = &mf->tracks[i];
-		uint32_t delta_time;
 
 		if ((res = read_mtrk(mf, tr)) < 0)
-			goto exit_unmap;
+			goto exit_close;
 
-		if ((res = parse_varlen(mf, tr, &delta_time)) < 0)
-			goto exit_unmap;
-
-		tr->tick = delta_time;
 		tr->id = i;
+
+		if (i + 1 < mf->info.ntracks &&
+		    fseek(mf->file, tr->start + tr->size, SEEK_SET) != 0) {
+			res = -errno;
+			goto exit_close;
+		}
 	}
 	mf->mode = 1;
 	*info = mf->info;
 	return 0;
 
-exit_unmap:
-	munmap(mf->data, mf->size);
 exit_close:
-	close(mf->fd);
+	if (mf->close)
+		fclose(mf->file);
 exit:
 	return res;
 }
 
-static inline int write_n(int fd, const void *buf, int count)
+static inline int write_n(FILE *file, const void *buf, int count)
 {
-	return write(fd, buf, count) == (ssize_t)count ? count : -errno;
+	return fwrite(buf, 1, count, file) == (size_t)count ? count : -errno;
 }
 
-static inline int write_be16(int fd, uint16_t val)
+static inline int write_be16(FILE *file, uint16_t val)
 {
 	uint8_t buf[2] = { val >> 8, val };
-	return write_n(fd, buf, 2);
+	return write_n(file, buf, 2);
 }
 
-static inline int write_be32(int fd, uint32_t val)
+static inline int write_be32(FILE *file, uint32_t val)
 {
 	uint8_t buf[4] = { val >> 24, val >> 16, val >> 8, val };
-	return write_n(fd, buf, 4);
+	return write_n(file, buf, 4);
 }
 
 #define CHECK_RES(expr) if ((res = (expr)) < 0) return res
@@ -197,17 +218,17 @@ static int write_headers(struct midi_file *mf)
 	struct midi_track *tr = &mf->tracks[0];
 	int res;
 
-	lseek(mf->fd, 0, SEEK_SET);
+	fseek(mf->file, 0, SEEK_SET);
 
 	mf->length = 6;
-	CHECK_RES(write_n(mf->fd, "MThd", 4));
-	CHECK_RES(write_be32(mf->fd, mf->length));
-	CHECK_RES(write_be16(mf->fd, mf->info.format));
-	CHECK_RES(write_be16(mf->fd, mf->info.ntracks));
-	CHECK_RES(write_be16(mf->fd, mf->info.division));
+	CHECK_RES(write_n(mf->file, "MThd", 4));
+	CHECK_RES(write_be32(mf->file, mf->length));
+	CHECK_RES(write_be16(mf->file, mf->info.format));
+	CHECK_RES(write_be16(mf->file, mf->info.ntracks));
+	CHECK_RES(write_be16(mf->file, mf->info.division));
 
-	CHECK_RES(write_n(mf->fd, "MTrk", 4));
-	CHECK_RES(write_be32(mf->fd, tr->size));
+	CHECK_RES(write_n(mf->file, "MTrk", 4));
+	CHECK_RES(write_be32(mf->file, tr->size));
 
 	return 0;
 }
@@ -225,9 +246,15 @@ static int open_write(struct midi_file *mf, const char *filename, struct midi_fi
 	if (info->division == 0)
 		info->division = 96;
 
-	if ((mf->fd = open(filename, O_WRONLY | O_CREAT, 0660)) < 0) {
-		res = -errno;
-		goto exit;
+	if (strcmp(filename, "-") != 0) {
+		if ((mf->file = fopen(filename, "w")) == NULL) {
+			res = -errno;
+			goto exit;
+		}
+		mf->close = true;
+	} else {
+		mf->file = stdout;
+		mf->close = false;
 	}
 	mf->mode = 2;
 	mf->tempo = DEFAULT_TEMPO;
@@ -270,17 +297,17 @@ int midi_file_close(struct midi_file *mf)
 {
 	int res;
 
-	if (mf->mode == 1) {
-		munmap(mf->data, mf->size);
-	} else if (mf->mode == 2) {
+	if (mf->mode == 2) {
 		uint8_t buf[4] = { 0x00, 0xff, 0x2f, 0x00 };
-		CHECK_RES(write_n(mf->fd, buf, 4));
+		CHECK_RES(write_n(mf->file, buf, 4));
 		mf->tracks[0].size += 4;
 		CHECK_RES(write_headers(mf));
 	} else
 		return -EINVAL;
 
-	close(mf->fd);
+	if (mf->close)
+		fclose(mf->file);
+	free(mf->buffer);
 	free(mf);
 	return 0;
 }
@@ -302,6 +329,7 @@ static int peek_next(struct midi_file *mf, struct midi_event *ev)
 
 	ev->track = found->id;
 	ev->sec = mf->tick_sec + ((found->tick - mf->tick_start) * (double)mf->tempo) / (1000000.0 * mf->info.division);
+	ev->type = MIDI_EVENT_TYPE_MIDI1;
 	return 1;
 }
 
@@ -320,22 +348,31 @@ int midi_file_next_time(struct midi_file *mf, double *sec)
 int midi_file_read_event(struct midi_file *mf, struct midi_event *event)
 {
 	struct midi_track *tr;
-	uint32_t delta_time, size;
+	uint32_t size;
 	uint8_t status, meta;
 	int res, running;
+	long offs;
+
+	event->data = NULL;
 
 	if ((res = peek_next(mf, event)) <= 0)
 		return res;
 
 	tr = &mf->tracks[event->track];
-	status = *tr->p;
+
+	offs = tr->pos;
+	if (offs != mf->pos) {
+		if (fseek(mf->file, offs, SEEK_SET) != 0)
+			return -errno;
+	}
+
+	mf_read(mf, &status, 1);
 
 	running = (status & 0x80) == 0;
 	if (running) {
+		tr->event[1] = status;
 		status = tr->event[0];
-		event->data = tr->event;
 	} else {
-		event->data = tr->p++;
 		tr->event[0] = status;
 	}
 
@@ -350,52 +387,82 @@ int midi_file_read_event(struct midi_file *mf, struct midi_event *event)
 		break;
 
 	case 0xff:
-		meta = *tr->p++;
+		if (running)
+			return -EINVAL;
+
+		mf_read(mf, &meta, 1);
 
 		if ((res = parse_varlen(mf, tr, &size)) < 0)
 			return res;
 
-		event->meta.offset = tr->p - event->data;
+		event->meta.offset = 2;
 		event->meta.size = size;
+
+		if ((event->data = ensure_buffer(mf, tr, size + event->meta.offset)) == NULL)
+			return -ENOMEM;
+
+		event->data[0] = status;
+		event->data[1] = meta;
+		if (size > 0 && mf_read(mf, &event->data[2], size) != 1)
+			return -EINVAL;
 
 		switch (meta) {
 		case 0x2f:
 			tr->eof = true;
 			break;
 		case 0x51:
+		{
 			if (size < 3)
 				return -EINVAL;
 			mf->tick_sec = event->sec;
 			mf->tick_start = tr->tick;
-			event->meta.parsed.tempo.uspqn = mf->tempo = (tr->p[0]<<16) | (tr->p[1]<<8) | tr->p[2];
+			event->meta.parsed.tempo.uspqn = mf->tempo =
+				(event->data[2]<<16) | (event->data[3]<<8) | event->data[4];
 			break;
 		}
-		size += tr->p - event->data;
+		}
+		size += event->meta.offset;
 		break;
 
 	case 0xf0:
 	case 0xf7:
+		if (running)
+			return -EINVAL;
+
 		if ((res = parse_varlen(mf, tr, &size)) < 0)
 			return res;
-		size += tr->p - event->data;
+
+		if ((event->data = ensure_buffer(mf, tr, size + 1)) == NULL)
+			return -ENOMEM;
+
+		event->data[0] = status;
+		if (mf_read(mf, &event->data[1], size) != 1)
+			return -EINVAL;
+
+		size += 1;
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	event->size = size;
-
-	if (running) {
-		memcpy(&event->data[1], tr->p, size - 1);
-		tr->p += size - 1;
-	} else {
-		tr->p = event->data + event->size;
+	if (event->data == NULL) {
+		if ((event->data = ensure_buffer(mf, tr, size)) == NULL)
+			return -ENOMEM;
+		event->data[0] = tr->event[0];
+		if (running) {
+			event->data[1] = tr->event[1];
+			if (size > 2 && mf_read(mf, &event->data[2], size - 2) != 1)
+				return -EINVAL;
+		} else {
+			if (size > 1 && mf_read(mf, &event->data[1], size - 1) != 1)
+				return -EINVAL;
+		}
 	}
 
-	if ((res = parse_varlen(mf, tr, &delta_time)) < 0)
+	if ((res = read_delta_time(mf, tr)) < 0)
 		return res;
 
-	tr->tick += delta_time;
 	return 1;
 }
 
@@ -412,7 +479,7 @@ static int write_varlen(struct midi_file *mf, struct midi_track *tr, uint32_t va
 	}
         do  {
 		b = buffer & 0xff;
-		CHECK_RES(write_n(mf->fd, &b, 1));
+		CHECK_RES(write_n(mf->file, &b, 1));
 		tr->size++;
 		buffer >>= 8;
 	} while (b & 0x80);
@@ -424,12 +491,30 @@ int midi_file_write_event(struct midi_file *mf, const struct midi_event *event)
 {
 	struct midi_track *tr;
 	uint32_t tick;
+	void *data;
+	size_t size;
 	int res;
+	uint8_t ev[32];
 
 	spa_return_val_if_fail(event != NULL, -EINVAL);
 	spa_return_val_if_fail(mf != NULL, -EINVAL);
 	spa_return_val_if_fail(event->track == 0, -EINVAL);
 	spa_return_val_if_fail(event->size > 1, -EINVAL);
+
+	switch (event->type) {
+	case MIDI_EVENT_TYPE_MIDI1:
+		data = event->data;
+		size = event->size;
+		break;
+	case MIDI_EVENT_TYPE_UMP:
+		data = ev;
+		size = spa_ump_to_midi((uint32_t*)event->data, event->size, ev, sizeof(ev));
+		if (size == 0)
+			return 0;
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	tr = &mf->tracks[event->track];
 
@@ -438,8 +523,8 @@ int midi_file_write_event(struct midi_file *mf, const struct midi_event *event)
 	CHECK_RES(write_varlen(mf, tr, tick - tr->tick));
 	tr->tick = tick;
 
-	CHECK_RES(write_n(mf->fd, event->data, event->size));
-	tr->size += event->size;
+	CHECK_RES(write_n(mf->file, data, size));
+	tr->size += size;
 
 	return 0;
 }
@@ -587,7 +672,7 @@ static void dump_mem(FILE *out, const char *label, uint8_t *data, uint32_t size)
 		fprintf(out, "%02x ", *data++);
 }
 
-int midi_file_dump_event(FILE *out, const struct midi_event *ev)
+static int dump_event_midi1(FILE *out, const struct midi_event *ev)
 {
 	fprintf(out, "track:%2d sec:%f ", ev->track, ev->sec);
 
@@ -662,19 +747,21 @@ int midi_file_dump_event(FILE *out, const struct midi_event *ev)
 		fprintf(out, "Active Sensing");
 		break;
 	case 0xff:
+	{
+		uint8_t *meta = &ev->data[ev->meta.offset];
 		fprintf(out, "Meta: ");
 		switch (ev->data[1]) {
 		case 0x00:
-			fprintf(out, "Sequence Number %3d %3d", ev->data[3], ev->data[4]);
+			fprintf(out, "Sequence Number %3d %3d", meta[0], meta[1]);
 			break;
 		case 0x01 ... 0x09:
-			fprintf(out, "%s: %s", event_names[ev->data[1] - 1], &ev->data[ev->meta.offset]);
+			fprintf(out, "%s: %s", event_names[ev->data[1] - 1], meta);
 			break;
 		case 0x20:
-			fprintf(out, "Channel Prefix: %03d", ev->data[3]);
+			fprintf(out, "Channel Prefix: %03d", meta[0]);
 			break;
 		case 0x21:
-			fprintf(out, "Midi Port: %03d", ev->data[3]);
+			fprintf(out, "Midi Port: %03d", meta[0]);
 			break;
 		case 0x2f:
 			fprintf(out, "End Of Track");
@@ -686,20 +773,20 @@ int midi_file_dump_event(FILE *out, const struct midi_event *ev)
 			break;
 		case 0x54:
 			fprintf(out, "SMPTE Offset: %s %02d:%02d:%02d:%02d.%03d",
-					smpte_rates[(ev->data[3] & 0x60) >> 5],
-					ev->data[3] & 0x1f, ev->data[4], ev->data[5],
-					ev->data[6], ev->data[7]);
+					smpte_rates[(meta[0] & 0x60) >> 5],
+					meta[0] & 0x1f, meta[1], meta[2],
+					meta[3], meta[4]);
 			break;
 		case 0x58:
 			fprintf(out, "Time Signature: %d/%d, %d clocks per click, %d notated 32nd notes per quarter note",
-				ev->data[3], (int)pow(2, ev->data[4]), ev->data[5], ev->data[6]);
+				meta[0], (int)pow(2, meta[1]), meta[2], meta[3]);
 			break;
 		case 0x59:
 		{
-			int sf = ev->data[3];
+			int sf = meta[0];
 			fprintf(out, "Key Signature: %d %s: %s", abs(sf),
 					sf > 0 ? "sharps" : "flats",
-					ev->data[4] == 0 ?
+					meta[1] == 0 ?
 						major_keys[SPA_CLAMP(sf + 9, 0, 18)] :
 						minor_keys[SPA_CLAMP(sf + 9, 0, 18)]);
 			break;
@@ -711,10 +798,217 @@ int midi_file_dump_event(FILE *out, const struct midi_event *ev)
 			dump_mem(out, "Invalid", ev->data, ev->size);
 		}
 		break;
+	}
 	default:
 		dump_mem(out, "Unknown", ev->data, ev->size);
 		break;
 	}
-	fprintf(out, "\n");
 	return 0;
+}
+
+static int dump_event_midi2_channel(FILE *out, const struct midi_event *ev)
+{
+	uint32_t *d = (uint32_t*)ev->data;
+	uint8_t status = d[0] >> 16;
+
+	fprintf(out, "track:%2d sec:%f ", ev->track, ev->sec);
+
+	switch (status) {
+	case 0x00 ... 0x0f:
+	case 0x10 ... 0x1f:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		uint8_t index = d[0] & 0xff;
+		fprintf(out, "%s Per-Note controller (channel %2d): note %3s%d, index %u, value %u",
+				(status & 0xf0) == 0x00 ? "Registered" : "Assignable",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1, index, d[1]);
+		break;
+	}
+	case 0x20 ... 0x2f:
+	case 0x30 ... 0x3f:
+	{
+		uint16_t index = (d[0] & 0x7f) | ((d[0] & 0x7f00) >> 1);
+		fprintf(out, "%s controller (channel %2d): index %u, value %u",
+				(status & 0xf0) == 0x20 ? "Registered" : "Assignable",
+				(status & 0x0f) + 1, index, d[1]);
+		break;
+	}
+	case 0x40 ... 0x4f:
+	case 0x50 ... 0x5f:
+	{
+		uint16_t index = (d[0] & 0x7f) | ((d[0] & 0x7f00) >> 1);
+		fprintf(out, "Relative %s controller (channel %2d): index %u, value %u",
+				(status & 0xf0) == 0x20 ? "Registered" : "Assignable",
+				(status & 0x0f) + 1, index, d[1]);
+		break;
+	}
+	case 0x60 ... 0x6f:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		fprintf(out, "Per-Note Pitch Bend  (channel %2d): note %3s%d, pitch %u",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1, d[1]);
+		break;
+	}
+	case 0x80 ... 0x8f:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		uint8_t attr_type = d[0] & 0xff;
+		uint16_t velocity = (d[1] >> 16) & 0xffff;
+		uint16_t attr_data = (d[1]) & 0xffff;
+		fprintf(out, "Note Off   (channel %2d): note %3s%d, velocity %5d, attr (%u)%u",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1,
+				velocity, attr_type, attr_data);
+		break;
+	}
+	case 0x90 ... 0x9f:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		uint8_t attr_type = d[0] & 0xff;
+		uint16_t velocity = (d[1] >> 16) & 0xffff;
+		uint16_t attr_data = (d[1]) & 0xffff;
+		fprintf(out, "Note On    (channel %2d): note %3s%d, velocity %5d, attr (%u)%u",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1,
+				velocity, attr_type, attr_data);
+		break;
+	}
+	case 0xa0 ... 0xaf:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		fprintf(out, "Aftertouch (channel %2d): note %3s%d, pressure %u",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1, d[1]);
+		break;
+	}
+	case 0xb0 ... 0xbf:
+	{
+		uint8_t index = (d[0] >> 8) & 0x7f;
+		fprintf(out, "Controller (channel %2d): controller %3d (%s), value %u",
+				(status & 0x0f) + 1, index,
+				controller_name(index), d[1]);
+		break;
+	}
+	case 0xc0 ... 0xcf:
+	{
+		uint8_t flags = (d[0] & 0xff);
+		uint8_t program = (d[1] >> 24) & 0x7f;
+		uint16_t bank = (d[1] & 0x7f) | ((d[1] & 0x7f00) >> 1);
+		fprintf(out, "Program    (channel %2d): flags %u program %3d (%s), bank %u",
+				(status & 0x0f) + 1, flags, program,
+				program_names[program], bank);
+		break;
+	}
+	case 0xd0 ... 0xdf:
+		fprintf(out, "Channel Pressure (channel %2d): pressure %u",
+				(status & 0x0f) + 1, d[1]);
+		break;
+	case 0xe0 ... 0xef:
+		fprintf(out, "Pitch Bend (channel %2d): value %u",
+				(status & 0x0f) + 1, d[1]);
+		break;
+	case 0xf0 ... 0xff:
+	{
+		uint8_t note = (d[0] >> 8) & 0x7f;
+		uint8_t flags = d[0] & 0xff;
+		fprintf(out, "Per-Note management (channel %2d): note %3s%d, flags %u",
+				(status & 0x0f) + 1,
+				note_names[note % 12], note / 12 -1, flags);
+		break;
+	}
+	default:
+		dump_mem(out, "Unknown", ev->data, ev->size);
+		break;
+	}
+
+	return 0;
+}
+
+static int dump_event_ump(FILE *out, const struct midi_event *ev)
+{
+	uint32_t *d = (uint32_t*)ev->data;
+	uint8_t group = (d[0] >> 24) & 0xf;
+	uint8_t mt = (d[0] >> 28) & 0xf;
+	int res = 0;
+
+	fprintf(out, "group:%2d ", group);
+
+	switch (mt) {
+	case 0x0:
+		dump_mem(out, "Utility", ev->data, ev->size);
+		break;
+	case 0x1:
+		dump_mem(out, "SysRT", ev->data, ev->size);
+		break;
+	case 0x2:
+	{
+		struct midi_event ev1;
+		uint8_t msg[4];
+
+		ev1 = *ev;
+		msg[0] = (d[0] >> 16);
+		msg[1] = (d[0] >> 8);
+		msg[2] = (d[0]);
+		if (msg[0] >= 0xc0 && msg[0] <= 0xdf)
+			ev1.size = 2;
+                else
+			ev1.size = 3;
+		ev1.data = msg;
+		dump_event_midi1(out, &ev1);
+		break;
+	}
+	case 0x3:
+	{
+		uint8_t status = (d[0] >> 20) & 0xf;
+		uint8_t bytes = SPA_CLAMP((d[0] >> 16) & 0xf, 0u, 6u);
+		uint8_t b[6] = { d[0] >> 8, d[0], d[1] >> 24, d[1] >> 16, d[1] >> 8, d[1] };
+		switch (status) {
+		case 0x0:
+			dump_mem(out, "SysEx7 (Complete) ", b, bytes);
+			break;
+		case 0x1:
+			dump_mem(out, "SysEx7 (Start)    ", b, bytes);
+			break;
+		case 0x2:
+			dump_mem(out, "SysEx7 (Continue) ", b, bytes);
+			break;
+		case 0x3:
+			dump_mem(out, "SysEx7 (End)      ", b, bytes);
+			break;
+		default:
+			dump_mem(out, "SysEx7 (invalid)", ev->data, ev->size);
+			break;
+		}
+		break;
+	}
+	case 0x4:
+		res = dump_event_midi2_channel(out, ev);
+		break;
+	case 0x5:
+		dump_mem(out, "Data128", ev->data, ev->size);
+		break;
+	default:
+		dump_mem(out, "Reserved", ev->data, ev->size);
+		break;
+	}
+	return res;
+}
+
+int midi_file_dump_event(FILE *out, const struct midi_event *ev)
+{
+	int res;
+	switch (ev->type) {
+	case MIDI_EVENT_TYPE_MIDI1:
+		res = dump_event_midi1(out, ev);
+		break;
+	case MIDI_EVENT_TYPE_UMP:
+		res = dump_event_ump(out, ev);
+		break;
+	default:
+		return -EINVAL;
+	}
+	fprintf(out, "\n");
+	return res;
 }

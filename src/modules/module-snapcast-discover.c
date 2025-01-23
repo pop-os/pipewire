@@ -23,6 +23,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa/param/audio/format.h>
+#include <spa/param/audio/raw-json.h>
 #include <spa/debug/types.h>
 
 #include <pipewire/impl.h>
@@ -65,6 +66,26 @@
  * - `stream.rules` = <rules>: match rules, use create-stream actions. See
  *   \ref page_module_protocol_simple for module properties.
  *
+ * ### stream.rules matches
+ *
+ *  - `snapcast.ip`: the IP address of the snapcast server
+ *  - `snapcast.port`: the port of the snapcast server
+ *  - `snapcast.ifindex`: the interface index where the snapcast announcement
+ *                        was received.
+ *  - `snapcast.ifname`: the interface name where the snapcast announcement
+ *                        was received.
+ *  - `snapcast.name`: the name of the snapcast server
+ *  - `snapcast.hostname`: the hostname of the snapcast server
+ *  - `snapcast.domain`: the domain of the snapcast server
+ *
+ * ### stream.rules create-stream
+ *
+ * In addition to all the properties that can be passed to
+ * \ref page_module_protocol_simple, you can also set:
+ *
+ * - `snapcast.stream-name`: The name of the stream on a snapcast server.
+ * - `node.name`: The name of the sink that is created on the sender.
+ *
  * ## Example configuration
  *
  *\code{.unparsed}
@@ -76,9 +97,9 @@
  *         stream.rules = [
  *             {   matches = [
  *                     {    snapcast.ip = "~.*"
+ *                          #snapcast.port = 1000
  *                          #snapcast.ifindex = 1
  *                          #snapcast.ifname = eth0
- *                          #snapcast.port = 1000
  *                          #snapcast.name = ""
  *                          #snapcast.hostname = ""
  *                          #snapcast.domain = ""
@@ -91,11 +112,18 @@
  *                         #audio.channels = 2
  *                         #audio.position = [ FL FR ]
  *                         #
+ *                         # The stream name as is appears on the snapcast
+ *                         # server:
  *                         #snapcast.stream-name = "PipeWire"
  *                         #
+ *                         # The name of the sink on the sender:
+ *                         #node.name = "Snapcast Sink"
+ *                         #
  *                         #capture = true
+ *                         #server.address = [ "tcp:4711" ]
  *                         #capture.props = {
  *                             #target.object = ""
+ *                             #node.latency = 2048/48000
  *                             #media.class = "Audio/Sink"
  *                         #}
  *                     }
@@ -461,14 +489,13 @@ static int snapcast_connect(struct tunnel *t)
 static int add_snapcast_stream(struct impl *impl, struct tunnel *t,
 		struct pw_properties *props, const char *servers)
 {
-	struct spa_json it[2];
+	struct spa_json it[1];
 	char v[256];
 
-	spa_json_init(&it[0], servers, strlen(servers));
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], servers, strlen(servers));
+        if (spa_json_begin_array_relax(&it[0], servers, strlen(servers)) <= 0)
+		return -EINVAL;
 
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0) {
+	while (spa_json_get_string(&it[0], v, sizeof(v)) > 0) {
 		t->server_address = strdup(v);
 		snapcast_connect(t);
 		return 0;
@@ -476,67 +503,22 @@ static int add_snapcast_stream(struct impl *impl, struct tunnel *t,
 	return -ENOENT;
 }
 
-static inline uint32_t format_from_name(const char *name, size_t len)
-{
-	int i;
-	for (i = 0; spa_type_audio_format[i].name; i++) {
-		if (strncmp(name, spa_debug_type_short_name(spa_type_audio_format[i].name), len) == 0)
-			return spa_type_audio_format[i].type;
-	}
-	return SPA_AUDIO_FORMAT_UNKNOWN;
-}
-
-static inline uint32_t channel_from_name(const char *name)
-{
-	int i;
-	for (i = 0; spa_type_audio_channel[i].name; i++) {
-		if (spa_streq(name, spa_debug_type_short_name(spa_type_audio_channel[i].name)))
-			return spa_type_audio_channel[i].type;
-	}
-	return SPA_AUDIO_CHANNEL_UNKNOWN;
-}
-
-static void parse_position(struct spa_audio_info_raw *info, const char *val, size_t len)
-{
-	struct spa_json it[2];
-	char v[256];
-
-	spa_json_init(&it[0], val, len);
-        if (spa_json_enter_array(&it[0], &it[1]) <= 0)
-                spa_json_init(&it[1], val, len);
-
-	info->channels = 0;
-	while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
-	    info->channels < SPA_AUDIO_MAX_CHANNELS) {
-		info->position[info->channels++] = channel_from_name(v);
-	}
-}
-
 static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	const char *str;
+	spa_audio_info_raw_init_dict_keys(info,
+			&SPA_DICT_ITEMS(
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
+				 SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
+			&props->dict,
+			SPA_KEY_AUDIO_FORMAT,
+			SPA_KEY_AUDIO_RATE,
+			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_POSITION, NULL);
 
-	spa_zero(*info);
-	if ((str = pw_properties_get(props, PW_KEY_AUDIO_FORMAT)) == NULL)
-		str = DEFAULT_FORMAT;
-	info->format = format_from_name(str, strlen(str));
-	if (info->format == 0) {
-		str = DEFAULT_FORMAT;
-		info->format = format_from_name(str, strlen(str));
-	}
-	pw_properties_set(props, PW_KEY_AUDIO_FORMAT, str);
-
-	info->rate = pw_properties_get_uint32(props, PW_KEY_AUDIO_RATE, info->rate);
-	if (info->rate == 0)
-		info->rate = DEFAULT_RATE;
+	pw_properties_set(props, PW_KEY_AUDIO_FORMAT,
+			spa_type_audio_format_to_short_name(info->format));
 	pw_properties_setf(props, PW_KEY_AUDIO_RATE, "%d", info->rate);
-
-	info->channels = pw_properties_get_uint32(props, PW_KEY_AUDIO_CHANNELS, info->channels);
-	info->channels = SPA_MIN(info->channels, SPA_AUDIO_MAX_CHANNELS);
-	if ((str = pw_properties_get(props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		parse_position(info, str, strlen(str));
-	if (info->channels == 0)
-		parse_position(info, DEFAULT_POSITION, strlen(DEFAULT_POSITION));
 	pw_properties_setf(props, PW_KEY_AUDIO_CHANNELS, "%d", info->channels);
 }
 

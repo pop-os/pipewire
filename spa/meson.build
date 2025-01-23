@@ -43,7 +43,7 @@ if get_option('spa-plugins').allowed()
   endif
 
   # plugin-specific dependencies
-  alsa_dep = dependency('alsa', required: get_option('alsa'))
+  alsa_dep = dependency('alsa', version : '>=1.2.10', required: get_option('alsa'))
   summary({'ALSA': alsa_dep.found()}, bool_yn: true, section: 'Backend')
 
   bluez_dep = dependency('bluez', version : '>= 4.101', required: get_option('bluez5'))
@@ -89,6 +89,9 @@ if get_option('spa-plugins').allowed()
       summary({'ModemManager': mm_dep.found()}, bool_yn: true, section: 'Bluetooth backends')
     endif
     cdata.set('HAVE_LC3', get_option('bluez5-codec-lc3').allowed() and lc3_dep.found())
+    g722_codec_option = get_option('bluez5-codec-g722')
+    summary({'G722': g722_codec_option.allowed()}, bool_yn: true, section: 'Bluetooth audio codecs')
+    cdata.set('HAVE_G722', g722_codec_option.allowed())
   endif
 
   have_vulkan = false
@@ -111,10 +114,20 @@ if get_option('spa-plugins').allowed()
   cdata.set('HAVE_LIBUDEV', libudev_dep.found())
   summary({'Udev': libudev_dep.found()}, bool_yn: true, section: 'Backend')
 
-  cdata.set('HAVE_SPA_PLUGINS', '1')
+  libmysofa_dep = dependency('libmysofa', required : get_option('libmysofa'))
+  summary({'libmysofa': libmysofa_dep.found()}, bool_yn: true, section: 'filter-graph')
+
+  lilv_lib = dependency('lilv-0', required: get_option('lv2'))
+  summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true, section: 'filter-graph')
+
+  ebur128_lib = dependency('libebur128', required: get_option('ebur128').enabled())
+  summary({'EBUR128': ebur128_lib.found()}, bool_yn: true, section: 'filter-graph')
+
+  cdata.set('HAVE_SPA_PLUGINS', true)
   subdir('plugins')
 endif
 
 subdir('tools')
 subdir('tests')
 subdir('examples')
+subdir('lib')

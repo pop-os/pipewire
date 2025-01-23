@@ -26,7 +26,7 @@
 
 #define SPA_TYPE_INTERFACE_Bluez5CodecMedia	SPA_TYPE_INFO_INTERFACE_BASE "Bluez5:Codec:Media:Private"
 
-#define SPA_VERSION_BLUEZ5_CODEC_MEDIA		9
+#define SPA_VERSION_BLUEZ5_CODEC_MEDIA		12
 
 struct spa_bluez5_codec_a2dp {
 	struct spa_interface iface;
@@ -71,6 +71,7 @@ struct media_codec {
 	a2dp_vendor_codec_t vendor;
 
 	bool bap;
+	bool asha;
 
 	const char *name;
 	const char *description;
@@ -87,7 +88,7 @@ struct media_codec {
 
 	/** If fill_caps is NULL, no endpoint is registered (for sharing with another codec). */
 	int (*fill_caps) (const struct media_codec *codec, uint32_t flags,
-			uint8_t caps[A2DP_MAX_CAPS_SIZE]);
+			const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE]);
 
 	int (*select_config) (const struct media_codec *codec, uint32_t flags,
 			const void *caps, size_t caps_size,
@@ -199,6 +200,17 @@ struct media_codec {
 	int (*increase_bitpool) (void *data);
 
 	void (*set_log) (struct spa_log *global_log);
+
+	/**
+	 * Get codec internal delays, in samples at input/output rates.
+	 *
+	 * The delay does not include the duration of the PCM input/output
+	 * audio data, but is that internal to the codec.
+	 *
+	 * \param[out] encoder    Encoder delay in samples, or NULL
+	 * \param[out] decoder    Decoder delay in samples, or NULL
+	 */
+	void (*get_delay) (void *data, uint32_t *encoder, uint32_t *decoder);
 };
 
 struct media_codec_config {
