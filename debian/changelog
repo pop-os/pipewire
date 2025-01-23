@@ -5,6 +5,7 @@ pipewire (1.3.81-0) UNRELEASED; urgency=medium
       for filter-chain plugins.
   * No longer install client-rt.conf in pipewire-bin
   * Install the new filter-graph module and libspa.so in libspa-0.2-modules
+  * Update symbols file
   * Adjust VCS fields in d/control and d/gbp.conf for experimental
   * Apply wrap-and-sort -a
 
