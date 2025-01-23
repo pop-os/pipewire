@@ -1,7 +1,8 @@
 pipewire (1.3.81-0) UNRELEASED; urgency=medium
 
   * New upstream release (1.4 release candidate 1)
-  * Add libebur128-dev in Build-Deps
+  * Add libebur128-dev and libfftw3-dev in Build-Deps
+      for filter-chain plugins.
   * Adjust VCS fields in d/control and d/gbp.conf for experimental
   * Apply wrap-and-sort -a
 
