@@ -26,7 +26,6 @@ usr/bin/pw-reserve
 usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
-usr/share/pipewire/client-rt.conf
 usr/share/pipewire/client.conf
 usr/share/pipewire/filter-chain.conf
 usr/share/pipewire/filter-chain/*.conf
