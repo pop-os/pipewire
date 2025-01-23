@@ -4,6 +4,7 @@ pipewire (1.3.81-0) UNRELEASED; urgency=medium
   * Add libebur128-dev and libfftw3-dev in Build-Deps
       for filter-chain plugins.
   * No longer install client-rt.conf in pipewire-bin
+  * Install the new filter-graph module and libspa.so in libspa-0.2-modules
   * Adjust VCS fields in d/control and d/gbp.conf for experimental
   * Apply wrap-and-sort -a
 
