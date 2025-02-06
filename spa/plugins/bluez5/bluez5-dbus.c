@@ -220,7 +220,8 @@ struct spa_bt_media_codec_switch {
 
 #define DEFAULT_RECONNECT_PROFILES SPA_BT_PROFILE_NULL
 #define DEFAULT_HW_VOLUME_PROFILES (SPA_BT_PROFILE_HEADSET_AUDIO_GATEWAY | SPA_BT_PROFILE_HEADSET_HEAD_UNIT | \
-					SPA_BT_PROFILE_A2DP_SOURCE | SPA_BT_PROFILE_A2DP_SINK)
+					SPA_BT_PROFILE_A2DP_SOURCE | SPA_BT_PROFILE_A2DP_SINK | \
+					SPA_BT_PROFILE_BAP_AUDIO)
 
 #define BT_DEVICE_DISCONNECTED	0
 #define BT_DEVICE_CONNECTED	1
@@ -2802,14 +2803,8 @@ next:
 			spa_bt_device_add_profile(remote_endpoint->device, profile);
 
 		if (spa_streq(remote_endpoint->uuid, SPA_BT_UUID_ASHA_SINK)) {
-			if (profile & SPA_BT_PROFILE_ASHA_SINK) {
-				if (setup_asha_transport(remote_endpoint, monitor)) {
-					spa_log_error(monitor->log, "Failed to create transport for remote_endpoint %p", remote_endpoint);
-				} else {
-					spa_log_debug(monitor->log, "Adding profile for remote_endpoint %p: device -> %p", remote_endpoint, remote_endpoint->device);
-					spa_bt_device_add_profile(remote_endpoint->device, SPA_BT_PROFILE_ASHA_SINK);
-				}
-			}
+			if (profile & SPA_BT_PROFILE_ASHA_SINK)
+				setup_asha_transport(remote_endpoint, monitor);
 		}
 	}
 
@@ -3464,6 +3459,10 @@ static int transport_update_props(struct spa_bt_transport *transport,
 				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_RX];
 			else if (transport->profile & SPA_BT_PROFILE_ASHA_SINK)
 				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_TX];
+			else if (transport->profile & SPA_BT_PROFILE_BAP_SINK)
+				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_TX];
+			else if (transport->profile & SPA_BT_PROFILE_BAP_SOURCE)
+				t_volume = &transport->volumes[SPA_BT_VOLUME_ID_RX];
 			else
 				goto next;
 
@@ -3615,7 +3614,7 @@ static int transport_set_volume(void *data, int id, float volume)
 	if (!t_volume->active || !spa_bt_transport_volume_enabled(transport))
 		return -ENOTSUP;
 
-	value = spa_bt_volume_linear_to_hw(volume, 127);
+	value = spa_bt_volume_linear_to_hw(volume, t_volume->hw_volume_max);
 	t_volume->volume = volume;
 
 	/* AVRCP volume would not applied on remote sink device
@@ -4090,8 +4089,10 @@ static int setup_asha_transport(struct spa_bt_remote_endpoint *remote_endpoint, 
 	struct spa_bt_transport *transport;
 	char *tpath;
 
-	if (!remote_endpoint->transport_path)
+	if (!remote_endpoint->transport_path) {
+		spa_log_error(monitor->log, "Missing ASHA transport path");
 		return -EINVAL;
+	}
 
 	transport = spa_bt_transport_find(monitor, remote_endpoint->transport_path);
 	if (transport != NULL) {
@@ -4695,7 +4696,10 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 
 	for (int i = 0; i < SPA_BT_VOLUME_ID_TERM; ++i) {
 		transport->volumes[i].hw_volume = SPA_BT_VOLUME_INVALID;
-		transport->volumes[i].hw_volume_max = SPA_BT_VOLUME_A2DP_MAX;
+		if (profile & SPA_BT_PROFILE_BAP_AUDIO)
+			transport->volumes[i].hw_volume_max = SPA_BT_VOLUME_BAP_MAX;
+		else
+			transport->volumes[i].hw_volume_max = SPA_BT_VOLUME_A2DP_MAX;
 	}
 
 	free(transport->endpoint_path);
@@ -5670,14 +5674,7 @@ static void interface_added(struct spa_bt_monitor *monitor,
 
 		/* Trigger bluez device creation before bluez profile negotiation started so that
 		 * profile connection handlers can receive per-device settings during profile negotiation. */
-		if (d->profiles & SPA_BT_PROFILE_ASHA_SINK) {
-			spa_log_info(monitor->log, "Add profile %s: %m",
-					object_path);
-			spa_bt_device_add_profile(d, SPA_BT_PROFILE_ASHA_SINK);
-			spa_bt_device_connect_profile(d, SPA_BT_PROFILE_ASHA_SINK);
-		}
-		else
-			spa_bt_device_add_profile(d, SPA_BT_PROFILE_NULL);
+		spa_bt_device_add_profile(d, SPA_BT_PROFILE_NULL);
 	}
 	else if (spa_streq(interface_name, BLUEZ_DEVICE_SET_INTERFACE)) {
 		device_set_update_props(monitor, object_path, props_iter, NULL);

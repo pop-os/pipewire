@@ -258,7 +258,7 @@ set_config (GstBufferPool * pool, GstStructure * config)
 
 void gst_pipewire_pool_set_paused (GstPipeWirePool *pool, gboolean paused)
 {
-  GST_DEBUG ("flush start");
+  GST_DEBUG_OBJECT (pool, "pause: %u", paused);
   GST_OBJECT_LOCK (pool);
   pool->paused = paused;
   g_cond_signal (&pool->cond);
@@ -270,7 +270,7 @@ flush_start (GstBufferPool * pool)
 {
   GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
 
-  GST_DEBUG ("flush start");
+  GST_DEBUG_OBJECT (pool, "flush start");
   GST_OBJECT_LOCK (pool);
   g_cond_signal (&p->cond);
   GST_OBJECT_UNLOCK (pool);
@@ -283,25 +283,26 @@ release_buffer (GstBufferPool * pool, GstBuffer *buffer)
 
   GstPipeWirePoolData *data = gst_pipewire_pool_get_data(buffer);
 
+  GST_OBJECT_LOCK (pool);
+
   if (!data->queued && data->b != NULL)
   {
     GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
-    GST_OBJECT_LOCK (pool);
-
     g_autoptr (GstPipeWireStream) s = g_weak_ref_get (&p->stream);
     int res;
 
     pw_thread_loop_lock (s->core->loop);
+
     if ((res = pw_stream_return_buffer (s->pwstream, data->b)) < 0) {
       GST_ERROR_OBJECT (pool,"can't return buffer %p; gstbuffer : %p, %s",data->b, buffer, spa_strerror(res));
     } else {
       data->queued = TRUE;
       GST_DEBUG_OBJECT (pool, "returned buffer %p; gstbuffer:%p", data->b, buffer);
     }
-    pw_thread_loop_unlock (s->core->loop);
-    GST_OBJECT_UNLOCK (pool);
 
+    pw_thread_loop_unlock (s->core->loop);
   }
+  GST_OBJECT_UNLOCK (pool);
 }
 
 static gboolean

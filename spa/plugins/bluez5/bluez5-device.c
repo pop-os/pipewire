@@ -528,7 +528,7 @@ static void emit_device_set_node(struct impl *this, uint32_t id)
 	struct spa_bt_device *device = this->bt_dev;
 	struct node *node = &this->nodes[id];
 	struct spa_device_object_info info;
-	struct spa_dict_item items[7];
+	struct spa_dict_item items[8];
 	char str_id[32], members_json[8192], channels_json[512];
 	struct device_set_member *members;
 	uint32_t n_members;
@@ -541,6 +541,7 @@ static void emit_device_set_node(struct impl *this, uint32_t id)
 	items[n_items++] = SPA_DICT_ITEM_INIT("api.bluez5.set.leader", "true");
 	snprintf(str_id, sizeof(str_id), "%d", id);
 	items[n_items++] = SPA_DICT_ITEM_INIT("card.profile.device", str_id);
+	items[n_items++] = SPA_DICT_ITEM_INIT("device.routes", "1");
 
 	if (id == DEVICE_ID_SOURCE_SET) {
 		items[n_items++] = SPA_DICT_ITEM_INIT("media.class", "Audio/Source");
@@ -2555,6 +2556,41 @@ static int impl_enum_params(void *object, int seq,
 	return 0;
 }
 
+static void device_set_update_volumes(struct node *node)
+{
+	struct impl *impl = node->impl;
+	struct device_set *dset = &impl->device_set;
+	float hw_volume = node_get_hw_volume(node);
+	bool sink = (node->id == DEVICE_ID_SINK_SET);
+	struct device_set_member *members = sink ? dset->sink : dset->source;
+	uint32_t n_members = sink ? dset->sinks : dset->sources;
+	uint32_t i;
+
+	/* Check if all sub-devices have HW volume */
+	if ((sink && !dset->sink_enabled) || (!sink && !dset->source_enabled))
+		goto soft_volume;
+
+	for (i = 0; i < n_members; ++i) {
+		struct spa_bt_transport *t = members[i].transport;
+		struct spa_bt_transport_volume *t_volume = t ? &t->volumes[members[i].id] : NULL;
+
+		if (!t_volume || !t_volume->active)
+			goto soft_volume;
+	}
+
+	node_update_soft_volumes(node, hw_volume);
+	for (i = 0; i < n_members; ++i)
+		spa_bt_transport_set_volume(members[i].transport, members[i].id, hw_volume);
+	return;
+
+soft_volume:
+	/* Soft volume fallback */
+	for (i = 0; i < n_members; ++i)
+		spa_bt_transport_set_volume(members[i].transport, members[i].id, 1.0f);
+	node_update_soft_volumes(node, 1.0f);
+	return;
+}
+
 static int node_set_volume(struct impl *this, struct node *node, float volumes[], uint32_t n_volumes)
 {
 	uint32_t i;
@@ -2582,6 +2618,8 @@ static int node_set_volume(struct impl *this, struct node *node, float volumes[]
 
 		node_update_soft_volumes(node, hw_volume);
 		spa_bt_transport_set_volume(node->transport, node->id, hw_volume);
+	} else if (node->id == DEVICE_ID_SOURCE_SET || node->id == DEVICE_ID_SINK_SET) {
+		device_set_update_volumes(node);
 	} else {
 		float boost = get_soft_volume_boost(node);
 		for (uint32_t i = 0; i < node->n_channels; ++i)

@@ -564,6 +564,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	int64_t ts_offset;
 	char addr[128];
 	int res = 0;
+	uint32_t header_size;
 
 	PW_LOG_TOPIC_INIT(mod_topic);
 
@@ -644,6 +645,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	pw_properties_set(stream_props, "rtp.source.ip", addr);
 	pw_properties_setf(stream_props, "rtp.source.port", "%u", impl->src_port);
 
+	header_size = impl->src_addr.ss_family == AF_INET ?
+                        IP4_HEADER_SIZE : IP6_HEADER_SIZE;
+	header_size += UDP_HEADER_SIZE;
+	pw_properties_setf(stream_props, "net.header", "%u", header_size);
+
 	ts_offset = pw_properties_get_int64(props, "sess.ts-offset", DEFAULT_TS_OFFSET);
 	if (ts_offset == -1)
 		ts_offset = pw_rand32();
@@ -655,7 +661,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			"stream.may-pause", false);
 	impl->standby = false;
 	impl->waiting = true;
-	pw_properties_set(stream_props, "rtp.receiving", "false");
+	/* Because we don't know the stream receiving state at the start, we try to fake it
+	 * till we make it (or get timed out) */
+	pw_properties_set(stream_props, "rtp.receiving", "true");
 
 	impl->cleanup_interval = pw_properties_get_uint32(props,
 			"cleanup.sec", DEFAULT_CLEANUP_SEC);

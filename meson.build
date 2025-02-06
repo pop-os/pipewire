@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.3.81',
+  version : '1.3.82',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -81,7 +81,6 @@ pkgconfig = import('pkgconfig')
 common_flags = [
   '-fvisibility=hidden',
   '-fno-strict-aliasing',
-  '-Wno-error=strict-aliasing',
   '-Werror=suggest-attribute=format',
   '-Wsign-compare',
   '-Wpointer-arith',
