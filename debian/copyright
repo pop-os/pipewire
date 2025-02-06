@@ -75,21 +75,21 @@ Copyright: 2004-2010 Marcel Holtmann
            2013 Julien Pommier
 License: Expat and LGPL-2.1+
 
+Files: spa/plugins/filter-graph/ladspa.h
+Copyright: 2000-2002 Richard W.E. Furse, Paul Barton-Davis
+License: LGPL-2.1+
+
+Files: spa/plugins/filter-graph/pffft.*
+Copyright: 2013 Julien Pommier
+           2004 The University Corporation for Atmospheric Research
+License: FFTPACK
+
 Files: src/modules/module-client-node/v0/*
        src/modules/module-protocol-native/v0/*
        src/modules/module-portal.c
 Copyright: 2015-2022 Wim Taymans
            2019 Red Hat Inc.
 License: LGPL-2+
-
-Files: src/modules/module-filter-chain/ladspa.h
-Copyright: 2000-2002 Richard W.E. Furse, Paul Barton-Davis
-License: LGPL-2.1+
-
-Files: src/modules/module-filter-chain/pffft.*
-Copyright: 2013 Julien Pommier
-           2004 The University Corporation for Atmospheric Research
-License: FFTPACK
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
