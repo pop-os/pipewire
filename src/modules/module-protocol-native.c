@@ -70,7 +70,7 @@ PW_LOG_TOPIC(mod_topic_connection, "conn." NAME);
  * a client and a server using unix local sockets.
  *
  * Normally this module is loaded in both client and server config files
- * so that they cam communicate.
+ * so that they can communicate.
  *
  * ## Module Name
  *
@@ -1326,9 +1326,8 @@ impl_new_client(struct pw_protocol *protocol,
 
 	if (props) {
 		str = spa_dict_lookup(props, PW_KEY_REMOTE_INTENTION);
-		if (str == NULL &&
-		   (str = spa_dict_lookup(props, PW_KEY_REMOTE_NAME)) != NULL &&
-		    spa_streq(str, "internal"))
+		if ((str == NULL || spa_streq(str, "generic")) &&
+		   spa_streq(spa_dict_lookup(props, PW_KEY_REMOTE_NAME), "internal"))
 			str = "internal";
 	}
 	if (str == NULL)

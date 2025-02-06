@@ -154,6 +154,7 @@ struct stream {
 	unsigned int trigger_done_rt:1;
 	int in_set_param;
 	int in_emit_param_changed;
+	int pending_drain;
 };
 
 static int get_param_index(uint32_t id)
@@ -455,14 +456,19 @@ do_call_drained(struct spa_loop *loop,
 	struct pw_stream *stream = &impl->this;
 	pw_log_trace_fp("%p: drained", stream);
 	pw_stream_emit_drained(stream);
+	SPA_ATOMIC_DEC(impl->pending_drain);
 	return 0;
 }
 
 static void call_drained(struct stream *impl)
 {
 	pw_log_info("%p: drained", impl);
-	pw_loop_invoke(impl->main_loop,
-		do_call_drained, 1, NULL, 0, false, impl);
+	if (SPA_ATOMIC_INC(impl->pending_drain) == 1) {
+		pw_loop_invoke(impl->main_loop,
+			do_call_drained, 1, NULL, 0, false, impl);
+	} else {
+		SPA_ATOMIC_DEC(impl->pending_drain);
+	}
 }
 
 static int
@@ -638,11 +644,18 @@ static inline void copy_position(struct stream *impl, int64_t queued)
 			impl->base_pos = p->clock.position - impl->time.ticks;
 			impl->clock_id = p->clock.id;
 		}
-		if (SPA_FLAG_IS_SET(p->clock.flags, SPA_IO_CLOCK_FLAG_NO_RATE))
-			impl->time.ticks = p->clock.nsec * p->clock.rate.denom /
-				(SPA_NSEC_PER_SEC * p->clock.rate.num);
-		else
+		if (SPA_FLAG_IS_SET(p->clock.flags, SPA_IO_CLOCK_FLAG_NO_RATE)) {
+			if (p->clock.rate.num == 0 || p->clock.rate.denom == 0) {
+				impl->time.ticks = p->clock.nsec;
+				impl->time.rate.num = 1;
+				impl->time.rate.denom = SPA_NSEC_PER_SEC;
+			} else {
+				impl->time.ticks = (p->clock.nsec * p->clock.rate.denom) /
+					(SPA_NSEC_PER_SEC * p->clock.rate.num);
+			}
+		} else {
 			impl->time.ticks = p->clock.position - impl->base_pos;
+		}
 
 		impl->time.delay = 0;
 		impl->time.queued = queued;
@@ -835,8 +848,14 @@ static void clear_buffers(struct pw_stream *stream)
 			if (b->busy)
 				SPA_ATOMIC_DEC(b->busy->count);
 		}
-	} else
+	} else {
 		clear_queue(impl, &impl->dequeued);
+		struct spa_io_buffers *io = impl->io;
+		if (io && io->status == SPA_STATUS_HAVE_DATA) {
+			io->buffer_id = SPA_ID_INVALID;
+			io->status = SPA_STATUS_OK;
+		}
+	}
 	clear_queue(impl, &impl->queued);
 }
 
