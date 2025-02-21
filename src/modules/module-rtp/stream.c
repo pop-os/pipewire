@@ -64,6 +64,7 @@ struct impl {
 	uint8_t payload;
 	uint32_t ssrc;
 	uint16_t seq;
+	unsigned fixed_ssrc:1;
 	unsigned have_ssrc:1;
 	unsigned ignore_ssrc:1;
 	unsigned have_seq:1;
@@ -436,7 +437,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 		impl->ssrc = pw_properties_get_uint32(props, "rtp.sender-ssrc", pw_rand32());
 		impl->ts_offset = pw_properties_get_uint32(props, "rtp.sender-ts-offset", pw_rand32());
 	} else {
-		impl->have_ssrc = pw_properties_fetch_uint32(props, "rtp.receiver-ssrc", &impl->ssrc);
+		impl->have_ssrc = impl->fixed_ssrc = pw_properties_fetch_uint32(props, "rtp.receiver-ssrc", &impl->ssrc);
 		if (pw_properties_fetch_uint32(props, "rtp.receiver-ts-offset", &impl->ts_offset) < 0)
 			impl->direct_timestamp = false;
 	}
@@ -547,6 +548,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 	pw_properties_setf(props, "rtp.media", "%s", impl->format_info->media_type);
 	pw_properties_setf(props, "rtp.mime", "%s", impl->format_info->mime);
 	pw_properties_setf(props, "rtp.payload", "%u", impl->payload);
+	pw_properties_setf(props, "rtp.ssrc", "%u", impl->ssrc);
 	pw_properties_setf(props, "rtp.rate", "%u", impl->rate);
 	if (impl->info.info.raw.channels > 0)
 		pw_properties_setf(props, "rtp.channels", "%u", impl->info.info.raw.channels);
