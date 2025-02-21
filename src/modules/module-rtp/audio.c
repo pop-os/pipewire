@@ -37,7 +37,7 @@ static void rtp_audio_process_playback(void *data)
 		memset(d[0].data, 0, wanted * stride);
 		if (impl->have_sync) {
 			impl->have_sync = false;
-			level = SPA_LOG_LEVEL_WARN;
+			level = SPA_LOG_LEVEL_INFO;
 		} else {
 			level = SPA_LOG_LEVEL_DEBUG;
 		}
@@ -197,8 +197,12 @@ invalid_len:
 	pw_log_warn("invalid RTP length");
 	return -EINVAL;
 unexpected_ssrc:
-	pw_log_warn("unexpected SSRC (expected %u != %u)",
-		impl->ssrc, hdr->ssrc);
+	if (!impl->fixed_ssrc) {
+		/* We didn't have a configured SSRC, and there's more than one SSRC on
+		 * this address/port pair */
+		pw_log_warn("unexpected SSRC (expected %u != %u)", impl->ssrc,
+			hdr->ssrc);
+	}
 	return -EINVAL;
 }
 

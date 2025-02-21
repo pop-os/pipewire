@@ -41,22 +41,26 @@
  *
  * ## Properties for the create_object call
  *
- * - `link.output.node`: The output node to use. This can be the node id, node.name,
+ * - `link.output.node`: The output node to use. This can be the node object.id, node.name,
  *                     node.nick, node.description or object.path of a node. When the
  *                     property is not given or NULL, the output port should be
  *                     specified.
- * - `link.output.port`: The output port to link. This can be a port id, port.name,
+ * - `link.output.port`: The output port to link. This can be a port object.id, port.name,
  *                     port.alias or object.path. If an output node is specified, the
- *                     port must belong to the node. If no output port is given, an
+ *                     port must belong to the node. Finding a port in a node using the
+ *                     port.id is deprecated and may lead to unexpected results when the
+ *                     port.id also matches an object.id. If no output port is given, an
  *                     output node must be specified and a random (unlinked) port will
  *                     be used from the node.
- * - `link.input.node`: The input node to use. This can be the node id, node.name,
+ * - `link.input.node`: The input node to use. This can be the node object.id, node.name,
  *                     node.nick, node.description or object.path of a node. When the
  *                     property is not given or NULL, the input port should be
  *                     specified.
- * - `link.input.port`: The input port to link. This can be a port id, port.name,
+ * - `link.input.port`: The input port to link. This can be a port object.id, port.name,
  *                     port.alias or object.path. If an input node is specified, the
- *                     port must belong to the node. If no input port is given, an
+ *                     port must belong to the node. Finding a port in a node using the
+ *                     port.id is deprecated and may lead to unexpected results when the
+ *                     port.id also matches an object.id. If no input port is given, an
  *                     input node must be specified and a random (unlinked) port will
  *                     be used from the node.
  * - `object.linger`: Keep the link around even when the client that created it is gone.
@@ -368,11 +372,15 @@ static struct pw_impl_port *find_port(struct pw_context *context,
 	if (find.id != SPA_ID_INVALID) {
 		struct pw_global *global = pw_context_find_global(context, find.id);
 		/* find port by global id */
-		if (global != NULL && pw_global_is_type(global, PW_TYPE_INTERFACE_Port))
-			return pw_global_get_object(global);
+		if (global != NULL && pw_global_is_type(global, PW_TYPE_INTERFACE_Port)) {
+			find.port = pw_global_get_object(global);
+			if (find.port != NULL &&
+			    (node == NULL || pw_impl_port_get_node(find.port) == node))
+				return find.port;
+		}
 	}
 	if (node != NULL) {
-		/* find port by local id */
+		/* find port by local id (deprecated) */
 		if (find.id != SPA_ID_INVALID) {
 			find.port = pw_impl_node_find_port(node, find.direction, find.id);
 			if (find.port != NULL)

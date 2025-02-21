@@ -207,6 +207,7 @@ struct sdp_info {
 	float ptime;
 	uint32_t framecount;
 
+	uint32_t ssrc;
 	uint32_t ts_offset;
 	char *ts_refclk;
 };
@@ -732,6 +733,9 @@ static int make_sdp(struct impl *impl, struct session *sess, char *buffer, size_
 			"a=source-filter: incl IN %s %s %s\n", dst_ip4 ? "IP4" : "IP6",
 				dst_addr, src_addr);
 
+	if (sdp->ssrc > 0)
+		spa_strbuf_append(&buf, "a=ssrc:%u\n", sdp->ssrc);
+
 	if (sdp->ptime > 0)
 		spa_strbuf_append(&buf,
 			"a=ptime:%.6g\n", sdp->ptime);
@@ -825,6 +829,18 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 			return fd;
 
 		impl->sap_fd = fd;
+	}
+
+        /* For the first session, we might not yet have an SDP because the
+         * socket needs to be open for us to get the interface address (which
+         * happens above. So let's create the SDP now, if needed. */
+        if (!sess->has_sdp) {
+		res = make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp));
+		if (res != 0) {
+			pw_log_error("Failed to create SDP: %s", spa_strerror(res));
+			return res;
+		}
+		sess->has_sdp = true;
 	}
 
 	spa_zero(header);
@@ -979,6 +995,10 @@ static struct session *session_new_announce(struct impl *impl, struct node *node
 		sdp->rate = atoi(str);
 	if ((str = pw_properties_get(props, "rtp.channels")) != NULL)
 		sdp->channels = atoi(str);
+	if ((str = pw_properties_get(props, "rtp.ssrc")) != NULL)
+		sdp->ssrc = atoi(str);
+	else
+		sdp->ssrc = 0;
 	if ((str = pw_properties_get(props, "rtp.ts-offset")) != NULL)
 		sdp->ts_offset = atoi(str);
 	str = pw_properties_get(props, "rtp.ts-refclk");
@@ -998,10 +1018,13 @@ static struct session *session_new_announce(struct impl *impl, struct node *node
 				spa_strbuf_append(&buf, "%s%s", count++ > 0 ? ", " : "", v);
 		}
 	}
-	make_sdp(impl, sess, buffer, sizeof(buffer));
+
+	/* see if we can make an SDP, will fail for the first session because we
+	 * haven't got the SAP socket open yet */
+	res = make_sdp(impl, sess, buffer, sizeof(buffer));
 
 	/* we had no sdp or something changed */
-	if (!sess->has_sdp || strcmp(buffer, sess->sdp) != 0) {
+	if (res == 0 && (!sess->has_sdp || strcmp(buffer, sess->sdp) != 0)) {
 		/*  send bye on the old session */
 		send_sap(impl, sess, 1);
 
@@ -1027,10 +1050,15 @@ static struct session *session_new_announce(struct impl *impl, struct node *node
 			sdp->session_version = sdp->t_ntp;
 		}
 
-		/* make an updated SDP for sending */
-		make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp));
-		sess->has_sdp = true;
+		/* make an updated SDP for sending, this should not actually fail */
+		res = make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp));
+
+		if (res == 0)
+			sess->has_sdp = true;
+		else
+			pw_log_error("Failed to create SDP: %s", spa_strerror(res));
 	}
+
 	send_sap(impl, sess, 0);
 
 	return sess;
@@ -1113,6 +1141,8 @@ static int session_load_source(struct session *session, struct pw_properties *pr
 			if ((str = pw_properties_get(props, "rtp.channels")) != NULL)
 				pw_properties_set(props, "audio.channels", str);
 		}
+		if ((str = pw_properties_get(props, "rtp.ssrc")) != NULL)
+			fprintf(f, "\"rtp.receiver-ssrc\" = \"%s\", ", str);
 	} else {
 		pw_log_error("Unhandled media %s", media);
 		res = -EINVAL;
@@ -1238,6 +1268,9 @@ static struct session *session_new(struct impl *impl, struct sdp_info *info)
 
 	pw_properties_setf(props, "rtp.ts-offset", "%u", info->ts_offset);
 	pw_properties_set(props, "rtp.ts-refclk", info->ts_refclk);
+
+	if (info->ssrc > 0)
+		pw_properties_setf(props, "rtp.ssrc", "%u", info->ssrc);
 
 	if (info->channelmap[0])
 		pw_properties_set(props, PW_KEY_NODE_CHANNELNAMES, info->channelmap);
@@ -1388,13 +1421,25 @@ static int parse_sdp_a_rtpmap(struct impl *impl, char *c, struct sdp_info *info)
 	return 0;
 }
 
+static int parse_sdp_a_ssrc(struct impl *impl, char *c, struct sdp_info *info)
+{
+	if (!spa_strstartswith(c, "a=ssrc:"))
+		return 0;
+
+	c += strlen("a=ssrc:");
+	if (!spa_atou32(c, &info->ssrc, 10))
+		return -EINVAL;
+	return 0;
+}
+
 static int parse_sdp_a_ptime(struct impl *impl, char *c, struct sdp_info *info)
 {
 	if (!spa_strstartswith(c, "a=ptime:"))
 		return 0;
 
 	c += strlen("a=ptime:");
-	spa_atof(c, &info->ptime);
+	if (!spa_atof(c, &info->ptime))
+		return -EINVAL;
 	return 0;
 }
 
@@ -1453,6 +1498,8 @@ static int parse_sdp(struct impl *impl, char *sdp, struct sdp_info *info)
 			res = parse_sdp_m(impl, s, info);
 		else if (spa_strstartswith(s, "a=rtpmap:"))
 			res = parse_sdp_a_rtpmap(impl, s, info);
+		else if (spa_strstartswith(s, "a=ssrc:"))
+			res = parse_sdp_a_ssrc(impl, s, info);
 		else if (spa_strstartswith(s, "a=ptime:"))
 			res = parse_sdp_a_ptime(impl, s, info);
 		else if (spa_strstartswith(s, "a=mediaclk:"))
