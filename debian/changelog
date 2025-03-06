@@ -1,9 +1,10 @@
-pipewire (1.4.0-0) UNRELEASED; urgency=medium
+pipewire (1.4.0-1) unstable; urgency=medium
 
   * New upstream release
   * Adjust VCS fields in d/control and d/gbp.conf
+  * Upload to unstable
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Mar 2025 16:23:09 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Mar 2025 17:10:21 +0100
 
 pipewire (1.3.83-1) experimental; urgency=medium
 
