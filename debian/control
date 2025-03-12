@@ -50,7 +50,7 @@ Build-Depends: debhelper-compat (= 13),
                python3-docutils,
                systemd-dev
 Build-Conflicts: libfdk-aac-dev
-Standards-Version: 4.7.0
+Standards-Version: 4.7.2
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
