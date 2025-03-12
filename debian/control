@@ -455,7 +455,7 @@ Architecture: all
 Depends: libspa-0.2-bluetooth,
          pipewire-alsa,
          pipewire-pulse,
-         wireplumber,
+         wireplumber (>= 0.5.0),
          ${misc:Depends}
 Conflicts: pulseaudio,
            pulseaudio-module-bluetooth
