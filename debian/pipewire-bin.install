@@ -27,6 +27,7 @@ usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
 usr/share/pipewire/client.conf
+usr/share/pipewire/client.conf.avail
 usr/share/pipewire/filter-chain.conf
 usr/share/pipewire/filter-chain/*.conf
 usr/share/pipewire/jack.conf
@@ -34,3 +35,4 @@ usr/share/pipewire/minimal.conf
 usr/share/pipewire/pipewire-aes67.conf
 usr/share/pipewire/pipewire-avb.conf
 usr/share/pipewire/pipewire.conf
+usr/share/pipewire/pipewire.conf.avail

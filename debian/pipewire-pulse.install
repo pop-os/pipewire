@@ -3,3 +3,4 @@ usr/lib/systemd/user/pipewire-pulse.service
 usr/lib/systemd/user/pipewire-pulse.socket
 usr/share/glib-2.0/schemas/org.freedesktop.pulseaudio.gschema.xml
 usr/share/pipewire/pipewire-pulse.conf
+usr/share/pipewire/pipewire-pulse.conf.avail
