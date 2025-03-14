@@ -7,7 +7,7 @@ pipewire (1.4.1-0) UNRELEASED; urgency=medium
       included in upstream release.
   * Bump minimum libasound2-dev to 1.2.6
   * Bump minimum libroc-dev to 0.4.0
-  * Bump minimun wireplumber to 0.5.0
+  * Bump minimum wireplumber to 0.5.0
   * Standards-Version: 4.7.2 (no changes required)
   * Install config files for multiple sample rates and upmixing in
       pipewire-bin and pipewire-pulse packages.
