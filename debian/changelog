@@ -3,6 +3,8 @@ pipewire (1.4.1-0) UNRELEASED; urgency=medium
   * New upstream release
       - Fix segfault in audioconvert (Closes: #1100160)
       - Fix issue with Scarlett Solo 4th Gen (Closes: #1100157)
+  * Drop Don-t-automatically-start-pipewire-for-root-logins.patch,
+      included in upstream release.
   * Bump minimum libasound2-dev to 1.2.10
   * Bump minimum libroc-dev to 0.4.0
   * Bump minimun wireplumber to 0.5.0
