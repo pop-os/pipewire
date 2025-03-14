@@ -1,4 +1,4 @@
-pipewire (1.4.1-0) UNRELEASED; urgency=medium
+pipewire (1.4.1-1) unstable; urgency=medium
 
   * New upstream release
       - Fix segfault in audioconvert (Closes: #1100160)
@@ -12,7 +12,7 @@ pipewire (1.4.1-0) UNRELEASED; urgency=medium
   * Install config files for multiple sample rates and upmixing in
       pipewire-bin and pipewire-pulse packages.
 
- -- Dylan Aïssi <daissi@debian.org>  Fri, 14 Mar 2025 12:13:45 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Fri, 14 Mar 2025 13:10:32 +0100
 
 pipewire (1.4.0-1) unstable; urgency=medium
 
