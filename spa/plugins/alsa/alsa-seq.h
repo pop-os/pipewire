@@ -12,8 +12,12 @@ extern "C" {
 #include <stddef.h>
 #include <math.h>
 
+#include "config.h"
+
 #include <alsa/asoundlib.h>
+#ifdef HAVE_ALSA_UMP
 #include <alsa/ump_msg.h>
+#endif
 
 #include <spa/support/plugin.h>
 #include <spa/support/loop.h>
@@ -153,6 +157,7 @@ struct seq_state {
 	unsigned int opened:1;
 	unsigned int started:1;
 	unsigned int following:1;
+	unsigned int ump:1;
 
 	struct seq_stream streams[2];
 

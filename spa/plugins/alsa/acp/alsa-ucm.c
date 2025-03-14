@@ -353,6 +353,15 @@ static pa_alsa_ucm_split *ucm_get_split_channels(pa_alsa_ucm_device *device, snd
     const char *device_name;
     int i;
     uint32_t hw_channels;
+    const char *pcm_name;
+    const char *rule_name;
+
+    if (spa_streq(prefix, "Playback"))
+        pcm_name = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_SINK);
+    else
+        pcm_name = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_SOURCE);
+    if (!pcm_name)
+        pcm_name = "";
 
     device_name = pa_proplist_gets(device->proplist, PA_ALSA_PROP_UCM_NAME);
     if (!device_name)
@@ -372,16 +381,23 @@ static pa_alsa_ucm_split *ucm_get_split_channels(pa_alsa_ucm_device *device, snd
         if (pa_atou(value, &idx) < 0)
             break;
 
-        if (idx >= hw_channels)
-            goto fail;
+        if (idx >= hw_channels) {
+            pa_log_notice("Error in ALSA UCM profile for %s (%s): %sChannel%d=%d >= %sChannels=%d",
+                          pcm_name, device_name, prefix, i, idx, prefix, hw_channels);
+            split->broken = true;
+	}
 
         value = ucm_get_string(uc_mgr, "%sChannelPos%d/%s", prefix, i, device_name);
-        if (!value)
+        if (!value) {
+            rule_name = "ChannelPos";
             goto fail;
+        }
 
         map = snd_pcm_chmap_parse_string(value);
-        if (!map)
+        if (!map) {
+            rule_name = "ChannelPos value";
             goto fail;
+        }
 
         if (map->channels == 1) {
             pa_log_debug("Split %s channel %d -> device %s channel %d: %s (%d)",
@@ -391,6 +407,7 @@ static pa_alsa_ucm_split *ucm_get_split_channels(pa_alsa_ucm_device *device, snd
             free(map);
         } else {
             free(map);
+            rule_name = "channel map parsing";
             goto fail;
         }
     }
@@ -405,7 +422,7 @@ static pa_alsa_ucm_split *ucm_get_split_channels(pa_alsa_ucm_device *device, snd
     return split;
 
 fail:
-    pa_log_warn("Invalid SplitPCM ALSA UCM rule for device %s", device_name);
+    pa_log_warn("Invalid SplitPCM ALSA UCM %s for device %s (%s)", rule_name, pcm_name, device_name);
     pa_xfree(split);
     return NULL;
 }
@@ -2383,7 +2400,7 @@ static void mapping_init_eld(pa_alsa_mapping *m, snd_pcm_t *pcm)
     dev->eld_device = pcm_device;
 }
 
-static snd_pcm_t* mapping_open_pcm(pa_alsa_ucm_config *ucm, pa_alsa_mapping *m, int mode) {
+static snd_pcm_t* mapping_open_pcm(pa_alsa_ucm_config *ucm, pa_alsa_mapping *m, int mode, bool max_channels) {
     snd_pcm_t* pcm;
     pa_sample_spec try_ss = ucm->default_sample_spec;
     pa_channel_map try_map;
@@ -2391,6 +2408,11 @@ static snd_pcm_t* mapping_open_pcm(pa_alsa_ucm_config *ucm, pa_alsa_mapping *m, 
     bool exact_channels = m->channel_map.channels > 0;
 
     if (!m->split) {
+        if (max_channels) {
+            errno = EINVAL;
+            return NULL;
+        }
+
         if (exact_channels) {
             try_map = m->channel_map;
             try_ss.channels = try_map.channels;
@@ -2402,8 +2424,8 @@ static snd_pcm_t* mapping_open_pcm(pa_alsa_ucm_config *ucm, pa_alsa_mapping *m, 
             return NULL;
         }
 
-        exact_channels = true;
-        try_ss.channels = m->split->hw_channels;
+        exact_channels = false;
+        try_ss.channels = max_channels ? PA_CHANNELS_MAX : m->split->hw_channels;
         pa_channel_map_init_extend(&try_map, try_ss.channels, PA_CHANNEL_MAP_AUX);
     }
 
@@ -2416,15 +2438,40 @@ static snd_pcm_t* mapping_open_pcm(pa_alsa_ucm_config *ucm, pa_alsa_mapping *m, 
             &try_map, mode, &try_period_size, &try_buffer_size, 0, NULL, NULL, NULL, NULL, exact_channels);
 
     if (pcm) {
-        if (!exact_channels)
+        if (m->split) {
+            const char *mode_name = mode == SND_PCM_STREAM_PLAYBACK ? "Playback" : "Capture";
+
+            if (try_map.channels < m->split->hw_channels) {
+                pa_logl((max_channels ? PA_LOG_NOTICE : PA_LOG_DEBUG),
+                        "Error in ALSA UCM profile for %s (%s): %sChannels=%d > avail %d",
+                        m->device_strings[0], m->name, mode_name, m->split->hw_channels, try_map.channels);
+
+                /* Retry with max channel count, in case ALSA rounded down */
+                if (!max_channels) {
+                    pa_alsa_close(&pcm);
+                    return mapping_open_pcm(ucm, m, mode, true);
+                }
+
+                /* Just accept whatever we got... Some of the routings won't get connected
+                 * anywhere */
+                m->split->hw_channels = try_map.channels;
+                m->split->broken = true;
+            } else if (try_map.channels > m->split->hw_channels) {
+                pa_log_notice("Error in ALSA UCM profile for %s (%s): %sChannels=%d < avail %d",
+                            m->device_strings[0], m->name, mode_name, m->split->hw_channels, try_map.channels);
+                m->split->hw_channels = try_map.channels;
+                m->split->broken = true;
+            }
+        } else if (!exact_channels) {
             m->channel_map = try_map;
+        }
         mapping_init_eld(m, pcm);
     }
 
     return pcm;
 }
 
-static void pa_alsa_init_proplist_split_pcm(pa_idxset *mappings, pa_alsa_mapping *leader, pa_direction_t direction)
+static void pa_alsa_init_split_pcm(pa_idxset *mappings, pa_alsa_mapping *leader, pa_direction_t direction)
 {
     pa_proplist *props = pa_proplist_new();
     uint32_t idx;
@@ -2445,6 +2492,9 @@ static void pa_alsa_init_proplist_split_pcm(pa_idxset *mappings, pa_alsa_mapping
 	    pa_proplist_update(m->output_proplist, PA_UPDATE_REPLACE, props);
         else
             pa_proplist_update(m->input_proplist, PA_UPDATE_REPLACE, props);
+
+        /* Update HW channel count to match probed one */
+        m->split->hw_channels = leader->split->hw_channels;
     }
 
     pa_proplist_free(props);
@@ -2464,7 +2514,7 @@ static void profile_finalize_probing(pa_alsa_profile *p) {
         if (!m->split)
             pa_alsa_init_proplist_pcm(NULL, m->output_proplist, m->output_pcm);
         else
-            pa_alsa_init_proplist_split_pcm(p->output_mappings, m, PA_DIRECTION_OUTPUT);
+            pa_alsa_init_split_pcm(p->output_mappings, m, PA_DIRECTION_OUTPUT);
 
         pa_alsa_close(&m->output_pcm);
     }
@@ -2479,7 +2529,7 @@ static void profile_finalize_probing(pa_alsa_profile *p) {
         if (!m->split)
             pa_alsa_init_proplist_pcm(NULL, m->input_proplist, m->input_pcm);
         else
-            pa_alsa_init_proplist_split_pcm(p->input_mappings, m, PA_DIRECTION_INPUT);
+            pa_alsa_init_split_pcm(p->input_mappings, m, PA_DIRECTION_INPUT);
 
         pa_alsa_close(&m->input_pcm);
     }
@@ -2521,7 +2571,7 @@ static void ucm_probe_profile_set(pa_alsa_ucm_config *ucm, pa_alsa_profile_set *
         pa_log_info("Set ucm verb to %s", verb_name);
 
         if ((snd_use_case_set(ucm->ucm_mgr, "_verb", verb_name)) < 0) {
-            pa_log("Failed to set verb %s", verb_name);
+            pa_log("Profile '%s': failed to set verb %s", p->name, verb_name);
             p->supported = false;
             continue;
         }
@@ -2536,8 +2586,10 @@ static void ucm_probe_profile_set(pa_alsa_ucm_config *ucm, pa_alsa_profile_set *
             if (m->split && !m->split->leader)
                 continue;
 
-            m->output_pcm = mapping_open_pcm(ucm, m, SND_PCM_STREAM_PLAYBACK);
+            m->output_pcm = mapping_open_pcm(ucm, m, SND_PCM_STREAM_PLAYBACK, false);
             if (!m->output_pcm) {
+                pa_log_info("Profile '%s' mapping '%s': output PCM open failed",
+                            p->name, m->name);
                 p->supported = false;
                 break;
             }
@@ -2554,8 +2606,10 @@ static void ucm_probe_profile_set(pa_alsa_ucm_config *ucm, pa_alsa_profile_set *
                 if (m->split && !m->split->leader)
                     continue;
 
-                m->input_pcm = mapping_open_pcm(ucm, m, SND_PCM_STREAM_CAPTURE);
+                m->input_pcm = mapping_open_pcm(ucm, m, SND_PCM_STREAM_CAPTURE, false);
                 if (!m->input_pcm) {
+                    pa_log_info("Profile '%s' mapping '%s': input PCM open failed",
+                                p->name, m->name);
                     p->supported = false;
                     break;
                 }
@@ -2564,6 +2618,7 @@ static void ucm_probe_profile_set(pa_alsa_ucm_config *ucm, pa_alsa_profile_set *
 
         if (!p->supported) {
             profile_finalize_probing(p);
+            pa_log_info("Profile %s not supported", p->name);
             continue;
         }
 
