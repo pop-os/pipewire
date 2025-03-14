@@ -1406,18 +1406,44 @@ static void hfp_hf_hangup(void *data, enum spa_bt_telephony_error *err, uint8_t 
 	struct rfcomm_call_data *call_data = data;
 	struct rfcomm *rfcomm = call_data->rfcomm;
 	struct impl *backend = rfcomm->backend;
+	struct spa_bt_telephony_call *call, *tcall;
+	bool found_held = false;
+	bool hfp_hf_in_progress = false;
 	char reply[20];
 	bool res;
+
+	spa_list_for_each(call, &rfcomm->telephony_ag->call_list, link) {
+		if (call->state == CALL_STATE_HELD)
+			found_held = true;
+	}
 
 	switch (call_data->call->state) {
 	case CALL_STATE_ACTIVE:
 	case CALL_STATE_DIALING:
 	case CALL_STATE_ALERTING:
 	case CALL_STATE_INCOMING:
-		rfcomm_send_cmd(rfcomm, "AT+CHUP");
+		if (found_held) {
+			if (!rfcomm->chld_supported) {
+				*err = BT_TELEPHONY_ERROR_NOT_SUPPORTED;
+				return;
+			} else if (rfcomm->hfp_hf_in_progress) {
+				*err = BT_TELEPHONY_ERROR_IN_PROGRESS;
+				return;
+			}
+
+			rfcomm_send_cmd(rfcomm, "AT+CHLD=1");
+			hfp_hf_in_progress = true;
+		} else {
+			rfcomm_send_cmd(rfcomm, "AT+CHUP");
+		}
 		break;
 	case CALL_STATE_WAITING:
+		if (rfcomm->hfp_hf_in_progress) {
+			*err = BT_TELEPHONY_ERROR_IN_PROGRESS;
+			return;
+		}
 		rfcomm_send_cmd(rfcomm, "AT+CHLD=0");
+		hfp_hf_in_progress = true;
 		break;
 	default:
 		spa_log_info(backend->log, "Call not incoming, waiting or active: skip hangup");
@@ -1435,6 +1461,24 @@ static void hfp_hf_hangup(void *data, enum spa_bt_telephony_error *err, uint8_t 
 		return;
 	}
 
+	if (hfp_hf_in_progress) {
+		if (call_data->call->state != CALL_STATE_WAITING) {
+			spa_list_for_each_safe(call, tcall, &rfcomm->telephony_ag->call_list, link) {
+				if (call->state == CALL_STATE_ACTIVE) {
+					call->state = CALL_STATE_DISCONNECTED;
+					telephony_call_notify_updated_props(call);
+					telephony_call_destroy(call);
+				}
+			}
+			spa_list_for_each(call, &rfcomm->telephony_ag->call_list, link) {
+				if (call->state == CALL_STATE_HELD) {
+					call->state = CALL_STATE_ACTIVE;
+					telephony_call_notify_updated_props(call);
+				}
+			}
+		}
+		rfcomm->hfp_hf_in_progress = true;
+	}
 	*err = BT_TELEPHONY_ERROR_NONE;
 }
 
@@ -2286,6 +2330,26 @@ static bool rfcomm_hfp_hf(struct rfcomm *rfcomm, char* token)
 				}
 				SPA_FALLTHROUGH;
 			case hfp_hf_chld:
+				rfcomm->slc_configured = true;
+
+				if (!rfcomm->codec_negotiation_supported) {
+					if (rfcomm_new_transport(rfcomm, HFP_AUDIO_CODEC_CVSD) < 0) {
+						// TODO: We should manage the missing transport
+					} else {
+						spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
+					}
+				}
+
+				rfcomm->telephony_ag = telephony_ag_new(backend->telephony, 0);
+				rfcomm->telephony_ag->address = strdup(rfcomm->device->address);
+				telephony_ag_set_callbacks(rfcomm->telephony_ag,
+							&telephony_ag_callbacks, rfcomm);
+				if (rfcomm->transport) {
+					rfcomm->telephony_ag->transport.codec = rfcomm->transport->codec;
+					rfcomm->telephony_ag->transport.state = rfcomm->transport->state;
+				}
+				telephony_ag_register(rfcomm->telephony_ag);
+
 				rfcomm_send_cmd(rfcomm, "AT+CLIP=1");
 				rfcomm->hf_state = hfp_hf_clip;
 				break;
@@ -2312,25 +2376,6 @@ static bool rfcomm_hfp_hf(struct rfcomm *rfcomm, char* token)
 				SPA_FALLTHROUGH;
 			case hfp_hf_nrec:
 				rfcomm->hf_state = hfp_hf_slc1;
-				rfcomm->slc_configured = true;
-
-				if (!rfcomm->codec_negotiation_supported) {
-					if (rfcomm_new_transport(rfcomm, HFP_AUDIO_CODEC_CVSD) < 0) {
-						// TODO: We should manage the missing transport
-					} else {
-						spa_bt_device_connect_profile(rfcomm->device, rfcomm->profile);
-					}
-				}
-
-				rfcomm->telephony_ag = telephony_ag_new(backend->telephony, 0);
-				rfcomm->telephony_ag->address = strdup(rfcomm->device->address);
-				telephony_ag_set_callbacks(rfcomm->telephony_ag,
-							&telephony_ag_callbacks, rfcomm);
-				if (rfcomm->transport) {
-					rfcomm->telephony_ag->transport.codec = rfcomm->transport->codec;
-					rfcomm->telephony_ag->transport.state = rfcomm->transport->state;
-				}
-				telephony_ag_register(rfcomm->telephony_ag);
 
 				if (rfcomm->hfp_hf_clcc) {
 					rfcomm_send_cmd(rfcomm, "AT+CLCC");
@@ -3318,6 +3363,7 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	} else if (profile == SPA_BT_PROFILE_HFP_AG) {
 		/* Start SLC connection */
 		unsigned int hf_features = SPA_BT_HFP_HF_FEATURE_CLIP | SPA_BT_HFP_HF_FEATURE_3WAY |
+									SPA_BT_HFP_HF_FEATURE_ECNR |
 									SPA_BT_HFP_HF_FEATURE_ENHANCED_CALL_STATUS |
 									SPA_BT_HFP_HF_FEATURE_ESCO_S4;
 		bool has_msbc = device_supports_codec(backend, rfcomm->device, HFP_AUDIO_CODEC_MSBC);
