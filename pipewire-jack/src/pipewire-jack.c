@@ -1538,12 +1538,35 @@ static inline jack_midi_data_t* midi_event_reserve(void *port_buffer,
 			res = ev->inline_data;
 		} else {
 			mb->write_pos += data_size;
-			ev->byte_offset = mb->buffer_size - 1 - mb->write_pos;
+			ev->byte_offset = mb->buffer_size - mb->write_pos;
 			res = SPA_PTROFF(mb, ev->byte_offset, uint8_t);
 		}
 		mb->event_count += 1;
 	}
 	return res;
+}
+
+static inline int midi_event_append(void *port_buffer, const jack_midi_data_t *data, size_t data_size)
+{
+	struct midi_buffer *mb = port_buffer;
+	struct midi_event *events = SPA_PTROFF(mb, sizeof(*mb), struct midi_event);
+	struct midi_event *ev;
+	size_t old_size;
+	uint8_t *old, *buf;
+
+	ev = &events[--mb->event_count];
+	mb->write_pos -= ev->size;
+	old_size = ev->size;
+	if (old_size <= MIDI_INLINE_MAX)
+		old = ev->inline_data;
+	else
+		old = SPA_PTROFF(mb, ev->byte_offset, uint8_t);
+	buf = midi_event_reserve(port_buffer, ev->time, old_size + data_size);
+	if (SPA_UNLIKELY(buf == NULL))
+		return -ENOBUFS;
+	memmove(buf, old, old_size);
+	memcpy(buf+old_size, data, data_size);
+	return 0;
 }
 
 static inline int midi_event_write(void *port_buffer,
@@ -1552,8 +1575,8 @@ static inline int midi_event_write(void *port_buffer,
                       size_t data_size, bool fix)
 {
 	jack_midi_data_t *retbuf = midi_event_reserve (port_buffer, time, data_size);
-        if (SPA_UNLIKELY(retbuf == NULL))
-                return -ENOBUFS;
+	if (SPA_UNLIKELY(retbuf == NULL))
+		return -ENOBUFS;
 	memcpy (retbuf, data, data_size);
 	if (fix)
 		fix_midi_event(retbuf, data_size);
@@ -1566,6 +1589,7 @@ static void convert_to_event(struct spa_pod_sequence **seq, uint32_t n_seq, void
 	uint64_t state = 0;
 	uint32_t i;
 	int res = 0;
+	bool in_sysex = false;
 
 	for (i = 0; i < n_seq; i++)
 		c[i] = spa_pod_control_first(&seq[i]->body);
@@ -1620,17 +1644,30 @@ static void convert_to_event(struct spa_pod_sequence **seq, uint32_t n_seq, void
 			void *data = SPA_POD_BODY(&next->value);
 			size_t size = SPA_POD_BODY_SIZE(&next->value);
 			uint8_t ev[32];
+			bool was_sysex = in_sysex;
 
 			if (type == TYPE_ID_MIDI) {
 				int ev_size = spa_ump_to_midi(data, size, ev, sizeof(ev));
 				if (ev_size <= 0)
 					break;
+
 				size = ev_size;
 				data = ev;
+
+				if (!in_sysex && ev[0] == 0xf0)
+					in_sysex = true;
+				if (in_sysex && ev[ev_size-1] == 0xf7)
+					in_sysex = false;
+
 			} else if (type != TYPE_ID_UMP)
 				break;
 
-			if ((res = midi_event_write(midi, next->offset, data, size, fix)) < 0)
+			if (was_sysex)
+				res = midi_event_append(midi, data, size);
+			else
+				res = midi_event_write(midi, next->offset, data, size, fix);
+
+			if (res < 0)
 				pw_log_warn("midi %p: can't write event: %s", midi,
 						spa_strerror(res));
 		}
@@ -5754,8 +5791,8 @@ static void *get_buffer_input_midi(struct port *p, jack_nframes_t frames)
 	convert_to_event(seq, n_seq, mb, p->client->fix_midi_events, p->object->port.type_id);
 	memcpy(ptr, mb, sizeof(struct midi_buffer) + (mb->event_count
                               * sizeof(struct midi_event)));
-	if (mb->write_pos) {
-		size_t offs = mb->buffer_size - 1 - mb->write_pos;
+	if (mb->write_pos > 0) {
+		size_t offs = mb->buffer_size - mb->write_pos;
 		memcpy(SPA_PTROFF(ptr, offs, void), SPA_PTROFF(mb, offs, void), mb->write_pos);
 	}
 	return ptr;
