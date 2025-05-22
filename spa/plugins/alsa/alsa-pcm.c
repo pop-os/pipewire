@@ -162,6 +162,11 @@ static int alsa_set_param(struct state *state, const char *k, const char *s)
 	int fmt_change = 0;
 	if (spa_streq(k, SPA_KEY_AUDIO_CHANNELS)) {
 		state->default_channels = atoi(s);
+		if (state->default_channels > SPA_AUDIO_MAX_CHANNELS) {
+			spa_log_warn(state->log, "%p: %s: %s > %d, clamping",
+					state, k, s, SPA_AUDIO_MAX_CHANNELS);
+			state->default_channels = SPA_AUDIO_MAX_CHANNELS;
+		}
 		fmt_change++;
 	} else if (spa_streq(k, SPA_KEY_AUDIO_RATE)) {
 		state->default_rate = atoi(s);
@@ -1563,14 +1568,17 @@ static int add_channels(struct state *state, bool all, uint32_t index, uint32_t 
 	spa_log_debug(state->log, "channels (%d %d) default:%d all:%d",
 			min, max, state->default_channels, all);
 
-	if (state->default_channels != 0 && !all) {
-		if (min < state->default_channels)
-			min = state->default_channels;
-		if (max > state->default_channels)
-			max = state->default_channels;
-	}
 	min = SPA_MIN(min, SPA_AUDIO_MAX_CHANNELS);
 	max = SPA_MIN(max, SPA_AUDIO_MAX_CHANNELS);
+
+	if (state->default_channels != 0 && !all) {
+		if (min > state->default_channels ||
+		    max < state->default_channels)
+			spa_log_warn(state->log, "given audio.channels %d out of range:%d-%d",
+					state->default_channels, min, max);
+		else
+			min = max = state->default_channels;
+	}
 
 	spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_channels, 0);
 
@@ -1842,10 +1850,12 @@ static int enum_iec958_formats(struct state *state, uint32_t index, uint32_t *ne
 	spa_log_debug(state->log, "rate (%d %d)", rmin, rmax);
 
 	if (state->default_rate != 0) {
-		if (rmin < state->default_rate)
-			rmin = state->default_rate;
-		if (rmax > state->default_rate)
-			rmax = state->default_rate;
+		if (rmin > state->default_rate ||
+		    rmax < state->default_rate)
+			spa_log_warn(state->log, "given audio.rate %d out of range:%d-%d",
+					state->default_rate, rmin, rmax);
+		else
+			rmin = rmax = state->default_rate;
 	}
 
 	spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_iec958Codec, 0);
