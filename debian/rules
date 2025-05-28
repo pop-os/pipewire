@@ -36,20 +36,15 @@ else
 LIBCAMERA=enabled
 endif
 
-# lilv and some of its dependencies are in universe
+# enable snap support in Ubuntu, Debian's kernel doesn't enable the option
+# for fine grained unix mediation at the moment
 ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
-LV2=disabled
-LIBMYSOFA=disabled
-LIBFFADO=disabled
 ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
 SNAP=enabled
 else
 SNAP=disabled
 endif
 else
-LV2=enabled
-LIBMYSOFA=enabled
-LIBFFADO=enabled
 SNAP=disabled
 endif
 
@@ -74,12 +69,12 @@ override_dh_auto_configure:
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
 		-Dbluez5-codec-opus=enabled \
 		-Dlibcamera=$(LIBCAMERA) \
-		-Dlibffado=$(LIBFFADO) \
-		-Dlibmysofa=$(LIBMYSOFA) \
+		-Dlibffado=enabled \
+		-Dlibmysofa=enabled \
 		-Ddocs=$(DOCS) \
 		-Dffmpeg=disabled \
 		-Dinstalled_tests=$(INSTTEST) \
-		-Dlv2=$(LV2) \
+		-Dlv2=enabled \
 		-Dman=$(MAN) \
 		-Droc=enabled \
 		-Dsdl2=$(SDL2) \
