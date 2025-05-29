@@ -38,14 +38,11 @@ endif
 
 # enable snap support in Ubuntu, Debian's kernel doesn't enable the option
 # for fine grained unix mediation at the moment
+SNAP=disabled
 ifeq (yes,$(shell dpkg-vendor --derives-from Ubuntu && echo yes))
 ifneq (,$(filter amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x,$(DEB_HOST_ARCH)))
 SNAP=enabled
-else
-SNAP=disabled
 endif
-else
-SNAP=disabled
 endif
 
 ifneq (,$(filter hurd-amd64 hurd-i386,$(DEB_HOST_ARCH)))

@@ -2,6 +2,7 @@ pipewire (1.4.4-0) UNRELEASED; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release
+  * debian/rules: Simplify the logic to enable SNAP support
 
   [ Sebastien Bacher ]
   * debian/rules: remove the logic to disable plugins on Ubuntu
