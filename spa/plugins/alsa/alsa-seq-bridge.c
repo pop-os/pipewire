@@ -275,7 +275,7 @@ static void emit_port_info(struct seq_state *this, struct seq_port *port, bool f
 		snprintf(alias, sizeof(alias), "%s:%s", client_name, port_name);
 		clean_name(alias);
 
-		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "32 bit raw UMP");
+		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_FORMAT_DSP, "8 bit raw midi");
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_OBJECT_PATH, path);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_NAME, name);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_PORT_ALIAS, alias);
@@ -529,8 +529,7 @@ impl_node_port_enum_params(void *object, int seq,
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
-			SPA_FORMAT_CONTROL_types,  SPA_POD_CHOICE_FLAGS_Int(1u<<SPA_CONTROL_UMP));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
 		break;
 
 	case SPA_PARAM_Format:
@@ -541,8 +540,7 @@ impl_node_port_enum_params(void *object, int seq,
 		param = spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
-			SPA_FORMAT_CONTROL_types,  SPA_POD_Int(1u<<SPA_CONTROL_UMP));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
 		break;
 
 	case SPA_PARAM_Buffers:
@@ -635,7 +633,7 @@ static int port_set_format(void *object, struct seq_port *port,
 		port->have_format = false;
 	} else {
 		struct spa_audio_info info = { 0 };
-		uint32_t types;
+		uint32_t types = 0;
 
 		if ((err = spa_format_parse(format, &info.media_type, &info.media_subtype)) < 0)
 			return err;
@@ -646,13 +644,12 @@ static int port_set_format(void *object, struct seq_port *port,
 
 		if ((err = spa_pod_parse_object(format,
 				SPA_TYPE_OBJECT_Format, NULL,
-				SPA_FORMAT_CONTROL_types,  SPA_POD_Int(&types))) < 0)
+				SPA_FORMAT_CONTROL_types,  SPA_POD_OPT_Int(&types))) < 0)
 			return err;
-		if (types != 1u << SPA_CONTROL_UMP)
-			return -EINVAL;
 
 		port->current_format = info;
 		port->have_format = true;
+		port->control_types = types;
 	}
 
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_RATE;
