@@ -2549,11 +2549,28 @@ static int param_enum_format(struct client *c, struct port *p,
 	case TYPE_ID_UMP:
 	case TYPE_ID_OSC:
 	case TYPE_ID_MIDI:
-		*param = spa_pod_builder_add_object(b,
-			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+	{
+		struct spa_pod_frame f;
+		int32_t types = 0;
+
+		spa_pod_builder_push_object(b, &f,
+			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+		spa_pod_builder_add(b,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_application),
-			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control));
+			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+			0);
+		if (p->object->port.type_id == TYPE_ID_UMP)
+			types |= 1u<<SPA_CONTROL_UMP;
+		if (p->object->port.type_id == TYPE_ID_OSC)
+			types |= 1u<<SPA_CONTROL_OSC;
+		if (types != 0)
+			spa_pod_builder_add(b,
+				SPA_FORMAT_CONTROL_types,  SPA_POD_CHOICE_FLAGS_Int(types),
+				0);
+
+		*param = spa_pod_builder_pop(b, &f);
 		break;
+	}
 	case TYPE_ID_VIDEO:
 		*param = spa_pod_builder_add_object(b,
 			SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
@@ -3461,24 +3478,6 @@ static const char* type_to_string(jack_port_type_id_t type_id)
 		return JACK_DEFAULT_MIDI_TYPE;
 	case TYPE_ID_OTHER:
 		return "other";
-	default:
-		return NULL;
-	}
-}
-
-static const char* type_to_format_dsp(jack_port_type_id_t type_id)
-{
-	switch(type_id) {
-	case TYPE_ID_AUDIO:
-		return JACK_DEFAULT_AUDIO_TYPE;
-	case TYPE_ID_VIDEO:
-		return JACK_DEFAULT_VIDEO_TYPE;
-	case TYPE_ID_OSC:
-		return JACK_DEFAULT_OSC_TYPE;
-	case TYPE_ID_MIDI:
-		return JACK_DEFAULT_MIDI_TYPE;
-	case TYPE_ID_UMP:
-		return JACK_DEFAULT_UMP_TYPE;
 	default:
 		return NULL;
 	}
@@ -5544,7 +5543,7 @@ jack_port_t * jack_port_register (jack_client_t *client,
 
 	spa_list_init(&p->mix);
 
-	pw_properties_set(p->props, PW_KEY_FORMAT_DSP, type_to_format_dsp(type_id));
+	pw_properties_set(p->props, PW_KEY_FORMAT_DSP, type_to_string(type_id));
 	pw_properties_set(p->props, PW_KEY_PORT_NAME, port_name);
 	if (flags > 0x1f) {
 		pw_properties_setf(p->props, PW_KEY_PORT_EXTRA,
