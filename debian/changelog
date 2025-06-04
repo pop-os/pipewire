@@ -1,8 +1,8 @@
-pipewire (1.4.5-0) UNRELEASED; urgency=medium
+pipewire (1.4.5-1) experimental; urgency=medium
 
   * New upstream release
 
- -- Dylan Aïssi <daissi@debian.org>  Wed, 04 Jun 2025 14:25:53 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 04 Jun 2025 14:53:43 +0200
 
 pipewire (1.4.4-1) experimental; urgency=medium
 
