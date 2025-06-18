@@ -82,7 +82,7 @@ override_dh_auto_configure:
 		-Dlv2=enabled \
 		-Dman=$(MAN) \
 		-Donnxruntime=$(ONNXRUNTIME) \
-		-Droc=enabled \
+		-Droc=disabled \
 		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
 		-Dsnap=$(SNAP) \
