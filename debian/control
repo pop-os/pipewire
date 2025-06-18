@@ -15,7 +15,7 @@ Build-Depends: debhelper-compat (= 13),
                libcamera-dev (>= 0.2.0) [!m68k !hurd-any],
                libcanberra-dev,
                libdbus-1-dev,
-               libebur128-dev,
+               libebur128-dev [!i386],
                libffado-dev,
                libfftw3-dev,
                libfreeaptx-dev,
@@ -59,7 +59,7 @@ Package: libpipewire-0.3-0t64
 Provides: ${t64:Provides}
 Replaces: libpipewire-0.3-0
 Breaks: libpipewire-0.3-0 (<< ${source:Version})
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -94,7 +94,7 @@ Description: libraries for the PipeWire multimedia server - common files
 
 Package: libpipewire-0.3-dev
 Section: libdevel
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: libpipewire-0.3-0t64 (= ${binary:Version}),
          libspa-0.2-dev (= ${binary:Version}),
@@ -112,7 +112,7 @@ Description: libraries for the PipeWire multimedia server - development
  This package contains the development files.
 
 Package: libpipewire-0.3-modules
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
@@ -132,7 +132,7 @@ Description: libraries for the PipeWire multimedia server - modules
  depend on the pipewire package instead.
 
 Package: libpipewire-0.3-modules-x11
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: libcanberra-pulse,
          ${misc:Depends},
@@ -152,7 +152,7 @@ Description: libraries for the PipeWire multimedia server - X11 modules
 
 Package: libspa-0.2-dev
 Section: libdevel
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: ${misc:Depends}
 Suggests: pipewire-doc
@@ -168,7 +168,7 @@ Description: libraries for the PipeWire multimedia server Simple Plugin API - de
  This package contains the development files for the Simple Plugin API.
 
 Package: libspa-0.2-modules
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
@@ -209,7 +209,7 @@ Description: libraries for the PipeWire multimedia server - documentation
 
 Package: pipewire
 Section: video
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: adduser,
          libpipewire-0.3-modules (= ${binary:Version}),
@@ -231,7 +231,7 @@ Description: audio and video processing engine multimedia server
 
 Package: pipewire-bin
 Section: video
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: foreign
 Depends: libpipewire-0.3-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -256,7 +256,7 @@ Description: PipeWire multimedia server - programs
 
 Package: pipewire-pulse
 Section: sound
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: foreign
 Replaces: pipewire-bin (<< 0.3.27-2)
 Breaks: pipewire-bin (<< 0.3.27-2)
@@ -280,7 +280,7 @@ Description: PipeWire PulseAudio daemon
 
 Package: pipewire-alsa
 Section: sound
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Replaces: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
@@ -301,7 +301,7 @@ Description: PipeWire ALSA plugin, for ALSA applications to output via PipeWire
 
 Package: pipewire-jack
 Section: sound
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Replaces: pipewire-audio-client-libraries (<< 0.3.54-1~)
 Breaks: pipewire-audio-client-libraries (<< 0.3.54-1~)
@@ -321,7 +321,7 @@ Description: PipeWire JACK plugin, for JACK applications to output via PipeWire
 
 Package: pipewire-v4l2
 Section: video
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Replaces: libpipewire-0.3-modules (<< 0.3.54-1),
           pipewire-bin (<< 0.3.54-1)
@@ -343,7 +343,7 @@ Description: PipeWire V4L2 plugin
 
 Package: pipewire-tests
 Build-Profiles: <!noinsttest>
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
@@ -360,7 +360,7 @@ Description: PipeWire multimedia server - tests and examples
  This package contains automated and manual tests and example programs.
 
 Package: gstreamer1.0-pipewire
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: pipewire (= ${binary:Version}),
          ${misc:Depends},
@@ -378,7 +378,7 @@ Description: GStreamer 1.0 plugin for the PipeWire multimedia server
  server available as GStreamer sources and sinks.
 
 Package: libspa-0.2-bluetooth
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
@@ -396,7 +396,7 @@ Description: libraries for the PipeWire multimedia server - bluetooth plugins
  speakers and headsets available to the PipeWire server.
 
 Package: libspa-0.2-jack
-Architecture: any
+Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: libspa-0.2-modules (= ${binary:Version}),
          ${misc:Depends},
