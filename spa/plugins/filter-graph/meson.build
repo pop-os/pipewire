@@ -105,7 +105,7 @@ spa_filter_graph_plugin_lv2 = shared_library('spa-filter-graph-plugin-lv2',
 )
 endif
 
-if ebur128_lib.found()
+if get_option('ebur128').enabled()
 spa_filter_graph_plugin_ebur128 = shared_library('spa-filter-graph-plugin-ebur128',
   [ 'plugin_ebur128.c' ],
   include_directories : [configinc],
