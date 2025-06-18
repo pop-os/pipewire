@@ -24,6 +24,13 @@ INSTTEST=disabled
 SDL2=disabled
 endif
 
+# Disable ebur128 on i386
+ifneq (,$(filter i386,$(DEB_HOST_ARCH)))
+EBUR128=disabled
+else
+EBUR128=enabled
+endif
+
 ifneq (,$(filter s390x hppa m68k powerpc ppc64 sparc64,$(DEB_HOST_ARCH)))
 BLUEZ5_CODEC_LDAC=disabled
 else
@@ -92,6 +99,7 @@ override_dh_auto_configure:
 		-Dudevrulesdir=$(UDEVRULESDIR) \
 		-Dvideotestsrc=enabled \
 		-Dvulkan=disabled \
+		-Debur128=$(EBUR128) \
 		$(NULL)
 	install -d debian/ld.so.conf.d
 	echo "/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3/jack/" > "debian/ld.so.conf.d/pipewire-jack-$(DEB_HOST_MULTIARCH).conf"
