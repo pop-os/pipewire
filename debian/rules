@@ -127,3 +127,6 @@ override_dh_shlibdeps-arch:
 		--remaining-packages \
 		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
 		$(NULL)
+
+override_dh_builddeb:
+	dh_builddeb -- -Zzstd -z3
