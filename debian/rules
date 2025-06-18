@@ -81,7 +81,7 @@ override_dh_auto_configure:
 		-Dinstalled_tests=$(INSTTEST) \
 		-Dlv2=$(LV2) \
 		-Dman=$(MAN) \
-		-Droc=enabled \
+		-Droc=disabled \
 		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
 		-Dsnap=$(SNAP) \
