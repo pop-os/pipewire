@@ -2574,6 +2574,7 @@ static int do_prepare(struct state *state)
 	state->alsa_sync = true;
 	state->alsa_sync_warning = false;
 	state->alsa_started = false;
+	spa_dll_init(&state->dll);
 
 	return 0;
 }
@@ -2606,6 +2607,7 @@ static inline int do_start(struct state *state)
 }
 
 static inline int check_position_config(struct state *state, bool starting);
+static void update_sources(struct state *state, bool active);
 
 static int alsa_recover(struct state *state)
 {
@@ -2685,6 +2687,8 @@ recover:
 		if (follower != driver && follower->linked)
 			do_start(follower);
 	}
+
+	update_sources(state, true);
 	return 0;
 }
 
@@ -2797,6 +2801,12 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 	double err, corr, avg;
 	int32_t diff;
 
+	if (SPA_UNLIKELY(state->dll.bw == 0.0)) {
+		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold, state->rate);
+		state->next_time = current_time;
+		state->base_time = current_time;
+	}
+
 	if (state->disable_tsched && !follower) {
 		err = (int64_t)(current_time - state->next_time);
 		err = err / 1e9 * state->rate;
@@ -2807,11 +2817,6 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 			err = target - delay;
 	}
 
-	if (SPA_UNLIKELY(state->dll.bw == 0.0)) {
-		spa_dll_set_bw(&state->dll, SPA_DLL_BW_MAX, state->threshold, state->rate);
-		state->next_time = current_time;
-		state->base_time = current_time;
-	}
 	diff = (int32_t) (state->last_threshold - state->threshold);
 
 	if (SPA_UNLIKELY(diff != 0)) {
@@ -2888,9 +2893,9 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 		state->clock->next_nsec = state->next_time;
 	}
 
-	spa_log_trace_fp(state->log, "%p: follower:%d %"PRIu64" %f %ld %ld %f %f %u",
-			state, follower, current_time, corr, delay, target, err, state->threshold * corr,
-			state->threshold);
+	spa_log_trace_fp(state->log, "%p: follower:%d %"PRIu64" %"PRIu64" %f %ld %ld %f %f %u",
+			state, follower, current_time, state->next_time, corr, delay, target,
+			err, state->threshold * corr, state->threshold);
 
 	return 0;
 }
@@ -3000,28 +3005,30 @@ static int alsa_write_sync(struct state *state, uint64_t current_time)
 	if (SPA_UNLIKELY((res = update_time(state, current_time, delay, target, following)) < 0))
 		return res;
 
-	if (following && state->alsa_started && !state->linked) {
+	if (following && state->alsa_started) {
 		if (SPA_UNLIKELY(state->alsa_sync)) {
 			enum spa_log_level lev;
 
-			if (SPA_UNLIKELY(state->alsa_sync_warning))
-				lev = SPA_LOG_LEVEL_WARN;
-			else
-				lev = SPA_LOG_LEVEL_INFO;
+			if (!state->linked) {
+				if (SPA_UNLIKELY(state->alsa_sync_warning))
+					lev = SPA_LOG_LEVEL_WARN;
+				else
+					lev = SPA_LOG_LEVEL_INFO;
 
-			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
-				lev = SPA_LOG_LEVEL_DEBUG;
+				if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
+					lev = SPA_LOG_LEVEL_DEBUG;
 
-			spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
-					"target:%ld thr:%u, resync (%d suppressed)",
-					state->name, avail, delay,
-					target, state->threshold, suppressed);
+				spa_log_lev(state->log, lev, "%s: follower avail:%lu delay:%ld "
+						"target:%ld thr:%u, resync (%d suppressed)",
+						state->name, avail, delay,
+						target, state->threshold, suppressed);
 
-			if (avail > target)
-				snd_pcm_rewind(state->hndl, avail - target);
-			else if (avail < target)
-				spa_alsa_silence(state, target - avail);
-			avail = target;
+				if (avail > target)
+					snd_pcm_rewind(state->hndl, avail - target);
+				else if (avail < target)
+					spa_alsa_silence(state, target - avail);
+				avail = target;
+			}
 			spa_dll_init(&state->dll);
 			state->alsa_sync = false;
 		} else
@@ -3266,27 +3273,28 @@ static int alsa_read_sync(struct state *state, uint64_t current_time)
 		return res;
 
 	max_read = state->buffer_frames;
-	if (following && !state->linked) {
+	if (following) {
 		if (state->alsa_sync) {
-			enum spa_log_level lev;
+			if (!state->linked) {
+				enum spa_log_level lev;
+				if (SPA_UNLIKELY(state->alsa_sync_warning))
+					lev = SPA_LOG_LEVEL_WARN;
+				else
+					lev = SPA_LOG_LEVEL_INFO;
 
-			if (SPA_UNLIKELY(state->alsa_sync_warning))
-				lev = SPA_LOG_LEVEL_WARN;
-			else
-				lev = SPA_LOG_LEVEL_INFO;
+				if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
+					lev = SPA_LOG_LEVEL_DEBUG;
 
-			if ((suppressed = spa_ratelimit_test(&state->rate_limit, current_time)) < 0)
-				lev = SPA_LOG_LEVEL_DEBUG;
+				spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u "
+						"resample:%d, resync (%d suppressed)", state->name, delay,
+						target, state->threshold, state->resample, suppressed);
 
-			spa_log_lev(state->log, lev, "%s: follower delay:%ld target:%ld thr:%u "
-					"resample:%d, resync (%d suppressed)", state->name, delay,
-					target, state->threshold, state->resample, suppressed);
-
-			if (avail < target)
-				max_read = target - avail;
-			else if (avail > target) {
-				snd_pcm_forward(state->hndl, avail - target);
-				avail = target;
+				if (avail < target)
+					max_read = target - avail;
+				else if (avail > target) {
+					snd_pcm_forward(state->hndl, avail - target);
+					avail = target;
+				}
 			}
 			state->alsa_sync = false;
 			spa_dll_init(&state->dll);
@@ -3409,11 +3417,13 @@ static int playback_ready(struct state *state)
 {
 	struct spa_io_buffers *io = state->io;
 
-	spa_log_trace_fp(state->log, "%p: %d", state, io->status);
+	spa_log_trace_fp(state->log, "%p: %d", state, io ? io->status : 0);
 
 	update_sources(state, false);
 
-	io->status = SPA_STATUS_NEED_DATA;
+	if (io != NULL)
+		io->status = SPA_STATUS_NEED_DATA;
+
 	return spa_node_call_ready(&state->callbacks, SPA_STATUS_NEED_DATA);
 }
 

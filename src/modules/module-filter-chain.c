@@ -844,6 +844,7 @@ struct impl {
 	struct spa_hook graph_listener;
 	uint32_t n_inputs;
 	uint32_t n_outputs;
+	bool graph_active;
 };
 
 static void capture_destroy(void *d)
@@ -863,6 +864,8 @@ static void capture_process(void *d)
 			struct pw_buffer *t;
 			if ((t = pw_stream_dequeue_buffer(impl->capture)) == NULL)
 				break;
+			/* playback part is not ready, consume, discard and recycle
+			 * the capture buffers */
 			pw_stream_queue_buffer(impl->capture, t);
 		}
 	}
@@ -929,13 +932,69 @@ static void playback_process(void *d)
 	pw_log_trace_fp("%p: stride:%d size:%d requested:%"PRIu64" (%"PRIu64")", impl,
 			stride, data_size, out->requested, out->requested * stride);
 
-	spa_filter_graph_process(impl->graph, cin, cout, data_size / sizeof(float));
+	if (impl->graph_active)
+		spa_filter_graph_process(impl->graph, cin, cout, data_size / sizeof(float));
 
 done:
 	if (in != NULL)
 		pw_stream_queue_buffer(impl->capture, in);
 	if (out != NULL)
 		pw_stream_queue_buffer(impl->playback, out);
+}
+
+static int do_deactivate(struct spa_loop *loop, bool async, uint32_t seq,
+                const void *data, size_t size, void *user_data)
+{
+	struct impl *impl = user_data;
+	impl->graph_active = false;
+	return 0;
+}
+
+static int activate_graph(struct impl *impl)
+{
+	char rate[64];
+	int res;
+
+	if (impl->graph_active)
+		return 0;
+
+	snprintf(rate, sizeof(rate), "%lu", impl->rate);
+	res = spa_filter_graph_activate(impl->graph, &SPA_DICT_ITEMS(
+				SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, rate)));
+
+	if (res >= 0)
+		impl->graph_active = true;
+
+	return res;
+}
+
+static int deactivate_graph(struct impl *impl)
+{
+	struct pw_loop *data_loop;
+
+	if (!impl->graph_active)
+		return 0;
+
+	data_loop = pw_stream_get_data_loop(impl->playback);
+	pw_loop_invoke(data_loop, do_deactivate, 0, NULL, 0, true, impl);
+
+	return spa_filter_graph_deactivate(impl->graph);
+}
+
+static int reset_graph(struct impl *impl)
+{
+	struct pw_loop *data_loop;
+	int res;
+	bool old_active = impl->graph_active;
+
+	data_loop = pw_stream_get_data_loop(impl->playback);
+	pw_loop_invoke(data_loop, do_deactivate, 0, NULL, 0, true, impl);
+
+	res = spa_filter_graph_reset(impl->graph);
+
+	impl->graph_active = old_active;
+
+	return res;
 }
 
 static void param_latency_changed(struct impl *impl, const struct spa_pod *param)
@@ -976,14 +1035,10 @@ static void capture_state_changed(void *data, enum pw_stream_state old,
 		enum pw_stream_state state, const char *error)
 {
 	struct impl *impl = data;
-	struct spa_filter_graph *graph = impl->graph;
-	int res;
 
 	switch (state) {
 	case PW_STREAM_STATE_PAUSED:
-		pw_stream_flush(impl->playback, false);
 		pw_stream_flush(impl->capture, false);
-		spa_filter_graph_reset(graph);
 		break;
 	case PW_STREAM_STATE_UNCONNECTED:
 		pw_log_info("module %p: unconnected", impl);
@@ -993,34 +1048,10 @@ static void capture_state_changed(void *data, enum pw_stream_state old,
 		pw_log_info("module %p: error: %s", impl, error);
 		break;
 	case PW_STREAM_STATE_STREAMING:
-	{
-		uint32_t target = impl->info.rate;
-		if (target == 0)
-			target = impl->position ?
-				impl->position->clock.target_rate.denom : DEFAULT_RATE;
-		if (target == 0) {
-			res = -EINVAL;
-			goto error;
-		}
-		if (impl->rate != target) {
-			char rate[64];
-			impl->rate = target;
-			snprintf(rate, sizeof(rate), "%lu", impl->rate);
-			spa_filter_graph_deactivate(graph);
-			if ((res = spa_filter_graph_activate(graph,
-					&SPA_DICT_ITEMS(
-						SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, rate)))) < 0)
-				goto error;
-		}
-		break;
-	}
 	default:
 		break;
 	}
 	return;
-error:
-	pw_stream_set_error(impl->capture, res, "can't start graph: %s",
-			spa_strerror(res));
 }
 
 static void io_changed(void *data, uint32_t id, void *area, uint32_t size)
@@ -1039,7 +1070,6 @@ static void param_changed(void *data, uint32_t id, const struct spa_pod *param,
 		bool capture)
 {
 	struct impl *impl = data;
-	struct spa_filter_graph *graph = impl->graph;
 	int res;
 
 	switch (id) {
@@ -1049,8 +1079,8 @@ static void param_changed(void *data, uint32_t id, const struct spa_pod *param,
 		spa_zero(info);
 		if (param == NULL) {
 			pw_log_info("module %p: filter deactivate", impl);
-			if (capture)
-				spa_filter_graph_deactivate(graph);
+			if (!capture)
+				deactivate_graph(impl);
 			impl->rate = 0;
 		} else {
 			if ((res = spa_format_audio_raw_parse(param, &info)) < 0)
@@ -1093,6 +1123,51 @@ static const struct pw_stream_events in_stream_events = {
 	.param_changed = capture_param_changed
 };
 
+static void playback_state_changed(void *data, enum pw_stream_state old,
+		enum pw_stream_state state, const char *error)
+{
+	struct impl *impl = data;
+	int res;
+
+	switch (state) {
+	case PW_STREAM_STATE_PAUSED:
+		pw_stream_flush(impl->playback, false);
+		reset_graph(impl);
+		break;
+	case PW_STREAM_STATE_UNCONNECTED:
+		pw_log_info("module %p: unconnected", impl);
+		pw_impl_module_schedule_destroy(impl->module);
+		break;
+	case PW_STREAM_STATE_ERROR:
+		pw_log_info("module %p: error: %s", impl, error);
+		break;
+	case PW_STREAM_STATE_STREAMING:
+	{
+		uint32_t target = impl->info.rate;
+		if (target == 0)
+			target = impl->position ?
+				impl->position->clock.target_rate.denom : DEFAULT_RATE;
+		if (target == 0) {
+			res = -EINVAL;
+			goto error;
+		}
+		if (impl->rate != target) {
+			impl->rate = target;
+			deactivate_graph(impl);
+		}
+		if ((res = activate_graph(impl)) < 0)
+			goto error;
+		break;
+	}
+	default:
+		break;
+	}
+	return;
+error:
+	pw_stream_set_error(impl->capture, res, "can't start graph: %s",
+			spa_strerror(res));
+}
+
 static void playback_param_changed(void *data, uint32_t id, const struct spa_pod *param)
 {
 	param_changed(data, id, param, false);
@@ -1110,6 +1185,7 @@ static const struct pw_stream_events out_stream_events = {
 	.destroy = playback_destroy,
 	.process = playback_process,
 	.io_changed = io_changed,
+	.state_changed = playback_state_changed,
 	.param_changed = playback_param_changed,
 };
 
