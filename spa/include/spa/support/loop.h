@@ -121,6 +121,9 @@ struct spa_loop_methods {
 	 * \param block If \true, do not return until func has been called. Otherwise,
 	 *              returns immediately. Passing \true does not risk a deadlock because
 	 *              the data thread is never allowed to wait on any other thread.
+	 *              It the loop requires some locking, it must be acquired before
+	 *              calling this function because a blocking invoke will release
+	 *              the lock while blocking.
 	 * \param user_data An opaque pointer passed to func.
 	 * \return `-EPIPE` if the internal ring buffer filled up,
 	 *         if block is \false, 0 if seq was SPA_ID_INVALID or
