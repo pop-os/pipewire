@@ -230,6 +230,26 @@ Description: audio and video processing engine multimedia server
  architecture, and provides the systemd user service necessary to run
  pipewire on-demand.
 
+Package: pipewire-system-services
+Architecture: all
+Depends: pipewire,
+         pipewire-pulse,
+         wireplumber-system-services,
+         ${misc:Depends},
+         ${shlibs:Depends}
+Description: audio and video processing engine multimedia server (system services)
+ PipeWire is a server and user space API to deal with multimedia
+ pipelines. This includes:
+ .
+  - Making available sources of audio and video (such as from a capture devices
+    or application provided streams) and multiplexing this with clients.
+  - Accessing sources of audio and video for consumption.
+  - Generating graphs for audio and video processing.
+ .
+ This package contains the systemd system services. NOTE: This is NOT the
+ recommended way to use PipeWire, but these services are provided for specific
+ use cases like embedded and accessibility.
+
 Package: pipewire-bin
 Section: video
 Architecture: any

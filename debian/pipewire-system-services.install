@@ -1,0 +1,5 @@
+usr/lib/systemd/system/pipewire-manager.socket
+usr/lib/systemd/system/pipewire-pulse.service
+usr/lib/systemd/system/pipewire-pulse.socket
+usr/lib/systemd/system/pipewire.service
+usr/lib/systemd/system/pipewire.socket

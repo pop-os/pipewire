@@ -77,6 +77,7 @@ override_dh_auto_configure:
 		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
 		-Dsnap=$(SNAP) \
+		-Dsystemd-system-service=enabled \
 		-Dtest=enabled \
 		-Dudevrulesdir=$(UDEVRULESDIR) \
 		-Dvideotestsrc=enabled \
@@ -119,3 +120,13 @@ override_dh_shlibdeps-arch:
 		--remaining-packages \
 		-l/usr/lib/$(DEB_HOST_MULTIARCH)/pipewire-0.3 \
 		$(NULL)
+
+override_dh_installsystemd:
+	# The recommanded way to install pipewire is using user services, but
+	# we install system services anyway for specific use cases (like embedded
+	# and accessibility) without enabling/starting them to avoid clashes.
+	dh_installsystemd -ppipewire-system-services --no-enable --no-start
+
+# Can be dropped in compat >= 14
+execute_after_dh_installinit:
+	dh_installsysusers
