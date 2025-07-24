@@ -309,11 +309,6 @@ static void process(struct impl *impl)
 	uint32_t i, size;
 	uint32_t rindex, pindex, oindex, pdindex, avail;
 
-	if (impl->playback != NULL && (pout = pw_stream_dequeue_buffer(impl->playback)) == NULL) {
-		pw_log_debug("out of playback buffers: %m");
-		goto done;
-	}
-
 	size = impl->aec_blocksize;
 
 	/* First read a block from the playback and capture ring buffers */
@@ -337,6 +332,16 @@ static void process(struct impl *impl)
 
 	spa_ringbuffer_get_read_index(&impl->play_ring, &pindex);
 	spa_ringbuffer_get_read_index(&impl->play_delayed_ring, &pdindex);
+
+	if (impl->playback != NULL && (pout = pw_stream_dequeue_buffer(impl->playback)) == NULL) {
+		pw_log_debug("out of playback buffers: %m");
+
+		/* playback stream may not yet be in streaming state, drop play
+		 * data to avoid introducing additional playback latency */
+		spa_ringbuffer_read_update(&impl->play_ring, pindex + size);
+		spa_ringbuffer_read_update(&impl->play_delayed_ring, pdindex + size);
+		goto done;
+	}
 
 	for (i = 0; i < impl->play_info.channels; i++) {
 		/* echo from sink */
@@ -453,6 +458,31 @@ done:
 	impl->capture_ready = false;
 }
 
+static void reset_buffers(struct impl *impl)
+{
+	uint32_t index, i;
+
+	spa_ringbuffer_init(&impl->rec_ring);
+	spa_ringbuffer_init(&impl->play_ring);
+	spa_ringbuffer_init(&impl->play_delayed_ring);
+	spa_ringbuffer_init(&impl->out_ring);
+
+	for (i = 0; i < impl->rec_info.channels; i++)
+		memset(impl->rec_buffer[i], 0, impl->rec_ringsize);
+	for (i = 0; i < impl->play_info.channels; i++)
+		memset(impl->play_buffer[i], 0, impl->play_ringsize);
+	for (i = 0; i < impl->out_info.channels; i++)
+		memset(impl->out_buffer[i], 0, impl->out_ringsize);
+
+	spa_ringbuffer_get_write_index(&impl->play_ring, &index);
+	spa_ringbuffer_write_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
+	spa_ringbuffer_get_read_index(&impl->play_ring, &index);
+	spa_ringbuffer_read_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
+
+	impl->sink_ready = false;
+	impl->capture_ready = false;
+}
+
 static void capture_destroy(void *d)
 {
 	struct impl *impl = d;
@@ -537,6 +567,8 @@ static void capture_state_changed(void *data, enum pw_stream_state old,
 
 		if (old == PW_STREAM_STATE_STREAMING) {
 			if (pw_stream_get_state(impl->sink, NULL) != PW_STREAM_STATE_STREAMING) {
+				reset_buffers(impl);
+
 				pw_log_debug("%p: deactivate %s", impl, impl->aec->name);
 				res = spa_audio_aec_deactivate(impl->aec);
 				if (res < 0 && res != -EOPNOTSUPP) {
@@ -588,28 +620,6 @@ static void source_state_changed(void *data, enum pw_stream_state old,
 	}
 }
 
-static void reset_buffers(struct impl *impl)
-{
-	uint32_t index, i;
-
-	spa_ringbuffer_init(&impl->rec_ring);
-	spa_ringbuffer_init(&impl->play_ring);
-	spa_ringbuffer_init(&impl->play_delayed_ring);
-	spa_ringbuffer_init(&impl->out_ring);
-
-	for (i = 0; i < impl->rec_info.channels; i++)
-		memset(impl->rec_buffer[i], 0, impl->rec_ringsize);
-	for (i = 0; i < impl->play_info.channels; i++)
-		memset(impl->play_buffer[i], 0, impl->play_ringsize);
-	for (i = 0; i < impl->out_info.channels; i++)
-		memset(impl->out_buffer[i], 0, impl->out_ringsize);
-
-	spa_ringbuffer_get_write_index(&impl->play_ring, &index);
-	spa_ringbuffer_write_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
-	spa_ringbuffer_get_read_index(&impl->play_ring, &index);
-	spa_ringbuffer_read_update(&impl->play_ring, index + (sizeof(float) * (impl->buffer_delay)));
-}
-
 static void input_param_latency_changed(struct impl *impl, const struct spa_pod *param)
 {
 	struct spa_latency_info latency;
@@ -624,9 +634,9 @@ static void input_param_latency_changed(struct impl *impl, const struct spa_pod 
 	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
 
 	if (latency.direction == SPA_DIRECTION_INPUT)
-		pw_stream_update_params(impl->source, params, 1);
-	else
 		pw_stream_update_params(impl->capture, params, 1);
+	else
+		pw_stream_update_params(impl->source, params, 1);
 }
 
 static struct spa_pod* get_props_param(struct impl* impl, struct spa_pod_builder* b)
@@ -792,6 +802,8 @@ static void sink_state_changed(void *data, enum pw_stream_state old,
 			impl->current_delay = 0;
 
 			if (pw_stream_get_state(impl->capture, NULL) != PW_STREAM_STATE_STREAMING) {
+				reset_buffers(impl);
+
 				pw_log_debug("%p: deactivate %s", impl, impl->aec->name);
 				res = spa_audio_aec_deactivate(impl->aec);
 				if (res < 0 && res != -EOPNOTSUPP) {

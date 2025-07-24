@@ -137,44 +137,38 @@ static inline uint32_t calc_gcd(uint32_t a, uint32_t b)
 static void impl_native_update_rate(struct resample *r, double rate)
 {
 	struct native_data *data = r->data;
-	uint32_t in_rate, out_rate, gcd, old_out_rate;
-	float phase;
+	uint32_t in_rate, out_rate;
 
 	if (SPA_LIKELY(data->rate == rate))
 		return;
 
-	old_out_rate = data->out_rate;
-	in_rate = (uint32_t)(r->i_rate / rate);
-	out_rate = r->o_rate;
-	phase = data->phase;
-
-	gcd = calc_gcd(in_rate, out_rate);
-	in_rate /= gcd;
-	out_rate /= gcd;
-
 	data->rate = rate;
-	data->phase = phase * out_rate / (float)old_out_rate;
-	data->in_rate = in_rate;
-	data->out_rate = out_rate;
+	in_rate = r->i_rate;
+	out_rate = r->o_rate;
 
+	if (rate != 1.0) {
+		in_rate = (uint32_t)(in_rate / rate);
+		data->func = data->info->process_inter;
+	}
+	else if (in_rate == out_rate) {
+		data->func = data->info->process_copy;
+	}
+	else {
+		in_rate /= data->gcd;
+		out_rate /= data->gcd;
+		data->func = data->info->process_full;
+	}
+
+	data->in_rate = in_rate;
+	if (data->out_rate != out_rate) {
+		data->phase = data->phase * out_rate / (float)data->out_rate;
+		data->out_rate = out_rate;
+	}
 	data->inc = data->in_rate / data->out_rate;
 	data->frac = data->in_rate % data->out_rate;
 
-	if (data->in_rate == data->out_rate && rate == 1.0) {
-		data->func = data->info->process_copy;
-		r->func_name = data->info->copy_name;
-	}
-	else if (rate == 1.0) {
-		data->func = data->info->process_full;
-		r->func_name = data->info->full_name;
-	}
-	else {
-		data->func = data->info->process_inter;
-		r->func_name = data->info->inter_name;
-	}
-
-	spa_log_trace_fp(r->log, "native %p: rate:%f in:%d out:%d gcd:%d phase:%f inc:%d frac:%d", r,
-			rate, r->i_rate, r->o_rate, gcd, data->phase, data->inc, data->frac);
+	spa_log_trace_fp(r->log, "native %p: rate:%f in:%d out:%d phase:%f inc:%d frac:%d", r,
+			rate, r->i_rate, r->o_rate, data->phase, data->inc, data->frac);
 
 }
 
@@ -393,6 +387,8 @@ int resample_native_init(struct resample *r)
 	d->n_phases = n_phases;
 	d->in_rate = in_rate;
 	d->out_rate = out_rate;
+	d->gcd = gcd;
+	d->pm = (float)n_phases / r->o_rate;
 	d->filter = SPA_PTROFF_ALIGN(d, sizeof(struct native_data), 64, float);
 	d->hist_mem = SPA_PTROFF_ALIGN(d->filter, filter_size, 64, float);
 	d->history = SPA_PTROFF(d->hist_mem, history_size, float*);
@@ -435,6 +431,13 @@ int resample_native_init(struct resample *r)
 
 	impl_native_reset(r);
 	impl_native_update_rate(r, 1.0);
+
+	if (d->func == d->info->process_copy)
+		r->func_name = d->info->copy_name;
+	else if (d->func == d->info->process_full)
+		r->func_name = d->info->full_name;
+	else
+		r->func_name = d->info->inter_name;
 
 	return 0;
 }
