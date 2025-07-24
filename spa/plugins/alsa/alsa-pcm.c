@@ -2368,13 +2368,13 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	spa_log_info(state->log, "%s: format:%s access:%s-%s rate:%d channels:%d "
 			"buffer frames %lu, period frames %lu, periods %u, frame_size %zd "
-			"headroom %u start-delay:%u batch:%u tsched:%u",
+			"headroom %u start-delay:%u batch:%u tsched:%u resample:%u",
 			state->name, snd_pcm_format_name(state->format),
 			state->use_mmap ? "mmap" : "rw",
 			planar ? "planar" : "interleaved",
 			state->rate, state->channels, state->buffer_frames, state->period_frames,
 			periods, state->frame_size, state->headroom, state->start_delay,
-			state->is_batch, !state->disable_tsched);
+			state->is_batch, !state->disable_tsched, state->resample);
 
 	/* write the parameters to device */
 	CHECK(snd_pcm_hw_params(hndl, params), "set_hw_params");
@@ -2900,6 +2900,13 @@ static int update_time(struct state *state, uint64_t current_time, snd_pcm_sfram
 	return 0;
 }
 
+static bool need_resample(struct state *state)
+{
+	return !state->pitch_elem &&
+		((state->rate != 0 && state->driver_rate.denom != 0 &&
+		 (uint32_t)state->rate != state->driver_rate.denom) || state->matching);
+}
+
 static int setup_matching(struct state *state)
 {
 	state->matching = state->following;
@@ -2913,8 +2920,10 @@ static int setup_matching(struct state *state)
 	if (spa_streq(state->position->clock.name, state->clock_name))
 		state->matching = false;
 
-	state->resample = !state->pitch_elem &&
-		(((uint32_t)state->rate != state->driver_rate.denom) || state->matching);
+	state->resample = need_resample(state);
+
+	check_position_config(state, false);
+
 	recalc_headroom(state);
 
 	spa_log_info(state->log, "driver clock:'%s'@%d our clock:'%s'@%d matching:%d resample:%d",
@@ -2972,8 +2981,7 @@ static inline int check_position_config(struct state *state, bool starting)
 		state->max_error = SPA_MAX(256.0f, (state->threshold + state->headroom) / 2.0f);
 		state->max_resync = SPA_MIN(state->threshold + state->headroom, state->max_error);
 		state->err_wdw = (double)state->driver_rate.denom/state->driver_duration;
-		state->resample = !state->pitch_elem &&
-			(((uint32_t)state->rate != state->driver_rate.denom) || state->matching);
+		state->resample = need_resample(state);
 		state->alsa_sync = true;
 	}
 	return 0;
@@ -3375,6 +3383,10 @@ int spa_alsa_read(struct state *state)
 	if (state->following && state->rt.driver == NULL) {
 		uint64_t current_time = state->position->clock.nsec;
 		alsa_read_sync(state, current_time);
+	}
+	else if (state->resample && state->rate_match) {
+		state->read_size = state->rate_match->size;
+		state->max_read = SPA_MIN(state->buffer_frames, state->read_size);
 	}
 	return alsa_read_frames(state);
 }
