@@ -78,6 +78,7 @@ override_dh_auto_configure:
 		-Dsession-managers= \
 		-Dsnap=$(SNAP) \
 		-Dsystemd-system-service=enabled \
+		-Dsystemd-user-service=enabled \
 		-Dtest=enabled \
 		-Dudevrulesdir=$(UDEVRULESDIR) \
 		-Dvideotestsrc=enabled \
