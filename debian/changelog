@@ -1,9 +1,11 @@
-pipewire (1.4.7-2) UNRELEASED; urgency=medium
+pipewire (1.4.7-2) experimental; urgency=medium
 
   * Install system-wide services in a new package (pipewire-system-services).
     (Closes: #1103237)
+  * Create a system user and group "pipewire" using a sysusers file instead
+    of doing it manually in maintainer scripts.
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 28 Jul 2025 12:37:54 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Wed, 30 Jul 2025 11:00:21 +0200
 
 pipewire (1.4.7-1) experimental; urgency=medium
 
