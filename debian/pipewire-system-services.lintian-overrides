@@ -1,0 +1,2 @@
+# It's just how pipewire works!
+systemd-service-file-refers-to-unusual-wantedby-target pipewire.service [usr/lib/systemd/system/pipewire-pulse.service]

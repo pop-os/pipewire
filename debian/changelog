@@ -1,6 +1,8 @@
 pipewire (1.4.8-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Override lintian tag systemd-service-file-refers-to-unusual-wantedby-target
+    for pipewire-system-services.
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 11 Sep 2025 10:47:28 +0200
 
