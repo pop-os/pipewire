@@ -197,6 +197,7 @@ enum {
 	CRYPTO_NONE,
 	CRYPTO_RSA,
 	CRYPTO_AUTH_SETUP,
+	CRYPTO_FP_SAP25,
 };
 enum {
 	CODEC_PCM,
@@ -442,6 +443,7 @@ static int write_codec_pcm(void *dst, void *frames, uint32_t n_frames)
 		bit_writer(&bp, &bpos, *(d + 2), 8);
 		d += 4;
 	}
+	bit_writer(&bp, &bpos, 7, 3); /* end tag */
 	return bp - b + 1;
 }
 
@@ -892,9 +894,9 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	interval.tv_nsec = 0;
 
 	// feedback timer is only needed for auth_setup	encryption
-	if (impl->encryption == CRYPTO_AUTH_SETUP && !impl->feedback_timer) {
-
-		impl->feedback_timer = pw_loop_add_timer(impl->loop, rtsp_do_post_feedback, impl);
+	if (impl->encryption == CRYPTO_FP_SAP25) {
+		if (!impl->feedback_timer)
+			impl->feedback_timer = pw_loop_add_timer(impl->loop, rtsp_do_post_feedback, impl);
 		pw_loop_update_timer(impl->loop, impl->feedback_timer, &timeout, &interval, false);
 	}
 
@@ -910,7 +912,6 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 	rtp_stream_set_first(impl->stream);
 
 	impl->sync = 0;
-	impl->sync_period = impl->rate / (impl->mtu / impl->stride);
 	impl->recording = true;
 
 	rtsp_send_volume(impl);
@@ -1239,6 +1240,7 @@ static int rtsp_do_announce(struct impl *impl)
 
 	switch (impl->encryption) {
 	case CRYPTO_NONE:
+	case CRYPTO_FP_SAP25:
 		sdp = spa_aprintf("v=0\r\n"
 				"o=iTunes %s 0 IN IP%d %s\r\n"
 				"s=iTunes\r\n"
@@ -1252,6 +1254,7 @@ static int rtsp_do_announce(struct impl *impl)
 		if (!sdp)
 			return -errno;
 		break;
+
 	case CRYPTO_AUTH_SETUP:
 		sdp = spa_aprintf("v=0\r\n"
 				"o=iTunes %s 0 IN IP%d %s\r\n"
@@ -1877,6 +1880,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		impl->encryption = CRYPTO_RSA;
 	else if (spa_streq(str, "auth_setup"))
 		impl->encryption = CRYPTO_AUTH_SETUP;
+	else if (spa_streq(str, "fp_sap25"))
+		impl->encryption = CRYPTO_FP_SAP25;
 	else {
 		pw_log_error( "can't handle encryption type %s", str);
 		res = -EINVAL;
@@ -1911,8 +1916,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->rate = RAOP_RATE;
 	impl->latency = msec_to_samples(impl, RAOP_LATENCY_MS);
 	impl->stride = RAOP_STRIDE;
-	impl->mtu = impl->stride * impl->psamples;
-	impl->sync_period = impl->rate / impl->psamples;
 
 	if ((str = pw_properties_get(props, "raop.latency.ms")) == NULL)
 		str = SPA_STRINGIFY(DEFAULT_LATENCY_MS);
@@ -1938,10 +1941,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
 	if (pw_properties_get(props, PW_KEY_MEDIA_CLASS) == NULL)
 		pw_properties_set(props, PW_KEY_MEDIA_CLASS, "Audio/Sink");
-	if (pw_properties_get(props, PW_KEY_MEDIA_FORMAT) == NULL)
-		pw_properties_setf(props, PW_KEY_MEDIA_FORMAT, "%d", SPA_AUDIO_FORMAT_S16_LE);
 	if (pw_properties_get(props, "net.mtu") == NULL)
-		pw_properties_setf(props, "net.mtu", "%d", impl->mtu);
+		pw_properties_set(props, "net.mtu", "1448");
 	if (pw_properties_get(props, "rtp.sender-ts-offset") == NULL)
 		pw_properties_setf(props, "rtp.sender-ts-offset", "%d", 0);
 	if (pw_properties_get(props, "sess.ts-direct") == NULL)
@@ -1977,6 +1978,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, "sess.ts-refclk");
 	copy_props(impl, props, "sess.ts-direct");
 
+	impl->mtu = pw_properties_get_uint32(impl->props, "net.mtu", 1448);
+	impl->sync_period = impl->rate / (impl->mtu / impl->stride);
 	impl->core = pw_context_get_object(impl->context, PW_TYPE_INTERFACE_Core);
 	if (impl->core == NULL) {
 		str = pw_properties_get(props, PW_KEY_REMOTE_NAME);

@@ -38,7 +38,7 @@ struct buffer {
 	struct pw_buffer this;
 	uint32_t id;
 #define BUFFER_FLAG_MAPPED	(1 << 0)
-#define BUFFER_FLAG_QUEUED	(1 << 1)
+#define BUFFER_FLAG_DEQUEUED	(1 << 1)
 #define BUFFER_FLAG_ADDED	(1 << 2)
 	uint32_t flags;
 	struct spa_meta_busy *busy;
@@ -340,11 +340,9 @@ static inline int queue_push(struct stream *stream, struct queue *queue, struct 
 {
 	uint32_t index;
 
-	if (SPA_FLAG_IS_SET(buffer->flags, BUFFER_FLAG_QUEUED) ||
-	    buffer->id >= stream->n_buffers)
+	if (buffer->id >= stream->n_buffers)
 		return -EINVAL;
 
-	SPA_FLAG_SET(buffer->flags, BUFFER_FLAG_QUEUED);
 	queue->incount += buffer->this.size;
 
 	spa_ringbuffer_get_write_index(&queue->ring, &index);
@@ -375,7 +373,6 @@ static inline struct buffer *queue_pop(struct stream *stream, struct queue *queu
 
 	buffer = &stream->buffers[id];
 	queue->outcount += buffer->this.size;
-	SPA_FLAG_CLEAR(buffer->flags, BUFFER_FLAG_QUEUED);
 
 	return buffer;
 }
@@ -1020,8 +1017,7 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 {
 	struct stream *d = object;
 	pw_log_trace("%p: recycle buffer %d", d, buffer_id);
-	if (buffer_id < d->n_buffers)
-		queue_push(d, &d->queued, &d->buffers[buffer_id]);
+	queue_push(d, &d->queued, &d->buffers[buffer_id]);
 	return 0;
 }
 
@@ -2478,6 +2474,9 @@ struct pw_buffer *pw_stream_dequeue_buffer(struct pw_stream *stream)
 			return NULL;
 		}
 	}
+
+	SPA_FLAG_SET(b->flags, BUFFER_FLAG_DEQUEUED);
+
 	return &b->this;
 }
 
@@ -2487,6 +2486,13 @@ int pw_stream_queue_buffer(struct pw_stream *stream, struct pw_buffer *buffer)
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
 	struct buffer *b = SPA_CONTAINER_OF(buffer, struct buffer, this);
 	int res;
+
+	if (!SPA_FLAG_IS_SET(b->flags, BUFFER_FLAG_DEQUEUED)) {
+		pw_log_warn("%p: tried to queue cleared buffer %d", stream, b->id);
+		return -EINVAL;
+	}
+
+	SPA_FLAG_CLEAR(b->flags, BUFFER_FLAG_DEQUEUED);
 
 	if (b->busy)
 		SPA_ATOMIC_DEC(b->busy->count);
@@ -2517,7 +2523,6 @@ static inline int queue_push_front(struct stream *stream, struct queue *queue, s
 	index -= 1;
 	queue->ids[index & MASK_BUFFERS] = buffer->id;
 	queue->outcount -= buffer->this.size;
-	SPA_FLAG_SET(buffer->flags, BUFFER_FLAG_QUEUED);
 	spa_ringbuffer_read_update(&queue->ring, index);
 
 	return ret;

@@ -343,7 +343,7 @@ static int port_enum_formats(void *object, struct port *port,
 				SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 				SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 				SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Int(12,
+				SPA_FORMAT_AUDIO_format,   SPA_POD_CHOICE_ENUM_Id(12,
 								SPA_AUDIO_FORMAT_S8,
 								SPA_AUDIO_FORMAT_U8,
 								SPA_AUDIO_FORMAT_S16,
@@ -921,7 +921,8 @@ static int impl_clear(struct spa_handle *handle)
 
 	for (i = 0; i < MAX_PORTS; i++)
 		free(this->in_ports[i]);
-	mix_ops_free(&this->ops);
+	if (this->ops.free)
+		mix_ops_free(&this->ops);
 	return 0;
 }
 
@@ -984,6 +985,7 @@ impl_init(const struct spa_handle_factory *factory,
 	this->info.max_output_ports = 1;
 	this->info.change_mask |= SPA_NODE_CHANGE_MASK_FLAGS;
 	this->info.flags = SPA_NODE_FLAG_RT | SPA_NODE_FLAG_IN_DYNAMIC_PORTS;
+	this->info_all = this->info.change_mask;
 
 	port = GET_OUT_PORT(this, 0);
 	port->valid = true;
@@ -993,6 +995,7 @@ impl_init(const struct spa_handle_factory *factory,
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_FLAGS;
 	port->info.flags = SPA_PORT_FLAG_DYNAMIC_DATA;
 	port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+	port->info_all = port->info.change_mask;
 	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
 	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Meta, SPA_PARAM_INFO_READ);
 	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
