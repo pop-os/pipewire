@@ -1005,6 +1005,8 @@ int spa_alsa_init(struct state *state, const struct spa_dict *info)
 			state->num_bind_ctls = i;
 
 			/* We'll do the actual binding after checking the card exists */
+		} else if (spa_streq(k, SPA_KEY_DEVICE_BUS)) {
+			state->is_firewire = spa_streq(s, "firewire");
 		} else {
 			alsa_set_param(state, k, s);
 		}
@@ -2052,6 +2054,13 @@ static void recalc_headroom(struct state *state)
 	if (rate != 0 && state->rate != 0)
 		latency = SPA_SCALE32_UP(latency, rate, state->rate);
 
+	if (state->is_firewire) {
+		/* XXX: For ALSA FireWire drivers, unlike for other ALSA drivers, buffer size
+		 * XXX: contributes extra latency (as of kernel 6.16).
+		 */
+		latency += state->buffer_frames;
+	}
+
 	state->latency[state->port_direction].min_rate =
 		state->latency[state->port_direction].max_rate = latency;
 }
@@ -2326,6 +2335,35 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 		}
 	}
 
+	if (state->default_period_num != 0) {
+		/* period number given use that */
+		periods = state->default_period_num;
+	} else if (state->disable_tsched) {
+		/* IRQ mode, use 3 periods. This is a bit of a workaround
+		 * for Firewire devices, which seem to only work with 3 periods.
+		 * For PipeWire it does not actually matter how many periods
+		 * are used, we will always keep 1 filled, so we can work fine
+		 * with anything from 2 periods to MAX. */
+		periods = 3;
+	} else {
+		periods = UINT_MAX;
+	}
+
+	if (state->default_period_size == 0) {
+		/* Some devices (FireWire) don't produce audio if period number is too
+		 * small, so force a minimum. This will restrict possible period sizes if
+		 * the device has small buffer (like FireWire), so force it only if
+		 * period size was not set manually.
+		 */
+		snd_pcm_uframes_t period_size_max;
+		unsigned int periods_min = (periods == UINT_MAX) ? 3 : periods;
+
+		CHECK(snd_pcm_hw_params_set_periods_min(hndl, params, &periods_min, &dir), "set_periods_min");
+		CHECK(snd_pcm_hw_params_get_period_size_max(params, &period_size_max, &dir), "get_period_size_max");
+		if (period_size > period_size_max)
+			period_size = SPA_MIN(period_size, flp2(period_size_max));
+	}
+
 	CHECK(snd_pcm_hw_params_set_period_size_near(hndl, params, &period_size, &dir), "set_period_size_near");
 
 	if (period_size == 0) {
@@ -2335,8 +2373,7 @@ int spa_alsa_set_format(struct state *state, struct spa_audio_info *fmt, uint32_
 
 	state->period_frames = period_size;
 
-	if (state->default_period_num != 0) {
-		periods = state->default_period_num;
+	if (periods != UINT_MAX) {
 		CHECK(snd_pcm_hw_params_set_periods_near(hndl, params, &periods, &dir), "set_periods");
 		state->buffer_frames = period_size * periods;
 	} else {
@@ -3866,7 +3903,7 @@ void spa_alsa_emit_node_info(struct state *state, bool full)
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, state->props.media_class);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_DRIVER, "true");
 
-		if (state->have_format)
+		if (state->have_format && !state->disable_tsched)
 			snprintf(latency, sizeof(latency), "%lu/%d",
 					state->buffer_frames / (2 * state->frame_scale), state->rate);
 		items[n_items++] = SPA_DICT_ITEM_INIT(SPA_KEY_NODE_MAX_LATENCY, latency[0] ? latency : NULL);
@@ -3881,7 +3918,7 @@ void spa_alsa_emit_node_info(struct state *state, bool full)
 			snprintf(nperiods, sizeof(nperiods), "%lu",
 					state->period_frames != 0 ? state->buffer_frames / state->period_frames : 0);
 		else if (state->default_period_num)
-			snprintf(nperiods, sizeof(nperiods), "%u", state->default_period_size);
+			snprintf(nperiods, sizeof(nperiods), "%u", state->default_period_num);
 		items[n_items++] = SPA_DICT_ITEM_INIT("api.alsa.period-num", nperiods[0] ? nperiods : NULL);
 
 		if (state->have_format)
