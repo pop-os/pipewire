@@ -1,3 +1,9 @@
+pipewire (1.4.9-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Oct 2025 13:41:04 +0200
+
 pipewire (1.4.8-1) unstable; urgency=medium
 
   * New upstream release
