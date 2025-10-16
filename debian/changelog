@@ -1,8 +1,15 @@
 pipewire (1.5.81-1) UNRELEASED; urgency=medium
 
-  * New upstream release
+  * New upstream release (1.6 release candidate 1)
+  * Disable bluez5-codec-ldac-dec, not yet available in Debian
+  * Enable bluez5-plc-spandsp, add libspandsp-dev in Build-Deps
+  * Enable onnxruntime, add libonnxruntime-dev in Build-Deps
+  * Install new binaries (pw-midi2play, pw-midi2record and pw-sysex)
+      in pipewire-bin
+  * Update symbols file
+  * Convert watch to version 5 and use Gitlab template
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Oct 2025 10:28:22 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Oct 2025 11:15:58 +0200
 
 pipewire (1.4.9-1) unstable; urgency=medium
 
