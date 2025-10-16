@@ -15,6 +15,8 @@ usr/bin/pw-encplay
 usr/bin/pw-link
 usr/bin/pw-loopback
 usr/bin/pw-metadata
+usr/bin/pw-midi2play
+usr/bin/pw-midi2record
 usr/bin/pw-mididump
 usr/bin/pw-midiplay
 usr/bin/pw-midirecord
@@ -23,6 +25,7 @@ usr/bin/pw-play
 usr/bin/pw-profiler
 usr/bin/pw-record
 usr/bin/pw-reserve
+usr/bin/pw-sysex
 usr/bin/pw-top
 usr/bin/spa-*
 usr/share/alsa-card-profile
