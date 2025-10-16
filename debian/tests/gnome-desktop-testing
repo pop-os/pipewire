@@ -8,6 +8,8 @@ exec gnome-desktop-testing-runner $(
 		case "$t" in
 			(pipewire-0.3/pw-test-pipewire-alsa-stress*)
 				;;
+			(pipewire-0.3/spa-benchmark-aec.test*)
+				;;
 			(*)
 				echo "$t"
 				;;
