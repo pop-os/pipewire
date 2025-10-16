@@ -66,6 +66,7 @@ override_dh_auto_configure:
 		-Dbluez5-codec-ldac=$(BLUEZ5_CODEC_LDAC) \
 		-Dbluez5-codec-ldac-dec=disabled \
 		-Dbluez5-codec-opus=enabled \
+		-Dbluez5-plc-spandsp=enabled \
 		-Dlibcamera=$(LIBCAMERA) \
 		-Dlibffado=enabled \
 		-Dlibmysofa=enabled \
