@@ -153,7 +153,7 @@ static void ebur128_run(void * Instance, unsigned long SampleCount)
 			ebur128_add_frames_float(st[i], in, SampleCount);
 
 		if (out != NULL)
-			memcpy(out, in, SampleCount * sizeof(float));
+			spa_memcpy(out, in, SampleCount * sizeof(float));
 	}
 	if (impl->port[PORT_OUT_MOMENTARY] != NULL) {
 		double sum = 0.0;
@@ -219,11 +219,10 @@ static void ebur128_run(void * Instance, unsigned long SampleCount)
 }
 
 static void ebur128_connect_port(void * Instance, unsigned long Port,
-                        float * DataLocation)
+                        void * DataLocation)
 {
 	struct ebur128_impl *impl = Instance;
-	if (Port < PORT_MAX)
-		impl->port[Port] = DataLocation;
+	impl->port[Port] = DataLocation;
 }
 
 static void ebur128_cleanup(void * Instance)
@@ -443,11 +442,10 @@ static void * lufs2gain_instantiate(const struct spa_fga_plugin *plugin, const s
 }
 
 static void lufs2gain_connect_port(void * Instance, unsigned long Port,
-                        float * DataLocation)
+                        void * DataLocation)
 {
 	struct lufs2gain_impl *impl = Instance;
-	if (Port < 3)
-		impl->port[Port] = DataLocation;
+	impl->port[Port] = DataLocation;
 }
 
 static void lufs2gain_run(void * Instance, unsigned long SampleCount)

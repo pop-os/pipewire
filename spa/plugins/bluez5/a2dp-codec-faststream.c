@@ -301,6 +301,9 @@ static int codec_encode(void *data,
 static SPA_UNUSED int codec_start_decode (void *data,
 		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp)
 {
+	if (!src_size)
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -584,6 +587,7 @@ static const struct media_codec duplex_codec = {
 };
 
 #define FASTSTREAM_COMMON_DEFS				\
+	.kind = MEDIA_CODEC_A2DP,			\
 	.codec_id = A2DP_CODEC_VENDOR,			\
 	.vendor = { .vendor_id = FASTSTREAM_VENDOR_ID,	\
 		.codec_id = FASTSTREAM_CODEC_ID },	\

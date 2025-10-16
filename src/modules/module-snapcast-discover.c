@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2024 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -16,8 +18,6 @@
 #include <netdb.h>
 #include <net/if.h>
 #include <ifaddrs.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -166,13 +166,13 @@ static const struct spa_dict_item module_props[] = {
 
 struct impl {
 	struct pw_context *context;
-	struct pw_loop *loop;
 
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
 
 	struct pw_properties *properties;
 	bool discover_local;
+	struct pw_loop *loop;
 
 	AvahiPoll *avahi_poll;
 	AvahiClient *client;
@@ -850,10 +850,8 @@ static int start_client(struct impl *impl)
 
 static int start_avahi(struct impl *impl)
 {
-	struct pw_loop *loop;
 
-	loop = pw_context_get_main_loop(impl->context);
-	impl->avahi_poll = pw_avahi_poll_new(loop);
+	impl->avahi_poll = pw_avahi_poll_new(impl->context);
 
 	return start_client(impl);
 }

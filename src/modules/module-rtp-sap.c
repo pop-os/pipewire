@@ -251,6 +251,7 @@ struct impl {
 	struct pw_properties *props;
 
 	struct pw_loop *loop;
+	struct pw_timer_queue *timer_queue;
 
 	struct pw_impl_module *module;
 	struct spa_hook module_listener;
@@ -263,7 +264,7 @@ struct impl {
 	struct pw_registry *registry;
 	struct spa_hook registry_listener;
 
-	struct spa_source *timer;
+	struct pw_timer timer;
 
 	char *ifname;
 	uint32_t ttl;
@@ -544,10 +545,10 @@ error:
 	return res;
 }
 
-static void update_ts_refclk(struct impl *impl)
+static bool update_ts_refclk(struct impl *impl)
 {
 	if (!impl->ptp_mgmt_socket || impl->ptp_fd < 0)
-		return;
+		return false;
 
 	// Read if something is left in the socket
 	int avail;
@@ -579,13 +580,13 @@ static void update_ts_refclk(struct impl *impl)
 
 	if (write(impl->ptp_fd, &req, sizeof(req)) == -1) {
 		pw_log_warn("Failed to send PTP management request: %m");
-		return;
+		return false;
 	}
 
 	uint8_t buf[sizeof(struct ptp_management_msg) + sizeof(struct ptp_parent_data_set)];
 	if (read(impl->ptp_fd, &buf, sizeof(buf)) == -1) {
 		pw_log_warn("Failed to receive PTP management response: %m");
-		return;
+		return false;
 	}
 
 	struct ptp_management_msg res = *(struct ptp_management_msg *)buf;
@@ -594,27 +595,27 @@ static void update_ts_refclk(struct impl *impl)
 
 	if ((res.ver & 0x0f) != 2) {
 		pw_log_warn("PTP major version is %d, expected 2", res.ver);
-		return;
+		return false;
 	}
 
 	if ((res.major_sdo_id_message_type & 0x0f) != PTP_MESSAGE_TYPE_MANAGEMENT) {
 		pw_log_warn("PTP management returned type %x, expected management", res.major_sdo_id_message_type);
-		return;
+		return false;
 	}
 
 	if (res.action != PTP_MGMT_ACTION_RESPONSE) {
 		pw_log_warn("PTP management returned action %d, expected response", res.action);
-		return;
+		return false;
 	}
 
 	if (be16toh(res.tlv_type_be) != PTP_TLV_TYPE_MGMT) {
 		pw_log_warn("PTP management returned tlv type %d, expected management", be16toh(res.tlv_type_be));
-		return;
+		return false;
 	}
 
 	if (be16toh(res.management_id_be) != PTP_MGMT_ID_PARENT_DATA_SET) {
 		pw_log_warn("PTP management returned ID %d, expected PARENT_DATA_SET", be16toh(res.management_id_be));
-		return;
+		return false;
 	}
 
 	uint16_t data_len = be16toh(res.management_message_length_be) - 2;
@@ -637,7 +638,8 @@ static void update_ts_refclk(struct impl *impl)
 	  );
 
 	uint8_t *gmid = parent.gm_clock_id;
-	if (memcmp(gmid, impl->gm_id, 8) != 0)
+	bool gmid_changed = false;
+	if (memcmp(gmid, impl->gm_id, 8) != 0) {
 		pw_log_info(
 			"GM ID: IEEE1588-2008:%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X:%d",
 			gmid[0],
@@ -650,24 +652,35 @@ static void update_ts_refclk(struct impl *impl)
 			gmid[7],
 			0 /* domain */
 	  );
+	  gmid_changed = true;
+	}
 
 	// When GM is not equal to own clock we are clocked by external master
 	pw_log_debug("Synced to GM: %s", (memcmp(cid, gmid, 8) != 0) ? "true" : "false");
 
 	memcpy(impl->clock_id, cid, 8);
 	memcpy(impl->gm_id, gmid, 8);
+	return gmid_changed;
+}
+
+static uint16_t generate_hash(uint16_t prev)
+{
+	uint16_t hash = pw_rand32();
+	if (hash == prev) hash++;
+	if (hash == 0) hash++;
+	return hash;
 }
 
 static int make_sdp(struct impl *impl, struct session *sess, char *buffer, size_t buffer_size, bool new)
 {
-	char src_addr[64], dst_addr[64], dst_ttl[8];
+	char src_addr[64], dst_addr[64], dst_ttl[8], ptime[32];
 	struct sdp_info *sdp = &sess->info;
 	bool src_ip4, dst_ip4;
 	bool multicast;
 	const char *user_name, *str;
 	struct spa_strbuf buf;
-	struct pw_properties *props = sess->props;
 	int res;
+	struct pw_properties *props = sess->props;
 
 	if ((res = pw_net_get_ip(&impl->src_addr, src_addr, sizeof(src_addr), &src_ip4, NULL)) < 0)
 		return res;
@@ -677,7 +690,7 @@ static int make_sdp(struct impl *impl, struct session *sess, char *buffer, size_
 
 	if (new) {
 		/* update the version and hash */
-		sdp->hash = pw_rand32();
+		sdp->hash = generate_hash(sdp->hash);
 		if ((str = pw_properties_get(props, "sess.id")) != NULL) {
 			if (!spa_atou32(str, &sdp->session_id, 10)) {
 				pw_log_error("Invalid session id: %s (must be a uint32)", str);
@@ -763,7 +776,7 @@ static int make_sdp(struct impl *impl, struct session *sess, char *buffer, size_
 
 	if (sdp->ptime > 0)
 		spa_strbuf_append(&buf,
-			"a=ptime:%.6g\n", sdp->ptime);
+			"a=ptime:%s\n", spa_dtoa(ptime, sizeof(ptime), sdp->ptime));
 
 	if (sdp->framecount > 0)
 		spa_strbuf_append(&buf,
@@ -897,7 +910,7 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	msg.msg_controllen = 0;
 	msg.msg_flags = 0;
 
-	pw_log_info("sending SAP for %u %s", sess->node->id, sess->sdp);
+	pw_log_debug("sending SAP for %u %s", sess->node->id, sess->sdp);
 
 	res = sendmsg(impl->sap_fd, &msg, MSG_NOSIGNAL);
 	if (res < 0)
@@ -908,18 +921,30 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	return res;
 }
 
-static void on_timer_event(void *data, uint64_t expirations)
+static void on_timer_event(void *data)
 {
 	struct impl *impl = data;
 	struct session *sess, *tmp;
 	uint64_t timestamp, interval;
+	bool clk_changed;
+	int res;
 
 	timestamp = get_time_nsec(impl);
 	interval = impl->cleanup_interval * SPA_NSEC_PER_SEC;
-	update_ts_refclk(impl);
+	clk_changed = update_ts_refclk(impl);
 
 	spa_list_for_each_safe(sess, tmp, &impl->sessions, link) {
 		if (sess->announce) {
+			if (clk_changed) {
+				// The clock has changed: Send bye and create new SDP.
+				send_sap(impl, sess, 1);
+
+				res = make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp), true);
+				if (res != 0)
+					pw_log_error("Failed to create SDP: %s", spa_strerror(res));
+				else
+					sess->has_sdp = true;
+			}
 			send_sap(impl, sess, 0);
 		} else {
 			if (sess->timestamp + interval < timestamp) {
@@ -930,6 +955,9 @@ static void on_timer_event(void *data, uint64_t expirations)
 
 		}
 	}
+	pw_timer_queue_add(impl->timer_queue, &impl->timer,
+			&impl->timer.timeout, SAP_INTERVAL_SEC * SPA_NSEC_PER_SEC,
+			on_timer_event, impl);
 }
 
 static struct session *session_find(struct impl *impl, const struct sdp_info *info)
@@ -937,6 +965,7 @@ static struct session *session_find(struct impl *impl, const struct sdp_info *in
 	struct session *sess;
 	spa_list_for_each(sess, &impl->sessions, link) {
 		if (info->hash == sess->info.hash &&
+		    info->dst_port == sess->info.dst_port &&
 		    spa_streq(info->origin, sess->info.origin))
 			return sess;
 	}
@@ -1049,17 +1078,16 @@ static struct session *session_new_announce(struct impl *impl, struct node *node
 	res = make_sdp(impl, sess, buffer, sizeof(buffer), false);
 
 	/* we had no sdp or something changed */
-	if (res == 0 && (!sess->has_sdp || strcmp(buffer, sess->sdp) != 0)) {
+	if (!sess->has_sdp || ((res == 0) && strcmp(buffer, sess->sdp) != 0)) {
 		/*  send bye on the old session */
 		send_sap(impl, sess, 1);
 
 		/* make an updated SDP for sending, this should not actually fail */
 		res = make_sdp(impl, sess, sess->sdp, sizeof(sess->sdp), true);
-
-		if (res == 0)
-			sess->has_sdp = true;
-		else
+		if (res != 0)
 			pw_log_error("Failed to create SDP: %s", spa_strerror(res));
+		else
+			sess->has_sdp = true;
 	}
 
 	send_sap(impl, sess, 0);
@@ -1481,6 +1509,8 @@ static int parse_sdp(struct impl *impl, char *sdp, struct sdp_info *info)
 	int count = 0, res = 0;
 	size_t l;
 
+	spa_zero(*info);
+
 	while (*s) {
 		if ((l = strcspn(s, "\r\n")) < 2)
 			goto too_short;
@@ -1526,12 +1556,15 @@ static int parse_sdp(struct impl *impl, char *sdp, struct sdp_info *info)
 	return 0;
 too_short:
 	pw_log_warn("SDP: line starting with `%.6s...' too short", s);
+	clear_sdp_info(info);
 	return -EINVAL;
 invalid_version:
 	pw_log_warn("SDP: invalid first version line `%*s'", (int)l, s);
+	clear_sdp_info(info);
 	return -EINVAL;
 error:
 	pw_log_warn("SDP: error: %s", spa_strerror(res));
+	clear_sdp_info(info);
 	return res;
 }
 
@@ -1573,7 +1606,6 @@ static int parse_sap(struct impl *impl, void *data, size_t len)
 
 	pw_log_debug("got SAP: %s %s", mime, sdp);
 
-	spa_zero(info);
 	if ((res = parse_sdp(impl, sdp, &info)) < 0)
 		return res;
 
@@ -1619,22 +1651,15 @@ on_sap_io(void *data, int fd, uint32_t mask)
 static int start_sap(struct impl *impl)
 {
 	int fd = -1, res;
-	struct timespec value, interval;
 	char addr[128] = "invalid";
 
 	pw_log_info("starting SAP timer");
-	impl->timer = pw_loop_add_timer(impl->loop, on_timer_event, impl);
-	if (impl->timer == NULL) {
-		res = -errno;
-		pw_log_error("can't create timer source: %m");
+	if ((res = pw_timer_queue_add(impl->timer_queue, &impl->timer,
+			NULL, SAP_INTERVAL_SEC * SPA_NSEC_PER_SEC,
+			on_timer_event, impl)) < 0) {
+		pw_log_error("can't add timer: %s", spa_strerror(res));
 		goto error;
 	}
-	value.tv_sec = 0;
-	value.tv_nsec = 1;
-	interval.tv_sec = SAP_INTERVAL_SEC;
-	interval.tv_nsec = 0;
-	pw_loop_update_timer(impl->loop, impl->timer, &value, &interval, false);
-
 	if ((fd = make_recv_socket(&impl->sap_addr, impl->sap_len, impl->ifname)) < 0)
 		return fd;
 
@@ -1781,8 +1806,7 @@ static void impl_destroy(struct impl *impl)
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
 
-	if (impl->timer)
-		pw_loop_destroy_source(impl->loop, impl->timer);
+	pw_timer_queue_cancel(&impl->timer);
 	if (impl->sap_source)
 		pw_loop_destroy_source(impl->loop, impl->sap_source);
 
@@ -1846,6 +1870,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 		return -errno;
 
 	impl->sap_fd = -1;
+	impl->ptp_fd = -1;
 	spa_list_init(&impl->sessions);
 
 	if (args == NULL)
@@ -1861,6 +1886,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->module = module;
 	impl->loop = pw_context_get_main_loop(context);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 
 	str = pw_properties_get(props, "local.ifname");
 	impl->ifname = str ? strdup(str) : NULL;

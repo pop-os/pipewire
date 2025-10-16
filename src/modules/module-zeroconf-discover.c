@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -9,8 +11,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -487,10 +487,7 @@ static int start_client(struct impl *impl)
 
 static int start_avahi(struct impl *impl)
 {
-	struct pw_loop *loop;
-
-	loop = pw_context_get_main_loop(impl->context);
-	impl->avahi_poll = pw_avahi_poll_new(loop);
+	impl->avahi_poll = pw_avahi_poll_new(impl->context);
 
 	return start_client(impl);
 }

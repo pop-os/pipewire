@@ -426,7 +426,8 @@ static int codec_start_decode (void *data,
 	const struct rtp_header *header = src;
 	size_t header_size = sizeof(struct rtp_header);
 
-	spa_return_val_if_fail(src_size > header_size, -EINVAL);
+	if (src_size <= header_size)
+		return -EINVAL;
 
 	if (seqnum)
 		*seqnum = ntohs(header->sequence_number);
@@ -617,6 +618,7 @@ static int msbc_decode(void *data,
 
 const struct media_codec a2dp_codec_aptx = {
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_APTX,
+	.kind = MEDIA_CODEC_A2DP,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = APTX_VENDOR_ID,
 		.codec_id = APTX_CODEC_ID },
@@ -641,6 +643,7 @@ const struct media_codec a2dp_codec_aptx = {
 
 const struct media_codec a2dp_codec_aptx_hd = {
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_APTX_HD,
+	.kind = MEDIA_CODEC_A2DP,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = APTX_HD_VENDOR_ID,
 		.codec_id = APTX_HD_CODEC_ID },
@@ -663,6 +666,7 @@ const struct media_codec a2dp_codec_aptx_hd = {
 };
 
 #define APTX_LL_COMMON_DEFS				\
+	.kind = MEDIA_CODEC_A2DP,			\
 	.codec_id = A2DP_CODEC_VENDOR,			\
 	.description = "aptX-LL",			\
 	.fill_caps = codec_fill_caps,			\

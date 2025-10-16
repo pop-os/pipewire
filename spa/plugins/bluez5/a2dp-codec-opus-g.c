@@ -444,7 +444,8 @@ static int codec_start_decode (void *data,
 	const struct rtp_payload *payload = SPA_PTROFF(src, sizeof(struct rtp_header), void);
 	size_t header_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
 
-	spa_return_val_if_fail (src_size > header_size, -EINVAL);
+	if (src_size <= header_size)
+		return -EINVAL;
 
 	if (seqnum)
 		*seqnum = ntohs(header->sequence_number);
@@ -512,6 +513,7 @@ static void codec_set_log(struct spa_log *global_log)
 
 const struct media_codec a2dp_codec_opus_g = {
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_OPUS_G,
+	.kind = MEDIA_CODEC_A2DP,
 	.codec_id = A2DP_CODEC_VENDOR,
 	.vendor = { .vendor_id = OPUS_G_VENDOR_ID,
 			.codec_id = OPUS_G_CODEC_ID },

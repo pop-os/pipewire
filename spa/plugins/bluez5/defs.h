@@ -5,9 +5,7 @@
 #ifndef SPA_BLUEZ5_DEFS_H
 #define SPA_BLUEZ5_DEFS_H
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "config.h"
 
 #include <math.h>
 
@@ -17,10 +15,13 @@ extern "C" {
 #include <spa/support/plugin.h>
 #include <spa/monitor/device.h>
 #include <spa/utils/hook.h>
+#include <spa/param/audio/raw.h>
 
 #include <dbus/dbus.h>
 
-#include "config.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define BLUEZ_SERVICE "org.bluez"
 #define BLUEZ_PROFILE_MANAGER_INTERFACE BLUEZ_SERVICE ".ProfileManager1"
@@ -142,10 +143,6 @@ extern "C" {
 #define BUS_TYPE_USB		1
 #define BUS_TYPE_OTHER		255
 
-#define HFP_AUDIO_CODEC_CVSD	0x01
-#define HFP_AUDIO_CODEC_MSBC	0x02
-#define HFP_AUDIO_CODEC_LC3_SWB	0x03
-
 #define A2DP_OBJECT_MANAGER_PATH "/MediaEndpoint"
 #define A2DP_SINK_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSink"
 #define A2DP_SOURCE_ENDPOINT	A2DP_OBJECT_MANAGER_PATH "/A2DPSource"
@@ -159,14 +156,6 @@ extern "C" {
 #define SPA_BT_UNKNOWN_DELAY			0
 
 #define SPA_BT_NO_BATTERY			((uint8_t)255)
-
-/* HFP uses SBC encoding with precisely defined parameters. Hence, the size
- * of the input (number of PCM samples) and output is known up front. */
-#define MSBC_DECODED_SIZE       	240
-#define MSBC_PAYLOAD_SIZE       	57	/* 1 byte padding follows payload */
-#define LC3_SWB_DECODED_SIZE    	960	/* 32 kHz mono S24_32 @ 7.5 ms */
-#define LC3_SWB_PAYLOAD_SIZE    	58
-#define HFP_CODEC_PACKET_SIZE		60	/* 2 bytes header + payload */
 
 enum spa_bt_media_direction {
 	SPA_BT_MEDIA_SOURCE,
@@ -206,7 +195,9 @@ enum spa_bt_profile {
 
 static inline enum spa_bt_profile spa_bt_profile_from_uuid(const char *uuid)
 {
-	if (strcasecmp(uuid, SPA_BT_UUID_A2DP_SOURCE) == 0)
+	if (!uuid)
+		return 0;
+	else if (strcasecmp(uuid, SPA_BT_UUID_A2DP_SOURCE) == 0)
 		return SPA_BT_PROFILE_A2DP_SOURCE;
 	else if (strcasecmp(uuid, SPA_BT_UUID_A2DP_SINK) == 0)
 		return SPA_BT_PROFILE_A2DP_SINK;
@@ -384,6 +375,7 @@ struct spa_bt_adapter {
 	unsigned int has_adapter1_interface:1;
 	unsigned int has_media1_interface:1;
 	unsigned int le_audio_bcast_supported:1;
+	unsigned int tx_timestamping_supported:1;
 };
 
 enum spa_bt_form_factor {
@@ -426,6 +418,31 @@ static inline const char *spa_bt_form_factor_name(enum spa_bt_form_factor ff)
 	}
 }
 
+static inline const char *spa_bt_form_factor_icon_name(enum spa_bt_form_factor ff)
+{
+	switch (ff) {
+	case SPA_BT_FORM_FACTOR_HEADSET:
+		return "audio-headset-bluetooth";
+	case SPA_BT_FORM_FACTOR_HANDSFREE:
+		return "audio-handsfree-bluetooth";
+	case SPA_BT_FORM_FACTOR_MICROPHONE:
+		return "audio-input-microphone-bluetooth";
+	case SPA_BT_FORM_FACTOR_SPEAKER:
+		return "audio-speakers-bluetooth";
+	case SPA_BT_FORM_FACTOR_HEADPHONE:
+		return "audio-headphones-bluetooth";
+	case SPA_BT_FORM_FACTOR_PORTABLE:
+		return "multimedia-player-bluetooth";
+	case SPA_BT_FORM_FACTOR_PHONE:
+		return "phone-bluetooth";
+	case SPA_BT_FORM_FACTOR_CAR:
+	case SPA_BT_FORM_FACTOR_HIFI:
+	case SPA_BT_FORM_FACTOR_UNKNOWN:
+	default:
+		return "audio-card-bluetooth";
+	}
+}
+
 static inline enum spa_bt_form_factor spa_bt_form_factor_from_class(uint32_t bluetooth_class)
 {
 	uint32_t major, minor;
@@ -460,7 +477,6 @@ static inline enum spa_bt_form_factor spa_bt_form_factor_from_class(uint32_t blu
 	return SPA_BT_FORM_FACTOR_UNKNOWN;
 }
 
-struct spa_bt_media_codec_switch;
 struct spa_bt_transport;
 
 struct spa_bt_device_events {
@@ -472,6 +488,9 @@ struct spa_bt_device_events {
 
 	/** Codec switching completed */
 	void (*codec_switched) (void *data, int status);
+
+	/** Codec switching initiated or completed by another device */
+	void (*codec_switch_other) (void *data, bool switching);
 
 	/** Profile configuration changed */
 	void (*profiles_changed) (void *data, uint32_t connected_change);
@@ -551,6 +570,7 @@ struct spa_bt_device {
 	DBusPendingCall *battery_pending_call;
 
 	const struct media_codec *preferred_codec;
+	uint32_t preferred_profiles;
 };
 
 struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const char *path);
@@ -558,20 +578,22 @@ struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monit
 int spa_bt_device_add_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_connect_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
 int spa_bt_device_check_profiles(struct spa_bt_device *device, bool force);
-int spa_bt_device_ensure_media_codec(struct spa_bt_device *device, const struct media_codec * const *codecs);
+int spa_bt_device_ensure_media_codec(struct spa_bt_device *device, const struct media_codec * const *codecs, uint32_t profiles);
+int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, const struct media_codec *codec);
 bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const struct media_codec *codec, enum spa_bt_profile profile);
 const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_bt_device *device, size_t *count);
-int spa_bt_device_ensure_hfp_codec(struct spa_bt_device *device, unsigned int codec);
-int spa_bt_device_supports_hfp_codec(struct spa_bt_device *device, unsigned int codec);
 int spa_bt_device_release_transports(struct spa_bt_device *device);
 int spa_bt_device_report_battery_level(struct spa_bt_device *device, uint8_t percentage);
 void spa_bt_device_update_last_bluez_action_time(struct spa_bt_device *device);
+const struct media_codec * const * spa_bt_get_media_codecs(struct spa_bt_monitor *monitor);
+const struct media_codec *spa_bt_get_hfp_codec(struct spa_bt_monitor *monitor, unsigned int hfp_codec_id);
 
 #define spa_bt_device_emit(d,m,v,...)			spa_hook_list_call(&(d)->listener_list, \
 								struct spa_bt_device_events,	\
 								m, v, ##__VA_ARGS__)
 #define spa_bt_device_emit_connected(d,...)	        spa_bt_device_emit(d, connected, 0, __VA_ARGS__)
 #define spa_bt_device_emit_codec_switched(d,...)	spa_bt_device_emit(d, codec_switched, 0, __VA_ARGS__)
+#define spa_bt_device_emit_codec_switch_other(d,...)	spa_bt_device_emit(d, codec_switch_other, 0, __VA_ARGS__)
 #define spa_bt_device_emit_profiles_changed(d,...)	spa_bt_device_emit(d, profiles_changed, 0, __VA_ARGS__)
 #define spa_bt_device_emit_device_set_changed(d)	spa_bt_device_emit(d, device_set_changed, 0)
 #define spa_bt_device_emit_switch_profile(d)		spa_bt_device_emit(d, switch_profile, 0)
@@ -583,11 +605,12 @@ struct spa_bt_iso_io;
 
 struct spa_bt_sco_io;
 
-struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_bt_transport *transport, struct spa_loop *data_loop, struct spa_log *log);
+struct spa_bt_sco_io *spa_bt_sco_io_create(struct spa_bt_transport *transport, struct spa_loop *data_loop,
+		struct spa_system *data_system, struct spa_log *log);
 void spa_bt_sco_io_destroy(struct spa_bt_sco_io *io);
-void spa_bt_sco_io_set_source_cb(struct spa_bt_sco_io *io, int (*source_cb)(void *userdata, uint8_t *data, int size), void *userdata);
-void spa_bt_sco_io_set_sink_cb(struct spa_bt_sco_io *io, int (*sink_cb)(void *userdata), void *userdata);
-int spa_bt_sco_io_write(struct spa_bt_sco_io *io, uint8_t *data, int size);
+void spa_bt_sco_io_set_source_cb(struct spa_bt_sco_io *io, int (*source_cb)(void *userdata, uint8_t *data, int size, uint64_t rx_time), void *userdata);
+int spa_bt_sco_io_write(struct spa_bt_sco_io *io, const uint8_t *buf, size_t size);
+void spa_bt_sco_io_write_start(struct spa_bt_sco_io *io);
 
 #define SPA_BT_VOLUME_ID_RX	0
 #define SPA_BT_VOLUME_ID_TX	1
@@ -647,15 +670,15 @@ struct spa_bt_transport {
 	enum spa_bt_profile profile;
 	enum spa_bt_transport_state state;
 	const struct media_codec *media_codec;
-	unsigned int codec;
 	void *configuration;
 	int configuration_len;
 	char *endpoint_path;
+	char *remote_endpoint_path;
 	bool bap_initiator;
 	struct spa_list bap_transport_linked;
 
 	uint32_t n_channels;
-	uint32_t channels[64];
+	uint32_t channels[SPA_AUDIO_MAX_CHANNELS];
 
 	struct spa_bt_transport_volume volumes[SPA_BT_VOLUME_ID_TERM];
 
@@ -685,6 +708,10 @@ struct spa_bt_transport {
 	struct spa_hook_list listener_list;
 	struct spa_callbacks impl;
 
+	/* For ASHA */
+	bool asha_right_side;
+	uint64_t hisyncid;
+
 	/* user_data must be the last item in the struct */
 	void *user_data;
 };
@@ -702,7 +729,7 @@ bool spa_bt_transport_volume_enabled(struct spa_bt_transport *transport);
 int spa_bt_transport_acquire(struct spa_bt_transport *t, bool optional);
 int spa_bt_transport_release(struct spa_bt_transport *t);
 int spa_bt_transport_keepalive(struct spa_bt_transport *t, bool keepalive);
-int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop);
+int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop, struct spa_system *data_system);
 
 #define spa_bt_transport_emit(t,m,v,...)		spa_hook_list_call(&(t)->listener_list, \
 								struct spa_bt_transport_events,	\

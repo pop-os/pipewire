@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2023 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -9,8 +11,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -140,13 +140,14 @@ struct impl {
 	struct pw_stream *capture;
 	struct spa_hook capture_listener;
 	struct spa_audio_info_raw capture_info;
-	struct spa_latency_info capture_latency;
 
 	struct pw_properties *playback_props;
 	struct pw_stream *playback;
 	struct spa_hook playback_listener;
 	struct spa_audio_info_raw playback_info;
-	struct spa_latency_info playback_latency;
+
+	struct spa_latency_info latency[2];
+	struct spa_process_latency_info process_latency;
 
 	unsigned int do_disconnect:1;
 };
@@ -236,22 +237,31 @@ static void playback_process(void *d)
 		pw_stream_queue_buffer(impl->playback, out);
 }
 
-static void param_latency_changed(struct impl *impl, const struct spa_pod *param,
-		struct spa_latency_info *info, struct pw_stream *other)
+static void update_latency(struct impl *impl, enum spa_direction direction)
 {
 	struct spa_latency_info latency;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b;
 	const struct spa_pod *params[1];
+	struct pw_stream *s = direction == SPA_DIRECTION_OUTPUT ?
+		impl->playback : impl->capture;
+
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	latency = impl->latency[direction];
+	spa_process_latency_info_add(&impl->process_latency, &latency);
+	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
+	pw_stream_update_params(s, params, 1);
+}
+
+static void param_latency_changed(struct impl *impl, const struct spa_pod *param)
+{
+	struct spa_latency_info latency;
 
 	if (param == NULL || spa_latency_parse(param, &latency) < 0)
 		return;
 
-	*info = latency;
-
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	params[0] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
-	pw_stream_update_params(other, params, 1);
+	impl->latency[latency.direction] = latency;
+	update_latency(impl, latency.direction);
 }
 
 static void stream_state_changed(void *data, enum pw_stream_state old,
@@ -294,7 +304,7 @@ static void capture_param_changed(void *data, uint32_t id, const struct spa_pod 
 		break;
 	}
 	case SPA_PARAM_Latency:
-		param_latency_changed(impl, param, &impl->capture_latency, impl->playback);
+		param_latency_changed(impl, param);
 		break;
 	}
 }
@@ -320,7 +330,7 @@ static void playback_param_changed(void *data, uint32_t id, const struct spa_pod
 
 	switch (id) {
 	case SPA_PARAM_Latency:
-		param_latency_changed(impl, param, &impl->playback_latency, impl->capture);
+		param_latency_changed(impl, param);
 		break;
 	}
 }
@@ -520,6 +530,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->module = module;
 	impl->context = context;
+	impl->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
+	impl->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
 	if (pw_properties_get(props, PW_KEY_NODE_GROUP) == NULL)
 		pw_properties_setf(props, PW_KEY_NODE_GROUP, "filter-%u-%u", pid, id);

@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -27,8 +29,6 @@
 #include <openssl/md5.h>
 #include <openssl/evp.h>
 
-#include "config.h"
-
 #include <spa/utils/cleanup.h>
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -38,7 +38,6 @@
 #include <spa/pod/builder.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw.h>
-#include <spa/param/latency-utils.h>
 
 #include <pipewire/impl.h>
 #include <pipewire/i18n.h>
@@ -213,6 +212,7 @@ struct impl {
 
 	struct pw_impl_module *module;
 	struct pw_loop *loop;
+	struct pw_timer_queue *timer_queue;
 
 	struct spa_hook module_listener;
 
@@ -246,7 +246,7 @@ struct impl {
 	uint16_t control_port;
 	int control_fd;
 	struct spa_source *control_source;
-	struct spa_source *feedback_timer;
+	struct pw_timer feedback_timer;
 
 	uint16_t timing_port;
 	int timing_fd;
@@ -271,9 +271,6 @@ struct impl {
 
 	bool mute;
 	float volume;
-
-	struct spa_latency_info latency_info;
-	struct spa_process_latency_info process_latency;
 
 	struct spa_ringbuffer ring;
 	uint8_t buffer[BUFFER_SIZE];
@@ -840,12 +837,16 @@ static int rtsp_send_volume(struct impl *impl)
 	return rtsp_send(impl, "SET_PARAMETER", "text/parameters", header, rtsp_log_reply_status);
 }
 
-static void rtsp_do_post_feedback(void *data, uint64_t expirations)
+static void rtsp_do_post_feedback(void *data)
 {
 	struct impl *impl = data;
 
 	pw_rtsp_client_url_send(impl->rtsp, "/feedback", "POST", &impl->headers->dict,
 					NULL, NULL, 0, rtsp_log_reply_status, impl);
+
+	pw_timer_queue_add(impl->timer_queue, &impl->feedback_timer,
+			&impl->feedback_timer.timeout, 2 * SPA_NSEC_PER_SEC,
+			rtsp_do_post_feedback, impl);
 }
 
 static uint32_t msec_to_samples(struct impl *impl, uint32_t msec)
@@ -853,31 +854,12 @@ static uint32_t msec_to_samples(struct impl *impl, uint32_t msec)
 	return (uint64_t) msec * impl->rate / 1000;
 }
 
-static void update_latency(struct impl *impl)
-{
-	uint32_t n_params = 0;
-	const struct spa_pod *params[3];
-	uint8_t buffer[1024];
-	struct spa_pod_builder b;
-	struct spa_latency_info latency;
-
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-
-	latency = SPA_LATENCY_INFO(PW_DIRECTION_INPUT);
-
-	spa_process_latency_info_add(&impl->process_latency, &latency);
-	params[n_params++] = spa_latency_build(&b, SPA_PARAM_Latency, &latency);
-	params[n_params++] = spa_latency_build(&b, SPA_PARAM_Latency, &impl->latency_info);
-	params[n_params++] = spa_process_latency_build(&b, SPA_PARAM_ProcessLatency, &impl->process_latency);
-	rtp_stream_update_params(impl->stream, params, n_params);
-}
-
 static int rtsp_record_reply(void *data, int status, const struct spa_dict *headers, const struct pw_array *content)
 {
 	struct impl *impl = data;
 	const char *str;
 	char progress[128];
-	struct timespec timeout, interval;
+	struct spa_process_latency_info process_latency;
 
 	pw_log_info("record status: %d", status);
 	switch (status) {
@@ -888,16 +870,12 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 		return 0;
 	}
 
-	timeout.tv_sec = 2;
-	timeout.tv_nsec = 0;
-	interval.tv_sec = 2;
-	interval.tv_nsec = 0;
-
 	// feedback timer is only needed for auth_setup	encryption
 	if (impl->encryption == CRYPTO_FP_SAP25) {
-		if (!impl->feedback_timer)
-			impl->feedback_timer = pw_loop_add_timer(impl->loop, rtsp_do_post_feedback, impl);
-		pw_loop_update_timer(impl->loop, impl->feedback_timer, &timeout, &interval, false);
+		pw_timer_queue_cancel(&impl->feedback_timer);
+		pw_timer_queue_add(impl->timer_queue, &impl->feedback_timer,
+				NULL, 2 * SPA_NSEC_PER_SEC,
+				rtsp_do_post_feedback, impl);
 	}
 
 	if ((str = spa_dict_lookup(headers, "Audio-Latency")) != NULL) {
@@ -905,9 +883,10 @@ static int rtsp_record_reply(void *data, int status, const struct spa_dict *head
 		if (spa_atou32(str, &l, 0))
 			impl->latency = SPA_MAX(l, impl->latency);
 	}
-	impl->process_latency.rate = impl->latency + msec_to_samples(impl, RAOP_LATENCY_MS);
+	spa_zero(process_latency);
+	process_latency.rate = impl->latency + msec_to_samples(impl, RAOP_LATENCY_MS);
 
-	update_latency(impl);
+	rtp_stream_update_process_latency(impl->stream, &process_latency);
 
 	rtp_stream_set_first(impl->stream);
 
@@ -1497,10 +1476,8 @@ static void connection_cleanup(struct impl *impl)
 		close(impl->timing_fd);
 		impl->timing_fd = -1;
 	}
-	if (impl->feedback_timer != NULL) {
-		pw_loop_destroy_source(impl->loop, impl->feedback_timer);
-		impl->feedback_timer = NULL;
-	}
+	pw_timer_queue_cancel(&impl->feedback_timer);
+
 	free(impl->auth_method);
 	impl->auth_method = NULL;
 	free(impl->realm);
@@ -1546,14 +1523,12 @@ static void stream_destroy(void *d)
 	impl->stream = NULL;
 }
 
-static void stream_state_changed(void *data, bool started, const char *error)
+static void stream_report_error(void *data, const char *error)
 {
 	struct impl *impl = data;
-
 	if (error) {
 		pw_log_error("stream error: %s", error);
 		pw_impl_module_schedule_destroy(impl->module);
-		return;
 	}
 }
 
@@ -1672,32 +1647,6 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 	rtp_stream_set_param(impl->stream, id, param);
 }
 
-static void param_latency_changed(struct impl *impl, const struct spa_pod *param)
-{
-	struct spa_latency_info latency;
-
-	if (param == NULL || spa_latency_parse(param, &latency) < 0)
-		return;
-	if (latency.direction == SPA_DIRECTION_OUTPUT)
-		impl->latency_info = latency;
-
-	update_latency(impl);
-}
-
-static void param_process_latency_changed(struct impl *impl, const struct spa_pod *param)
-{
-	struct spa_process_latency_info info;
-
-	if (param == NULL)
-		spa_zero(info);
-	else if (spa_process_latency_parse(param, &info) < 0)
-		return;
-	if (spa_process_latency_info_compare(&impl->process_latency, &info) == 0)
-		return;
-	impl->process_latency = info;
-	update_latency(impl);
-}
-
 static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *param)
 {
 	struct impl *impl = data;
@@ -1713,12 +1662,6 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 		if (param != NULL)
 			stream_props_changed(impl, id, param);
 		break;
-	case SPA_PARAM_Latency:
-		param_latency_changed(impl, param);
-		break;
-	case SPA_PARAM_ProcessLatency:
-		param_process_latency_changed(impl, param);
-		break;
 	default:
 		break;
 	}
@@ -1727,7 +1670,7 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 static const struct rtp_stream_events stream_events = {
 	RTP_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
-	.state_changed = stream_state_changed,
+	.report_error = stream_report_error,
 	.param_changed = stream_param_changed,
 	.send_packet = stream_send_packet
 };
@@ -1847,8 +1790,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->loop = pw_context_get_main_loop(context);
-
-	impl->latency_info = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 
 	ip = pw_properties_get(props, "raop.ip");
 	port = pw_properties_get(props, "raop.port");

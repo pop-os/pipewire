@@ -116,7 +116,15 @@ static void ladspa_port_update_ranges(struct descriptor *dd, struct spa_fga_port
 	lower = d->PortRangeHints[p].LowerBound;
 	upper = d->PortRangeHints[p].UpperBound;
 
-	port->hint = hint;
+	port->hint = 0;
+	if (hint & LADSPA_HINT_TOGGLED)
+		port->hint |= SPA_FGA_HINT_BOOLEAN;
+	if (hint & LADSPA_HINT_SAMPLE_RATE)
+		port->hint |= SPA_FGA_HINT_SAMPLE_RATE;
+	if (hint & LADSPA_HINT_INTEGER)
+		port->hint |= SPA_FGA_HINT_INTEGER;
+	if (spa_streq(port->name, "latency"))
+		port->hint |= SPA_FGA_HINT_LATENCY;
 	port->def = get_default(port, hint, lower, upper);
 	port->min = lower;
 	port->max = upper;
@@ -145,7 +153,7 @@ static const struct spa_fga_descriptor *ladspa_plugin_make_desc(void *plugin, co
 
 	desc->desc.instantiate = ladspa_instantiate;
 	desc->desc.cleanup = d->cleanup;
-	desc->desc.connect_port = d->connect_port;
+	desc->desc.connect_port = (__typeof__(desc->desc.connect_port))d->connect_port;
 	desc->desc.activate = d->activate;
 	desc->desc.deactivate = d->deactivate;
 	desc->desc.run = d->run;

@@ -21,6 +21,7 @@
 #include <spa/utils/defs.h>
 #include <spa/utils/dll.h>
 #include <spa/utils/json.h>
+#include <spa/utils/ratelimit.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/control/control.h>
 #include <spa/debug/types.h>
@@ -34,11 +35,12 @@
 
 /** \page page_module_rtp_source RTP source
  *
- * The `rtp-source` module creates a PipeWire source that receives audio
- * and midi RTP packets.
+ * The `rtp-source` module creates a PipeWire source that receives audio RTP packets.
+ * These RTP packets may contain raw PCM data, Opus encoded audio, or midi audio.
  *
  * This module is usually loaded from the \ref page_module_rtp_sap so that the
- * source.ip and source.port and format parameters matches that of the sender.
+ * source.ip and source.port and format parameters matches that of the sender that
+ * is announced via SAP.
  *
  * ## Module Name
  *
@@ -56,6 +58,8 @@
  * - `sess.latency.msec = <float>`: target network latency in milliseconds, default 100
  * - `sess.ignore-ssrc = <bool>`: ignore SSRC, default false
  * - `sess.media = <string>`: the media type audio|midi|opus, default audio
+ * - `sess.ts-direct = <bool>`: use direct timestamp mode, default false
+ *                (see the Buffer Modes section below)
  * - `stream.may-pause = <bool>`: pause the stream when no data is reveived, default false
  * - `stream.props = {}`: properties to be passed to the stream
  *
@@ -103,6 +107,47 @@
  * ]
  *\endcode
  *
+ * ## Buffer modes
+ *
+ * RTP source nodes created by this module use an internal ring buffer. Received RTP audio
+ * data is written into this ring buffer. When the node's process callback is run, it reads
+ * from that ring buffer and provides audio data from it to the graph.
+ *
+ * The `sess.ts-direct` option controls the _buffer mode_, which defines how this ring buffer
+ * is used. The RTP source nodes created by this module can operate in one of two of these
+ * buffer modes. In both modes, the RTP source node uses the timestamps of incoming RTP
+ * packets to write into the ring buffer (more specifically, at the position
+ * `timestamp + latency from the sess.latency.msec option`). The modes are:
+ *
+ * -# *Constant latency mode*: This is the default mode. It is used when `sess.ts-direct`
+ *    is set to false. `sess.latency.msec` then defines the ideal fill level of the ring
+ *    buffer. If the fill level is above or below this, then a DLL is used to adjust the
+ *    consumption of the buffer contents. If the fill level is below a critical value
+ *    (that's the amount of data that is needed in a cycle), or if the fill level equals
+ *    the total buffer size (meaning that no more data can be fed into the buffer), the
+ *    buffer contents are resynchronized, meaning that the existing contents are thrown
+ *    away, and the ring buffer is reset. This buffer mode is useful for when a constant
+ *    latency is desired, and the actual moment playback starts is unimportant (meaning
+ *    that playback is not necessarily in sync with other devices). This mode requires
+ *    no special graph driver.
+ * -# *Direct timestamp mode*: This is an alternate mode, used when `sess.ts-direct` is
+ *    set to true. In this mode, ring buffer over- and underrun and fill level are not
+ *    directly tracked; instead, they are handled implicitly. There is no constant latency
+ *    maintained. The current time (more specifically, the \ref spa_io_clock::position field
+ *    of \ref spa_io_position::clock) is directly used during playback to retrieve audio
+ *    data. This assumes that a graph driver is used whose time is somehow synchronized
+ *    to the sender's. Since the current time is directly used as an offset within the
+ *    ring buffer, the correct data is always pulled from the ring buffer, that is, the
+ *    data that shall be played now, in sync with the sender (and with other receivers).
+ *    This buffer mode is useful for when receivers shall play in sync with each other,
+ *    and shall use one common synchronized time, provided through the \ref spa_io_clock .
+ *    `sess.latency.msec` functions as a configurable assumed maximum transport delay
+ *    instead of a constant latency quantity in this mode. The DLL is not used in this
+ *    mode, since the graph driver is assumed to be synchronized to the sender, as said,
+ *    so any output sinks in the graph will already adjust their consumption pace to
+ *    match the pace of the graph driver.
+ *    AES67 sessions use this mode, for example.
+ *
  * \since 0.3.60
  */
 
@@ -141,19 +186,25 @@ struct impl {
 	struct pw_properties *props;
 	struct pw_context *context;
 
-	struct pw_loop *loop;
+	struct pw_loop *main_loop;
 	struct pw_loop *data_loop;
+	struct pw_timer_queue *timer_queue;
 
 	struct pw_core *core;
 	struct spa_hook core_listener;
 	struct spa_hook core_proxy_listener;
 	unsigned int do_disconnect:1;
 
+	struct spa_ratelimit rate_limit;
+
 	char *ifname;
 	bool always_process;
 	uint32_t cleanup_interval;
 
-	struct spa_source *timer;
+	struct pw_timer standby_timer;
+	/* This timer is used when the first stream_start() call fails because
+	 * of an ENODEV error (see the stream_start() code for details) */
+	struct pw_timer stream_start_retry_timer;
 
 	struct pw_properties *stream_props;
 	struct rtp_stream *stream;
@@ -166,11 +217,22 @@ struct impl {
 	uint8_t *buffer;
 	size_t buffer_size;
 
-	bool receiving;
+#define STATE_IDLE	0
+#define STATE_PROBE	1
+#define STATE_RECEIVING	2
+#define STATE_STOPPING	3
+	int state;
 	bool may_pause;
 	bool standby;
 	bool waiting;
 };
+
+static inline uint64_t get_time_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
 
 static int do_start(struct spa_loop *loop, bool async, uint32_t seq, const void *data,
 		size_t size, void *user_data)
@@ -198,6 +260,7 @@ on_rtp_io(void *data, int fd, uint32_t mask)
 {
 	struct impl *impl = data;
 	ssize_t len;
+	int suppressed;
 
 	if (mask & SPA_IO_IN) {
 		if ((len = recv(fd, impl->buffer, impl->buffer_size, 0)) < 0)
@@ -211,18 +274,23 @@ on_rtp_io(void *data, int fd, uint32_t mask)
 				goto receive_error;
 		}
 
-		if (!impl->receiving) {
-			impl->receiving = true;
-			pw_loop_invoke(impl->loop, do_start, 1, NULL, 0, false, impl);
+		if (SPA_ATOMIC_LOAD(impl->state) != STATE_RECEIVING) {
+			if (!SPA_ATOMIC_CAS(impl->state, STATE_PROBE, STATE_RECEIVING)) {
+				if (SPA_ATOMIC_CAS(impl->state, STATE_IDLE, STATE_RECEIVING))
+					pw_loop_invoke(impl->main_loop, do_start, 1, NULL, 0, false, impl);
+			}
 		}
 	}
 	return;
 
 receive_error:
-	pw_log_warn("recv error: %m");
+	if ((suppressed = spa_ratelimit_test(&impl->rate_limit, get_time_ns())) >= 0)
+		pw_log_warn("(%d suppressed) recv() error: %m", suppressed);
 	return;
 short_packet:
-	pw_log_warn("short packet of len %zd received", len);
+	if ((suppressed = spa_ratelimit_test(&impl->rate_limit, get_time_ns())) >= 0)
+		pw_log_warn("(%d suppressed) short packet of len %zd received",
+				suppressed, len);
 	return;
 }
 
@@ -324,37 +392,109 @@ error:
 	return res;
 }
 
-static int stream_start(struct impl *impl)
+static void stream_report_error(void *data, const char *error)
 {
+	struct impl *impl = data;
+	if (error) {
+		pw_log_error("stream error: %s", error);
+		pw_impl_module_schedule_destroy(impl->module);
+	}
+}
+
+static void stream_open_connection(void *data, int *result);
+
+static void on_open_connection_retry_timer_event(void *data)
+{
+	struct impl *impl = data;
+	pw_log_debug("trying again to open connection after previous attempt failed with ENODEV");
+	stream_open_connection(impl, NULL);
+}
+
+static void stream_open_connection(void *data, int *result)
+{
+	int res = 0;
 	int fd;
+	struct impl *impl = data;
 
 	if (impl->source != NULL)
-		return 0;
+		goto finish;
 
 	pw_log_info("starting RTP listener");
 
 	if ((fd = make_socket((const struct sockaddr *)&impl->src_addr,
 					impl->src_len, impl->ifname)) < 0) {
-		pw_log_error("failed to create socket: %m");
-		return -errno;
+		/* If make_socket() tries to create a socket and join to a multicast
+		 * group while the network interfaces are not ready yet to do so
+		 * (usually because a network manager component is still setting up
+		 * those network interfaces), ENODEV will be returned. This is essentially
+		 * a race condition. There is no discernible way to be notified when the
+		 * network interfaces are ready for that operation, so the next best
+		 * approach is to essentially do a form of polling by retrying the
+		 * stream_start() call after some time. The stream_start_retry_timer exists
+		 * precisely for that purpose. This means that ENODEV is not treated as
+		 * an error, but instead, it triggers the creation of that timer. */
+		if (errno == ENODEV) {
+			pw_log_warn("failed to create socket because network device is not ready "
+				"and present yet; will try again");
+
+			pw_timer_queue_cancel(&impl->stream_start_retry_timer);
+			/* Use a 1-second retry interval. The network interfaces
+			 * are likely to be up and running then. */
+			pw_timer_queue_add(impl->timer_queue, &impl->stream_start_retry_timer,
+					NULL, 1 * SPA_NSEC_PER_SEC,
+					on_open_connection_retry_timer_event, impl);
+
+			/* It is important to return 0 in this case. Otherwise, the nonzero return
+			 * value will later be propagated through the core as an error. */
+			res = 0;
+			goto finish;
+		} else {
+			pw_log_error("failed to create socket: %m");
+			/* If ENODEV was returned earlier, and the stream_start_retry_timer
+			 * was consequently created, but then a non-ENODEV error occurred,
+			 * the timer must be stopped and removed. */
+			pw_timer_queue_cancel(&impl->stream_start_retry_timer);
+			res = -errno;
+			goto finish;
+		}
 	}
+
+	/* Cleanup the timer in case ENODEV occurred earlier, and this time,
+	 * the socket creation succeeded. */
+	pw_timer_queue_cancel(&impl->stream_start_retry_timer);
 
 	impl->source = pw_loop_add_io(impl->data_loop, fd,
 				SPA_IO_IN, true, on_rtp_io, impl);
 	if (impl->source == NULL) {
 		pw_log_error("can't create io source: %m");
 		close(fd);
-		return -errno;
+		res = -errno;
+		goto finish;
 	}
-	return 0;
+
+finish:
+	if (res != 0) {
+		pw_log_error("failed to start RTP stream: %s", spa_strerror(res));
+		rtp_stream_set_error(impl->stream, res, "Can't start RTP stream");
+	}
+
+	if (result)
+		*result = res;
 }
 
-static void stream_stop(struct impl *impl)
+static void stream_close_connection(void *data, int *result)
 {
+	struct impl *impl = data;
+
+	if (result)
+		*result = 0;
+
 	if (!impl->source)
 		return;
 
 	pw_log_info("stopping RTP listener");
+
+	pw_timer_queue_cancel(&impl->stream_start_retry_timer);
 
 	pw_loop_destroy_source(impl->data_loop, impl->source);
 	impl->source = NULL;
@@ -364,25 +504,6 @@ static void stream_destroy(void *d)
 {
 	struct impl *impl = d;
 	impl->stream = NULL;
-}
-
-static void stream_state_changed(void *data, bool started, const char *error)
-{
-	struct impl *impl = data;
-	int res;
-
-	if (error) {
-		pw_log_error("stream error: %s", error);
-		pw_impl_module_schedule_destroy(impl->module);
-	} else if (started) {
-		if ((res = stream_start(impl)) < 0) {
-			pw_log_error("failed to start RTP stream: %s", spa_strerror(res));
-			rtp_stream_set_error(impl->stream, res, "Can't start RTP stream");
-		}
-	} else {
-		if (!impl->always_process && !impl->standby)
-			stream_stop(impl);
-	}
 }
 
 static void stream_props_changed(struct impl *impl, uint32_t id, const struct spa_pod *param)
@@ -449,17 +570,20 @@ static void stream_param_changed(void *data, uint32_t id, const struct spa_pod *
 static const struct rtp_stream_events stream_events = {
 	RTP_VERSION_STREAM_EVENTS,
 	.destroy = stream_destroy,
-	.state_changed = stream_state_changed,
+	.report_error = stream_report_error,
+	.open_connection = stream_open_connection,
+	.close_connection = stream_close_connection,
 	.param_changed = stream_param_changed,
 };
 
-static void on_timer_event(void *data, uint64_t expirations)
+static void on_standby_timer_event(void *data)
 {
 	struct impl *impl = data;
 
-	pw_log_debug("timer %d", impl->receiving);
+	pw_log_debug("standby timer event; state: %d standby: %d waiting: %d",
+			impl->state, impl->standby, impl->waiting);
 
-	if (!impl->receiving) {
+	if (SPA_ATOMIC_CAS(impl->state, STATE_PROBE, STATE_STOPPING)) {
 		if (!impl->standby) {
 			struct spa_dict_item item[1];
 
@@ -474,10 +598,15 @@ static void on_timer_event(void *data, uint64_t expirations)
 				rtp_stream_set_active(impl->stream, false);
 		}
 		//pw_impl_module_schedule_destroy(impl->module);
+		SPA_ATOMIC_STORE(impl->state, STATE_IDLE);
 	} else {
 		pw_log_debug("timeout, keeping active RTP source");
+		SPA_ATOMIC_CAS(impl->state, STATE_RECEIVING, STATE_PROBE);
 	}
-	impl->receiving = false;
+
+	pw_timer_queue_add(impl->timer_queue, &impl->standby_timer,
+			&impl->standby_timer.timeout, impl->cleanup_interval * SPA_NSEC_PER_SEC,
+			on_standby_timer_event, impl);
 }
 
 static void core_destroy(void *d)
@@ -502,8 +631,8 @@ static void impl_destroy(struct impl *impl)
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
 
-	if (impl->timer)
-		pw_loop_destroy_source(impl->loop, impl->timer);
+	pw_timer_queue_cancel(&impl->standby_timer);
+	pw_timer_queue_cancel(&impl->stream_start_retry_timer);
 
 	if (impl->data_loop)
 		pw_context_release_loop(impl->context, impl->data_loop);
@@ -559,7 +688,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	struct pw_context *context = pw_impl_module_get_context(module);
 	struct impl *impl;
 	const char *str, *sess_name;
-	struct timespec value, interval;
 	struct pw_properties *props, *stream_props;
 	int64_t ts_offset;
 	char addr[128];
@@ -585,8 +713,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	impl->module = module;
 	impl->context = context;
-	impl->loop = pw_context_get_main_loop(context);
+	impl->main_loop = pw_context_get_main_loop(context);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 	impl->data_loop = pw_context_acquire_loop(context, &props->dict);
+
+	impl->rate_limit.interval = 2 * SPA_NSEC_PER_SEC;
+	impl->rate_limit.burst = 1;
 
 	if ((sess_name = pw_properties_get(props, "sess.name")) == NULL)
 		sess_name = pw_get_host_name();
@@ -691,17 +823,12 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			&impl->core_listener,
 			&core_events, impl);
 
-	impl->timer = pw_loop_add_timer(impl->loop, on_timer_event, impl);
-	if (impl->timer == NULL) {
-		res = -errno;
-		pw_log_error("can't create timer source: %m");
+	if ((res = pw_timer_queue_add(impl->timer_queue, &impl->standby_timer,
+			NULL, impl->cleanup_interval * SPA_NSEC_PER_SEC,
+			on_standby_timer_event, impl)) < 0) {
+		pw_log_error("can't add timer: %s", spa_strerror(res));
 		goto out;
 	}
-	value.tv_sec = impl->cleanup_interval;
-	value.tv_nsec = 0;
-	interval.tv_sec = impl->cleanup_interval;
-	interval.tv_nsec = 0;
-	pw_loop_update_timer(impl->loop, impl->timer, &value, &interval, false);
 
 	impl->stream = rtp_stream_new(impl->core,
 			PW_DIRECTION_OUTPUT, pw_properties_copy(stream_props),

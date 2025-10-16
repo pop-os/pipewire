@@ -81,6 +81,9 @@ bool media_codec_check_caps(const struct media_codec *codec, unsigned int codec_
 	uint8_t config[A2DP_MAX_CAPS_SIZE];
 	int res;
 
+	if (codec->kind == MEDIA_CODEC_HFP)
+		return true;
+
 	if (codec_id != codec->codec_id)
 		return false;
 
@@ -91,7 +94,7 @@ bool media_codec_check_caps(const struct media_codec *codec, unsigned int codec_
 	if (res < 0)
 		return false;
 
-	if (codec->bap)
+	if (codec->kind == MEDIA_CODEC_BAP)
 		return true;
 	else
 		return ((size_t)res == caps_size);

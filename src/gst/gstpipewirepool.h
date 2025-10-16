@@ -9,6 +9,7 @@
 
 #include <gst/gst.h>
 
+#include <gst/audio/audio.h>
 #include <gst/video/video.h>
 
 #include <pipewire/pipewire.h>
@@ -17,6 +18,15 @@ G_BEGIN_DECLS
 
 #define GST_TYPE_PIPEWIRE_POOL (gst_pipewire_pool_get_type())
 G_DECLARE_FINAL_TYPE (GstPipeWirePool, gst_pipewire_pool, GST, PIPEWIRE_POOL, GstBufferPool)
+
+#define PIPEWIRE_POOL_MIN_BUFFERS 2u
+#define PIPEWIRE_POOL_MAX_BUFFERS 16u
+
+/* Only available in GStreamer 1.22+ */
+#ifndef GST_VIDEO_FORMAT_INFO_IS_VALID_RAW
+#define GST_VIDEO_FORMAT_INFO_IS_VALID_RAW(info)              \
+  (info != NULL && (info)->format > GST_VIDEO_FORMAT_ENCODED)
+#endif
 
 typedef struct _GstPipeWirePoolData GstPipeWirePoolData;
 struct _GstPipeWirePoolData {
@@ -29,6 +39,7 @@ struct _GstPipeWirePoolData {
   gboolean queued;
   struct spa_meta_region *crop;
   struct spa_meta_videotransform *videotransform;
+  struct spa_meta_cursor *cursor;
 };
 
 struct _GstPipeWirePool {
@@ -37,14 +48,20 @@ struct _GstPipeWirePool {
   GWeakRef stream;
   guint n_buffers;
 
+  gboolean has_video;
+  gboolean has_rawvideo;
   gboolean add_metavideo;
+  GstAudioInfo audio_info;
   GstVideoInfo video_info;
+  GstVideoAlignment video_align;
 
   GstAllocator *fd_allocator;
   GstAllocator *dmabuf_allocator;
+  GstAllocator *shm_allocator;
 
   GCond cond;
   gboolean paused;
+  gboolean allocate_memory;
 };
 
 enum GstPipeWirePoolMode {

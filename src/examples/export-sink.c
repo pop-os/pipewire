@@ -26,6 +26,7 @@
 #define WIDTH   640
 #define HEIGHT  480
 #define BPP    3
+#define RATE	30
 
 #include "sdl.h"
 
@@ -304,7 +305,8 @@ static int port_set_format(void *object,
 						  SDL_TEXTUREACCESS_STREAMING,
 						  d->format.size.width,
 						  d->format.size.height);
-		SDL_LockTexture(d->texture, NULL, &dest, &d->stride);
+		if (SDL_LockTexture(d->texture, NULL, &dest, &d->stride) < 0)
+			return -EINVAL;
 		SDL_UnlockTexture(d->texture);
 
 	}

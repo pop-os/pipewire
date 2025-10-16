@@ -10,6 +10,7 @@
 #include <spa/utils/defs.h>
 #include <spa/utils/list.h>
 #include <spa/utils/string.h>
+#include <spa/utils/json.h>
 #include <spa/support/loop.h>
 #include <spa/support/log.h>
 
@@ -19,16 +20,20 @@
 		#include <lv2/atom/atom.h>
 		#include <lv2/buf-size/buf-size.h>
 		#include <lv2/worker/worker.h>
+		#include <lv2/state/state.h>
 		#include <lv2/options/options.h>
 		#include <lv2/parameters/parameters.h>
+		#include <lv2/log/log.h>
 
 #	else
 
 		#include <lv2/lv2plug.in/ns/ext/atom/atom.h>
 		#include <lv2/lv2plug.in/ns/ext/buf-size/buf-size.h>
 		#include <lv2/lv2plug.in/ns/ext/worker/worker.h>
+		#include <lv2/lv2plug.in/ns/ext/state/state.h>
 		#include <lv2/lv2plug.in/ns/ext/options/options.h>
 		#include <lv2/lv2plug.in/ns/ext/parameters/parameters.h>
+		#include <lv2/lv2plug.in/ns/ext/log/log.h>
 
 #	endif
 
@@ -101,6 +106,7 @@ struct context {
 	LilvNode *boundedBlockLength;
 	LilvNode* worker_schedule;
 	LilvNode* worker_iface;
+	LilvNode* state_iface;
 
 	URITable uri_table;
 	LV2_URID_Map map;
@@ -169,14 +175,15 @@ static struct context *context_new(void)
 	c->boundedBlockLength = lilv_new_uri(c->world, LV2_BUF_SIZE__boundedBlockLength);
         c->worker_schedule = lilv_new_uri(c->world, LV2_WORKER__schedule);
 	c->worker_iface = lilv_new_uri(c->world, LV2_WORKER__interface);
+	c->state_iface = lilv_new_uri(c->world, LV2_STATE__interface);
 
 	c->map.handle = &c->uri_table;
 	c->map.map = uri_table_map;
-	c->map_feature.URI = LV2_URID_MAP_URI;
+	c->map_feature.URI = LV2_URID__map;
 	c->map_feature.data = &c->map;
 	c->unmap.handle = &c->uri_table;
 	c->unmap.unmap  = uri_table_unmap;
-	c->unmap_feature.URI = LV2_URID_UNMAP_URI;
+	c->unmap_feature.URI = LV2_URID__unmap;
 	c->unmap_feature.data = &c->unmap;
 
 	c->atom_Int = context_map(c, LV2_ATOM__Int);
@@ -231,12 +238,15 @@ struct instance {
 	LilvInstance *instance;
 	LV2_Worker_Schedule work_schedule;
 	LV2_Feature work_schedule_feature;
+	LV2_Log_Log log;
+	LV2_Feature log_feature;
 	LV2_Options_Option options[6];
 	LV2_Feature options_feature;
 
-	const LV2_Feature *features[8];
+	const LV2_Feature *features[10];
 
 	const LV2_Worker_Interface *work_iface;
+	const LV2_State_Interface *state_iface;
 
 	int32_t block_length;
 	LV2_Atom empty_atom;
@@ -278,6 +288,76 @@ work_schedule(LV2_Worker_Schedule_Handle handle, uint32_t size, const void *data
 	return LV2_WORKER_SUCCESS;
 }
 
+struct state_data {
+	struct instance *i;
+	const char *config;
+	char *tmp;
+};
+
+static const void *state_retrieve_function(LV2_State_Handle handle,
+		uint32_t key, size_t *size, uint32_t *type, uint32_t *flags)
+{
+	struct state_data *sd = (struct state_data*)handle;
+	struct plugin *p = sd->i->p;
+	struct context *c = p->c;
+	const char *uri = c->unmap.unmap(c->unmap.handle, key), *val;
+	struct spa_json it[3];
+	char k[strlen(uri)+3];
+	int len;
+
+	if (sd->config == NULL) {
+		spa_log_info(p->log, "lv2: restore %d %s without a config", key, uri);
+		return NULL;
+	}
+
+	if (spa_json_begin_object(&it[0], sd->config, strlen(sd->config)) <= 0) {
+		spa_log_error(p->log, "lv2: config must be an object");
+		return NULL;
+	}
+
+	while ((len = spa_json_object_next(&it[0], k, sizeof(k), &val)) > 0) {
+		if (!spa_streq(k, uri))
+			continue;
+
+		if (spa_json_is_container(val, len))
+			if ((len = spa_json_container_len(&it[0], val, len)) <= 0)
+				return NULL;
+
+		sd->tmp = realloc(sd->tmp, len+1);
+		spa_json_parse_stringn(val, len, sd->tmp, len+1);
+
+		spa_log_info(p->log, "lv2: restore %d %s %s", key, uri, sd->tmp);
+		if (size)
+			*size = strlen(sd->tmp);
+		if (type)
+			*type = 0;
+		if (flags)
+			*flags = LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE;
+		return sd->tmp;
+	}
+	spa_log_info(p->log, "lv2: restore %d %s not found in config", key, uri);
+	return NULL;
+}
+
+SPA_PRINTF_FUNC(3, 0)
+static int log_vprintf(LV2_Log_Handle handle, LV2_URID type, const char* fmt, va_list ap)
+{
+	struct instance *i = (struct instance*)handle;
+	spa_log_logv(i->p->log, SPA_LOG_LEVEL_INFO, __FILE__,__LINE__,__func__, fmt, ap);
+	return 0;
+}
+
+SPA_PRINTF_FUNC(3, 4)
+static int log_printf(LV2_Log_Handle handle, LV2_URID type, const char* fmt, ...)
+{
+	va_list args;
+	int ret;
+	va_start(args, fmt);
+	ret = log_vprintf(handle, type, fmt, args);
+	va_end(args);
+	return ret;
+}
+
 static void *lv2_instantiate(const struct spa_fga_plugin *plugin, const struct spa_fga_descriptor *desc,
                         unsigned long SampleRate, int index, const char *config)
 {
@@ -298,6 +378,12 @@ static void *lv2_instantiate(const struct spa_fga_plugin *plugin, const struct s
 	i->block_length = 1024;
 	i->desc = d;
 	i->p = p;
+	i->log.handle = i;
+	i->log.printf = log_printf;
+	i->log.vprintf = log_vprintf;
+	i->log_feature.URI = LV2_LOG__log;
+	i->log_feature.data = &i->log;
+	i->features[n_features++] = &i->log_feature;
 	i->features[n_features++] = &c->map_feature;
 	i->features[n_features++] = &c->unmap_feature;
 	i->features[n_features++] = &buf_size_features[0];
@@ -332,7 +418,7 @@ static void *lv2_instantiate(const struct spa_fga_plugin *plugin, const struct s
 	i->options_feature.data = i->options;
 	i->features[n_features++] = &i->options_feature;
 	i->features[n_features++] = NULL;
-	spa_assert(n_features <= SPA_N_ELEMENTS(i->features));
+	spa_assert(n_features < SPA_N_ELEMENTS(i->features));
 
 	i->instance = lilv_plugin_instantiate(p->p, SampleRate, i->features);
 	if (i->instance == NULL) {
@@ -343,24 +429,35 @@ static void *lv2_instantiate(const struct spa_fga_plugin *plugin, const struct s
                 i->work_iface = (const LV2_Worker_Interface*)
 			lilv_instance_get_extension_data(i->instance, LV2_WORKER__interface);
         }
+	if (lilv_plugin_has_extension_data(p->p, c->state_iface)) {
+                i->state_iface = (const LV2_State_Interface*)
+			lilv_instance_get_extension_data(i->instance, LV2_STATE__interface);
+        }
 	for (n = 0; n < desc->n_ports; n++) {
 		const LilvPort *port = lilv_plugin_get_port_by_index(p->p, n);
 		if (lilv_port_is_a(p->p, port, c->atom_AtomPort)) {
 			lilv_instance_connect_port(i->instance, n, &i->empty_atom);
 		}
 	}
-
+	if (i->state_iface && i->state_iface->restore) {
+		struct state_data sd = { .i = i, .config = config, .tmp = NULL };
+		i->state_iface->restore(i->instance->lv2_handle, state_retrieve_function,
+				&sd, 0, i->features);
+		free(sd.tmp);
+	}
 	return i;
 }
 
 static void lv2_cleanup(void *instance)
 {
 	struct instance *i = instance;
+	spa_loop_invoke(i->p->data_loop, NULL, 0, NULL, 0, true, NULL);
+	spa_loop_invoke(i->p->main_loop, NULL, 0, NULL, 0, true, NULL);
 	lilv_instance_free(i->instance);
 	free(i);
 }
 
-static void lv2_connect_port(void *instance, unsigned long port, float *data)
+static void lv2_connect_port(void *instance, unsigned long port, void *data)
 {
 	struct instance *i = instance;
 	lilv_instance_connect_port(i->instance, port, data);
@@ -389,6 +486,9 @@ static void lv2_run(void *instance, unsigned long SampleCount)
 static void lv2_free(const struct spa_fga_descriptor *desc)
 {
 	struct descriptor *d = (struct descriptor*)desc;
+	uint32_t i;
+	for (i = 0; i <  d->desc.n_ports; i++)
+		free((void*)d->desc.ports[i].name);
 	free((char*)d->desc.name);
 	free(d->desc.ports);
 	free(d);
@@ -401,6 +501,8 @@ static const struct spa_fga_descriptor *lv2_plugin_make_desc(void *plugin, const
 	struct descriptor *desc;
 	uint32_t i;
 	float *mins, *maxes, *controls;
+	bool latent;
+	uint32_t latency_index;
 
 	desc = calloc(1, sizeof(*desc));
 	if (desc == NULL)
@@ -426,6 +528,9 @@ static const struct spa_fga_descriptor *lv2_plugin_make_desc(void *plugin, const
 	maxes = alloca(desc->desc.n_ports * sizeof(float));
 	controls = alloca(desc->desc.n_ports * sizeof(float));
 
+	latent = lilv_plugin_has_latency(p->p);
+	latency_index = latent ? lilv_plugin_get_latency_port_index(p->p) : 0;
+
 	lilv_plugin_get_port_ranges_float(p->p, mins, maxes, controls);
 
 	for (i = 0; i < desc->desc.n_ports; i++) {
@@ -445,8 +550,13 @@ static const struct spa_fga_descriptor *lv2_plugin_make_desc(void *plugin, const
 			fp->flags |= SPA_FGA_PORT_CONTROL;
 		if (lilv_port_is_a(p->p, port, c->lv2_AudioPort))
 			fp->flags |= SPA_FGA_PORT_AUDIO;
+		if (lilv_port_has_property(p->p, port, c->lv2_Optional))
+			fp->flags |= SPA_FGA_PORT_SUPPORTS_NULL_DATA;
 
 		fp->hint = 0;
+		if (latent && latency_index == i)
+			fp->hint |= SPA_FGA_HINT_LATENCY;
+
 		fp->min = mins[i];
 		fp->max = maxes[i];
 		fp->def = controls[i];

@@ -40,7 +40,8 @@ GST_DEBUG_CATEGORY_STATIC (pipewire_sink_debug);
 #define DEFAULT_PROP_SLAVE_METHOD GST_PIPEWIRE_SINK_SLAVE_METHOD_NONE
 #define DEFAULT_PROP_USE_BUFFERPOOL USE_BUFFERPOOL_AUTO
 
-#define MIN_BUFFERS     8u
+#define MAX_ERROR_MS 1
+#define RESYNC_TIMEOUT_MS 10
 
 enum
 {
@@ -167,7 +168,8 @@ gst_pipewire_sink_propose_allocation (GstBaseSink * bsink, GstQuery * query)
   GstPipeWireSink *pwsink = GST_PIPEWIRE_SINK (bsink);
 
   if (pwsink->use_bufferpool != USE_BUFFERPOOL_NO)
-    gst_query_add_allocation_pool (query, GST_BUFFER_POOL_CAST (pwsink->stream->pool), 0, 0, 0);
+    gst_query_add_allocation_pool (query, GST_BUFFER_POOL_CAST (pwsink->stream->pool), 0,
+        PIPEWIRE_POOL_MIN_BUFFERS, PIPEWIRE_POOL_MAX_BUFFERS);
 
   gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
   return TRUE;
@@ -242,7 +244,8 @@ gst_pipewire_sink_class_init (GstPipeWireSinkClass * klass)
                                                         GST_TYPE_PIPEWIRE_SINK_MODE,
                                                         DEFAULT_PROP_MODE,
                                                         G_PARAM_READWRITE |
-                                                        G_PARAM_STATIC_STRINGS));
+                                                        G_PARAM_STATIC_STRINGS |
+                                                        GST_PARAM_MUTABLE_READY));
 
    g_object_class_install_property (gobject_class,
                                     PROP_FD,
@@ -310,21 +313,38 @@ gst_pipewire_sink_update_params (GstPipeWireSink *sink)
   config = gst_buffer_pool_get_config (GST_BUFFER_POOL (pool));
   gst_buffer_pool_config_get_params (config, &caps, &size, &min_buffers, &max_buffers);
 
+  /* We cannot dynamically grow the pool */
+  if (max_buffers == 0) {
+    GST_WARNING_OBJECT (sink, "cannot support unlimited buffers in pool");
+    max_buffers = PIPEWIRE_POOL_MAX_BUFFERS;
+  }
+
   spa_pod_builder_init (&b, buffer, sizeof (buffer));
   spa_pod_builder_push_object (&b, &f, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers);
   spa_pod_builder_add (&b,
       SPA_PARAM_BUFFERS_size, SPA_POD_CHOICE_RANGE_Int(size, size, INT32_MAX),
       0);
+  if (sink->is_rawvideo) {
+    /* MUST have n_datas == n_planes */
+    spa_pod_builder_add (&b,
+        SPA_PARAM_BUFFERS_blocks,
+        SPA_POD_Int(GST_VIDEO_INFO_N_PLANES (&pool->video_info)),
+        0);
+  } else {
+    /* Non-planar data, get a single block */
+    spa_pod_builder_add (&b,
+        SPA_PARAM_BUFFERS_blocks,
+        SPA_POD_Int(1),
+        0);
+  }
 
   spa_pod_builder_add (&b,
       SPA_PARAM_BUFFERS_stride,  SPA_POD_CHOICE_RANGE_Int(0, 0, INT32_MAX),
+      /* At this stage, we will request as many buffers as we _might_ need as
+       * the default, since we can't grow the pool once this is set */
       SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(
-              SPA_MAX(MIN_BUFFERS, min_buffers),
-              SPA_MAX(MIN_BUFFERS, min_buffers),
-              max_buffers ? max_buffers : INT32_MAX),
-      SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
-                                                (1<<SPA_DATA_MemFd) |
-                                                (1<<SPA_DATA_MemPtr)),
+              max_buffers, min_buffers, max_buffers),
+      SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1<<SPA_DATA_MemFd),
       0);
   port_params[n_params++] = spa_pod_builder_pop (&b, &f);
 
@@ -333,7 +353,7 @@ gst_pipewire_sink_update_params (GstPipeWireSink *sink)
       SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
       SPA_PARAM_META_size, SPA_POD_Int(sizeof (struct spa_meta_header)));
 
-  if (sink->is_video) {
+  if (sink->is_rawvideo) {
     port_params[n_params++] = spa_pod_builder_add_object (&b,
         SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
         SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
@@ -343,6 +363,8 @@ gst_pipewire_sink_update_params (GstPipeWireSink *sink)
   pw_thread_loop_lock (sink->stream->core->loop);
   pw_stream_update_params (sink->stream->pwstream, port_params, n_params);
   pw_thread_loop_unlock (sink->stream->core->loop);
+
+  gst_structure_free (config);
 }
 
 static void
@@ -359,7 +381,8 @@ gst_pipewire_sink_init (GstPipeWireSink * sink)
 
   sink->mode = DEFAULT_PROP_MODE;
   sink->use_bufferpool = DEFAULT_PROP_USE_BUFFERPOOL;
-  sink->is_video = false;
+  sink->is_rawvideo = false;
+  sink->first_buffer = true;
 
   GST_OBJECT_FLAG_SET (sink, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
 
@@ -377,7 +400,7 @@ gst_pipewire_sink_sink_fixate (GstBaseSink * bsink, GstCaps * caps)
   structure = gst_caps_get_structure (caps, 0);
 
   if (gst_structure_has_name (structure, "video/x-raw")) {
-    pwsink->is_video = true;
+    pwsink->is_rawvideo = true;
     gst_structure_fixate_field_nearest_int (structure, "width", 320);
     gst_structure_fixate_field_nearest_int (structure, "height", 240);
     gst_structure_fixate_field_nearest_fraction (structure, "framerate", 30, 1);
@@ -591,14 +614,17 @@ static void
 on_remove_buffer (void *_data, struct pw_buffer *b)
 {
   GstPipeWireSink *pwsink = _data;
+
   GST_DEBUG_OBJECT (pwsink, "remove pw_buffer %p", b);
   gst_pipewire_pool_remove_buffer (pwsink->stream->pool, b);
 
   if (!gst_pipewire_pool_has_buffers (pwsink->stream->pool) &&
       !GST_BUFFER_POOL_IS_FLUSHING (GST_BUFFER_POOL_CAST (pwsink->stream->pool))) {
-    GST_ELEMENT_ERROR (pwsink, RESOURCE, NOT_FOUND,
-        ("all buffers have been removed"),
-        ("PipeWire link to remote node was destroyed"));
+      if (pwsink->mode != GST_PIPEWIRE_SINK_MODE_PROVIDE) {
+        GST_ELEMENT_ERROR (pwsink, RESOURCE, NOT_FOUND,
+          ("all buffers have been removed"),
+          ("PipeWire link to remote node was destroyed"));
+      }
   }
 }
 
@@ -633,6 +659,9 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
     }
   }
   data->b->size = 0;
+
+  spa_assert(b->n_datas == gst_buffer_n_memory(buffer));
+
   for (i = 0; i < b->n_datas; i++) {
     struct spa_data *d = &b->datas[i];
     GstMemory *mem = gst_buffer_peek_memory (buffer, i);
@@ -646,16 +675,20 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
   GstVideoMeta *meta = gst_buffer_get_video_meta (buffer);
   if (meta) {
     if (meta->n_planes == b->n_datas) {
+      uint32_t n_planes = GST_VIDEO_INFO_N_PLANES (&data->pool->video_info);
       gsize video_size = 0;
-      for (i = 0; i < meta->n_planes; i++) {
+
+      for (i = 0; i < n_planes; i++) {
         struct spa_data *d = &b->datas[i];
-        d->chunk->offset += meta->offset[i] - video_size;
+
         d->chunk->stride = meta->stride[i];
+        d->chunk->offset = meta->offset[i] - video_size;
 
         video_size += d->chunk->size;
       }
     } else {
-      GST_ERROR_OBJECT (pwsink, "plane num not matching, meta:%u buffer:%u", meta->n_planes, b->n_datas);
+      GST_ERROR_OBJECT (pwsink, "plane num not matching, meta:%u buffer:%u",
+          meta->n_planes, b->n_datas);
     }
   }
 
@@ -663,7 +696,18 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
     GST_WARNING_OBJECT (pwsink, "can't send buffer %s", spa_strerror(res));
   } else {
     data->queued = TRUE;
-    GST_LOG_OBJECT(pwsink, "queued pwbuffer: %p; gstbuffer %p ",data->b, buffer);
+    GST_LOG_OBJECT(pwsink, "queued pwbuffer: %p size: %"PRIu64"; gstbuffer %p",
+      data->b, data->b->size, buffer);
+    if (pwsink->first_buffer) {
+      pwsink->first_buffer = false;
+      pwsink->first_buffer_pts = GST_BUFFER_PTS(buffer);
+    }
+    stream->position = gst_util_uint64_scale_int(GST_BUFFER_PTS(buffer) - pwsink->first_buffer_pts,
+      pwsink->rate, 1 * GST_SECOND);
+
+    // have the buffer duration value minimum as 1, in case of video where rate is 0 (not applicable)
+    stream->buf_duration =  SPA_MAX((uint64_t)1, gst_util_uint64_scale_int(GST_BUFFER_DURATION(buffer),
+      pwsink->rate, 1 * GST_SECOND));
   }
 
   switch (pwsink->slave_method) {
@@ -675,6 +719,56 @@ do_send_buffer (GstPipeWireSink *pwsink, GstBuffer *buffer)
   }
 }
 
+static void update_time (GstPipeWireSink *pwsink)
+{
+  struct spa_io_position *p = pwsink->stream->io_position;
+  double err = 0.0, corr = 1.0;
+  guint64 now;
+  double max_err = pwsink->rate * MAX_ERROR_MS/1000.0;
+  double resync_timeout = pwsink->rate * RESYNC_TIMEOUT_MS/1000.0;
+
+  if (pwsink->first_buffer) {
+    // use the target duration before the first buffer
+    pwsink->stream->buf_duration = p->clock.target_duration;
+    spa_dll_set_bw(&pwsink->stream->dll, SPA_DLL_BW_MIN, pwsink->stream->buf_duration,
+      pwsink->rate);
+  }
+
+  now = pw_stream_get_nsec(pwsink->stream->pwstream);
+  err = (double)gst_util_uint64_scale(now, pwsink->rate, 1 * GST_SECOND) -
+          (double)gst_util_uint64_scale(p->clock.next_nsec, pwsink->rate, 1 * GST_SECOND);
+
+  GST_LOG_OBJECT(pwsink, "err is %f max err is %f now %"PRIu64" next is %"PRIu64"", err, max_err, now,
+    p->clock.next_nsec);
+
+  if (fabs(err) > max_err) {
+    if (fabs(err) > resync_timeout) {
+      GST_WARNING_OBJECT(pwsink, "err %f exceeds resync timeout, resetting", err);
+      spa_dll_set_bw(&pwsink->stream->dll, SPA_DLL_BW_MIN, pwsink->stream->buf_duration,
+        pwsink->rate);
+      err = 0.0;
+    } else {
+      err = SPA_CLAMPD(err, -max_err, max_err);
+    }
+  }
+  corr = spa_dll_update(&pwsink->stream->dll, err);
+
+  p->clock.nsec = now;
+  p->clock.position = pwsink->stream->position;
+  p->clock.duration = pwsink->stream->buf_duration;
+  /* we don't have a way to estimate the target (next cycle) buffer duration
+   * so use the current buffer duration
+   */
+  p->clock.target_duration = pwsink->stream->buf_duration;
+  p->clock.rate = SPA_FRACTION(1, pwsink->rate);
+  // current time plus duration scaled with correlation
+  p->clock.next_nsec = now + (uint64_t)(p->clock.duration / corr * GST_SECOND / pwsink->rate);
+  p->clock.rate_diff = corr;
+
+  GST_DEBUG_OBJECT(pwsink, "now %"PRIu64", position %"PRIu64", duration %"PRIu64", rate :%d,"
+    "next : %"PRIu64", delay is %"PRIi64", rate_diff is %f", p->clock.nsec, p->clock.position,
+    p->clock.duration, pwsink->rate, p->clock.next_nsec, p->clock.delay,p->clock.rate_diff);
+}
 
 static void
 on_process (void *data)
@@ -682,6 +776,23 @@ on_process (void *data)
   GstPipeWireSink *pwsink = data;
   GST_LOG_OBJECT (pwsink, "signal");
   g_cond_signal (&pwsink->stream->pool->cond);
+}
+
+static int invoke_trigger_process(struct spa_loop *loop,
+  bool async, uint32_t seq, const void *data, size_t size, void *user_data)
+{
+
+  GstPipeWireSink *pwsink = user_data;
+
+  /* Note: We cannot use the rate for computation of other clock params
+   * in case of video because the rate for video is set as 0 in the _setcaps.
+   * So skip update time for video (i.e. when rate is 0). The video buffers
+   * get timestamp from the SPA_META_Header anyway
+   */
+
+  if (pwsink->rate)
+    update_time(pwsink);
+  return pw_stream_trigger_process(pwsink->stream->pwstream);
 }
 
 static void
@@ -699,7 +810,8 @@ on_state_changed (void *data, enum pw_stream_state old, enum pw_stream_state sta
       break;
     case PW_STREAM_STATE_STREAMING:
       if (pw_stream_is_driving (pwsink->stream->pwstream))
-        pw_stream_trigger_process (pwsink->stream->pwstream);
+        pw_loop_invoke(pw_stream_get_data_loop(pwsink->stream->pwstream),
+          invoke_trigger_process, 1, NULL, 0 , false, pwsink);
       break;
     case PW_STREAM_STATE_ERROR:
       /* make the error permanent, if it is not already;
@@ -759,9 +871,21 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
     if (pwsink->use_bufferpool != USE_BUFFERPOOL_YES)
       pwsink->use_bufferpool = USE_BUFFERPOOL_NO;
   } else {
+    GstVideoInfo video_info;
+
     pwsink->rate = rate = 0;
     pwsink->rate_match = false;
-    pwsink->is_video = true;
+
+    gst_video_info_from_caps (&video_info, caps);
+
+    if (GST_VIDEO_FORMAT_INFO_IS_VALID_RAW (video_info.finfo)
+#ifdef HAVE_GSTREAMER_DMA_DRM
+        && GST_VIDEO_FORMAT_INFO_FORMAT (video_info.finfo) != GST_VIDEO_FORMAT_DMA_DRM
+#endif
+        )
+      pwsink->is_rawvideo = TRUE;
+    else
+      pwsink->is_rawvideo = FALSE;
   }
 
   spa_dll_set_bw(&pwsink->stream->dll, SPA_DLL_BW_MIN, 4096, rate);
@@ -787,6 +911,11 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
       flags |= PW_STREAM_FLAG_AUTOCONNECT;
     else
       flags |= PW_STREAM_FLAG_DRIVER;
+
+#ifdef HAVE_GSTREAMER_SHM_ALLOCATOR
+    flags |= PW_STREAM_FLAG_ALLOC_BUFFERS;
+    pwsink->stream->pool->allocate_memory = true;
+#endif
 
     target_id = pwsink->stream->path ? (uint32_t)atoi(pwsink->stream->path) : PW_ID_ANY;
 
@@ -841,8 +970,12 @@ gst_pipewire_sink_setcaps (GstBaseSink * bsink, GstCaps * caps)
   config = gst_buffer_pool_get_config (GST_BUFFER_POOL_CAST (pwsink->stream->pool));
   gst_buffer_pool_config_get_params (config, NULL, &size, &min_buffers, &max_buffers);
   gst_buffer_pool_config_set_params (config, caps, size, min_buffers, max_buffers);
-  if(pwsink->is_video)
-    gst_buffer_pool_config_add_option(config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+  if (pwsink->is_rawvideo) {
+    gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+#ifdef HAVE_GSTREAMER_SHM_ALLOCATOR
+    gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_ALIGNMENT);
+#endif
+  }
   gst_buffer_pool_set_config (GST_BUFFER_POOL_CAST (pwsink->stream->pool), config);
 
   pw_thread_loop_unlock (pwsink->stream->core->loop);
@@ -924,20 +1057,17 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
       if (res != GST_FLOW_OK)
         goto done;
 
-      if (pwsink->is_video) {
+      if (pwsink->is_rawvideo) {
         GstVideoFrame src, dst;
         gboolean copied = FALSE;
         buf_size = 0; // to break from the loop
 
-        /*
-          splitting of buffers in the case of video might break the frame layout
-          and that seems to be causing issues while retrieving the buffers on the receiver
-          side. Hence use the video_frame_map to copy the buffer of bigger size into the
-          pipewirepool's buffer
-        */
+        /* splitting of buffers in the case of video might break the frame layout
+         * and that seems to be causing issues while retrieving the buffers on the receiver
+         * side. Hence use the video_frame_map to copy the buffer of bigger size into the
+         * pipewirepool's buffer */
 
-        if (!gst_video_frame_map (&dst, &pwsink->stream->pool->video_info, b,
-          GST_MAP_WRITE)) {
+        if (!gst_video_frame_map (&dst, &pwsink->stream->pool->video_info, b, GST_MAP_WRITE)) {
           GST_ERROR_OBJECT(pwsink, "Failed to map dest buffer");
           return GST_FLOW_ERROR;
         }
@@ -957,8 +1087,6 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
           GST_ERROR_OBJECT(pwsink, "Failed to copy the frame");
           return GST_FLOW_ERROR;
         }
-
-        gst_buffer_copy_into(b, buffer, GST_BUFFER_COPY_METADATA, 0, -1);
       } else {
         gst_buffer_map (b, &info, GST_MAP_WRITE);
         gsize extract_size = (buf_size <= info.maxsize) ? buf_size: info.maxsize;
@@ -980,7 +1108,8 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
       gst_buffer_unref (b);
 
       if (pw_stream_is_driving (pwsink->stream->pwstream))
-        pw_stream_trigger_process (pwsink->stream->pwstream);
+        pw_loop_invoke(pw_stream_get_data_loop(pwsink->stream->pwstream),
+          invoke_trigger_process, 1, NULL, 0 , false, pwsink);
     }
   } else {
     GST_TRACE_OBJECT(pwsink, "Buffer is from pipewirepool");
@@ -988,7 +1117,8 @@ gst_pipewire_sink_render (GstBaseSink * bsink, GstBuffer * buffer)
     do_send_buffer (pwsink, buffer);
 
     if (pw_stream_is_driving (pwsink->stream->pwstream))
-      pw_stream_trigger_process (pwsink->stream->pwstream);
+      pw_loop_invoke(pw_stream_get_data_loop(pwsink->stream->pwstream),
+        invoke_trigger_process, 1, NULL, 0 , false, pwsink);
   }
 
 done_unlock:
@@ -1002,6 +1132,18 @@ not_negotiated:
   }
 }
 
+static void
+on_io_changed(void *data, uint32_t id, void *area, uint32_t size)
+{
+	GstPipeWireSink *pwsink = data;
+
+	switch (id) {
+	case SPA_IO_Position:
+		pwsink->stream->io_position = area;
+		break;
+	}
+}
+
 static const struct pw_stream_events stream_events = {
         PW_VERSION_STREAM_EVENTS,
         .state_changed = on_state_changed,
@@ -1009,6 +1151,7 @@ static const struct pw_stream_events stream_events = {
         .add_buffer = on_add_buffer,
         .remove_buffer = on_remove_buffer,
         .process = on_process,
+        .io_changed = on_io_changed,
 };
 
 static GstStateChangeReturn
@@ -1023,6 +1166,14 @@ gst_pipewire_sink_change_state (GstElement * element, GstStateChange transition)
         goto open_failed;
       break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:
+      /* If we are a driver, we shouldn't try to also provide the clock, as we
+       * _are_ the clock for the graph. For that case, we rely on the pipeline
+       * clock to drive the pipeline (and thus the graph). */
+      if (this->mode == GST_PIPEWIRE_SINK_MODE_PROVIDE)
+        GST_OBJECT_FLAG_UNSET (this, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
+      else
+        GST_OBJECT_FLAG_SET (this, GST_ELEMENT_FLAG_PROVIDE_CLOCK);
+
       /* the initial stream state is active, which is needed for linking and
        * negotiation to happen and the bufferpool to be set up. We don't know
        * if we'll go to plaing, so we deactivate the stream until that

@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -13,8 +15,6 @@
 #include <signal.h>
 #include <limits.h>
 #include <math.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -317,21 +317,21 @@ static inline void fix_midi_event(uint8_t *data, size_t size)
 
 static void midi_to_ffado(struct port *p, float *src, uint32_t n_samples)
 {
-	struct spa_pod *pod;
-	struct spa_pod_sequence *seq;
-	struct spa_pod_control *c;
+	struct spa_pod_parser parser;
+	struct spa_pod_frame frame;
+	struct spa_pod_sequence seq;
+	struct spa_pod_control c;
+	const void *seq_body, *c_body;
 	uint32_t i, index = 0, unhandled = 0;
 	uint32_t *dst = p->buffer;
 
 	if (src == NULL)
 		return;
 
-	if ((pod = spa_pod_from_data(src, n_samples * sizeof(float), 0, n_samples * sizeof(float))) == NULL)
+	spa_pod_parser_init_from_data(&parser, src, n_samples * sizeof(float),
+			0, n_samples * sizeof(float));
+	if (spa_pod_parser_push_sequence_body(&parser, &frame, &seq, &seq_body) < 0)
 		return;
-	if (!spa_pod_is_sequence(pod))
-		return;
-
-	seq = (struct spa_pod_sequence*)pod;
 
 	clear_port_buffer(p, n_samples);
 
@@ -342,31 +342,35 @@ static void midi_to_ffado(struct port *p, float *src, uint32_t n_samples)
 	}
 	p->event_pos = 0;
 
-	SPA_POD_SEQUENCE_FOREACH(seq, c) {
+	while (spa_pod_parser_get_control_body(&parser, &c, &c_body) >= 0) {
 		uint8_t data[16];
 		int j, size;
+		size_t c_size = c.value.size;
+		uint64_t state = 0;
 
-		if (c->type != SPA_CONTROL_UMP)
+		if (c.type != SPA_CONTROL_UMP)
 			continue;
 
-		size = spa_ump_to_midi(SPA_POD_BODY(&c->value),
-				SPA_POD_BODY_SIZE(&c->value), data, sizeof(data));
-		if (size <= 0)
-			continue;
+		if (index < c.offset)
+			index = SPA_ROUND_UP_N(c.offset, 8);
 
-		if (index < c->offset)
-			index = SPA_ROUND_UP_N(c->offset, 8);
-		for (j = 0; j < size; j++) {
-			if (index >= n_samples) {
-				/* keep events that don't fit for the next cycle */
-				if (p->event_pos < sizeof(p->event_buffer))
-					p->event_buffer[p->event_pos++] = data[j];
+		while (c_size > 0) {
+			size = spa_ump_to_midi((const uint32_t**)&c_body, &c_size, data, sizeof(data), &state);
+			if (size <= 0)
+				break;
+
+			for (j = 0; j < size; j++) {
+				if (index >= n_samples) {
+					/* keep events that don't fit for the next cycle */
+					if (p->event_pos < sizeof(p->event_buffer))
+						p->event_buffer[p->event_pos++] = data[j];
+					else
+						unhandled++;
+				}
 				else
-					unhandled++;
+					dst[index] = 0x01000000 | (uint32_t) data[j];
+				index += 8;
 			}
-			else
-				dst[index] = 0x01000000 | (uint32_t) data[j];
-			index += 8;
 		}
 	}
 	if (unhandled > 0)

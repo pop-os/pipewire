@@ -621,7 +621,7 @@ static int reply_create_playback_stream(struct stream *stream, struct pw_manager
 			TAG_INVALID);
 	}
 
-	stream->create_tag = SPA_ID_INVALID;
+	stream_created(stream);
 
 	return client_queue_message(client, reply);
 }
@@ -783,7 +783,7 @@ static int reply_create_record_stream(struct stream *stream, struct pw_manager_o
 			TAG_INVALID);
 	}
 
-	stream->create_tag = SPA_ID_INVALID;
+	stream_created(stream);
 
 	return client_queue_message(client, reply);
 }
@@ -1127,6 +1127,25 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		break;
 	}
 
+	/* Don't emit suspended if we are creating a corked stream, as that will have a quick
+	 * RUNNING/SUSPENDED transition for initial negotiation */
+	if (stream->create_tag == SPA_ID_INVALID && !stream->corked) {
+		if (old == PW_STREAM_STATE_PAUSED && state == PW_STREAM_STATE_STREAMING &&
+		    stream->is_suspended) {
+			stream_send_suspended(stream, false);
+			stream->is_suspended = false;
+		}
+		if (old == PW_STREAM_STATE_STREAMING && state == PW_STREAM_STATE_PAUSED &&
+		    !stream->is_suspended) {
+			if (stream->fail_on_suspend) {
+				stream->killed = true;
+				destroy_stream = true;
+			} else {
+				stream_send_suspended(stream, true);
+			}
+			stream->is_suspended = true;
+		}
+	}
 	if (destroy_stream) {
 		pw_work_queue_add(impl->work_queue, stream, 0,
 				do_destroy_stream, NULL);
@@ -1488,7 +1507,7 @@ static void stream_process(void *data)
 
 	pw_stream_get_time_n(stream->stream, &pd.pwt, sizeof(pd.pwt));
 
-	pw_loop_invoke(impl->loop,
+	pw_loop_invoke(impl->main_loop,
 			do_process_done, 1, &pd, sizeof(pd), false, stream);
 }
 
@@ -1733,6 +1752,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	stream->muted_set = muted_set;
 	stream->is_underrun = true;
 	stream->underrun_for = -1;
+	stream->fail_on_suspend = fail_on_suspend;
 
 	pw_properties_set(props, "pulse.corked", corked ? "true" : "false");
 
@@ -2008,6 +2028,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	stream->volume_set = volume_set;
 	stream->muted = muted;
 	stream->muted_set = muted_set;
+	stream->fail_on_suspend = fail_on_suspend;
 
 	if (client->quirks & QUIRK_REMOVE_CAPTURE_DONT_MOVE)
 		no_move = false;
@@ -5501,8 +5522,9 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	spa_list_init(&impl->cleanup_clients);
 	spa_list_init(&impl->free_messages);
 
-	impl->loop = pw_context_get_main_loop(context);
+	impl->main_loop = pw_context_get_main_loop(context);
 	impl->work_queue = pw_context_get_work_queue(context);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);

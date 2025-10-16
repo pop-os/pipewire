@@ -125,16 +125,24 @@ static struct spa_thread *impl_create(void *object,
 static int impl_join(void *object, struct spa_thread *thread, void **retval)
 {
 	pthread_t pt = (pthread_t)thread;
-	return pthread_join(pt, retval);
+	return -pthread_join(pt, retval);
 }
 
 static int impl_get_rt_range(void *object, const struct spa_dict *props,
 		int *min, int *max)
 {
-	if (min)
+	if (min) {
 		*min = sched_get_priority_min(SCHED_OTHER);
-	if (max)
+		if (*min < 0)
+			return -errno;
+	}
+
+	if (max) {
 		*max = sched_get_priority_max(SCHED_OTHER);
+		if (*max < 0)
+			return -errno;
+	}
+
 	return 0;
 }
 static int impl_acquire_rt(void *object, struct spa_thread *thread, int priority)

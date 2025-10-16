@@ -9,6 +9,7 @@
 #include <regex.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <fnmatch.h>
 
 #include <pipewire/log.h>
@@ -229,6 +230,7 @@ static int setup_data_loops(struct impl *impl)
 			pw_properties_clear(pr);
 			pw_properties_update(pr, &this->properties->dict);
 			pw_properties_set(pr, PW_KEY_LIBRARY_NAME_SYSTEM, lib_name);
+			pw_properties_set(pr, "loop.prio-inherit",  "true");
 
 			while ((l = spa_json_object_next(&it[1], key, sizeof(key), &val)) > 0) {
 				if (spa_json_is_container(val, l))
@@ -261,6 +263,7 @@ static int setup_data_loops(struct impl *impl)
 		}
 		for (i = 0; i < impl->n_data_loops; i++) {
 			pw_properties_setf(pr, SPA_KEY_THREAD_NAME,  "data-loop.%d", i);
+			pw_properties_set(pr, "loop.prio-inherit",  "true");
 			impl->data_loops[i].impl = pw_data_loop_new(&pr->dict);
 			if (impl->data_loops[i].impl == NULL)  {
 				res = -errno;
@@ -296,6 +299,88 @@ static void data_loop_stop(struct impl *impl, struct data_loop *loop)
 		return;
 	pw_data_loop_stop(loop->impl);
 	loop->started = false;
+}
+
+static int adjust_rlimit(int resource, const char *name, int value)
+{
+	struct rlimit rlim, highest, fixed;
+
+	rlim = (struct rlimit) { .rlim_cur = value, .rlim_max = value, };
+
+	if (setrlimit(resource, &rlim) >= 0) {
+		pw_log_info("set rlimit %s to %d", name, value);
+		return 0;
+	}
+	if (errno != EPERM)
+		return -errno;
+
+	/* So we failed to set the desired setrlimit, then let's try
+	* to get as close as we can */
+	if (getrlimit(resource, &highest) < 0)
+		return -errno;
+
+	/* If the hard limit is unbounded anyway, then the EPERM had other reasons,
+	 * let's propagate the original EPERM then */
+	if (highest.rlim_max == RLIM_INFINITY)
+		return -EPERM;
+
+        fixed = (struct rlimit) {
+		.rlim_cur = SPA_MIN(rlim.rlim_cur, highest.rlim_max),
+		.rlim_max = SPA_MIN(rlim.rlim_max, highest.rlim_max),
+	};
+
+	/* Shortcut things if we wouldn't change anything. */
+	if (fixed.rlim_cur == highest.rlim_cur &&
+	    fixed.rlim_max == highest.rlim_max)
+		return 0;
+
+	pw_log_info("set rlimit %s to %d/%d instead of %d", name,
+			(int)fixed.rlim_cur, (int)fixed.rlim_max, value);
+	if (setrlimit(resource, &fixed) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static int adjust_rlimits(const struct spa_dict *dict)
+{
+	const struct spa_dict_item *it;
+	static const char* rlimit_table[] = {
+		[RLIMIT_AS]         = "as",
+		[RLIMIT_CORE]       = "core",
+		[RLIMIT_CPU]        = "cpu",
+		[RLIMIT_DATA]       = "data",
+		[RLIMIT_FSIZE]      = "fsize",
+		[RLIMIT_LOCKS]      = "locks",
+		[RLIMIT_MEMLOCK]    = "memlock",
+		[RLIMIT_MSGQUEUE]   = "msgqueue",
+		[RLIMIT_NICE]       = "nice",
+		[RLIMIT_NOFILE]     = "nofile",
+		[RLIMIT_NPROC]      = "nproc",
+		[RLIMIT_RSS]        = "rss",
+		[RLIMIT_RTPRIO]     = "rtprio",
+		[RLIMIT_RTTIME]     = "rttime",
+		[RLIMIT_SIGPENDING] = "sigpending",
+		[RLIMIT_STACK]      = "stack",
+	};
+	int res;
+	spa_dict_for_each(it, dict) {
+		if (!spa_strstartswith(it->key, "rlimit."))
+			continue;
+		for (size_t i = 0; i < SPA_N_ELEMENTS(rlimit_table); i++) {
+			const char *name = rlimit_table[i];
+			int64_t val;
+			if (!spa_streq(it->key+7, name))
+				continue;
+			if (!spa_atoi64(it->value, &val, 0)) {
+				pw_log_warn("invalid number %s", it->value);
+			} else if ((res = adjust_rlimit(i, name, val)) < 0)
+				pw_log_warn("can't set rlimit %s to %s: %s",
+						name, it->value, spa_strerror(res));
+			break;
+		}
+	}
+	return 0;
 }
 
 /** Create a new context object
@@ -418,6 +503,7 @@ struct pw_context *pw_context_new(struct pw_loop *main_loop,
 		else
 			pw_log_info("%p: mlockall succeeded", impl);
 	}
+	adjust_rlimits(&properties->dict);
 
 	pw_settings_init(this);
 	this->settings = this->defaults;
@@ -580,6 +666,8 @@ void pw_context_destroy(struct pw_context *context)
 
 	if (context->work_queue)
 		pw_work_queue_destroy(context->work_queue);
+	if (context->timer_queue)
+		pw_timer_queue_destroy(context->timer_queue);
 
 	pw_properties_free(context->properties);
 	pw_properties_free(context->conf);
@@ -751,6 +839,14 @@ struct pw_work_queue *pw_context_get_work_queue(struct pw_context *context)
 }
 
 SPA_EXPORT
+struct pw_timer_queue *pw_context_get_timer_queue(struct pw_context *context)
+{
+	if (context->timer_queue == NULL)
+		context->timer_queue =  pw_timer_queue_new(context->main_loop);
+	return context->timer_queue;
+}
+
+SPA_EXPORT
 struct pw_mempool *pw_context_get_mempool(struct pw_context *context)
 {
 	return context->pool;
@@ -884,194 +980,6 @@ SPA_PRINTF_FUNC(7, 8) int pw_context_debug_port_params(struct pw_context *this,
                 pw_log_pod(SPA_LOG_LEVEL_ERROR, param);
         }
         return 0;
-}
-
-/** Find a common format between two ports
- *
- * \param context a context object
- * \param output an output port
- * \param input an input port
- * \param props extra properties
- * \param n_format_filters number of format filters
- * \param format_filters array of format filters
- * \param[out] format the common format between the ports
- * \param builder builder to use for processing
- * \param[out] error an error when something is wrong
- * \return a common format of NULL on error
- *
- * Find a common format between the given ports. The format will
- * be restricted to a subset given with the format filters.
- */
-int pw_context_find_format(struct pw_context *context,
-			struct pw_impl_port *output,
-			uint32_t output_mix,
-			struct pw_impl_port *input,
-			uint32_t input_mix,
-			struct pw_properties *props,
-			uint32_t n_format_filters,
-			struct spa_pod **format_filters,
-			struct spa_pod **format,
-			struct spa_pod_builder *builder,
-			char **error)
-{
-	uint32_t out_state, in_state;
-	int res;
-	uint32_t iidx = 0, oidx = 0;
-	struct spa_pod_builder fb = { 0 };
-	uint8_t fbuf[4096];
-	struct spa_pod *filter;
-	struct spa_node *in_node, *out_node;
-	uint32_t in_port, out_port;
-
-	out_state = output->state;
-	in_state = input->state;
-
-	if (output_mix == SPA_ID_INVALID) {
-		out_node = output->node->node;
-		out_port = output->port_id;
-	} else {
-		out_node = output->mix;
-		out_port = output_mix;
-	}
-	if (input_mix == SPA_ID_INVALID) {
-		in_node = input->node->node;
-		in_port = input->port_id;
-	} else {
-		in_node = input->mix;
-		in_port = input_mix;
-	}
-
-	pw_log_debug("%p: finding best format %d %d", context, out_state, in_state);
-
-	/* when a port is configured but the node is idle, we can reconfigure with a different format */
-	if (out_state > PW_IMPL_PORT_STATE_CONFIGURE && output->node->info.state == PW_NODE_STATE_IDLE)
-		out_state = PW_IMPL_PORT_STATE_CONFIGURE;
-	if (in_state > PW_IMPL_PORT_STATE_CONFIGURE && input->node->info.state == PW_NODE_STATE_IDLE)
-		in_state = PW_IMPL_PORT_STATE_CONFIGURE;
-
-	pw_log_debug("%p: states %d %d", context, out_state, in_state);
-
-	if (in_state == PW_IMPL_PORT_STATE_CONFIGURE && out_state > PW_IMPL_PORT_STATE_CONFIGURE) {
-		/* only input needs format */
-		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
-		if ((res = spa_node_port_enum_params_sync(out_node,
-						     output->direction, out_port,
-						     SPA_PARAM_Format, &oidx,
-						     NULL, &filter, &fb)) != 1) {
-			if (res < 0)
-				*error = spa_aprintf("error get output format: %s", spa_strerror(res));
-			else
-				*error = spa_aprintf("no output formats");
-			goto error;
-		}
-		pw_log_debug("%p: Got output format:", context);
-		pw_log_format(SPA_LOG_LEVEL_DEBUG, filter);
-
-		if ((res = spa_node_port_enum_params_sync(in_node,
-						     input->direction, in_port,
-						     SPA_PARAM_EnumFormat, &iidx,
-						     filter, format, builder)) <= 0) {
-			if (res == -ENOENT || res == 0) {
-				pw_log_debug("%p: no input format filter, using output format: %s",
-						context, spa_strerror(res));
-
-				uint32_t offset = builder->state.offset;
-				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
-				if (res < 0) {
-					*error = spa_aprintf("failed to add pod");
-					goto error;
-				}
-
-				*format = spa_pod_builder_deref(builder, offset);
-			} else {
-				*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
-				goto error;
-			}
-		}
-	} else if (out_state >= PW_IMPL_PORT_STATE_CONFIGURE && in_state > PW_IMPL_PORT_STATE_CONFIGURE) {
-		/* only output needs format */
-		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
-		if ((res = spa_node_port_enum_params_sync(in_node,
-						     input->direction, in_port,
-						     SPA_PARAM_Format, &iidx,
-						     NULL, &filter, &fb)) != 1) {
-			if (res < 0)
-				*error = spa_aprintf("error get input format: %s", spa_strerror(res));
-			else
-				*error = spa_aprintf("no input format");
-			goto error;
-		}
-		pw_log_debug("%p: Got input format:", context);
-		pw_log_format(SPA_LOG_LEVEL_DEBUG, filter);
-
-		if ((res = spa_node_port_enum_params_sync(out_node,
-						     output->direction, out_port,
-						     SPA_PARAM_EnumFormat, &oidx,
-						     filter, format, builder)) <= 0) {
-			if (res == -ENOENT || res == 0) {
-				pw_log_debug("%p: no output format filter, using input format: %s",
-						context, spa_strerror(res));
-
-				uint32_t offset = builder->state.offset;
-				res = spa_pod_builder_raw_padded(builder, filter, SPA_POD_SIZE(filter));
-				if (res < 0) {
-					*error = spa_aprintf("failed to add pod");
-					goto error;
-				}
-
-				*format = spa_pod_builder_deref(builder, offset);
-			} else {
-				*error = spa_aprintf("error output enum formats: %s", spa_strerror(res));
-				goto error;
-			}
-		}
-	} else if (in_state == PW_IMPL_PORT_STATE_CONFIGURE && out_state == PW_IMPL_PORT_STATE_CONFIGURE) {
-	      again:
-		/* both ports need a format */
-		pw_log_debug("%p: do enum input %d", context, iidx);
-		spa_pod_builder_init(&fb, fbuf, sizeof(fbuf));
-		if ((res = spa_node_port_enum_params_sync(in_node,
-						     input->direction, in_port,
-						     SPA_PARAM_EnumFormat, &iidx,
-						     NULL, &filter, &fb)) != 1) {
-			if (res == -ENOENT) {
-				pw_log_debug("%p: no input filter", context);
-				filter = NULL;
-			} else {
-				if (res < 0)
-					*error = spa_aprintf("error input enum formats: %s", spa_strerror(res));
-				else
-					*error = spa_aprintf("no more input formats");
-				goto error;
-			}
-		}
-		pw_log_debug("%p: enum output %d with filter: %p", context, oidx, filter);
-		pw_log_format(SPA_LOG_LEVEL_DEBUG, filter);
-
-		if ((res = spa_node_port_enum_params_sync(out_node,
-						     output->direction, out_port,
-						     SPA_PARAM_EnumFormat, &oidx,
-						     filter, format, builder)) != 1) {
-			if (res == 0 && filter != NULL) {
-				oidx = 0;
-				goto again;
-			}
-			*error = spa_aprintf("error output enum formats: %s", spa_strerror(res));
-			goto error;
-		}
-
-		pw_log_debug("%p: Got filtered:", context);
-		pw_log_format(SPA_LOG_LEVEL_DEBUG, *format);
-	} else {
-		res = -EBADF;
-		*error = spa_aprintf("error bad node state");
-		goto error;
-	}
-	return res;
-error:
-	if (res == 0)
-		res = -EINVAL;
-	return res;
 }
 
 static int ensure_state(struct pw_impl_node *node, bool running)
@@ -1277,11 +1185,25 @@ static int collect_nodes(struct pw_context *context, struct pw_impl_node *node, 
 		pw_log_debug(" next node %p: '%s' runnable:%u %p %p %p", n, n->name, n->runnable,
 				n->groups, n->link_groups, sync);
 	}
-	spa_list_for_each(n, collect, sort_link)
-		if (!n->driving && n->runnable) {
+	/* All non-driver runnable nodes (ie. reachable with a non-passive link) now make
+	 * all linked nodes up and downstream runnable as well */
+	spa_list_for_each(n, collect, sort_link) {
+		if (!n->driver && n->runnable) {
 			run_nodes(context, n, collect, PW_DIRECTION_OUTPUT, 0);
 			run_nodes(context, n, collect, PW_DIRECTION_INPUT, 0);
 		}
+	}
+	/* now we might have made a driver runnable, if the node is not runnable at this point
+	 * it means it was linked to the driver with passives links and some other node
+	 * made the driver active. If the node is a leaf it can not be activated in any other
+	 * way and we will also make it, and all its peers, runnable */
+	spa_list_for_each(n, collect, sort_link) {
+		if (!n->driver && n->driver_node->runnable && !n->runnable && n->leaf && n->active) {
+			n->runnable = true;
+			run_nodes(context, n, collect, PW_DIRECTION_OUTPUT, 0);
+			run_nodes(context, n, collect, PW_DIRECTION_INPUT, 0);
+		}
+	}
 
 	return 0;
 }

@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -13,8 +15,6 @@
 #include <signal.h>
 #include <limits.h>
 #include <math.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -148,6 +148,7 @@ static const struct spa_dict_item module_props[] = {
 struct impl {
 	struct pw_context *context;
 	struct pw_loop *main_loop;
+	struct pw_timer_queue *timer_queue;
 
 #define MODE_SINK	0
 #define MODE_SOURCE	1
@@ -194,7 +195,7 @@ struct impl {
 	bool do_disconnect:1;
 	bool stopping;
 
-	struct spa_source *timer;
+	struct pw_timer timer;
 	uint32_t reconnect_interval_ms;
 	bool recovering;
 };
@@ -298,7 +299,7 @@ static void stream_param_changed(void *d, uint32_t id, const struct spa_pod *par
 
 			if ((n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
 					vols, SPA_AUDIO_MAX_CHANNELS)) > 0) {
-				volume.channels = n;
+				volume.channels = SPA_MIN(PA_CHANNELS_MAX, n);
 				for (n = 0; n < volume.channels; n++)
 					volume.values[n] = pa_sw_volume_from_linear(vols[n]);
 
@@ -525,7 +526,7 @@ static void cleanup_streams(struct impl *impl)
 		pw_stream_destroy(impl->stream);
 }
 
-static void on_timer_event(void *data, uint64_t expirations)
+static void on_timer_event(void *data)
 {
 	struct impl *impl = data;
 	cleanup_streams(impl);
@@ -538,13 +539,9 @@ do_schedule_recovery(struct spa_loop *loop,
 {
 	struct impl *impl = user_data;
 	if (impl->reconnect_interval_ms > 0) {
-		struct timespec value;
-		uint64_t timestamp;
-
-		timestamp = impl->reconnect_interval_ms * SPA_NSEC_PER_MSEC;
-		value.tv_sec = timestamp / SPA_NSEC_PER_SEC;
-		value.tv_nsec = timestamp % SPA_NSEC_PER_SEC;
-		pw_loop_update_timer(impl->main_loop, impl->timer, &value, NULL, false);
+		pw_timer_queue_add(impl->timer_queue, &impl->timer,
+				NULL, impl->reconnect_interval_ms * SPA_NSEC_PER_MSEC,
+				on_timer_event, impl);
 	} else {
 		if (impl->module)
 			pw_impl_module_schedule_destroy(impl->module);
@@ -834,11 +831,12 @@ do_stream_sync_volumes(struct spa_loop *loop,
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
 	struct spa_pod_frame f[1];
 	struct spa_pod *param;
-	uint32_t i;
+	uint32_t i, channels;
 	float vols[SPA_AUDIO_MAX_CHANNELS];
 	float soft_vols[SPA_AUDIO_MAX_CHANNELS];
 
-	for (i = 0; i < impl->volume.channels; i++) {
+	channels = SPA_MIN(impl->volume.channels, SPA_AUDIO_MAX_CHANNELS);
+	for (i = 0; i < channels; i++) {
 		vols[i] = (float)pa_sw_volume_to_linear(impl->volume.values[i]);
 		soft_vols[i] = 1.0f;
 	}
@@ -851,10 +849,10 @@ do_stream_sync_volumes(struct spa_loop *loop,
 
 	spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
 	spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
-			impl->volume.channels, vols);
+			channels, vols);
 	spa_pod_builder_prop(&b, SPA_PROP_softVolumes, 0);
 	spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float,
-			impl->volume.channels, soft_vols);
+			channels, soft_vols);
 	param = spa_pod_builder_pop(&b, &f[0]);
 
 	pw_stream_set_param(impl->stream, SPA_PARAM_Props, param);
@@ -1028,8 +1026,7 @@ static void impl_destroy(struct impl *impl)
 	pw_properties_free(impl->stream_props);
 	pw_properties_free(impl->props);
 
-	if (impl->timer)
-		pw_loop_destroy_source(impl->main_loop, impl->timer);
+	pw_timer_queue_cancel(&impl->timer);
 
 	free(impl->buffer);
 	free(impl);
@@ -1143,6 +1140,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->module = module;
 	impl->context = context;
 	impl->main_loop = pw_context_get_main_loop(context);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 
 	spa_ringbuffer_init(&impl->ring);
 	impl->buffer = calloc(1, RINGBUFFER_SIZE);
@@ -1163,13 +1161,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 	impl->reconnect_interval_ms = pw_properties_get_uint32(props,
 			"reconnect.interval.ms", 0);
-
-	impl->timer = pw_loop_add_timer(impl->main_loop, on_timer_event, impl);
-	if (impl->timer == NULL) {
-		res = -errno;
-		pw_log_error("can't create timer source: %m");
-		goto error;
-	}
 
 	impl->latency_msec = pw_properties_get_uint32(props, "pulse.latency", DEFAULT_LATENCY_MSEC);
 

@@ -5,6 +5,12 @@
 #ifndef SPA_AUDIO_DSD_UTILS_H
 #define SPA_AUDIO_DSD_UTILS_H
 
+#include <spa/pod/iter.h>
+#include <spa/pod/parser.h>
+#include <spa/pod/builder.h>
+#include <spa/param/format-utils.h>
+#include <spa/param/audio/format.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,11 +19,6 @@ extern "C" {
  * \addtogroup spa_param
  * \{
  */
-
-#include <spa/pod/parser.h>
-#include <spa/pod/builder.h>
-#include <spa/param/format-utils.h>
-#include <spa/param/audio/format.h>
 
 #ifndef SPA_API_AUDIO_DSD_UTILS
  #ifdef SPA_API_IMPL

@@ -497,7 +497,7 @@ static int get_mapping(const struct media_codec *codec, const a2dp_opus_05_direc
 		bool use_surround_encoder, uint8_t *streams_ret, uint8_t *coupled_streams_ret,
 		const uint8_t **surround_mapping, uint32_t *positions)
 {
-	const uint8_t channels = conf->channels;
+	const uint32_t channels = conf->channels;
 	const uint32_t location = OPUS_05_GET_LOCATION(*conf);
 	const uint8_t coupled_streams = conf->coupled_streams;
 	const uint8_t *permutation = NULL;
@@ -561,7 +561,7 @@ static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
 	a2dp_opus_05_t a2dp_opus_05 = {
 		.info = codec->vendor,
 		.main = {
-			.channels = SPA_AUDIO_MAX_CHANNELS,
+			.channels = SPA_MIN(255u, SPA_AUDIO_MAX_CHANNELS),
 			.frame_duration = (OPUS_05_FRAME_DURATION_25 |
 					OPUS_05_FRAME_DURATION_50 |
 					OPUS_05_FRAME_DURATION_100 |
@@ -571,7 +571,7 @@ static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
 			OPUS_05_INIT_BITRATE(0)
 		},
 		.bidi = {
-			.channels = SPA_AUDIO_MAX_CHANNELS,
+			.channels = SPA_MIN(255u, SPA_AUDIO_MAX_CHANNELS),
 			.frame_duration = (OPUS_05_FRAME_DURATION_25 |
 					OPUS_05_FRAME_DURATION_50 |
 					OPUS_05_FRAME_DURATION_100 |
@@ -1188,7 +1188,8 @@ static SPA_UNUSED int codec_start_decode (void *data,
 	const struct rtp_payload *payload = SPA_PTROFF(src, sizeof(struct rtp_header), void);
 	size_t header_size = sizeof(struct rtp_header) + sizeof(struct rtp_payload);
 
-	spa_return_val_if_fail (src_size > header_size, -EINVAL);
+	if (src_size <= header_size)
+		return -EINVAL;
 
 	if (seqnum)
 		*seqnum = ntohs(header->sequence_number);
@@ -1349,6 +1350,7 @@ static void codec_set_log(struct spa_log *global_log)
 }
 
 #define OPUS_05_COMMON_DEFS					\
+	.kind = MEDIA_CODEC_A2DP,				\
 	.codec_id = A2DP_CODEC_VENDOR,				\
 	.vendor = { .vendor_id = OPUS_05_VENDOR_ID,		\
 			.codec_id = OPUS_05_CODEC_ID },		\

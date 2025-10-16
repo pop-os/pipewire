@@ -30,7 +30,7 @@ struct spatializer_impl {
 	struct spa_log *log;
 
 	unsigned long rate;
-	float *port[6];
+	float *port[7];
 	int n_samples, blocksize, tailsize;
 	float *tmp[2];
 
@@ -262,7 +262,7 @@ static void spatializer_reload(void * Instance)
 		spa_log_error(impl->log, "reloading left or right convolver failed");
 		return;
 	}
-	spa_loop_invoke(impl->plugin->data_loop, do_switch, 1, NULL, 0, true, impl);
+	spa_loop_locked(impl->plugin->data_loop, do_switch, 1, NULL, 0, impl);
 }
 
 struct free_data {
@@ -312,14 +312,13 @@ static void spatializer_run(void * Instance, unsigned long SampleCount)
 		convolver_run(impl->l_conv[0], impl->port[2], impl->port[0], SampleCount);
 		convolver_run(impl->r_conv[0], impl->port[2], impl->port[1], SampleCount);
 	}
+	impl->port[6][0] = impl->n_samples;
 }
 
 static void spatializer_connect_port(void * Instance, unsigned long Port,
-                        float * DataLocation)
+                        void * DataLocation)
 {
 	struct spatializer_impl *impl = Instance;
-	if (Port > 5)
-		return;
 	impl->port[Port] = DataLocation;
 }
 
@@ -344,6 +343,12 @@ static void spatializer_cleanup(void * Instance)
 static void spatializer_control_changed(void * Instance)
 {
 	spatializer_reload(Instance);
+}
+
+static void spatializer_activate(void * Instance)
+{
+	struct spatializer_impl *impl = Instance;
+	impl->port[6][0] = impl->n_samples;
 }
 
 static void spatializer_deactivate(void * Instance)
@@ -385,17 +390,23 @@ static struct spa_fga_port spatializer_ports[] = {
 	  .flags = SPA_FGA_PORT_INPUT | SPA_FGA_PORT_CONTROL,
 	  .def = 1.0f, .min = 0.0f, .max = 100.0f
 	},
+	{ .index = 6,
+	  .name = "latency",
+	  .hint = SPA_FGA_HINT_LATENCY,
+	  .flags = SPA_FGA_PORT_OUTPUT | SPA_FGA_PORT_CONTROL,
+	},
 };
 
 static const struct spa_fga_descriptor spatializer_desc = {
 	.name = "spatializer",
 
-	.n_ports = 6,
+	.n_ports = SPA_N_ELEMENTS(spatializer_ports),
 	.ports = spatializer_ports,
 
 	.instantiate = spatializer_instantiate,
 	.connect_port = spatializer_connect_port,
 	.control_changed = spatializer_control_changed,
+	.activate = spatializer_activate,
 	.deactivate = spatializer_deactivate,
 	.run = spatializer_run,
 	.cleanup = spatializer_cleanup,
