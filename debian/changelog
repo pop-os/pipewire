@@ -1,10 +1,10 @@
-pipewire (1.5.83-1) UNRELEASED; urgency=medium
+pipewire (1.5.83-1) experimental; urgency=medium
 
-  * New upstream release
+  * New upstream release (1.6 release candidate 3)
   * Disable onnxruntime on unsupported architectures
   * Remove redundant "Rules-Requires-Root: no"
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Nov 2025 16:43:26 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Nov 2025 17:29:27 +0100
 
 pipewire (1.5.81-1) experimental; urgency=medium
 
