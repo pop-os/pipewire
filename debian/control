@@ -56,7 +56,6 @@ Standards-Version: 4.7.2
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git -b debian/experimental
 Homepage: https://pipewire.org/
-Rules-Requires-Root: no
 
 Package: libpipewire-0.3-0t64
 Provides: ${t64:Provides}
