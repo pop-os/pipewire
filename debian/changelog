@@ -1,6 +1,7 @@
 pipewire (1.5.83-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Disable onnxruntime on unsupported architectures
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Nov 2025 16:43:26 +0100
 
