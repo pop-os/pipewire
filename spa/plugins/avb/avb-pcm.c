@@ -40,7 +40,13 @@ static int avb_set_param(struct state *state, const char *k, const char *s)
 		state->default_format = spa_type_audio_format_from_short_name(s);
 		fmt_change++;
 	} else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
-		spa_audio_parse_position(s, strlen(s), state->default_pos.pos,
+		spa_audio_parse_position_n(s, strlen(s), state->default_pos.pos,
+				SPA_N_ELEMENTS(state->default_pos.pos),
+				&state->default_pos.channels);
+		fmt_change++;
+	} else if (spa_streq(k, SPA_KEY_AUDIO_LAYOUT)) {
+		spa_audio_parse_layout(s, state->default_pos.pos,
+				SPA_N_ELEMENTS(state->default_pos.pos),
 				&state->default_pos.channels);
 		fmt_change++;
 	} else if (spa_streq(k, SPA_KEY_AUDIO_ALLOWED_RATES)) {
@@ -85,11 +91,12 @@ static int position_to_string(struct channel_map *map, char *val, size_t len)
 {
 	uint32_t i, o = 0;
 	int r;
+	char pos[8];
 	o += snprintf(val, len, "[ ");
 	for (i = 0; i < map->channels; i++) {
 		r = snprintf(val+o, len-o, "%s%s", i == 0 ? "" : ", ",
-				spa_debug_type_find_short_name(spa_type_audio_channel,
-					map->pos[i]));
+				spa_type_audio_channel_make_short_name(map->pos[i],
+					pos, sizeof(pos), "UNK"));
 		if (r < 0 || o + r >= len)
 			return -ENOSPC;
 		o += r;

@@ -47,10 +47,11 @@ SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioconvert");
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 
+#define MAX_CHANNELS	SPA_AUDIO_MAX_CHANNELS
 #define MAX_ALIGN	FMT_OPS_MAX_ALIGN
 #define MAX_BUFFERS	32
-#define MAX_DATAS	SPA_AUDIO_MAX_CHANNELS
-#define MAX_PORTS	(SPA_AUDIO_MAX_CHANNELS+1)
+#define MAX_DATAS	MAX_CHANNELS
+#define MAX_PORTS	(MAX_CHANNELS+1)
 #define MAX_STAGES	64
 #define MAX_GRAPH	9	/* 8 active + 1 replacement slot */
 
@@ -62,7 +63,7 @@ SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.audioconvert");
 struct volumes {
 	bool mute;
 	uint32_t n_volumes;
-	float volumes[SPA_AUDIO_MAX_CHANNELS];
+	float volumes[MAX_CHANNELS];
 };
 
 static void init_volumes(struct volumes *vol)
@@ -70,7 +71,7 @@ static void init_volumes(struct volumes *vol)
 	uint32_t i;
 	vol->mute = DEFAULT_MUTE;
 	vol->n_volumes = 0;
-	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+	for (i = 0; i < MAX_CHANNELS; i++)
 		vol->volumes[i] = DEFAULT_VOLUME;
 }
 
@@ -91,7 +92,7 @@ struct props {
 	float max_volume;
 	float prev_volume;
 	uint32_t n_channels;
-	uint32_t channel_map[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t channel_map[MAX_CHANNELS];
 	struct volumes channel;
 	struct volumes soft;
 	struct volumes monitor;
@@ -112,7 +113,7 @@ static void props_reset(struct props *props)
 	props->min_volume = DEFAULT_MIN_VOLUME;
 	props->max_volume = DEFAULT_MAX_VOLUME;
 	props->n_channels = 0;
-	for (i = 0; i < SPA_AUDIO_MAX_CHANNELS; i++)
+	for (i = 0; i < MAX_CHANNELS; i++)
 		props->channel_map[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
 	init_volumes(&props->channel);
 	init_volumes(&props->soft);
@@ -241,9 +242,9 @@ struct filter_graph {
 	struct spa_filter_graph *graph;
 	struct spa_hook listener;
 	uint32_t n_inputs;
-	uint32_t inputs_position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t inputs_position[MAX_CHANNELS];
 	uint32_t n_outputs;
-	uint32_t outputs_position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t outputs_position[MAX_CHANNELS];
 	uint32_t latency;
 	bool removing;
 	bool setup;
@@ -281,6 +282,7 @@ struct impl {
 
 	struct props props;
 
+	struct spa_io_clock *io_clock;
 	struct spa_io_position *io_position;
 	struct spa_io_rate_match *io_rate_match;
 
@@ -423,7 +425,6 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 		uint32_t position, bool is_dsp, bool is_monitor, bool is_control)
 {
 	struct port *port = GET_PORT(this, direction, port_id);
-	const char *name;
 
 	spa_assert(port_id < MAX_PORTS);
 
@@ -438,8 +439,7 @@ static int init_port(struct impl *this, enum spa_direction direction, uint32_t p
 	port->latency[SPA_DIRECTION_INPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_INPUT);
 	port->latency[SPA_DIRECTION_OUTPUT] = SPA_LATENCY_INFO(SPA_DIRECTION_OUTPUT);
 
-	name = spa_debug_type_find_short_name(spa_type_audio_channel, position);
-	snprintf(port->position, sizeof(port->position), "%s", name ? name : "UNK");
+	spa_type_audio_channel_make_short_name(position, port->position, sizeof(port->position), "UNK");
 
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.change_mask = port->info_all = SPA_PORT_CHANGE_MASK_FLAGS |
@@ -1006,12 +1006,43 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	spa_log_debug(this->log, "%p: io %d %p/%zd", this, id, data, size);
 
 	switch (id) {
-	case SPA_IO_Position:
-		this->io_position = data;
+	case SPA_IO_Clock:
+		this->io_clock = data;
 		break;
+	case SPA_IO_Position:
+	{
+		struct port *p;
+		uint32_t i;
+
+		this->io_position = data;
+
+		if (this->io_position && this->io_clock &&
+		    this->io_position->clock.target_rate.denom != this->io_clock->target_rate.denom &&
+		    !this->props.resample_disabled) {
+			spa_log_warn(this->log, "driver %d changed rate:%u -> %u", this->io_position->clock.id,
+					this->io_clock->target_rate.denom,
+					this->io_position->clock.target_rate.denom);
+
+			this->io_clock->target_rate = this->io_position->clock.target_rate;
+			for (i = 0; i < this->dir[SPA_DIRECTION_INPUT].n_ports; i++) {
+				if ((p = GET_IN_PORT(this, i)) && p->valid && !p->is_dsp && !p->is_control) {
+					p->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+					p->params[IDX_EnumFormat].user++;
+				}
+			}
+			for (i = 0; i < this->dir[SPA_DIRECTION_OUTPUT].n_ports; i++) {
+				if ((p = GET_OUT_PORT(this, i)) && p->valid && !p->is_dsp && !p->is_control) {
+					p->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+					p->params[IDX_EnumFormat].user++;
+				}
+			}
+		}
+		break;
+	}
 	default:
 		return -ENOENT;
 	}
+	emit_info(this, false);
 	return 0;
 }
 
@@ -1103,11 +1134,11 @@ static void graph_info(void *object, const struct spa_filter_graph_info *info)
 		else if (spa_streq(k, "n_outputs"))
 			spa_atou32(s, &g->n_outputs, 0);
 		else if (spa_streq(k, "inputs.audio.position"))
-			spa_audio_parse_position(s, strlen(s),
-					g->inputs_position, &g->n_inputs);
+			spa_audio_parse_position_n(s, strlen(s), g->inputs_position,
+					SPA_N_ELEMENTS(g->inputs_position), &g->n_inputs);
 		else if (spa_streq(k, "outputs.audio.position"))
-			spa_audio_parse_position(s, strlen(s),
-					g->outputs_position, &g->n_outputs);
+			spa_audio_parse_position_n(s, strlen(s), g->outputs_position,
+					SPA_N_ELEMENTS(g->outputs_position), &g->n_outputs);
 		else if (spa_streq(k, "latency")) {
 			double latency;
 			if (spa_atod(s, &latency))
@@ -1539,8 +1570,6 @@ static int get_ramp_samples(struct impl *this, struct volume_ramp_params *vrp)
 		samples = (vrp->volume_ramp_time * vrp->rate) / 1000;
 		spa_log_info(this->log, "volume ramp samples calculated from time is %d", samples);
 	}
-	if (!samples)
-		samples = -1;
 	return samples;
 }
 
@@ -1551,12 +1580,10 @@ static int get_ramp_step_samples(struct impl *this, struct volume_ramp_params *v
 	if (vrp->volume_ramp_step_samples)
 		samples = vrp->volume_ramp_step_samples;
 	else if (vrp->volume_ramp_step_time) {
-		/* convert the step time which is in nano seconds to seconds */
-		samples = (vrp->volume_ramp_step_time/1000) * (vrp->rate/1000);
+		/* convert the step time which is in nano seconds to seconds, round up */
+		samples = SPA_MAX(1u, vrp->volume_ramp_step_time/1000) * (vrp->rate/1000);
 		spa_log_debug(this->log, "volume ramp step samples calculated from time is %d", samples);
 	}
-	if (!samples)
-		samples = -1;
 	return samples;
 }
 
@@ -1569,76 +1596,52 @@ static float get_volume_at_scale(struct volume_ramp_params *vrp, float value)
 	return 0.0;
 }
 
-static struct spa_pod *generate_ramp_up_seq(struct impl *this, struct volume_ramp_params *vrp,
+static struct spa_pod *generate_ramp_seq(struct impl *this, struct volume_ramp_params *vrp,
 		void *buffer, size_t size)
 {
 	struct spa_pod_dynamic_builder b;
 	struct spa_pod_frame f[1];
-	float start = vrp->start, end = vrp->end, volume_accum = start;
-	int ramp_samples = get_ramp_samples(this, vrp);
-	int ramp_step_samples = get_ramp_step_samples(this, vrp);
-	float volume_step = ((end - start) / (ramp_samples / ramp_step_samples));
-	uint32_t volume_offs = 0;
+	float start = vrp->start, end = vrp->end;
+	int samples = get_ramp_samples(this, vrp);
+	int step = get_ramp_step_samples(this, vrp);
+	int offs = 0;
+
+	if (samples < 0 || step < 0 || (samples > 0 && step == 0))
+		return NULL;
 
 	spa_pod_dynamic_builder_init(&b, buffer, size, 4096);
 
 	spa_pod_builder_push_sequence(&b.b, &f[0], 0);
-	spa_log_info(this->log, "generating ramp up sequence from %f to %f with a"
-		" step value %f at scale %d", start, end, volume_step, vrp->scale);
-	do {
-		float vas = get_volume_at_scale(vrp, volume_accum);
-		spa_log_trace(this->log, "volume accum %f", vas);
-		spa_pod_builder_control(&b.b, volume_offs, SPA_CONTROL_Properties);
-		spa_pod_builder_add_object(&b.b,
-				SPA_TYPE_OBJECT_Props, 0,
-				SPA_PROP_volume, SPA_POD_Float(vas));
-		volume_accum += volume_step;
-		volume_offs += ramp_step_samples;
-	} while (volume_accum < end);
-	return spa_pod_builder_pop(&b.b, &f[0]);
-}
+	spa_log_info(this->log, "generating ramp sequence from %f to %f with "
+			"step %d/%d at scale %d", start, end, step, samples, vrp->scale);
 
-static struct spa_pod *generate_ramp_down_seq(struct impl *this, struct volume_ramp_params *vrp,
-		void *buffer, size_t size)
-{
-	struct spa_pod_dynamic_builder b;
-	struct spa_pod_frame f[1];
-	int ramp_samples = get_ramp_samples(this, vrp);
-	int ramp_step_samples = get_ramp_step_samples(this, vrp);
-	float start = vrp->start, end = vrp->end, volume_accum = start;
-	float volume_step = ((start - end) / (ramp_samples / ramp_step_samples));
-	uint32_t volume_offs = 0;
+	while (1) {
+		float pos = (samples == 0) ? end :
+			SPA_CLAMP(start + (end - start) * offs / samples,
+					SPA_MIN(start, end), SPA_MAX(start, end));
+		float vas = get_volume_at_scale(vrp, pos);
 
-	spa_pod_dynamic_builder_init(&b, buffer, size, 4096);
-
-	spa_pod_builder_push_sequence(&b.b, &f[0], 0);
-	spa_log_info(this->log, "generating ramp down sequence from %f to %f with a"
-		" step value %f at scale %d", start, end, volume_step, vrp->scale);
-	do {
-		float vas = get_volume_at_scale(vrp, volume_accum);
-		spa_log_trace(this->log, "volume accum %f", vas);
-		spa_pod_builder_control(&b.b, volume_offs, SPA_CONTROL_Properties);
+		spa_log_trace(this->log, "volume %d accum %f", offs, vas);
+		spa_pod_builder_control(&b.b, offs, SPA_CONTROL_Properties);
 		spa_pod_builder_add_object(&b.b,
 				SPA_TYPE_OBJECT_Props, 0,
 				SPA_PROP_volume, SPA_POD_Float(vas));
 
-		volume_accum -= volume_step;
-		volume_offs += ramp_step_samples;
-	} while (volume_accum > end);
+		if (offs >= samples)
+			break;
+
+		offs = SPA_MIN(samples, offs + step);
+	}
+
 	return spa_pod_builder_pop(&b.b, &f[0]);
 }
 
 static void generate_volume_ramp(struct impl *this, struct volume_ramp_params *vrp,
 		void *buffer, size_t size)
 {
-	void *sequence = NULL;
-	if (vrp->start == vrp->end)
-		spa_log_error(this->log, "no change in volume, cannot ramp volume");
-	else if (vrp->end > vrp->start)
-		sequence = generate_ramp_up_seq(this, vrp, buffer, size);
-	else
-		sequence = generate_ramp_down_seq(this, vrp, buffer, size);
+	void *sequence;
 
+	sequence = generate_ramp_seq(this, vrp, buffer, size);
 	if (!sequence)
 		spa_log_error(this->log, "unable to generate sequence");
 
@@ -1748,7 +1751,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 		case SPA_PROP_channelVolumes:
 			if (!p->lock_volumes &&
 			    (n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					p->channel.volumes, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					p->channel.volumes, SPA_N_ELEMENTS(p->channel.volumes))) > 0) {
 				have_channel_volume = true;
 				p->channel.n_volumes = n;
 				changed++;
@@ -1756,7 +1759,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 			break;
 		case SPA_PROP_channelMap:
 			if ((n = spa_pod_copy_array(&prop->value, SPA_TYPE_Id,
-					p->channel_map, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					p->channel_map, SPA_N_ELEMENTS(p->channel_map))) > 0) {
 				p->n_channels = n;
 				changed++;
 			}
@@ -1771,7 +1774,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 		case SPA_PROP_softVolumes:
 			if (!p->lock_volumes &&
 			    (n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					p->soft.volumes, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					p->soft.volumes, SPA_N_ELEMENTS(p->soft.volumes))) > 0) {
 				have_soft_volume = true;
 				p->soft.n_volumes = n;
 				changed++;
@@ -1783,7 +1786,7 @@ static int apply_props(struct impl *this, const struct spa_pod *param)
 			break;
 		case SPA_PROP_monitorVolumes:
 			if ((n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					p->monitor.volumes, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					p->monitor.volumes, SPA_N_ELEMENTS(p->monitor.volumes))) > 0) {
 				p->monitor.n_volumes = n;
 				changed++;
 			}
@@ -1895,10 +1898,11 @@ static int reconfigure_mode(struct impl *this, enum spa_param_port_config_mode m
 			this->dir[SPA_DIRECTION_OUTPUT].n_ports = dir->n_ports + 1;
 
 		for (i = 0; i < dir->n_ports; i++) {
-			init_port(this, direction, i, info->info.raw.position[i], true, false, false);
+			uint32_t pos = info->info.raw.position[i];
+			init_port(this, direction, i, pos, true, false, false);
 			if (this->monitor && direction == SPA_DIRECTION_INPUT)
 				init_port(this, SPA_DIRECTION_OUTPUT, i+1,
-					info->info.raw.position[i], true, true, false);
+					pos, true, true, false);
 		}
 		break;
 	}
@@ -1966,7 +1970,7 @@ static int node_set_param_port_config(struct impl *this, uint32_t flags,
 			return -EINVAL;
 
 		if (info.info.raw.channels == 0 ||
-		    info.info.raw.channels > SPA_AUDIO_MAX_CHANNELS)
+		    info.info.raw.channels > MAX_CHANNELS)
 			return -EINVAL;
 
 		infop = &info;
@@ -2056,22 +2060,24 @@ static int setup_in_convert(struct impl *this)
 			dst_info.info.raw.rate);
 
 	qsort(dst_info.info.raw.position, dst_info.info.raw.channels,
-					sizeof(uint32_t), int32_cmp);
+			sizeof(uint32_t), int32_cmp);
 
 	for (i = 0; i < src_info.info.raw.channels; i++) {
 		for (j = 0; j < dst_info.info.raw.channels; j++) {
-			if (src_info.info.raw.position[i] !=
-			    dst_info.info.raw.position[j])
+			uint32_t pi, pj;
+			char b1[8], b2[8];
+
+			pi = src_info.info.raw.position[i];
+			pj = dst_info.info.raw.position[j];
+			if (pi != pj)
 				continue;
 			in->remap[i] = j;
 			if (i != j)
 				remap = true;
 			spa_log_debug(this->log, "%p: channel %d (%d) -> %d (%s -> %s)", this,
 					i, in->remap[i], j,
-					spa_debug_type_find_short_name(spa_type_audio_channel,
-						src_info.info.raw.position[i]),
-					spa_debug_type_find_short_name(spa_type_audio_channel,
-						dst_info.info.raw.position[j]));
+					spa_type_audio_channel_make_short_name(pi, b1, 8, "UNK"),
+					spa_type_audio_channel_make_short_name(pj, b2, 8, "UNK"));
 			dst_info.info.raw.position[j] = -1;
 			break;
 		}
@@ -2120,9 +2126,10 @@ static int remap_volumes(struct impl *this, const struct spa_audio_info *info)
 
 	for (i = 0; i < p->n_channels; i++) {
 		for (j = i; j < target; j++) {
+			uint32_t pj = info->info.raw.position[j];
 			spa_log_debug(this->log, "%d %d: %d <-> %d", i, j,
-					p->channel_map[i], info->info.raw.position[j]);
-			if (p->channel_map[i] != info->info.raw.position[j])
+					p->channel_map[i], pj);
+			if (p->channel_map[i] != pj)
 				continue;
 			if (i != j) {
 				SPA_SWAP(p->channel_map[i], p->channel_map[j]);
@@ -2153,7 +2160,7 @@ static void set_volume(struct impl *this)
 {
 	struct volumes *vol;
 	uint32_t i;
-	float volumes[SPA_AUDIO_MAX_CHANNELS];
+	float volumes[MAX_CHANNELS];
 	struct dir *dir = &this->dir[this->direction];
 
 	spa_log_debug(this->log, "%p set volume %f have_format:%d", this, this->props.volume, dir->have_format);
@@ -2184,10 +2191,11 @@ static void set_volume(struct impl *this)
 static char *format_position(char *str, size_t len, uint32_t channels, uint32_t *position)
 {
 	uint32_t i, idx = 0;
+	char buf[8];
 	for (i = 0; i < channels; i++)
 		idx += snprintf(str + idx, len - idx, "%s%s", i == 0 ? "" : " ",
-				spa_debug_type_find_short_name(spa_type_audio_channel,
-					position[i]));
+				spa_type_audio_channel_make_short_name(position[i],
+				buf, sizeof(buf), "UNK"));
 	return str;
 }
 
@@ -2344,12 +2352,16 @@ static int setup_out_convert(struct impl *this)
 			dst_info.info.raw.rate);
 
 	qsort(src_info.info.raw.position, src_info.info.raw.channels,
-					sizeof(uint32_t), int32_cmp);
+			sizeof(uint32_t), int32_cmp);
 
 	for (i = 0; i < src_info.info.raw.channels; i++) {
 		for (j = 0; j < dst_info.info.raw.channels; j++) {
-			if (src_info.info.raw.position[i] !=
-			    dst_info.info.raw.position[j])
+			uint32_t pi, pj;
+			char b1[8], b2[8];
+
+			pi = src_info.info.raw.position[i];
+			pj = dst_info.info.raw.position[j];
+			if (pi != pj)
 				continue;
 			out->remap[i] = j;
 			if (i != j)
@@ -2357,10 +2369,9 @@ static int setup_out_convert(struct impl *this)
 
 			spa_log_debug(this->log, "%p: channel %d (%d) -> %d (%s -> %s)", this,
 					i, out->remap[i], j,
-					spa_debug_type_find_short_name(spa_type_audio_channel,
-						src_info.info.raw.position[i]),
-					spa_debug_type_find_short_name(spa_type_audio_channel,
-						dst_info.info.raw.position[j]));
+					spa_type_audio_channel_make_short_name(pi, b1, 8, "UNK"),
+					spa_type_audio_channel_make_short_name(pj, b2, 8, "UNK"));
+
 			dst_info.info.raw.position[j] = -1;
 			break;
 		}
@@ -2671,7 +2682,7 @@ static int port_param_enum_formats(struct impl *impl, struct port *port, uint32_
 			}
 			spa_pod_builder_add(b,
 				SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(
-					DEFAULT_CHANNELS, 1, SPA_AUDIO_MAX_CHANNELS),
+					DEFAULT_CHANNELS, 1, MAX_CHANNELS),
 				0);
 			*param = spa_pod_builder_pop(b, &f[0]);
 		}
@@ -3064,7 +3075,7 @@ static int port_set_format(void *object,
 			if (info.info.raw.format == 0 ||
 			    (!this->props.resample_disabled && info.info.raw.rate == 0) ||
 			    info.info.raw.channels == 0 ||
-			    info.info.raw.channels > SPA_AUDIO_MAX_CHANNELS) {
+			    info.info.raw.channels > MAX_CHANNELS) {
 				spa_log_error(this->log, "invalid format:%d rate:%d channels:%d",
 						info.info.raw.format, info.info.raw.rate,
 						info.info.raw.channels);
@@ -4295,9 +4306,18 @@ impl_init(const struct spa_handle_factory *factory,
 				this->direction = SPA_DIRECTION_INPUT;
 		}
 		else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
-			if (s != NULL)
-				spa_audio_parse_position(s, strlen(s), this->props.channel_map,
-						&this->props.n_channels);
+			if (s == NULL)
+				continue;
+			spa_audio_parse_position_n(s, strlen(s),
+				this->props.channel_map, SPA_N_ELEMENTS(this->props.channel_map),
+				&this->props.n_channels);
+		}
+		else if (spa_streq(k, SPA_KEY_AUDIO_LAYOUT)) {
+			if (s == NULL)
+				continue;
+			spa_audio_parse_layout(s,
+				this->props.channel_map, SPA_N_ELEMENTS(this->props.channel_map),
+				&this->props.n_channels);
 		}
 		else if (spa_streq(k, SPA_KEY_PORT_IGNORE_LATENCY))
 			this->port_ignore_latency = spa_atob(s);

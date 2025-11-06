@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.5.81',
+  version : '1.5.83',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -115,10 +115,11 @@ cc_flags = common_flags + [
   '-Werror=old-style-definition',
   '-Werror=missing-parameter-type',
   '-Werror=strict-prototypes',
+  '-DSPA_AUDIO_MAX_CHANNELS=128u',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
-
-cc_flags_native = cc_native.get_supported_arguments(cc_flags)
+add_project_arguments(cc_native.get_supported_arguments(cc_flags),
+                      language: 'c', native: true)
 
 have_cpp = add_languages('cpp', native: false, required : false)
 

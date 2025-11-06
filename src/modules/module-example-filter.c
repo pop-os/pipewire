@@ -46,6 +46,7 @@
  * - \ref PW_KEY_REMOTE_NAME
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_LAYOUT
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_MEDIA_NAME
  * - \ref PW_KEY_NODE_LATENCY
@@ -298,8 +299,7 @@ static void capture_param_changed(void *data, uint32_t id, const struct spa_pod 
 		if (spa_format_audio_raw_parse(param, &info) < 0)
 			return;
 		if (info.rate == 0 ||
-		    info.channels == 0 ||
-		    info.channels > SPA_AUDIO_MAX_CHANNELS)
+		    info.channels == 0)
 			return;
 		break;
 	}
@@ -468,15 +468,16 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	return spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
 				SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
 			&props->dict,
 			SPA_KEY_AUDIO_RATE,
 			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_LAYOUT,
 			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
@@ -549,6 +550,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_LAYOUT);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
 	copy_props(impl, props, PW_KEY_NODE_GROUP);
@@ -574,8 +576,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	if (pw_properties_get(impl->playback_props, PW_KEY_NODE_DESCRIPTION) == NULL)
 		pw_properties_set(impl->playback_props, PW_KEY_NODE_DESCRIPTION, str);
 
-	parse_audio_info(impl->capture_props, &impl->capture_info);
-	parse_audio_info(impl->playback_props, &impl->playback_info);
+	if ((res = parse_audio_info(impl->capture_props, &impl->capture_info)) < 0 ||
+	    (res = parse_audio_info(impl->playback_props, &impl->playback_info)) < 0) {
+		pw_log_error( "can't parse formats: %s", spa_strerror(res));
+		goto error;
+	}
 
 	if (!impl->capture_info.rate && !impl->playback_info.rate) {
 		if (pw_properties_get(impl->playback_props, "resample.disable") == NULL)

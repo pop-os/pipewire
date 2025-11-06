@@ -70,6 +70,8 @@
 #define DEFAULT_VOLUME		1.0
 #define DEFAULT_QUALITY		4
 
+#define MAX_CHANNELS		SPA_AUDIO_MAX_CHANNELS
+
 enum mode {
 	mode_none,
 	mode_playback,
@@ -91,7 +93,7 @@ typedef int (*fill_fn)(struct data *d, void *dest, unsigned int n_frames, bool *
 
 struct channelmap {
 	uint32_t n_channels;
-	uint32_t channels[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t channels[MAX_CHANNELS];
 };
 
 struct data {
@@ -702,7 +704,8 @@ static int parse_channelmap(const char *channel_map, struct channelmap *map)
 		}
 	}
 
-	spa_audio_parse_position(channel_map, strlen(channel_map), map->channels, &map->n_channels);
+	spa_audio_parse_position_n(channel_map, strlen(channel_map),
+			map->channels, SPA_N_ELEMENTS(map->channels), &map->n_channels);
 	return 0;
 }
 
@@ -744,10 +747,11 @@ static int channelmap_default(struct channelmap *map, int n_channels)
 static void channelmap_print(struct channelmap *map)
 {
 	uint32_t i;
-
+	char pos[8];
 	for (i = 0; i < map->n_channels; i++) {
-		const char *name = spa_type_audio_channel_to_short_name(map->channels[i]);
-		fprintf(stderr, "%s%s", name, i + 1 < map->n_channels ? "," : "");
+		fprintf(stderr, "%s%s", i ? "," : "",
+				spa_type_audio_channel_make_short_name(map->channels[i],
+					pos, sizeof(pos), "UNK"));
 	}
 }
 
@@ -2344,9 +2348,23 @@ int main(int argc, char *argv[])
 			.rate = data.rate,
 			.channels = data.channels);
 
-		if (data.channelmap.n_channels)
-			memcpy(info.position, data.channelmap.channels, data.channels * sizeof(int));
-
+		if (data.channels > MAX_CHANNELS) {
+			fprintf(stderr, "error: too many channels %d > %d\n",
+					data.channels, MAX_CHANNELS);
+			goto error_bad_file;
+		}
+		if (data.channelmap.n_channels) {
+			if (data.channels > MAX_CHANNELS) {
+				fprintf(stderr, "error: too many channels in channelmap %d > %d\n",
+						data.channelmap.n_channels, MAX_CHANNELS);
+				goto error_bad_file;
+			}
+			uint32_t i;
+			for (i = 0; i < data.channelmap.n_channels; i++)
+				info.position[i] = data.channelmap.channels[i];
+			for (; i < data.channels; i++)
+				info.position[i] = SPA_AUDIO_CHANNEL_AUX0 + i;
+		}
 		params[n_params++] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
 		break;
 	}

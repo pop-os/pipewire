@@ -94,6 +94,7 @@
  *
  * - \ref PW_KEY_REMOTE_NAME
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_LAYOUT
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_NODE_NAME
  * - \ref PW_KEY_NODE_DESCRIPTION
@@ -181,7 +182,7 @@ static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info);
+static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info);
 
 struct port {
 	enum spa_direction direction;
@@ -601,12 +602,11 @@ static void make_stream_ports(struct stream *s)
 		}
 
 		if (i < s->info.channels) {
-			str = spa_debug_type_find_short_name(spa_type_audio_channel,
-					s->info.position[i]);
-
+			str = spa_type_audio_channel_make_short_name(
+					s->info.position[i], name, sizeof(name), "UNK");
 			props = pw_properties_new(
 					PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-					PW_KEY_AUDIO_CHANNEL, str ? str : "UNK",
+					PW_KEY_AUDIO_CHANNEL, str,
 					PW_KEY_PORT_PHYSICAL, "true",
 					NULL);
 
@@ -677,9 +677,9 @@ static void parse_props(struct stream *s, const struct spa_pod *param)
 		case SPA_PROP_channelVolumes:
 		{
 			uint32_t n;
-			float vols[SPA_AUDIO_MAX_CHANNELS];
+			float vols[MAX_CHANNELS];
 			if ((n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					vols, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					vols, SPA_N_ELEMENTS(vols))) > 0) {
 				s->volume.n_volumes = n;
 				for (n = 0; n < s->volume.n_volumes; n++)
 					s->volume.volumes[n] = vols[n];
@@ -969,8 +969,11 @@ static int handle_follower_available(struct impl *impl, struct nj2_session_param
 	follower->sink.direction = PW_DIRECTION_INPUT;
 	follower->sink.props = pw_properties_copy(impl->sink_props);
 
-	parse_audio_info(follower->source.props, &follower->source.info);
-	parse_audio_info(follower->sink.props, &follower->sink.info);
+	if ((res = parse_audio_info(follower->source.props, &follower->source.info)) < 0 ||
+	    (res = parse_audio_info(follower->sink.props, &follower->sink.info)) < 0) {
+		pw_log_error("can't parse format: %s", spa_strerror(res));
+		return res;
+	}
 
 	follower->source.n_audio = pw_properties_get_uint32(follower->source.props,
 			"audio.ports", follower->source.info.channels ?
@@ -1026,14 +1029,14 @@ static int handle_follower_available(struct impl *impl, struct nj2_session_param
 	follower->source.n_ports = peer->params.recv_audio_channels + peer->params.recv_midi_channels;
 	follower->source.info.rate = peer->params.sample_rate;
 	if ((uint32_t)peer->params.recv_audio_channels != follower->source.info.channels) {
-		follower->source.info.channels = SPA_MIN(peer->params.recv_audio_channels, (int)SPA_AUDIO_MAX_CHANNELS);
+		follower->source.info.channels = peer->params.recv_audio_channels;
 		for (i = 0; i < follower->source.info.channels; i++)
 			follower->source.info.position[i] = SPA_AUDIO_CHANNEL_AUX0 + i;
 	}
 	follower->sink.n_ports = peer->params.send_audio_channels + peer->params.send_midi_channels;
 	follower->sink.info.rate = peer->params.sample_rate;
 	if ((uint32_t)peer->params.send_audio_channels != follower->sink.info.channels) {
-		follower->sink.info.channels = SPA_MIN(peer->params.send_audio_channels, (int)SPA_AUDIO_MAX_CHANNELS);
+		follower->sink.info.channels = peer->params.send_audio_channels;
 		for (i = 0; i < follower->sink.info.channels; i++)
 			follower->sink.info.position[i] = SPA_AUDIO_CHANNEL_AUX0 + i;
 	}
@@ -1290,13 +1293,14 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	return spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P")),
 			&props->dict,
 			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_LAYOUT,
 			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
@@ -1415,6 +1419,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_LOCK_QUANTUM);
 	copy_props(impl, props, PW_KEY_NODE_LOCK_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_LAYOUT);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, "audio.ports");
 	copy_props(impl, props, "midi.ports");

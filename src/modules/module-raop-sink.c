@@ -82,6 +82,7 @@
  * - \ref PW_KEY_AUDIO_FORMAT
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_LAYOUT
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_NODE_NAME
  * - \ref PW_KEY_NODE_DESCRIPTION
@@ -158,6 +159,7 @@ PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define RAOP_LATENCY_MS		250
 #define DEFAULT_LATENCY_MS	1500
 
+#define MAX_CHANNELS		SPA_AUDIO_MAX_CHANNELS
 #define VOLUME_MAX		0.0
 #define VOLUME_MIN		-30.0
 #define VOLUME_MUTE		-144.0
@@ -1612,11 +1614,11 @@ static void stream_props_changed(struct impl *impl, uint32_t id, const struct sp
 		case SPA_PROP_channelVolumes:
 		{
 			uint32_t i, n_vols;
-			float vols[SPA_AUDIO_MAX_CHANNELS], volume;
-			float soft_vols[SPA_AUDIO_MAX_CHANNELS];
+			float vols[MAX_CHANNELS], volume;
+			float soft_vols[MAX_CHANNELS];
 
 			if ((n_vols = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					vols, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					vols, SPA_N_ELEMENTS(vols))) > 0) {
 				volume = 0.0f;
 				for (i = 0; i < n_vols; i++) {
 					volume += vols[i];
@@ -1900,6 +1902,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_LAYOUT);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_DEVICE_ICON_NAME);
 	copy_props(impl, props, PW_KEY_NODE_NAME);

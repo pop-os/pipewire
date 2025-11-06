@@ -156,6 +156,7 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_LOOP		false
 
 #define MAX_SDP			2048
+#define MAX_CHANNELS		SPA_AUDIO_MAX_CHANNELS
 
 #define USAGE	"( local.ifname=<local interface name to use> ) "					\
 		"( sap.ip=<SAP IP address to send announce, default:"DEFAULT_SAP_IP"> ) "		\
@@ -247,6 +248,16 @@ struct node {
 	struct session *session;
 };
 
+struct igmp_recovery {
+	struct pw_timer timer;
+	int socket_fd;
+	struct sockaddr_storage mcast_addr;
+	socklen_t mcast_len;
+	uint32_t if_index;
+	bool is_ipv6;
+	uint32_t deadline;
+};
+
 struct impl {
 	struct pw_properties *props;
 
@@ -264,7 +275,11 @@ struct impl {
 	struct pw_registry *registry;
 	struct spa_hook registry_listener;
 
-	struct pw_timer timer;
+	struct pw_timer sap_send_timer;
+
+	/* This timer is used when the first start_sap() call fails because
+	 * of an ENODEV error (see the start_sap() code for details) */
+	struct pw_timer start_sap_retry_timer;
 
 	char *ifname;
 	uint32_t ttl;
@@ -280,6 +295,10 @@ struct impl {
 	struct spa_source *sap_source;
 	uint32_t cleanup_interval;
 
+	/* IGMP recovery (triggers when no SAP packets are
+	 * received after the recovery deadline is reached) */
+	struct igmp_recovery igmp_recovery;
+
 	uint32_t max_sessions;
 	uint32_t n_sessions;
 	struct spa_list sessions;
@@ -287,7 +306,7 @@ struct impl {
 	char *extra_attrs_preamble;
 	char *extra_attrs_end;
 
-	char *ptp_mgmt_socket;
+	char *ptp_mgmt_socket_path;
 	int ptp_fd;
 	uint32_t ptp_seq;
 	uint8_t clock_id[8];
@@ -321,6 +340,7 @@ static const struct format_info *find_audio_format_info(const char *mime)
 	return NULL;
 }
 
+static int start_sap(struct impl *impl);
 static int send_sap(struct impl *impl, struct session *sess, bool bye);
 
 
@@ -382,7 +402,7 @@ static bool is_multicast(struct sockaddr *sa, socklen_t salen)
 	return false;
 }
 
-static int make_unix_socket(const char *path) {
+static int make_unix_ptp_mgmt_socket(const char *path) {
 	struct sockaddr_un addr;
 
 	spa_autoclose int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -418,7 +438,7 @@ static int make_send_socket(
 
 	af = src->ss_family;
 	if ((fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
-		pw_log_error("socket failed: %m");
+		pw_log_error("socket() failed: %m");
 		return -errno;
 	}
 	if (bind(fd, (struct sockaddr*)src, src_len) < 0) {
@@ -450,6 +470,9 @@ static int make_send_socket(
 				pw_log_warn("setsockopt(IPV6_MULTICAST_HOPS) failed: %m");
 		}
 	}
+
+	pw_log_info("sender socket up and running");
+
 	return fd;
 error:
 	close(fd);
@@ -457,7 +480,7 @@ error:
 }
 
 static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
-		char *ifname)
+		char *ifname, struct igmp_recovery *igmp_recovery)
 {
 	int af, fd, val, res;
 	struct ifreq req;
@@ -467,13 +490,13 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 
 	af = sa->ss_family;
 	if ((fd = socket(af, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)) < 0) {
-		pw_log_error("socket failed: %m");
+		pw_log_error("socket() failed: %m");
 		return -errno;
 	}
 	val = 1;
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
 		res = -errno;
-		pw_log_error("setsockopt failed: %m");
+		pw_log_error("setsockopt() failed: %m");
 		goto error;
 	}
 	spa_zero(req);
@@ -527,6 +550,16 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 		goto error;
 	}
 
+	/* Store multicast info for recovery */
+	igmp_recovery->socket_fd = fd;
+	igmp_recovery->mcast_addr = ba;
+	igmp_recovery->mcast_len = salen;
+	igmp_recovery->if_index = req.ifr_ifindex;
+	igmp_recovery->is_ipv6 = (af == AF_INET6);
+	pw_log_debug("stored %s multicast info: socket_fd=%d, "
+			"if_index=%d", igmp_recovery->is_ipv6 ?
+			"IPv6" : "IPv4", fd, req.ifr_ifindex);
+
 	if (bind(fd, (struct sockaddr*)&ba, salen) < 0) {
 		res = -errno;
 		pw_log_error("bind() failed: %m");
@@ -539,6 +572,9 @@ static int make_recv_socket(struct sockaddr_storage *sa, socklen_t salen,
 			goto error;
 		}
 	}
+
+	pw_log_info("receiver socket up and running");
+
 	return fd;
 error:
 	close(fd);
@@ -547,8 +583,13 @@ error:
 
 static bool update_ts_refclk(struct impl *impl)
 {
-	if (!impl->ptp_mgmt_socket || impl->ptp_fd < 0)
+	if (!impl->ptp_mgmt_socket_path)
 		return false;
+	if (impl->ptp_fd < 0) {
+		impl->ptp_fd = make_unix_ptp_mgmt_socket(impl->ptp_mgmt_socket_path);
+		if (impl->ptp_fd < 0)
+			return false;
+	}
 
 	// Read if something is left in the socket
 	int avail;
@@ -580,6 +621,12 @@ static bool update_ts_refclk(struct impl *impl)
 
 	if (write(impl->ptp_fd, &req, sizeof(req)) == -1) {
 		pw_log_warn("Failed to send PTP management request: %m");
+		if (errno != ENOTCONN)
+			return false;
+		close(impl->ptp_fd);
+		impl->ptp_fd = make_unix_ptp_mgmt_socket(impl->ptp_mgmt_socket_path);
+		if (impl->ptp_fd > -1)
+			pw_log_info("Reopened PTP management socket");
 		return false;
 	}
 
@@ -921,7 +968,98 @@ static int send_sap(struct impl *impl, struct session *sess, bool bye)
 	return res;
 }
 
-static void on_timer_event(void *data)
+static void on_igmp_recovery_timer_event(void *data)
+{
+	struct impl *impl = data;
+	char addr[128];
+	int res = 0;
+
+	/* Only attempt recovery if we have a valid socket and multicast address */
+	if (impl->igmp_recovery.socket_fd < 0) {
+		pw_log_debug("no socket, skipping IGMP recovery");
+		goto finish;
+	}
+
+	pw_net_get_ip(&impl->igmp_recovery.mcast_addr, addr, sizeof(addr), NULL, NULL);
+	pw_log_info("IGMP recovery triggered for %s", addr);
+
+	/* Force IGMP membership refresh by leaving the group first, then rejoin */
+	if (impl->igmp_recovery.is_ipv6) {
+		struct ipv6_mreq mr6;
+		memset(&mr6, 0, sizeof(mr6));
+		mr6.ipv6mr_multiaddr = ((struct sockaddr_in6*)&impl->igmp_recovery.mcast_addr)->sin6_addr;
+		mr6.ipv6mr_interface = impl->igmp_recovery.if_index;
+
+		/* Leave the group first */
+		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP,
+					&mr6, sizeof(mr6));
+		if (SPA_LIKELY(res == 0)) {
+			pw_log_info("left IPv6 multicast group");
+		} else {
+			if (errno == EADDRNOTAVAIL) {
+				pw_log_info("attempted to leave IPv6 multicast group, but "
+						"membership was already silently dropped");
+			} else {
+				pw_log_warn("failed to leave IPv6 multicast group: %m");
+			}
+		}
+
+		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IPV6, IPV6_JOIN_GROUP,
+				&mr6, sizeof(mr6));
+		if (res < 0) {
+			pw_log_warn("failed to re-join IPv6 multicast group: %m");
+		} else {
+			pw_log_info("re-joined IPv6 multicast group successfully");
+		}
+	} else {
+		struct ip_mreqn mr4;
+		memset(&mr4, 0, sizeof(mr4));
+		mr4.imr_multiaddr = ((struct sockaddr_in*)&impl->igmp_recovery.mcast_addr)->sin_addr;
+		mr4.imr_ifindex = impl->igmp_recovery.if_index;
+
+		/* Leave the group first */
+		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
+					&mr4, sizeof(mr4));
+		if (SPA_LIKELY(res == 0)) {
+			pw_log_info("left IPv4 multicast group");
+		} else {
+			if (errno == EADDRNOTAVAIL) {
+				pw_log_info("attempted to leave IPv4 multicast group, but "
+						"membership was already silently dropped");
+			} else {
+				pw_log_warn("failed to leave IPv4 multicast group: %m");
+			}
+		}
+
+		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IP, IP_ADD_MEMBERSHIP,
+				&mr4, sizeof(mr4));
+		if (res < 0) {
+			pw_log_warn("failed to re-join IPv4 multicast group: %m");
+		} else {
+			pw_log_info("re-joined IPv4 multicast group successfully");
+		}
+	}
+
+finish:
+	/* If rejoining failed, try again in 1 second. This can happen
+	 * for example when the network interface went down, and is not
+	 * yet up and running again, and ENODEV is returned as a result.
+	 * Otherwise, continue with the usual deadline. */
+	pw_timer_queue_add(impl->timer_queue, &impl->igmp_recovery.timer,
+			&impl->igmp_recovery.timer.timeout,
+			((res == 0) ? impl->igmp_recovery.deadline : 1) * SPA_NSEC_PER_SEC,
+			on_igmp_recovery_timer_event, impl);
+}
+
+static void rearm_igmp_recovery_timer(struct impl *impl)
+{
+	pw_timer_queue_cancel(&impl->igmp_recovery.timer);
+	pw_timer_queue_add(impl->timer_queue, &impl->igmp_recovery.timer,
+			NULL, impl->igmp_recovery.deadline * SPA_NSEC_PER_SEC,
+			on_igmp_recovery_timer_event, impl);
+}
+
+static void on_sap_send_timer_event(void *data)
 {
 	struct impl *impl = data;
 	struct session *sess, *tmp;
@@ -955,9 +1093,16 @@ static void on_timer_event(void *data)
 
 		}
 	}
-	pw_timer_queue_add(impl->timer_queue, &impl->timer,
-			&impl->timer.timeout, SAP_INTERVAL_SEC * SPA_NSEC_PER_SEC,
-			on_timer_event, impl);
+	pw_timer_queue_add(impl->timer_queue, &impl->sap_send_timer,
+			&impl->sap_send_timer.timeout, SAP_INTERVAL_SEC * SPA_NSEC_PER_SEC,
+			on_sap_send_timer_event, impl);
+}
+
+static void on_start_sap_retry_timer_event(void *data)
+{
+	struct impl *impl = data;
+	pw_log_debug("trying again to start SAP send after previous attempt failed with ENODEV");
+	start_sap(impl);
 }
 
 static struct session *session_find(struct impl *impl, const struct sdp_info *info)
@@ -1404,7 +1549,7 @@ static int parse_sdp_i(struct impl *impl, char *c, struct sdp_info *info)
 	c[strcspn(c, " ")] = '\0';
 
 	uint32_t channels;
-	if (sscanf(c, "%u", &channels) != 1 || channels <= 0 || channels > SPA_AUDIO_MAX_CHANNELS)
+	if (sscanf(c, "%u", &channels) != 1 || channels <= 0 || channels > MAX_CHANNELS)
 		return 0;
 
 	c += strcspn(c, "\0");
@@ -1645,23 +1790,70 @@ on_sap_io(void *data, int fd, uint32_t mask)
 		buffer[len] = 0;
 		if ((res = parse_sap(impl, buffer, len)) < 0)
 			pw_log_warn("error parsing SAP: %s", spa_strerror(res));
+
+		rearm_igmp_recovery_timer(impl);
 	}
 }
 
 static int start_sap(struct impl *impl)
 {
-	int fd = -1, res;
+	int fd = -1, res = 0;
 	char addr[128] = "invalid";
 
-	pw_log_info("starting SAP timer");
-	if ((res = pw_timer_queue_add(impl->timer_queue, &impl->timer,
+	pw_log_info("starting SAP send timer");
+	/* start_sap() might be called more than once. See the make_recv_socket()
+	 * call below for why that can happen. In such a case, the timer was
+	 * started already. The easiest way of handling it is to just cancel it.
+	 * Such cases are not expected to occur often, so canceling and then
+	 * adding the timer again is acceptable. */
+	pw_timer_queue_cancel(&impl->sap_send_timer);
+	if ((res = pw_timer_queue_add(impl->timer_queue, &impl->sap_send_timer,
 			NULL, SAP_INTERVAL_SEC * SPA_NSEC_PER_SEC,
-			on_timer_event, impl)) < 0) {
-		pw_log_error("can't add timer: %s", spa_strerror(res));
+			on_sap_send_timer_event, impl)) < 0) {
+		pw_log_error("can't add SAP send timer: %s", spa_strerror(res));
 		goto error;
 	}
-	if ((fd = make_recv_socket(&impl->sap_addr, impl->sap_len, impl->ifname)) < 0)
-		return fd;
+	if ((fd = make_recv_socket(&impl->sap_addr, impl->sap_len, impl->ifname,
+					&(impl->igmp_recovery))) < 0) {
+		/* If make_recv_socket() tries to create a socket and join to a multicast
+		 * group while the network interfaces are not ready yet to do so
+		 * (usually because a network manager component is still setting up
+		 * those network interfaces), ENODEV will be returned. This is essentially
+		 * a race condition. There is no discernible way to be notified when the
+		 * network interfaces are ready for that operation, so the next best
+		 * approach is to essentially do a form of polling by retrying the
+		 * start_sap() call after some time. The start_sap_retry_timer exists
+		 * precisely for that purpose. This means that ENODEV is not treated as
+		 * an error, but instead, it triggers the creation of that timer. */
+		if (fd == -ENODEV) {
+			pw_log_warn("failed to create receiver socket because network device "
+				"is not ready and present yet; will try again");
+
+			pw_timer_queue_cancel(&impl->start_sap_retry_timer);
+			/* Use a 1-second retry interval. The network interfaces
+			 * are likely to be up and running then. */
+			pw_timer_queue_add(impl->timer_queue, &impl->start_sap_retry_timer,
+					NULL, 1 * SPA_NSEC_PER_SEC,
+					on_start_sap_retry_timer_event, impl);
+
+			/* It is important to return 0 in this case. Otherwise, the nonzero return
+			 * value will later be propagated through the core as an error. */
+			res = 0;
+			goto finish;
+		} else {
+			pw_log_error("failed to create socket: %s", spa_strerror(-fd));
+			/* If ENODEV was returned earlier, and the start_sap_retry_timer
+			 * was consequently created, but then a non-ENODEV error occurred,
+			 * the timer must be stopped and removed. */
+			pw_timer_queue_cancel(&impl->start_sap_retry_timer);
+			res = fd;
+			goto error;
+		}
+	}
+
+	/* Cleanup the timer in case ENODEV occurred earlier, and this time,
+	 * the socket creation succeeded. */
+	pw_timer_queue_cancel(&impl->start_sap_retry_timer);
 
 	pw_net_get_ip(&impl->sap_addr, addr, sizeof(addr), NULL, NULL);
 	pw_log_info("starting SAP listener on %s", addr);
@@ -1672,11 +1864,15 @@ static int start_sap(struct impl *impl)
 		goto error;
 	}
 
-	return 0;
+	rearm_igmp_recovery_timer(impl);
+
+finish:
+	return res;
+
 error:
 	if (fd > 0)
 		close(fd);
-	return res;
+	goto finish;
 }
 
 static void node_event_info(void *data, const struct pw_node_info *info)
@@ -1806,7 +2002,9 @@ static void impl_destroy(struct impl *impl)
 	if (impl->core && impl->do_disconnect)
 		pw_core_disconnect(impl->core);
 
-	pw_timer_queue_cancel(&impl->timer);
+	pw_timer_queue_cancel(&impl->sap_send_timer);
+	pw_timer_queue_cancel(&impl->start_sap_retry_timer);
+	pw_timer_queue_cancel(&impl->igmp_recovery.timer);
 	if (impl->sap_source)
 		pw_loop_destroy_source(impl->loop, impl->sap_source);
 
@@ -1820,7 +2018,7 @@ static void impl_destroy(struct impl *impl)
 	free(impl->extra_attrs_preamble);
 	free(impl->extra_attrs_end);
 
-	free(impl->ptp_mgmt_socket);
+	free(impl->ptp_mgmt_socket_path);
 	free(impl->ifname);
 	free(impl);
 }
@@ -1873,6 +2071,9 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->ptp_fd = -1;
 	spa_list_init(&impl->sessions);
 
+	impl->igmp_recovery.socket_fd = -1;
+	impl->igmp_recovery.if_index = -1;
+
 	if (args == NULL)
 		args = "";
 
@@ -1892,11 +2093,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	impl->ifname = str ? strdup(str) : NULL;
 
 	str = pw_properties_get(props, "ptp.management-socket");
-	impl->ptp_mgmt_socket = str ? strdup(str) : NULL;
+	impl->ptp_mgmt_socket_path = str ? strdup(str) : NULL;
 
 	// TODO: support UDP management access as well
-	if (impl->ptp_mgmt_socket)
-		impl->ptp_fd = make_unix_socket(impl->ptp_mgmt_socket);
+	if (impl->ptp_mgmt_socket_path)
+		impl->ptp_fd = make_unix_ptp_mgmt_socket(impl->ptp_mgmt_socket_path);
 
 	if ((str = pw_properties_get(props, "sap.ip")) == NULL)
 		str = DEFAULT_SAP_IP;
@@ -1907,6 +2108,11 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 	impl->cleanup_interval = pw_properties_get_uint32(impl->props,
 			"sap.cleanup.sec", DEFAULT_CLEANUP_SEC);
+
+	/* We will use half of the cleanup interval for IGMP deadline, minimum 1 second */
+	impl->igmp_recovery.deadline = SPA_MAX(impl->cleanup_interval / 2, 1u);
+	pw_log_info("using IGMP deadline of %" PRIu32 " second(s)",
+			impl->igmp_recovery.deadline);
 
 	impl->ttl = pw_properties_get_uint32(props, "net.ttl", DEFAULT_TTL);
 	impl->mcast_loop = pw_properties_get_bool(props, "net.loop", DEFAULT_LOOP);

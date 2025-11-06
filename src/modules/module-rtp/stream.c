@@ -151,7 +151,8 @@ struct impl {
 	 * access below for the reason why. */
 	uint8_t timer_running;
 
-	int (*receive_rtp)(struct impl *impl, uint8_t *buffer, ssize_t len);
+	int (*receive_rtp)(struct impl *impl, uint8_t *buffer, ssize_t len,
+			uint64_t current_time);
 	/* Used for resetting the ring buffer before the stream starts, to prevent
 	 * reading from uninitialized memory. This can otherwise happen in direct
 	 * timestamp mode when the read index is set to an uninitialized location.
@@ -569,9 +570,9 @@ static const struct format_info *find_audio_format_info(const struct spa_audio_i
 	return NULL;
 }
 
-static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	return spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
@@ -580,6 +581,7 @@ static void parse_audio_info(const struct pw_properties *props, struct spa_audio
 			SPA_KEY_AUDIO_FORMAT,
 			SPA_KEY_AUDIO_RATE,
 			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_LAYOUT,
 			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
@@ -675,7 +677,10 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 
 	switch (impl->info.media_subtype) {
 	case SPA_MEDIA_SUBTYPE_raw:
-		parse_audio_info(props, &impl->info.info.raw);
+		if ((res = parse_audio_info(props, &impl->info.info.raw)) < 0) {
+			pw_log_error("can't parse format: %s", spa_strerror(res));
+			goto out;
+		}
 		impl->stream_info = impl->info;
 		impl->format_info = find_audio_format_info(&impl->info);
 		if (impl->format_info == NULL) {
@@ -704,7 +709,10 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 	case SPA_MEDIA_SUBTYPE_opus:
 		impl->stream_info.media_type = SPA_MEDIA_TYPE_audio;
 		impl->stream_info.media_subtype = SPA_MEDIA_SUBTYPE_raw;
-		parse_audio_info(props, &impl->stream_info.info.raw);
+		if ((res = parse_audio_info(props, &impl->stream_info.info.raw)) < 0) {
+			pw_log_error("can't parse format: %s", spa_strerror(res));
+			goto out;
+		}
 		impl->stream_info.info.raw.format = SPA_AUDIO_FORMAT_F32;
 		impl->info.info.opus.rate = impl->stream_info.info.raw.rate;
 		impl->info.info.opus.channels = impl->stream_info.info.raw.channels;
@@ -1030,10 +1038,17 @@ int rtp_stream_update_properties(struct rtp_stream *s, const struct spa_dict *di
 	return pw_stream_update_properties(impl->stream, dict);
 }
 
-int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len)
+int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len,
+				uint64_t current_time)
 {
 	struct impl *impl = (struct impl*)s;
-	return impl->receive_rtp(impl, buffer, len);
+	return impl->receive_rtp(impl, buffer, len, current_time);
+}
+
+uint64_t rtp_stream_get_nsec(struct rtp_stream *s)
+{
+	struct impl *impl = (struct impl*)s;
+	return pw_stream_get_nsec(impl->stream);
 }
 
 uint64_t rtp_stream_get_time(struct rtp_stream *s, uint32_t *rate)

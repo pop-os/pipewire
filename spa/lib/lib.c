@@ -1,4 +1,6 @@
 
+#undef SPA_AUDIO_MAX_CHANNELS
+
 #define SPA_API_IMPL	SPA_EXPORT
 #include <spa/utils/defs.h>
 #include <spa/buffer/alloc.h>
@@ -61,6 +63,7 @@
 #include <spa/param/audio/iec958-types.h>
 #include <spa/param/audio/iec958-utils.h>
 #include <spa/param/audio/layout.h>
+#include <spa/param/audio/layout-types.h>
 #include <spa/param/audio/mp3.h>
 #include <spa/param/audio/mp3-types.h>
 #include <spa/param/audio/mp3-utils.h>
@@ -165,9 +168,3 @@
 #include <spa/utils/string.h>
 #include <spa/utils/type.h>
 #include <spa/utils/type-info.h>
-
-
-
-
-
-
