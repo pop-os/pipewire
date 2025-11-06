@@ -35,12 +35,13 @@
 SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.null-audio-sink");
 
 #define DEFAULT_CLOCK_NAME	"clock.system.monotonic"
+#define MAX_CHANNELS	SPA_AUDIO_MAX_CHANNELS
 
 struct props {
 	uint32_t format;
 	uint32_t channels;
 	uint32_t rate;
-	uint32_t pos[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t pos[MAX_CHANNELS];
 	char clock_name[64];
 	unsigned int debug:1;
 	unsigned int driver:1;
@@ -636,7 +637,7 @@ port_set_format(struct impl *this,
 
 		if (info.info.raw.rate == 0 ||
 		    info.info.raw.channels == 0 ||
-		    info.info.raw.channels > SPA_AUDIO_MAX_CHANNELS)
+		    info.info.raw.channels > MAX_CHANNELS)
 			return -EINVAL;
 
 		if (this->props.format != 0) {
@@ -949,7 +950,11 @@ impl_init(const struct spa_handle_factory *factory,
 		} else if (spa_streq(k, SPA_KEY_NODE_DRIVER)) {
 			this->props.driver = spa_atob(s);
 		} else if (spa_streq(k, SPA_KEY_AUDIO_POSITION)) {
-			spa_audio_parse_position(s, strlen(s), this->props.pos, &this->props.channels);
+			spa_audio_parse_position_n(s, strlen(s), this->props.pos,
+					SPA_N_ELEMENTS(this->props.pos), &this->props.channels);
+		} else if (spa_streq(k, SPA_KEY_AUDIO_LAYOUT)) {
+			spa_audio_parse_layout(s, this->props.pos,
+					SPA_N_ELEMENTS(this->props.pos), &this->props.channels);
 		} else if (spa_streq(k, "clock.name")) {
 			spa_scnprintf(this->props.clock_name,
 					sizeof(this->props.clock_name),

@@ -808,6 +808,7 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 		if (spa_format_audio_parse(param, &info) < 0) {
 			spa_log_error(this->log, "%p: cannot set Format param: "
 					"parsing the POD failed", this);
+			spa_debug_log_pod(this->log, SPA_LOG_LEVEL_ERROR, 0, NULL, param);
 			return -EINVAL;
 		}
 		if (info.media_subtype != SPA_MEDIA_SUBTYPE_raw) {
@@ -841,6 +842,7 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 				SPA_PARAM_PORT_CONFIG_format,		SPA_POD_OPT_Pod(&format)) < 0) {
 			spa_log_error(this->log, "%p: cannot set PortConfig param: "
 					"parsing the POD failed", this);
+			spa_debug_log_pod(this->log, SPA_LOG_LEVEL_ERROR, 0, NULL, param);
 			return -EINVAL;
 		}
 
@@ -848,8 +850,12 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 			struct spa_audio_info info;
 
 			spa_zero(info);
-			if ((res = spa_format_audio_parse(format, &info)) < 0)
+			if ((res = spa_format_audio_parse(format, &info)) < 0) {
+				spa_log_error(this->log, "%p: cannot set PortConfig param: "
+						"parsing format failed: %s", this, spa_strerror(res));
+				spa_debug_log_pod(this->log, SPA_LOG_LEVEL_ERROR, 0, NULL, format);
 				return res;
+			}
 
 			if (info.media_subtype == SPA_MEDIA_SUBTYPE_raw) {
 				info.info.raw.rate = 0;
@@ -1213,6 +1219,9 @@ static void follower_convert_port_info(void *data,
 			case SPA_PARAM_Tag:
 				idx = IDX_Tag;
 				break;
+			case SPA_PARAM_EnumFormat:
+				idx = IDX_EnumFormat;
+				break;
 			default:
 				continue;
 			}
@@ -1239,6 +1248,11 @@ static void follower_convert_port_info(void *data,
 				this->in_recalc--;
 				spa_log_debug(this->log, "tag: %d (%s)", res,
 						spa_strerror(res));
+			}
+			if (idx == IDX_EnumFormat) {
+				spa_log_info(this->log, "new EnumFormat from converter");
+				/* we will renegotiate when restarting */
+				this->recheck_format = true;
 			}
 			spa_log_debug(this->log, "param %d changed", info->params[i].id);
 		}
@@ -1438,7 +1452,7 @@ static void follower_port_info(void *data,
 						spa_strerror(res));
 			}
 			if (idx == IDX_EnumFormat) {
-				spa_log_debug(this->log, "new formats");
+				spa_log_debug(this->log, "new EnumFormat from follower");
 				/* we will renegotiate when restarting */
 				this->recheck_format = true;
 			}
@@ -2046,11 +2060,12 @@ static int do_auto_port_config(struct impl *this, const char *str)
 		return -ENOENT;
 
 	if (format.media_subtype == SPA_MEDIA_SUBTYPE_raw) {
+		uint32_t n_pos = SPA_MIN(SPA_N_ELEMENTS(format.info.raw.position), format.info.raw.channels);
 		if (position == POSITION_AUX) {
-			for (i = 0; i < format.info.raw.channels; i++)
+			for (i = 0; i < n_pos; i++)
 				format.info.raw.position[i] = SPA_AUDIO_CHANNEL_START_Aux + i;
 		} else if (position == POSITION_UNKNOWN) {
-			for (i = 0; i < format.info.raw.channels; i++)
+			for (i = 0; i < n_pos; i++)
 				format.info.raw.position[i] = SPA_AUDIO_CHANNEL_UNKNOWN;
 		}
 	}

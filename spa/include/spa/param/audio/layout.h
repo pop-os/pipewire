@@ -21,7 +21,10 @@ extern "C" {
 struct spa_audio_layout_info {
 	uint32_t n_channels;
 	uint32_t position[SPA_AUDIO_MAX_CHANNELS];
+	/* padding may follow to allow more channels */
 };
+
+#define SPA_AUDIO_LAYOUT_INFO_MAX_POSITION(size)	(((size)-offsetof(struct spa_audio_layout_info,position))/sizeof(uint32_t))
 
 #define SPA_AUDIO_LAYOUT_Mono		1, { SPA_AUDIO_CHANNEL_MONO, }
 #define SPA_AUDIO_LAYOUT_Stereo		2, { SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR, }
@@ -37,7 +40,7 @@ struct spa_audio_layout_info {
 					     SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR, \
 					     SPA_AUDIO_CHANNEL_FC, SPA_AUDIO_CHANNEL_RC, \
 					     SPA_AUDIO_CHANNEL_SL, SPA_AUDIO_CHANNEL_SR, }
-#define SPA_AUDIO_LAYOUT_Cube		8, { SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR }, \
+#define SPA_AUDIO_LAYOUT_Cube		8, { SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR, \
 					     SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR, \
 					     SPA_AUDIO_CHANNEL_TFL, SPA_AUDIO_CHANNEL_TFR, \
 					     SPA_AUDIO_CHANNEL_TRL, SPA_AUDIO_CHANNEL_TRR, }

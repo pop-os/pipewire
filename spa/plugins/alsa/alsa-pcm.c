@@ -163,10 +163,10 @@ static int alsa_set_param(struct state *state, const char *k, const char *s)
 	int fmt_change = 0;
 	if (spa_streq(k, SPA_KEY_AUDIO_CHANNELS)) {
 		state->default_channels = atoi(s);
-		if (state->default_channels > SPA_AUDIO_MAX_CHANNELS) {
+		if (state->default_channels > MAX_CHANNELS) {
 			spa_log_warn(state->log, "%p: %s: %s > %d, clamping",
-					state, k, s, SPA_AUDIO_MAX_CHANNELS);
-			state->default_channels = SPA_AUDIO_MAX_CHANNELS;
+					state, k, s, MAX_CHANNELS);
+			state->default_channels = MAX_CHANNELS;
 		}
 		fmt_change++;
 	} else if (spa_streq(k, SPA_KEY_AUDIO_RATE)) {
@@ -240,35 +240,33 @@ static int alsa_set_param(struct state *state, const char *k, const char *s)
 
 static int position_to_string(struct channel_map *map, char *val, size_t len)
 {
-	uint32_t i, o = 0;
-	int r;
-	o += snprintf(val, len, "[ ");
-	for (i = 0; i < map->channels; i++) {
-		r = snprintf(val+o, len-o, "%s%s", i == 0 ? "" : ", ",
-				spa_debug_type_find_short_name(spa_type_audio_channel,
-					map->pos[i]));
-		if (r < 0 || o + r >= len)
-			return -ENOSPC;
-		o += r;
+	uint32_t i;
+	char pos[8];
+	struct spa_strbuf b;
+
+	spa_strbuf_init(&b, val, len);
+	spa_strbuf_append(&b, "[");
+	for (i = 0; i < map->n_pos; i++) {
+		spa_strbuf_append(&b, "%s%s", i == 0 ? " " : ", ",
+				spa_type_audio_channel_make_short_name(map->pos[i],
+					pos, sizeof(pos), "UNK"));
 	}
-	if (len > o)
-		o += snprintf(val+o, len-o, " ]");
+	if (spa_strbuf_append(&b, " ]") < 2)
+		return -ENOSPC;
 	return 0;
 }
 
 static int uint32_array_to_string(uint32_t *vals, uint32_t n_vals, char *val, size_t len)
 {
-	uint32_t i, o = 0;
-	int r;
-	o += snprintf(val, len, "[ ");
-	for (i = 0; i < n_vals; i++) {
-		r = snprintf(val+o, len-o, "%s%d", i == 0 ? "" : ", ", vals[i]);
-		if (r < 0 || o + r >= len)
-			return -ENOSPC;
-		o += r;
-	}
-	if (len > o)
-		o += snprintf(val+o, len-o, " ]");
+	uint32_t i;
+	struct spa_strbuf b;
+
+	spa_strbuf_init(&b, val, len);
+	spa_strbuf_append(&b, "[");
+	for (i = 0; i < n_vals; i++)
+		spa_strbuf_append(&b, "%s%d", i == 0 ? " " : ", ", vals[i]);
+	if (spa_strbuf_append(&b, " ]") < 2)
+		return -ENOSPC;
 	return 0;
 }
 
@@ -775,7 +773,7 @@ static void bind_ctl_event(struct spa_source *source)
 	snd_ctl_elem_id_alloca(&bound_id);
 	snd_ctl_elem_value_alloca(&old_value);
 
-	while ((err = snd_ctl_read(state->ctl, ev) > 0)) {
+	while ((err = snd_ctl_read(state->ctl, ev)) > 0) {
 		bool changed = false;
 
 		if (snd_ctl_event_get_type(ev) != SND_CTL_EVENT_ELEM)
@@ -1584,8 +1582,8 @@ static int add_channels(struct state *state, bool all, uint32_t index, uint32_t 
 	spa_log_debug(state->log, "channels (%d %d) default:%d all:%d",
 			min, max, state->default_channels, all);
 
-	min = SPA_MIN(min, SPA_AUDIO_MAX_CHANNELS);
-	max = SPA_MIN(max, SPA_AUDIO_MAX_CHANNELS);
+	min = SPA_MIN(min, MAX_CHANNELS);
+	max = SPA_MIN(max, MAX_CHANNELS);
 
 	if (state->default_channels != 0 && !all) {
 		if (min > state->default_channels ||
@@ -1645,7 +1643,7 @@ skip_channels:
 		} else {
 			const struct channel_map *map = NULL;
 			spa_pod_builder_int(b, min);
-			if (state->default_pos.channels == min) {
+			if (state->default_pos.n_pos == min) {
 				map = &state->default_pos;
 				spa_log_debug(state->log, "%p: using provided default", state);
 			} else if (min <= 8) {
@@ -1655,7 +1653,7 @@ skip_channels:
 			if (map) {
 				spa_pod_builder_prop(b, SPA_FORMAT_AUDIO_position, 0);
 				spa_pod_builder_push_array(b, &f[0]);
-				for (i = 0; i < map->channels; i++) {
+				for (i = 0; i < map->n_pos; i++) {
 					spa_log_debug(state->log, "%p: position %zd %d", state, i, map->pos[i]);
 					spa_pod_builder_id(b, map->pos[i]);
 				}

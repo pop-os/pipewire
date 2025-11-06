@@ -174,12 +174,12 @@ ie. for example `device.Param.Props = { ... }` to set `Props`.
 
 @PAR@ device-prop  device.product.id # integer
 \parblock
-\copydoc PW_KEY_DEVICE_PRODUCT_NAME
+\copydoc PW_KEY_DEVICE_PRODUCT_ID
 \endparblock
 
 @PAR@ device-prop  device.product.name # string
 \parblock
-\copydoc PW_KEY_DEVICE_PRODUCT_ID
+\copydoc PW_KEY_DEVICE_PRODUCT_NAME
 \endparblock
 
 @PAR@ device-prop  device.class # string
@@ -842,6 +842,9 @@ The audio format to open the device in. By default this is "UNKNOWN", which will
 
 @PAR@ node-prop  audio.position    # JSON array of strings
 The audio position of the channels in the device. This is auto detected based on the profile. You can configure an array of channel positions, like "[ FL, FR ]".
+
+@PAR@ node-prop  audio.layout    # string
+The audio layout of the channels in the device. You can use any of the predefined layouts, like "Stereo", "5.1" etc.
 
 @PAR@ node-prop  audio.allowed-rates    # JSON array of integers
 \parblock

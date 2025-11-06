@@ -42,7 +42,7 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 		struct spa_pod_builder *b, struct spa_pod **param)
 {
 	struct spa_pod_frame f[1];
-	const uint32_t position[SPA_AUDIO_MAX_CHANNELS] = { SPA_AUDIO_CHANNEL_MONO };
+	const uint32_t position[1] = { SPA_AUDIO_CHANNEL_MONO };
 	const int channels = 1;
 
 	spa_assert(caps == NULL && caps_size == 0);
@@ -55,7 +55,7 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 			SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 			SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 			SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_F32),
-			SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_ENUM_Int(1, 32000),
+			SPA_FORMAT_AUDIO_rate,     SPA_POD_Int(32000),
 			SPA_FORMAT_AUDIO_channels, SPA_POD_Int(channels),
 			SPA_FORMAT_AUDIO_position, SPA_POD_Array(sizeof(uint32_t),
 					SPA_TYPE_Id, channels, position),

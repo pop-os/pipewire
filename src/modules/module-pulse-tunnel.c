@@ -72,6 +72,7 @@
  * - \ref PW_KEY_AUDIO_FORMAT
  * - \ref PW_KEY_AUDIO_RATE
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_LAYOUT
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_NODE_LATENCY
  * - \ref PW_KEY_NODE_NAME
@@ -116,6 +117,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 #define DEFAULT_RATE 48000
 #define DEFAULT_CHANNELS 2
 #define DEFAULT_POSITION "[ FL FR ]"
+
+#define MAX_CHANNELS	SPA_AUDIO_MAX_CHANNELS
 
 #define MODULE_USAGE	"( remote.name=<remote> ] "				\
 			"( node.latency=<latency as fraction> ] "		\
@@ -295,10 +298,10 @@ static void stream_param_changed(void *d, uint32_t id, const struct spa_pod *par
 		{
 			struct pa_cvolume volume;
 			uint32_t n;
-			float vols[SPA_AUDIO_MAX_CHANNELS];
+			float vols[MAX_CHANNELS];
 
 			if ((n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
-					vols, SPA_AUDIO_MAX_CHANNELS)) > 0) {
+					vols, SPA_N_ELEMENTS(vols))) > 0) {
 				volume.channels = SPA_MIN(PA_CHANNELS_MAX, n);
 				for (n = 0; n < volume.channels; n++)
 					volume.values[n] = pa_sw_volume_from_linear(vols[n]);
@@ -752,7 +755,8 @@ static int create_pulse_stream(struct impl *impl)
 
 	map.channels = impl->info.channels;
 	for (i = 0; i < map.channels; i++)
-		map.map[i] = (pa_channel_position_t)channel_id2pa(impl->info.position[i], &aux);
+		map.map[i] = (pa_channel_position_t)channel_id2pa(
+				impl->info.position[i], &aux);
 
 	snprintf(stream_name, sizeof(stream_name), _("Tunnel for %s@%s"),
 			pw_get_user_name(), pw_get_host_name());
@@ -832,10 +836,10 @@ do_stream_sync_volumes(struct spa_loop *loop,
 	struct spa_pod_frame f[1];
 	struct spa_pod *param;
 	uint32_t i, channels;
-	float vols[SPA_AUDIO_MAX_CHANNELS];
-	float soft_vols[SPA_AUDIO_MAX_CHANNELS];
+	float vols[MAX_CHANNELS];
+	float soft_vols[MAX_CHANNELS];
 
-	channels = SPA_MIN(impl->volume.channels, SPA_AUDIO_MAX_CHANNELS);
+	channels = SPA_MIN(impl->volume.channels, MAX_CHANNELS);
 	for (i = 0; i < channels; i++) {
 		vols[i] = (float)pa_sw_volume_to_linear(impl->volume.values[i]);
 		soft_vols[i] = 1.0f;
@@ -1045,9 +1049,9 @@ static const struct pw_impl_module_events module_events = {
 	.destroy = module_destroy,
 };
 
-static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	return spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
@@ -1056,6 +1060,7 @@ static void parse_audio_info(const struct pw_properties *props, struct spa_audio
 			SPA_KEY_AUDIO_FORMAT,
 			SPA_KEY_AUDIO_RATE,
 			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_LAYOUT,
 			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
@@ -1180,6 +1185,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_AUDIO_FORMAT);
 	copy_props(impl, props, PW_KEY_AUDIO_RATE);
 	copy_props(impl, props, PW_KEY_AUDIO_CHANNELS);
+	copy_props(impl, props, SPA_KEY_AUDIO_LAYOUT);
 	copy_props(impl, props, SPA_KEY_AUDIO_POSITION);
 	copy_props(impl, props, PW_KEY_NODE_NAME);
 	copy_props(impl, props, PW_KEY_NODE_DESCRIPTION);
@@ -1189,7 +1195,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(impl, props, PW_KEY_NODE_NETWORK);
 	copy_props(impl, props, PW_KEY_MEDIA_CLASS);
 
-	parse_audio_info(impl->stream_props, &impl->info);
+	if ((res = parse_audio_info(impl->stream_props, &impl->info)) < 0) {
+		pw_log_error("can't parse format: %s", spa_strerror(res));
+		goto error;
+	}
 
 	impl->frame_size = calc_frame_size(&impl->info);
 	if (impl->frame_size == 0) {

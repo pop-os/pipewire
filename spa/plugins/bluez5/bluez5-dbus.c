@@ -35,6 +35,7 @@
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
 #include <spa-private/dbus-helpers.h>
+#include <spa/param/audio/raw-utils.h>
 #include <spa/param/audio/raw-json.h>
 
 #include "codec-loader.h"
@@ -5037,6 +5038,10 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 			spa_log_error(monitor->log, "invalid transport configuration");
 			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
 		}
+		if (info.info.raw.channels > MAX_CHANNELS) {
+			spa_log_error(monitor->log, "too many channels in transport");
+			return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+		}
 		transport->n_channels = info.info.raw.channels;
 		memcpy(transport->channels, info.info.raw.position,
 				transport->n_channels * sizeof(uint32_t));
@@ -6850,7 +6855,7 @@ static void parse_bap_locations(struct spa_bt_monitor *this, const struct spa_di
 		const char *key, uint32_t *value)
 {
 	const char *str;
-	uint32_t position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t position[MAX_CHANNELS];
 	uint32_t n_channels;
 	uint32_t locations;
 	unsigned int i, j;
@@ -6861,7 +6866,8 @@ static void parse_bap_locations(struct spa_bt_monitor *this, const struct spa_di
 	if (spa_atou32(str, value, 0))
 		return;
 
-	if (!spa_audio_parse_position(str, strlen(str), position, &n_channels)) {
+	if (!spa_audio_parse_position_n(str, strlen(str), position,
+				SPA_N_ELEMENTS(position), &n_channels)) {
 		spa_log_error(this->log, "property %s '%s' is not valid position array", key, str);
 		return;
 	}

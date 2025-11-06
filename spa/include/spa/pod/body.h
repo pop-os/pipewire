@@ -78,6 +78,36 @@ SPA_API_POD_BODY uint32_t spa_pod_type_size(uint32_t type)
 	return 0;
 }
 
+SPA_API_POD_BODY int spa_pod_choice_n_values(uint32_t choice_type, uint32_t *min, uint32_t *max)
+{
+	switch (choice_type) {
+	case SPA_CHOICE_Enum:
+		*min = 2;
+		*max = UINT32_MAX;
+		break;
+	case SPA_CHOICE_Range:
+		*min = *max = 3;
+		break;
+	case SPA_CHOICE_Step:
+		*min = *max = 4;
+		break;
+	case SPA_CHOICE_None:
+	case SPA_CHOICE_Flags:
+		*min = *max = 1;
+		break;
+	default:
+		/*
+		 * This must always return at least 1, because callers
+		 * assume that n_vals >= spa_pod_choice_n_values()
+		 * mean that n_vals is at least 1.
+		 */
+		*min = 1;
+		*max = UINT32_MAX;
+		return 0;
+	}
+	return 1;
+}
+
 SPA_API_POD_BODY int spa_pod_body_from_data(void *data, size_t maxsize, off_t offset, size_t size,
 		struct spa_pod *pod, const void **body)
 {
@@ -243,9 +273,9 @@ SPA_API_POD_BODY int spa_pod_is_pointer(const struct spa_pod *pod)
 SPA_API_POD_BODY int spa_pod_body_get_pointer(const struct spa_pod *pod, const void *body,
 		uint32_t *type, const void **value)
 {
+	struct spa_pod_pointer_body b;
 	if (!spa_pod_is_pointer(pod))
 		return -EINVAL;
-	struct spa_pod_pointer_body b;
 	SPA_POD_BODY_LOAD_FIELD_ONCE(&b, body, type);
 	SPA_POD_BODY_LOAD_FIELD_ONCE(&b, body, value);
 	*type = b.type;
@@ -333,6 +363,8 @@ SPA_API_POD_BODY const void *spa_pod_array_body_get_values(const struct spa_pod_
 	*n_values = child_size ? (arr->pod.size - sizeof(arr->body)) / child_size : 0;
 	*val_size = child_size;
 	*val_type = arr->body.child.type;
+	if (*val_size < spa_pod_type_size(*val_type))
+		*n_values = 0;
 	return body;
 }
 
@@ -366,13 +398,16 @@ SPA_API_POD_BODY const void *spa_pod_choice_body_get_values(const struct spa_pod
 		const void *body, uint32_t *n_values, uint32_t *choice,
 		uint32_t *val_size, uint32_t *val_type)
 {
-	uint32_t child_size = pod->body.child.size;
+	uint32_t child_size = pod->body.child.size, min, max;
 	*val_size = child_size;
 	*val_type = pod->body.child.type;
 	*n_values = child_size ? (pod->pod.size - sizeof(pod->body)) / child_size : 0;
 	*choice = pod->body.type;
-	if (*choice == SPA_CHOICE_None)
-		*n_values = SPA_MIN(1u, *n_values);
+	spa_pod_choice_n_values(*choice, &min, &max);
+	if (*n_values < min || *val_size < spa_pod_type_size(*val_type))
+		*n_values = 0;
+	else if (*n_values > max)
+		*n_values = max;
 	return body;
 }
 

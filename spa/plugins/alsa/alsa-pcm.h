@@ -36,6 +36,7 @@ extern "C" {
 #endif
 
 #define MAX_RATES	16
+#define MAX_CHANNELS SPA_AUDIO_MAX_CHANNELS
 
 #define DEFAULT_PERIOD		1024u
 #define DEFAULT_RATE		48000u
@@ -71,8 +72,8 @@ struct buffer {
 #define BW_PERIOD	(3 * SPA_NSEC_PER_SEC)
 
 struct channel_map {
-	uint32_t channels;
-	uint32_t pos[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t n_pos;
+	uint32_t pos[MAX_CHANNELS];
 };
 
 struct card {
@@ -314,7 +315,7 @@ void spa_alsa_emit_port_info(struct state *state, bool full);
 
 static inline void spa_alsa_parse_position(struct channel_map *map, const char *val, size_t len)
 {
-	spa_audio_parse_position(val, len, map->pos, &map->channels);
+	spa_audio_parse_position_n(val, len, map->pos, SPA_N_ELEMENTS(map->pos), &map->n_pos);
 }
 
 static inline uint32_t spa_alsa_parse_rates(uint32_t *rates, uint32_t max, const char *val, size_t len)

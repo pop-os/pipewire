@@ -15,6 +15,7 @@ struct rtp_stream;
 #define DEFAULT_RATE		48000
 #define DEFAULT_CHANNELS	2
 #define DEFAULT_POSITION	"[ FL FR ]"
+#define DEFAULT_LAYOUT		"Stereo"
 
 #define ERROR_MSEC		2.0f
 #define DEFAULT_SESS_LATENCY	100.0f
@@ -62,7 +63,10 @@ void rtp_stream_destroy(struct rtp_stream *s);
 
 int rtp_stream_update_properties(struct rtp_stream *s, const struct spa_dict *dict);
 
-int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len);
+int rtp_stream_receive_packet(struct rtp_stream *s, uint8_t *buffer, size_t len,
+				uint64_t current_time);
+
+uint64_t rtp_stream_get_nsec(struct rtp_stream *s);
 
 uint64_t rtp_stream_get_time(struct rtp_stream *s, uint32_t *rate);
 
