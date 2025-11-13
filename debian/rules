@@ -98,7 +98,7 @@ override_dh_auto_configure:
 
 test_timeout_multiplier = 1
 
-ifneq ($(filter arm hppa ia64 m68k riscv64 sh4 sparc%,$(DEB_HOST_ARCH_CPU)),)
+ifneq ($(filter alpha arm hppa ia64 m68k riscv64 sh4 sparc%,$(DEB_HOST_ARCH_CPU)),)
 test_timeout_multiplier = 5
 endif
 
