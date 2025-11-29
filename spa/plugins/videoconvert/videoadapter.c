@@ -25,6 +25,7 @@
 #include <spa/param/video/format-utils.h>
 #include <spa/param/latency-utils.h>
 #include <spa/param/tag-utils.h>
+#include <spa/param/peer-utils.h>
 #include <spa/debug/format.h>
 #include <spa/debug/pod.h>
 #include <spa/debug/log.h>
@@ -900,7 +901,6 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	switch (id) {
 	case SPA_IO_Position:
 		this->io_position = data;
-		this->recheck_format = true;
 		break;
 	default:
 		break;
@@ -920,7 +920,7 @@ static int update_param_peer_formats(struct impl *impl)
 	uint8_t buffer[4096];
 	spa_auto(spa_pod_dynamic_builder) b = { 0 };
 	uint32_t state = 0;
-	struct spa_pod *param;
+	struct spa_pod *param, *p, *str;
 	struct spa_pod_frame f;
 	int res;
 
@@ -934,7 +934,6 @@ static int update_param_peer_formats(struct impl *impl)
 
 	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 	spa_pod_builder_push_struct(&b.b, &f);
-
 	while (true) {
 		res = node_port_enum_params_sync(impl, impl->follower,
 					impl->direction, 0,
@@ -951,10 +950,24 @@ static int update_param_peer_formats(struct impl *impl)
 	spa_pod_simplify(&b.b, &param, param);
 	spa_debug_log_pod(impl->log, SPA_LOG_LEVEL_DEBUG, 0, NULL, param);
 
+	str = spa_pod_copy(param);
+	spa_pod_dynamic_builder_clean(&b);
+
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
+	spa_peer_param_build_start(&b.b, &f, SPA_PARAM_PeerEnumFormat);
+	SPA_POD_STRUCT_FOREACH(str, p) {
+		spa_debug_log_pod(impl->log, SPA_LOG_LEVEL_DEBUG, 0, NULL, p);
+		spa_peer_param_build_add_param(&b.b, 1, p);
+	}
+	param = spa_peer_param_build_end(&b.b, &f);
+
+	spa_debug_log_pod(impl->log, SPA_LOG_LEVEL_DEBUG, 0, NULL, param);
+
 	res = spa_node_port_set_param(impl->target,
 				   SPA_DIRECTION_REVERSE(impl->direction), 0,
-				   SPA_PARAM_PeerFormats, 0, param);
+				   SPA_PARAM_PeerEnumFormat, 0, param);
 
+	free(str);
 	impl->recheck_format = false;
 
 	spa_log_debug(impl->log, "done updating peer formats: %d", res);

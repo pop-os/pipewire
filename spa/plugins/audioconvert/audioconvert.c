@@ -100,6 +100,7 @@ struct props {
 	unsigned int mix_disabled:1;
 	unsigned int resample_disabled:1;
 	unsigned int resample_quality;
+	struct resample_config resample_config;
 	double rate;
 	char wav_path[512];
 	unsigned int lock_volumes:1;
@@ -122,6 +123,7 @@ static void props_reset(struct props *props)
 	props->mix_disabled = false;
 	props->resample_disabled = false;
 	props->resample_quality = RESAMPLE_DEFAULT_QUALITY;
+	spa_zero(props->resample_config);
 	props->rate = 1.0;
 	spa_zero(props->wav_path);
 	props->lock_volumes = false;
@@ -1019,7 +1021,7 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 		if (this->io_position && this->io_clock &&
 		    this->io_position->clock.target_rate.denom != this->io_clock->target_rate.denom &&
 		    !this->props.resample_disabled) {
-			spa_log_warn(this->log, "driver %d changed rate:%u -> %u", this->io_position->clock.id,
+			spa_log_debug(this->log, "driver %d changed rate:%u -> %u", this->io_position->clock.id,
 					this->io_clock->target_rate.denom,
 					this->io_position->clock.target_rate.denom);
 
@@ -1478,6 +1480,16 @@ static int audioconvert_set_param(struct impl *this, const char *k, const char *
 		this->props.resample_quality = atoi(s);
 	else if (spa_streq(k, "resample.disable"))
 		this->props.resample_disabled = spa_atob(s);
+	else if (spa_streq(k, "resample.window"))
+		this->props.resample_config.window = resample_window_from_label(s);
+	else if (spa_streq(k, "resample.cutoff"))
+		spa_atod(s, &this->props.resample_config.cutoff);
+	else if (spa_streq(k, "resample.n-taps"))
+		spa_atou32(s, &this->props.resample_config.n_taps, 0);
+	else if (spa_strstartswith(k, "resample.param.")) {
+		uint32_t idx = resample_param_from_label(k+strlen("resample.param."));
+		spa_atod(s, &this->props.resample_config.params[idx]);
+	}
 	else if (spa_streq(k, "dither.noise"))
 		spa_atou32(s, &this->dir[1].conv.noise_bits, 0);
 	else if (spa_streq(k, "dither.method"))
@@ -2289,6 +2301,7 @@ static int setup_resample(struct impl *this)
 	this->resample.o_rate = out->format.info.raw.rate;
 	this->resample.log = this->log;
 	this->resample.quality = this->props.resample_quality;
+	this->resample.config = this->props.resample_config;
 	this->resample.cpu_flags = this->cpu_flags;
 
 	this->rate_adjust = this->props.rate != 1.0;
