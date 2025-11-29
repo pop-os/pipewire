@@ -259,6 +259,19 @@ struct impl {
 	bool waiting;
 };
 
+static inline uint64_t get_time_ns(struct impl *impl)
+{
+	uint64_t res;
+	if (impl->stream) {
+		res = rtp_stream_get_nsec(impl->stream);
+	} else {
+		struct timespec ts;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		res = SPA_TIMESPEC_TO_NSEC(&ts);
+	}
+	return res;
+}
+
 static int do_start(struct spa_loop *loop, bool async, uint32_t seq, const void *data,
 		size_t size, void *user_data)
 {
@@ -288,9 +301,10 @@ on_rtp_io(void *data, int fd, uint32_t mask)
 	int suppressed;
 	uint64_t current_time;
 
-	current_time = rtp_stream_get_nsec(impl->stream);
+	current_time = get_time_ns(impl);
 
 	if (mask & SPA_IO_IN) {
+
 		if ((len = recv(fd, impl->buffer, impl->buffer_size, 0)) < 0)
 			goto receive_error;
 
@@ -349,10 +363,10 @@ static int rejoin_igmp_group(struct spa_loop *loop, bool async, uint32_t seq,
 		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IPV6, IPV6_LEAVE_GROUP,
 					&mr6, sizeof(mr6));
 		if (SPA_LIKELY(res == 0)) {
-			pw_log_info("left IPv6 multicast group");
+			pw_log_debug("left IPv6 multicast group");
 		} else {
 			if (errno == EADDRNOTAVAIL) {
-				pw_log_info("attempted to leave IPv6 multicast group, but "
+				pw_log_debug("attempted to leave IPv6 multicast group, but "
 						"membership was already silently dropped");
 			} else {
 				pw_log_warn("failed to leave IPv6 multicast group: %m");
@@ -364,7 +378,7 @@ static int rejoin_igmp_group(struct spa_loop *loop, bool async, uint32_t seq,
 		if (res < 0) {
 			pw_log_warn("failed to re-join IPv6 multicast group: %m");
 		} else {
-			pw_log_info("re-joined IPv6 multicast group successfully");
+			pw_log_debug("re-joined IPv6 multicast group successfully");
 		}
 	} else {
 		struct ip_mreqn mr4;
@@ -376,10 +390,10 @@ static int rejoin_igmp_group(struct spa_loop *loop, bool async, uint32_t seq,
 		res = setsockopt(impl->igmp_recovery.socket_fd, IPPROTO_IP, IP_DROP_MEMBERSHIP,
 					&mr4, sizeof(mr4));
 		if (SPA_LIKELY(res == 0)) {
-			pw_log_info("left IPv4 multicast group");
+			pw_log_debug("left IPv4 multicast group");
 		} else {
 			if (errno == EADDRNOTAVAIL) {
-				pw_log_info("attempted to leave IPv4 multicast group, but "
+				pw_log_debug("attempted to leave IPv4 multicast group, but "
 						"membership was already silently dropped");
 			} else {
 				pw_log_warn("failed to leave IPv4 multicast group: %m");
@@ -391,11 +405,11 @@ static int rejoin_igmp_group(struct spa_loop *loop, bool async, uint32_t seq,
 		if (res < 0) {
 			pw_log_warn("failed to re-join IPv4 multicast group: %m");
 		} else {
-			pw_log_info("re-joined IPv4 multicast group successfully");
+			pw_log_debug("re-joined IPv4 multicast group successfully");
 		}
 	}
 
-	current_time = rtp_stream_get_nsec(impl->stream);
+	current_time = get_time_ns(impl);
 	SPA_ATOMIC_STORE(impl->last_packet_time, current_time);
 
 	return res;
@@ -420,7 +434,7 @@ static void on_igmp_recovery_timer_event(void *data)
 	 * silently kicked out of the IGMP group (which causes data
 	 * to no longer arrive, thus leading to these states). */
 
-	current_time = rtp_stream_get_nsec(impl->stream);
+	current_time = get_time_ns(impl);
 	last_packet_time = SPA_ATOMIC_LOAD(impl->last_packet_time);
 	elapsed_seconds = (current_time - last_packet_time) / SPA_NSEC_PER_SEC;
 
@@ -433,7 +447,7 @@ static void on_igmp_recovery_timer_event(void *data)
 	}
 
 	pw_net_get_ip(&impl->igmp_recovery.mcast_addr, addr, sizeof(addr), NULL, NULL);
-	pw_log_info("starting IGMP recovery for %s", addr);
+	pw_log_debug("starting IGMP recovery for %s", addr);
 
 	/* Run the actual recovery in the data loop, since recovery involves
 	 * rejoining the socket to the IGMP group. By running this in the
@@ -446,7 +460,7 @@ static void on_igmp_recovery_timer_event(void *data)
 	res = pw_loop_locked(impl->data_loop, rejoin_igmp_group, 1, NULL, 0, impl);
 
 	if (SPA_LIKELY(res == 0)) {
-		pw_log_info("IGMP recovery for %s finished", addr);
+		pw_log_debug("IGMP recovery for %s finished", addr);
 	} else {
 		pw_log_error("error while finishing IGMP recovery for %s: %s",
 				addr, spa_strerror(res));

@@ -71,7 +71,6 @@ struct port {
 	struct spa_fraction rate = {};
 	StreamConfiguration streamConfig;
 
-	spa_data_type memtype = SPA_DATA_Invalid;
 	uint32_t buffers_blocks = 1;
 
 	struct buffer buffers[MAX_BUFFERS];
@@ -449,8 +448,7 @@ const struct format_info *find_format_info_by_media_type(
 	uint32_t type, uint32_t subtype, uint32_t format)
 {
 	for (const auto& f : format_info) {
-		if (f.media_type == type && f.media_subtype == subtype
-		    && (f.format == SPA_VIDEO_FORMAT_UNKNOWN || f.format == format))
+		if (f.media_type == type && f.media_subtype == subtype && f.format == format)
 			return &f;
 	}
 
@@ -667,7 +665,6 @@ int spa_libcamera_set_format(struct impl *impl, struct port *port,
 	const struct format_info *info = nullptr;
 	uint32_t video_format;
 	struct spa_rectangle *size = nullptr;
-	struct spa_fraction *framerate = nullptr;
 	CameraConfiguration::Status validation;
 	int res;
 
@@ -675,18 +672,15 @@ int spa_libcamera_set_format(struct impl *impl, struct port *port,
 	case SPA_MEDIA_SUBTYPE_raw:
 		video_format = format->info.raw.format;
 		size = &format->info.raw.size;
-		framerate = &format->info.raw.framerate;
 		break;
 	case SPA_MEDIA_SUBTYPE_mjpg:
 	case SPA_MEDIA_SUBTYPE_jpeg:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
 		size = &format->info.mjpg.size;
-		framerate = &format->info.mjpg.framerate;
 		break;
 	case SPA_MEDIA_SUBTYPE_h264:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
 		size = &format->info.h264.size;
-		framerate = &format->info.h264.framerate;
 		break;
 	default:
 		video_format = SPA_VIDEO_FORMAT_ENCODED;
@@ -695,7 +689,7 @@ int spa_libcamera_set_format(struct impl *impl, struct port *port,
 
 	info = find_format_info_by_media_type(format->media_type,
 					      format->media_subtype, video_format);
-	if (info == nullptr || size == nullptr || framerate == nullptr) {
+	if (info == nullptr || size == nullptr) {
 		spa_log_error(impl->log, "unknown media type %d %d %d", format->media_type,
 			      format->media_subtype, video_format);
 		return -EINVAL;
@@ -1210,21 +1204,17 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 	const std::vector<std::unique_ptr<FrameBuffer>> &bufs =
 			impl->allocator.buffers(stream);
 
-	if (n_buffers > 0) {
-		if (bufs.size() != n_buffers)
-			return -EINVAL;
+	if (n_buffers > 0 && bufs.size() != n_buffers)
+		return -EINVAL;
 
-		spa_data *d = buffers[0]->datas;
+	const auto choose_memtype = [](uint32_t t) {
+		if (t != SPA_ID_INVALID && t & (1u << SPA_DATA_DmaBuf))
+			return SPA_DATA_DmaBuf;
+		if (t & (1u << SPA_DATA_MemFd))
+			return SPA_DATA_MemFd;
 
-		if (d[0].type != SPA_ID_INVALID && d[0].type & (1u << SPA_DATA_DmaBuf)) {
-			port->memtype = SPA_DATA_DmaBuf;
-		} else if (d[0].type & (1u << SPA_DATA_MemFd)) {
-			port->memtype = SPA_DATA_MemFd;
-		} else {
-			spa_log_error(impl->log, "can't use buffers of type %d", d[0].type);
-			return -EINVAL;
-		}
-	}
+		return SPA_DATA_Invalid;
+	};
 
 	for (uint32_t i = 0; i < n_buffers; i++) {
 		struct buffer *b;
@@ -1254,9 +1244,17 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 		spa_data *d = buffers[i]->datas;
 
 		for(uint32_t j = 0; j < buffers[i]->n_datas; ++j) {
-			d[j].type = port->memtype;
+			const auto memtype = choose_memtype(d[j].type);
+			if (memtype == SPA_DATA_Invalid) {
+				spa_log_error(impl->log, "can't use buffers of type %" PRIu32, d[j].type);
+				return -EINVAL;
+			}
+
+			d[j].type = memtype;
 			d[j].flags = SPA_DATA_FLAG_READABLE;
+			d[j].fd = -1;
 			d[j].mapoffset = 0;
+			d[j].data = nullptr;
 			d[j].chunk->stride = port->streamConfig.stride;
 			d[j].chunk->flags = 0;
 			/* Update parameters according to the plane information */
@@ -1286,15 +1284,16 @@ spa_libcamera_alloc_buffers(struct impl *impl, struct port *port,
 				d[j].chunk->size = port->streamConfig.frameSize;
 			}
 
-			if (port->memtype == SPA_DATA_DmaBuf ||
-			    port->memtype == SPA_DATA_MemFd) {
+			switch (memtype) {
+			case SPA_DATA_DmaBuf:
+			case SPA_DATA_MemFd:
 				d[j].flags |= SPA_DATA_FLAG_MAPPABLE;
 				d[j].fd = planes[j].fd.get();
 				spa_log_debug(impl->log, "Got fd = %" PRId64 " for buffer: #%d", d[j].fd, i);
-				d[j].data = nullptr;
-			} else {
-				spa_log_error(impl->log, "invalid buffer type");
-				return -EIO;
+				break;
+			default:
+				spa_assert_not_reached();
+				break;
 			}
 		}
 	}
@@ -1420,20 +1419,17 @@ int port_get_format(struct impl *impl, struct port *port,
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_format,    SPA_POD_Id(port->current_format->info.raw.format),
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.raw.size),
-			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&port->current_format->info.raw.framerate),
 			0);
 		break;
 	case SPA_MEDIA_SUBTYPE_mjpg:
 	case SPA_MEDIA_SUBTYPE_jpeg:
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.mjpg.size),
-			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&port->current_format->info.mjpg.framerate),
 			0);
 		break;
 	case SPA_MEDIA_SUBTYPE_h264:
 		spa_pod_builder_add(builder,
 			SPA_FORMAT_VIDEO_size,      SPA_POD_Rectangle(&port->current_format->info.h264.size),
-			SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&port->current_format->info.h264.framerate),
 			0);
 		break;
 	default:

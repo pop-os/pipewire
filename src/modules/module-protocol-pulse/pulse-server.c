@@ -2051,6 +2051,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		flags |= PW_STREAM_FLAG_DONT_RECONNECT;
 
 	if (direct_on_input_idx != SPA_ID_INVALID) {
+		dont_inhibit_auto_suspend = false;
 		source_index = direct_on_input_idx;
 	} else if (source_name != NULL) {
 		if ((id = atoi(source_name)) != 0)
@@ -4673,6 +4674,10 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 
 	pw_log_info("[%s] %s tag:%u name:%s", client->name,
 			commands[command].name, tag, name);
+
+	/* @NONE@ is used to clear the setting */
+	if (spa_streq(name, "@NONE@"))
+		name = NULL;
 
 	if (name != NULL && (o = find_device(client, SPA_ID_INVALID, name, sink, NULL)) == NULL)
 		return -ENOENT;

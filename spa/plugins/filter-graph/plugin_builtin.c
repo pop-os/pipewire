@@ -704,16 +704,93 @@ struct convolver_impl {
 	struct convolver *conv;
 };
 
+struct finfo {
+#define TYPE_INVALID	0
+#define TYPE_SNDFILE	1
+#define TYPE_HILBERT	2
+#define TYPE_DIRAC	3
+#define TYPE_IR		4
+	uint32_t type;
+
+	const char *filename;
 #ifdef HAVE_SNDFILE
-static float *read_samples_from_sf(SNDFILE *f, const SF_INFO *info, float gain, int delay,
-		int offset, int length, int channel, long unsigned *rate, int *n_samples) {
-	float *samples;
-	int i, n;
+	SF_INFO info;
+	SNDFILE *fs;
+#endif
+	int channels;
+	int def_frames;
+	int max_frames;
+	float latency; /* latency relative to number of samples */
+	uint32_t rate;
+	const char *error;
+};
+
+static int finfo_open(const char *filename, struct finfo *info, int rate)
+{
+	info->filename = filename;
+	if (spa_strstartswith(filename, "/hilbert")) {
+		info->channels = 1;
+		info->rate = rate;
+		info->def_frames = 64;
+		info->max_frames = INT_MAX;
+		info->type = TYPE_HILBERT;
+		info->latency = 0.5f;
+	}
+	else if (spa_strstartswith(filename, "/dirac")) {
+		info->channels = 1;
+		info->def_frames = 1;
+		info->max_frames = 1;
+		info->rate = rate;
+		info->type = TYPE_DIRAC;
+		info->latency = 0.0f;
+	}
+	else if (spa_strstartswith(filename, "/ir:")) {
+		struct spa_json it[1];
+		float v;
+		int rate;
+		info->channels = 1;
+		info->type = TYPE_IR;
+		info->def_frames = 0;
+		if (spa_json_begin_array_relax(&it[0], filename+4, strlen(filename+4)) <= 0)
+			return -EINVAL;
+		if (spa_json_get_int(&it[0], &rate) <= 0)
+			return -EINVAL;
+		info->rate = rate;
+		while (spa_json_get_float(&it[0], &v) > 0)
+			info->def_frames++;
+		info->max_frames = info->def_frames;
+		info->latency = 0.0f;
+	} else {
+#ifdef HAVE_SNDFILE
+		info->fs = sf_open(filename, SFM_READ, &info->info);
+		if (info->fs == NULL) {
+			info->error = sf_strerror(NULL);
+			return -ENOENT;
+		}
+		info->channels = info->info.channels;
+		info->def_frames = info->info.frames;
+		info->max_frames = info->def_frames;
+		info->rate = info->info.samplerate;
+		info->type = TYPE_SNDFILE;
+		info->latency = 0.0f;
+#else
+		info->error = "compiled without sndfile support, can't load samples";
+		return -ENOTSUP;
+#endif
+	}
+	return 0;
+}
+
+static float *finfo_read_samples(struct plugin *pl, struct finfo *info, float gain, int delay,
+		int offset, int length, int channel, long unsigned *rate, int *n_samples, int *latency)
+{
+	float *samples, v;
+	int i, n, h;
 
 	if (length <= 0)
-		length = info->frames;
+		length = info->def_frames;
 	else
-		length = SPA_MIN(length, info->frames);
+		length = SPA_MIN(length, info->max_frames);
 
 	length -= SPA_MIN(offset, length);
 
@@ -725,127 +802,106 @@ static float *read_samples_from_sf(SNDFILE *f, const SF_INFO *info, float gain, 
 	if (samples == NULL)
 		return NULL;
 
-	if (offset > 0)
-		sf_seek(f, offset, SEEK_SET);
-	sf_readf_float(f, samples + (delay * info->channels), length);
-
 	channel = channel % info->channels;
 
-	for (i = 0; i < n; i++)
-		samples[i] = samples[info->channels * i + channel] * gain;
-
+	switch (info->type) {
+	case TYPE_SNDFILE:
+#ifdef HAVE_SNDFILE
+		if (offset > 0)
+			sf_seek(info->fs, offset, SEEK_SET);
+		sf_readf_float(info->fs, samples + (delay * info->channels), length);
+		for (i = 0; i < n; i++)
+			samples[i] = samples[info->channels * i + channel] * gain;
+#endif
+		break;
+	case TYPE_HILBERT:
+		gain *= 2 / (float)M_PI;
+		h = length / 2;
+		for (i = 1; i < h; i += 2) {
+			v = (gain / i) * (0.43f + 0.57f * cosf(i * (float)M_PI / h));
+			samples[delay + h + i] = -v;
+			samples[delay + h - i] =  v;
+		}
+		spa_log_info(pl->log, "created hilbert function length %d", length);
+		break;
+	case TYPE_DIRAC:
+		samples[delay] = gain;
+		spa_log_info(pl->log, "created dirac function");
+		break;
+	case TYPE_IR:
+	{
+		struct spa_json it[1];
+		float v;
+		if (spa_json_begin_array_relax(&it[0], info->filename+4, strlen(info->filename+4)) <= 0)
+			return NULL;
+		if (spa_json_get_int(&it[0], &h) <= 0)
+			return NULL;
+		info->rate = h;
+		i = 0;
+		while (spa_json_get_float(&it[0], &v) > 0) {
+			samples[delay + i] = v * gain;
+			i++;
+		}
+		break;
+	}
+	}
 	*n_samples = n;
-	*rate = info->samplerate;
+	*rate = info->rate;
+	*latency = (int) (n * info->latency);
 	return samples;
 }
-#endif
 
-static float *read_closest(struct plugin *pl, char **filenames, float gain, float delay_sec, int offset,
-		int length, int channel, long unsigned *rate, int *n_samples)
+
+static void finfo_close(struct finfo *info)
 {
 #ifdef HAVE_SNDFILE
-	SF_INFO infos[MAX_RATES];
-	SNDFILE *fs[MAX_RATES];
+	if (info->type == TYPE_SNDFILE && info->fs != NULL)
+		sf_close(info->fs);
+#endif
+}
 
-	spa_zero(infos);
-	spa_zero(fs);
-
-	int diff = INT_MAX;
-	uint32_t best = 0, i;
+static float *read_closest(struct plugin *pl, char **filenames, float gain, float delay_sec, int offset,
+		int length, int channel, long unsigned *rate, int *n_samples, int *latency)
+{
+	struct finfo finfo[MAX_RATES];
+	int res, diff = INT_MAX;
+	uint32_t best = SPA_ID_INVALID, i;
 	float *samples = NULL;
 
+	spa_zero(finfo);
+
 	for (i = 0; i < MAX_RATES && filenames[i] && filenames[i][0]; i++) {
-		fs[i] = sf_open(filenames[i], SFM_READ, &infos[i]);
-		if (fs[i] == NULL)
+		res = finfo_open(filenames[i], &finfo[i], *rate);
+		if (res < 0)
 			continue;
 
-		if (labs((long)infos[i].samplerate - (long)*rate) < diff) {
+		if (labs((long)finfo[i].rate - (long)*rate) < diff) {
 			best = i;
-			diff = labs((long)infos[i].samplerate - (long)*rate);
-			spa_log_debug(pl->log, "new closest match: %d", infos[i].samplerate);
+			diff = labs((long)finfo[i].rate - (long)*rate);
+			spa_log_debug(pl->log, "new closest match: %d", finfo[i].rate);
 		}
 	}
-	if (fs[best] != NULL) {
-		spa_log_info(pl->log, "loading best rate:%u %s", infos[best].samplerate, filenames[best]);
-		samples = read_samples_from_sf(fs[best], &infos[best], gain,
-				(int) (delay_sec * infos[best].samplerate), offset, length,
-				channel, rate, n_samples);
+	if (best != SPA_ID_INVALID) {
+		spa_log_info(pl->log, "loading best rate:%u %s", finfo[best].rate, filenames[best]);
+		samples = finfo_read_samples(pl, &finfo[best], gain,
+				(int) (delay_sec * finfo[best].rate), offset, length,
+				channel, rate, n_samples, latency);
 	} else {
 		char buf[PATH_MAX];
 		spa_log_error(pl->log, "Can't open any sample file (CWD %s):",
 				getcwd(buf, sizeof(buf)));
+
 		for (i = 0; i < MAX_RATES && filenames[i] && filenames[i][0]; i++) {
-			fs[i] = sf_open(filenames[i], SFM_READ, &infos[i]);
-			if (fs[i] == NULL)
-				spa_log_error(pl->log, " failed file %s: %s", filenames[i], sf_strerror(fs[i]));
+			res = finfo_open(filenames[i], &finfo[i], *rate);
+			if (res < 0)
+				spa_log_error(pl->log, " failed file %s: %s", filenames[i], finfo[i].error);
 			else
 				spa_log_warn(pl->log, " unexpectedly opened file %s", filenames[i]);
 		}
 	}
 	for (i = 0; i < MAX_RATES; i++)
-		if (fs[i] != NULL)
-			sf_close(fs[i]);
+		finfo_close(&finfo[i]);
 
-	return samples;
-#else
-	spa_log_error(pl->log, "compiled without sndfile support, can't load samples: "
-			"using dirac impulse");
-	float *samples = calloc(1, sizeof(float));
-	samples[0] = gain;
-	*n_samples = 1;
-	return samples;
-#endif
-}
-
-static float *create_hilbert(struct plugin *pl, const char *filename, float gain, int rate, float delay_sec, int offset,
-		int length, int *n_samples)
-{
-	float *samples, v;
-	int i, n, h;
-	int delay = (int) (delay_sec * rate);
-
-	if (length <= 0)
-		length = 64;
-
-	length -= SPA_MIN(offset, length);
-
-	n = delay + length;
-	if (n == 0)
-		return NULL;
-
-	samples = calloc(n, sizeof(float));
-        if (samples == NULL)
-		return NULL;
-
-	gain *= 2 / (float)M_PI;
-	h = length / 2;
-	for (i = 1; i < h; i += 2) {
-		v = (gain / i) * (0.43f + 0.57f * cosf(i * (float)M_PI / h));
-		samples[delay + h + i] = -v;
-		samples[delay + h - i] =  v;
-	}
-	*n_samples = n;
-	spa_log_info(pl->log, "created hilbert function");
-	return samples;
-}
-
-static float *create_dirac(struct plugin *pl, const char *filename, float gain, int rate, float delay_sec, int offset,
-		int length, int *n_samples)
-{
-	float *samples;
-	int delay = (int) (delay_sec * rate);
-	int n;
-
-	n = delay + 1;
-
-	samples = calloc(n, sizeof(float));
-        if (samples == NULL)
-		return NULL;
-
-	samples[delay] = gain;
-
-	spa_log_info(pl->log, "created dirac function");
-	*n_samples = n;
 	return samples;
 }
 
@@ -936,10 +992,10 @@ static void * convolver_instantiate(const struct spa_fga_plugin *plugin, const s
 	uint32_t i = 0;
 	struct spa_json it[2];
 	const char *val;
-	char key[256], v[256];
+	char key[256];
 	char *filenames[MAX_RATES] = { 0 };
 	int blocksize = 0, tailsize = 0;
-	int resample_quality = RESAMPLE_DEFAULT_QUALITY;
+	int resample_quality = RESAMPLE_DEFAULT_QUALITY, def_latency;
 	float gain = 1.0f, delay = 0.0f, latency = -1.0f;
 	unsigned long rate;
 
@@ -985,17 +1041,20 @@ static void * convolver_instantiate(const struct spa_fga_plugin *plugin, const s
 		else if (spa_streq(key, "filename")) {
 			if (spa_json_is_array(val, len)) {
 				spa_json_enter(&it[0], &it[1]);
-				while (spa_json_get_string(&it[1], v, sizeof(v)) > 0 &&
+				while ((len = spa_json_next(&it[1], &val)) > 0 &&
 					i < SPA_N_ELEMENTS(filenames)) {
-						filenames[i] = strdup(v);
+						filenames[i] = malloc(len+1);
+						if (filenames[i] == NULL)
+							return NULL;
+						spa_json_parse_stringn(val, len, filenames[i], len+1);
 						i++;
 				}
 			}
-			else if (spa_json_parse_stringn(val, len, v, sizeof(v)) <= 0) {
-				spa_log_error(pl->log, "convolver:filename requires a string or an array");
-				return NULL;
-			} else {
-				filenames[0] = strdup(v);
+			else {
+				filenames[0] = malloc(len+1);
+				if (filenames[0] == NULL)
+					return NULL;
+				spa_json_parse_stringn(val, len, filenames[0], len+1);
 			}
 		}
 		else if (spa_streq(key, "offset")) {
@@ -1042,21 +1101,12 @@ static void * convolver_instantiate(const struct spa_fga_plugin *plugin, const s
 	if (offset < 0)
 		offset = 0;
 
-	if (spa_streq(filenames[0], "/hilbert")) {
-		samples = create_hilbert(pl, filenames[0], gain, SampleRate, delay, offset,
-				length, &n_samples);
-	} else if (spa_streq(filenames[0], "/dirac")) {
-		samples = create_dirac(pl, filenames[0], gain, SampleRate, delay, offset,
-				length, &n_samples);
-	} else {
-		rate = SampleRate;
-		samples = read_closest(pl, filenames, gain, delay, offset,
-				length, channel, &rate, &n_samples);
-		if (samples != NULL && rate != SampleRate) {
-			samples = resample_buffer(pl, samples, &n_samples,
-					rate, SampleRate, resample_quality);
-		}
-	}
+	rate = SampleRate;
+	samples = read_closest(pl, filenames, gain, delay, offset,
+			length, channel, &rate, &n_samples, &def_latency);
+	if (samples != NULL && rate != SampleRate)
+		samples = resample_buffer(pl, samples, &n_samples,
+				rate, SampleRate, resample_quality);
 
 	for (i = 0; i < MAX_RATES; i++)
 		if (filenames[i])
@@ -1072,8 +1122,8 @@ static void * convolver_instantiate(const struct spa_fga_plugin *plugin, const s
 	if (tailsize <= 0)
 		tailsize = SPA_CLAMP(4096, blocksize, 32768);
 
-	spa_log_info(pl->log, "using n_samples:%u %d:%d blocksize delay:%f", n_samples,
-			blocksize, tailsize, delay);
+	spa_log_info(pl->log, "using n_samples:%u %d:%d blocksize delay:%f def-latency:%d", n_samples,
+			blocksize, tailsize, delay, def_latency);
 
 	impl = calloc(1, sizeof(*impl));
 	if (impl == NULL)
@@ -1089,7 +1139,7 @@ static void * convolver_instantiate(const struct spa_fga_plugin *plugin, const s
 		goto error;
 
 	if (latency < 0.0f)
-		impl->latency = n_samples;
+		impl->latency = def_latency;
 	else
 		impl->latency = latency * impl->rate;
 
