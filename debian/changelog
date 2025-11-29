@@ -1,10 +1,15 @@
 pipewire (1.5.84-1) UNRELEASED; urgency=medium
 
-  * New upstream release
+  [ Dylan Aïssi ]
+  * New upstream release (1.6 release candidate 4)
   * Remove Fix_services.patch, this was required to avoid conflict
     with pipewire-media-session due to a bug in systemd. systemd is fixed
     since v253 and pipewire-media-session is no longer available since Trixie,
     so no reason to keep it.
+  * d/rules: increase test timeout for alpha.
+
+  [ Charles ]
+  * d/tests: Update manual-tests.md for modern releases.
 
  -- Dylan Aïssi <daissi@debian.org>  Sat, 29 Nov 2025 14:10:12 +0100
 
