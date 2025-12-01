@@ -1,4 +1,4 @@
-pipewire (1.5.84-1) UNRELEASED; urgency=medium
+pipewire (1.5.84-1) experimental; urgency=medium
 
   [ Dylan Aïssi ]
   * New upstream release (1.6 release candidate 4)
@@ -11,7 +11,7 @@ pipewire (1.5.84-1) UNRELEASED; urgency=medium
   [ Charles ]
   * d/tests: Update manual-tests.md for modern releases.
 
- -- Dylan Aïssi <daissi@debian.org>  Sat, 29 Nov 2025 14:10:12 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 01 Dec 2025 15:56:30 +0100
 
 pipewire (1.5.83-1) experimental; urgency=medium
 
