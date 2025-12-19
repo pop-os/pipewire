@@ -88,7 +88,7 @@ override_dh_auto_configure:
 		-Dinstalled_tests=$(INSTTEST) \
 		-Dlv2=enabled \
 		-Dman=$(MAN) \
-		-Donnxruntime=$(ONNXRUNTIME) \
+		-Donnxruntime=disabled \
 		-Droc=disabled \
 		-Dsdl2=$(SDL2) \
 		-Dsession-managers= \
