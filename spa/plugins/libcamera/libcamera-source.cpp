@@ -4,11 +4,9 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans <wim.taymans@gmail.com> */
 /* SPDX-License-Identifier: MIT */
 
-#include <array>
 #include <cstddef>
 #include <limits>
 #include <optional>
-#include <type_traits>
 #include <utility>
 
 #include <sys/mman.h>
@@ -768,23 +766,6 @@ uint32_t prop_id_to_control(uint32_t prop_id)
 	return SPA_ID_INVALID;
 }
 
-template<typename T>
-[[nodiscard]]
-std::array<T, 3> control_info_to_range(const libcamera::ControlInfo& cinfo)
-{
-	static_assert(std::is_arithmetic_v<T>);
-
-	auto min = cinfo.min().get<T>();
-	auto max = cinfo.max().get<T>();
-	spa_assert(min <= max);
-
-	auto def = !cinfo.def().isNone()
-			? cinfo.def().get<T>()
-			: (min + ((max - min) / 2));
-
-	return {{ min, max, def }};
-}
-
 [[nodiscard]]
 spa_pod *control_details_to_pod(spa_pod_builder& b,
 				const libcamera::ControlId& cid, const libcamera::ControlInfo& cinfo)
@@ -819,7 +800,14 @@ spa_pod *control_details_to_pod(spa_pod_builder& b,
 		spa_pod_builder_pop(&b, &f);
 	} break;
 	case ControlTypeFloat: {
-		auto [ min, max, def ] = control_info_to_range<float>(cinfo);
+		float min = cinfo.min().get<float>();
+		float max = cinfo.max().get<float>();
+		float def;
+
+		if (cinfo.def().isNone())
+			def = (min + max) / 2;
+		else
+			def = cinfo.def().get<float>();
 
 		spa_pod_builder_add(&b,
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Float(
@@ -827,7 +815,14 @@ spa_pod *control_details_to_pod(spa_pod_builder& b,
 				0);
 	} break;
 	case ControlTypeInteger32: {
-		auto [ min, max, def ] = control_info_to_range<int32_t>(cinfo);
+		int32_t min = cinfo.min().get<int32_t>();
+		int32_t max = cinfo.max().get<int32_t>();
+		int32_t def;
+
+		if (cinfo.def().isNone())
+			def = (min + max) / 2;
+		else
+			def = cinfo.def().get<int32_t>();
 
 		spa_pod_builder_add(&b,
 				SPA_PROP_INFO_type, SPA_POD_CHOICE_RANGE_Int(
