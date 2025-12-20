@@ -209,18 +209,19 @@ void setup_initial_controls(const ControlInfoMap& ctrl_infos, ControlList& ctrls
 	/* Libcamera recommends cameras default to manual focus mode, but we don't
 	 * expose any focus controls.  So, specifically enable autofocus on
 	 * cameras which support it. */
-	auto af_it = ctrl_infos.find(libcamera::controls::AF_MODE);
-	if (af_it != ctrl_infos.end()) {
-		const ControlInfo &ctrl_info = af_it->second;
-		auto is_af_continuous = [](const ControlValue &value) {
-			return value.get<int32_t>() == libcamera::controls::AfModeContinuous;
-		};
-		if (std::any_of(ctrl_info.values().begin(),
-		    ctrl_info.values().end(), is_af_continuous)) {
-			ctrls.set(libcamera::controls::AF_MODE,
-					libcamera::controls::AfModeContinuous);
-		}
-	}
+	// NOTE: libcamera in 24.04 does not support this.
+	// auto af_it = ctrl_infos.find(libcamera::controls::AF_MODE);
+	// if (af_it != ctrl_infos.end()) {
+	// 	const ControlInfo &ctrl_info = af_it->second;
+	// 	auto is_af_continuous = [](const ControlValue &value) {
+	// 		return value.get<int32_t>() == libcamera::controls::AfModeContinuous;
+	// 	};
+	// 	if (std::any_of(ctrl_info.values().begin(),
+	// 	    ctrl_info.values().end(), is_af_continuous)) {
+	// 		ctrls.set(libcamera::controls::AF_MODE,
+	// 				libcamera::controls::AfModeContinuous);
+	// 	}
+	// }
 
 	auto ae_it = ctrl_infos.find(libcamera::controls::AE_ENABLE);
 	if (ae_it != ctrl_infos.end()) {
