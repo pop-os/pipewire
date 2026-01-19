@@ -1,3 +1,9 @@
+pipewire (1.5.85-1) UNRELEASED; urgency=medium
+
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 19 Jan 2026 16:58:15 +0100
+
 pipewire (1.5.84-1) experimental; urgency=medium
 
   [ Dylan Aïssi ]
