@@ -1,6 +1,7 @@
 pipewire (1.4.10-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Update symbols file: add 5 new symbols
   * Update debian/watch to only track the serie 1.4.*
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 19 Jan 2026 09:35:39 +0100
