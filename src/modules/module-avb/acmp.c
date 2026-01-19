@@ -11,6 +11,8 @@
 #include "msrp.h"
 #include "internal.h"
 #include "stream.h"
+#include "aecp-aem-descriptors.h"
+#include "aecp-aem-state.h"
 
 static const uint8_t mac[6] = AVB_BROADCAST_MAC;
 
@@ -77,11 +79,63 @@ static void pending_free(struct acmp *acmp, struct pending *p)
 	free(p);
 }
 
+static void pending_destroy(struct acmp *acmp)
+{
+	struct pending *p, *t;
+	for (uint32_t list_id = 0; list_id < PENDING_CONTROLLER; list_id++) {
+		spa_list_for_each_safe(p, t, &acmp->pending[list_id], link) {
+			pending_free(acmp, p);
+		}
+	}
+}
+
 struct msg_info {
 	uint16_t type;
 	const char *name;
 	int (*handle) (struct acmp *acmp, uint64_t now, const void *m, int len);
 };
+
+static struct stream *find_stream(struct server *server, enum spa_direction direction,
+		uint16_t index)
+{
+	uint16_t type;
+	struct descriptor *desc;
+	struct stream *stream;
+
+	switch (direction) {
+	case SPA_DIRECTION_INPUT:
+		type = AVB_AEM_DESC_STREAM_INPUT;
+		break;
+	case SPA_DIRECTION_OUTPUT:
+		type = AVB_AEM_DESC_STREAM_OUTPUT;
+		break;
+	default:
+		pw_log_error("Unkown direction\n");
+		return NULL;
+	}
+
+	desc = server_find_descriptor(server, type, index);
+	if (!desc) {
+		pw_log_error("Could not find stream type %u index %u\n",
+			type, index);
+		return NULL;
+	}
+
+	switch (direction) {
+	case SPA_DIRECTION_INPUT:
+		struct aecp_aem_stream_input_state *stream_in;
+		stream_in = desc->ptr;
+		stream = &stream_in->stream;
+		break;
+	case SPA_DIRECTION_OUTPUT:
+		struct  aecp_aem_stream_output_state *stream_out;
+		stream_out = desc->ptr;
+		stream = &stream_out->stream;
+		break;
+	}
+
+	return stream;
+}
 
 static int reply_not_supported(struct acmp *acmp, uint8_t type, const void *m, int len)
 {
@@ -120,8 +174,7 @@ static int handle_connect_tx_command(struct acmp *acmp, uint64_t now, const void
 		return 0;
 
 	memcpy(buf, m, len);
-	stream = server_find_stream(server, SPA_DIRECTION_OUTPUT,
-			reply->talker_unique_id);
+	stream = find_stream(server, SPA_DIRECTION_OUTPUT, ntohs(reply->talker_unique_id));
 	if (stream == NULL) {
 		status = AVB_ACMP_STATUS_TALKER_NO_STREAM_INDEX;
 		goto done;
@@ -130,7 +183,7 @@ static int handle_connect_tx_command(struct acmp *acmp, uint64_t now, const void
 	AVB_PACKET_ACMP_SET_MESSAGE_TYPE(reply, AVB_ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
 	reply->stream_id = htobe64(stream->id);
 
-	stream_activate(stream, now);
+	stream_activate(stream, ntohs(reply->talker_unique_id), now);
 
 	memcpy(reply->stream_dest_mac, stream->addr, 6);
 	reply->connection_count = htons(1);
@@ -169,14 +222,13 @@ static int handle_connect_tx_response(struct acmp *acmp, uint64_t now, const voi
 	reply->sequence_id = htons(pending->old_sequence_id);
 	AVB_PACKET_ACMP_SET_MESSAGE_TYPE(reply, AVB_ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
 
-	stream = server_find_stream(server, SPA_DIRECTION_INPUT,
-			ntohs(reply->listener_unique_id));
+	stream = find_stream(server, SPA_DIRECTION_INPUT, ntohs(reply->listener_unique_id));
 	if (stream == NULL)
 		return 0;
 
 	stream->peer_id = be64toh(reply->stream_id);
 	memcpy(stream->addr, reply->stream_dest_mac, 6);
-	stream_activate(stream, now);
+	stream_activate(stream, ntohs(reply->listener_unique_id), now);
 
 	res = avb_server_send_packet(server, h->dest, AVB_TSN_ETH, h, pending->size);
 
@@ -199,8 +251,7 @@ static int handle_disconnect_tx_command(struct acmp *acmp, uint64_t now, const v
 		return 0;
 
 	memcpy(buf, m, len);
-	stream = server_find_stream(server, SPA_DIRECTION_OUTPUT,
-			reply->talker_unique_id);
+	stream = find_stream(server, SPA_DIRECTION_OUTPUT, ntohs(reply->talker_unique_id));
 	if (stream == NULL) {
 		status = AVB_ACMP_STATUS_TALKER_NO_STREAM_INDEX;
 		goto done;
@@ -243,8 +294,7 @@ static int handle_disconnect_tx_response(struct acmp *acmp, uint64_t now, const 
 	reply->sequence_id = htons(pending->old_sequence_id);
 	AVB_PACKET_ACMP_SET_MESSAGE_TYPE(reply, AVB_ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE);
 
-	stream = server_find_stream(server, SPA_DIRECTION_INPUT,
-			reply->listener_unique_id);
+	stream = find_stream(server, SPA_DIRECTION_INPUT, ntohs(reply->listener_unique_id));
 	if (stream == NULL)
 		return 0;
 
@@ -369,6 +419,7 @@ static void acmp_destroy(void *data)
 {
 	struct acmp *acmp = data;
 	spa_hook_remove(&acmp->server_listener);
+	pending_destroy(acmp);
 	free(acmp);
 }
 

@@ -35,6 +35,8 @@ struct spa_bt_iso_io
 	struct spa_audio_info format;	/**< Audio format */
 	void *codec_data;		/**< Codec data */
 
+	bool debug_mono;	/**< Duplicate packets from first sink to other sinks */
+
 	void *user_data;
 };
 
@@ -46,6 +48,8 @@ struct spa_bt_iso_io *spa_bt_iso_io_attach(struct spa_bt_iso_io *io, struct spa_
 void spa_bt_iso_io_destroy(struct spa_bt_iso_io *io);
 void spa_bt_iso_io_set_cb(struct spa_bt_iso_io *io, spa_bt_iso_io_pull_t pull, void *user_data);
 int spa_bt_iso_io_recv_errqueue(struct spa_bt_iso_io *io);
+
+void spa_bt_iso_io_ready(struct spa_bt_iso_io *io);
 
 void spa_bt_iso_io_set_source_buffer(struct spa_bt_iso_io *io, struct spa_bt_decode_buffer *buffer);
 int32_t spa_bt_iso_io_get_source_target_latency(struct spa_bt_iso_io *io);

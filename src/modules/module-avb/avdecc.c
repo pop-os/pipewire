@@ -40,6 +40,12 @@
 #define server_emit_periodic(s,n)	server_emit(s, periodic, 0, n)
 #define server_emit_command(s,n,c,a,f)	server_emit(s, command, 0, n, c, a, f)
 
+
+static const char *avb_mode_str[] = {
+	[AVB_MODE_LEGACY] = "AVB Legacy",
+	[AVB_MODE_MILAN_V12] = "Milan V1.2",
+};
+
 static void on_timer_event(void *data)
 {
 	struct server *server = data;
@@ -252,16 +258,20 @@ struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 	spa_list_append(&impl->servers, &server->link);
 	str = spa_dict_lookup(props, "ifname");
 	server->ifname = str ? strdup(str) : NULL;
+
+	if ((str = spa_dict_lookup(props, "milan")) != NULL && spa_atob(str))
+		server->avb_mode = AVB_MODE_MILAN_V12;
+	else
+		server->avb_mode = AVB_MODE_LEGACY;
+
 	spa_hook_list_init(&server->listener_list);
 	spa_list_init(&server->descriptors);
-	spa_list_init(&server->streams);
 
 	server->debug_messages = false;
 
 	if ((res = setup_socket(server)) < 0)
 		goto error_free;
 
-	init_descriptors(server);
 
 	server->mrp = avb_mrp_new(server);
 	if (server->mrp == NULL)
@@ -284,10 +294,9 @@ struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 	avb_mrp_attribute_begin(server->domain_attr->mrp, 0);
 	avb_mrp_attribute_join(server->domain_attr->mrp, 0, true);
 
-	server_create_stream(server, SPA_DIRECTION_INPUT, 0);
-	server_create_stream(server, SPA_DIRECTION_OUTPUT, 0);
-
 	avb_maap_reserve(server->maap, 1);
+
+	init_descriptors(server);
 
 	return server;
 
@@ -308,10 +317,17 @@ void avdecc_server_free(struct server *server)
 {
 	struct impl *impl = server->impl;
 
+	server_destroy_descriptors(server);
 	spa_list_remove(&server->link);
 	if (server->source)
 		pw_loop_destroy_source(impl->loop, server->source);
 	pw_timer_queue_cancel(&server->timer);
 	spa_hook_list_clean(&server->listener_list);
+	free(server->ifname);
 	free(server);
+}
+
+const char *get_avb_mode_str(enum avb_mode mode)
+{
+	return avb_mode_str[mode];
 }
