@@ -116,9 +116,12 @@ struct node {
 	void *hndl[MAX_HNDL];
 
 	unsigned int n_deps;
-	unsigned int visited:1;
+
 	unsigned int disabled:1;
 	unsigned int control_changed:1;
+
+	unsigned int n_sort_deps;
+	unsigned int sorted:1;
 };
 
 struct link {
@@ -160,6 +163,7 @@ struct volume {
 struct graph {
 	struct impl *impl;
 
+	uint32_t n_nodes;
 	struct spa_list node_list;
 	struct spa_list link_list;
 
@@ -175,9 +179,23 @@ struct graph {
 	uint32_t n_control;
 	struct port **control_port;
 
+	uint32_t n_input_names;
+	char **input_names;
+
+	uint32_t n_output_names;
+	char **output_names;
+
 	struct volume volume[2];
 
+	uint32_t n_inputs;
+	uint32_t n_outputs;
+	uint32_t inputs_position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t n_inputs_position;
+	uint32_t outputs_position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t n_outputs_position;
+
 	unsigned activated:1;
+	unsigned setup:1;
 };
 
 struct impl {
@@ -205,14 +223,52 @@ struct impl {
 	float *discard_data;
 };
 
+static inline void print_channels(char *buffer, size_t max_size, uint32_t n_channels, uint32_t *positions)
+{
+	uint32_t i;
+	struct spa_strbuf buf;
+
+	spa_strbuf_init(&buf, buffer, max_size);
+	spa_strbuf_append(&buf, "[");
+	for (i = 0; i < n_channels; i++) {
+		spa_strbuf_append(&buf, "%s%s", i ? "," : "",
+			spa_type_audio_channel_to_short_name(positions[i]));
+	}
+	spa_strbuf_append(&buf, "]");
+}
+
 static void emit_filter_graph_info(struct impl *impl, bool full)
 {
 	uint64_t old = full ? impl->info.change_mask : 0;
+	struct graph *graph = &impl->graph;
 
 	if (full)
 		impl->info.change_mask = impl->info_all;
 	if (impl->info.change_mask || full) {
+		char n_inputs[64], n_outputs[64];
+		struct spa_dict_item items[6];
+		struct spa_dict dict = SPA_DICT(items, 0);
+		char in_pos[SPA_AUDIO_MAX_CHANNELS * 8];
+		char out_pos[SPA_AUDIO_MAX_CHANNELS * 8];
+
+		snprintf(n_inputs, sizeof(n_inputs), "%d", impl->graph.n_inputs);
+		snprintf(n_outputs, sizeof(n_outputs), "%d", impl->graph.n_outputs);
+
+		items[dict.n_items++] = SPA_DICT_ITEM("n_inputs", n_inputs);
+		items[dict.n_items++] = SPA_DICT_ITEM("n_outputs", n_outputs);
+		if (graph->n_inputs_position) {
+			print_channels(in_pos, sizeof(in_pos),
+					graph->n_inputs_position, graph->inputs_position);
+			items[dict.n_items++] = SPA_DICT_ITEM("inputs.audio.position", in_pos);
+		}
+		if (graph->n_outputs_position) {
+			print_channels(out_pos, sizeof(out_pos),
+					graph->n_outputs_position, graph->outputs_position);
+			items[dict.n_items++] = SPA_DICT_ITEM("outputs.audio.position", out_pos);
+		}
+		impl->info.props = &dict;
 		spa_filter_graph_emit_info(&impl->hooks, &impl->info);
+		impl->info.props = NULL;
 		impl->info.change_mask = old;
 	}
 }
@@ -243,7 +299,7 @@ static int impl_process(void *object,
 	uint32_t i, j, n_hndl = graph->n_hndl;
 	struct graph_port *port;
 
-	for (i = 0, j = 0; i < impl->info.n_inputs; i++) {
+	for (i = 0, j = 0; i < graph->n_inputs; i++) {
 		while (j < graph->n_input) {
 			port = &graph->input[j++];
 			if (port->desc && in[i])
@@ -252,7 +308,7 @@ static int impl_process(void *object,
 				break;
 		}
 	}
-	for (i = 0; i < impl->info.n_outputs; i++) {
+	for (i = 0; i < graph->n_outputs; i++) {
 		if (out[i] == NULL)
 			continue;
 
@@ -1065,7 +1121,7 @@ static int parse_link(struct graph *graph, struct spa_json *json)
 	out_port = find_port(def_out_node, output, SPA_FGA_PORT_OUTPUT);
 	in_port = find_port(def_in_node, input, SPA_FGA_PORT_INPUT);
 
-	if (out_port == NULL && out_port == NULL) {
+	if (out_port == NULL && in_port == NULL) {
 		/* try control ports */
 		out_port = find_port(def_out_node, output, SPA_FGA_PORT_OUTPUT | SPA_FGA_PORT_CONTROL);
 		in_port = find_port(def_in_node, input, SPA_FGA_PORT_INPUT | SPA_FGA_PORT_CONTROL);
@@ -1338,6 +1394,8 @@ static int load_node(struct graph *graph, struct spa_json *json)
 		parse_control(node, &control);
 
 	spa_list_append(&graph->node_list, &node->link);
+	graph->n_nodes++;
+	graph->n_control += desc->n_control;
 
 	return 0;
 }
@@ -1422,6 +1480,8 @@ static int impl_deactivate(void *object)
 	return 0;
 }
 
+static int setup_graph(struct graph *graph);
+
 static int impl_activate(void *object, const struct spa_dict *props)
 {
 	struct impl *impl = object;
@@ -1432,10 +1492,10 @@ static int impl_activate(void *object, const struct spa_dict *props)
 	struct descriptor *desc;
 	const struct spa_fga_descriptor *d;
 	const struct spa_fga_plugin *p;
-	uint32_t i, j, max_samples = impl->quantum_limit;
+	uint32_t i, j, max_samples = impl->quantum_limit, n_ports;
 	int res;
 	float *sd, *dd, *data;
-	const char *rate;
+	const char *rate, *str;
 
 	if (graph->activated)
 		return 0;
@@ -1444,6 +1504,31 @@ static int impl_activate(void *object, const struct spa_dict *props)
 
 	rate = spa_dict_lookup(props, SPA_KEY_AUDIO_RATE);
 	impl->rate = rate ? atoi(rate) : DEFAULT_RATE;
+
+	if ((str = spa_dict_lookup(props, "filter-graph.n_inputs")) != NULL) {
+		if (spa_atou32(str, &n_ports, 0) &&
+		    n_ports != graph->n_inputs) {
+			graph->n_inputs = n_ports;
+			graph->n_outputs = 0;
+			impl->info.change_mask |= SPA_FILTER_GRAPH_CHANGE_MASK_PROPS;
+			graph->setup = false;
+		}
+	}
+	if ((str = spa_dict_lookup(props, "filter-graph.n_outputs")) != NULL) {
+		if (spa_atou32(str, &n_ports, 0) &&
+		    n_ports != graph->n_outputs) {
+			graph->n_outputs = n_ports;
+			graph->n_inputs = 0;
+			impl->info.change_mask |= SPA_FILTER_GRAPH_CHANGE_MASK_PROPS;
+			graph->setup = false;
+		}
+	}
+	if (!graph->setup) {
+		if ((res = setup_graph(graph)) < 0)
+			return res;
+		graph->setup = true;
+		emit_filter_graph_info(impl, false);
+	}
 
 	/* first make instances */
 	spa_list_for_each(node, &graph->node_list, link) {
@@ -1541,35 +1626,29 @@ error:
 	return res;
 }
 
-/* any default values for the controls are set in the first instance
- * of the control data. Duplicate this to the other instances now. */
-static void setup_node_controls(struct node *node)
-{
-	uint32_t i, j;
-	uint32_t n_hndl = node->n_hndl;
-	uint32_t n_ports = node->desc->n_control;
-	struct port *ports = node->control_port;
-
-	for (i = 0; i < n_ports; i++) {
-		struct port *port = &ports[i];
-		for (j = 1; j < n_hndl; j++)
-			port->control_data[j] = port->control_data[0];
-	}
-}
-
 static struct node *find_next_node(struct graph *graph)
 {
 	struct node *node;
 	spa_list_for_each(node, &graph->node_list, link) {
-		if (node->n_deps == 0 && !node->visited) {
-			node->visited = true;
+		if (node->n_sort_deps == 0 && !node->sorted) {
+			node->sorted = true;
 			return node;
 		}
 	}
 	return NULL;
 }
 
-static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_json *outputs)
+static void unsetup_graph(struct graph *graph)
+{
+	free(graph->input);
+	graph->input = NULL;
+	free(graph->output);
+	graph->output = NULL;
+	free(graph->hndl);
+	graph->hndl = NULL;
+
+}
+static int setup_graph(struct graph *graph)
 {
 	struct impl *impl = graph->impl;
 	struct node *node, *first, *last;
@@ -1577,33 +1656,35 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 	struct link *link;
 	struct graph_port *gp;
 	struct graph_hndl *gh;
-	uint32_t i, j, n_nodes, n_input, n_output, n_control, n_hndl = 0;
+	uint32_t i, j, n, n_input, n_output, n_hndl = 0;
 	int res;
 	struct descriptor *desc;
 	const struct spa_fga_descriptor *d;
-	char v[256];
+	char *pname;
 	bool allow_unused;
+
+	unsetup_graph(graph);
 
 	first = spa_list_first(&graph->node_list, struct node, link);
 	last = spa_list_last(&graph->node_list, struct node, link);
 
 	/* calculate the number of inputs and outputs into the graph.
-	 * If we have a list of inputs/outputs, just count them. Otherwise
+	 * If we have a list of inputs/outputs, just use them. Otherwise
 	 * we count all input ports of the first node and all output
 	 * ports of the last node */
-	if (inputs != NULL)
-		n_input = count_array(inputs);
+	if (graph->n_input_names != 0)
+		n_input = graph->n_input_names;
 	else
 		n_input = first->desc->n_input;
 
-	if (outputs != NULL)
-		n_output = count_array(outputs);
+	if (graph->n_output_names != 0)
+		n_output = graph->n_output_names;
 	else
 		n_output = last->desc->n_output;
 
 	/* we allow unconnected ports when not explicitly given and the nodes support
 	 * NULL data */
-	allow_unused = inputs == NULL && outputs == NULL &&
+	allow_unused = graph->n_input_names == 0 && graph->n_output_names == 0 &&
 	    SPA_FLAG_IS_SET(first->desc->desc->flags, SPA_FGA_DESCRIPTOR_SUPPORTS_NULL_DATA) &&
 	    SPA_FLAG_IS_SET(last->desc->desc->flags, SPA_FGA_DESCRIPTOR_SUPPORTS_NULL_DATA);
 
@@ -1617,24 +1698,28 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		res = -EINVAL;
 		goto error;
 	}
+	if (graph->n_inputs == 0)
+		graph->n_inputs = impl->info.n_inputs;
+	if (graph->n_inputs == 0)
+		graph->n_inputs = n_input;
 
-	if (impl->info.n_inputs == 0)
-		impl->info.n_inputs = n_input;
+	if (graph->n_outputs == 0)
+		graph->n_outputs = impl->info.n_outputs;
 
 	/* compare to the requested number of inputs and duplicate the
 	 * graph n_hndl times when needed. */
-	n_hndl = impl->info.n_inputs / n_input;
+	n_hndl = graph->n_inputs / n_input;
 
-	if (impl->info.n_outputs == 0)
-		impl->info.n_outputs = n_output * n_hndl;
+	if (graph->n_outputs == 0)
+		graph->n_outputs = n_output * n_hndl;
 
-	if (n_hndl != impl->info.n_outputs / n_output) {
+	if (n_hndl != graph->n_outputs / n_output) {
 		spa_log_error(impl->log, "invalid ports. The input stream has %1$d ports and "
 				"the filter has %2$d inputs. The output stream has %3$d ports "
 				"and the filter has %4$d outputs. input:%1$d / input:%2$d != "
 				"output:%3$d / output:%4$d. Check inputs and outputs objects.",
-				impl->info.n_inputs, n_input,
-				impl->info.n_outputs, n_output);
+				graph->n_inputs, n_input,
+				graph->n_outputs, n_output);
 		res = -EINVAL;
 		goto error;
 	}
@@ -1650,24 +1735,14 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				"the filter has %2$d inputs. The output stream has %3$d ports "
 				"and the filter has %4$d outputs. Some filter ports will be "
 				"unconnected..",
-				impl->info.n_inputs, n_input,
-				impl->info.n_outputs, n_output);
+				graph->n_inputs, n_input,
+				graph->n_outputs, n_output);
 
-		if (impl->info.n_outputs == 0)
-			impl->info.n_outputs = n_output * n_hndl;
+		if (graph->n_outputs == 0)
+			graph->n_outputs = n_output * n_hndl;
 	}
 	spa_log_info(impl->log, "using %d instances %d %d", n_hndl, n_input, n_output);
 
-	/* now go over all nodes and create instances. */
-	n_control = 0;
-	n_nodes = 0;
-	spa_list_for_each(node, &graph->node_list, link) {
-		node->n_hndl = n_hndl;
-		desc = node->desc;
-		n_control += desc->n_control;
-		n_nodes++;
-		setup_node_controls(node);
-	}
 	graph->n_input = 0;
 	graph->input = calloc(n_input * 16 * n_hndl, sizeof(struct graph_port));
 	graph->n_output = 0;
@@ -1675,7 +1750,7 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 
 	/* now collect all input and output ports for all the handles. */
 	for (i = 0; i < n_hndl; i++) {
-		if (inputs == NULL) {
+		if (graph->n_input_names == 0) {
 			desc = first->desc;
 			d = desc->desc;
 			for (j = 0; j < desc->n_input; j++) {
@@ -1687,15 +1762,15 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				gp->port = desc->input[j];
 			}
 		} else {
-			struct spa_json it = *inputs;
-			while (spa_json_get_string(&it, v, sizeof(v)) > 0) {
-				if (spa_streq(v, "null")) {
+			for (n = 0; n < graph->n_input_names; n++) {
+				pname = graph->input_names[n];
+				if (spa_streq(pname, "null")) {
 					gp = &graph->input[graph->n_input++];
 					gp->desc = NULL;
 					spa_log_info(impl->log, "ignore input port %d", graph->n_input);
-				} else if ((port = find_port(first, v, SPA_FGA_PORT_INPUT)) == NULL) {
+				} else if ((port = find_port(first, pname, SPA_FGA_PORT_INPUT)) == NULL) {
 					res = -ENOENT;
-					spa_log_error(impl->log, "input port %s not found", v);
+					spa_log_error(impl->log, "input port %s not found", pname);
 					goto error;
 				} else {
 					bool disabled = false;
@@ -1754,7 +1829,7 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				}
 			}
 		}
-		if (outputs == NULL) {
+		if (graph->n_output_names == 0) {
 			desc = last->desc;
 			d = desc->desc;
 			for (j = 0; j < desc->n_output; j++) {
@@ -1766,15 +1841,15 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 				gp->port = desc->output[j];
 			}
 		} else {
-			struct spa_json it = *outputs;
-			while (spa_json_get_string(&it, v, sizeof(v)) > 0) {
+			for (n = 0; n < graph->n_output_names; n++) {
+				pname = graph->output_names[n];
 				gp = &graph->output[graph->n_output];
-				if (spa_streq(v, "null")) {
+				if (spa_streq(pname, "null")) {
 					gp->desc = NULL;
 					spa_log_info(impl->log, "silence output port %d", graph->n_output);
-				} else if ((port = find_port(last, v, SPA_FGA_PORT_OUTPUT)) == NULL) {
+				} else if ((port = find_port(last, pname, SPA_FGA_PORT_OUTPUT)) == NULL) {
 					res = -ENOENT;
-					spa_log_error(impl->log, "output port %s not found", v);
+					spa_log_error(impl->log, "output port %s not found", pname);
 					goto error;
 				} else {
 					desc = port->node->desc;
@@ -1804,15 +1879,18 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		}
 	}
 
-	/* order all nodes based on dependencies */
 	graph->n_hndl = 0;
-	graph->hndl = calloc(n_nodes * n_hndl, sizeof(struct graph_hndl));
-	graph->n_control = 0;
-	graph->control_port = calloc(n_control, sizeof(struct port *));
+	graph->hndl = calloc(graph->n_nodes * n_hndl, sizeof(struct graph_hndl));
+	/* order all nodes based on dependencies, first reset fields */
+	spa_list_for_each(node, &graph->node_list, link) {
+		node->sorted = false;
+		node->n_sort_deps = node->n_deps;
+	}
 	while (true) {
 		if ((node = find_next_node(graph)) == NULL)
 			break;
 
+		node->n_hndl = n_hndl;
 		desc = node->desc;
 		d = desc->desc;
 
@@ -1825,22 +1903,40 @@ static int setup_graph(struct graph *graph, struct spa_json *inputs, struct spa_
 		}
 		for (i = 0; i < desc->n_output; i++) {
 			spa_list_for_each(link, &node->output_port[i].link_list, output_link)
-				link->input->node->n_deps--;
+				link->input->node->n_sort_deps--;
 		}
 		for (i = 0; i < desc->n_notify; i++) {
 			spa_list_for_each(link, &node->notify_port[i].link_list, output_link)
-				link->input->node->n_deps--;
+				link->input->node->n_sort_deps--;
 		}
-
-		/* collect all control ports on the graph */
 		for (i = 0; i < desc->n_control; i++) {
-			graph->control_port[graph->n_control] = &node->control_port[i];
-			graph->n_control++;
+			/* any default values for the controls are set in the first instance
+			 * of the control data. Duplicate this to the other instances now. */
+			struct port *port = &node->control_port[i];
+			for (j = 1; j < n_hndl; j++)
+				port->control_data[j] = port->control_data[0];
 		}
 	}
 	res = 0;
 error:
 	return res;
+}
+
+static int setup_graph_controls(struct graph *graph)
+{
+	struct node *node;
+	uint32_t i, n_control = 0;
+
+	graph->control_port = calloc(graph->n_control, sizeof(struct port *));
+	if (graph->control_port == NULL)
+		return -errno;
+
+	spa_list_for_each(node, &graph->node_list, link) {
+		/* collect all control ports on the graph */
+		for (i = 0; i < node->desc->n_control; i++)
+			graph->control_port[n_control++] = &node->control_port[i];
+	}
+	return 0;
 }
 
 /**
@@ -1899,6 +1995,26 @@ static int load_graph(struct graph *graph, const struct spa_dict *props)
 				return -EINVAL;
 			}
 			impl->info.n_outputs = res;
+		}
+		else if (spa_streq("inputs.audio.position", key)) {
+			if (!spa_json_is_array(val, len) ||
+			    (len = spa_json_container_len(&it[0], val, len)) < 0) {
+				spa_log_error(impl->log, "%s expects an array", key);
+				return -EINVAL;
+			}
+			spa_audio_parse_position(val, len, graph->inputs_position,
+						&graph->n_inputs_position);
+			impl->info.n_inputs = graph->n_inputs_position;
+		}
+		else if (spa_streq("outputs.audio.position", key)) {
+			if (!spa_json_is_array(val, len) ||
+			    (len = spa_json_container_len(&it[0], val, len)) < 0) {
+				spa_log_error(impl->log, "%s expects an array", key);
+				return -EINVAL;
+			}
+			spa_audio_parse_position(val, len, graph->outputs_position,
+						&graph->n_outputs_position);
+			impl->info.n_outputs = graph->n_outputs_position;
 		}
 		else if (spa_streq("nodes", key)) {
 			if (!spa_json_is_array(val, len)) {
@@ -1979,21 +2095,45 @@ static int load_graph(struct graph *graph, const struct spa_dict *props)
 				return res;
 		}
 	}
-	return setup_graph(graph, pinputs, poutputs);
+	if (pinputs != NULL) {
+		graph->n_input_names = count_array(pinputs);
+		graph->input_names = calloc(graph->n_input_names, sizeof(char *));
+		graph->n_input_names = 0;
+		while (spa_json_get_string(pinputs, key, sizeof(key)) > 0)
+			graph->input_names[graph->n_input_names++] = strdup(key);
+	}
+	if (poutputs != NULL) {
+		graph->n_output_names = count_array(poutputs);
+		graph->output_names = calloc(graph->n_output_names, sizeof(char *));
+		graph->n_output_names = 0;
+		while (spa_json_get_string(poutputs, key, sizeof(key)) > 0)
+			graph->output_names[graph->n_output_names++] = strdup(key);
+	}
+	if ((res = setup_graph_controls(graph)) < 0)
+		return res;
+	return 0;
 }
 
 static void graph_free(struct graph *graph)
 {
 	struct link *link;
 	struct node *node;
+	uint32_t i;
+
+	unsetup_graph(graph);
+
 	spa_list_consume(link, &graph->link_list, link)
 		link_free(link);
 	spa_list_consume(node, &graph->node_list, link)
 		node_free(node);
-	free(graph->input);
-	free(graph->output);
-	free(graph->hndl);
+	for (i = 0; i < graph->n_input_names; i++)
+		free(graph->input_names[i]);
+	free(graph->input_names);
+	for (i = 0; i < graph->n_output_names; i++)
+		free(graph->output_names[i]);
+	free(graph->output_names);
 	free(graph->control_port);
+	graph->control_port = NULL;
 }
 
 static const struct spa_filter_graph_methods impl_filter_graph = {
