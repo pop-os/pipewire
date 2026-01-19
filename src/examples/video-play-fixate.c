@@ -13,13 +13,28 @@
 #include <unistd.h>
 #include <signal.h>
 #include <libdrm/drm_fourcc.h>
+#include <sys/mman.h>
+#include <sys/sysmacros.h>
+#include <assert.h>
 
+#include <spa/utils/json.h>
 #include <spa/utils/result.h>
+#include <spa/param/dict-utils.h>
+#include <spa/param/peer-utils.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/param/props.h>
 #include <spa/debug/format.h>
+#include <spa/debug/pod.h>
 
 #include <pipewire/pipewire.h>
+#include <pipewire/capabilities.h>
+
+#include "base64.h"
+
+/* Comment out to test device ID negotation backward compatibility. */
+#define SUPPORT_DEVICE_ID_NEGOTIATION 1
+/* If defined, emulate failing to import DMA buffer. */
+#define EMULATE_DMA_BUF_IMPORT_FAIL 1
 
 #define WIDTH   640
 #define HEIGHT  480
@@ -27,6 +42,8 @@
 
 #define MAX_BUFFERS	64
 #define MAX_MOD		8
+#define MAX_PARAMS	16
+#define MAX_DEVICE_IDS  16
 
 #include "sdl.h"
 
@@ -44,6 +61,35 @@ struct modifier_info {
         uint32_t spa_format;
         uint32_t n_modifiers;
         uint64_t modifiers[MAX_MOD];
+};
+
+struct {
+	unsigned int major;
+	unsigned int minor;
+	struct modifier_info mod_info;
+} devices[] = {
+#if 1
+	{
+		.major = 100,
+		.minor = 100,
+		.mod_info = {
+			.spa_format = SPA_VIDEO_FORMAT_RGBA,
+			.modifiers = { DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID },
+			.n_modifiers = 2,
+		},
+	},
+#endif
+#if 1
+	{
+		.major = 200,
+		.minor = 200,
+		.mod_info = {
+			.spa_format = SPA_VIDEO_FORMAT_RGBA,
+			.modifiers = {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_GENERIC_16_16_TILE},
+			.n_modifiers = 2,
+		},
+	},
+#endif
 };
 
 struct data {
@@ -64,12 +110,20 @@ struct data {
 	int32_t stride;
 	struct spa_rectangle size;
 
-	uint32_t n_mod_info;
-	struct modifier_info mod_info[2];
-
 	int counter;
+
+	bool capabilities_known;
+	bool device_negotiation_supported;
+
+	dev_t device_ids[MAX_DEVICE_IDS];
+	size_t n_device_ids;
+
+	int used_device_index;
 };
 
+static int build_formats(struct data *data, struct spa_pod_builder *b, const struct spa_pod **params);
+
+#ifdef EMULATE_DMA_BUF_IMPORT_FAIL
 static struct pw_version parse_pw_version(const char* version) {
 	struct pw_version pw_version;
 	sscanf(version, "%d.%d.%d", &pw_version.major, &pw_version.minor,
@@ -84,41 +138,38 @@ static bool has_pw_version(int major, int minor, int micro) {
 	return major <= pw_version.major && minor <= pw_version.minor && micro <= pw_version.micro;
 }
 
-static void init_modifiers(struct data *data)
-{
-	data->n_mod_info = 1;
-	data->mod_info[0].spa_format = SPA_VIDEO_FORMAT_RGB;
-	data->mod_info[0].n_modifiers = 2;
-	data->mod_info[0].modifiers[0] = DRM_FORMAT_MOD_LINEAR;
-	data->mod_info[0].modifiers[1] = DRM_FORMAT_MOD_INVALID;
-}
-
-static void destroy_modifiers(struct data *data)
-{
-	data->mod_info[0].n_modifiers = 0;
-}
-
 static void strip_modifier(struct data *data, uint32_t spa_format, uint64_t modifier)
 {
-	if (data->mod_info[0].spa_format != spa_format)
+	struct modifier_info *mod_info;
+
+	assert(data->used_device_index >= 0);
+
+	mod_info = &devices[data->used_device_index].mod_info;
+
+	if (mod_info->spa_format != spa_format)
 		return;
-	struct modifier_info *mod_info = &data->mod_info[0];
+
 	uint32_t counter = 0;
 	// Dropping of single modifiers is only supported on PipeWire 0.3.40 and newer.
 	// On older PipeWire just dropping all modifiers might work on Versions newer then 0.3.33/35
 	if (has_pw_version(0,3,40)) {
-		printf("Dropping a single modifier\n");
+		printf("Dropping a single modifier from device %u:%u\n",
+			devices[data->used_device_index].major,
+			devices[data->used_device_index].minor);
 		for (uint32_t i = 0; i < mod_info->n_modifiers; i++) {
 			if (mod_info->modifiers[i] == modifier)
 				continue;
 			mod_info->modifiers[counter++] = mod_info->modifiers[i];
 		}
 	} else {
-		printf("Dropping all modifiers\n");
+		printf("Dropping all modifiers from device %u:%u\n",
+			devices[data->used_device_index].major,
+			devices[data->used_device_index].minor);
 		counter = 0;
 	}
 	mod_info->n_modifiers = counter;
 }
+#endif /* EMULATE_DMA_BUF_IMPORT_FAIL */
 
 static void handle_events(struct data *data)
 {
@@ -132,15 +183,36 @@ static void handle_events(struct data *data)
 	}
 }
 
-static struct spa_pod *build_format(struct spa_pod_builder *b, SDL_RendererInfo *info, enum spa_video_format format,
-        uint64_t *modifiers, int modifier_count)
+static struct spa_pod *build_format(struct data *data, struct spa_pod_builder *b,
+	SDL_RendererInfo *info, enum spa_video_format format, int device_index)
 {
 	struct spa_pod_frame f[2];
 	int i, c;
+        uint64_t *modifiers;
+	int modifier_count;
+
+	if (device_index == -1) {
+		modifiers = NULL;
+		modifier_count = 0;
+	} else {
+		struct modifier_info *mod_info = &devices[device_index].mod_info;
+
+		modifiers = mod_info->modifiers;
+		modifier_count = mod_info->n_modifiers;
+	}
 
 	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
 	spa_pod_builder_add(b, SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video), 0);
 	spa_pod_builder_add(b, SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw), 0);
+	/* device */
+	if (data->device_negotiation_supported && device_index >= 0) {
+		dev_t device_id = makedev(devices[device_index].major,
+			devices[device_index].minor);
+
+		spa_pod_builder_prop(b, SPA_FORMAT_VIDEO_deviceId,
+			SPA_POD_PROP_FLAG_MANDATORY);
+		spa_pod_builder_bytes(b, &device_id, sizeof device_id);
+	}
 	/* format */
 	spa_pod_builder_add(b, SPA_FORMAT_VIDEO_format, SPA_POD_Id(format), 0);
 	/* modifiers */
@@ -192,10 +264,12 @@ on_process(void *_data)
 	struct pw_stream *stream = data->stream;
 	struct pw_buffer *b;
 	struct spa_buffer *buf;
+	struct spa_data *d;
 	void *sdata, *ddata;
 	int sstride, dstride, ostride;
 	uint32_t i;
 	uint8_t *src, *dst;
+	bool needs_unmap = false;
 
 	b = NULL;
 	/* dequeue and queue old buffers, use the last available
@@ -214,11 +288,13 @@ on_process(void *_data)
 	}
 
 	buf = b->buffer;
+	d = buf->datas;
 
 	pw_log_info("new buffer %p", buf);
 
 	handle_events(data);
 
+#ifdef EMULATE_DMA_BUF_IMPORT_FAIL
 	if (buf->datas[0].type == SPA_DATA_DmaBuf) {
 		// Simulate a failed import of a DmaBuf
 		// We should try another modifier
@@ -227,8 +303,17 @@ on_process(void *_data)
 		pw_loop_signal_event(pw_main_loop_get_loop(data->loop), data->reneg);
 		goto done;
 	}
+#endif
 
-	if ((sdata = buf->datas[0].data) == NULL)
+	if (buf->datas[0].type == SPA_DATA_DmaBuf) {
+		sdata = mmap(NULL, d[0].maxsize, PROT_READ,
+			MAP_SHARED, d[0].fd, d[0].mapoffset);
+		needs_unmap = true;
+	} else {
+		sdata = buf->datas[0].data;
+	}
+
+	if (sdata == NULL)
 		goto done;
 
 	if (SDL_LockTexture(data->texture, NULL, &ddata, &dstride) < 0) {
@@ -258,6 +343,8 @@ on_process(void *_data)
 	SDL_RenderPresent(data->renderer);
 
       done:
+	if (needs_unmap)
+		munmap(d[0].data, d[0].maxsize);
 	pw_stream_queue_buffer(stream, b);
 }
 
@@ -278,8 +365,151 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old,
 	}
 }
 
-/* Be notified when the stream param changes. We're only looking at the
- * format changes.
+static void
+collect_device_ids(struct data *data, const char *json)
+{
+	struct spa_json it;
+	int len;
+	const char *value;
+	struct spa_json sub;
+
+	if ((len = spa_json_begin(&it, json, strlen(json), &value)) <= 0) {
+		fprintf(stderr, "invalid device IDs value\n");
+		return;
+	}
+	if (!spa_json_is_array(value, len)) {
+		fprintf(stderr, "device IDs not array\n");
+		return;
+	}
+
+	spa_json_enter(&it, &sub);
+	while ((len = spa_json_next(&sub, &value)) > 0) {
+		char *string;
+		union {
+			dev_t device_id;
+			uint8_t buffer[1024];
+		} dec;
+
+		string = alloca(len + 1);
+
+		if (!spa_json_is_string(value, len)) {
+			fprintf(stderr, "device ID not string\n");
+			return;
+		}
+
+		if (spa_json_parse_string(value, len, string) <= 0) {
+			fprintf(stderr, "invalid device ID string\n");
+			return;
+		}
+
+		if (base64_decode(string, strlen(string),
+				  (uint8_t *)&dec.device_id) < sizeof(dev_t)) {
+			fprintf(stderr, "invalid device ID\n");
+			return;
+		}
+
+		fprintf(stderr, "discovered device ID %u:%u\n",
+			major(dec.device_id), minor(dec.device_id));
+
+		data->device_ids[data->n_device_ids++] = dec.device_id;
+	}
+}
+
+static void
+discover_capabilities(struct data *data, const struct spa_pod *param)
+{
+#ifdef SUPPORT_DEVICE_ID_NEGOTIATION
+	struct spa_peer_param_info info;
+	void *state = NULL;
+
+	while (spa_peer_param_parse(param, &info, sizeof(info), &state) == 1) {
+		struct spa_param_dict_info di;
+
+		if (spa_param_dict_parse(info.param, &di, sizeof(di)) > 0) {
+			struct spa_dict dict;
+			struct spa_dict_item *items;
+			const struct spa_dict_item *it;
+
+			if (spa_param_dict_info_parse(&di, sizeof(di), &dict, NULL) < 0)
+				return;
+
+			items = alloca(sizeof(struct spa_dict_item) * dict.n_items);
+			if (spa_param_dict_info_parse(&di, sizeof(di), &dict, items) < 0)
+				return;
+
+			spa_dict_for_each(it, &dict) {
+				if (spa_streq(it->key, PW_CAPABILITY_DEVICE_ID_NEGOTIATION) &&
+				    spa_streq(it->value, "true")) {
+					data->device_negotiation_supported = true;
+				} else if (spa_streq(it->key, PW_CAPABILITY_DEVICE_IDS)) {
+					collect_device_ids(data, it->value);
+				}
+			}
+		}
+	}
+#endif /* SUPPORT_DEVICE_ID_NEGOTIATION */
+}
+
+static void
+on_stream_peer_capability_changed(struct data *data, const struct spa_pod *param)
+{
+	struct pw_stream *stream = data->stream;
+
+	printf("peer capability param changed: \n");
+	spa_debug_pod(4, NULL, param);
+
+	discover_capabilities(data, param);
+
+	if (!data->capabilities_known) {
+		const struct spa_pod *params[MAX_PARAMS];
+		uint32_t n_params = 0;
+		uint8_t buffer[1024];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+
+		data->capabilities_known = true;
+
+		if (data->device_negotiation_supported)
+			printf("stream supports device negotiation\n");
+		else
+			printf("stream does not support device negotiation\n");
+
+		/* build the extra parameters to connect with. To connect, we can provide
+		 * a list of supported formats.  We use a builder that writes the param
+		 * object to the stack. */
+		printf("supported formats:\n");
+
+		n_params = build_formats(data, &b, params);
+		pw_stream_update_params(data->stream, params, n_params);
+
+		printf("activating stream\n");
+		pw_stream_set_active(stream, true);
+	}
+}
+
+static int
+find_device_id_from_param(const struct spa_pod *format, dev_t *device_id)
+{
+	const struct spa_pod_prop *device_prop;
+	const void *bytes;
+	uint32_t size;
+
+	device_prop = spa_pod_find_prop(format, NULL, SPA_FORMAT_VIDEO_deviceId);
+	if (device_prop == NULL)
+		return -ENOENT;
+
+	if (spa_pod_parse_object (format, SPA_TYPE_OBJECT_Format, NULL,
+				  SPA_FORMAT_VIDEO_deviceId, SPA_POD_OPT_Bytes(&bytes, &size)) < 0)
+		return -EINVAL;
+
+	if (size != sizeof(dev_t))
+		return -EINVAL;
+
+	*device_id = *(dev_t *)bytes;
+
+	return 0;
+}
+
+/* Be notified when the stream format param changes.
  *
  * We are now supposed to call pw_stream_finish_format() with success or
  * failure, depending on if we can support the format. Because we gave
@@ -290,20 +520,15 @@ static void on_stream_state_changed(void *_data, enum pw_stream_state old,
  * that we would like on our buffer, the size, alignment, etc.
  */
 static void
-on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
+on_stream_format_changed(struct data *data, const struct spa_pod *param)
 {
-	struct data *data = _data;
 	struct pw_stream *stream = data->stream;
 	uint8_t params_buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	const struct spa_pod *params[1];
+	const struct spa_pod *params[MAX_PARAMS];
 	uint32_t n_params = 0;
 	Uint32 sdl_format;
 	void *d;
-
-	/* NULL means to clear the format */
-	if (param == NULL || id != SPA_PARAM_Format)
-		return;
 
 	fprintf(stderr, "got format:\n");
 	spa_debug_format(2, NULL, param);
@@ -319,6 +544,28 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	spa_format_video_raw_parse(param, &data->format.info.raw);
 	sdl_format = id_to_sdl_format(data->format.info.raw.format);
 	data->size = data->format.info.raw.size;
+
+	if (data->device_negotiation_supported) {
+		dev_t device_id;
+
+		if (find_device_id_from_param(param, &device_id) == 0) {
+			size_t i;
+
+			for (i = 0; i < SPA_N_ELEMENTS(devices); i++) {
+				if (major(device_id) == devices[i].major &&
+				    minor(device_id) == devices[i].minor) {
+					data->used_device_index = i;
+					printf("using negotiated device %u:%u\n",
+						devices[i].major, devices[i].minor);
+					break;
+				}
+			}
+		}
+	} else {
+		data->used_device_index = 0;
+		printf("using implicitly assumed device %u:%u\n",
+		       devices[0].major, devices[0].minor);
+	}
 
 	if (sdl_format == SDL_PIXELFORMAT_UNKNOWN) {
 		pw_stream_set_error(stream, -EINVAL, "unknown pixel format");
@@ -354,6 +601,24 @@ on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
 	pw_stream_update_params(stream, params, n_params);
 }
 
+static void
+on_stream_param_changed(void *_data, uint32_t id, const struct spa_pod *param)
+{
+	struct data *data = _data;
+
+	if (param == NULL)
+		return;
+
+	switch (id) {
+	case SPA_PARAM_PeerCapability:
+		on_stream_peer_capability_changed(data, param);
+		break;
+	case SPA_PARAM_Format:
+		on_stream_format_changed(data, param);
+		break;
+	}
+}
+
 /* these are the stream events we listen for */
 static const struct pw_stream_events stream_events = {
 	PW_VERSION_STREAM_EVENTS,
@@ -362,6 +627,22 @@ static const struct pw_stream_events stream_events = {
 	.process = on_process,
 };
 
+static bool
+has_device_id(struct data *data, dev_t device_id)
+{
+	size_t i;
+
+	if (data->n_device_ids == 0)
+		return true;
+
+	for (i = 0; i < data->n_device_ids; i++) {
+		if (data->device_ids[i] == device_id)
+			return true;
+	}
+
+	return false;
+}
+
 static int build_formats(struct data *data, struct spa_pod_builder *b, const struct spa_pod **params)
 {
 	SDL_RendererInfo info;
@@ -369,13 +650,28 @@ static int build_formats(struct data *data, struct spa_pod_builder *b, const str
 
 	SDL_GetRendererInfo(data->renderer, &info);
 
-	if (data->mod_info[0].n_modifiers > 0) {
-		params[n_params++] = build_format(b,
-				&info, SPA_VIDEO_FORMAT_RGB,
-				data->mod_info[0].modifiers,
-				data->mod_info[0].n_modifiers);
+	if (data->device_negotiation_supported) {
+		size_t i;
+
+		for (i = 0; i < SPA_N_ELEMENTS(devices); i++) {
+			dev_t device_id;
+
+			device_id = makedev(devices[i].major, devices[i].minor);
+			if (!has_device_id(data, device_id)) {
+				fprintf(stderr, "filtered out %u:%u\n",
+					devices[i].major, devices[i].minor);
+				continue;
+			}
+
+			params[n_params++] = build_format(data, b,
+					&info, SPA_VIDEO_FORMAT_RGBA, i);
+		}
+	} else {
+		params[n_params++] = build_format(data, b,
+				&info, SPA_VIDEO_FORMAT_RGBA, 0);
 	}
-	params[n_params++] = build_format(b, &info, SPA_VIDEO_FORMAT_RGB, NULL, 0);
+
+	params[n_params++] = build_format(data, b, &info, SPA_VIDEO_FORMAT_RGBA, -1);
 
 	for (int i=0; i < n_params; i++) {
 		spa_debug_format(2, NULL, params[i]);
@@ -388,7 +684,7 @@ static void reneg_format(void *_data, uint64_t expiration)
 	struct data *data = (struct data*) _data;
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-	const struct spa_pod *params[2];
+	const struct spa_pod *params[MAX_PARAMS];
 	uint32_t n_params;
 
 	if (data->format.info.raw.format == 0)
@@ -409,11 +705,13 @@ static void do_quit(void *userdata, int signal_number)
 int main(int argc, char *argv[])
 {
 	struct data data = { 0, };
-	const struct spa_pod *params[2];
+	const struct spa_pod *params[MAX_PARAMS];
 	uint8_t buffer[1024];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod_frame f;
 	struct pw_properties *props;
-	int res, n_params;
+	int res, n_params = 0;
+	SDL_RendererInfo info;
 
 	pw_init(&argc, &argv);
 
@@ -443,6 +741,7 @@ int main(int argc, char *argv[])
 		/* Set stream target if given on command line */
 		pw_properties_set(props, PW_KEY_TARGET_OBJECT, data.path);
 
+	data.used_device_index = -1;
 	data.stream = pw_stream_new_simple(
 			pw_main_loop_get_loop(data.loop),
 			"video-play-fixate",
@@ -455,19 +754,41 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	init_modifiers(&data);
-
 	if (SDL_CreateWindowAndRenderer
 	    (WIDTH, HEIGHT, SDL_WINDOW_RESIZABLE, &data.window, &data.renderer)) {
 		fprintf(stderr, "can't create window: %s\n", SDL_GetError());
 		return -1;
 	}
 
-	/* build the extra parameters to connect with. To connect, we can provide
-	 * a list of supported formats.  We use a builder that writes the param
-	 * object to the stack. */
-	printf("supported formats:\n");
-	n_params = build_formats(&data, &b, params);
+	SDL_GetRendererInfo(data.renderer, &info);
+
+	/* Push bare minimum video format to inactive stream, and wait for
+	 * sending actual format until capability discovery is done. */
+	spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+	spa_pod_builder_add(&b, SPA_FORMAT_mediaType,
+		SPA_POD_Id (SPA_MEDIA_TYPE_video),
+		0);
+	spa_pod_builder_add(&b, SPA_FORMAT_mediaSubtype,
+		SPA_POD_Id (SPA_MEDIA_SUBTYPE_raw),
+		0);
+	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_format,
+		SPA_POD_Id(SPA_VIDEO_FORMAT_RGBA),
+		0);
+	spa_pod_builder_add(&b, SPA_FORMAT_VIDEO_size,
+		SPA_POD_CHOICE_RANGE_Rectangle(
+			&SPA_RECTANGLE(WIDTH, HEIGHT),
+			&SPA_RECTANGLE(1,1),
+			&SPA_RECTANGLE(info.max_texture_width,
+				       info.max_texture_height)),
+		0);
+	params[n_params++] = spa_pod_builder_pop(&b, &f);
+
+#ifdef SUPPORT_DEVICE_ID_NEGOTIATION
+	params[n_params++] =
+		spa_param_dict_build_dict(&b, SPA_PARAM_Capability,
+			&SPA_DICT_ITEMS(
+				SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_ID_NEGOTIATION, "true")));
+#endif
 
 	/* now connect the stream, we need a direction (input/output),
 	 * an optional target node to connect to, some flags and parameters
@@ -476,6 +797,7 @@ int main(int argc, char *argv[])
 			  PW_DIRECTION_INPUT,
 			  PW_ID_ANY,
 			  PW_STREAM_FLAG_AUTOCONNECT |	/* try to automatically connect this stream */
+			  PW_STREAM_FLAG_INACTIVE |     /* set active after capability discovery */
 			  PW_STREAM_FLAG_MAP_BUFFERS,	/* mmap the buffer data for us */
 			  params, n_params))		/* extra parameters, see above */ < 0) {
 		fprintf(stderr, "can't connect: %s\n", spa_strerror(res));
@@ -489,8 +811,6 @@ int main(int argc, char *argv[])
 
 	pw_stream_destroy(data.stream);
 	pw_main_loop_destroy(data.loop);
-
-	destroy_modifiers(&data);
 
 	SDL_DestroyTexture(data.texture);
 	if (data.cursor)

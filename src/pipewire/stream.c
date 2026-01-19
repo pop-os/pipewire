@@ -715,8 +715,6 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Flush:
 	case SPA_NODE_COMMAND_Pause:
-		pw_loop_invoke(impl->main_loop,
-			NULL, 0, NULL, 0, false, impl);
 		if (stream->state == PW_STREAM_STATE_STREAMING && id != SPA_NODE_COMMAND_Flush) {
 			pw_log_debug("%p: pause", stream);
 			stream_set_state(stream, PW_STREAM_STATE_PAUSED, 0, NULL);
@@ -1748,11 +1746,35 @@ static int stream_disconnect(struct stream *impl)
 	return 0;
 }
 
+static void stream_free(struct pw_stream *stream)
+{
+	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
+	struct control *c;
+
+	pw_log_debug("%p: free", stream);
+	clear_params(impl, SPA_ID_INVALID, 0);
+
+	free(stream->error);
+
+	pw_properties_free(stream->properties);
+
+	free(stream->name);
+
+	spa_list_consume(c, &stream->controls, link) {
+		spa_list_remove(&c->link);
+		free(c);
+	}
+	if (impl->data.context)
+		pw_context_destroy(impl->data.context);
+
+	pw_properties_free(impl->port_props);
+	free(impl);
+}
+
 SPA_EXPORT
 void pw_stream_destroy(struct pw_stream *stream)
 {
 	struct stream *impl = SPA_CONTAINER_OF(stream, struct stream, this);
-	struct control *c;
 
 	ensure_loop(impl->main_loop, return);
 
@@ -1768,29 +1790,13 @@ void pw_stream_destroy(struct pw_stream *stream)
 		spa_list_remove(&stream->link);
 		stream->core = NULL;
 	}
-
-	clear_params(impl, SPA_ID_INVALID, 0);
-
-	pw_log_debug("%p: free", stream);
-	free(stream->error);
-
-	pw_properties_free(stream->properties);
-
-	free(stream->name);
-
-	spa_list_consume(c, &stream->controls, link) {
-		spa_list_remove(&c->link);
-		free(c);
-	}
-
 	spa_hook_list_clean(&impl->hooks);
 	spa_hook_list_clean(&stream->listener_list);
 
-	if (impl->data.context)
-		pw_context_destroy(impl->data.context);
+	/* Make sure there are no queued invokes from us anymore */
+	pw_loop_invoke(impl->main_loop, NULL, 0, NULL, 0, false, impl);
 
-	pw_properties_free(impl->port_props);
-	free(impl);
+	stream_free(stream);
 }
 
 static int
@@ -2475,8 +2481,9 @@ int pw_stream_get_time_n(struct pw_stream *stream, struct pw_time *time, size_t 
 
 	time->delay += (int64_t)(((latency->min_quantum + latency->max_quantum) / 2.0f) * quantum);
 	time->delay += (latency->min_rate + latency->max_rate) / 2;
-	time->delay += ((latency->min_ns + latency->max_ns) / 2) *
-		(int64_t)time->rate.denom / (int64_t)SPA_NSEC_PER_SEC;
+	if (time->rate.num != 0)
+		time->delay += ((latency->min_ns + latency->max_ns) / 2) *
+			(int64_t)time->rate.denom / ((int64_t)SPA_NSEC_PER_SEC * time->rate.num);
 
 	avail_buffers = spa_ringbuffer_get_read_index(&impl->dequeued.ring, &index);
 	avail_buffers = SPA_CLAMP(avail_buffers, 0, (int32_t)impl->n_buffers);

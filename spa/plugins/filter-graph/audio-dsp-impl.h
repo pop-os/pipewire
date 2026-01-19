@@ -32,7 +32,7 @@ void dsp_biquad_run_##arch (void *obj, struct biquad *bq, uint32_t n_bq, uint32_
 	float * SPA_RESTRICT out[], const float * SPA_RESTRICT in[], uint32_t n_src, uint32_t n_samples)
 #define MAKE_DELAY_FUNC(arch) \
 void dsp_delay_##arch (void *obj, float *buffer, uint32_t *pos, uint32_t n_buffer, \
-		uint32_t delay, float *dst, const float *src, uint32_t n_samples)
+		uint32_t delay, float *dst, const float *src, uint32_t n_samples, float fb, float ff)
 
 #define MAKE_FFT_NEW_FUNC(arch) \
 void *dsp_fft_new_##arch(void *obj, uint32_t size, bool real)
@@ -84,11 +84,11 @@ MAKE_DELAY_FUNC(sse);
 MAKE_FFT_CMUL_FUNC(sse);
 MAKE_FFT_CMULADD_FUNC(sse);
 #endif
-#if defined (HAVE_AVX)
-MAKE_MIX_GAIN_FUNC(avx);
-MAKE_SUM_FUNC(avx);
-MAKE_FFT_CMUL_FUNC(avx);
-MAKE_FFT_CMULADD_FUNC(avx);
+#if defined (HAVE_AVX2)
+MAKE_MIX_GAIN_FUNC(avx2);
+MAKE_SUM_FUNC(avx2);
+MAKE_FFT_CMUL_FUNC(avx2);
+MAKE_FFT_CMULADD_FUNC(avx2);
 #endif
 
 #endif /* DSP_OPS_IMPL_H */

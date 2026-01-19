@@ -507,8 +507,6 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Flush:
 	case SPA_NODE_COMMAND_Pause:
-		pw_loop_invoke(impl->main_loop,
-			NULL, 0, NULL, 0, false, impl);
 		if (filter->state == PW_FILTER_STATE_STREAMING && id != SPA_NODE_COMMAND_Flush) {
 			pw_log_debug("%p: pause", filter);
 			filter_set_state(filter, PW_FILTER_STATE_PAUSED, 0, NULL);
@@ -1389,6 +1387,28 @@ static void free_port(struct filter *impl, struct port *port)
 	free(port);
 }
 
+static void filter_free(struct pw_filter *filter)
+{
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+
+	pw_log_debug("%p: free", filter);
+	clear_params(impl, NULL, SPA_ID_INVALID);
+
+	free(filter->error);
+
+	pw_properties_free(filter->properties);
+
+	pw_map_clear(&impl->ports[SPA_DIRECTION_INPUT]);
+	pw_map_clear(&impl->ports[SPA_DIRECTION_OUTPUT]);
+
+	free(filter->name);
+
+	if (impl->data.context)
+		pw_context_destroy(impl->data.context);
+
+	free(impl);
+}
+
 SPA_EXPORT
 void pw_filter_destroy(struct pw_filter *filter)
 {
@@ -1411,26 +1431,13 @@ void pw_filter_destroy(struct pw_filter *filter)
 		spa_hook_remove(&filter->core_listener);
 		spa_list_remove(&filter->link);
 	}
-
-	clear_params(impl, NULL, SPA_ID_INVALID);
-
-	pw_log_debug("%p: free", filter);
-	free(filter->error);
-
-	pw_properties_free(filter->properties);
-
 	spa_hook_list_clean(&impl->hooks);
 	spa_hook_list_clean(&filter->listener_list);
 
-	pw_map_clear(&impl->ports[SPA_DIRECTION_INPUT]);
-	pw_map_clear(&impl->ports[SPA_DIRECTION_OUTPUT]);
+	/* Make sure there are no queued invokes from us anymore */
+	pw_loop_invoke(impl->main_loop, NULL, 0, NULL, 0, false, impl);
 
-	free(filter->name);
-
-	if (impl->data.context)
-		pw_context_destroy(impl->data.context);
-
-	free(impl);
+	filter_free(filter);
 }
 
 static int
