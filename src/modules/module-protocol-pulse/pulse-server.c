@@ -404,6 +404,14 @@ static void handle_metadata(struct client *client, struct pw_manager_object *old
 		if (client->metadata_routes == old)
 			client->metadata_routes = new;
 	}
+	else if (spa_streq(name, "sm-settings")) {
+		if (client->metadata_sm_settings == old)
+			client->metadata_sm_settings = new;
+	}
+	else if (spa_streq(name, "schema-sm-settings")) {
+		if (client->metadata_schema_sm_settings == old)
+			client->metadata_schema_sm_settings = new;
+	}
 }
 
 static uint32_t frac_to_bytes_round_up(struct spa_fraction val, const struct sample_spec *ss)
@@ -621,7 +629,7 @@ static int reply_create_playback_stream(struct stream *stream, struct pw_manager
 			TAG_INVALID);
 	}
 
-	stream->create_tag = SPA_ID_INVALID;
+	stream_created(stream);
 
 	return client_queue_message(client, reply);
 }
@@ -783,7 +791,7 @@ static int reply_create_record_stream(struct stream *stream, struct pw_manager_o
 			TAG_INVALID);
 	}
 
-	stream->create_tag = SPA_ID_INVALID;
+	stream_created(stream);
 
 	return client_queue_message(client, reply);
 }
@@ -964,6 +972,14 @@ static void manager_metadata(void *data, struct pw_manager_object *o,
 	}
 	if (subject == PW_ID_CORE && o == client->metadata_routes)
 		client_update_routes(client, key, value);
+	if (subject == PW_ID_CORE && o == client->metadata_schema_sm_settings) {
+		if (spa_streq(key, METADATA_FEATURES_AUDIO_MONO))
+			client->have_force_mono_audio = true;
+	}
+	if (subject == PW_ID_CORE && o == client->metadata_sm_settings) {
+		if (spa_streq(key, METADATA_FEATURES_AUDIO_MONO))
+			client->force_mono_audio = spa_streq(value, "true");
+	}
 }
 
 
@@ -5503,6 +5519,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 
 	impl->loop = pw_context_get_main_loop(context);
 	impl->work_queue = pw_context_get_work_queue(context);
+	impl->timer_queue = pw_context_get_timer_queue(context);
 
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
