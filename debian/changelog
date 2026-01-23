@@ -1,3 +1,9 @@
+pipewire (1.5.85-1ubuntu1pop1) noble; urgency=medium
+
+  *
+
+ -- Michael Murphy <michael@mmurphy.dev>  Fri, 23 Jan 2026 17:51:13 +0100
+
 pipewire (1.5.85-1) experimental; urgency=medium
 
   * New upstream release (1.6 release candidate 5)
