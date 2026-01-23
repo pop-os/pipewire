@@ -148,3 +148,6 @@ override_dh_installsystemd:
 # Can be dropped in compat >= 14
 execute_after_dh_installinit:
 	dh_installsysusers
+
+override_dh_builddeb:
+	dh_builddeb -- -Zzstd -z3
