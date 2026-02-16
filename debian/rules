@@ -136,7 +136,3 @@ override_dh_installsystemd:
 	# we install system services anyway for specific use cases (like embedded
 	# and accessibility) without enabling/starting them to avoid clashes.
 	dh_installsystemd -ppipewire-system-services --no-enable --no-start
-
-# Can be dropped in compat >= 14
-execute_after_dh_installinit:
-	dh_installsysusers
