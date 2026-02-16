@@ -214,8 +214,7 @@ Package: pipewire
 Section: video
 Architecture: any
 Multi-Arch: same
-Depends: adduser,
-         libpipewire-0.3-modules (= ${binary:Version}),
+Depends: libpipewire-0.3-modules (= ${binary:Version}),
          pipewire-bin (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}
