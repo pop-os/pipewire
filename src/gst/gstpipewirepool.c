@@ -209,8 +209,6 @@ void gst_pipewire_pool_wrap_buffer (GstPipeWirePool *pool, struct pw_buffer *b)
   data->b = b;
   data->buf = buf;
   data->crop = spa_buffer_find_meta_data (b->buffer, SPA_META_VideoCrop, sizeof(*data->crop));
-  if (data->crop)
-	  gst_buffer_add_video_crop_meta(buf);
   data->videotransform =
     spa_buffer_find_meta_data (b->buffer, SPA_META_VideoTransform, sizeof(*data->videotransform));
   data->cursor = spa_buffer_find_meta_data (b->buffer, SPA_META_Cursor, sizeof(*data->cursor));
@@ -434,16 +432,15 @@ release_buffer (GstBufferPool * pool, GstBuffer *buffer)
   GST_LOG_OBJECT (pool, "release buffer %p", buffer);
 
   GstPipeWirePoolData *data = gst_pipewire_pool_get_data(buffer);
+  GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
+  g_autoptr (GstPipeWireStream) s = g_weak_ref_get (&p->stream);
 
   GST_OBJECT_LOCK (pool);
+  pw_thread_loop_lock (s->core->loop);
 
   if (!data->queued && data->b != NULL)
   {
-    GstPipeWirePool *p = GST_PIPEWIRE_POOL (pool);
-    g_autoptr (GstPipeWireStream) s = g_weak_ref_get (&p->stream);
     int res;
-
-    pw_thread_loop_lock (s->core->loop);
 
     if ((res = pw_stream_return_buffer (s->pwstream, data->b)) < 0) {
       GST_ERROR_OBJECT (pool,"can't return buffer %p; gstbuffer : %p, %s",data->b, buffer, spa_strerror(res));
@@ -451,9 +448,9 @@ release_buffer (GstBufferPool * pool, GstBuffer *buffer)
       data->queued = TRUE;
       GST_DEBUG_OBJECT (pool, "returned buffer %p; gstbuffer:%p", data->b, buffer);
     }
-
-    pw_thread_loop_unlock (s->core->loop);
   }
+
+  pw_thread_loop_unlock (s->core->loop);
   GST_OBJECT_UNLOCK (pool);
 }
 

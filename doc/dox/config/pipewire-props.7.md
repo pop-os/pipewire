@@ -1171,6 +1171,15 @@ in a platform-specific way. See `tests/examples/bt-pinephone.lua` in WirePlumber
 Do not enable this setting if you don't know what all this means, as it won't work.
 \endparblock
 
+@PAR@ monitor-prop bluez5.hw-offload-datapath # integer
+\parblock
+HFP/HSP hardware offload data path ID (default: 0).
+
+This feature configures the SCO hardware‑offload data path for HFP/HSP using the Bluetooth 
+SIG–specified procedure. It is intended for advanced setups and vendor integrations. Do not 
+edit this unless required; incorrect values can disable SCO offload.
+\endparblock
+
 @PAR@ monitor-prop  bluez5.a2dp.opus.pro.channels = 3   # integer
 PipeWire Opus Pro audio profile channel count.
 
@@ -1202,6 +1211,7 @@ PipeWire Opus Pro audio profile duplex max bitrate.
 PipeWire Opus Pro audio profile duplex frame duration (1/10 ms).
 
 @PAR@ monitor-prop  bluez5.bcast_source.config = []  # JSON
+For a per-adapter configuration of multiple BIGs use an "adapter" entry in the BIG with the BD address.
 \parblock
 Example:
 ```
@@ -1362,6 +1372,12 @@ Default: as per QoS preset.
 BAP QoS framing that needs to be applied for vendor defined preset
 This property is experimental.
 Default: as per QoS preset.
+
+@PAR@ device-prop  bluez5.bap.force-target-latency = "balanced" # string
+BAP QoS target latency profile forced for QoS configuration selection.
+If not set or set to "balanced", both low-latency and high-reliabilty QoS configuration table are used.
+This property is experimental.
+Available: low-latency, high-reliabilty, balanced
 
 ## Node properties
 

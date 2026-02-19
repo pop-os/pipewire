@@ -148,6 +148,7 @@ struct spa_bt_monitor {
 struct spa_bt_remote_endpoint {
 	struct spa_list link;
 	struct spa_list device_link;
+	struct spa_list adapter_link;
 	struct spa_bt_monitor *monitor;
 	char *path;
 	char *transport_path;
@@ -155,6 +156,7 @@ struct spa_bt_remote_endpoint {
 	char *uuid;
 	unsigned int codec;
 	struct spa_bt_device *device;
+	struct spa_bt_adapter *adapter;
 	uint8_t *capabilities;
 	size_t capabilities_len;
 	uint8_t *metadata;
@@ -194,6 +196,7 @@ struct spa_bt_bis {
 };
 
 #define BROADCAST_CODE_LEN	16
+#define BD_ADDR_STR_LEN		17
 
 struct spa_bt_big {
 	struct spa_list link;
@@ -202,6 +205,7 @@ struct spa_bt_big {
 	struct spa_list bis_list;
 	int big_id;
 	int sync_factor;
+	char adapter[BD_ADDR_STR_LEN + 3];
 };
 
 /*
@@ -732,6 +736,11 @@ static const char *bap_features_get_name(struct bap_features *feat, size_t i, co
 static void bap_features_clear(struct bap_features *feat)
 {
 	spa_zero(*feat);
+}
+
+const struct spa_dict *get_device_codec_settings(struct spa_bt_device *device, bool bap)
+{
+    return bap ? device->settings : &device->monitor->global_settings;
 }
 
 static DBusHandlerResult endpoint_select_configuration(DBusConnection *conn, DBusMessage *m, void *userdata)
@@ -1634,6 +1643,8 @@ static struct spa_bt_adapter *adapter_create(struct spa_bt_monitor *monitor, con
 	d->monitor = monitor;
 	d->path = strdup(path);
 
+	spa_list_init(&d->remote_endpoint_list);
+
 	spa_list_prepend(&monitor->adapter_list, &d->link);
 
 	adapter_init_bus_type(monitor, d);
@@ -1648,6 +1659,7 @@ static void adapter_free(struct spa_bt_adapter *adapter)
 {
 	struct spa_bt_monitor *monitor = adapter->monitor;
 	struct spa_bt_device *d, *td;
+	struct spa_bt_remote_endpoint *ep, *tep;
 
 	spa_log_debug(monitor->log, "%p", adapter);
 
@@ -1655,6 +1667,13 @@ static void adapter_free(struct spa_bt_adapter *adapter)
 	spa_list_for_each_safe(d, td, &monitor->device_list, link)
 		if (d->adapter == adapter)
 			device_free(d);
+
+	spa_list_for_each_safe(ep, tep, &adapter->remote_endpoint_list, adapter_link) {
+		if (ep->adapter == adapter) {
+			spa_list_remove(&ep->adapter_link);
+			ep->adapter = NULL;
+		}
+	}
 
 	spa_bt_player_destroy(adapter->dummy_player);
 
@@ -2758,6 +2777,7 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 		{ SPA_BLUETOOTH_AUDIO_CODEC_FASTSTREAM_DUPLEX, SPA_BT_FEATURE_A2DP_DUPLEX },
 	};
 	bool is_a2dp = codec->kind == MEDIA_CODEC_A2DP;
+	bool is_bap = codec->kind == MEDIA_CODEC_BAP;
 	size_t i;
 
 	codec_target_profile = get_codec_target_profile(monitor, codec);
@@ -2799,7 +2819,8 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 			continue;
 
 		if (media_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len,
-						&ep->monitor->default_audio_info, &monitor->global_settings))
+						&ep->monitor->default_audio_info,
+						get_device_codec_settings(device, is_bap)))
 			return true;
 	}
 
@@ -3015,19 +3036,30 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 			}
 			else if (spa_streq(key, "Device")) {
 				struct spa_bt_device *device;
+				struct spa_bt_adapter *adapter;
 
 				device = spa_bt_device_find(monitor, value);
-				if (device == NULL)
-					goto next;
+				adapter = adapter_find(monitor, value);
 
-				spa_log_debug(monitor->log, "remote_endpoint %p: device -> %p", remote_endpoint, device);
+				if (device != NULL) {
+					spa_log_debug(monitor->log, "remote_endpoint %p: device -> %p", remote_endpoint, device);
 
-				if (remote_endpoint->device != device) {
-					if (remote_endpoint->device != NULL)
-						spa_list_remove(&remote_endpoint->device_link);
-					remote_endpoint->device = device;
-					if (device != NULL)
+					if (remote_endpoint->device != device) {
+						if (remote_endpoint->device != NULL)
+							spa_list_remove(&remote_endpoint->device_link);
+						remote_endpoint->device = device;
 						spa_list_append(&device->remote_endpoint_list, &remote_endpoint->device_link);
+					}
+				}
+				if (adapter != NULL) {
+					spa_log_debug(monitor->log, "remote_endpoint %p: adapter -> %p", remote_endpoint, adapter);
+
+					if (remote_endpoint->adapter != adapter) {
+						if (remote_endpoint->adapter != NULL)
+							spa_list_remove(&remote_endpoint->adapter_link);
+						remote_endpoint->adapter = adapter;
+						spa_list_append(&adapter->remote_endpoint_list, &remote_endpoint->adapter_link);
+					}
 				}
 			} else if (spa_streq(key, "Transport")) {
 				/* For ASHA */
@@ -3102,11 +3134,13 @@ static int remote_endpoint_update_props(struct spa_bt_remote_endpoint *remote_en
 
 			spa_log_debug(monitor->log, "remote_endpoint %p: %s=%"PRIu64, remote_endpoint, key, remote_endpoint->hisyncid);
 		} else if (spa_streq(key, "SupportedFeatures")) {
+			DBusMessageIter iter;
+
 			if (!check_iter_signature(&it[1], "a{sv}"))
 				goto next;
 
-			dbus_message_iter_recurse(&it[1], &it[2]);
-			parse_supported_features(monitor, &it[2], &remote_endpoint->bap_features);
+			dbus_message_iter_recurse(&it[1], &iter);
+			parse_supported_features(monitor, &iter, &remote_endpoint->bap_features);
 		} else {
 unhandled:
 			spa_log_debug(monitor->log, "remote_endpoint %p: unhandled key %s", remote_endpoint, key);
@@ -3161,6 +3195,9 @@ static void remote_endpoint_free(struct spa_bt_remote_endpoint *remote_endpoint)
 
 	if (remote_endpoint->device)
 		spa_list_remove(&remote_endpoint->device_link);
+
+	if (remote_endpoint->adapter)
+		spa_list_remove(&remote_endpoint->adapter_link);
 
 	bap_features_clear(&remote_endpoint->bap_features);
 
@@ -3382,8 +3419,12 @@ int spa_bt_transport_acquire(struct spa_bt_transport *transport, bool optional)
 
 	if (!transport->acquired)
 		res = spa_bt_transport_impl(transport, acquire, 0, optional);
-	else
-		res = 0;
+	else {
+		/* keepalive */
+		transport->acquire_refcount = 1;
+		spa_bt_transport_emit_state_changed(transport, transport->state, transport->state);
+		return 0;
+	}
 
 	if (res >= 0) {
 		transport->acquire_refcount = 1;
@@ -4651,7 +4692,7 @@ static bool codec_switch_check_endpoint(struct spa_bt_remote_endpoint *ep,
 
 	if (!media_codec_check_caps(codec, ep->codec, ep->capabilities, ep->capabilities_len,
 					&ep->device->monitor->default_audio_info,
-					&ep->device->monitor->global_settings))
+					get_device_codec_settings(ep->device, codec->kind == MEDIA_CODEC_BAP)))
 		return false;
 
 	if (ep_profile & (SPA_BT_PROFILE_A2DP_SINK | SPA_BT_PROFILE_BAP_SINK)) {
@@ -6234,6 +6275,7 @@ static void configure_bis(struct spa_bt_monitor *monitor,
 }
 
 static void configure_bcast_source(struct spa_bt_monitor *monitor,
+				struct spa_bt_remote_endpoint *ep,
 				const struct media_codec *codec,
 				DBusConnection *conn,
 				const char *object_path,
@@ -6242,8 +6284,24 @@ static void configure_bcast_source(struct spa_bt_monitor *monitor,
 {
 	struct spa_bt_big *big;
 	struct spa_bt_bis *bis;
+
 	/* Configure each BIS from a BIG */
 	spa_list_for_each(big, &monitor->bcast_source_config_list, link) {
+		/* Apply per adapter configuration if BIG has an adapter value stated,
+		 * otherwise apply the BIG config angnostically to each adapter
+		 */
+		if ((strlen(big->adapter) > 0) && (ep->adapter != NULL)) {
+			if (!ep->adapter->address) {
+				spa_log_warn(monitor->log, "this adapter is not associated with any BD address. BIG config will applied agnostically to any adapter!");
+				continue;
+			}
+
+			if (strcasecmp(ep->adapter->address, big->adapter))
+				continue;
+
+			spa_log_debug(monitor->log, "configuring BIG for adapter=%s", big->adapter);
+		}
+
 		spa_list_for_each(bis, &big->bis_list, link) {
 			configure_bis(monitor, codec, conn, object_path, interface_name,
 				big, bis, local_endpoint);
@@ -6367,7 +6425,7 @@ static void interface_added(struct spa_bt_monitor *monitor,
 			}
 
 			if (local_endpoint != NULL)
-				configure_bcast_source(monitor, monitor->media_codecs[i], conn, object_path, interface_name, local_endpoint);
+				configure_bcast_source(monitor, ep, monitor->media_codecs[i], conn, object_path, interface_name, local_endpoint);
 		}
 	}
 }
@@ -7022,6 +7080,10 @@ static void parse_broadcast_source_config(struct spa_bt_monitor *monitor, const 
 					goto parse_failed;
 				memcpy(big_entry->broadcast_code, bcode, strlen(bcode));
 				spa_log_debug(monitor->log, "big_entry->broadcast_code %s", big_entry->broadcast_code);
+			} else if (spa_streq(key, "adapter")) {
+				if (spa_json_get_string(&it[1], big_entry->adapter, sizeof(big_entry->adapter)) <= 0)
+					goto parse_failed;
+				spa_log_debug(monitor->log, "big_entry->adapter %s", big_entry->adapter);
 			} else if (spa_streq(key, "encryption")) {
 				if (spa_json_get_bool(&it[0], &big_entry->encryption) <= 0)
 					goto parse_failed;

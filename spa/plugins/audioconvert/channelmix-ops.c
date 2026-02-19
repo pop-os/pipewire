@@ -720,7 +720,7 @@ done:
 	if (src_paired == 0)
 		src_paired = ~0LU;
 
-	for (jc = 0, ic = 0, i = 0; i < CHANNEL_BITS; i++) {
+	for (jc = 0, ic = 0, i = 0; ic < dst_chan; i++) {
 		float sum = 0.0f;
 		char str1[1024], str2[1024];
 		struct spa_strbuf sb1, sb2;
@@ -728,12 +728,10 @@ done:
 		spa_strbuf_init(&sb1, str1, sizeof(str1));
 		spa_strbuf_init(&sb2, str2, sizeof(str2));
 
-		if ((dst_paired & (1UL << i)) == 0)
+		if (i < CHANNEL_BITS && (dst_paired & (1UL << i)) == 0)
 			continue;
-		for (jc = 0, j = 0; j < CHANNEL_BITS; j++) {
-			if ((src_paired & (1UL << j)) == 0)
-				continue;
-			if (ic >= dst_chan || jc >= src_chan)
+		for (jc = 0, j = 0; jc < src_chan; j++) {
+			if (j < CHANNEL_BITS && (src_paired & (1UL << j)) == 0)
 				continue;
 
 			if (ic == 0)
@@ -752,7 +750,7 @@ done:
 		if (sb2.pos > 0)
 			spa_log_info(mix->log, "     %s", str2);
 		if (sb1.pos > 0) {
-			spa_log_info(mix->log, "%-4.4s %s   %f",
+			spa_log_info(mix->log, "%03d %-4.4s %s   %f", ic,
 					dst_mask == 0 ? "UNK" :
 					spa_debug_type_find_short_name(spa_type_audio_channel, i + _SH),
 					str1, sum);
@@ -825,7 +823,6 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 	for (i = 0; i < dst_chan; i++) {
 		for (j = 0; j < src_chan; j++) {
 			float v = mix->matrix[i][j];
-			spa_log_debug(mix->log, "%d %d: %f", i, j, v);
 			if (i == 0 && j == 0)
 				t = v;
 			else if (t != v)
@@ -840,7 +837,31 @@ static void impl_channelmix_set_volume(struct channelmix *mix, float volume, boo
 	SPA_FLAG_UPDATE(mix->flags, CHANNELMIX_FLAG_IDENTITY,
 			dst_chan == src_chan && SPA_FLAG_IS_SET(mix->flags, CHANNELMIX_FLAG_COPY));
 
-	spa_log_debug(mix->log, "flags:%08x", mix->flags);
+	if (SPA_UNLIKELY(spa_log_level_topic_enabled(mix->log,
+			SPA_LOG_TOPIC_DEFAULT, SPA_LOG_LEVEL_DEBUG))) {
+		char str1[1024], str2[1024];
+		struct spa_strbuf sb1, sb2;
+		spa_strbuf_init(&sb2, str2, sizeof(str2));
+		for (i = 0; i < dst_chan; i++) {
+			spa_strbuf_init(&sb1, str1, sizeof(str1));
+			for (j = 0; j < src_chan; j++) {
+				float v = mix->matrix[i][j];
+				if (i == 0)
+					spa_strbuf_append(&sb2, " %03d  ", j);
+				if (v == 0.0f)
+					spa_strbuf_append(&sb1, "      ");
+				else
+					spa_strbuf_append(&sb1, "%1.3f ", v);
+			}
+			if (i == 0 && sb2.pos > 0)
+				spa_log_debug(mix->log, "      %s", str2);
+			if (sb1.pos > 0)
+				spa_log_debug(mix->log, "%03d  %s %03d", i, str1, i);
+		}
+		if (sb2.pos > 0)
+			spa_log_debug(mix->log, "      %s", str2);
+		spa_log_debug(mix->log, "flags:%08x", mix->flags);
+	}
 }
 
 static void impl_channelmix_free(struct channelmix *mix)

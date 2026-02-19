@@ -63,6 +63,9 @@ SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.native");
 
 #define RFCOMM_MESSAGE_MAX_LENGTH 256
 
+#define BT_CODEC_CVSD		0x02
+#define BT_CODEC_MSBC		0x05
+
 enum {
 	HFP_AG_INITIAL_CODEC_SETUP_NONE = 0,
 	HFP_AG_INITIAL_CODEC_SETUP_SEND,
@@ -112,6 +115,7 @@ struct impl {
 	int hfp_default_speaker_volume;
 
 	struct spa_source sco;
+	unsigned int hfphsp_sco_datapath;
 
 	const struct spa_bt_quirks *quirks;
 
@@ -295,6 +299,33 @@ static const struct media_codec *codec_list_best(struct impl *backend, struct sp
 
 	spa_assert_not_reached();
 	return NULL;
+}
+
+static void sco_offload_btcodec(struct impl *backend, int sock, bool msbc)
+{
+	int err;
+	char buffer[255];
+	struct bt_codecs *codecs;
+
+	if (backend->hfphsp_sco_datapath == HFP_SCO_DEFAULT_DATAPATH)
+		return;
+
+	spa_log_info(backend->log, "sock(%d) msbc(%d)", sock, msbc);
+
+	memset(buffer, 0, sizeof(buffer));
+	codecs = (void *)buffer;
+	if (msbc)
+		codecs->codecs[0].id = BT_CODEC_MSBC;
+	else
+		codecs->codecs[0].id = BT_CODEC_CVSD;
+	codecs->num_codecs = 1;
+	codecs->codecs[0].data_path_id = backend->hfphsp_sco_datapath;
+
+	err = setsockopt(sock, SOL_BLUETOOTH, BT_CODEC, codecs, sizeof(buffer));
+	if (err < 0)
+		spa_log_error(backend->log, "ERROR: %s (%d)", strerror(errno), errno);
+	else
+		spa_log_info(backend->log, "set offload codec succeeded");
 }
 
 static DBusHandlerResult profile_release(DBusConnection *conn, DBusMessage *m, void *userdata)
@@ -2595,6 +2626,8 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
 		}
 	}
 
+	sco_offload_btcodec(backend, sock, transparent);
+
 	return spa_steal_fd(sock);
 }
 
@@ -4101,6 +4134,14 @@ static void parse_hfp_default_volumes(struct impl *backend, const struct spa_dic
 		backend->hfp_default_speaker_volume = SPA_BT_VOLUME_HS_MAX;
 }
 
+static void parse_sco_datapath(struct impl *backend, const struct spa_dict *info)
+{
+	backend->hfphsp_sco_datapath = HFP_SCO_DEFAULT_DATAPATH;
+
+	spa_atou32(spa_dict_lookup(info, "bluez5.hw-offload-datapath"),
+		&backend->hfphsp_sco_datapath, 10);
+}
+
 static const struct spa_bt_backend_implementation backend_impl = {
 	SPA_VERSION_BT_BACKEND_IMPLEMENTATION,
 	.free = backend_native_free,
@@ -4163,6 +4204,7 @@ struct spa_bt_backend *backend_native_new(struct spa_bt_monitor *monitor,
 	parse_hfp_disable_nrec(backend, info);
 	parse_hfp_default_volumes(backend, info);
 	parse_hfp_pts(backend, info);
+	parse_sco_datapath(backend, info);
 
 #ifdef HAVE_BLUEZ_5_BACKEND_HSP_NATIVE
 	if (!dbus_connection_register_object_path(backend->conn,
