@@ -30,7 +30,7 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/capabilities.h>
 
-#include "base64.h"
+#include "utils.h"
 
 /* Comment out to test device ID negotation backward compatibility. */
 #define SUPPORT_DEVICE_ID_NEGOTIATION 1
@@ -450,8 +450,9 @@ discover_capabilities(struct data *data, const struct spa_pod *param)
 				return;
 
 			spa_dict_for_each(it, &dict) {
-				if (spa_streq(it->key, PW_CAPABILITY_DEVICE_ID_NEGOTIATION) &&
-				    spa_streq(it->value, "true")) {
+				if (spa_streq(it->key, PW_CAPABILITY_DEVICE_ID_NEGOTIATION)) {
+				    int version = atoi(it->value);
+				    if (version >= 1)
 					data->device_negotiation_supported = true;
 				}
 			}
@@ -783,23 +784,26 @@ int main(int argc, char *argv[])
 	size_t i;
 
 	ms = open_memstream(&device_ids, &device_ids_size);
-	fprintf(ms, "[");
+	fprintf(ms, "{\"available-devices\": [");
 	for (i = 0; i < SPA_N_ELEMENTS(devices); i++) {
 		dev_t device_id = makedev(devices[i].major, devices[i].minor);
-		char device_id_encoded[256];
+		char *device_id_encoded;
 
-		base64_encode((const uint8_t *) &device_id, sizeof (device_id), device_id_encoded, '\0');
+		device_id_encoded = encode_hex((const uint8_t *) &device_id, sizeof (device_id));
+
 		if (i > 0)
 			fprintf(ms, ",");
 		fprintf(ms, "\"%s\"", device_id_encoded);
+
+		free(device_id_encoded);
 	}
-	fprintf(ms, "]");
+	fprintf(ms, "]}");
 	fclose(ms);
 #endif /* SUPPORT_DEVICE_IDS_LIST */
 
 	params[n_params++] =
 		spa_param_dict_build_dict(&b, SPA_PARAM_Capability,
-			&SPA_DICT_ITEMS(SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_ID_NEGOTIATION, "true"),
+			&SPA_DICT_ITEMS(SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_ID_NEGOTIATION, "1"),
 #ifdef SUPPORT_DEVICE_IDS_LIST
 					SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_IDS, device_ids)
 #endif /* SUPPORT_DEVICE_IDS_LIST */

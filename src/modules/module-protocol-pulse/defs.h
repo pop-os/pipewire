@@ -39,6 +39,8 @@
 #define MODULE_INDEX_MASK	0xfffffffu
 #define MODULE_FLAG		(1u << 29)
 
+#define STREAM_CREATE_TIMEOUT	(35 * SPA_NSEC_PER_SEC)
+
 #define DEFAULT_SINK		"@DEFAULT_SINK@"
 #define DEFAULT_SOURCE		"@DEFAULT_SOURCE@"
 #define DEFAULT_MONITOR		"@DEFAULT_MONITOR@"
@@ -324,5 +326,6 @@ static inline uint32_t port_type_value(const char *port_type)
 #define METADATA_TARGET_NODE            "target.node"
 #define METADATA_TARGET_OBJECT          "target.object"
 #define METADATA_FEATURES_AUDIO_MONO    "node.features.audio.mono"
+#define METADATA_BLUETOOTH_HEADSET_AUTOSWITCH "bluetooth.autoswitch-to-headset-profile"
 
 #endif /* PULSE_SERVER_DEFS_H */

@@ -135,7 +135,8 @@ extern "C" {
 #define PROFILE_HFP_AG	"/Profile/HFPAG"
 #define PROFILE_HFP_HF	"/Profile/HFPHF"
 
-#define HSP_HS_DEFAULT_CHANNEL  3
+#define HSP_HS_DEFAULT_CHANNEL      3
+#define HFP_SCO_DEFAULT_DATAPATH    0
 
 #define SOURCE_ID_BLUETOOTH	0x1	/* Bluetooth SIG */
 #define SOURCE_ID_USB		0x2	/* USB Implementer's Forum */
@@ -378,6 +379,7 @@ struct spa_bt_adapter {
 	unsigned int has_media1_interface:1;
 	unsigned int le_audio_bcast_supported:1;
 	unsigned int tx_timestamping_supported:1;
+	struct spa_list remote_endpoint_list;
 };
 
 enum spa_bt_form_factor {

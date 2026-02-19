@@ -29,7 +29,7 @@
 #include <pipewire/pipewire.h>
 #include <pipewire/capabilities.h>
 
-#include "base64.h"
+#include "utils.h"
 
 /* Comment out to test device ID negotation backward compatibility. */
 #define SUPPORT_DEVICE_ID_NEGOTIATION 1
@@ -372,46 +372,56 @@ collect_device_ids(struct data *data, const char *json)
 	int len;
 	const char *value;
 	struct spa_json sub;
+	char key[1024];
 
 	if ((len = spa_json_begin(&it, json, strlen(json), &value)) <= 0) {
 		fprintf(stderr, "invalid device IDs value\n");
 		return;
 	}
-	if (!spa_json_is_array(value, len)) {
-		fprintf(stderr, "device IDs not array\n");
+	if (!spa_json_is_object(value, len)) {
+		fprintf(stderr, "device IDs not object\n");
 		return;
 	}
 
 	spa_json_enter(&it, &sub);
-	while ((len = spa_json_next(&sub, &value)) > 0) {
-		char *string;
-		union {
-			dev_t device_id;
-			uint8_t buffer[1024];
-		} dec;
+	while ((len = spa_json_object_next(&sub, key, sizeof(key), &value)) > 0) {
+		struct spa_json devices_sub;
 
-		string = alloca(len + 1);
-
-		if (!spa_json_is_string(value, len)) {
-			fprintf(stderr, "device ID not string\n");
+		if (!spa_json_is_array(value, len)) {
+			fprintf(stderr, "available-devices not array\n");
 			return;
 		}
 
-		if (spa_json_parse_string(value, len, string) <= 0) {
-			fprintf(stderr, "invalid device ID string\n");
-			return;
+		spa_json_enter(&sub, &devices_sub);
+		while ((len = spa_json_next(&devices_sub, &value)) > 0) {
+			char *string;
+			union {
+				dev_t device_id;
+				uint8_t buffer[1024];
+			} dec;
+
+			string = alloca(len + 1);
+
+			if (!spa_json_is_string(value, len)) {
+				fprintf(stderr, "device ID not string\n");
+				return;
+			}
+
+			if (spa_json_parse_string(value, len, string) <= 0) {
+				fprintf(stderr, "invalid device ID string\n");
+				return;
+			}
+
+			if (decode_hex(string, dec.buffer, sizeof (dec.buffer)) < 0) {
+				fprintf(stderr, "invalid device ID string\n");
+				return;
+			}
+
+			fprintf(stderr, "discovered device ID %u:%u\n",
+				major(dec.device_id), minor(dec.device_id));
+
+			data->device_ids[data->n_device_ids++] = dec.device_id;
 		}
-
-		if (base64_decode(string, strlen(string),
-				  (uint8_t *)&dec.device_id) < sizeof(dev_t)) {
-			fprintf(stderr, "invalid device ID\n");
-			return;
-		}
-
-		fprintf(stderr, "discovered device ID %u:%u\n",
-			major(dec.device_id), minor(dec.device_id));
-
-		data->device_ids[data->n_device_ids++] = dec.device_id;
 	}
 }
 
@@ -438,8 +448,9 @@ discover_capabilities(struct data *data, const struct spa_pod *param)
 				return;
 
 			spa_dict_for_each(it, &dict) {
-				if (spa_streq(it->key, PW_CAPABILITY_DEVICE_ID_NEGOTIATION) &&
-				    spa_streq(it->value, "true")) {
+				if (spa_streq(it->key, PW_CAPABILITY_DEVICE_ID_NEGOTIATION)) {
+				    int version = atoi(it->value);
+				    if (version >= 1)
 					data->device_negotiation_supported = true;
 				} else if (spa_streq(it->key, PW_CAPABILITY_DEVICE_IDS)) {
 					collect_device_ids(data, it->value);
@@ -787,7 +798,7 @@ int main(int argc, char *argv[])
 	params[n_params++] =
 		spa_param_dict_build_dict(&b, SPA_PARAM_Capability,
 			&SPA_DICT_ITEMS(
-				SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_ID_NEGOTIATION, "true")));
+				SPA_DICT_ITEM(PW_CAPABILITY_DEVICE_ID_NEGOTIATION, "1")));
 #endif
 
 	/* now connect the stream, we need a direction (input/output),
