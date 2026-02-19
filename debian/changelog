@@ -1,10 +1,13 @@
-pipewire (1.5.85-2) UNRELEASED; urgency=medium
+pipewire (1.6.0-1) UNRELEASED; urgency=medium
 
   [ Luca Boccassi ]
   * Use dh sequence instead of manual call in d/rules
   * Drop unused adduser dependency
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 19 Feb 2026 11:31:58 +0100
+  [ Dylan Aïssi ]
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 19 Feb 2026 11:34:16 +0100
 
 pipewire (1.5.85-1) experimental; urgency=medium
 
