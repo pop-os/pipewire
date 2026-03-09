@@ -99,6 +99,8 @@ struct stream {
 	unsigned int pending:1;
 	unsigned int is_idle:1;
 	unsigned int is_paused:1;
+	unsigned int fail_on_suspend:1;
+	unsigned int is_suspended:1;
 };
 
 struct stream *stream_new(struct client *client, enum stream_type type, uint32_t create_tag,
@@ -116,6 +118,7 @@ int stream_send_underflow(struct stream *stream, int64_t offset);
 int stream_send_overflow(struct stream *stream);
 int stream_send_killed(struct stream *stream);
 int stream_send_started(struct stream *stream);
+int stream_send_suspended(struct stream *stream, bool suspended);
 int stream_send_request(struct stream *stream);
 int stream_update_minreq(struct stream *stream, uint32_t minreq);
 int stream_send_moved(struct stream *stream, uint32_t peer_index, const char *peer_name);

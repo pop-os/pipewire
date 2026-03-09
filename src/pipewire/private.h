@@ -7,10 +7,6 @@
 
 /** \privatesection */
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <sys/socket.h>
 #include <sys/types.h> /* for pthread_t */
 
@@ -23,6 +19,10 @@ extern "C" {
 #include <spa/utils/ratelimit.h>
 #include <spa/utils/result.h>
 #include <spa/utils/type-info.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #if defined(__FreeBSD__) || defined(__MidnightBSD__) || defined(__GNU__)
 struct ucred {
@@ -269,9 +269,6 @@ struct pw_impl_client {
 	unsigned int destroyed:1;
 
 	int refcount;
-
-	/* v2 compatibility data */
-	void *compat_v2;
 };
 
 #define pw_global_emit(o,m,v,...) spa_hook_list_call(&o->listener_list, struct pw_global_events, m, v, ##__VA_ARGS__)
@@ -342,18 +339,6 @@ pw_core_resource_errorf(struct pw_resource *resource, uint32_t id, int seq,
 	pw_core_resource_errorv(resource, id, seq, res, message, args);
 	va_end(args);
 }
-
-struct pw_loop_callbacks {
-#define PW_VERSION_LOOP_CALLBACKS	0
-	uint32_t version;
-
-	int (*check) (void *data, struct pw_loop *loop);
-};
-
-void
-pw_loop_set_callbacks(struct pw_loop *loop, const struct pw_loop_callbacks *cb, void *data);
-
-int pw_loop_check(struct pw_loop *loop);
 
 #define ensure_loop(loop,...) ({							\
 	int res = pw_loop_check(loop);							\
@@ -446,6 +431,7 @@ struct pw_data_loop {
 	char *class;
 	char **classes;
 	int rt_prio;
+	bool reset_on_fork;
 	struct spa_hook_list listener_list;
 
 	struct spa_thread_utils *thread_utils;
@@ -798,6 +784,9 @@ struct pw_impl_node {
 	unsigned int sync:1;		/**< the sync-groups are active */
 	unsigned int async:1;		/**< async processing, one cycle latency */
 	unsigned int lazy:1;		/**< the graph is lazy scheduling */
+	unsigned int exclusive:1;	/**< ports can only be linked once */
+	unsigned int leaf:1;		/**< node only produces/consumes data */
+	unsigned int reliable:1;	/**< ports need reliable tee */
 
 	uint32_t transport;		/**< latest transport request */
 
@@ -913,6 +902,7 @@ struct pw_impl_port_implementation {
 #define pw_impl_port_emit_param_changed(p,i)		pw_impl_port_emit(p, param_changed, 1, i)
 #define pw_impl_port_emit_latency_changed(p)		pw_impl_port_emit(p, latency_changed, 2)
 #define pw_impl_port_emit_tag_changed(p)		pw_impl_port_emit(p, tag_changed, 3)
+#define pw_impl_port_emit_capability_changed(p)		pw_impl_port_emit(p, capability_changed, 4)
 
 #define PW_IMPL_PORT_IS_CONTROL(port)	SPA_FLAG_MASK((port)->flags, \
 						PW_IMPL_PORT_FLAG_BUFFERS|PW_IMPL_PORT_FLAG_CONTROL,\
@@ -973,15 +963,23 @@ struct pw_impl_port {
 	} rt;					/**< data only accessed from the data thread */
 	unsigned int destroying:1;
 	unsigned int passive:1;
+	unsigned int auto_path:1;		/* path was automatically generated */
+	unsigned int auto_name:1;		/* name was automatically generated */
+	unsigned int auto_alias:1;		/* alias was automatically generated */
 	int busy_count;
 
 	struct spa_latency_info latency[2];	/**< latencies */
 	unsigned int have_latency_param:1;
 	unsigned int ignore_latency:1;
 	unsigned int have_latency:1;
+	unsigned int exclusive:1;		/**< port can only be linked once */
+	unsigned int reliable:1;		/**< port needs reliable tee */
 
 	unsigned int have_tag_param:1;
 	struct spa_pod *tag[2];			/**< tags */
+
+	unsigned int have_peer_capability_param:1;
+	struct spa_pod *cap[2];		/**< capabilities */
 
 	void *owner_data;		/**< extra owner data */
 	void *user_data;                /**< extra user data */
@@ -1037,6 +1035,7 @@ struct pw_impl_link {
 
 	void *user_data;
 
+	unsigned int async:1;
 	unsigned int registered:1;
 	unsigned int feedback:1;
 	unsigned int preparing:1;
@@ -1266,19 +1265,6 @@ struct pw_control {
 	void *user_data;
 };
 
-/** Find a good format between 2 ports */
-int pw_context_find_format(struct pw_context *context,
-			struct pw_impl_port *output,
-			uint32_t output_mix,
-			struct pw_impl_port *input,
-			uint32_t input_mix,
-			struct pw_properties *props,
-			uint32_t n_format_filters,
-			struct spa_pod **format_filters,
-			struct spa_pod **format,
-			struct spa_pod_builder *builder,
-			char **error);
-
 int pw_context_debug_port_params(struct pw_context *context,
 		struct spa_node *node, enum spa_direction direction,
 		uint32_t port_id, uint32_t id, int err, const char *debug, ...);
@@ -1350,6 +1336,7 @@ int pw_impl_port_set_param(struct pw_impl_port *port,
 int pw_impl_port_use_buffers(struct pw_impl_port *port, struct pw_impl_port_mix *mix, uint32_t flags,
 		struct spa_buffer **buffers, uint32_t n_buffers);
 
+int pw_impl_port_recalc_capability(struct pw_impl_port *port);
 int pw_impl_port_recalc_latency(struct pw_impl_port *port);
 int pw_impl_port_recalc_tag(struct pw_impl_port *port);
 

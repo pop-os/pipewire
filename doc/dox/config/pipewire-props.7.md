@@ -36,13 +36,96 @@ type. Other properties control settings of a specific kinds of device
 or node (ALSA, Bluetooth, ...), and have meaning only for those
 objects.
 
-Usually, all the properties are configured in the session manager
-configuration.  For how to configure them, see the session manager
-documentation. In minimal PipeWire setups without a session manager,
-they can be configured via
-\ref pipewire_conf__context_objects "context.objects in pipewire.conf(5)".
+# CUSTOMIZING PROPERTIES  @IDX@ props
 
-\see [WirePlumber configuration](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration.html)
+Usually, all device properties are configured in the session manager
+configuration, see the session manager documentation.
+Application properties are configured in
+``client.conf`` (for native PipeWire and ALSA applications),
+``pipewire-pulse.conf`` (for Pulseaudio applications), and
+``jack.conf`` (for JACK applications).
+
+In minimal PipeWire setups without a session manager,
+the device properties can be configured via
+\ref pipewire_conf__context_objects "context.objects in pipewire.conf(5)"
+when creating the devices.
+
+## Examples
+
+Device configuration using WirePlumber (requires WirePlumber restart to apply).
+See [WirePlumber configuration](https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration.html)
+```css
+# ~/.config/wireplumber/wireplumber.conf.d/custom-props.conf
+
+monitor.alsa.properties = {
+  alsa.udev.expose-busy = true
+}
+
+monitor.alsa.rules = [
+  {
+    matches = [ { device.name = "~alsa_card.pci-.*" } ],
+    actions = { update-props = { api.alsa.soft-mixer = true } }
+  },
+  {
+    matches = [ { node.name = "alsa_output.pci-0000_03_00.1.hdmi-stereo-extra3" } ]
+    actions = { update-props = { node.description = "Main Audio" } }
+  }
+]
+
+monitor.alsa-midi.properties = {
+  api.alsa.seq.ump = true
+}
+
+monitor.bluez.properties = {
+  bluez5.hfphsp-backend = ofono
+}
+
+monitor.bluez.rules = [
+  {
+    matches = [ { device.name = "~bluez_card.*" } ],
+    actions = { update-props = { bluez5.dummy-avrcp player = true } }
+  }
+]
+```
+
+Native client configuration (requires client application restart to apply).
+See \ref client_conf__stream_rules "pipewire-client.conf(5)"
+```css
+# ~/.config/pipewire/client.conf/custom-props.conf
+
+stream.rules = [
+  {
+    matches = [ { application.name = "pw-play" } ]
+    actions = { update-props = { node.description = "Some pw-cat stream" } }
+  }
+]
+```
+
+Pulseaudio client configuration (requires \ref page_man_pipewire-pulse_1 "pipewire-pulse(1)" restart to apply).
+See \ref pipewire-pulse_conf__stream_rules "pipewire-pulse.conf(5)"
+```css
+# ~/.config/pipewire/pipewire-pulse.conf/custom-props.conf
+
+stream.rules = [
+  {
+    matches = [ { application.name = "paplay" } ]
+    actions = { update-props = { node.description = "Some paplay stream" } }
+  }
+]
+```
+
+JACK client configuration (requires client restart to apply).
+See \ref jack_conf__match_rules "pipewire-jack.conf(5)"
+```css
+# ~/.config/pipewire/jack.conf/custom-props.conf
+
+jack.rules = [
+  {
+    matches = [ { client.name = "jack_delay" } ]
+    actions = { update-props = { node.description = "Some JACK node" } }
+  }
+]
+```
 
 # COMMON DEVICE PROPERTIES  @IDX@ props
 
@@ -91,12 +174,12 @@ ie. for example `device.Param.Props = { ... }` to set `Props`.
 
 @PAR@ device-prop  device.product.id # integer
 \parblock
-\copydoc PW_KEY_DEVICE_PRODUCT_NAME
+\copydoc PW_KEY_DEVICE_PRODUCT_ID
 \endparblock
 
 @PAR@ device-prop  device.product.name # string
 \parblock
-\copydoc PW_KEY_DEVICE_PRODUCT_ID
+\copydoc PW_KEY_DEVICE_PRODUCT_NAME
 \endparblock
 
 @PAR@ device-prop  device.class # string
@@ -143,11 +226,14 @@ real or virtual devices.
 
 These contain properties to identify the node or to display the node in a GUI application.
 
-@PAR@ node-prop  node.name
+@PAR@ node-prop  node.name    # string
 A (unique) name for the node. This is usually set on sink and sources to identify them
 as targets for linking by the session manager.
 
-@PAR@ node-prop  node.description
+@PAR@ node-prop  node.nick    # string
+A short name for the node.
+
+@PAR@ node-prop  node.description    # string
 A human readable description of the node or stream.
 
 @PAR@ node-prop  media.name
@@ -338,13 +424,13 @@ a sink or source.
 @PAR@ node-prop  node.exclusive = false
 If this node wants to be linked exclusively to the sink/source.
 
+@PAR@ node-prop  target.object = <node.name|object.serial>
+Where the node should link to, this can be a node.name or an object.serial.
+
 @PAR@ node-prop  node.target = <node.name|object.id>
 Where this node should be linked to. This can be a node.name or an object.id of a node. This property is
 deprecated, the target.object property should be used instead, which uses the more unique object.serial as
 a possible target.
-
-@PAR@ node-prop  target.object = <node.name|object.serial>
-Where the node should link to, this can be a node.name or an object.serial.
 
 @PAR@ node-prop  node.dont-reconnect = false
 \parblock
@@ -354,6 +440,13 @@ This property also inhibits that the node is moved to another sink/source.
 Note that if a stream should appear/disappear in sync with the target, a session manager (WirePlumber) script
 should be written instead.
 \endparblock
+
+@PAR@ node-prop  node.dont-fallback = false
+If linking this node to its specified target does not succeed, session
+manager should not fall back to linking it to the default target.
+
+@PAR@ node-prop  node.dont-move = false
+Whether the node target may be changed using metadata.
 
 @PAR@ node-prop  node.passive = false
 \parblock
@@ -370,6 +463,13 @@ Instruct the session manager to not remix the channels of a stream. Normally the
 
 @PAR@ node-prop  priority.session    # integer
 The priority for selecting this node as the default source or sink.
+
+@PAR@ node-prop  session.suspend-timeout-seconds = 3  # float
+Timeout in seconds, after which an idle node is suspended.
+Value ``0`` means the node will not be suspended.
+
+@PAR@ node-prop  state.restore-props = true
+Whether session manager should save state for this node.
 
 ## Format Properties
 
@@ -447,16 +547,138 @@ Below is an explanation of the options that can be tuned in the sample converter
 \parblock
 The quality of the resampler. from 0 to 14, the default is 4.
 
+The quality of a resampler depends on multiple factors:
+
+1. Anti-Aliasing, how well are unwanted frequencies filtered out. Poor anti-aliasing
+   will make the original inaudible frequencies audible as distortion and noise.
+2. Cutoff frequency. At what frequency the transition band will start. This is the
+   frequency where the signal will start to fade out. A too low cutoff might remove too
+   much of the high frequencies and make the sound dull. A too high cutoff might cause
+   aliasing. The cutoff frequency is usually expressed as a ratio of the Nyquist
+   frequency, 1.0 being the Nyquist frequency (frequency/2).
+3. Transition band length. How quickly the unwanted frequencies are filtered out. A
+   shorter transition band requires longer filters with more CPU and latency but
+   causes less aliasing. The transition band length is expressed as a ratio of the
+   Nyquist frequency.
+4. Stopband attenuation. How well the unwanted frequencies are filtered out. This is
+   usually measured in dB. 96dB is below audible on CD quality audio, 150dB is below
+   the precision of floating point values.
+5. CPU usage. Better anti-aliasing needs longer filters and is therefore more CPU
+   intensive.
+6. Latency. Longer filters have a higher Latency. In real-time application the latency
+   should be kept as low as possible. The required latency is usually
+   (filter-length/2)/source-sample-rate, so a resample filter with length of 128 on a
+   48Khz signal has 1.3ms ((128/2)/48000) of latency.
+7. Ringing. A too short transition band length might cause ringing because of how the
+   sinc filters work. This can sound like flutter on sharp attacks in the audio signal.
+
 Increasing the quality will result in better cutoff and less aliasing at the expense of
-(much) more CPU consumption. The default quality of 4 has been selected as a good compromise
-between quality and performance with no artifacts that are well below the audible range.
+(much) more CPU consumption, latency and more ringing. The default quality of 4 has
+been selected as a good compromise between quality and performance with no artifact
+s that are well below the audible range.
+
+The default resampler quality for the exp window results in a cutoff of 0.87 and a
+filter size of about 48 taps. It has a Stopband attenuation of about 150 dB.
 
 See [Infinite Wave](https://src.infinitewave.ca/) for a comparison of the performance.
+
+You can tune the resampler in a variaty of ways:
+
+* Tune the cutoff frequency. Increase the cutoff to preserve more high frequencies at the
+  expense of more aliasing.
+* Tune the transition band. Reduce the transition band to better filter out the frequencies
+  around the cutoff frequency and get less aliasing at the expense of more ringing, CPU and
+  Latency. This can be done by increasing the number of taps.
+* Tune the stopband attenuation. Increase the attenuation to reduce aliasing at the expense
+  of a wider transition band. This can only be done on the kaiser window, the exp and
+  blackman window have 150dB and 96dB attenuation respecively.
 \endparblock
 
 @PAR@ node-prop  resample.disable = false
 Disable the resampler entirely. The node will only be able to negotiate with the graph
 when the samplerates are compatible.
+
+@PAR@ node-prop  resample.window = exp
+\parblock
+The resampler window function to use. By default an exponential window function is used
+that gives a good balance between complexitiy and quality.
+
+You can also specify a blackman or kaiser window, both with different tradeoffs. The
+kaiser window has some extra tunable parameters for the specific use cases.
+\endparblock
+
+@PAR@ node-prop  resample.cutoff = 0.0
+\parblock
+The resampler cutoff frequency. This is a value between 0.0 and 1.0. A value of 0.0 will
+use a predefined value based on the resampler quality.
+
+A higher cutoff value will preserve more high frequency content but depending on the
+size of the transition band will cause more aliasing.
+
+The default quality 4 setting for all windows is 0.87.
+\endparblock
+
+@PAR@ node-prop  resample.n-taps = 0
+\parblock
+The resampler number of taps. A value of 0 will use a predefined value based on
+the resampler quality or other window function parameters.
+
+A higher number of taps will use more CPU, Latency and cause more ringing but will
+reduce aliasing.
+
+The default quality setting for the exp window is 48.
+\endparblock
+
+@PAR@ node-prop  resample.param.exp.A = 0.0
+\parblock
+The A parameter for the exponential window function. A value of 0.0 will use a predefined
+value based on the quality when the exp window is in use.
+
+The default setting for the exp window is 16.97789.
+\endparblock
+
+@PAR@ node-prop  resample.param.blackman.alpha = 0.0
+\parblock
+The alpha value of the blackman function. A value of 0.0 will use a predefined
+value based on the quality when the blackman window is in use.
+
+The default quality setting for the blackman window is 0.16.
+\endparblock
+
+@PAR@ node-prop  resample.param.kaiser.stopband-attenuation = 0.0
+\parblock
+The kaiser window stopband attenuation parameter in dB. A default value of 0.0 will use a
+predefined value based on the quality.
+
+A higher value will filter out more of the unwanted frequencies and reduce aliasing at the
+expense of a larger transition band. A value of 96dB is below the dynamic range of CD quality
+audio. 150dB is the limit of the precision of the resampler.
+
+The default quality setting for the kaiser window is 130.000000.
+\endparblock
+
+@PAR@ node-prop  resample.param.kaiser.transition-bandwidth = 0.0
+\parblock
+The kaiser window transition bandwidth parameter. A default value of 0.0 will use a
+predefined value based on the quality.
+
+A smaller transition band will cause a steeper cutoff with less unwanted frequencies
+in the final signal at the expense of more a larger filter and more CPU usage and
+latency. A smaller transition band can also cause more ringing.
+
+The default quality setting for the kaiser window is 0.177032
+\endparblock
+
+@PAR@ node-prop  resample.param.kaiser.alpha = 0.0
+\parblock
+The kaiser window alpha parameter. A default value of 0.0 will calculate an alpha value
+based on the stopband-attenuation and transition-bandwidth parameters.
+
+This value is usually calculated from the other parameters but can be set explicitly
+with this property.
+
+The default quality setting for the kaiser window is 4.254931.
+\endparblock
 
 ## Channel Mixer Parameters
 
@@ -640,8 +862,12 @@ See \ref spa_param_port_config for the meaning.
 
 ## Monitor properties
 
-@PAR@ monitor-prop  alsa.use-acp    # boolean
+@PAR@ monitor-prop  alsa.use-acp = true      # boolean
 Use \ref monitor-prop__alsa_card_profiles "ALSA Card Profiles" (ACP) for device configuration.
+This autodetects available ALSA devices and configures port and hardware mixers.
+
+@PAR@ monitor-prop  alsa.use-ucm             # boolean
+Enable or disable UCM for all devices. Default: unset.
 
 @PAR@ monitor-prop  alsa.udev.expose-busy    # boolean
 Expose the ALSA card even if it is busy/in use. Default false. This can be useful when some
@@ -658,7 +884,7 @@ When ACP is enabled and a UCM configuration is available for a device, by
 default it is used instead of the ACP profiles. This option allows you to
 disable this and use the ACP profiles instead.
 
-This option does nothing if `api.alsa.use-acp` is set to `false`.
+This option does nothing if `alsa.use-acp` is set to `false`.
 \endparblock
 
 @PAR@ device-prop  api.alsa.soft-mixer = false  # boolean
@@ -718,6 +944,13 @@ some devices.
 \copydoc SPA_KEY_API_ALSA_SPLIT_ENABLE
 \endparblock
 
+@PAR@ device-prop api.acp.disable-pro-audio = false  # boolean
+Disable the "Pro Audio" profile for this device.
+
+@PAR@ device-prop api.acp.use-eld-channels = false  # boolean
+Use the channel count and mapping the connected HDMI device
+provides via ELD information.
+
 ## Node properties
 
 @PAR@ node-prop  audio.channels    # integer
@@ -731,6 +964,9 @@ The audio format to open the device in. By default this is "UNKNOWN", which will
 
 @PAR@ node-prop  audio.position    # JSON array of strings
 The audio position of the channels in the device. This is auto detected based on the profile. You can configure an array of channel positions, like "[ FL, FR ]".
+
+@PAR@ node-prop  audio.layout    # string
+The audio layout of the channels in the device. You can use any of the predefined layouts, like "Stereo", "5.1" etc.
 
 @PAR@ node-prop  audio.allowed-rates    # JSON array of integers
 \parblock
@@ -778,6 +1014,12 @@ Setting this to 0 makes htimestamp never get disabled.
 Disable timer-based scheduling, and use IRQ for scheduling instead.
 The "Pro Audio" profile will usually enable this setting, if it is expected it works on the hardware.
 
+@PAR@ node-prop  api.alsa.dll-bandwidth-max    # double
+Sets the maximum bandwidth of the DLL (delay-locked loop) filter used to smooth out rate adjustments.
+The default value may be too responsive in some scenarios.
+For example, with UAC2 pitch control, the host reacts more slowly compared to local resampling,
+so using a lower bandwidth helps avoid oscillations or instability.
+
 @PAR@ node-prop  api.alsa.auto-link = false    # boolean
 Link follower PCM devices to the driver PCM device when using IRQ-based scheduling.
 The "Pro Audio" profile will usually enable this setting, if it is expected it works on the hardware.
@@ -791,10 +1033,16 @@ Static set the device systemic latency, in nanoseconds.
 @PAR@ node-prop  api.alsa.path    # string
 UNDOCUMENTED
 
+@PAR@ node-prop  api.alsa.pcm.card  # integer
+Card index to open. Usually determined from `api.alsa.path`.
+
 @PAR@ node-prop  api.alsa.open.ucm    # boolean
 Open device using UCM.
 
 @PAR@ node-prop  api.alsa.bind-ctls    # boolean
+UNDOCUMENTED
+
+@PAR@ node-prop  api.alsa.bind-ctl.NAME   # boolean
 UNDOCUMENTED
 
 @PAR@ node-prop  iec958.codecs    # JSON array of string
@@ -818,6 +1066,34 @@ Informative property.
 Informative property.
 \endparblock
 
+@PAR@ node-prop  api.alsa.dsd-lsb = false  # boolean
+Use LSB bit order for DSD audio output.
+
+
+# ALSA MIDI PROPERTIES  @IDX@ props
+
+## Node properties
+
+For ALSA MIDI in Wireplumber, MIDI bridge node properties are
+configured in the monitor properties.
+
+@PAR@ monitor-prop  api.alsa.seq.ump = true         # boolean
+Use MIDI 2.0 if possible.
+
+@PAR@ monitor-prop  api.alsa.seq.min-pool = 500     # integer
+UNDOCUMENTED
+
+@PAR@ monitor-prop  api.alsa.seq.max-pool = 2000    # integer
+UNDOCUMENTED
+
+@PAR@ monitor-prop  clock.name = "clock.system.monotonic"  # string
+Clock to follow.
+
+@PAR@ monitor-prop  api.alsa.path = "default"   # string
+Sequencer device to use.
+
+@PAR@ monitor-prop  api.alsa.disable-longname = true  # boolean
+If card long name should not be passed to MIDI port.
 
 # BLUETOOTH PROPERTIES  @IDX@ props
 
@@ -864,6 +1140,15 @@ HFP/HSP backend (default: native). Available values: any, none, hsphfpd, ofono, 
 
 @PAR@ monitor-prop  bluez5.hfphsp-backend-native-modem   # string
 
+@PAR@ monitor-prop  bluez5.hfphsp-backend-native-pts   # boolean
+Enable specific workarounds for Bluetooth qualification.
+
+@PAR@ monitor-prop  bluez5.disable-dummy-call   # boolean
+By default a call status event is sent on audio stream connection/disconnection to
+workaround some headset timeout disconnection when the HFP HF is used by another
+application than telephony one, e.g. a conference application/website.
+This prevent to send this event.
+
 @PAR@ monitor-prop  bluez5.dummy-avrcp player   # boolean
 Register dummy AVRCP player. Some devices have wrongly functioning
 volume or playback controls if this is not enabled. Default: false
@@ -884,6 +1169,15 @@ HFP/HSP hardware offload SCO support (default: false).
 This feature requires a custom configuration that routes SCO audio to ALSA nodes,
 in a platform-specific way. See `tests/examples/bt-pinephone.lua` in WirePlumber for an example.
 Do not enable this setting if you don't know what all this means, as it won't work.
+\endparblock
+
+@PAR@ monitor-prop bluez5.hw-offload-datapath # integer
+\parblock
+HFP/HSP hardware offload data path ID (default: 0).
+
+This feature configures the SCO hardware‑offload data path for HFP/HSP using the Bluetooth 
+SIG–specified procedure. It is intended for advanced setups and vendor integrations. Do not 
+edit this unless required; incorrect values can disable SCO offload.
 \endparblock
 
 @PAR@ monitor-prop  bluez5.a2dp.opus.pro.channels = 3   # integer
@@ -917,6 +1211,7 @@ PipeWire Opus Pro audio profile duplex max bitrate.
 PipeWire Opus Pro audio profile duplex frame duration (1/10 ms).
 
 @PAR@ monitor-prop  bluez5.bcast_source.config = []  # JSON
+For a per-adapter configuration of multiple BIGs use an "adapter" entry in the BIG with the BD address.
 \parblock
 Example:
 ```
@@ -963,6 +1258,62 @@ Maximum number of octets supported per codec frame for the LC3 codec (default: 4
 @PAR@ monitor-prop  bluez5.bap-server-capabilities.max_frames		# integer
 Maximum number of codec frames supported per SDU for the LC3 codec (default: 2).
 
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.locations		# JSON or integer
+Sink audio locations of the server, as channel positions or PACS bitmask.
+Example: `FL,FR`
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.contexts		# integer
+Available sink contexts PACS bitmask of the the server.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.supported-contexts		# integer
+Supported sink contexts PACS bitmask of the the server.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.delay-min		# integer
+Minimum presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.delay-max		# integer
+Maximum presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.preferred-delay-min		# integer
+Minimum preferred presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.sink.preferred-delay-max		# integer
+Maximum preferred presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.locations		# JSON or integer
+Source audio locations of the server, as channel positions or PACS bitmask.
+Example: `FL,FR`
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.contexts		# integer
+Available source contexts PACS bitmask of the the server.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.supported-contexts		# integer
+Supported source contexts PACS bitmask of the the server.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.delay-min		# integer
+Minimum presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.delay-max		# integer
+Maximum presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.preferred-delay-min		# integer
+Minimum preferred presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop  bluez5.bap-server-capabilities.source.preferred-delay-max		# integer
+Maximum preferred presentation delay supported, in microseconds.
+
+@PAR@ monitor-prop bluez5.bap-server-tmap-features = null  # array of string
+Override advertised TMAP service features. See TMAP specification for their meaning.
+Possible values: "cg", "ct", "ums", "umr", "bms", "bmr".
+Default: none.
+
+@PAR@ monitor-prop bluez5.bap-server-gmap-features = null  # array of string
+Override advertised GMAP service features. See GMAP specification for their meaning.
+Possible values: "ugg", "ugt", "bgs", "bgr", "ugg-multiplex", "ugg-96kbps-source", "ugg-multisink",
+"ugt-source", "ugt-80kbps-source", "ugt-sink", "ugt-64kbps-sink", "ugt-multiplex", "ugt-multisink",
+"ugt-multisource", "bgs-96kbps", "bgr-multisink", "bgr-multiplex".
+Default: none.
+
 ## Device properties
 
 @PAR@ device-prop  bluez5.auto-connect   # boolean
@@ -997,6 +1348,37 @@ PipeWire Opus Pro Audio duplex encoding mode: audio, voip, lowdelay
 @PAR@ device-prop  bluez5.bap.cig = "auto"   # integer, or 'auto'
 Set CIG ID for BAP unicast streams of the device.
 
+@PAR@ device-prop  bluez5.bap.preset = "auto"  # string
+BAP QoS preset name that needed to be used with vendor config.
+This property is experimental.
+Available: "48_2_1", ... as in the BAP specification.
+
+@PAR@ device-prop  bluez5.bap.rtn  # integer
+BAP QoS preset name that needed to be used with vendor config.
+This property is experimental.
+Default: as per QoS preset.
+
+@PAR@ device-prop  bluez5.bap.latency  # integer
+BAP QoS latency that needs to be applied for vendor defined preset
+This property is experimental.
+Default: as QoS preset.
+
+@PAR@ device-prop  bluez5.bap.delay = 40000 # integer
+BAP QoS delay that needs to be applied for vendor defined preset
+This property is experimental.
+Default: as per QoS preset.
+
+@PAR@ device-prop  bluez5.framing = false # boolean
+BAP QoS framing that needs to be applied for vendor defined preset
+This property is experimental.
+Default: as per QoS preset.
+
+@PAR@ device-prop  bluez5.bap.force-target-latency = "balanced" # string
+BAP QoS target latency profile forced for QoS configuration selection.
+If not set or set to "balanced", both low-latency and high-reliabilty QoS configuration table are used.
+This property is experimental.
+Available: low-latency, high-reliabilty, balanced
+
 ## Node properties
 
 @PAR@ node-prop  bluez5.media-source-role   # string
@@ -1006,6 +1388,21 @@ this instance. Available values:
   - playback: playing stream to speakers
   - input: appear as source node.
 \endparblock
+
+@PAR@ node-prop  bluez5.decode-buffer.latency   # integer
+Applies on media source nodes and defines the target amount
+of samples to be buffered on the output of the decoder.
+Default: 0, which means it is automatically determined.
+
+@PAR@ node-prop  node.latency-offset-msec   # string
+Applies only for BLE MIDI nodes.
+Latency adjustment to apply on the node. Larger values add a
+constant latency, but reduces timing jitter caused by Bluetooth
+transport.
+
+@PAR@ node-prop bluez5.debug.iso-mono = false  # boolean
+Debugging option for forcing ISO sinks send identical packets out for
+all streams.
 
 # PORT PROPERTIES  @IDX@ props
 

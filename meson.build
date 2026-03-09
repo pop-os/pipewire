@@ -1,10 +1,10 @@
 project('pipewire', ['c' ],
-  version : '1.4.10',
+  version : '1.6.1',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
                       'c_std=gnu11',
-                      'cpp_std=c++17',
+                      'cpp_std=c++20',
                       'b_pie=true',
                       #'b_sanitize=address,undefined',
                       'buildtype=debugoptimized' ])
@@ -81,6 +81,8 @@ pkgconfig = import('pkgconfig')
 common_flags = [
   '-fvisibility=hidden',
   '-fno-strict-aliasing',
+  '-fno-strict-overflow',
+  '-DSPA_AUDIO_MAX_CHANNELS=128u',
   '-Werror=suggest-attribute=format',
   '-Wsign-compare',
   '-Wpointer-arith',
@@ -116,8 +118,8 @@ cc_flags = common_flags + [
   '-Werror=strict-prototypes',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
-
-cc_flags_native = cc_native.get_supported_arguments(cc_flags)
+add_project_arguments(cc_native.get_supported_arguments(cc_flags),
+                      language: 'c', native: true)
 
 have_cpp = add_languages('cpp', native: false, required : false)
 
@@ -277,11 +279,9 @@ endforeach
 cdata.set('HAVE_PIDFD_OPEN',
           cc.get_define('SYS_pidfd_open', prefix: '#include <sys/syscall.h>') != '')
 
-systemd = dependency('systemd', required: get_option('systemd'))
-systemd_dep = dependency('libsystemd',required: get_option('systemd'))
-summary({'systemd conf data': systemd.found()}, bool_yn: true)
+systemd_dep = dependency('libsystemd', required: get_option('libsystemd'))
 summary({'libsystemd': systemd_dep.found()}, bool_yn: true)
-cdata.set('HAVE_SYSTEMD', systemd.found() and systemd_dep.found())
+cdata.set('HAVE_SYSTEMD', systemd_dep.found())
 
 logind_dep = dependency(get_option('logind-provider'), required: get_option('logind'))
 summary({'logind': logind_dep.found()}, bool_yn: true)
@@ -321,7 +321,7 @@ cdata.set('HAVE_DBUS', dbus_dep.found())
 sdl_dep = dependency('sdl2', required : get_option('sdl2'))
 summary({'SDL2 (video examples)': sdl_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 drm_dep = dependency('libdrm', required : false)
-fftw_dep = dependency('fftw3f', required : false)
+fftw_dep = dependency('fftw3f', required : get_option('fftw'))
 summary({'fftw3f (filter-chain convolver)': fftw_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 cdata.set('HAVE_FFTW', fftw_dep.found())
 
@@ -340,12 +340,23 @@ endif
 pw_cat_ffmpeg = get_option('pw-cat-ffmpeg')
 ffmpeg = get_option('ffmpeg')
 if pw_cat_ffmpeg.allowed() or ffmpeg.allowed()
+  # libswscale is only used by videoconvert. FFmpeg might however be used for
+  # compressed audio (both for decoding said compressed audio and for parsing
+  # it in pw-cat). If users only care about audio, then libswscale would still
+  # become a requirement if its required flag is defined only by FFmpeg options.
+  # Make the videoconvert option a factor in swscale_dep as well to avoid this.
+  videoconvert = get_option('videoconvert')
   avcodec_dep = dependency('libavcodec', required: pw_cat_ffmpeg.enabled() or ffmpeg.enabled())
   avformat_dep = dependency('libavformat', required: pw_cat_ffmpeg.enabled())
+  avfilter_dep = dependency('libavfilter', required: ffmpeg.enabled())
   avutil_dep = dependency('libavutil', required: pw_cat_ffmpeg.enabled() or ffmpeg.enabled())
-  swscale_dep = dependency('libswscale', required: pw_cat_ffmpeg.enabled() or ffmpeg.enabled())
+  swscale_dep = dependency('libswscale', required: (pw_cat_ffmpeg.enabled() or ffmpeg.enabled()) and videoconvert.enabled())
 else
   avcodec_dep = dependency('', required: false)
+  avformat_dep = dependency('', required: false)
+  avfilter_dep = dependency('', required: false)
+  avutil_dep = dependency('', required: false)
+  swscale_dep = dependency('', required: false)
 endif
 cdata.set('HAVE_PW_CAT_FFMPEG_INTEGRATION', pw_cat_ffmpeg.allowed())
 
@@ -380,9 +391,6 @@ libusb_dep = dependency('libusb-1.0', required : get_option('libusb'))
 summary({'libusb (Bluetooth quirks)': libusb_dep.found()}, bool_yn: true, section: 'Backend')
 cdata.set('HAVE_LIBUSB', libusb_dep.found())
 
-cap_lib = dependency('libcap', required : false)
-cdata.set('HAVE_LIBCAP', cap_lib.found())
-
 glib2_dep = dependency('glib-2.0', required : get_option('flatpak'))
 summary({'GLib-2.0 (Flatpak support)': glib2_dep.found()}, bool_yn: true, section: 'Misc dependencies')
 flatpak_support = glib2_dep.found()
@@ -410,6 +418,7 @@ gst_deps_def = {
 
 gst_dep = []
 gst_dma_drm_found = false
+gst_shm_allocator_found = false
 foreach depname, kwargs: gst_deps_def
   dep = dependency(depname, required: gst_option, kwargs: kwargs)
   summary({depname: dep.found()}, bool_yn: true, section: 'GStreamer modules')
@@ -425,8 +434,12 @@ foreach depname, kwargs: gst_deps_def
 
   if depname == 'gstreamer-allocators-1.0' and dep.version().version_compare('>= 1.23.1')
     gst_dma_drm_found = true
+    gst_shm_allocator_found = true
   endif
 endforeach
+
+summary({'gstreamer SHM allocator': gst_shm_allocator_found}, bool_yn: true, section: 'Backend')
+cdata.set('HAVE_GSTREAMER_SHM_ALLOCATOR', gst_shm_allocator_found)
 
 # This code relies on the array being empty if any dependency was not found
 gst_dp_found = gst_dep.length() > 0
@@ -621,6 +634,8 @@ devenv.prepend('GST_PLUGIN_PATH', builddir / 'src'/ 'gst')
 devenv.prepend('ALSA_PLUGIN_DIR', builddir / 'pipewire-alsa' / 'alsa-plugins')
 devenv.prepend('LD_LIBRARY_PATH', builddir / 'pipewire-jack' / 'src')
 
+devenv.set('PIPEWIRE_LOG_SYSTEMD', 'false')
 devenv.set('PW_UNINSTALLED', '1')
+devenv.set('PW_BUILDDIR', meson.project_build_root())
 
 meson.add_devenv(devenv)

@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <errno.h>
+#include <limits.h>
 #include <arpa/inet.h>
 #include <bluetooth/bluetooth.h>
 
@@ -15,6 +16,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/utils/string.h>
 #include <spa/utils/json.h>
+#include <spa/utils/cleanup.h>
 #include <spa/debug/log.h>
 
 #include <lc3.h>
@@ -31,21 +33,38 @@ struct impl {
 	lc3_decoder_t dec[LC3_MAX_CHANNELS];
 
 	int samplerate;
+	int codec_samplerate;
 	int channels;
 	int frame_dus;
 	int framelen;
 	int samples;
 	unsigned int codesize;
+
+	uint16_t seqnum;
+};
+
+struct settings {
+	uint32_t locations;
+	uint32_t channel_allocation;
+	uint16_t supported_context;
+	uint16_t available_context;
+	bool sink;
+	bool duplex;
+	char *qos_name;
+	int retransmission;
+	int latency;
+	int64_t delay;
+	int framing;
+	char *force_target_latency;
 };
 
 struct pac_data {
-	const uint8_t *data;
+	const void *data;
 	size_t size;
+	const void *metadata;
+	size_t metadata_size;
 	int index;
-	uint32_t locations;
-	uint32_t channel_allocation;
-	bool sink;
-	bool duplex;
+	const struct settings *settings;
 };
 
 struct bap_qos {
@@ -58,6 +77,7 @@ struct bap_qos {
 	uint16_t latency;
 	uint32_t delay;
 	unsigned int priority;
+	char *tag;
 };
 
 typedef struct {
@@ -68,88 +88,60 @@ typedef struct {
 	uint8_t n_blks;
 	bool sink;
 	bool duplex;
+	uint16_t preferred_context;
 	unsigned int priority;
 } bap_lc3_t;
 
-static const struct {
-	uint32_t bit;
-	enum spa_audio_channel channel;
-} channel_bits[] = {
-	{ BAP_CHANNEL_MONO, SPA_AUDIO_CHANNEL_MONO },
-	{ BAP_CHANNEL_FL,   SPA_AUDIO_CHANNEL_FL },
-	{ BAP_CHANNEL_FR,   SPA_AUDIO_CHANNEL_FR },
-	{ BAP_CHANNEL_FC,   SPA_AUDIO_CHANNEL_FC },
-	{ BAP_CHANNEL_LFE,  SPA_AUDIO_CHANNEL_LFE },
-	{ BAP_CHANNEL_BL,   SPA_AUDIO_CHANNEL_RL },
-	{ BAP_CHANNEL_BR,   SPA_AUDIO_CHANNEL_RR },
-	{ BAP_CHANNEL_FLC,  SPA_AUDIO_CHANNEL_FLC },
-	{ BAP_CHANNEL_FRC,  SPA_AUDIO_CHANNEL_FRC },
-	{ BAP_CHANNEL_BC,   SPA_AUDIO_CHANNEL_BC },
-	{ BAP_CHANNEL_LFE2, SPA_AUDIO_CHANNEL_LFE2 },
-	{ BAP_CHANNEL_SL,   SPA_AUDIO_CHANNEL_SL },
-	{ BAP_CHANNEL_SR,   SPA_AUDIO_CHANNEL_SR },
-	{ BAP_CHANNEL_TFL,  SPA_AUDIO_CHANNEL_TFL },
-	{ BAP_CHANNEL_TFR,  SPA_AUDIO_CHANNEL_TFR },
-	{ BAP_CHANNEL_TFC,  SPA_AUDIO_CHANNEL_TFC },
-	{ BAP_CHANNEL_TC,   SPA_AUDIO_CHANNEL_TC },
-	{ BAP_CHANNEL_TBL,  SPA_AUDIO_CHANNEL_TRL },
-	{ BAP_CHANNEL_TBR,  SPA_AUDIO_CHANNEL_TRR },
-	{ BAP_CHANNEL_TSL,  SPA_AUDIO_CHANNEL_TSL },
-	{ BAP_CHANNEL_TSR,  SPA_AUDIO_CHANNEL_TSR },
-	{ BAP_CHANNEL_TBC,  SPA_AUDIO_CHANNEL_TRC },
-	{ BAP_CHANNEL_BFC,  SPA_AUDIO_CHANNEL_BC },
-	{ BAP_CHANNEL_BFL,  SPA_AUDIO_CHANNEL_BLC },
-	{ BAP_CHANNEL_BFR,  SPA_AUDIO_CHANNEL_BRC },
-	{ BAP_CHANNEL_FLW,  SPA_AUDIO_CHANNEL_FLW },
-	{ BAP_CHANNEL_FRW,  SPA_AUDIO_CHANNEL_FRW },
-	{ BAP_CHANNEL_LS,   SPA_AUDIO_CHANNEL_SL }, /* is it the right mapping? */
-	{ BAP_CHANNEL_RS,   SPA_AUDIO_CHANNEL_SR }, /* is it the right mapping? */
+struct config_data {
+	bap_lc3_t conf;
+	int pac_index;
+	struct settings settings;
 };
 
-#define BAP_QOS(name_, rate_, duration_, framing_, framelen_, rtn_, latency_, delay_, priority_) \
+#define BAP_QOS(name_, rate_, duration_, framing_, framelen_, rtn_, latency_, delay_, priority_, tag_) \
 	((struct bap_qos){ .name = (name_), .rate = (rate_), .frame_duration = (duration_), .framing = (framing_), \
 			 .framelen = (framelen_), .retransmission = (rtn_), .latency = (latency_),	\
-			 .delay = (delay_), .priority = (priority_) })
+			 .delay = (delay_), .priority = (priority_), .tag = (tag_) })
 
 static const struct bap_qos bap_qos_configs[] = {
 	/* Priority: low-latency > high-reliability, 7.5ms > 10ms,
 	 * bigger frequency and sdu better */
 
 	/* BAP v1.0.1 Table 5.2; low-latency */
-	BAP_QOS("8_1_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 2,  8, 40000, 30), /* 8_1_1 */
-	BAP_QOS("8_2_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 2, 10, 40000, 20), /* 8_2_1 */
-	BAP_QOS("16_1_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 2,  8, 40000, 31), /* 16_1_1 */
-	BAP_QOS("16_2_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 2, 10, 40000, 21), /* 16_2_1 (mandatory) */
-	BAP_QOS("24_1_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 2,  8, 40000, 32), /* 24_1_1 */
-	BAP_QOS("24_2_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 2, 10, 40000, 22), /* 24_2_1 */
-	BAP_QOS("32_1_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 2,  8, 40000, 33), /* 32_1_1 */
-	BAP_QOS("32_2_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 2, 10, 40000, 23), /* 32_2_1 */
-	BAP_QOS("441_1_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5,  true,  97, 5, 24, 40000, 34), /* 441_1_1 */
-	BAP_QOS("441_2_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,   true, 130, 5, 31, 40000, 24), /* 441_2_1 */
-	BAP_QOS("48_1_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 5, 15, 40000, 35), /* 48_1_1 */
-	BAP_QOS("48_2_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 5, 20, 40000, 25), /* 48_2_1 */
-	BAP_QOS("48_3_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 5, 15, 40000, 36), /* 48_3_1 */
-	BAP_QOS("48_4_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 5, 20, 40000, 26), /* 48_4_1 */
-	BAP_QOS("48_5_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 5, 15, 40000, 37), /* 48_5_1 */
-	BAP_QOS("48_6_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 5, 20, 40000, 27), /* 48_6_1 */
+	BAP_QOS("8_1_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 2,  8, 40000, 30, "low-latency"), /* 8_1_1 */
+	BAP_QOS("8_2_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 2, 10, 40000, 20, "low-latency"), /* 8_2_1 */
+	BAP_QOS("16_1_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 2,  8, 40000, 31, "low-latency"), /* 16_1_1 */
+	BAP_QOS("16_2_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 2, 10, 40000, 21, "low-latency"), /* 16_2_1 (mandatory) */
+	BAP_QOS("24_1_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 2,  8, 40000, 32, "low-latency"), /* 24_1_1 */
+	BAP_QOS("24_2_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 2, 10, 40000, 22, "low-latency"), /* 24_2_1 */
+	BAP_QOS("32_1_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 2,  8, 40000, 33, "low-latency"), /* 32_1_1 */
+	BAP_QOS("32_2_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 2, 10, 40000, 23, "low-latency"), /* 32_2_1 */
+	BAP_QOS("441_1_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5,  true,  97, 5, 24, 40000, 34, "low-latency"), /* 441_1_1 */
+	BAP_QOS("441_2_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,   true, 130, 5, 31, 40000, 24, "low-latency"), /* 441_2_1 */
+	BAP_QOS("48_1_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 5, 15, 40000, 35, "low-latency"), /* 48_1_1 */
+	BAP_QOS("48_2_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 5, 20, 40000, 25, "low-latency"), /* 48_2_1 */
+	BAP_QOS("48_3_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 5, 15, 40000, 36, "low-latency"), /* 48_3_1 */
+	BAP_QOS("48_4_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 5, 20, 40000, 26, "low-latency"), /* 48_4_1 */
+	BAP_QOS("48_5_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 5, 15, 40000, 37, "low-latency"), /* 48_5_1 */
+	BAP_QOS("48_6_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 5, 20, 40000, 27, "low-latency"), /* 48_6_1 */
 
 	/* BAP v1.0.1 Table 5.2; high-reliability */
-	BAP_QOS("8_1_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 13,  75, 40000, 10), /* 8_1_2 */
-	BAP_QOS("8_2_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 13,  95, 40000,  0), /* 8_2_2 */
-	BAP_QOS("16_1_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 13,  75, 40000, 11), /* 16_1_2 */
-	BAP_QOS("16_2_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 13,  95, 40000,  1), /* 16_2_2 */
-	BAP_QOS("24_1_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 13,  75, 40000, 12), /* 24_1_2 */
-	BAP_QOS("24_2_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 13,  95, 40000,  2), /* 24_2_2 */
-	BAP_QOS("32_1_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 13,  75, 40000, 13), /* 32_1_2 */
-	BAP_QOS("32_2_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 13,  95, 40000,  3), /* 32_2_2 */
-	BAP_QOS("441_1_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5,  true,  97, 13,  80, 40000, 14), /* 441_1_2 */
-	BAP_QOS("441_2_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,   true, 130, 13,  85, 40000,  4), /* 441_2_2 */
-	BAP_QOS("48_1_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 13,  75, 40000, 15), /* 48_1_2 */
-	BAP_QOS("48_2_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 13,  95, 40000,  5), /* 48_2_2 */
-	BAP_QOS("48_3_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 13,  75, 40000, 16), /* 48_3_2 */
-	BAP_QOS("48_4_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 13, 100, 40000,  6), /* 48_4_2 */
-	BAP_QOS("48_5_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 13,  75, 40000, 17), /* 48_5_2 */
-	BAP_QOS("48_6_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 13, 100, 40000,  7), /* 48_6_2 */
+	BAP_QOS("8_1_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 13,  75, 40000, 10, "high-reliabilty"), /* 8_1_2 */
+	BAP_QOS("8_2_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 13,  95, 40000,  0, "high-reliabilty"), /* 8_2_2 */
+	BAP_QOS("16_1_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 13,  75, 40000, 11, "high-reliabilty"), /* 16_1_2 */
+	BAP_QOS("16_2_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 13,  95, 40000,  1, "high-reliabilty"), /* 16_2_2 */
+	BAP_QOS("24_1_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 13,  75, 40000, 12, "high-reliabilty"), /* 24_1_2 */
+	BAP_QOS("24_2_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 13,  95, 40000,  2, "high-reliabilty"), /* 24_2_2 */
+	BAP_QOS("32_1_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 13,  75, 40000, 13, "high-reliabilty"), /* 32_1_2 */
+	BAP_QOS("32_2_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 13,  95, 40000,  3, "high-reliabilty"), /* 32_2_2 */
+	BAP_QOS("441_1_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5,  true,  97, 13,  80, 40000, 54, "high-reliabilty"), /* 441_1_2 */
+	BAP_QOS("441_2_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,   true, 130, 13,  85, 40000, 44, "high-reliabilty"), /* 441_2_2 */
+	BAP_QOS("48_1_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 13,  75, 40000, 55, "high-reliabilty"), /* 48_1_2 */
+	BAP_QOS("48_2_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 13,  95, 40000, 45, "high-reliabilty"), /* 48_2_2 */
+	BAP_QOS("48_3_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 13,  75, 40000, 56, "high-reliabilty"), /* 48_3_2 */
+	BAP_QOS("48_4_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 13, 100, 40000, 46, "high-reliabilty"), /* 48_4_2 */
+	BAP_QOS("48_5_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 13,  75, 40000, 57, "high-reliabilty"), /* 48_5_2 */
+	BAP_QOS("48_6_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 13, 100, 40000, 47, "high-reliabilty"), /* 48_6_2 */
 };
 
 static const struct bap_qos bap_bcast_qos_configs[] = {
@@ -157,40 +149,40 @@ static const struct bap_qos bap_bcast_qos_configs[] = {
 	 * bigger frequency and sdu better */
 
 	/* BAP v1.0.1 Table 6.4; low-latency */
-	BAP_QOS("8_1_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 2,  8, 40000, 30), /* 8_1_1 */
-	BAP_QOS("8_2_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 2, 10, 40000, 20), /* 8_2_1 */
-	BAP_QOS("16_1_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 2,  8, 40000, 31), /* 16_1_1 */
-	BAP_QOS("16_2_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 2, 10, 40000, 21), /* 16_2_1 (mandatory) */
-	BAP_QOS("24_1_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 2,  8, 40000, 32), /* 24_1_1 */
-	BAP_QOS("24_2_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 2, 10, 40000, 22), /* 24_2_1 */
-	BAP_QOS("32_1_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 2,  8, 40000, 33), /* 32_1_1 */
-	BAP_QOS("32_2_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 2, 10, 40000, 23), /* 32_2_1 */
-	BAP_QOS("441_1_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5, true,   97, 4, 24, 40000, 34), /* 441_1_1 */
-	BAP_QOS("441_2_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,  true,  130, 4, 31, 40000, 24), /* 441_2_1 */
-	BAP_QOS("48_1_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 4, 15, 40000, 35), /* 48_1_1 */
-	BAP_QOS("48_2_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 4, 20, 40000, 25), /* 48_2_1 */
-	BAP_QOS("48_3_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 4, 15, 40000, 36), /* 48_3_1 */
-	BAP_QOS("48_4_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 4, 20, 40000, 26), /* 48_4_1 */
-	BAP_QOS("48_5_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 4, 15, 40000, 37), /* 48_5_1 */
-	BAP_QOS("48_6_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 4, 20, 40000, 27), /* 48_6_1 */
+	BAP_QOS("8_1_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 2,  8, 40000, 30, "low-latency"), /* 8_1_1 */
+	BAP_QOS("8_2_1",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 2, 10, 40000, 20, "low-latency"), /* 8_2_1 */
+	BAP_QOS("16_1_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 2,  8, 40000, 31, "low-latency"), /* 16_1_1 */
+	BAP_QOS("16_2_1",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 2, 10, 40000, 21, "low-latency"), /* 16_2_1 (mandatory) */
+	BAP_QOS("24_1_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 2,  8, 40000, 32, "low-latency"), /* 24_1_1 */
+	BAP_QOS("24_2_1",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 2, 10, 40000, 22, "low-latency"), /* 24_2_1 */
+	BAP_QOS("32_1_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 2,  8, 40000, 33, "low-latency"), /* 32_1_1 */
+	BAP_QOS("32_2_1",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 2, 10, 40000, 23, "low-latency"), /* 32_2_1 */
+	BAP_QOS("441_1_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5, true,   97, 4, 24, 40000, 34, "low-latency"), /* 441_1_1 */
+	BAP_QOS("441_2_1", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,  true,  130, 4, 31, 40000, 24, "low-latency"), /* 441_2_1 */
+	BAP_QOS("48_1_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 4, 15, 40000, 35, "low-latency"), /* 48_1_1 */
+	BAP_QOS("48_2_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 4, 20, 40000, 25, "low-latency"), /* 48_2_1 */
+	BAP_QOS("48_3_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 4, 15, 40000, 36, "low-latency"), /* 48_3_1 */
+	BAP_QOS("48_4_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 4, 20, 40000, 26, "low-latency"), /* 48_4_1 */
+	BAP_QOS("48_5_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 4, 15, 40000, 37, "low-latency"), /* 48_5_1 */
+	BAP_QOS("48_6_1",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 4, 20, 40000, 27, "low-latency"), /* 48_6_1 */
 
 	/* BAP v1.0.1 Table 6.4; high-reliability */
-	BAP_QOS("8_1_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 4,  45, 40000, 10), /* 8_1_2 */
-	BAP_QOS("8_2_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 4,  60, 40000,  0), /* 8_2_2 */
-	BAP_QOS("16_1_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 4,  45, 40000, 11), /* 16_1_2 */
-	BAP_QOS("16_2_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 4,  60, 40000,  1), /* 16_2_2 */
-	BAP_QOS("24_1_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 4,  45, 40000, 12), /* 24_1_2 */
-	BAP_QOS("24_2_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 4,  60, 40000,  2), /* 24_2_2 */
-	BAP_QOS("32_1_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 4,  45, 40000, 13), /* 32_1_2 */
-	BAP_QOS("32_2_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 4,  60, 40000,  3), /* 32_2_2 */
-	BAP_QOS("441_1_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5, true,   97, 4,  54, 40000, 14), /* 441_1_2 */
-	BAP_QOS("441_2_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,  true,  130, 4,  60, 40000,  4), /* 441_2_2 */
-	BAP_QOS("48_1_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 4,  50, 40000, 15), /* 48_1_2 */
-	BAP_QOS("48_2_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 4,  65, 40000,  5), /* 48_2_2 */
-	BAP_QOS("48_3_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 4,  50, 40000, 16), /* 48_3_2 */
-	BAP_QOS("48_4_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 4,  65, 40000,  6), /* 48_4_2 */
-	BAP_QOS("48_5_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 4,  50, 40000, 17), /* 48_5_2 */
-	BAP_QOS("48_6_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 4,  65, 40000,  7), /* 48_6_2 */
+	BAP_QOS("8_1_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_7_5, false,  26, 4,  45, 40000, 10, "high-reliabilty"), /* 8_1_2 */
+	BAP_QOS("8_2_2",   LC3_CONFIG_FREQ_8KHZ,  LC3_CONFIG_DURATION_10,  false,  30, 4,  60, 40000,  0, "high-reliabilty"), /* 8_2_2 */
+	BAP_QOS("16_1_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_7_5, false,  30, 4,  45, 40000, 11, "high-reliabilty"), /* 16_1_2 */
+	BAP_QOS("16_2_2",  LC3_CONFIG_FREQ_16KHZ, LC3_CONFIG_DURATION_10,  false,  40, 4,  60, 40000,  1, "high-reliabilty"), /* 16_2_2 */
+	BAP_QOS("24_1_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_7_5, false,  45, 4,  45, 40000, 12, "high-reliabilty"), /* 24_1_2 */
+	BAP_QOS("24_2_2",  LC3_CONFIG_FREQ_24KHZ, LC3_CONFIG_DURATION_10,  false,  60, 4,  60, 40000,  2, "high-reliabilty"), /* 24_2_2 */
+	BAP_QOS("32_1_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_7_5, false,  60, 4,  45, 40000, 13, "high-reliabilty"), /* 32_1_2 */
+	BAP_QOS("32_2_2",  LC3_CONFIG_FREQ_32KHZ, LC3_CONFIG_DURATION_10,  false,  80, 4,  60, 40000,  3, "high-reliabilty"), /* 32_2_2 */
+	BAP_QOS("441_1_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_7_5, true,   97, 4,  54, 40000, 14, "high-reliabilty"), /* 441_1_2 */
+	BAP_QOS("441_2_2", LC3_CONFIG_FREQ_44KHZ, LC3_CONFIG_DURATION_10,  true,  130, 4,  60, 40000,  4, "high-reliabilty"), /* 441_2_2 */
+	BAP_QOS("48_1_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  75, 4,  50, 40000, 15, "high-reliabilty"), /* 48_1_2 */
+	BAP_QOS("48_2_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 100, 4,  65, 40000,  5, "high-reliabilty"), /* 48_2_2 */
+	BAP_QOS("48_3_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false,  90, 4,  50, 40000, 16, "high-reliabilty"), /* 48_3_2 */
+	BAP_QOS("48_4_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 120, 4,  65, 40000,  6, "high-reliabilty"), /* 48_4_2 */
+	BAP_QOS("48_5_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_7_5, false, 117, 4,  50, 40000, 17, "high-reliabilty"), /* 48_5_2 */
+	BAP_QOS("48_6_2",  LC3_CONFIG_FREQ_48KHZ, LC3_CONFIG_DURATION_10,  false, 155, 4,  65, 40000,  7, "high-reliabilty"), /* 48_6_2 */
 };
 
 static unsigned int get_rate_mask(uint8_t rate) {
@@ -211,32 +203,6 @@ static unsigned int get_duration_mask(uint8_t rate) {
 	case LC3_CONFIG_DURATION_10: return LC3_DUR_10;
 	}
 	return 0;
-}
-
-static int write_ltv(uint8_t *dest, uint8_t type, void* value, size_t len)
-{
-	struct ltv *ltv = (struct ltv *)dest;
-
-	ltv->len = len + 1;
-	ltv->type = type;
-	memcpy(ltv->value, value, len);
-
-	return len + 2;
-}
-
-static int write_ltv_uint8(uint8_t *dest, uint8_t type, uint8_t value)
-{
-	return write_ltv(dest, type, &value, sizeof(value));
-}
-
-static int write_ltv_uint16(uint8_t *dest, uint8_t type, uint16_t value)
-{
-	return write_ltv(dest, type, &value, sizeof(value));
-}
-
-static int write_ltv_uint32(uint8_t *dest, uint8_t type, uint32_t value)
-{
-	return write_ltv(dest, type, &value, sizeof(value));
 }
 
 static uint16_t parse_rates(const char *str)
@@ -341,10 +307,9 @@ static uint8_t parse_channel_counts(const char *str)
 static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
 		const struct spa_dict *settings, uint8_t caps[A2DP_MAX_CAPS_SIZE])
 {
-	uint8_t *data = caps;
 	const char *str;
 	uint16_t framelen[2];
-	uint16_t rate_mask = LC3_FREQ_48KHZ | LC3_FREQ_32KHZ | \
+	uint16_t rate_mask = LC3_FREQ_48KHZ | LC3_FREQ_44KHZ | LC3_FREQ_32KHZ | \
 				LC3_FREQ_24KHZ | LC3_FREQ_16KHZ | LC3_FREQ_8KHZ;
 	uint8_t duration_mask = LC3_DUR_ANY;
 	uint8_t channel_counts = LC3_CHAN_1 | LC3_CHAN_2;
@@ -352,6 +317,7 @@ static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
 	uint16_t framelen_max = LC3_MAX_FRAME_BYTES;
 	uint8_t max_frames = 2;
 	uint32_t value;
+	struct ltv_writer writer = LTV_WRITER(caps, A2DP_MAX_CAPS_SIZE);
 
 	if (settings && (str = spa_dict_lookup(settings, "bluez5.bap-server-capabilities.rates")))
 		rate_mask = parse_rates(str);
@@ -377,17 +343,17 @@ static int codec_fill_caps(const struct media_codec *codec, uint32_t flags,
 	framelen[0] = htobs(framelen_min);
 	framelen[1] = htobs(framelen_max);
 
-	data += write_ltv_uint16(data, LC3_TYPE_FREQ, htobs(rate_mask));
-	data += write_ltv_uint8(data, LC3_TYPE_DUR, duration_mask);
-	data += write_ltv_uint8(data, LC3_TYPE_CHAN, channel_counts);
-	data += write_ltv(data, LC3_TYPE_FRAMELEN, framelen, sizeof(framelen));
+	ltv_writer_uint16(&writer, LC3_TYPE_FREQ, rate_mask);
+	ltv_writer_uint8(&writer, LC3_TYPE_DUR, duration_mask);
+	ltv_writer_uint8(&writer, LC3_TYPE_CHAN, channel_counts);
+	ltv_writer_data(&writer, LC3_TYPE_FRAMELEN, framelen, sizeof(framelen));
 	/* XXX: we support only one frame block -> max 2 frames per SDU */
 	if (max_frames > 2)
 		max_frames = 2;
 
-	data += write_ltv_uint8(data, LC3_TYPE_BLKS, max_frames);
+	ltv_writer_uint8(&writer, LC3_TYPE_BLKS, max_frames);
 
-	return data - caps;
+	return ltv_writer_end(&writer);
 }
 
 static void debugc_ltv(struct spa_debug_context *debug_ctx, int pac, struct ltv *ltv)
@@ -413,7 +379,7 @@ static void debugc_ltv(struct spa_debug_context *debug_ctx, int pac, struct ltv 
 	}
 }
 
-static int parse_bluez_pacs(const uint8_t *data, size_t data_size, struct pac_data pacs[MAX_PACS],
+static int parse_bluez_pacs_data(const uint8_t *data, size_t data_size, struct pac_data pacs[MAX_PACS],
 		struct spa_debug_context *debug_ctx)
 {
 	/*
@@ -422,7 +388,7 @@ static int parse_bluez_pacs(const uint8_t *data, size_t data_size, struct pac_da
 	 */
 	int pac = 0;
 
-	pacs[pac] = (struct pac_data){ data, 0 };
+	pacs[pac] = (struct pac_data){ .data = data };
 
 	while (data_size > 0) {
 		struct ltv *ltv = (struct ltv *)data;
@@ -433,7 +399,7 @@ static int parse_bluez_pacs(const uint8_t *data, size_t data_size, struct pac_da
 				break;
 
 			++pac;
-			pacs[pac] = (struct pac_data){ data + 1, 0, pac };
+			pacs[pac] = (struct pac_data){ .data = data + 1, .index = pac };
 		} else if (ltv->len >= data_size) {
 			return -EINVAL;
 		} else {
@@ -445,6 +411,28 @@ static int parse_bluez_pacs(const uint8_t *data, size_t data_size, struct pac_da
 	}
 
 	return pac + 1;
+}
+
+static int parse_bluez_pacs(const uint8_t *data, size_t data_size,
+		const uint8_t *metadata, size_t metadata_size, struct pac_data pacs[MAX_PACS],
+		struct spa_debug_context *debug_ctx)
+{
+	struct pac_data meta[MAX_PACS];
+	int pac_count, meta_count;
+
+	pac_count = parse_bluez_pacs_data(data, data_size, pacs, debug_ctx);
+	if (pac_count < 0)
+		return pac_count;
+
+	meta_count = parse_bluez_pacs_data(metadata, metadata_size, meta, debug_ctx);
+	if (meta_count == pac_count) {
+		for (int i = 0; i < pac_count; ++i) {
+			pacs[i].metadata = meta[i].data;
+			pacs[i].metadata_size = meta[i].size;
+		}
+	}
+
+	return pac_count;
 }
 
 static uint8_t get_channel_count(uint32_t channels)
@@ -470,28 +458,50 @@ static bool supports_channel_count(uint8_t mask, uint8_t count)
 	return mask & (1u << (count - 1));
 }
 
-static const struct bap_qos *select_bap_qos(unsigned int rate_mask, unsigned int duration_mask, uint16_t framelen_min, uint16_t framelen_max)
+static bool select_bap_qos(struct bap_qos *conf,
+		const struct settings *s, unsigned int rate_mask,
+		unsigned int duration_mask, uint16_t framelen_min,
+		uint16_t framelen_max)
 {
-	const struct bap_qos *best = NULL;
-	unsigned int best_priority = 0;
+	bool found = false;
+	conf->name = NULL;
+	conf->priority = 0;
 
-	SPA_FOR_EACH_ELEMENT_VAR(bap_qos_configs, c) {
-		if (c->priority < best_priority)
-			continue;
-		if (!(get_rate_mask(c->rate) & rate_mask))
-			continue;
-		if (!(get_duration_mask(c->frame_duration) & duration_mask))
-			continue;
-		if (c->framing)
-			continue;  /* XXX: framing not supported */
-		if (c->framelen < framelen_min || c->framelen > framelen_max)
+	SPA_FOR_EACH_ELEMENT_VAR(bap_qos_configs, cur_conf) {
+		struct bap_qos c = *cur_conf;
+
+		/* Check if custom QoS settings are configured. If so, we check if
+		 * the configured settings are compatible with unicast server
+		 */
+		if (spa_streq(c.name, s->qos_name))
+			c.priority = UINT_MAX;
+		else if (c.priority < conf->priority)
 			continue;
 
-		best = c;
-		best_priority = c->priority;
+		if (s->force_target_latency && !spa_streq(s->force_target_latency, c.tag))
+			continue;
+
+		if (s->retransmission >= 0)
+			c.retransmission = s->retransmission;
+		if (s->latency >= 0)
+			c.latency = s->latency;
+		if (s->delay >= 0)
+			c.delay = s->delay;
+		if (s->framing >= 0)
+			c.framing = s->framing;
+
+		if (!(get_rate_mask(c.rate) & rate_mask))
+			continue;
+		if (!(get_duration_mask(c.frame_duration) & duration_mask))
+			continue;
+		if (c.framelen < framelen_min || c.framelen > framelen_max)
+			continue;
+
+		*conf = c;
+		found = true;
 	}
 
-	return best;
+	return found;
 }
 
 static int select_channels(uint8_t channel_counts, uint32_t locations, uint32_t channel_allocation,
@@ -538,9 +548,9 @@ static int select_channels(uint8_t channel_counts, uint32_t locations, uint32_t 
 		return -1;
 
 	*allocation = 0;
-	for (i = 0; i < SPA_N_ELEMENTS(channel_bits); ++i) {
-		if (locations & channel_bits[i].bit) {
-			*allocation |= channel_bits[i].bit;
+	for (i = 0; i < SPA_N_ELEMENTS(bap_channel_bits); ++i) {
+		if (locations & bap_channel_bits[i].bit) {
+			*allocation |= bap_channel_bits[i].bit;
 			--num;
 			if (num == 0)
 				break;
@@ -552,7 +562,7 @@ static int select_channels(uint8_t channel_counts, uint32_t locations, uint32_t 
 
 static bool select_config(bap_lc3_t *conf, const struct pac_data *pac,	struct spa_debug_context *debug_ctx)
 {
-	const uint8_t *data = pac->data;
+	const void *data = pac->data;
 	size_t data_size = pac->size;
 	uint16_t framelen_min = 0, framelen_max = 0;
 	int max_frames = -1;
@@ -560,27 +570,23 @@ static bool select_config(bap_lc3_t *conf, const struct pac_data *pac,	struct sp
 	uint8_t max_channels = 0;
 	uint8_t duration_mask = 0;
 	uint16_t rate_mask = 0;
-	const struct bap_qos *bap_qos = NULL;
+	uint16_t preferred_context = 0;
+	struct bap_qos bap_qos;
 	unsigned int i;
+	bool found = false;
+	const struct ltv *ltv;
 
 	if (!data_size)
 		return false;
 	memset(conf, 0, sizeof(*conf));
 
-	conf->sink = pac->sink;
-	conf->duplex = pac->duplex;
+	conf->sink = pac->settings->sink;
+	conf->duplex = pac->settings->duplex;
 
 	/* XXX: we always use one frame block */
 	conf->n_blks = 1;
 
-	while (data_size > 0) {
-		struct ltv *ltv = (struct ltv *)data;
-
-		if (ltv->len < sizeof(struct ltv) || ltv->len >= data_size) {
-			spa_debugc(debug_ctx, "invalid LTV data");
-			return false;
-		}
-
+	while ((ltv = ltv_next(&data, &data_size))) {
 		switch (ltv->type) {
 		case LC3_TYPE_FREQ:
 			spa_return_val_if_fail(ltv->len == 3, false);
@@ -607,9 +613,25 @@ static bool select_config(bap_lc3_t *conf, const struct pac_data *pac,	struct sp
 			spa_debugc(debug_ctx, "unknown LTV type: 0x%02x", ltv->type);
 			break;
 		}
-		data_size -= ltv->len + 1;
-		data += ltv->len + 1;
 	}
+	if (data) {
+		spa_debugc(debug_ctx, "invalid LTV data");
+		return false;
+	}
+
+	data = pac->metadata;
+	data_size = pac->metadata_size;
+	while ((ltv = ltv_next(&data, &data_size))) {
+		switch (ltv->type) {
+		case BAP_META_TYPE_PREFERRED_CONTEXT:
+			if (ltv->len != 3)
+				break;
+			preferred_context = ltv->value[0] + (ltv->value[1] << 8);
+			break;
+		}
+	}
+	if (data)
+		spa_debugc(debug_ctx, "malformed metadata");
 
 	for (i = 0; i < 8; ++i)
 		if (channel_counts & (1u << i))
@@ -630,7 +652,7 @@ static bool select_config(bap_lc3_t *conf, const struct pac_data *pac,	struct sp
 		max_frames = max_channels;
 	}
 
-	if (select_channels(channel_counts, pac->locations, pac->channel_allocation, &conf->channels) < 0) {
+	if (select_channels(channel_counts, pac->settings->locations, pac->settings->channel_allocation, &conf->channels) < 0) {
 		spa_debugc(debug_ctx, "invalid channel configuration: 0x%02x %u",
 				channel_counts, max_frames);
 		return false;
@@ -647,33 +669,40 @@ static bool select_config(bap_lc3_t *conf, const struct pac_data *pac,	struct sp
 	 * Frame length is not limited by ISO MTU, as kernel will fragment
 	 * and reassemble SDUs as needed.
 	 */
-	if (pac->sink && pac->duplex) {
-		/* 16KHz input is mandatory in BAP v1.0.1 Table 3.5, so prefer
-		 * it for now for input rate in duplex configuration.
+	if (pac->settings->duplex) {
+		/* 16KHz input is mandatory in BAP v1.0.1 Table 3.5, and 32KHz in TMAP,
+		 * so prefer those for now for input rate in duplex configuration.
+		 *
+		 * It appears few devices support 48kHz out + input, so in duplex mode
+		 * try 32 kHz or 16 kHz also for output direction.
 		 *
 		 * Devices may list other values but not certain they will work properly.
 		 */
-		bap_qos = select_bap_qos(rate_mask & LC3_FREQ_16KHZ, duration_mask, framelen_min, framelen_max);
+		found = select_bap_qos(&bap_qos, pac->settings, rate_mask & (LC3_FREQ_16KHZ | LC3_FREQ_32KHZ),
+				duration_mask, framelen_min, framelen_max);
 	}
-	if (!bap_qos)
-		bap_qos = select_bap_qos(rate_mask, duration_mask, framelen_min, framelen_max);
+	if (!found)
+		found = select_bap_qos(&bap_qos, pac->settings, rate_mask, duration_mask, framelen_min, framelen_max);
 
-	if (!bap_qos) {
+	if (!found) {
 		spa_debugc(debug_ctx, "no compatible configuration found, rate:0x%08x, duration:0x%08x frame:%u-%u",
 				rate_mask, duration_mask, framelen_min, framelen_max);
 		return false;
 	}
 
-	conf->rate = bap_qos->rate;
-	conf->frame_duration = bap_qos->frame_duration;
-	conf->framelen = bap_qos->framelen;
-	conf->priority = bap_qos->priority;
+	conf->rate = bap_qos.rate;
+	conf->frame_duration = bap_qos.frame_duration;
+	conf->framelen = bap_qos.framelen;
+	conf->priority = bap_qos.priority;
+	conf->preferred_context = preferred_context;
 
 	return true;
 }
 
-static bool parse_conf(bap_lc3_t *conf, const uint8_t *data, size_t data_size)
+static bool parse_conf(bap_lc3_t *conf, const void *data, size_t data_size)
 {
+	const struct ltv *ltv;
+
 	if (!data_size)
 		return false;
 	memset(conf, 0, sizeof(*conf));
@@ -683,12 +712,7 @@ static bool parse_conf(bap_lc3_t *conf, const uint8_t *data, size_t data_size)
 	/* Absent Codec_Frame_Blocks_Per_SDU means 0x1 (BAP v1.0.1 Sec 4.3.2) */
 	conf->n_blks = 1;
 
-	while (data_size > 0) {
-		struct ltv *ltv = (struct ltv *)data;
-
-		if (ltv->len < sizeof(struct ltv) || ltv->len >= data_size)
-			return false;
-
+	while ((ltv = ltv_next(&data, &data_size))) {
 		switch (ltv->type) {
 		case LC3_TYPE_FREQ:
 			spa_return_val_if_fail(ltv->len == 2, false);
@@ -716,9 +740,9 @@ static bool parse_conf(bap_lc3_t *conf, const uint8_t *data, size_t data_size)
 		default:
 			return false;
 		}
-		data_size -= ltv->len + 1;
-		data += ltv->len + 1;
 	}
+	if (data)
+		return false;
 
 	if (conf->frame_duration == 0xFF || !conf->rate)
 		return false;
@@ -726,7 +750,32 @@ static bool parse_conf(bap_lc3_t *conf, const uint8_t *data, size_t data_size)
 	return true;
 }
 
-static int conf_cmp(const bap_lc3_t *conf1, int res1, const bap_lc3_t *conf2, int res2)
+static uint16_t get_wanted_context(const struct settings *settings)
+{
+	uint16_t context;
+
+	/* Stick with contexts specified in TMAP. Anything else is probably crapshoot due
+	 * to interesting device firmware behavior.
+	 *
+	 * Eg. some Earfun firmwares fail if we set MEDIA | CONVERSATIONAL, other versions
+	 * disconnect if LIVE is set, Samsung Galaxy Buds fail on microphone Enable if
+	 * CONVERSATIONAL is not set.
+	 */
+	if (settings->sink || settings->duplex)
+		context = BAP_CONTEXT_CONVERSATIONAL;
+	else
+		context = BAP_CONTEXT_MEDIA;
+
+	/* CAP v1.0.1 Sec 7.3.1.2.1: drop contexts if not available, otherwise unspecified */
+	context &= settings->available_context;
+	if (!context)
+		context = BAP_CONTEXT_UNSPECIFIED & settings->available_context;
+
+	return context;
+}
+
+static int conf_cmp(const bap_lc3_t *conf1, int res1, const bap_lc3_t *conf2, int res2,
+		const struct settings *settings)
 {
 	const bap_lc3_t *conf;
 	int a, b;
@@ -749,11 +798,16 @@ static int conf_cmp(const bap_lc3_t *conf1, int res1, const bap_lc3_t *conf2, in
 	if (!a || !b)
 		return b - a;
 
+	PREFER_EXPR(conf->priority == UINT_MAX);
+
+	/* CAP v1.0.1 Sec 7.3.1.2.4: should use PAC preferred context if possible */
+	PREFER_BOOL(conf->preferred_context & get_wanted_context(settings));
+
 	PREFER_BOOL(conf->channels & LC3_CHAN_2);
 	PREFER_BOOL(conf->channels & LC3_CHAN_1);
 
-	if (conf->sink && conf->duplex)
-		PREFER_BOOL(conf->rate & LC3_CONFIG_FREQ_16KHZ);
+	if (conf->duplex)
+		PREFER_BOOL(conf->rate & (LC3_CONFIG_FREQ_16KHZ | LC3_CONFIG_FREQ_32KHZ));
 
 	PREFER_EXPR(conf->priority);
 
@@ -774,47 +828,117 @@ static int pac_cmp(const void *p1, const void *p2)
 	res1 = select_config(&conf1, pac1, &debug_ctx.ctx) ? (int)sizeof(bap_lc3_t) : -EINVAL;
 	res2 = select_config(&conf2, pac2, &debug_ctx.ctx) ? (int)sizeof(bap_lc3_t) : -EINVAL;
 
-	return conf_cmp(&conf1, res1, &conf2, res2);
+	return conf_cmp(&conf1, res1, &conf2, res2, pac1->settings);
 }
+
+static void parse_settings(struct settings *s, const struct spa_dict *settings,
+		struct spa_debug_log_ctx *debug_ctx)
+{
+	const char *str;
+	uint32_t value;
+
+	spa_zero(*s);
+	s->retransmission = -1;
+	s->latency = -1;
+	s->delay = -1;
+	s->framing = -1;
+
+	if (!settings)
+		return;
+
+	if ((str = spa_dict_lookup(settings, "bluez5.bap.preset")))
+		s->qos_name = strdup(str);
+
+	if ((str = spa_dict_lookup(settings, "bluez5.bap.force-target-latency")))
+		s->force_target_latency = strdup(str);
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.rtn"), &value, 0))
+		s->retransmission = value;
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.latency"), &value, 0))
+		s->latency = value;
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.delay"), &value, 0))
+		s->delay = value;
+
+	if ((str = spa_dict_lookup(settings, "bluez5.bap.framing")))
+		s->framing = spa_atob(str);
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.locations"), &value, 0))
+		s->locations = value;
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.channel-allocation"), &value, 0))
+		s->channel_allocation = value;
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.supported-context"), &value, 0))
+		s->supported_context = value;
+
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.available-context"), &value, 0))
+		s->available_context = value;
+
+	if (spa_atob(spa_dict_lookup(settings, "bluez5.bap.debug")))
+		*debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_DEBUG);
+	else
+		*debug_ctx = SPA_LOG_DEBUG_INIT(NULL, SPA_LOG_LEVEL_TRACE);
+
+	/* Is local endpoint sink or source */
+	s->sink = spa_atob(spa_dict_lookup(settings, "bluez5.bap.sink"));
+
+	/* Is remote endpoint duplex */
+	s->duplex = spa_atob(spa_dict_lookup(settings, "bluez5.bap.duplex"));
+
+	spa_debugc(&debug_ctx->ctx,
+			"BAP LC3 settings: preset:%s rtn:%d latency:%d delay:%d framing:%d "
+			"locations:%x chnalloc:%x sink:%d duplex:%d force-target-latency:%s",
+			s->qos_name ? s->qos_name : "auto",
+			s->retransmission, s->latency, (int)s->delay, s->framing,
+			(unsigned int)s->locations, (unsigned int)s->channel_allocation,
+			(int)s->sink, (int)s->duplex, s->force_target_latency);
+}
+
+static void free_config_data(struct config_data *d)
+{
+	if (!d)
+		return;
+	free(d->settings.qos_name);
+	free(d->settings.force_target_latency);
+	free(d);
+}
+
+SPA_DEFINE_AUTOPTR_CLEANUP(config_data, struct config_data, { spa_clear_ptr(*thing, free_config_data); });
 
 static int codec_select_config(const struct media_codec *codec, uint32_t flags,
 		const void *caps, size_t caps_size,
 		const struct media_codec_audio_info *info,
-		const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE])
+		const struct spa_dict *settings, uint8_t config[A2DP_MAX_CAPS_SIZE],
+		void **config_data)
 {
 	struct pac_data pacs[MAX_PACS];
 	int npacs;
 	bap_lc3_t conf;
-	uint8_t *data = config;
-	uint32_t locations = 0;
-	uint32_t channel_allocation = 0;
-	bool sink = false, duplex = false;
-	struct spa_debug_log_ctx debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_TRACE);
-	int i;
+	struct spa_debug_log_ctx debug_ctx;
+	spa_autoptr(config_data) d = NULL;
+	int i, ret;
+	struct ltv_writer writer = LTV_WRITER(config, A2DP_MAX_CAPS_SIZE);
+	const void *metadata = NULL;
+	uint32_t metadata_len = 0;
 
 	if (caps == NULL)
 		return -EINVAL;
 
-	if (settings) {
-		for (i = 0; i < (int)settings->n_items; ++i) {
-			if (spa_streq(settings->items[i].key, "bluez5.bap.locations"))
-				sscanf(settings->items[i].value, "%"PRIu32, &locations);
-			if (spa_streq(settings->items[i].key, "bluez5.bap.channel-allocation"))
-				sscanf(settings->items[i].value, "%"PRIu32, &channel_allocation);
-		}
+	d = calloc(1, sizeof(*d));
+	if (!d)
+		return -ENOMEM;
 
-		if (spa_atob(spa_dict_lookup(settings, "bluez5.bap.debug")))
-			debug_ctx = SPA_LOG_DEBUG_INIT(log_, SPA_LOG_LEVEL_DEBUG);
+	parse_settings(&d->settings, settings, &debug_ctx);
 
-		/* Is remote endpoint sink or source */
-		sink = spa_atob(spa_dict_lookup(settings, "bluez5.bap.sink"));
-
-		/* Is remote endpoint duplex */
-		duplex = spa_atob(spa_dict_lookup(settings, "bluez5.bap.duplex"));
-	}
+	if (spa_atou32(spa_dict_lookup(settings, "bluez5.bap.metadata"), &metadata_len, 0))
+		metadata = spa_dict_lookup(settings, "bluez5.bap.metadata");
+	if (!metadata)
+		metadata_len = 0;
 
 	/* Select best conf from those possible */
-	npacs = parse_bluez_pacs(caps, caps_size, pacs, &debug_ctx.ctx);
+	npacs = parse_bluez_pacs(caps, caps_size, metadata, metadata_len, pacs, &debug_ctx.ctx);
 	if (npacs < 0) {
 		spa_debugc(&debug_ctx.ctx, "malformed PACS");
 		return npacs;
@@ -823,12 +947,8 @@ static int codec_select_config(const struct media_codec *codec, uint32_t flags,
 		return -EINVAL;
 	}
 
-	for (i = 0; i < npacs; ++i) {
-		pacs[i].locations = locations;
-		pacs[i].channel_allocation = channel_allocation;
-		pacs[i].sink = sink;
-		pacs[i].duplex = duplex;
-	}
+	for (i = 0; i < npacs; ++i)
+		pacs[i].settings = &d->settings;
 
 	qsort(pacs, npacs, sizeof(struct pac_data), pac_cmp);
 
@@ -837,38 +957,55 @@ static int codec_select_config(const struct media_codec *codec, uint32_t flags,
 	if (!select_config(&conf, &pacs[0], &debug_ctx.ctx))
 		return -ENOTSUP;
 
-	data += write_ltv_uint8(data, LC3_TYPE_FREQ, conf.rate);
-	data += write_ltv_uint8(data, LC3_TYPE_DUR, conf.frame_duration);
+	d->conf = conf;
+	d->pac_index = pacs[0].index;
+
+	ltv_writer_uint8(&writer, LC3_TYPE_FREQ, conf.rate);
+	ltv_writer_uint8(&writer, LC3_TYPE_DUR, conf.frame_duration);
 
 	/* Indicate MONO with absent Audio_Channel_Allocation (BAP v1.0.1 Sec. 4.3.2) */
 	if (conf.channels != 0)
-		data += write_ltv_uint32(data, LC3_TYPE_CHAN, htobl(conf.channels));
+		ltv_writer_uint32(&writer, LC3_TYPE_CHAN, conf.channels);
 
-	data += write_ltv_uint16(data, LC3_TYPE_FRAMELEN, htobs(conf.framelen));
-	data += write_ltv_uint8(data, LC3_TYPE_BLKS, conf.n_blks);
+	ltv_writer_uint16(&writer, LC3_TYPE_FRAMELEN, conf.framelen);
+	ltv_writer_uint8(&writer, LC3_TYPE_BLKS, conf.n_blks);
 
-	return data - config;
+	ret = ltv_writer_end(&writer);
+
+	if (ret >= 0 && config_data)
+		*config_data = spa_steal_ptr(d);
+
+	return ret;
 }
 
 static int codec_caps_preference_cmp(const struct media_codec *codec, uint32_t flags, const void *caps1, size_t caps1_size,
 		const void *caps2, size_t caps2_size, const struct media_codec_audio_info *info, const struct spa_dict *global_settings)
 {
 	bap_lc3_t conf1, conf2;
-	int res1, res2;
+	int res1, res2, res;
+	void *data1 = NULL;
+	void *data2 = NULL;
+	const struct config_data *d;
 
 	/* Order selected configurations by preference */
-	res1 = codec->select_config(codec, 0, caps1, caps1_size, info, global_settings, (uint8_t *)&conf1);
-	res2 = codec->select_config(codec, 0, caps2, caps2_size, info, global_settings, (uint8_t *)&conf2);
+	res1 = codec->select_config(codec, 0, caps1, caps1_size, info, global_settings, (uint8_t *)&conf1, &data1);
+	res2 = codec->select_config(codec, 0, caps2, caps2_size, info, global_settings, (uint8_t *)&conf2, &data2);
 
-	return conf_cmp(&conf1, res1, &conf2, res2);
+	d = data1 ? data1 : data2;
+	res = conf_cmp(&conf1, res1, &conf2, res2, d ? &d->settings : NULL);
+
+	codec->free_config_data(codec, data1);
+	codec->free_config_data(codec, data2);
+
+	return res;
 }
 
-static uint8_t channels_to_positions(uint32_t channels, uint32_t *position)
+static uint8_t channels_to_positions(uint32_t channels, uint32_t *position, uint32_t max_position)
 {
-	uint8_t n_channels = get_channel_count(channels);
+	uint32_t n_channels = get_channel_count(channels);
 	uint8_t n_positions = 0;
 
-	spa_assert(n_channels <= SPA_AUDIO_MAX_CHANNELS);
+	spa_assert(n_channels <= max_position);
 
 	if (channels == 0) {
 		position[0] = SPA_AUDIO_CHANNEL_MONO;
@@ -876,9 +1013,9 @@ static uint8_t channels_to_positions(uint32_t channels, uint32_t *position)
 	} else {
 		unsigned int i;
 
-		for (i = 0; i < SPA_N_ELEMENTS(channel_bits); ++i)
-			if (channels & channel_bits[i].bit)
-				position[n_positions++] = channel_bits[i].channel;
+		for (i = 0; i < SPA_N_ELEMENTS(bap_channel_bits); ++i)
+			if (channels & bap_channel_bits[i].bit)
+				position[n_positions++] = bap_channel_bits[i].channel;
 	}
 
 	if (n_positions != n_channels)
@@ -894,7 +1031,7 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 	bap_lc3_t conf;
 	struct spa_pod_frame f[2];
 	struct spa_pod_choice *choice;
-	uint32_t position[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t position[LC3_MAX_CHANNELS];
 	uint32_t i = 0;
 	uint8_t res;
 
@@ -919,6 +1056,11 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 		if (i++ == 0)
 			spa_pod_builder_int(b, 48000);
 		spa_pod_builder_int(b, 48000);
+	}
+	if (conf.rate == LC3_CONFIG_FREQ_44KHZ) {
+		if (i++ == 0)
+			spa_pod_builder_int(b, 44100);
+		spa_pod_builder_int(b, 44100);
 	}
 	if (conf.rate == LC3_CONFIG_FREQ_32KHZ) {
 		if (i++ == 0)
@@ -947,7 +1089,7 @@ static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
 	if (i == 0)
 		return -EINVAL;
 
-	res = channels_to_positions(conf.channels, position);
+	res = channels_to_positions(conf.channels, position, SPA_N_ELEMENTS(position));
 	if (res == 0)
 		return -EINVAL;
 	spa_pod_builder_add(b,
@@ -982,6 +1124,9 @@ static int codec_validate_config(const struct media_codec *codec, uint32_t flags
 	case LC3_CONFIG_FREQ_48KHZ:
 		info->info.raw.rate = 48000U;
 		break;
+	case LC3_CONFIG_FREQ_44KHZ:
+		info->info.raw.rate = 44100U;
+		break;
 	case LC3_CONFIG_FREQ_32KHZ:
 		info->info.raw.rate = 32000U;
 		break;
@@ -998,7 +1143,8 @@ static int codec_validate_config(const struct media_codec *codec, uint32_t flags
 		return -EINVAL;
 	}
 
-	res = channels_to_positions(conf.channels, info->info.raw.position);
+	res = channels_to_positions(conf.channels, info->info.raw.position,
+			SPA_N_ELEMENTS(info->info.raw.position));
 	if (res == 0)
 		return -EINVAL;
 	info->info.raw.channels = res;
@@ -1015,27 +1161,35 @@ static int codec_validate_config(const struct media_codec *codec, uint32_t flags
 }
 
 static int codec_get_qos(const struct media_codec *codec,
-		const void *config, size_t config_size,
 		const struct bap_endpoint_qos *endpoint_qos,
+		const void *config_data,
 		struct bap_codec_qos *qos)
 {
-	const struct bap_qos *bap_qos;
+	struct bap_qos bap_qos;
 	bap_lc3_t conf;
+	bool found = false;
+	const struct config_data *d = config_data;
 
 	spa_zero(*qos);
 
-	if (!parse_conf(&conf, config, config_size))
+	if (!d)
 		return -EINVAL;
 
-	bap_qos = select_bap_qos(get_rate_mask(conf.rate), get_duration_mask(conf.frame_duration),
+	conf = d->conf;
+
+	found = select_bap_qos(&bap_qos, &d->settings, get_rate_mask(conf.rate), get_duration_mask(conf.frame_duration),
 			conf.framelen, conf.framelen);
-	if (!bap_qos) {
+	if (!found) {
 		/* shouldn't happen: select_config should pick existing one */
 		spa_log_error(log_, "no QoS settings found");
 		return -EINVAL;
 	}
 
-	qos->framing = false;
+	if (endpoint_qos->framing == 0x01)
+		qos->framing = true;
+	else
+		qos->framing = bap_qos.framing;
+
 	if (endpoint_qos->phy & 0x2)
 		qos->phy = 0x2;
 	else if (endpoint_qos->phy & 0x1)
@@ -1047,9 +1201,9 @@ static int codec_get_qos(const struct media_codec *codec,
 	qos->interval = (conf.frame_duration == LC3_CONFIG_DURATION_7_5 ? 7500 : 10000);
 	qos->target_latency = BT_ISO_QOS_TARGET_LATENCY_BALANCED;
 
-	qos->delay = bap_qos->delay;
-	qos->latency = bap_qos->latency;
-	qos->retransmission = bap_qos->retransmission;
+	qos->delay = bap_qos.delay;
+	qos->latency = bap_qos.latency;
+	qos->retransmission = bap_qos.retransmission;
 
 	/* Clamp to ASE values (if known) */
 	if (endpoint_qos->delay_min)
@@ -1064,6 +1218,27 @@ static int codec_get_qos(const struct media_codec *codec,
 	 */
 
 	return 0;
+}
+
+static int codec_get_metadata(const struct media_codec *codec, const void *config_data,
+		uint8_t *meta, size_t meta_max_size)
+{
+	const struct config_data *d = config_data;
+	struct ltv_writer writer = LTV_WRITER(meta, meta_max_size);
+	uint16_t ctx;
+
+	ctx = get_wanted_context(&d->settings);
+	if (!ctx)
+		ctx = BAP_CONTEXT_UNSPECIFIED;
+
+	ltv_writer_uint16(&writer, BAP_META_TYPE_STREAMING_CONTEXT, ctx);
+
+	return ltv_writer_end(&writer);
+}
+
+static void codec_free_config_data(const struct media_codec *codec, void *config_data)
+{
+	free_config_data(config_data);
 }
 
 static void *codec_init(const struct media_codec *codec, uint32_t flags,
@@ -1098,6 +1273,10 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	this->channels = config_info.info.raw.channels;
 	this->framelen = conf.framelen;
 
+	/* Google liblc3 doesn't have direct support for encoding to 44.1kHz; instead
+	 * lc3.h suggests using a nearby samplerate, so we do just that */
+	this->codec_samplerate = (this->samplerate == 44100) ? 48000 : this->samplerate;
+
 	switch (conf.frame_duration) {
 	case LC3_CONFIG_DURATION_10:
 		this->frame_dus = 10000;
@@ -1113,7 +1292,7 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	spa_log_info(log_, "LC3 rate:%d frame_duration:%d channels:%d framelen:%d nblks:%d",
 			this->samplerate, this->frame_dus, this->channels, this->framelen, conf.n_blks);
 
-	res = lc3_frame_samples(this->frame_dus, this->samplerate);
+	res = lc3_frame_samples(this->frame_dus, this->codec_samplerate);
 	if (res < 0) {
 		spa_log_error(log_, "invalid LC3 frame samples");
 		res = -EINVAL;
@@ -1124,7 +1303,8 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 
 	if (!(flags & MEDIA_CODEC_FLAG_SINK)) {
 		for (ich = 0; ich < this->channels; ich++) {
-			this->enc[ich] = lc3_setup_encoder(this->frame_dus, this->samplerate, 0, calloc(1, lc3_encoder_size(this->frame_dus, this->samplerate)));
+			this->enc[ich] = lc3_setup_encoder(this->frame_dus, this->codec_samplerate, 0,
+					calloc(1, lc3_encoder_size(this->frame_dus, this->codec_samplerate)));
 			if (this->enc[ich] == NULL) {
 				res = -EINVAL;
 				goto error;
@@ -1132,7 +1312,8 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 		}
 	} else {
 		for (ich = 0; ich < this->channels; ich++) {
-			this->dec[ich] = lc3_setup_decoder(this->frame_dus, this->samplerate, 0, calloc(1, lc3_decoder_size(this->frame_dus, this->samplerate)));
+			this->dec[ich] = lc3_setup_decoder(this->frame_dus, this->codec_samplerate, 0,
+					calloc(1, lc3_decoder_size(this->frame_dus, this->codec_samplerate)));
 			if (this->dec[ich] == NULL) {
 				res = -EINVAL;
 				goto error;
@@ -1184,7 +1365,7 @@ static uint64_t codec_get_interval(void *data)
 {
 	struct impl *this = data;
 
-	return (uint64_t)this->frame_dus * 1000;
+	return (uint64_t)this->samples * SPA_NSEC_PER_SEC / this->samplerate;
 }
 
 static int codec_abr_process (void *data, size_t unsent)
@@ -1232,13 +1413,23 @@ static int codec_encode(void *data,
 	return processed;
 }
 
-static SPA_UNUSED int codec_start_decode (void *data,
+static int codec_start_decode (void *data,
 		const void *src, size_t src_size, uint16_t *seqnum, uint32_t *timestamp)
 {
+	struct impl *this = data;
+
+	/* packets come from controller, so also invalid ones bump seqnum */
+	this->seqnum++;
+
+	if (!src_size)
+		return -EINVAL;
+
+	if (*seqnum)
+		*seqnum = this->seqnum;
 	return 0;
 }
 
-static SPA_UNUSED int codec_decode(void *data,
+static int codec_decode(void *data,
 		const void *src, size_t src_size,
 		void *dst, size_t dst_size,
 		size_t *dst_out)
@@ -1268,6 +1459,24 @@ static SPA_UNUSED int codec_decode(void *data,
 	return consumed;
 }
 
+static int codec_produce_plc(void *data, void *dst, size_t dst_size)
+{
+	struct impl *this = data;
+	int ich, res;
+
+	if (dst_size < this->codesize)
+		return -EINVAL;
+
+	for (ich = 0; ich < this->channels; ich++) {
+		uint8_t *out = (uint8_t *)dst + (ich * 4);
+		res = lc3_decode(this->dec[ich], NULL, 0, LC3_PCM_FORMAT_S24, out, this->channels);
+		if (SPA_UNLIKELY(res < 0))
+			return -EINVAL;
+	}
+
+	return this->codesize;
+}
+
 static int codec_reduce_bitpool(void *data)
 {
 	return -ENOTSUP;
@@ -1288,90 +1497,75 @@ static int codec_get_bis_config(const struct media_codec *codec, uint8_t *caps,
 				uint8_t *caps_size, struct spa_dict *settings,
 				struct bap_codec_qos *qos)
 {
-	int index = 0x0;
-	bool preset_found = false;
-	const char *preset = NULL;
+	const char *preset_name = NULL;
 	int channel_allocation = 0;
-	uint8_t *data = caps;
+	int i, ret;
+	struct ltv_writer writer = LTV_WRITER(caps, *caps_size);
+	const struct bap_qos *preset = NULL;
+
 	*caps_size = 0;
-	int i;
 
 	if (settings) {
 		for (i = 0; i < (int)settings->n_items; ++i) {
 			if (spa_streq(settings->items[i].key, "channel_allocation"))
 				sscanf(settings->items[i].value, "%"PRIu32, &channel_allocation);
 			if (spa_streq(settings->items[i].key, "preset"))
-				preset = spa_dict_lookup(settings, "preset");
+				preset_name = settings->items[i].value;
 		}
 	}
 
-	if (preset == NULL)
+	if (preset_name == NULL)
 		return -EINVAL;
 
 	SPA_FOR_EACH_ELEMENT_VAR(bap_bcast_qos_configs, c) {
-		if (spa_streq(c->name, preset)) {
-			preset_found = true;
+		if (spa_streq(c->name, preset_name)) {
+			preset = c;
 			break;
 		}
-		index++;
 	}
 
-	if (!preset_found)
+	if (!preset)
 		return -EINVAL;
 
-	switch (bap_bcast_qos_configs[index].rate) {
-	case LC3_CONFIG_FREQ_48KHZ:
-		data += write_ltv_uint8(data, LC3_TYPE_FREQ, LC3_CONFIG_FREQ_48KHZ);
-		break;
-	case LC3_CONFIG_FREQ_32KHZ:
-		data += write_ltv_uint8(data, LC3_TYPE_FREQ, LC3_CONFIG_FREQ_32KHZ);
-		break;
-	case LC3_CONFIG_FREQ_24KHZ:
-		data += write_ltv_uint8(data, LC3_TYPE_FREQ, LC3_CONFIG_FREQ_24KHZ);
-		break;
-	case LC3_CONFIG_FREQ_16KHZ:
-		data += write_ltv_uint8(data, LC3_TYPE_FREQ, LC3_CONFIG_FREQ_16KHZ);
-		break;
-	case LC3_CONFIG_FREQ_8KHZ:
-		data += write_ltv_uint8(data, LC3_TYPE_FREQ, LC3_CONFIG_FREQ_8KHZ);
-		break;
-	default:
-		return -EINVAL;
-	}
-	*caps_size += 3;
+	ltv_writer_uint8(&writer, LC3_TYPE_FREQ, preset->rate);
+	ltv_writer_uint16(&writer, LC3_TYPE_FRAMELEN, preset->framelen);
+	ltv_writer_uint8(&writer, LC3_TYPE_DUR, preset->frame_duration);
+	ltv_writer_uint32(&writer, LC3_TYPE_CHAN, channel_allocation);
 
-	data += write_ltv_uint16(data, LC3_TYPE_FRAMELEN, htobs(bap_bcast_qos_configs[index].framelen));
-	*caps_size += 4;
-	data += write_ltv_uint8(data, LC3_TYPE_DUR, bap_bcast_qos_configs[index].frame_duration);
-	*caps_size += 3;
-	data += write_ltv_uint32(data, LC3_TYPE_CHAN, htobl(channel_allocation));
-	*caps_size += 6;
-
-	if(bap_bcast_qos_configs[index].framing)
+	if (preset->framing)
 		qos->framing = 1;
 	else
 		qos->framing = 0;
-	qos->sdu = bap_bcast_qos_configs[index].framelen * get_channel_count(channel_allocation);
-	qos->retransmission = bap_bcast_qos_configs[index].retransmission;
-	qos->latency = bap_bcast_qos_configs[index].latency;
-	qos->delay = bap_bcast_qos_configs[index].delay;
+	qos->sdu = preset->framelen * get_channel_count(channel_allocation);
+	qos->retransmission = preset->retransmission;
+	qos->latency = preset->latency;
+	qos->delay = preset->delay;
 	qos->phy = 2;
-	qos->interval = (bap_bcast_qos_configs[index].frame_duration == LC3_CONFIG_DURATION_7_5 ? 7500 : 10000);
+	qos->interval = (preset->frame_duration == LC3_CONFIG_DURATION_7_5 ? 7500 : 10000);
 
-	return true;
+	ret = ltv_writer_end(&writer);
+	if (ret < 0)
+		return ret;
+	if (ret > UINT8_MAX)
+		return -ENOSPC;
+
+	*caps_size = ret;
+	return 0;
 }
 
 const struct media_codec bap_codec_lc3 = {
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_LC3,
+	.kind = MEDIA_CODEC_BAP,
 	.name = "lc3",
 	.codec_id = BAP_CODEC_LC3,
-	.bap = true,
 	.description = "LC3",
 	.fill_caps = codec_fill_caps,
 	.select_config = codec_select_config,
 	.enum_config = codec_enum_config,
 	.validate_config = codec_validate_config,
 	.get_qos = codec_get_qos,
+	.get_metadata = codec_get_metadata,
+	.free_config_data = codec_free_config_data,
 	.caps_preference_cmp = codec_caps_preference_cmp,
 	.init = codec_init,
 	.deinit = codec_deinit,
@@ -1382,6 +1576,7 @@ const struct media_codec bap_codec_lc3 = {
 	.encode = codec_encode,
 	.start_decode = codec_start_decode,
 	.decode = codec_decode,
+	.produce_plc = codec_produce_plc,
 	.reduce_bitpool = codec_reduce_bitpool,
 	.increase_bitpool = codec_increase_bitpool,
 	.set_log = codec_set_log,

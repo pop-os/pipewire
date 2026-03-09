@@ -5,6 +5,10 @@
 #ifndef SPA_PARAM_PROPS_TYPES_H
 #define SPA_PARAM_PROPS_TYPES_H
 
+#include <spa/param/param-types.h>
+
+#include <spa/param/bluetooth/type-info.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,10 +17,6 @@ extern "C" {
  * \addtogroup spa_param
  * \{
  */
-
-#include <spa/param/param-types.h>
-
-#include <spa/param/bluetooth/type-info.h>
 
 /** Props Param */
 #define SPA_TYPE_INFO_Props			SPA_TYPE_INFO_PARAM_BASE "Props"
@@ -40,6 +40,9 @@ static const struct spa_type_info spa_type_props[] = {
 	{ SPA_PROP_quality, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "quality", NULL },
 	{ SPA_PROP_bluetoothAudioCodec, SPA_TYPE_Id, SPA_TYPE_INFO_PROPS_BASE "bluetoothAudioCodec", spa_type_bluetooth_audio_codec },
 	{ SPA_PROP_bluetoothOffloadActive, SPA_TYPE_Bool, SPA_TYPE_INFO_PROPS_BASE "bluetoothOffloadActive", NULL },
+	{ SPA_PROP_clockId, SPA_TYPE_String, SPA_TYPE_INFO_PROPS_BASE "clockId", NULL },
+	{ SPA_PROP_clockDevice, SPA_TYPE_String, SPA_TYPE_INFO_PROPS_BASE "clockDevice", NULL },
+	{ SPA_PROP_clockInterface, SPA_TYPE_String, SPA_TYPE_INFO_PROPS_BASE "clockInterface", NULL },
 
 	{ SPA_PROP_waveType, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "waveType", NULL },
 	{ SPA_PROP_frequency, SPA_TYPE_Int, SPA_TYPE_INFO_PROPS_BASE "frequency", NULL },

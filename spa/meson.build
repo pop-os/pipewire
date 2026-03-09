@@ -18,6 +18,13 @@ spa_dep = declare_dependency(
   },
 )
 
+spa_inc_dep = declare_dependency(
+  include_directories : [
+    include_directories('include'),
+    include_directories('include-private'),
+  ],
+)
+
 meson.override_dependency('lib@0@'.format(spa_name), spa_dep)
 
 pkgconfig.generate(filebase : 'lib@0@'.format(spa_name),
@@ -25,7 +32,7 @@ pkgconfig.generate(filebase : 'lib@0@'.format(spa_name),
   subdirs : spa_name,
   description : 'Simple Plugin API',
   version : spaversion,
-  extra_cflags : '-D_REENTRANT',
+  extra_cflags : ['-D_REENTRANT', '-fno-strict-aliasing', '-fno-strict-overflow'],
   variables : ['plugindir=${libdir}/@0@'.format(spa_name)],
   uninstalled_variables : ['plugindir=${prefix}/spa/plugins'],
 )
@@ -46,7 +53,7 @@ if get_option('spa-plugins').allowed()
   alsa_dep = dependency('alsa', version : '>=1.2.6', required: get_option('alsa'))
   summary({'ALSA': alsa_dep.found()}, bool_yn: true, section: 'Backend')
 
-  if alsa_dep.version().version_compare('>=1.2.10')
+  if alsa_dep.version().version_compare('>=1.2.11')
     cdata.set('HAVE_ALSA_UMP', true)
   endif
 
@@ -70,6 +77,23 @@ if get_option('spa-plugins').allowed()
     summary({'LDAC': ldac_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
     ldac_abr_dep = dependency('ldacBT-abr', required : get_option('bluez5-codec-ldac'))
     summary({'LDAC ABR': ldac_abr_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
+
+    if get_option('bluez5-codec-ldac-dec').allowed()
+      ldac_dec_dep = dependency('ldacBT-dec', required : false)
+      if not ldac_dec_dep.found()
+        dep = cc.find_library('ldacBT_dec', required : false)
+        if dep.found() and cc.has_function('ldacBT_decode', dependencies : dep)
+          ldac_dec_dep = dep
+        endif
+      endif
+      if not ldac_dec_dep.found() and get_option('bluez5-codec-ldac-dec').enabled()
+        error('LDAC decoder library not found')
+      endif
+    else
+      ldac_dec_dep = dependency('', required: false)
+    endif
+    summary({'LDAC DEC': ldac_dec_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
+
     aptx_dep = dependency('libfreeaptx', required : get_option('bluez5-codec-aptx'))
     summary({'aptX': aptx_dep.found()}, bool_yn: true, section: 'Bluetooth audio codecs')
     fdk_aac_dep = dependency('fdk-aac', required : get_option('bluez5-codec-aac'))
@@ -92,10 +116,11 @@ if get_option('spa-plugins').allowed()
       mm_dep = dependency('ModemManager', version : '>= 1.10.0', required : get_option('bluez5-backend-native-mm'))
       summary({'ModemManager': mm_dep.found()}, bool_yn: true, section: 'Bluetooth backends')
     endif
-    cdata.set('HAVE_LC3', get_option('bluez5-codec-lc3').allowed() and lc3_dep.found())
     g722_codec_option = get_option('bluez5-codec-g722')
     summary({'G722': g722_codec_option.allowed()}, bool_yn: true, section: 'Bluetooth audio codecs')
-    cdata.set('HAVE_G722', g722_codec_option.allowed())
+
+    spandsp_dep = dependency('spandsp', required : get_option('bluez5-plc-spandsp'))
+    cdata.set('HAVE_SPANDSP', spandsp_dep.found())
   endif
 
   have_vulkan = false
@@ -114,7 +139,7 @@ if get_option('spa-plugins').allowed()
   cdata.set('HAVE_ALSA_COMPRESS_OFFLOAD', compress_offload_option.allowed())
 
   # common dependencies
-  libudev_dep = dependency('libudev', required: get_option('udev').enabled())
+  libudev_dep = dependency('libudev', required: get_option('udev'))
   cdata.set('HAVE_LIBUDEV', libudev_dep.found())
   summary({'Udev': libudev_dep.found()}, bool_yn: true, section: 'Backend')
 
@@ -124,8 +149,13 @@ if get_option('spa-plugins').allowed()
   lilv_lib = dependency('lilv-0', required: get_option('lv2'))
   summary({'lilv (for lv2 plugins)': lilv_lib.found()}, bool_yn: true, section: 'filter-graph')
 
-  ebur128_lib = dependency('libebur128', required: get_option('ebur128').enabled())
+  ebur128_lib = dependency('libebur128', required: get_option('ebur128'))
   summary({'EBUR128': ebur128_lib.found()}, bool_yn: true, section: 'filter-graph')
+
+  summary({'ffmpeg': avfilter_dep.found()}, bool_yn: true, section: 'filter-graph')
+
+  onnxruntime_dep = dependency('libonnxruntime', required: get_option('onnxruntime'))
+  summary({'onnxruntime': onnxruntime_dep.found()}, bool_yn: true, section: 'filter-graph')
 
   cdata.set('HAVE_SPA_PLUGINS', true)
   subdir('plugins')

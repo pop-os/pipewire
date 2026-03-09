@@ -14,6 +14,7 @@
 
 #include <spa/support/cpu.h>
 #include <spa/debug/mem.h>
+#include <spa/utils/result.h>
 
 #include <pipewire/pipewire.h>
 
@@ -39,12 +40,24 @@
 #define server_emit_periodic(s,n)	server_emit(s, periodic, 0, n)
 #define server_emit_command(s,n,c,a,f)	server_emit(s, command, 0, n, c, a, f)
 
-static void on_timer_event(void *data, uint64_t expirations)
+
+static const char *avb_mode_str[] = {
+	[AVB_MODE_LEGACY] = "AVB Legacy",
+	[AVB_MODE_MILAN_V12] = "Milan V1.2",
+};
+
+static void on_timer_event(void *data)
 {
 	struct server *server = data;
+	struct impl *impl = server->impl;
 	struct timespec now;
+
 	clock_gettime(CLOCK_REALTIME, &now);
 	server_emit_periodic(server, SPA_TIMESPEC_TO_NSEC(&now));
+
+	pw_timer_queue_add(impl->timer_queue, &server->timer,
+		&server->timer.timeout, DEFAULT_INTERVAL * SPA_NSEC_PER_SEC,
+		on_timer_event, server);
 }
 
 static void on_socket_data(void *data, int fd, uint32_t mask)
@@ -201,7 +214,6 @@ static int setup_socket(struct server *server)
 	struct impl *impl = server->impl;
 	int fd, res;
 	static const uint8_t bmac[6] = AVB_BROADCAST_MAC;
-	struct timespec value, interval;
 
 	fd = avb_server_make_socket(server, AVB_TSN_ETH, bmac);
 	if (fd < 0)
@@ -215,18 +227,13 @@ static int setup_socket(struct server *server)
 		pw_log_error("server %p: can't create server source: %m", impl);
 		goto error_no_source;
 	}
-	server->timer = pw_loop_add_timer(impl->loop, on_timer_event, server);
-	if (server->timer == NULL) {
-		res = -errno;
-		pw_log_error("server %p: can't create timer source: %m", impl);
+
+	if ((res = pw_timer_queue_add(impl->timer_queue, &server->timer,
+			NULL, DEFAULT_INTERVAL * SPA_NSEC_PER_SEC,
+			on_timer_event, server)) < 0) {
+		pw_log_error("server %p: can't create timer: %s", impl, spa_strerror(res));
 		goto error_no_timer;
 	}
-	value.tv_sec = 0;
-	value.tv_nsec = 1;
-	interval.tv_sec = DEFAULT_INTERVAL;
-	interval.tv_nsec = 0;
-	pw_loop_update_timer(impl->loop, server->timer, &value, &interval, false);
-
 	return 0;
 
 error_no_timer:
@@ -251,16 +258,20 @@ struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 	spa_list_append(&impl->servers, &server->link);
 	str = spa_dict_lookup(props, "ifname");
 	server->ifname = str ? strdup(str) : NULL;
+
+	if ((str = spa_dict_lookup(props, "milan")) != NULL && spa_atob(str))
+		server->avb_mode = AVB_MODE_MILAN_V12;
+	else
+		server->avb_mode = AVB_MODE_LEGACY;
+
 	spa_hook_list_init(&server->listener_list);
 	spa_list_init(&server->descriptors);
-	spa_list_init(&server->streams);
 
 	server->debug_messages = false;
 
 	if ((res = setup_socket(server)) < 0)
 		goto error_free;
 
-	init_descriptors(server);
 
 	server->mrp = avb_mrp_new(server);
 	if (server->mrp == NULL)
@@ -283,10 +294,9 @@ struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props)
 	avb_mrp_attribute_begin(server->domain_attr->mrp, 0);
 	avb_mrp_attribute_join(server->domain_attr->mrp, 0, true);
 
-	server_create_stream(server, SPA_DIRECTION_INPUT, 0);
-	server_create_stream(server, SPA_DIRECTION_OUTPUT, 0);
-
 	avb_maap_reserve(server->maap, 1);
+
+	init_descriptors(server);
 
 	return server;
 
@@ -307,11 +317,17 @@ void avdecc_server_free(struct server *server)
 {
 	struct impl *impl = server->impl;
 
+	server_destroy_descriptors(server);
 	spa_list_remove(&server->link);
 	if (server->source)
 		pw_loop_destroy_source(impl->loop, server->source);
-	if (server->timer)
-		pw_loop_destroy_source(impl->loop, server->timer);
+	pw_timer_queue_cancel(&server->timer);
 	spa_hook_list_clean(&server->listener_list);
+	free(server->ifname);
 	free(server);
+}
+
+const char *get_avb_mode_str(enum avb_mode mode)
+{
+	return avb_mode_str[mode];
 }

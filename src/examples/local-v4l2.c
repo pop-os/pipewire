@@ -13,6 +13,7 @@
 
 #define WIDTH   640
 #define HEIGHT  480
+#define RATE	30
 #define BPP    3
 #define MAX_BUFFERS	32
 
@@ -210,7 +211,8 @@ static int port_set_format(void *object, enum spa_direction direction, uint32_t 
 					       SDL_TEXTUREACCESS_STREAMING,
 					       d->format.size.width,
 					       d->format.size.height);
-		SDL_LockTexture(d->texture, NULL, &dest, &d->stride);
+		if (SDL_LockTexture(d->texture, NULL, &dest, &d->stride) < 0)
+			return -EINVAL;
 		SDL_UnlockTexture(d->texture);
 	}
 

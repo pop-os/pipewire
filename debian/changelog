@@ -1,3 +1,70 @@
+pipewire (1.6.1-1) UNRELEASED; urgency=medium
+
+  * salsa-ci: enable licenserecon and drop reprotest
+  * salsa-ci: allow licenserecon to fail for now
+  * Remove redundant 'Priority: optional'
+  * Standards-Version: 4.7.3 (no changes required)
+  * Switch to pkgconf (from pkg-config) in testsuite Depends
+  * New upstream release
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 09 Mar 2026 12:34:08 +0100
+
+pipewire (1.6.0-1) experimental; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release
+
+  [ Luca Boccassi ]
+  * Use dh sequence instead of manual call in d/rules
+  * Drop unused adduser dependency
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 19 Feb 2026 11:43:23 +0100
+
+pipewire (1.5.85-1) experimental; urgency=medium
+
+  * New upstream release (1.6 release candidate 5)
+    (Closes: #1125964)
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 19 Jan 2026 17:16:39 +0100
+
+pipewire (1.5.84-1) experimental; urgency=medium
+
+  [ Dylan Aïssi ]
+  * New upstream release (1.6 release candidate 4)
+  * Remove Fix_services.patch, this was required to avoid conflict
+    with pipewire-media-session due to a bug in systemd. systemd is fixed
+    since v253 and pipewire-media-session is no longer available since Trixie,
+    so no reason to keep it.
+  * d/rules: increase test timeout for alpha.
+
+  [ Charles ]
+  * d/tests: Update manual-tests.md for modern releases.
+
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 01 Dec 2025 15:56:30 +0100
+
+pipewire (1.5.83-1) experimental; urgency=medium
+
+  * New upstream release (1.6 release candidate 3)
+  * Disable onnxruntime on unsupported architectures
+  * Remove redundant "Rules-Requires-Root: no"
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 06 Nov 2025 17:29:27 +0100
+
+pipewire (1.5.81-1) experimental; urgency=medium
+
+  * New upstream release (1.6 release candidate 1)
+  * Disable bluez5-codec-ldac-dec, not yet available in Debian
+  * Enable bluez5-plc-spandsp, add libspandsp-dev in Build-Deps
+  * Enable onnxruntime, add libonnxruntime-dev in Build-Deps
+  * Install new binaries (pw-midi2play, pw-midi2record and pw-sysex)
+      in pipewire-bin
+  * Update symbols file
+  * Convert watch to version 5 and use Gitlab template
+  * Skip the new test spa-benchmark-aec.test,
+      it requires sample files.
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 16 Oct 2025 12:34:32 +0200
+
 pipewire (1.4.10-1) unstable; urgency=medium
 
   * New upstream release

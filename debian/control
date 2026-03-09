@@ -1,10 +1,10 @@
 Source: pipewire
 Section: libs
-Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@alioth-lists.debian.net>
 Uploaders: Jeremy Bicha <jbicha@debian.org>,
            Dylan Aïssi <daissi@debian.org>
 Build-Depends: debhelper-compat (= 13),
+               dh-sequence-installsysusers,
                doxygen <!nodoc>,
                dpkg-dev (>= 1.22.5),
                graphviz <!nodoc>,
@@ -29,6 +29,7 @@ Build-Depends: debhelper-compat (= 13),
                liblilv-dev,
                libmysofa-dev,
                libncurses-dev,
+               libonnxruntime-dev [!alpha !hurd-any !m68k !powerpc !ppc64 !sh4 !x32],
                libopus-dev,
                libpulse-dev,
                libreadline-dev,
@@ -37,6 +38,7 @@ Build-Depends: debhelper-compat (= 13),
                libsdl2-dev <!noinsttest>,
                libsnapd-glib-dev [amd64 arm64 armhf i386 powerpc ppc64el riscv64 s390x],
                libsndfile1-dev,
+               libspandsp-dev,
                libssl-dev,
                libsystemd-dev [linux-any],
                libudev-dev [linux-any],
@@ -50,11 +52,10 @@ Build-Depends: debhelper-compat (= 13),
                python3-docutils,
                systemd-dev
 Build-Conflicts: libfdk-aac-dev
-Standards-Version: 4.7.2
+Standards-Version: 4.7.3
 Vcs-Browser: https://salsa.debian.org/utopia-team/pipewire
 Vcs-Git: https://salsa.debian.org/utopia-team/pipewire.git
 Homepage: https://pipewire.org/
-Rules-Requires-Root: no
 
 Package: libpipewire-0.3-0t64
 Provides: ${t64:Provides}
@@ -212,8 +213,7 @@ Package: pipewire
 Section: video
 Architecture: any
 Multi-Arch: same
-Depends: adduser,
-         libpipewire-0.3-modules (= ${binary:Version}),
+Depends: libpipewire-0.3-modules (= ${binary:Version}),
          pipewire-bin (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends}

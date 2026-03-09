@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2024 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -16,8 +18,6 @@
 #include <netdb.h>
 #include <net/if.h>
 #include <ifaddrs.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -162,7 +162,8 @@ static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_VERSION, PACKAGE_VERSION },
 };
 
-#define SERVICE_TYPE_CONTROL "_snapcast-jsonrpc._tcp"
+#define SERVICE_TYPE_JSONRPC "_snapcast-jsonrpc._tcp"
+#define SERVICE_TYPE_CONTROL "_snapcast-ctrl._tcp"
 
 struct impl {
 	struct pw_context *context;
@@ -176,7 +177,8 @@ struct impl {
 
 	AvahiPoll *avahi_poll;
 	AvahiClient *client;
-	AvahiServiceBrowser *sink_browser;
+	AvahiServiceBrowser *jsonrpc_browser;
+	AvahiServiceBrowser *ctrl_browser;
 
 	struct spa_list tunnel_list;
 	uint32_t id;
@@ -252,8 +254,10 @@ static void impl_free(struct impl *impl)
 	spa_list_consume(t, &impl->tunnel_list, link)
 		free_tunnel(t);
 
-	if (impl->sink_browser)
-		avahi_service_browser_free(impl->sink_browser);
+	if (impl->jsonrpc_browser)
+		avahi_service_browser_free(impl->jsonrpc_browser);
+	if (impl->ctrl_browser)
+		avahi_service_browser_free(impl->ctrl_browser);
 	if (impl->client)
 		avahi_client_free(impl->client);
 	if (impl->avahi_poll)
@@ -503,9 +507,11 @@ static int add_snapcast_stream(struct impl *impl, struct tunnel *t,
 	return -ENOENT;
 }
 
-static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	int res;
+
+	if ((res = spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, DEFAULT_FORMAT),
 				 SPA_DICT_ITEM(SPA_KEY_AUDIO_RATE, SPA_STRINGIFY(DEFAULT_RATE)),
@@ -514,12 +520,15 @@ static void parse_audio_info(struct pw_properties *props, struct spa_audio_info_
 			SPA_KEY_AUDIO_FORMAT,
 			SPA_KEY_AUDIO_RATE,
 			SPA_KEY_AUDIO_CHANNELS,
-			SPA_KEY_AUDIO_POSITION, NULL);
+			SPA_KEY_AUDIO_LAYOUT,
+			SPA_KEY_AUDIO_POSITION, NULL)) < 0)
+		return res;
 
 	pw_properties_set(props, PW_KEY_AUDIO_FORMAT,
 			spa_type_audio_format_to_short_name(info->format));
 	pw_properties_setf(props, PW_KEY_AUDIO_RATE, "%d", info->rate);
 	pw_properties_setf(props, PW_KEY_AUDIO_CHANNELS, "%d", info->channels);
+	return res;
 }
 
 static int create_stream(struct impl *impl, struct pw_properties *props,
@@ -545,7 +554,10 @@ static int create_stream(struct impl *impl, struct pw_properties *props,
 	if ((str = pw_properties_get(props, "capture.props")) == NULL)
 		pw_properties_set(props, "capture.props", "{ media.class = Audio/Sink }");
 
-	parse_audio_info(props, &t->audio_info);
+	if ((res = parse_audio_info(props, &t->audio_info)) < 0) {
+		pw_log_error("Can't parse format: %s", spa_strerror(res));
+		goto done;
+	}
 
 	if ((f = open_memstream(&args, &size)) == NULL) {
 		res = -errno;
@@ -628,10 +640,9 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	}
 
 	avahi_address_snprint(at, sizeof(at), a);
-	if (spa_strstartswith(at, link_local_range)) {
-		pw_log_info("found link-local ip address %s - skipping tunnel creation", at);
-		goto done;
-	}
+	if (spa_strstartswith(at, link_local_range))
+		pw_log_info("found link-local ip address %s for '%s'", at, name);
+
 	pw_log_info("%s %s", name, at);
 
 	tinfo = TUNNEL_INFO(.name = name, .port = port);
@@ -657,6 +668,11 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	if (a->proto == AVAHI_PROTO_INET6 &&
 	    a->data.ipv6.address[0] == 0xfe &&
 	    (a->data.ipv6.address[1] & 0xc0) == 0x80)
+		snprintf(if_suffix, sizeof(if_suffix), "%%%d", interface);
+
+	/* For IPv4 link-local, bind to the discovery interface */
+	if (a->proto == AVAHI_PROTO_INET &&
+	    spa_strstartswith(at, link_local_range))
 		snprintf(if_suffix, sizeof(if_suffix), "%%%d", interface);
 
 	pw_properties_setf(props, "snapcast.ip", "%s%s", at, if_suffix);
@@ -810,9 +826,13 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
 	case AVAHI_CLIENT_S_REGISTERING:
 	case AVAHI_CLIENT_S_RUNNING:
 	case AVAHI_CLIENT_S_COLLISION:
-		if (impl->sink_browser == NULL)
-			impl->sink_browser = make_browser(impl, SERVICE_TYPE_CONTROL);
-		if (impl->sink_browser == NULL)
+		if (impl->ctrl_browser == NULL)
+			impl->ctrl_browser = make_browser(impl, SERVICE_TYPE_CONTROL);
+		if (impl->ctrl_browser == NULL)
+			goto error;
+		if (impl->jsonrpc_browser == NULL)
+			impl->jsonrpc_browser = make_browser(impl, SERVICE_TYPE_JSONRPC);
+		if (impl->jsonrpc_browser == NULL)
 			goto error;
 		break;
 	case AVAHI_CLIENT_FAILURE:
@@ -821,9 +841,13 @@ static void client_callback(AvahiClient *c, AvahiClientState state, void *userda
 
 		SPA_FALLTHROUGH;
 	case AVAHI_CLIENT_CONNECTING:
-		if (impl->sink_browser) {
-			avahi_service_browser_free(impl->sink_browser);
-			impl->sink_browser = NULL;
+		if (impl->ctrl_browser) {
+			avahi_service_browser_free(impl->ctrl_browser);
+			impl->ctrl_browser = NULL;
+		}
+		if (impl->jsonrpc_browser) {
+			avahi_service_browser_free(impl->jsonrpc_browser);
+			impl->jsonrpc_browser = NULL;
 		}
 		break;
 	default:

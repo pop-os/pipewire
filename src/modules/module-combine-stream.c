@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2023 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -13,8 +15,6 @@
 #include <signal.h>
 #include <limits.h>
 #include <math.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -64,6 +64,7 @@
  *
  * - \ref PW_KEY_REMOTE_NAME
  * - \ref PW_KEY_AUDIO_CHANNELS
+ * - \ref SPA_KEY_AUDIO_LAYOUT
  * - \ref SPA_KEY_AUDIO_POSITION
  * - \ref PW_KEY_MEDIA_NAME
  * - \ref PW_KEY_NODE_LATENCY
@@ -76,9 +77,10 @@
  * ## Stream options
  *
  * - `audio.position`: Set the stream channel map. By default this is the same channel
- *                     map as the combine stream.
+ *                     map as the combine stream. You can also use audio.layout
  * - `combine.audio.position`: map the combine audio positions to the stream positions.
  *                     combine input channels are mapped one-by-one to stream output channels.
+ *                     You can also use combine.audio.layout.
  *
  * ## Example configuration
  *
@@ -231,8 +233,8 @@ PW_LOG_TOPIC_STATIC(mod_topic, "mod." NAME);
 			"( stream.props=<properties> ) "					\
 			"( stream.rules=<properties> ) "
 
+#define MAX_CHANNELS	SPA_AUDIO_MAX_CHANNELS
 #define DELAYBUF_MAX_SIZE	(20 * sizeof(float) * 96000)
-
 
 static const struct spa_dict_item module_props[] = {
 	{ PW_KEY_MODULE_AUTHOR, "Wim Taymans <wim.taymans@gmail.com>" },
@@ -312,10 +314,10 @@ struct stream {
 	struct spa_latency_info latency;
 
 	struct spa_audio_info_raw info;
-	uint32_t remap[SPA_AUDIO_MAX_CHANNELS];
+	uint32_t remap[MAX_CHANNELS];
 
 	void *delaybuf;
-	struct ringbuffer delay[SPA_AUDIO_MAX_CHANNELS];
+	struct ringbuffer delay[MAX_CHANNELS];
 
 	int64_t delay_samples;		/* for main loop */
 	int64_t data_delay_samples;	/* for data loop */
@@ -326,14 +328,15 @@ struct stream {
 	unsigned int have_latency:1;
 };
 
-static void parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
+static int parse_audio_info(const struct pw_properties *props, struct spa_audio_info_raw *info)
 {
-	spa_audio_info_raw_init_dict_keys(info,
+	return spa_audio_info_raw_init_dict_keys(info,
 			&SPA_DICT_ITEMS(
 				SPA_DICT_ITEM(SPA_KEY_AUDIO_FORMAT, "F32P"),
 				SPA_DICT_ITEM(SPA_KEY_AUDIO_POSITION, DEFAULT_POSITION)),
 			&props->dict,
 			SPA_KEY_AUDIO_CHANNELS,
+			SPA_KEY_AUDIO_LAYOUT,
 			SPA_KEY_AUDIO_POSITION, NULL);
 }
 
@@ -509,7 +512,7 @@ static void update_latency(struct impl *impl)
 struct replace_delay_info {
 	struct stream *stream;
 	void *buf;
-	struct ringbuffer delay[SPA_AUDIO_MAX_CHANNELS];
+	struct ringbuffer delay[MAX_CHANNELS];
 };
 
 static int do_replace_delay(struct spa_loop *loop, bool async, uint32_t seq,
@@ -554,7 +557,7 @@ static void resize_delay(struct stream *stream, uint32_t size)
 	for (i = 0; i < channels; ++i)
 		ringbuffer_init(&info.delay[i], SPA_PTROFF(info.buf, i*size, void), size);
 
-	pw_loop_invoke(stream->impl->data_loop, do_replace_delay, 0, NULL, 0, true, &info);
+	pw_loop_locked(stream->impl->data_loop, do_replace_delay, 0, NULL, 0, &info);
 
 	free(info.buf);
 }
@@ -618,7 +621,7 @@ static int do_clear_delaybuf(struct spa_loop *loop, bool async, uint32_t seq,
 
 static void clear_delaybuf(struct impl *impl)
 {
-	pw_loop_invoke(impl->data_loop, do_clear_delaybuf, 0, NULL, 0, true, impl);
+	pw_loop_locked(impl->data_loop, do_clear_delaybuf, 0, NULL, 0, impl);
 }
 
 static int do_add_stream(struct spa_loop *loop, bool async, uint32_t seq,
@@ -705,7 +708,7 @@ static void remove_stream(struct stream *s, bool destroy)
 {
 	pw_log_debug("destroy stream %d", s->id);
 
-	pw_loop_invoke(s->impl->data_loop, do_remove_stream, 0, NULL, 0, true, s);
+	pw_loop_locked(s->impl->data_loop, do_remove_stream, 0, NULL, 0, s);
 
 	if (destroy && s->stream) {
 		spa_hook_remove(&s->stream_listener);
@@ -866,13 +869,21 @@ static int create_stream(struct stream_info *info)
 
 	s->info = impl->info;
 	if ((str = pw_properties_get(info->stream_props, SPA_KEY_AUDIO_POSITION)) != NULL)
-		spa_audio_parse_position(str, strlen(str), s->info.position, &s->info.channels);
+		spa_audio_parse_position_n(str, strlen(str), s->info.position,
+				SPA_N_ELEMENTS(s->info.position), &s->info.channels);
+	if ((str = pw_properties_get(info->stream_props, SPA_KEY_AUDIO_LAYOUT)) != NULL)
+		spa_audio_parse_layout(str, s->info.position,
+				SPA_N_ELEMENTS(s->info.position), &s->info.channels);
 	if (s->info.channels == 0)
 		s->info = impl->info;
 
 	spa_zero(remap_info);
 	if ((str = pw_properties_get(info->stream_props, "combine.audio.position")) != NULL)
-		spa_audio_parse_position(str, strlen(str), remap_info.position, &remap_info.channels);
+		spa_audio_parse_position_n(str, strlen(str), remap_info.position,
+				SPA_N_ELEMENTS(remap_info.position), &remap_info.channels);
+	if ((str = pw_properties_get(info->stream_props, "combine.audio.layout")) != NULL)
+		spa_audio_parse_layout(str, remap_info.position,
+				SPA_N_ELEMENTS(remap_info.position), &remap_info.channels);
 	if (remap_info.channels == 0)
 		remap_info = s->info;
 
@@ -880,7 +891,10 @@ static int create_stream(struct stream_info *info)
 	for (i = 0; i < remap_info.channels; i++) {
 		s->remap[i] = i;
 		for (j = 0; j < tmp_info.channels; j++) {
-			if (tmp_info.position[j] == remap_info.position[i]) {
+			uint32_t pj, pi;
+			pj = tmp_info.position[j];
+			pi = remap_info.position[i];
+			if (pj == pi) {
 				s->remap[i] = j;
 				break;
 			}
@@ -935,7 +949,7 @@ static int create_stream(struct stream_info *info)
 			direction, PW_ID_ANY, flags, params, n_params)) < 0)
 		goto error;
 
-	pw_loop_invoke(impl->data_loop, do_add_stream, 0, NULL, 0, true, s);
+	pw_loop_locked(impl->data_loop, do_add_stream, 0, NULL, 0, s);
 	update_delay(impl);
 	return 0;
 
@@ -1228,7 +1242,7 @@ static void combine_output_process(void *d)
 	struct pw_buffer *in, *out;
 	struct stream *s;
 	bool delay_changed = false;
-	bool mix[SPA_AUDIO_MAX_CHANNELS];
+	bool mix[MAX_CHANNELS];
 
 	if ((out = pw_stream_dequeue_buffer(impl->combine)) == NULL) {
 		pw_log_debug("%p: out of output buffers: %m", impl);
@@ -1622,6 +1636,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 
 	copy_props(props, impl->combine_props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(props, impl->combine_props, PW_KEY_AUDIO_CHANNELS);
+	copy_props(props, impl->combine_props, SPA_KEY_AUDIO_LAYOUT);
 	copy_props(props, impl->combine_props, SPA_KEY_AUDIO_POSITION);
 	copy_props(props, impl->combine_props, PW_KEY_NODE_NAME);
 	copy_props(props, impl->combine_props, PW_KEY_NODE_DESCRIPTION);
@@ -1633,7 +1648,10 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	copy_props(props, impl->combine_props, "resample.prefill");
 	copy_props(props, impl->combine_props, "resample.disable");
 
-	parse_audio_info(impl->combine_props, &impl->info);
+	if ((res = parse_audio_info(impl->combine_props, &impl->info)) < 0) {
+		pw_log_error( "can't create format: %s", spa_strerror(res));
+		goto error;
+	}
 
 	copy_props(props, impl->stream_props, PW_KEY_NODE_LOOP_NAME);
 	copy_props(props, impl->stream_props, PW_KEY_NODE_GROUP);

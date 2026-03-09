@@ -44,10 +44,7 @@ static int codec_get_block_size(void *data)
 static int codec_start_encode (void *data,
 		void *dst, size_t dst_size, uint16_t seqnum, uint32_t timestamp)
 {
-	/* Payload for ASHA must be preceded by 1-byte sequence number */
-	*(uint8_t *)dst = seqnum % 256;
-
-	return 1;
+	return 0;
 }
 
 static int codec_enum_config(const struct media_codec *codec, uint32_t flags,
@@ -118,6 +115,7 @@ static int codec_encode(void *data,
 		size_t *dst_out, int *need_flush)
 {
 	struct impl *this = data;
+	uint8_t *dest = (uint8_t *)dst;
 	size_t src_sz;
 	int ret;
 
@@ -133,13 +131,17 @@ static int codec_encode(void *data,
 
 	src_sz = (src_size > this->codesize) ? this->codesize : src_size;
 
-	ret = g722_encode(&this->encode, dst, src, src_sz / 2 /* S16LE */);
+	/* Sequence number will be set in media-sink before flushing */
+	*dest = 0;
+	dest++;
+
+	ret = g722_encode(&this->encode, dest, src, src_sz / 2 /* S16LE */);
 	if (ret < 0) {
 		spa_log_error(spalog, "encode error: %d", ret);
 		return -EIO;
 	}
 
-	*dst_out = ret;
+	*dst_out = ret + ASHA_HEADER_SZ;
 	*need_flush = NEED_FLUSH_ALL;
 
 	return src_sz;
@@ -153,9 +155,9 @@ static void codec_set_log(struct spa_log *global_log)
 
 const struct media_codec asha_codec_g722 = {
 	.id = SPA_BLUETOOTH_AUDIO_CODEC_G722,
+	.kind = MEDIA_CODEC_ASHA,
 	.codec_id = ASHA_CODEC_G722,
 	.name = "g722",
-	.asha = true,
 	.description = "G722",
 	.fill_caps = NULL,
 	.enum_config = codec_enum_config,

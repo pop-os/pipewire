@@ -2,6 +2,8 @@
 /* SPDX-FileCopyrightText: Copyright © 2021 Wim Taymans */
 /* SPDX-License-Identifier: MIT */
 
+#include "config.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -9,8 +11,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-
-#include "config.h"
 
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
@@ -45,7 +45,7 @@
  *
  * Options specific to the behavior of this module
  *
- * - `roap.discover-local` = allow discovery of local services as well.
+ * - `raop.discover-local` = allow discovery of local services as well.
  *    false by default.
  * - `raop.latency.ms` = latency for all streams in microseconds. This
  *    can be overwritten in the stream rules.
@@ -60,7 +60,7 @@
  * context.modules = [
  * {   name = libpipewire-module-raop-discover
  *     args = {
- *         #roap.discover-local = false;
+ *         #raop.discover-local = false;
  *         #raop.latency.ms = 1000
  *         stream.rules = [
  *             {   matches = [
@@ -384,10 +384,8 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	}
 
 	avahi_address_snprint(at, sizeof(at), a);
-	if (spa_strstartswith(at, link_local_range)) {
-		pw_log_info("found link-local ip address %s - skipping tunnel creation", at);
-		goto done;
-	}
+	if (spa_strstartswith(at, link_local_range))
+		pw_log_info("found link-local ip address %s for '%s'", at, name);
 
 	tinfo = TUNNEL_INFO(.name = name);
 
@@ -412,6 +410,11 @@ static void resolver_cb(AvahiServiceResolver *r, AvahiIfIndex interface, AvahiPr
 	if (a->proto == AVAHI_PROTO_INET6 &&
 	    a->data.ipv6.address[0] == 0xfe &&
 	    (a->data.ipv6.address[1] & 0xc0) == 0x80)
+		snprintf(if_suffix, sizeof(if_suffix), "%%%d", interface);
+
+	/* For IPv4 link-local, bind to the discovery interface */
+	if (a->proto == AVAHI_PROTO_INET &&
+	    spa_strstartswith(at, link_local_range))
 		snprintf(if_suffix, sizeof(if_suffix), "%%%d", interface);
 
 	pw_properties_setf(props, "raop.ip", "%s%s", at, if_suffix);

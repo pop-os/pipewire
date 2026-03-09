@@ -5,6 +5,8 @@
 #ifndef SPA_BLUEZ5_BAP_CODEC_CAPS_H_
 #define SPA_BLUEZ5_BAP_CODEC_CAPS_H_
 
+#include <spa/param/audio/format.h>
+
 #define BAP_CODEC_LC3           0x06
 
 #define LC3_TYPE_FREQ           0x01
@@ -80,6 +82,22 @@
 
 #define LC3_MAX_CHANNELS 28
 
+/* Metadata types */
+#define BAP_META_TYPE_PREFERRED_CONTEXT		0x01
+#define BAP_META_TYPE_STREAMING_CONTEXT		0x02
+#define BAP_META_TYPE_PROGRAM_INFO		0x03
+#define BAP_META_TYPE_LANGUAGE			0x04
+#define BAP_META_TYPE_CCID_LIST			0x05
+#define BAP_META_TYPE_PARENTAL_RATING		0x06
+#define BAP_META_TYPE_PROGRAM_INFO_URI		0x07
+#define BAP_META_TYPE_AUDIO_ACTIVE_STATE	0x08
+#define BAP_META_TYPE_BCAST_IMMEDIATE		0x09
+#define BAP_META_TYPE_ASSISTED_LISTENING	0x0a
+#define BAP_META_TYPE_BCAST_NAME		0x0b
+#define BAP_META_TYPE_EXTENDED			0xfe
+#define BAP_META_TYPE_VENDOR			0xff
+
+
 #define BAP_CHANNEL_MONO	0x00000000 /* mono */
 #define BAP_CHANNEL_FL		0x00000001 /* front left */
 #define BAP_CHANNEL_FR		0x00000002 /* front right */
@@ -135,11 +153,68 @@
 #define BT_ISO_QOS_TARGET_LATENCY_BALANCED	0x02
 #define BT_ISO_QOS_TARGET_LATENCY_RELIABILITY	0x03
 
-struct __attribute__((packed)) ltv {
-	uint8_t  len;
-	uint8_t  type;
-	uint8_t  value[];
-};
+
+#define BT_TMAP_UUID		"00001855-0000-1000-8000-00805f9b34fb"
+
+#define BT_TMAP_ROLE_CG_STR		"cg"
+#define BT_TMAP_ROLE_CT_STR		"ct"
+#define BT_TMAP_ROLE_UMS_STR		"ums"
+#define BT_TMAP_ROLE_UMR_STR		"umr"
+#define BT_TMAP_ROLE_BMS_STR		"bms"
+#define BT_TMAP_ROLE_BMR_STR		"bmr"
+
+#define BT_GMAP_ROLE_UGG_STR		"ugg"
+#define BT_GMAP_ROLE_UGT_STR		"ugt"
+#define BT_GMAP_ROLE_BGS_STR		"bgs"
+#define BT_GMAP_ROLE_BGR_STR		"bgr"
+
+#define BT_TMAP_ROLE_LIST(role) \
+	role(BT_TMAP_ROLE_CG) \
+	role(BT_TMAP_ROLE_CT) \
+	role(BT_TMAP_ROLE_UMS) \
+	role(BT_TMAP_ROLE_UMR) \
+	role(BT_TMAP_ROLE_BMS) \
+	role(BT_TMAP_ROLE_BMR)
+
+#define BT_GMAP_UUID		"00001858-0000-1000-8000-00805f9b34fb"
+
+#define BT_GMAP_UGG_MULTIPLEX_STR	"ugg-multiplex"
+#define BT_GMAP_UGG_96KBPS_SOURCE_STR	"ugg-96kbps-source"
+#define BT_GMAP_UGG_MULTISINK_STR	"ugg-multisink"
+
+#define BT_GMAP_UGT_SOURCE_STR		"ugt-source"
+#define BT_GMAP_UGT_80KBPS_SOURCE_STR	"ugt-80kbps-source"
+#define BT_GMAP_UGT_SINK_STR		"ugt-sink"
+#define BT_GMAP_UGT_64KBPS_SINK_STR	"ugt-64kbps-sink"
+#define BT_GMAP_UGT_MULTIPLEX_STR	"ugt-multiplex"
+#define BT_GMAP_UGT_MULTISINK_STR	"ugt-multisink"
+#define BT_GMAP_UGT_MULTISOURCE_STR	"ugt-multisource"
+
+#define BT_GMAP_BGS_96KBPS_STR		"bgs-96kbps"
+
+#define BT_GMAP_BGR_MULTISINK_STR	"bgr-multisink"
+#define BT_GMAP_BGR_MULTIPLEX_STR	"bgr-multiplex"
+
+#define BT_GMAP_ROLE_LIST(role) \
+	role(BT_GMAP_ROLE_UGG) \
+	role(BT_GMAP_ROLE_UGT) \
+	role(BT_GMAP_ROLE_BGS) \
+	role(BT_GMAP_ROLE_BGR)
+
+#define BT_GMAP_FEATURE_LIST(feature) \
+	feature(BT_GMAP_UGG_MULTIPLEX) \
+	feature(BT_GMAP_UGG_96KBPS_SOURCE) \
+	feature(BT_GMAP_UGG_MULTISINK) \
+	feature(BT_GMAP_UGT_SOURCE) \
+	feature(BT_GMAP_UGT_80KBPS_SOURCE) \
+	feature(BT_GMAP_UGT_SINK) \
+	feature(BT_GMAP_UGT_64KBPS_SINK) \
+	feature(BT_GMAP_UGT_MULTIPLEX) \
+	feature(BT_GMAP_UGT_MULTISINK) \
+	feature(BT_GMAP_UGT_MULTISOURCE) \
+	feature(BT_GMAP_BGS_96KBPS) \
+	feature(BT_GMAP_BGR_MULTISINK) \
+	feature(BT_GMAP_BGR_MULTIPLEX)
 
 struct bap_endpoint_qos {
 	uint8_t	framing;
@@ -173,6 +248,41 @@ struct bap_codec_qos_full {
 	uint8_t big;
 	uint8_t bis;
 	struct bap_codec_qos qos;
+};
+
+static const struct {
+	uint32_t bit;
+	enum spa_audio_channel channel;
+} bap_channel_bits[] = {
+	{ BAP_CHANNEL_MONO, SPA_AUDIO_CHANNEL_MONO },
+	{ BAP_CHANNEL_FL,   SPA_AUDIO_CHANNEL_FL },
+	{ BAP_CHANNEL_FR,   SPA_AUDIO_CHANNEL_FR },
+	{ BAP_CHANNEL_FC,   SPA_AUDIO_CHANNEL_FC },
+	{ BAP_CHANNEL_LFE,  SPA_AUDIO_CHANNEL_LFE },
+	{ BAP_CHANNEL_BL,   SPA_AUDIO_CHANNEL_RL },
+	{ BAP_CHANNEL_BR,   SPA_AUDIO_CHANNEL_RR },
+	{ BAP_CHANNEL_FLC,  SPA_AUDIO_CHANNEL_FLC },
+	{ BAP_CHANNEL_FRC,  SPA_AUDIO_CHANNEL_FRC },
+	{ BAP_CHANNEL_BC,   SPA_AUDIO_CHANNEL_BC },
+	{ BAP_CHANNEL_LFE2, SPA_AUDIO_CHANNEL_LFE2 },
+	{ BAP_CHANNEL_SL,   SPA_AUDIO_CHANNEL_SL },
+	{ BAP_CHANNEL_SR,   SPA_AUDIO_CHANNEL_SR },
+	{ BAP_CHANNEL_TFL,  SPA_AUDIO_CHANNEL_TFL },
+	{ BAP_CHANNEL_TFR,  SPA_AUDIO_CHANNEL_TFR },
+	{ BAP_CHANNEL_TFC,  SPA_AUDIO_CHANNEL_TFC },
+	{ BAP_CHANNEL_TC,   SPA_AUDIO_CHANNEL_TC },
+	{ BAP_CHANNEL_TBL,  SPA_AUDIO_CHANNEL_TRL },
+	{ BAP_CHANNEL_TBR,  SPA_AUDIO_CHANNEL_TRR },
+	{ BAP_CHANNEL_TSL,  SPA_AUDIO_CHANNEL_TSL },
+	{ BAP_CHANNEL_TSR,  SPA_AUDIO_CHANNEL_TSR },
+	{ BAP_CHANNEL_TBC,  SPA_AUDIO_CHANNEL_TRC },
+	{ BAP_CHANNEL_BFC,  SPA_AUDIO_CHANNEL_BC },
+	{ BAP_CHANNEL_BFL,  SPA_AUDIO_CHANNEL_BLC },
+	{ BAP_CHANNEL_BFR,  SPA_AUDIO_CHANNEL_BRC },
+	{ BAP_CHANNEL_FLW,  SPA_AUDIO_CHANNEL_FLW },
+	{ BAP_CHANNEL_FRW,  SPA_AUDIO_CHANNEL_FRW },
+	{ BAP_CHANNEL_LS,   SPA_AUDIO_CHANNEL_SL }, /* is it the right mapping? */
+	{ BAP_CHANNEL_RS,   SPA_AUDIO_CHANNEL_SR }, /* is it the right mapping? */
 };
 
 #endif

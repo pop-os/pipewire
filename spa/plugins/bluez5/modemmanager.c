@@ -10,6 +10,10 @@
 
 #include "modemmanager.h"
 
+SPA_LOG_TOPIC_DEFINE_STATIC(log_topic, "spa.bluez5.modemmanager");
+#undef SPA_LOG_TOPIC_DEFAULT
+#define SPA_LOG_TOPIC_DEFAULT &log_topic
+
 #define DBUS_INTERFACE_OBJECTMANAGER "org.freedesktop.DBus.ObjectManager"
 
 struct modem {
@@ -32,6 +36,8 @@ struct impl {
 
 	struct modem modem;
 	struct spa_list call_list;
+
+	bool pts;
 };
 
 struct dbus_cmd_data {
@@ -412,6 +418,26 @@ static void mm_get_managed_objects_reply(DBusPendingCall *pending, void *user_da
 	}
 }
 
+static bool mm_get_managed_objects(struct impl *this)
+{
+	spa_autoptr(DBusMessage) m = dbus_message_new_method_call(MM_DBUS_SERVICE,
+								"/org/freedesktop/ModemManager1",
+								DBUS_INTERFACE_OBJECTMANAGER,
+								"GetManagedObjects");
+	if (m == NULL)
+		return false;
+
+	dbus_message_set_auto_start(m, false);
+
+	this->pending = send_with_reply(this->conn, m, mm_get_managed_objects_reply, this);
+	if (!this->pending) {
+		spa_log_error(this->log, "dbus call failure");
+		return false;
+	}
+
+	return true;
+}
+
 static void call_free(struct call *call)
 {
 	spa_list_remove(&call->link);
@@ -488,8 +514,12 @@ static DBusHandlerResult mm_filter_cb(DBusConnection *bus, DBusMessage *m, void 
 				mm_clean_modem(this);
 			}
 
-			if (new_owner && *new_owner)
+			if (new_owner && *new_owner) {
 				spa_log_debug(this->log, "ModemManager daemon appeared (%s)", new_owner);
+
+				if (!mm_get_managed_objects(this))
+					goto finish;
+			}
 		}
 	} else if (dbus_message_is_signal(m, DBUS_INTERFACE_OBJECTMANAGER, DBUS_SIGNAL_INTERFACES_ADDED)) {
 		DBusMessageIter arg_i;
@@ -916,8 +946,13 @@ bool mm_do_call(void *modemmanager, const char* number, void *user_data, enum cm
 	spa_autofree struct dbus_cmd_data *data = NULL;
 	spa_autoptr(DBusMessage) m = NULL;
 	DBusMessageIter iter, dict;
+	size_t i = 0;
 
-	for (size_t i = 0; number[i]; i++) {
+	/* Allow memory dial for PTS tests HFP/AG/OCM/BV-01-C and HFP/AG/OCM/BV-02-C */
+	if (this->pts && number[0] == '>')
+		i++;
+
+	for (; number[i]; i++) {
 		if (!is_valid_dial_string_char(number[i])) {
 			spa_log_warn(this->log, "Call creation canceled, invalid character found in dial string: %c", number[i]);
 			if (error)
@@ -1050,6 +1085,8 @@ void *mm_register(struct spa_log *log, void *dbus_connection, const struct spa_d
 {
 	const char *modem_device_str = NULL;
 	bool modem_device_found = false;
+	const char *pts_str = NULL;
+	bool pts = false;
 
 	spa_assert(log);
 	spa_assert(dbus_connection);
@@ -1058,6 +1095,9 @@ void *mm_register(struct spa_log *log, void *dbus_connection, const struct spa_d
 		if ((modem_device_str = spa_dict_lookup(info, "bluez5.hfphsp-backend-native-modem")) != NULL) {
 			if (!spa_streq(modem_device_str, "none"))
 				modem_device_found = true;
+		}
+		if ((pts_str = spa_dict_lookup(info, "bluez5.hfphsp-backend-native-pts")) != NULL) {
+			pts = spa_atob(pts_str);
 		}
 	}
 	if (!modem_device_found) {
@@ -1076,24 +1116,13 @@ void *mm_register(struct spa_log *log, void *dbus_connection, const struct spa_d
 	if (modem_device_str && !spa_streq(modem_device_str, "any"))
 		this->allowed_modem_device = strdup(modem_device_str);
 	spa_list_init(&this->call_list);
+	this->pts = pts;
 
 	if (add_filters(this) < 0)
 		return NULL;
 
-	spa_autoptr(DBusMessage) m = dbus_message_new_method_call(MM_DBUS_SERVICE,
-								  "/org/freedesktop/ModemManager1",
-								  DBUS_INTERFACE_OBJECTMANAGER,
-								  "GetManagedObjects");
-	if (m == NULL)
+	if (!mm_get_managed_objects(this))
 		return NULL;
-
-	dbus_message_set_auto_start(m, false);
-
-	this->pending = send_with_reply(this->conn, m, mm_get_managed_objects_reply, this);
-	if (!this->pending) {
-		spa_log_error(this->log, "dbus call failure");
-		return NULL;
-	}
 
 	return spa_steal_ptr(this);
 }

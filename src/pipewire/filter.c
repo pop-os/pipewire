@@ -26,7 +26,7 @@
 PW_LOG_TOPIC_EXTERN(log_filter);
 #define PW_LOG_TOPIC_DEFAULT log_filter
 
-#define MAX_BUFFERS	64
+#define MAX_BUFFERS	64u
 
 #define MASK_BUFFERS	(MAX_BUFFERS-1)
 
@@ -206,7 +206,7 @@ static void fix_datatype(struct spa_pod *param)
 	if (spa_pod_get_int(&vals[0], (int32_t*)&dataType) < 0)
 		return;
 
-	pw_log_debug("dataType: %u", dataType);
+	pw_log_debug("dataType: %" PRIu32, dataType);
 	if (dataType & (1u << SPA_DATA_MemPtr)) {
 		SPA_POD_VALUE(struct spa_pod_int, &vals[0]) =
 			dataType | (1<<SPA_DATA_MemFd);
@@ -507,8 +507,6 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	case SPA_NODE_COMMAND_Suspend:
 	case SPA_NODE_COMMAND_Flush:
 	case SPA_NODE_COMMAND_Pause:
-		pw_loop_invoke(impl->main_loop,
-			NULL, 0, NULL, 0, false, impl);
 		if (filter->state == PW_FILTER_STATE_STREAMING && id != SPA_NODE_COMMAND_Flush) {
 			pw_log_debug("%p: pause", filter);
 			filter_set_state(filter, PW_FILTER_STATE_PAUSED, 0, NULL);
@@ -885,8 +883,7 @@ static int impl_port_use_buffers(void *object,
 	struct port *port;
 	struct pw_filter *filter = &impl->this;
 	uint32_t i, j, impl_flags;
-	int prot, res;
-	int size = 0;
+	int res, size = 0;
 
 	pw_log_debug("%p: port:%d.%d buffers:%u disconnecting:%d", impl,
 			direction, port_id, n_buffers, impl->disconnecting);
@@ -900,7 +897,6 @@ static int impl_port_use_buffers(void *object,
 	clear_buffers(port);
 
 	impl_flags = port->flags;
-	prot = PROT_READ | (direction == SPA_DIRECTION_OUTPUT ? PROT_WRITE : 0);
 
 	if (n_buffers > MAX_BUFFERS)
 		return -ENOSPC;
@@ -915,7 +911,12 @@ static int impl_port_use_buffers(void *object,
 		if (SPA_FLAG_IS_SET(impl_flags, PW_FILTER_PORT_FLAG_MAP_BUFFERS)) {
 			for (j = 0; j < buffers[i]->n_datas; j++) {
 				struct spa_data *d = &buffers[i]->datas[j];
-				if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE)) {
+				if (d->data == NULL && SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_MAPPABLE)) {
+					int prot = 0;
+					if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_READABLE))
+						prot |= PROT_READ;
+					if (SPA_FLAG_IS_SET(d->flags, SPA_DATA_FLAG_WRITABLE))
+						prot |= PROT_WRITE;
 					if ((res = map_data(impl, d, prot)) < 0)
 						return res;
 					SPA_FLAG_SET(b->flags, BUFFER_FLAG_MAPPED);
@@ -1386,6 +1387,28 @@ static void free_port(struct filter *impl, struct port *port)
 	free(port);
 }
 
+static void filter_free(struct pw_filter *filter)
+{
+	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
+
+	pw_log_debug("%p: free", filter);
+	clear_params(impl, NULL, SPA_ID_INVALID);
+
+	free(filter->error);
+
+	pw_properties_free(filter->properties);
+
+	pw_map_clear(&impl->ports[SPA_DIRECTION_INPUT]);
+	pw_map_clear(&impl->ports[SPA_DIRECTION_OUTPUT]);
+
+	free(filter->name);
+
+	if (impl->data.context)
+		pw_context_destroy(impl->data.context);
+
+	free(impl);
+}
+
 SPA_EXPORT
 void pw_filter_destroy(struct pw_filter *filter)
 {
@@ -1408,26 +1431,13 @@ void pw_filter_destroy(struct pw_filter *filter)
 		spa_hook_remove(&filter->core_listener);
 		spa_list_remove(&filter->link);
 	}
-
-	clear_params(impl, NULL, SPA_ID_INVALID);
-
-	pw_log_debug("%p: free", filter);
-	free(filter->error);
-
-	pw_properties_free(filter->properties);
-
 	spa_hook_list_clean(&impl->hooks);
 	spa_hook_list_clean(&filter->listener_list);
 
-	pw_map_clear(&impl->ports[SPA_DIRECTION_INPUT]);
-	pw_map_clear(&impl->ports[SPA_DIRECTION_OUTPUT]);
+	/* Make sure there are no queued invokes from us anymore */
+	pw_loop_invoke(impl->main_loop, NULL, 0, NULL, 0, false, impl);
 
-	free(filter->name);
-
-	if (impl->data.context)
-		pw_context_destroy(impl->data.context);
-
-	free(impl);
+	filter_free(filter);
 }
 
 static int
@@ -1443,7 +1453,7 @@ static void hook_removed(struct spa_hook *hook)
 {
 	struct filter *impl = hook->priv;
 	if (impl->data_loop)
-		pw_loop_invoke(impl->data_loop, do_remove_callbacks, 1, NULL, 0, true, impl);
+		pw_loop_locked(impl->data_loop, do_remove_callbacks, 1, NULL, 0, impl);
 	else
 		spa_zero(impl->rt_callbacks);
 	hook->priv = NULL;
@@ -1743,7 +1753,7 @@ static void add_audio_dsp_port_params(struct filter *impl, struct port *port)
 			SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32)));
 
 	spa_pod_builder_init(&b, buffer, sizeof(buffer));
-	add_param(impl, port, SPA_PARAM_Buffers, PARAM_FLAG_LOCKED,
+	add_param(impl, port, SPA_PARAM_Buffers, 0,
 		spa_pod_builder_add_object(&b,
 			SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, MAX_BUFFERS),
@@ -1964,7 +1974,8 @@ int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time)
 	if (SPA_LIKELY(p != NULL)) {
 		impl->time.now = p->clock.nsec;
 		impl->time.rate = p->clock.rate;
-		if (SPA_UNLIKELY(impl->clock_id != p->clock.id)) {
+		if (SPA_UNLIKELY(impl->clock_id != p->clock.id ||
+		    SPA_FLAG_IS_SET(p->clock.flags, SPA_IO_CLOCK_FLAG_DISCONT))) {
 			impl->base_pos = p->clock.position - impl->time.ticks;
 			impl->clock_id = p->clock.id;
 		}
@@ -1975,7 +1986,8 @@ int pw_filter_get_time(struct pw_filter *filter, struct pw_time *time)
 	pw_log_trace("%p: %"PRIi64" %"PRIi64" %"PRIu64" %d/%d ", filter,
 			time->now, time->delay, time->ticks,
 			time->rate.num, time->rate.denom);
-	return 0;
+
+	return filter->state == PW_FILTER_STATE_STREAMING ? 0 : -EIO;
 }
 
 SPA_EXPORT
@@ -2083,8 +2095,8 @@ SPA_EXPORT
 int pw_filter_flush(struct pw_filter *filter, bool drain)
 {
 	struct filter *impl = SPA_CONTAINER_OF(filter, struct filter, this);
-	pw_loop_invoke(impl->data_loop,
-			drain ? do_drain : do_flush, 1, NULL, 0, true, impl);
+	pw_loop_locked(impl->data_loop,
+			drain ? do_drain : do_flush, 1, NULL, 0, impl);
 	return 0;
 }
 

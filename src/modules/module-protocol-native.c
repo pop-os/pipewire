@@ -26,7 +26,6 @@
 #include <sys/ucred.h>
 #endif
 
-#include <spa/pod/iter.h>
 #include <spa/pod/parser.h>
 #include <spa/pod/builder.h>
 #include <spa/utils/cleanup.h>
@@ -35,10 +34,6 @@
 #include <spa/utils/json.h>
 #include <spa/debug/log.h>
 
-#ifdef HAVE_SYSTEMD
-#include <systemd/sd-daemon.h>
-#endif
-
 #ifdef HAVE_SELINUX
 #include <selinux/selinux.h>
 #endif
@@ -46,6 +41,7 @@
 #include <pipewire/impl.h>
 #include <pipewire/extensions/protocol-native.h>
 
+#include "network-utils.h"
 #include "pipewire/private.h"
 
 #include "modules/module-protocol-native/connection.h"
@@ -190,7 +186,6 @@ static const struct spa_dict_item module_props[] = {
 #define LOCK_SUFFIXLEN  5
 
 void pw_protocol_native_init(struct pw_protocol *protocol);
-void pw_protocol_native0_init(struct pw_protocol *protocol);
 void *protocol_native_security_context_init(struct pw_impl_module *module, struct pw_protocol *protocol);
 void protocol_native_security_context_free(void *data);
 
@@ -271,8 +266,6 @@ struct client_data {
 
 	unsigned int busy:1;
 	unsigned int need_flush:1;
-
-	struct protocol_compat_v2 compat_v2;
 };
 
 static void debug_msg(const char *prefix, const struct pw_protocol_native_message *msg, bool hex)
@@ -536,8 +529,6 @@ static void client_free(void *data)
 		pw_loop_destroy_source(client->context->main_loop, this->source);
 	if (this->connection)
 		pw_protocol_native_connection_destroy(this->connection);
-
-	pw_map_clear(&this->compat_v2.types);
 }
 
 static const struct pw_impl_client_events client_events = {
@@ -566,9 +557,6 @@ static void on_start(void *data, uint32_t version)
 	if (pw_global_bind(pw_impl_core_get_global(client->core), client,
 			PW_PERM_ALL, version, 0) < 0)
 		return;
-
-	if (version == 0)
-		client->compat_v2 = &this->compat_v2;
 
 	return;
 }
@@ -687,7 +675,6 @@ static struct client_data *client_new(struct server *s, int fd)
 
 	this->server = s;
 	this->client = client;
-	pw_map_init(&this->compat_v2.types, 0, 32);
 
 	pw_impl_client_add_listener(client, &this->client_listener, &client_events, this);
 
@@ -919,13 +906,12 @@ static int add_socket(struct pw_protocol *protocol, struct server *s, struct soc
 	int fd = -1, res;
 	bool activated = false;
 
-#ifdef HAVE_SYSTEMD
 	{
-		int i, n = sd_listen_fds(0);
+		int i, n = listen_fds();
 		for (i = 0; i < n; ++i) {
-			if (sd_is_socket_unix(SD_LISTEN_FDS_START + i, SOCK_STREAM,
-						1, s->addr.sun_path, 0) > 0) {
-				fd = SD_LISTEN_FDS_START + i;
+			if (is_socket_unix(LISTEN_FDS_START + i, SOCK_STREAM,
+						s->addr.sun_path) > 0) {
+				fd = LISTEN_FDS_START + i;
 				activated = true;
 				pw_log_info("server %p: Found socket activation socket for '%s'",
 						s, s->addr.sun_path);
@@ -933,7 +919,6 @@ static int add_socket(struct pw_protocol *protocol, struct server *s, struct soc
 			}
 		}
 	}
-#endif
 
 	if (fd < 0) {
 		struct stat socket_stat;
@@ -1836,7 +1821,6 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args_str)
 	this->extension = &protocol_ext_impl;
 
 	pw_protocol_native_init(this);
-	pw_protocol_native0_init(this);
 
 	pw_log_debug("%p: new", this);
 

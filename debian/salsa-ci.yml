@@ -1,7 +1,9 @@
 ---
 include:
-  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/salsa-ci.yml
-  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/pipeline-jobs.yml
+  - https://salsa.debian.org/salsa-ci-team/pipeline/raw/master/recipes/debian.yml
 
-reprotest:
+variables:
+  SALSA_CI_DISABLE_LICENSERECON: 0
+
+licenserecon:
   allow_failure: true

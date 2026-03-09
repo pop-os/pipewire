@@ -15,6 +15,7 @@
 #include <gst/video/video.h>
 
 #include <pipewire/pipewire.h>
+#include <spa/param/format.h>
 #include <gst/gstpipewirepool.h>
 #include <gst/gstpipewirecore.h>
 
@@ -24,6 +25,22 @@ G_BEGIN_DECLS
 #define GST_PIPEWIRE_SRC_CAST(obj) ((GstPipeWireSrc *) (obj))
 G_DECLARE_FINAL_TYPE (GstPipeWireSrc, gst_pipewire_src, GST, PIPEWIRE_SRC, GstPushSrc)
 
+/**
+ * GstPipeWireSrcOnDisconnect:
+ * @GST_PIPEWIRE_SRC_ON_DISCONNECT_EOS: send EoS downstream
+ * @GST_PIPEWIRE_SRC_ON_DISCONNECT_ERROR: raise pipeline error
+ * @GST_PIPEWIRE_SRC_ON_DISCONNECT_NONE: no action
+ *
+ * Different actions on disconnect.
+ */
+typedef enum
+{
+  GST_PIPEWIRE_SRC_ON_DISCONNECT_NONE,
+  GST_PIPEWIRE_SRC_ON_DISCONNECT_EOS,
+  GST_PIPEWIRE_SRC_ON_DISCONNECT_ERROR,
+} GstPipeWireSrcOnDisconnect;
+
+#define GST_TYPE_PIPEWIRE_SRC_ON_DISCONNECT (gst_pipewire_src_on_disconnect_get_type ())
 
 /**
  * GstPipeWireSrc:
@@ -36,6 +53,7 @@ struct _GstPipeWireSrc {
   GstPipeWireStream *stream;
 
   /*< private >*/
+  gint n_buffers;
   gint use_bufferpool;
   gint min_buffers;
   gint max_buffers;
@@ -46,7 +64,8 @@ struct _GstPipeWireSrc {
   GstCaps *caps;
   GstCaps *possible_caps;
 
-  gboolean is_video;
+  enum spa_media_type media_type;
+  gboolean is_rawvideo;
   GstVideoInfo video_info;
 #ifdef HAVE_GSTREAMER_DMA_DRM
   GstVideoInfoDmaDrm drm_info;
@@ -56,6 +75,7 @@ struct _GstPipeWireSrc {
   gboolean flushing;
   gboolean started;
   gboolean eos;
+  gboolean flushing_on_remove_buffer;
 
   gboolean is_live;
   int64_t delay;
@@ -63,9 +83,14 @@ struct _GstPipeWireSrc {
   GstClockTime max_latency;
 
   GstBuffer *last_buffer;
+  GstClockTime last_buffer_clock_time;
 
   enum spa_meta_videotransform_value transform_value;
+
+  GstPipeWireSrcOnDisconnect on_disconnect;
 };
+
+GType gst_pipewire_src_on_stream_disconnect_get_type (void);
 
 G_END_DECLS
 

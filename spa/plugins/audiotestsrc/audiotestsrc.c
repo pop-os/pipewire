@@ -83,6 +83,7 @@ struct port {
 
 	struct spa_io_buffers *io;
 	struct spa_io_sequence *io_control;
+	uint32_t io_control_size;
 
 	bool have_format;
 	struct spa_audio_info current_format;
@@ -112,6 +113,7 @@ struct impl {
 	struct props props;
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
+	bool following;
 
 	struct spa_hook_list hooks;
 	struct spa_callbacks callbacks;
@@ -305,6 +307,8 @@ static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
 	default:
 		return -ENOENT;
 	}
+	this->following = this->position && this->clock && this->position->clock.id != this->clock->id;
+
 	return 0;
 }
 
@@ -421,7 +425,8 @@ static int make_buffer(struct impl *this)
 
 	this->sample_count += n_samples;
 	this->elapsed_time = SAMPLES_TO_TIME(this, this->sample_count);
-	set_timer(this, true);
+	if (!this->following)
+		set_timer(this, true);
 
 	io->buffer_id = b->id;
 	io->status = SPA_STATUS_HAVE_DATA;
@@ -474,7 +479,8 @@ static int impl_node_send_command(void *object, const struct spa_command *comman
 		this->elapsed_time = 0;
 
 		this->started = true;
-		set_timer(this, true);
+		if (!this->following)
+			set_timer(this, true);
 		break;
 	}
 	case SPA_NODE_COMMAND_Suspend:
@@ -872,6 +878,7 @@ impl_node_port_set_io(void *object,
 		break;
 	case SPA_IO_Control:
 		port->io_control = data;
+		port->io_control_size = size;
 		break;
 	default:
 		return -ENOENT;
@@ -889,7 +896,7 @@ static inline void reuse_buffer(struct impl *this, struct port *port, uint32_t i
 	b->outstanding = false;
 	spa_list_append(&port->empty, &b->link);
 
-	if (!this->props.live)
+	if (!this->props.live && !this->following)
 		set_timer(this, true);
 }
 
@@ -909,16 +916,24 @@ static int impl_node_port_reuse_buffer(void *object, uint32_t port_id, uint32_t 
 	return 0;
 }
 
-static int process_control(struct impl *this, struct spa_pod_sequence *sequence)
+static int process_control(struct impl *this, struct spa_pod_sequence *sequence, uint32_t size)
 {
-	struct spa_pod_control *c;
+	struct spa_pod_parser parser;
+	struct spa_pod_frame frame;
+	struct spa_pod_sequence seq;
+	const void *seq_body, *c_body;
+	struct spa_pod_control c;
 
-	SPA_POD_SEQUENCE_FOREACH(sequence, c) {
-		switch (c->type) {
+	spa_pod_parser_init_from_data(&parser, sequence, size, 0, size);
+	if (spa_pod_parser_push_sequence_body(&parser, &frame, &seq, &seq_body) < 0)
+		return 0;
+
+	while (spa_pod_parser_get_control_body(&parser, &c, &c_body) >= 0) {
+		switch (c.type) {
 		case SPA_CONTROL_Properties:
 		{
 			struct props *p = &this->props;
-			spa_pod_parse_object(&c->value,
+			spa_pod_body_parse_object(&c.value, c_body,
 				SPA_TYPE_OBJECT_Props, NULL,
 				SPA_PROP_frequency, SPA_POD_OPT_Float(&p->freq),
 				SPA_PROP_volume,    SPA_POD_OPT_Float(&p->volume));
@@ -946,7 +961,7 @@ static int impl_node_process(void *object)
 		return -EIO;
 
 	if (port->io_control)
-		process_control(this, &port->io_control->sequence);
+		process_control(this, &port->io_control->sequence, port->io_control_size);
 
 	if (io->status == SPA_STATUS_HAVE_DATA)
 		return SPA_STATUS_HAVE_DATA;
@@ -956,7 +971,7 @@ static int impl_node_process(void *object)
 		io->buffer_id = SPA_ID_INVALID;
 	}
 
-	if (!this->props.live)
+	if (!this->props.live || this->following)
 		return make_buffer(this);
 	else
 		return SPA_STATUS_OK;
@@ -1013,7 +1028,7 @@ static int impl_clear(struct spa_handle *handle)
 	this = (struct impl *) handle;
 
 	if (this->data_loop)
-		spa_loop_invoke(this->data_loop, do_remove_timer, 0, NULL, 0, true, this);
+		spa_loop_locked(this->data_loop, do_remove_timer, 0, NULL, 0, this);
 	spa_system_close(this->data_system, this->timer_source.fd);
 
 	return 0;

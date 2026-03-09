@@ -5,11 +5,11 @@
 #ifndef AVB_INTERNAL_H
 #define AVB_INTERNAL_H
 
+#include <pipewire/pipewire.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <pipewire/pipewire.h>
 
 struct server;
 struct avb_mrp;
@@ -19,6 +19,7 @@ struct avb_mrp;
 
 struct impl {
 	struct pw_loop *loop;
+	struct pw_timer_queue *timer_queue;
 	struct pw_context *context;
 	struct spa_hook context_listener;
 	struct pw_core *core;
@@ -51,22 +52,37 @@ struct descriptor {
 	void *ptr;
 };
 
+
+enum avb_mode {
+	/** The legacy AVB Mode */
+	AVB_MODE_LEGACY,
+	/**
+	 * \brief Milan version 1.2, which subset of the AVB,
+	 * \see Milan Specifications https://avnu.org/resource/milan-specification/
+	 */
+	AVB_MODE_MILAN_V12,
+
+	/** Future AVB mode will be added here if necessary */
+	AVB_MODE_MAX
+};
+
 struct server {
 	struct spa_list link;
 	struct impl *impl;
 
 	char *ifname;
+	/** Parsed from the configuration pipewire-avb.conf */
+	enum avb_mode avb_mode;
 	uint8_t mac_addr[6];
 	uint64_t entity_id;
 	int ifindex;
 
 	struct spa_source *source;
-	struct spa_source *timer;
+	struct pw_timer timer;
 
 	struct spa_hook_list listener_list;
 
 	struct spa_list descriptors;
-	struct spa_list streams;
 
 	unsigned debug_messages:1;
 
@@ -81,7 +97,18 @@ struct server {
 
 #include "stream.h"
 
-static inline const struct descriptor *server_find_descriptor(struct server *server,
+static inline void server_destroy_descriptors(struct server *server)
+{
+	struct descriptor *d, *t;
+
+        spa_list_for_each_safe(d, t, &server->descriptors, link) {
+		free(d->ptr);
+		spa_list_remove(&d->link);
+		free(d);
+        }
+}
+
+static inline struct descriptor *server_find_descriptor(struct server *server,
 		uint16_t type, uint16_t index)
 {
 	struct descriptor *d;
@@ -107,20 +134,10 @@ static inline void *server_add_descriptor(struct server *server,
 	if (ptr)
 		memcpy(d->ptr, ptr, size);
 	spa_list_append(&server->descriptors, &d->link);
-	return d->ptr;
+	return d;
 }
 
-static inline struct stream *server_find_stream(struct server *server,
-		enum spa_direction direction, uint16_t index)
-{
-	struct stream *s;
-	spa_list_for_each(s, &server->streams, link) {
-		if (s->direction == direction &&
-		    s->index == index)
-			return s;
-	}
-	return NULL;
-}
+const char *get_avb_mode_str(enum avb_mode mode);
 
 struct server *avdecc_server_new(struct impl *impl, struct spa_dict *props);
 void avdecc_server_free(struct server *server);

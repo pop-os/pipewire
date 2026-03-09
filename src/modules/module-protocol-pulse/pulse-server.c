@@ -57,12 +57,12 @@
 #include "volume.h"
 
 #define DEFAULT_ALLOW_MODULE_LOADING 	"true"
-#define DEFAULT_MIN_REQ		"128/48000"
+#define DEFAULT_MIN_REQ		"256/48000"
 #define DEFAULT_DEFAULT_REQ	"960/48000"
-#define DEFAULT_MIN_FRAG	"128/48000"
+#define DEFAULT_MIN_FRAG	"256/48000"
 #define DEFAULT_DEFAULT_FRAG	"96000/48000"
 #define DEFAULT_DEFAULT_TLENGTH	"96000/48000"
-#define DEFAULT_MIN_QUANTUM	"128/48000"
+#define DEFAULT_MIN_QUANTUM	"256/48000"
 #define DEFAULT_FORMAT		"F32"
 #define DEFAULT_POSITION	"[ FL FR ]"
 #define DEFAULT_IDLE_TIMEOUT	"0"
@@ -973,12 +973,33 @@ static void manager_metadata(void *data, struct pw_manager_object *o,
 	if (subject == PW_ID_CORE && o == client->metadata_routes)
 		client_update_routes(client, key, value);
 	if (subject == PW_ID_CORE && o == client->metadata_schema_sm_settings) {
-		if (spa_streq(key, METADATA_FEATURES_AUDIO_MONO))
+		char default_[16];
+
+		if (spa_streq(key, METADATA_FEATURES_AUDIO_MONO)) {
 			client->have_force_mono_audio = true;
+
+			if (spa_json_str_object_find(value, strlen(value),
+						"default", default_, sizeof(default_)) < 0)
+				client->default_force_mono_audio = false;
+			else
+				client->default_force_mono_audio = spa_streq(default_, "true");
+		}
+
+		if (spa_streq(key, METADATA_BLUETOOTH_HEADSET_AUTOSWITCH)) {
+			client->have_bluetooth_headset_autoswitch = true;
+
+			if (spa_json_str_object_find(value, strlen(value),
+						"default", default_, sizeof(default_)) < 0)
+				client->default_bluetooth_headset_autoswitch = false;
+			else
+				client->default_bluetooth_headset_autoswitch = spa_streq(default_, "true");
+		}
 	}
 	if (subject == PW_ID_CORE && o == client->metadata_sm_settings) {
 		if (spa_streq(key, METADATA_FEATURES_AUDIO_MONO))
 			client->force_mono_audio = spa_streq(value, "true");
+		if (spa_streq(key, METADATA_BLUETOOTH_HEADSET_AUTOSWITCH))
+			client->bluetooth_headset_autoswitch = spa_streq(value, "true");
 	}
 }
 
@@ -1143,6 +1164,25 @@ static void stream_state_changed(void *data, enum pw_stream_state old,
 		break;
 	}
 
+	/* Don't emit suspended if we are creating a corked stream, as that will have a quick
+	 * RUNNING/SUSPENDED transition for initial negotiation */
+	if (stream->create_tag == SPA_ID_INVALID && !stream->corked) {
+		if (old == PW_STREAM_STATE_PAUSED && state == PW_STREAM_STATE_STREAMING &&
+		    stream->is_suspended) {
+			stream_send_suspended(stream, false);
+			stream->is_suspended = false;
+		}
+		if (old == PW_STREAM_STATE_STREAMING && state == PW_STREAM_STATE_PAUSED &&
+		    !stream->is_suspended) {
+			if (stream->fail_on_suspend) {
+				stream->killed = true;
+				destroy_stream = true;
+			} else {
+				stream_send_suspended(stream, true);
+			}
+			stream->is_suspended = true;
+		}
+	}
 	if (destroy_stream) {
 		pw_work_queue_add(impl->work_queue, stream, 0,
 				do_destroy_stream, NULL);
@@ -1504,7 +1544,7 @@ static void stream_process(void *data)
 
 	pw_stream_get_time_n(stream->stream, &pd.pwt, sizeof(pd.pwt));
 
-	pw_loop_invoke(impl->loop,
+	pw_loop_invoke(impl->main_loop,
 			do_process_done, 1, &pd, sizeof(pd), false, stream);
 }
 
@@ -1749,6 +1789,7 @@ static int do_create_playback_stream(struct client *client, uint32_t command, ui
 	stream->muted_set = muted_set;
 	stream->is_underrun = true;
 	stream->underrun_for = -1;
+	stream->fail_on_suspend = fail_on_suspend;
 
 	pw_properties_set(props, "pulse.corked", corked ? "true" : "false");
 
@@ -2024,6 +2065,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 	stream->volume_set = volume_set;
 	stream->muted = muted;
 	stream->muted_set = muted_set;
+	stream->fail_on_suspend = fail_on_suspend;
 
 	if (client->quirks & QUIRK_REMOVE_CAPTURE_DONT_MOVE)
 		no_move = false;
@@ -2046,6 +2088,7 @@ static int do_create_record_stream(struct client *client, uint32_t command, uint
 		flags |= PW_STREAM_FLAG_DONT_RECONNECT;
 
 	if (direct_on_input_idx != SPA_ID_INVALID) {
+		dont_inhibit_auto_suspend = false;
 		source_index = direct_on_input_idx;
 	} else if (source_name != NULL) {
 		if ((id = atoi(source_name)) != 0)
@@ -4669,6 +4712,10 @@ static int do_set_default(struct client *client, uint32_t command, uint32_t tag,
 	pw_log_info("[%s] %s tag:%u name:%s", client->name,
 			commands[command].name, tag, name);
 
+	/* @NONE@ is used to clear the setting */
+	if (spa_streq(name, "@NONE@"))
+		name = NULL;
+
 	if (name != NULL && (o = find_device(client, SPA_ID_INVALID, name, sink, NULL)) == NULL)
 		return -ENOENT;
 
@@ -5517,7 +5564,7 @@ struct pw_protocol_pulse *pw_protocol_pulse_new(struct pw_context *context,
 	spa_list_init(&impl->cleanup_clients);
 	spa_list_init(&impl->free_messages);
 
-	impl->loop = pw_context_get_main_loop(context);
+	impl->main_loop = pw_context_get_main_loop(context);
 	impl->work_queue = pw_context_get_work_queue(context);
 	impl->timer_queue = pw_context_get_timer_queue(context);
 
