@@ -1,13 +1,14 @@
-pipewire (1.6.1-1) UNRELEASED; urgency=medium
+pipewire (1.6.1-1) unstable; urgency=medium
 
-  * salsa-ci: enable licenserecon and drop reprotest
-  * salsa-ci: allow licenserecon to fail for now
+  * New upstream release
+  * Upload to unstable
   * Remove redundant 'Priority: optional'
   * Standards-Version: 4.7.3 (no changes required)
   * Switch to pkgconf (from pkg-config) in testsuite Depends
-  * New upstream release
+  * salsa-ci: enable licenserecon and drop reprotest
+  * salsa-ci: allow licenserecon to fail for now
 
- -- Dylan Aïssi <daissi@debian.org>  Mon, 09 Mar 2026 12:34:08 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Mon, 09 Mar 2026 13:55:41 +0100
 
 pipewire (1.6.0-1) experimental; urgency=medium
 
