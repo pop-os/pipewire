@@ -1,0 +1,6 @@
+libspa-0.2-dev: pkg-config-bad-directive -fno-strict-aliasing [usr/lib/*/pkgconfig/libspa-0.2.pc]
+# See https://gitlab.freedesktop.org/pipewire/pipewire/-/merge_requests/2481
+# SPA does not respect the C strict aliasing rules at all, so any code
+# that uses it must be built with -fno-strict-aliasing.  Furthermore,
+# there is code in SPA that compares pointers that point to different
+# objects, so -fno-strict-overflow is also needed.
