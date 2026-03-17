@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.6.1',
+  version : '1.6.2',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -116,6 +116,7 @@ cc_flags = common_flags + [
   '-Werror=old-style-definition',
   '-Werror=missing-parameter-type',
   '-Werror=strict-prototypes',
+  '-Werror=discarded-qualifiers',
 ]
 add_project_arguments(cc.get_supported_arguments(cc_flags), language: 'c')
 add_project_arguments(cc_native.get_supported_arguments(cc_flags),
