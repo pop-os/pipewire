@@ -4887,9 +4887,21 @@ int jack_activate (jack_client_t *client)
 	c->activation->pending_sync = true;
 
 	spa_list_for_each(o, &c->context.objects, link) {
+#if !defined(LIBJACKSERVER)
 		if (o->type != INTERFACE_Port || o->port.port == NULL ||
 		    o->port.port->client != c || !o->port.port->valid)
 			continue;
+#else
+		/* emits all foreign active ports, skips own (already announced via jack_port_register) */
+		if (o->type != INTERFACE_Port || o->removed)
+			continue;
+		/* own ports are handled by jack_port_register */
+		if (o->port.port != NULL && o->port.port->client == c)
+			continue;
+		/* only announce ports whose node is active */
+		if (o->port.node != NULL && !node_is_active(c, o->port.node))
+			continue;
+#endif
 		o->registered = 0;
 		queue_notify(c, NOTIFY_TYPE_PORTREGISTRATION, o, 1, NULL);
 	}
@@ -5325,7 +5337,7 @@ int jack_set_freewheel(jack_client_t* client, int onoff)
 	pw_thread_loop_lock(c->context.loop);
 	str = pw_properties_get(c->props, PW_KEY_NODE_GROUP);
 	if (str != NULL) {
-		char *p = strstr(str, ",pipewire.freewheel");
+		const char *p = strstr(str, ",pipewire.freewheel");
 		if (p == NULL)
 			p = strstr(str, "pipewire.freewheel");
 		if (p == NULL && onoff)
@@ -6012,7 +6024,16 @@ jack_port_type_id_t jack_port_type_id (const jack_port_t *port)
 	return_val_if_fail(o != NULL, 0);
 	if (o->type != INTERFACE_Port)
 		return TYPE_ID_OTHER;
-	return o->port.type_id;
+
+	/* map internal type IDs to jack1/jack2 compatible public values */
+	switch (o->port.type_id) {
+	case TYPE_ID_AUDIO: return 0;
+	case TYPE_ID_MIDI:
+	case TYPE_ID_OSC:
+	case TYPE_ID_UMP:   return 1;  /* all MIDI variants map to 1 */
+	case TYPE_ID_VIDEO: return 3;  /* video maps to 3 */
+	default:            return o->port.type_id;
+	}
 }
 
 SPA_EXPORT
