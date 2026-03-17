@@ -1,8 +1,8 @@
-pipewire (1.6.2-1) UNRELEASED; urgency=medium
+pipewire (1.6.2-1) unstable; urgency=medium
 
   * New upstream release
 
- -- Dylan Aïssi <daissi@debian.org>  Tue, 17 Mar 2026 10:14:52 +0100
+ -- Dylan Aïssi <daissi@debian.org>  Tue, 17 Mar 2026 13:38:48 +0100
 
 pipewire (1.6.1-1) unstable; urgency=medium
 
