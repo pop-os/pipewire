@@ -4,6 +4,3 @@ include:
 
 variables:
   SALSA_CI_DISABLE_LICENSERECON: 0
-
-licenserecon:
-  allow_failure: true

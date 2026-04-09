@@ -4,6 +4,7 @@ pipewire (1.6.3-1) UNRELEASED; urgency=medium
   * Add lintian-overrides for pkg-config-bad-directive
   * Standards-Version: 4.7.4 (no changes required)
   * Update debian/copyright
+  * salsa-ci: don't allow licenserecon to fail
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Apr 2026 17:20:45 +0200
 
