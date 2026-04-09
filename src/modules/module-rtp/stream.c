@@ -48,8 +48,11 @@ PW_LOG_TOPIC_EXTERN(mod_topic);
 #define rtp_stream_emit_open_connection(s,r)	rtp_stream_emit(s, open_connection, 0,r)
 #define rtp_stream_emit_close_connection(s,r)	rtp_stream_emit(s, close_connection, 0,r)
 #define rtp_stream_emit_param_changed(s,i,p)	rtp_stream_emit(s, param_changed,0,i,p)
-#define rtp_stream_emit_send_packet(s,i,l)	rtp_stream_emit(s, send_packet,0,i,l)
-#define rtp_stream_emit_send_feedback(s,seq)	rtp_stream_emit(s, send_feedback,0,seq)
+
+#define rtp_stream_call(s,m,v,...)		spa_callbacks_call_fast(&s->rtp_callbacks, \
+							struct rtp_stream_events, m, v, ##__VA_ARGS__)
+#define rtp_stream_call_send_packet(s,i,l)	rtp_stream_call(s, send_packet,0,i,l)
+#define rtp_stream_call_send_feedback(s,seq)	rtp_stream_call(s, send_feedback,0,seq)
 
 enum rtp_stream_internal_state {
 	/* The state when the stream is idle / stopped. The background
@@ -85,6 +88,8 @@ struct impl {
 	struct spa_hook stream_listener;
 	struct pw_stream_events stream_events;
 
+	struct spa_callbacks rtp_callbacks;
+
 	struct spa_hook_list listener_list;
 	struct spa_hook listener;
 
@@ -109,6 +114,7 @@ struct impl {
 	uint32_t mtu;
 	uint32_t header_size;
 	uint32_t payload_size;
+	uint32_t ts_align;
 
 	struct spa_ringbuffer ring;
 	uint8_t buffer[BUFFER_SIZE];
@@ -426,7 +432,7 @@ static int stream_stop(struct impl *impl)
 	 * because a stop involves closing the connection. If the timer is still
 	 * running, it needs an open connection for sending out remaining packets. */
 	if (!timer_running) {
-		int res;
+		int res = 0;
 		pw_log_info("closing connection as part of stopping the stream");
 		rtp_stream_emit_close_connection(impl, &res);
 		if (res > 0) {
@@ -1002,6 +1008,7 @@ struct rtp_stream *rtp_stream_new(struct pw_core *core,
 		(res = stream_start(impl)) < 0)
 		goto out;
 
+	impl->rtp_callbacks = SPA_CALLBACKS_INIT(events, data);
 	spa_hook_list_append(&impl->listener_list, &impl->listener, events, data);
 
 	return (struct rtp_stream*)impl;

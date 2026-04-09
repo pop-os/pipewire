@@ -86,7 +86,7 @@ PW_LOG_TOPIC_STATIC(jack_log_topic, "jack");
 #define OTHER_CONNECT_FAIL	-1
 #define OTHER_CONNECT_IGNORE	0
 
-#define NOTIFY_BUFFER_SIZE	(1u<<13)
+#define NOTIFY_BUFFER_SIZE	(1u<<16)
 #define NOTIFY_BUFFER_MASK	(NOTIFY_BUFFER_SIZE-1)
 
 struct notify {
@@ -104,8 +104,8 @@ struct notify {
 #define NOTIFY_TYPE_TOTAL_LATENCY	((9<<4)|NOTIFY_ACTIVE_FLAG)
 #define NOTIFY_TYPE_PORT_RENAME		((10<<4)|NOTIFY_ACTIVE_FLAG)
 	int type;
-	struct object *object;
 	int arg1;
+	struct object *object;
 	const char *msg;
 };
 
@@ -1448,8 +1448,9 @@ static size_t convert_from_event(void *midi, void *buffer, size_t size, uint32_t
 
 	switch (type) {
 	case TYPE_ID_MIDI:
+		event_type = SPA_CONTROL_Midi;
+		break;
 	case TYPE_ID_OSC:
-		/* we handle MIDI as OSC, check below */
 		event_type = SPA_CONTROL_OSC;
 		break;
 	case TYPE_ID_UMP:
@@ -1466,27 +1467,15 @@ static size_t convert_from_event(void *midi, void *buffer, size_t size, uint32_t
 	for (i = 0; i < count; i++) {
 		jack_midi_event_t ev;
 		jack_midi_event_get(&ev, midi, i);
+		uint32_t ev_type;
 
-		if (type != TYPE_ID_MIDI || is_osc(&ev)) {
-			/* no midi port or it's OSC */
-			spa_pod_builder_control(&b, ev.time, event_type);
-			spa_pod_builder_bytes(&b, ev.buffer, ev.size);
-		} else {
-			/* midi port and it's not OSC, convert to UMP */
-			uint8_t *data = ev.buffer;
-			size_t size = ev.size;
-			uint64_t state = 0;
+		if (type == TYPE_ID_MIDI && is_osc(&ev))
+			ev_type = SPA_CONTROL_OSC;
+		else
+			ev_type = event_type;
 
-			while (size > 0) {
-				uint32_t ump[4];
-				int ump_size = spa_ump_from_midi(&data, &size,
-						ump, sizeof(ump), 0, &state);
-				if (ump_size <= 0)
-					break;
-				spa_pod_builder_control(&b, ev.time, SPA_CONTROL_UMP);
-				spa_pod_builder_bytes(&b, ump, ump_size);
-			}
-		}
+		spa_pod_builder_control(&b, ev.time, ev_type);
+		spa_pod_builder_bytes(&b, ev.buffer, ev.size);
 	}
 	spa_pod_builder_pop(&b, &f);
 	return b.state.offset;
@@ -2210,7 +2199,7 @@ on_rtsocket_condition(void *data, int fd, uint32_t mask)
 		}
 	} else if (SPA_LIKELY(mask & SPA_IO_IN)) {
 		uint32_t buffer_frames;
-		int status = 0;
+		int status = -EBUSY;
 
 		buffer_frames = cycle_run(c);
 
@@ -4875,7 +4864,7 @@ int jack_activate (jack_client_t *client)
 	freeze_callbacks(c);
 
 	/* reemit buffer_frames */
-	c->buffer_frames = 0;
+	c->buffer_frames = (uint32_t)-1;
 
 	pw_data_loop_start(c->loop);
 	c->active = true;
@@ -5456,7 +5445,7 @@ SPA_EXPORT
 jack_nframes_t jack_get_buffer_size (jack_client_t *client)
 {
 	struct client *c = (struct client *) client;
-	jack_nframes_t res = -1;
+	uint32_t res = -1;
 
 	return_val_if_fail(c != NULL, 0);
 
@@ -5473,7 +5462,7 @@ jack_nframes_t jack_get_buffer_size (jack_client_t *client)
 	}
 	c->buffer_frames = res;
 	pw_log_debug("buffer_frames: %u", res);
-	return res;
+	return (jack_nframes_t)res;
 }
 
 SPA_EXPORT

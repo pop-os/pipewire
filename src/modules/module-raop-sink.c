@@ -130,11 +130,6 @@
 PW_LOG_TOPIC(mod_topic, "mod." NAME);
 #define PW_LOG_TOPIC_DEFAULT mod_topic
 
-#define BUFFER_SIZE		(1u<<22)
-#define BUFFER_MASK		(BUFFER_SIZE-1)
-#define BUFFER_SIZE2		(BUFFER_SIZE>>1)
-#define BUFFER_MASK2		(BUFFER_SIZE2-1)
-
 #define FRAMES_PER_TCP_PACKET	4096
 #define FRAMES_PER_UDP_PACKET	352
 
@@ -273,13 +268,6 @@ struct impl {
 
 	bool mute;
 	float volume;
-
-	struct spa_ringbuffer ring;
-	uint8_t buffer[BUFFER_SIZE];
-
-	struct spa_io_position *io_position;
-
-	uint32_t filled;
 };
 
 static inline void bit_writer(uint8_t **p, int *pos, uint8_t data, int len)
@@ -357,7 +345,7 @@ static int send_udp_sync_packet(struct impl *impl, uint32_t rtptime, unsigned in
 	res = sendmsg(impl->control_fd, &msg, MSG_NOSIGNAL);
 	if (res < 0) {
 		res = -errno;
-		pw_log_warn("error sending control packet: %d", res);
+		pw_log_warn("error sending control packet: %d (%m)", res);
 	}
 
 	pw_log_debug("raop control sync: first:%d latency:%u now:%"PRIx64" rtptime:%u",

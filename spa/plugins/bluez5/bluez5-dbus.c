@@ -587,18 +587,35 @@ static enum spa_bt_profile get_codec_profile(const struct media_codec *codec,
 {
 	switch (direction) {
 	case SPA_BT_MEDIA_SOURCE:
-		return codec->kind == MEDIA_CODEC_BAP ? SPA_BT_PROFILE_BAP_SOURCE : SPA_BT_PROFILE_A2DP_SOURCE;
+		if (codec->kind == MEDIA_CODEC_A2DP)
+			return SPA_BT_PROFILE_A2DP_SOURCE;
+		else if (codec->kind == MEDIA_CODEC_BAP)
+			return SPA_BT_PROFILE_BAP_SOURCE;
+		else if (codec->kind == MEDIA_CODEC_HFP)
+			return SPA_BT_PROFILE_HEADSET_AUDIO;
+		else
+			return SPA_BT_PROFILE_NULL;
 	case SPA_BT_MEDIA_SINK:
-		if (codec->kind == MEDIA_CODEC_ASHA)
+		if (codec->kind == MEDIA_CODEC_A2DP)
+			return SPA_BT_PROFILE_A2DP_SINK;
+		else if (codec->kind == MEDIA_CODEC_ASHA)
 			return SPA_BT_PROFILE_ASHA_SINK;
 		else if (codec->kind == MEDIA_CODEC_BAP)
 			return SPA_BT_PROFILE_BAP_SINK;
+		else if (codec->kind == MEDIA_CODEC_HFP)
+			return SPA_BT_PROFILE_HEADSET_AUDIO;
 		else
-			return SPA_BT_PROFILE_A2DP_SINK;
+			return SPA_BT_PROFILE_NULL;
 	case SPA_BT_MEDIA_SOURCE_BROADCAST:
-		return SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
+		if (codec->kind == MEDIA_CODEC_BAP)
+			return SPA_BT_PROFILE_BAP_BROADCAST_SOURCE;
+		else
+			return SPA_BT_PROFILE_NULL;
 	case SPA_BT_MEDIA_SINK_BROADCAST:
-		return SPA_BT_PROFILE_BAP_BROADCAST_SINK;
+		if (codec->kind == MEDIA_CODEC_BAP)
+			return SPA_BT_PROFILE_BAP_BROADCAST_SINK;
+		else
+			return SPA_BT_PROFILE_NULL;
 	default:
 		spa_assert_not_reached();
 	}
@@ -2777,15 +2794,17 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 	bool is_bap = codec->kind == MEDIA_CODEC_BAP;
 	size_t i;
 
-	codec_target_profile = get_codec_target_profile(monitor, codec);
-	if (!codec_target_profile)
-		return false;
-
 	if (codec->kind == MEDIA_CODEC_HFP) {
 		if (!(profile & SPA_BT_PROFILE_HEADSET_AUDIO))
 			return false;
+		if (!is_media_codec_enabled(monitor, codec))
+			return false;
 		return spa_bt_backend_supports_codec(monitor->backend, device, codec->codec_id) == 1;
 	}
+
+	codec_target_profile = get_codec_target_profile(monitor, codec);
+	if (!codec_target_profile)
+		return false;
 
 	if (!device->adapter->a2dp_application_registered && is_a2dp) {
 		/* Codec switching not supported: only plain SBC allowed */
@@ -7078,7 +7097,7 @@ static void parse_broadcast_source_config(struct spa_bt_monitor *monitor, const 
 				memcpy(big_entry->broadcast_code, bcode, strlen(bcode));
 				spa_log_debug(monitor->log, "big_entry->broadcast_code %s", big_entry->broadcast_code);
 			} else if (spa_streq(key, "adapter")) {
-				if (spa_json_get_string(&it[1], big_entry->adapter, sizeof(big_entry->adapter)) <= 0)
+				if (spa_json_get_string(&it[0], big_entry->adapter, sizeof(big_entry->adapter)) <= 0)
 					goto parse_failed;
 				spa_log_debug(monitor->log, "big_entry->adapter %s", big_entry->adapter);
 			} else if (spa_streq(key, "encryption")) {
