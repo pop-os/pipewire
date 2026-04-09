@@ -25,7 +25,7 @@ Copyright: 2009 Lennart Poettering
            2021 Florian Hülsmann
 License: Expat
 
-Files: include/*
+Files: include/valgrind/*
 Copyright: 2000-2017 Julian Seward.
 License: BZIP2
 
@@ -62,7 +62,17 @@ Copyright: 1999 Tom Tromey
            2011 Wolfson Microelectronics PLC
            2012 Feng Wei, Freescale Ltd.
            2015-2022 Wim Taymans
-License: LGPL-2+ and LGPL-2.1+ and Expat
+License: LGPL-2.1+
+
+Files: spa/plugins/alsa/acp/acp.c
+       spa/plugins/alsa/acp/acp.h
+       spa/plugins/alsa/acp/array.h
+       spa/plugins/alsa/acp/dynarray.h
+       spa/plugins/alsa/acp/hashmap.h
+       spa/plugins/alsa/acp/idxset.h
+       spa/plugins/alsa/acp/proplist.h
+Copyright: 2018-2020 Wim Taymans
+License: Expat
 
 Files: spa/plugins/bluez5/*
 Copyright: 2004-2010 Marcel Holtmann
@@ -73,7 +83,14 @@ Copyright: 2004-2010 Marcel Holtmann
            2018 Pali Rohár
            2021-2022 Pauli Virtanen
            2013 Julien Pommier
-License: Expat and LGPL-2.1+
+License: Expat
+
+Files: spa/plugins/bluez5/a2dp-codec-caps.h
+       spa/plugins/bluez5/rtp.h
+Copyright: 2006-2010 Nokia Corporation
+           2004-2010 Marcel Holtmann <marcel@holtmann.org>
+           2018 Pali Rohár <pali.rohar@gmail.com>
+License: LGPL-2.1+
 
 Files: spa/plugins/filter-graph/ladspa.h
 Copyright: 2000-2002 Richard W.E. Furse, Paul Barton-Davis
@@ -84,12 +101,10 @@ Copyright: 2013 Julien Pommier
            2004 The University Corporation for Atmospheric Research
 License: FFTPACK
 
-Files: src/modules/module-client-node/v0/*
-       src/modules/module-protocol-native/v0/*
-       src/modules/module-portal.c
-Copyright: 2015-2022 Wim Taymans
+Files: src/modules/module-portal.c
+Copyright: 2016 Wim Taymans
            2019 Red Hat Inc.
-License: LGPL-2+
+License: Expat
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
