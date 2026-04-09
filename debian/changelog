@@ -1,6 +1,7 @@
 pipewire (1.6.3-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Add lintian-overrides for pkg-config-bad-directive
 
  -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Apr 2026 17:20:45 +0200
 
