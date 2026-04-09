@@ -1,4 +1,4 @@
-pipewire (1.6.3-1) UNRELEASED; urgency=medium
+pipewire (1.6.3-1) unstable; urgency=medium
 
   * New upstream release
   * Add lintian-overrides for pkg-config-bad-directive
@@ -6,7 +6,7 @@ pipewire (1.6.3-1) UNRELEASED; urgency=medium
   * Update debian/copyright
   * salsa-ci: don't allow licenserecon to fail
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Apr 2026 17:20:45 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Apr 2026 18:13:29 +0200
 
 pipewire (1.6.2-1) unstable; urgency=medium
 
