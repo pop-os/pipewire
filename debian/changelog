@@ -1,6 +1,7 @@
 pipewire (1.6.4-1) UNRELEASED; urgency=medium
 
   * New upstream release
+  * Drop unused LGPL-2+ paragraph in debian/copyright
 
  -- Dylan Aïssi <daissi@debian.org>  Wed, 22 Apr 2026 12:41:46 +0200
 
