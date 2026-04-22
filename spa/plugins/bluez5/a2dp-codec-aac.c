@@ -286,7 +286,7 @@ static void *codec_init_props(const struct media_codec *codec, uint32_t flags, c
 		return NULL;
 
 	if (settings == NULL || (str = spa_dict_lookup(settings, "bluez5.a2dp.aac.bitratemode")) == NULL)
-		str = "0";
+		str = "5";
 
 	p->bitratemode = SPA_CLAMP(atoi(str), 0, 5);
 	return p;
@@ -380,8 +380,12 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	// Fragmentation is not implemented yet,
 	// so make sure every encoded AAC frame fits in (mtu - header)
 	this->max_bitrate = ((this->mtu - sizeof(struct rtp_header)) * 8 * this->rate) / 1024;
-	this->max_bitrate = SPA_MIN(this->max_bitrate, get_valid_aac_bitrate(conf));
-	this->cur_bitrate = this->max_bitrate;
+	this->cur_bitrate = SPA_MIN(this->max_bitrate, get_valid_aac_bitrate(conf));
+	spa_log_debug(log, "AAC: max (peak) bitrate: %d, cur bitrate: %d, mode: %d (vbr: %d)",
+			this->max_bitrate,
+			this->cur_bitrate,
+			bitratemode,
+			conf->vbr);
 
 	res = aacEncoder_SetParam(this->aacenc, AACENC_BITRATE, this->cur_bitrate);
 	if (res != AACENC_OK)
@@ -390,6 +394,15 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	res = aacEncoder_SetParam(this->aacenc, AACENC_PEAK_BITRATE, this->max_bitrate);
 	if (res != AACENC_OK)
 		goto error;
+
+	// Assume >110 kbit/s as a "high bitrate" CBR and increase the
+	// band pass cutout up to 19.3 kHz (as in mode 5 VBR).
+	if (!conf->vbr && this->cur_bitrate > 110000)  {
+		res = aacEncoder_SetParam(this->aacenc, AACENC_BANDWIDTH,
+				19293);
+		if (res != AACENC_OK)
+			goto error;
+	}
 
 	res = aacEncoder_SetParam(this->aacenc, AACENC_TRANSMUX, TT_MP4_LATM_MCP1);
 	if (res != AACENC_OK)
