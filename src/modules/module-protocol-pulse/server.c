@@ -128,7 +128,8 @@ static int handle_memblock(struct client *client, struct message *msg)
 		     client, channel, offset, flags, msg->length);
 
 	stream = pw_map_lookup(&client->streams, channel);
-	if (stream == NULL || stream->type == STREAM_TYPE_RECORD) {
+	if (stream == NULL || stream->type == STREAM_TYPE_RECORD ||
+	    (stream->type != STREAM_TYPE_UPLOAD && stream->create_tag != SPA_ID_INVALID)) {
 		pw_log_info("client %p [%s]: received memblock for unknown channel %d",
 			    client, client->name, channel);
 		goto finish;
@@ -391,7 +392,6 @@ on_connect(void *data, int fd, uint32_t mask)
 	}
 
 	if (server->n_clients >= server->max_clients) {
-		close(client_fd);
 		error_reason = "too many client application connections";
 		errno = ECONNREFUSED;
 		goto error;
@@ -404,7 +404,7 @@ on_connect(void *data, int fd, uint32_t mask)
 	pw_log_debug("server %p: new client %p fd:%d", server, client, client_fd);
 
 	client->source = pw_loop_add_io(impl->main_loop,
-					client_fd,
+					spa_steal_fd(client_fd),
 					SPA_IO_ERR | SPA_IO_HUP | SPA_IO_IN,
 					true, on_client_data, client);
 	if (client->source == NULL)
@@ -521,6 +521,8 @@ error:
 
 	if (client)
 		client_free(client);
+	if (client_fd >= 0)
+		close(client_fd);
 }
 
 static int parse_unix_address(const char *address, struct sockaddr_storage *addrs, int len)

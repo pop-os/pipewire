@@ -724,7 +724,7 @@ static int get_phc_index(struct spa_system *s, const char *name) {
 	strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
 	ifr.ifr_data = (char *) &info;
 
-	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return -errno;
 
@@ -756,7 +756,7 @@ static bool parse_clock_id(struct impl *this, const char *s)
 
 static bool parse_clock_device(struct impl *this, const char *s)
 {
-	int fd = open(s, O_RDONLY);
+	int fd = open(s, O_RDONLY | O_CLOEXEC);
 	if (fd == -1) {
 		spa_log_info(this->log, "failed to open clock device '%s': %m", s);
 		return false;
