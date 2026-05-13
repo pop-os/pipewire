@@ -2613,7 +2613,7 @@ static int sco_create_socket(struct impl *backend, struct spa_bt_adapter *adapte
 	socklen_t len;
 	bdaddr_t src;
 
-	spa_autoclose int sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_NONBLOCK, BTPROTO_SCO);
+	spa_autoclose int sock = socket(PF_BLUETOOTH, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, BTPROTO_SCO);
 	if (sock < 0) {
 		spa_log_error(backend->log, "socket(SEQPACKET, SCO) %s", strerror(errno));
 		return -1;
@@ -2759,13 +2759,13 @@ static void sco_ready(struct spa_bt_transport *t)
 	}
 
 	/* Clear nonblocking flag we set for connect() */
-	err = fcntl(t->fd, F_GETFL, O_NONBLOCK);
+	err = fcntl(t->fd, F_GETFL);
 	if (err < 0) {
 		td->err = -errno;
 		goto done;
 	}
 	err &= ~O_NONBLOCK;
-	err = fcntl(t->fd, F_SETFL, O_NONBLOCK, err);
+	err = fcntl(t->fd, F_SETFL, err);
 	if (err < 0) {
 		td->err = -errno;
 		goto done;

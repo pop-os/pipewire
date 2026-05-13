@@ -714,19 +714,25 @@ int spa_alsa_parse_prop_params(struct state *state, struct spa_pod *params)
 static ssize_t log_write(void *cookie, const char *buf, size_t size)
 {
 	struct state *state = cookie;
-	int len;
 
-	while (size > 0) {
-		len = strcspn(buf, "\n");
+	if (!spa_log_level_topic_enabled(state->log, SPA_LOG_TOPIC_DEFAULT, SPA_LOG_LEVEL_DEBUG))
+		return size;
+
+	for (size_t left = size; left > 0; ) {
+		const char *end = memchr(buf, '\n', left);
+		size_t len = end ? (size_t)(end - buf) : left;
+
 		if (len > 0)
 			spa_log_debug(state->log, "%.*s", (int)len, buf);
-		buf += len + 1;
-		size -= len + 1;
+
+		buf += len + !!end;
+		left -= len + !!end;
 	}
+
 	return size;
 }
 
-static cookie_io_functions_t io_funcs = {
+static const cookie_io_functions_t io_funcs = {
 	.write = log_write,
 };
 
@@ -1092,12 +1098,8 @@ int spa_alsa_clear(struct state *state)
 	state->card = NULL;
 	state->card_index = SPA_ID_INVALID;
 
-	if ((err = snd_output_close(state->output)) < 0)
-		spa_log_warn(state->log, "output close failed: %s", snd_strerror(err));
-	fclose(state->log_file);
-
-	free(state->tag[0]);
-	free(state->tag[1]);
+	spa_clear_ptr(state->tag[0], free);
+	spa_clear_ptr(state->tag[1], free);
 
 	if (state->ctl) {
 		for (int i = 0; i < state->ctl_n_fds; i++) {
@@ -1118,6 +1120,10 @@ int spa_alsa_clear(struct state *state)
 			}
 		}
 	}
+
+	if ((err = snd_output_close(state->output)) < 0)
+		spa_log_warn(state->log, "output close failed: %s", snd_strerror(err));
+	spa_clear_ptr(state->log_file, fclose);
 
 	spa_clear_ptr(state->alsa_chmap, free);
 

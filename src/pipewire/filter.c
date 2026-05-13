@@ -969,6 +969,8 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id, uint32_t buffe
 
 	if ((port = get_port(impl, SPA_DIRECTION_OUTPUT, port_id)) == NULL)
 		return -EINVAL;
+	if (buffer_id >= port->n_buffers)
+		return -EINVAL;
 
 	pw_log_trace("%p: recycle buffer %d", impl, buffer_id);
 	push_queue(port, &port->queued, &port->buffers[buffer_id]);
@@ -1055,7 +1057,8 @@ static int impl_node_process(void *object)
 
 		if (p->direction == SPA_DIRECTION_INPUT) {
 			res |= SPA_STATUS_NEED_DATA;
-			if (SPA_UNLIKELY(io->status != SPA_STATUS_HAVE_DATA))
+			if (SPA_UNLIKELY(io->status != SPA_STATUS_HAVE_DATA &&
+			    io->buffer_id != SPA_ID_INVALID))
 				continue;
 
 			/* pop buffer to recycle */

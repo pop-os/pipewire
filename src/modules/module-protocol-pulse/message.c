@@ -145,7 +145,7 @@ static int read_arbitrary(struct message *m, const void **val, size_t *length)
 	int res;
 	if ((res = read_u32(m, &len)) < 0)
 		return res;
-	if (m->offset + len > m->length)
+	if (m->offset > m->length || len > m->length - m->offset)
 		return -ENOSPC;
 	*val = m->data + m->offset;
 	m->offset += len;
@@ -215,7 +215,7 @@ static int read_cvolume(struct message *m, struct volume *vol)
 
 	if ((res = read_u8(m, &vol->channels)) < 0)
 		return res;
-	if (vol->channels > CHANNELS_MAX)
+	if (vol->channels == 0 || vol->channels > CHANNELS_MAX)
 		return -EINVAL;
 	for (i = 0; i < vol->channels; i ++) {
 		if ((res = read_volume(m, &vol->values[i])) < 0)
@@ -361,6 +361,8 @@ int message_get(struct message *m, ...)
 			if ((res = read_format_info(m, va_arg(va, struct format_info*))) < 0)
 				goto done;
 			break;
+		default:
+			goto invalid;
 		}
 	}
 	res = 0;
@@ -383,8 +385,11 @@ static int ensure_size(struct message *m, uint32_t size)
 	if (m->length > m->allocated)
 		return -ENOMEM;
 
-	if (m->length + size <= m->allocated)
+	if (size <= m->allocated - m->length)
 		return size;
+
+	if (m->allocated + size < m->allocated)
+		return -ENOMEM;
 
 	alloc = SPA_ROUND_UP_N(SPA_MAX(m->allocated + size, 4096u), 4096u);
 	diff = alloc - m->allocated;

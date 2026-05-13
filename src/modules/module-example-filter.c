@@ -590,7 +590,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	} else if (impl->capture_info.rate && !impl->playback_info.rate)
 		impl->playback_info.rate = impl->capture_info.rate;
 	else if (impl->playback_info.rate && !impl->capture_info.rate)
-		impl->capture_info.rate = !impl->playback_info.rate;
+		impl->capture_info.rate = impl->playback_info.rate;
 	else if (impl->capture_info.rate != impl->playback_info.rate) {
 		pw_log_warn("Both capture and playback rate are set, but"
 			" they are different. Using the highest of two. This behaviour"
@@ -623,6 +623,7 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 	}
 
 	pw_properties_free(props);
+	props = NULL;
 
 	pw_proxy_add_listener((struct pw_proxy*)impl->core,
 			&impl->core_proxy_listener,
@@ -631,7 +632,8 @@ int pipewire__module_init(struct pw_impl_module *module, const char *args)
 			&impl->core_listener,
 			&core_events, impl);
 
-	setup_streams(impl);
+	if ((res = setup_streams(impl)) < 0)
+		goto error;
 
 	pw_impl_module_add_listener(module, &impl->module_listener, &module_events, impl);
 

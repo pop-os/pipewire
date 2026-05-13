@@ -1115,8 +1115,8 @@ static void stream_control_info(void *data, uint32_t id,
 	switch (id) {
 	case SPA_PROP_channelVolumes:
 		if (!stream->volume_set) {
-			stream->volume.channels = control->n_values;
-			memcpy(stream->volume.values, control->values, control->n_values * sizeof(float));
+			stream->volume.channels = SPA_MIN(control->n_values, CHANNELS_MAX);
+			memcpy(stream->volume.values, control->values, stream->volume.channels * sizeof(float));
 			pw_log_info("stream %p: volume changed %f", stream, stream->volume.values[0]);
 		}
 		break;
@@ -2690,6 +2690,8 @@ static int do_cork_stream(struct client *client, uint32_t command, uint32_t tag,
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
 		return -ENOENT;
+	if (stream->create_tag != SPA_ID_INVALID)
+		return -ENOENT;
 
 	stream_set_corked(stream, cork);
 	if (cork) {
@@ -2719,6 +2721,8 @@ static int do_flush_trigger_prebuf_stream(struct client *client, uint32_t comman
 
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
+		return -ENOENT;
+	if (stream->create_tag != SPA_ID_INVALID)
 		return -ENOENT;
 
 	switch (command) {
@@ -3218,6 +3222,8 @@ static int do_set_stream_name(struct client *client, uint32_t command, uint32_t 
 
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
+		return -ENOENT;
+	if (stream->create_tag != SPA_ID_INVALID)
 		return -ENOENT;
 
 	items[0] = SPA_DICT_ITEM_INIT(PW_KEY_MEDIA_NAME, name);
@@ -4518,7 +4524,7 @@ static int do_set_stream_buffer_attr(struct client *client, uint32_t command, ui
 			commands[command].name, tag, channel);
 
 	stream = pw_map_lookup(&client->streams, channel);
-	if (stream == NULL)
+	if (stream == NULL || stream->create_tag != SPA_ID_INVALID)
 		return -ENOENT;
 
 	if (command == COMMAND_SET_PLAYBACK_STREAM_BUFFER_ATTR) {
@@ -4608,6 +4614,11 @@ static int do_update_stream_sample_rate(struct client *client, uint32_t command,
 	stream = pw_map_lookup(&client->streams, channel);
 	if (stream == NULL || stream->type == STREAM_TYPE_UPLOAD)
 		return -ENOENT;
+	if (stream->create_tag != SPA_ID_INVALID)
+		return -ENOENT;
+
+	if (rate == 0 || rate > RATE_MAX)
+		return -EINVAL;
 
 	stream->rate = rate;
 
