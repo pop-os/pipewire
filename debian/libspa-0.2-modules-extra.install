@@ -1,4 +1,5 @@
+#!/usr/bin/dh-exec
 usr/lib/*/spa-0.2/filter-graph/libspa-filter-graph-plugin-ebur128.so
-usr/lib/*/spa-0.2/filter-graph/libspa-filter-graph-plugin-onnx.so
+usr/lib/*/spa-0.2/filter-graph/libspa-filter-graph-plugin-onnx.so	[!i386]
 usr/lib/*/spa-0.2/filter-graph/libspa-filter-graph-plugin-lv2.so
 usr/lib/*/spa-0.2/filter-graph/libspa-filter-graph-plugin-sofa.so
