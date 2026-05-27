@@ -209,21 +209,24 @@ exit:
 	return res;
 }
 
-static inline int write_n(FILE *file, const void *buf, int count)
+static inline int write_n(struct midi_file *mf, const void *buf, int count)
 {
-	return fwrite(buf, 1, count, file) == (size_t)count ? count : -errno;
+	if (fwrite(buf, 1, count, mf->file) != (size_t)count)
+		return -errno;
+	mf->pos += count;
+	return count;
 }
 
-static inline int write_be16(FILE *file, uint16_t val)
+static inline int write_be16(struct midi_file *mf, uint16_t val)
 {
 	uint8_t buf[2] = { val >> 8, val };
-	return write_n(file, buf, 2);
+	return write_n(mf, buf, 2);
 }
 
-static inline int write_be32(FILE *file, uint32_t val)
+static inline int write_be32(struct midi_file *mf, uint32_t val)
 {
 	uint8_t buf[4] = { val >> 24, val >> 16, val >> 8, val };
-	return write_n(file, buf, 4);
+	return write_n(mf, buf, 4);
 }
 
 #define CHECK_RES(expr) if ((res = (expr)) < 0) return res
@@ -233,17 +236,18 @@ static int write_headers(struct midi_file *mf)
 	struct midi_track *tr = &mf->tracks[0];
 	int res;
 
-	mf_seek(mf, 0);
+	if ((res = mf_seek(mf, 0)) < 0)
+		return -res;
 
 	mf->length = 6;
-	CHECK_RES(write_n(mf->file, "MThd", 4));
-	CHECK_RES(write_be32(mf->file, mf->length));
-	CHECK_RES(write_be16(mf->file, mf->info.format));
-	CHECK_RES(write_be16(mf->file, mf->info.ntracks));
-	CHECK_RES(write_be16(mf->file, mf->info.division));
+	CHECK_RES(write_n(mf, "MThd", 4));
+	CHECK_RES(write_be32(mf, mf->length));
+	CHECK_RES(write_be16(mf, mf->info.format));
+	CHECK_RES(write_be16(mf, mf->info.ntracks));
+	CHECK_RES(write_be16(mf, mf->info.division));
 
-	CHECK_RES(write_n(mf->file, "MTrk", 4));
-	CHECK_RES(write_be32(mf->file, tr->size));
+	CHECK_RES(write_n(mf, "MTrk", 4));
+	CHECK_RES(write_be32(mf, tr->size));
 
 	return 0;
 }
@@ -314,7 +318,7 @@ int midi_file_close(struct midi_file *mf)
 
 	if (mf->mode == 2) {
 		uint8_t buf[4] = { 0x00, 0xff, 0x2f, 0x00 };
-		CHECK_RES(write_n(mf->file, buf, 4));
+		CHECK_RES(write_n(mf, buf, 4));
 		mf->tracks[0].size += 4;
 		CHECK_RES(write_headers(mf));
 	} else if (mf->mode != 1)
@@ -490,7 +494,7 @@ static int write_varlen(struct midi_file *mf, struct midi_track *tr, uint32_t va
 	}
         do  {
 		b = buffer & 0xff;
-		CHECK_RES(write_n(mf->file, &b, 1));
+		CHECK_RES(write_n(mf, &b, 1));
 		tr->size++;
 		buffer >>= 8;
 	} while (b & 0x80);
@@ -502,10 +506,10 @@ int midi_file_write_event(struct midi_file *mf, const struct midi_event *event)
 {
 	struct midi_track *tr;
 	uint32_t tick;
-	void *data, *ev_data;
+	void *data;
 	size_t size;
 	int res, ev_size;
-	uint8_t ev[32];
+	uint8_t ev[32], *ev_data;
 	uint64_t state = 0;
 
 	spa_return_val_if_fail(event != NULL, -EINVAL);
@@ -539,7 +543,18 @@ int midi_file_write_event(struct midi_file *mf, const struct midi_event *event)
 		CHECK_RES(write_varlen(mf, tr, tick - tr->tick));
 		tr->tick = tick;
 
-		CHECK_RES(write_n(mf->file, ev_data, ev_size));
+		if (ev_size > 0 &&
+		    (ev_data[0] == 0xf0 || ev_data[0] == 0xf7)) {
+			CHECK_RES(write_n(mf, ev_data, 1));
+			ev_size -= 1;
+			ev_data += 1;
+
+			CHECK_RES(write_varlen(mf, tr, ev_size));
+
+			tr->size += 1;
+		}
+
+		CHECK_RES(write_n(mf, ev_data, ev_size));
 		tr->size += ev_size;
 	}
 	return 0;

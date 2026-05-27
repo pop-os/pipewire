@@ -230,6 +230,7 @@ struct impl {
 	uint32_t quantum_limit;
 	uint32_t max_align;
 	long unsigned rate;
+	bool filter_path;
 
 	struct spa_list plugin_list;
 
@@ -739,6 +740,9 @@ static int sync_volume(struct graph *graph, struct volume *vol)
 		}
 		v = v * (vol->max[n_port] - vol->min[n_port]) + vol->min[n_port];
 
+		p->control_initialized = true;
+		p->control_current = v;
+
 		n_hndl = SPA_MAX(1u, p->node->n_hndl);
 		res += port_id_set_control_value(p, i % n_hndl, v);
 	}
@@ -884,7 +888,7 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 	struct spa_handle *hndl = NULL;
 	struct plugin *plugin;
 	char module[PATH_MAX];
-	char factory_name[256], dsp_ptr[256];
+	char factory_name[256], dsp_ptr[256], filter[16];
 	void *iface;
 	int res;
 
@@ -902,11 +906,14 @@ static struct plugin *plugin_load(struct impl *impl, const char *type, const cha
 			"filter.graph.plugin.%s", type);
 	spa_scnprintf(dsp_ptr, sizeof(dsp_ptr),
 			"pointer:%p", impl->dsp);
+	spa_scnprintf(filter, sizeof(filter),
+			"%s", impl->filter_path ? "true" : "false");
 
 	hndl = spa_plugin_loader_load(impl->loader, factory_name,
 			&SPA_DICT_ITEMS(
 				SPA_DICT_ITEM(SPA_KEY_LIBRARY_NAME, module),
 				SPA_DICT_ITEM("filter.graph.path", path),
+				SPA_DICT_ITEM("library.filter-path", filter),
 				SPA_DICT_ITEM("filter.graph.audio.dsp", dsp_ptr)));
 
 	if (hndl == NULL) {
@@ -2400,6 +2407,8 @@ impl_init(const struct spa_handle_factory *factory,
 			spa_atou32(s, &impl->info.n_inputs, 0);
 		if (spa_streq(k, "filter-graph.n_outputs"))
 			spa_atou32(s, &impl->info.n_outputs, 0);
+		if (spa_streq(k, "library.filter-path"))
+			impl->filter_path = spa_atob(s);
 	}
 	if (impl->quantum_limit == 0)
 		return -EINVAL;
