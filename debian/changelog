@@ -1,8 +1,9 @@
-pipewire (1.6.8-1) UNRELEASED; urgency=medium
+pipewire (1.6.8-1) unstable; urgency=medium
 
   * New upstream release
+    - Fix CVE-2026-14324 (Closes: #1141308)
 
- -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Jul 2026 13:04:07 +0200
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 09 Jul 2026 13:16:15 +0200
 
 pipewire (1.6.7-1) unstable; urgency=medium
 
