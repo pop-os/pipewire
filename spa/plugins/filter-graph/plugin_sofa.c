@@ -34,6 +34,7 @@ struct spatializer_impl {
 	int n_samples, blocksize, tailsize;
 	float gain;
 	float *tmp[2];
+	float latency;
 
 	struct MYSOFA_EASY *sofa;
 	unsigned int interpolate:1;
@@ -50,6 +51,8 @@ static void * spatializer_instantiate(const struct spa_fga_plugin *plugin, const
 	const char *val;
 	char key[256];
 	char filename[PATH_MAX] = "";
+	bool normalize = false;
+	float normalized;
 	int len;
 
 	errno = EINVAL;
@@ -73,6 +76,7 @@ static void * spatializer_instantiate(const struct spa_fga_plugin *plugin, const
 	impl->dsp = pl->dsp;
 	impl->log = pl->log;
 	impl->gain = 1.0f;
+	impl->latency = 0.0f;
 
 	while ((len = spa_json_object_next(&it[0], key, sizeof(key), &val)) > 0) {
 		if (spa_streq(key, "blocksize")) {
@@ -102,6 +106,23 @@ static void * spatializer_instantiate(const struct spa_fga_plugin *plugin, const
 				errno = EINVAL;
 				goto error;
 			}
+		}
+		else if (spa_streq(key, "normalize")) {
+			if (spa_json_parse_bool(val, len, &normalize) <= 0) {
+				spa_log_error(impl->log, "spatializer:normalize requires a bool");
+				errno = EINVAL;
+				goto error;
+			}
+		}
+		else if (spa_streq(key, "latency")) {
+			if (spa_json_parse_float(val, len, &impl->latency) <= 0) {
+				spa_log_error(impl->log, "spatializer:latency requires a number");
+				errno = EINVAL;
+				goto error;
+			}
+		}
+		else {
+			spa_log_warn(pl->log, "spatializer: ignoring config key: '%s'", key);
 		}
 	}
 	if (!filename[0]) {
@@ -195,8 +216,13 @@ static void * spatializer_instantiate(const struct spa_fga_plugin *plugin, const
 	if (impl->tailsize <= 0)
 		impl->tailsize = SPA_CLAMP(4096, impl->blocksize, 32768);
 
-	spa_log_info(impl->log, "using n_samples:%u %d:%d blocksize gain:%f sofa:%s", impl->n_samples,
-		impl->blocksize, impl->tailsize, impl->gain, filename);
+	if (normalize)
+		normalized = mysofa_loudness(impl->sofa->hrtf);
+
+	spa_log_info(impl->log, "using n_samples:%u %d:%d blocksize %sgain:%f sofa:%s", impl->n_samples,
+		impl->blocksize, impl->tailsize,
+		normalize ? "auto" : "", normalize ? normalized : impl->gain, filename);
+
 
 	impl->tmp[0] = calloc(impl->plugin->quantum_limit, sizeof(float));
 	impl->tmp[1] = calloc(impl->plugin->quantum_limit, sizeof(float));
@@ -331,7 +357,7 @@ static void spatializer_run(void * Instance, unsigned long SampleCount)
 		convolver_run(impl->l_conv[0], impl->port[2], impl->port[0], SampleCount);
 		convolver_run(impl->r_conv[0], impl->port[2], impl->port[1], SampleCount);
 	}
-	impl->port[6][0] = impl->n_samples;
+	impl->port[6][0] = impl->latency;
 }
 
 static void spatializer_connect_port(void * Instance, unsigned long Port,
@@ -367,7 +393,7 @@ static void spatializer_control_changed(void * Instance)
 static void spatializer_activate(void * Instance)
 {
 	struct spatializer_impl *impl = Instance;
-	impl->port[6][0] = impl->n_samples;
+	impl->port[6][0] = impl->latency;
 }
 
 static void spatializer_deactivate(void * Instance)

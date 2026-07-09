@@ -1290,44 +1290,6 @@ static int ensure_tmp(struct impl *this)
 	return 0;
 }
 
-
-static int setup_filter_graphs(struct impl *impl, bool force)
-{
-	int res;
-	uint32_t channels, *position;
-	struct dir *in, *out;
-	struct filter_graph *g, *t;
-
-	in = &impl->dir[SPA_DIRECTION_INPUT];
-	out = &impl->dir[SPA_DIRECTION_OUTPUT];
-
-	channels = in->format.info.raw.channels;
-	position = in->format.info.raw.position;
-	impl->maxports = SPA_MAX(in->format.info.raw.channels, out->format.info.raw.channels);
-
-	spa_list_for_each_safe(g, t, &impl->active_graphs, link) {
-		if (g->removing)
-			continue;
-		if (force)
-			g->setup = false;
-		if ((res = setup_filter_graph(impl, g, channels, position)) < 0) {
-			g->removing = true;
-			spa_log_warn(impl->log, "failed to activate graph %d: %s", g->order,
-					spa_strerror(res));
-		} else {
-			channels = g->n_outputs;
-			position = g->outputs_position;
-			impl->maxports = SPA_MAX(impl->maxports, channels);
-		}
-	}
-	if ((res = ensure_tmp(impl)) < 0)
-		return res;
-	if ((res = setup_channelmix(impl, channels, position)) < 0)
-		return res;
-
-	return 0;
-}
-
 static int do_sync_filter_graph(struct spa_loop *loop, bool async, uint32_t seq,
 		const void *data, size_t size, void *user_data)
 {
@@ -1349,6 +1311,55 @@ static void sync_filter_graph(struct impl *impl)
 		spa_loop_locked(impl->data_loop, do_sync_filter_graph, 0, NULL, 0, impl);
 	else
 		do_sync_filter_graph(NULL, false, 0, NULL, 0, impl);
+}
+
+static int setup_filter_graphs(struct impl *impl, bool force)
+{
+	int res;
+	uint32_t channels, *position;
+	struct dir *in, *out;
+	struct filter_graph *g, *t;
+
+	in = &impl->dir[SPA_DIRECTION_INPUT];
+	out = &impl->dir[SPA_DIRECTION_OUTPUT];
+
+	channels = in->format.info.raw.channels;
+	position = in->format.info.raw.position;
+	impl->maxports = SPA_MAX(in->format.info.raw.channels, out->format.info.raw.channels);
+
+	if (force) {
+		/* A forced setup deactivates and re-instantiates each graph below,
+		 * which frees and recreates the underlying plugin handles. Pull the
+		 * graphs out of the data-loop's view first (under the loop lock, via
+		 * sync_filter_graph) so the RT thread cannot run a graph while its
+		 * handles are NULL during the rebuild. They are republished by the
+		 * sync_filter_graph() that follows setup. */
+		spa_list_for_each(g, &impl->active_graphs, link) {
+			if (!g->removing)
+				g->setup = false;
+		}
+		sync_filter_graph(impl);
+	}
+
+	spa_list_for_each_safe(g, t, &impl->active_graphs, link) {
+		if (g->removing)
+			continue;
+		if ((res = setup_filter_graph(impl, g, channels, position)) < 0) {
+			g->removing = true;
+			spa_log_warn(impl->log, "failed to activate graph %d: %s", g->order,
+					spa_strerror(res));
+		} else {
+			channels = g->n_outputs;
+			position = g->outputs_position;
+			impl->maxports = SPA_MAX(impl->maxports, channels);
+		}
+	}
+	if ((res = ensure_tmp(impl)) < 0)
+		return res;
+	if ((res = setup_channelmix(impl, channels, position)) < 0)
+		return res;
+
+	return 0;
 }
 
 static void clean_filter_handles(struct impl *impl, bool force)
