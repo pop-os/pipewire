@@ -66,6 +66,9 @@ export UDEVRULESDIR=/usr/lib/udev/rules.d
 # export UDEVRULESDIR=/lib/udev/rules.d
 endif
 
+override_dh_builddeb:
+	dh_builddeb -- -Zzstd -z3
+
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-Daudiotestsrc=enabled \
