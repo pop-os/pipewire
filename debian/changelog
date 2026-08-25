@@ -1,3 +1,9 @@
+pipewire (1.6.8-1pop1) noble; urgency=medium
+
+  * Backport
+
+ -- Michael Murphy <michael@mmurphy.dev>  Tue, 25 Aug 2026 22:08:50 +0200
+
 pipewire (1.6.8-1) unstable; urgency=medium
 
   * New upstream release
