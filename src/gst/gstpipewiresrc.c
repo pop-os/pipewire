@@ -1074,10 +1074,6 @@ wait_negotiated (GstPipeWireSrc *this)
     GST_DEBUG_OBJECT (this, "waiting for NEGOTIATED, now %s", pw_stream_state_as_string (state));
     if (state == PW_STREAM_STATE_ERROR)
       break;
-    if (this->flushing) {
-      state = PW_STREAM_STATE_ERROR;
-      break;
-    }
 
     if (this->negotiated)
       break;
@@ -1779,8 +1775,11 @@ gst_pipewire_src_change_state (GstElement * element, GstStateChange transition)
        * be moved from idle to suspended, which would mean format cleared via
        * handle_format_change. Wait for new format to avoid basesrc calling
        * create() and get not-negotiated error as response. */
-      if (wait_negotiated(this) == PW_STREAM_STATE_ERROR)
+      if (wait_negotiated(this) == PW_STREAM_STATE_ERROR) {
+        pw_thread_loop_unlock (this->stream->core->loop);
         goto open_failed;
+      }
+
       pw_thread_loop_unlock (this->stream->core->loop);
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:

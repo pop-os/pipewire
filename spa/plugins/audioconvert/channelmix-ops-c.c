@@ -41,11 +41,11 @@ static inline void conv_c(float *d, const float **s, float *c, uint32_t n_c, uin
 	}
 }
 
-static inline void avg_c(float *d, const float *s0, const float *s1, uint32_t n_samples)
+static inline void add_c(float *d, const float *s0, const float *s1, uint32_t n_samples)
 {
 	uint32_t n;
 	for (n = 0; n < n_samples; n++)
-		d[n] = (s0[n] + s1[n]) * 0.5f;
+		d[n] = s0[n] + s1[n];
 }
 
 static inline void sub_c(float *d, const float *s0, const float *s1, uint32_t n_samples)
@@ -110,7 +110,7 @@ static inline void delay_convolve_run_c(float *buffer, uint32_t *pos,
 {
 	uint32_t i, j;
 	uint32_t w = *pos;
-	uint32_t o = n_buffer - delay - n_taps-1;
+	uint32_t o = n_buffer - delay - (n_taps-1);
 
 	if (n_taps == 1) {
 		for (i = 0; i < n_samples; i++) {
@@ -299,7 +299,7 @@ channelmix_f32_2_3p1_c(struct channelmix *mix, void * SPA_RESTRICT dst[],
 		if (mix->widen == 0.0f) {
 			vol_c(d[0], s[0], v0, n_samples);
 			vol_c(d[1], s[1], v1, n_samples);
-			avg_c(d[2], s[0], s[1], n_samples);
+			add_c(d[2], s[0], s[1], n_samples);
 		} else {
 			for (n = 0; n < n_samples; n++) {
 				float c = s[0][n] + s[1][n];
