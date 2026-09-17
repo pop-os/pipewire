@@ -653,6 +653,36 @@ parse_colorimetry(struct impl *this, const struct v4l2_pix_format *pix, bool is_
 
 #define FOURCC_ARGS(f) (f)&0x7f,((f)>>8)&0x7f,((f)>>16)&0x7f,((f)>>24)&0x7f
 
+/* The frame sizes a device enumerates are what its scaler can emit, which on a
+ * device that has one says nothing about how much detail reaches it: vivid
+ * offers up to 16384x8640 from a 720x576 source. V4L2 reports the source
+ * rectangle separately, so ask for that, and leave the default where it is
+ * today for a device that does not answer. */
+static void spa_v4l2_native_size(struct spa_v4l2_device *dev,
+				 const struct v4l2_frmsize_stepwise *s,
+				 uint32_t *width, uint32_t *height)
+{
+	struct v4l2_selection sel;
+	uint32_t sw, sh;
+
+	*width = s->min_width;
+	*height = s->min_height;
+
+	spa_zero(sel);
+	sel.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	sel.target = V4L2_SEL_TGT_CROP_BOUNDS;
+	if (xioctl(dev->fd, VIDIOC_G_SELECTION, &sel) < 0)
+		return;
+	if (sel.r.width < s->min_width || sel.r.width > s->max_width ||
+	    sel.r.height < s->min_height || sel.r.height > s->max_height)
+		return;
+
+	sw = s->step_width ? s->step_width : 1;
+	sh = s->step_height ? s->step_height : 1;
+	*width = s->min_width + (sel.r.width - s->min_width) / sw * sw;
+	*height = s->min_height + (sel.r.height - s->min_height) / sh * sh;
+}
+
 static int
 spa_v4l2_enum_format(struct impl *this, int seq,
 		     uint32_t start, uint32_t num,
@@ -671,6 +701,7 @@ spa_v4l2_enum_format(struct impl *this, int seq,
 	struct spa_result_node_params result;
 	struct v4l2_format fmt;
 	uint32_t count = 0, try_width = 0, try_height = 0;
+	uint32_t def_width = 0, def_height = 0;
 	bool with_modifier;
 
 	if ((res = spa_v4l2_open(dev, this->props.device)) < 0)
@@ -758,6 +789,18 @@ do_enum_fmt:
 				spa_log_error(this->log, "'%s' VIDIOC_ENUM_FMT: %m",
 						this->props.device);
 				goto exit;
+			}
+			/* This enumerates every pixel format of the device, so a
+			 * filter that constrains the media type but not the pixel
+			 * format is only applied here. */
+			if (filter) {
+				const struct format_info *fi =
+					fourcc_to_format_info(port->fmtdesc.pixelformat);
+
+				if (fi == NULL ||
+				    fi->media_type != filter_media_type ||
+				    fi->media_subtype != filter_media_subtype)
+					goto next_fmtdesc;
 			}
 		}
 		port->next_fmtdesc = false;
@@ -907,9 +950,11 @@ do_frmsize_filter:
 		spa_pod_builder_push_choice(&b.b, &f[1], SPA_CHOICE_None, 0);
 		choice = (struct spa_pod_choice*)spa_pod_builder_frame(&b.b, &f[1]);
 
-		spa_pod_builder_rectangle(&b.b,
-				port->frmsize.stepwise.min_width,
-				port->frmsize.stepwise.min_height);
+		/* The default is what a client gets when it expresses no preference of
+		 * its own, so offer the frame the device natively produces rather than
+		 * the smallest one it can be asked for. */
+		spa_v4l2_native_size(dev, &port->frmsize.stepwise, &def_width, &def_height);
+		spa_pod_builder_rectangle(&b.b, def_width, def_height);
 		spa_pod_builder_rectangle(&b.b,
 				port->frmsize.stepwise.min_width,
 				port->frmsize.stepwise.min_height);
@@ -1552,20 +1597,20 @@ spa_v4l2_update_controls(struct impl *this)
 		spa_zero(control);
 		control.id = c->ctrl_id;
 		if (xioctl(dev->fd, VIDIOC_G_CTRL, &control) < 0) {
-			/* Write only controls like relative pan/tilt return EACCES */
-			if (errno == EACCES) {
-				c->value = 0;
-				continue;
-			}
-			res = -errno;
-			goto done;
+			/* One control that cannot be read must not hide every other
+			 * property of the node. Write only controls like relative
+			 * pan/tilt return EACCES, and a volatile control returns
+			 * whatever its g_volatile_ctrl handler returns. Keep the value
+			 * from the last successful read, or the default that
+			 * spa_v4l2_enum_controls() stored. */
+			spa_log_debug(this->log, "'%s' VIDIOC_G_CTRL %08x: %m",
+					this->props.device, c->ctrl_id);
+			continue;
 		}
 		c->value = control.value;
 	}
-	res = 0;
-done:
 	spa_v4l2_close(dev);
-	return res;
+	return 0;
 }
 
 static int

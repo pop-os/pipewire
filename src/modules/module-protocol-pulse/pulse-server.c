@@ -1357,9 +1357,20 @@ do_process_done(struct spa_loop *loop,
 		avail = spa_ringbuffer_get_read_index(&stream->ring, &index);
 
 		if (!spa_list_is_empty(&client->out_messages)) {
-			pw_log_debug("%p: [%s] pending read:%u avail:%d",
-					stream, client->name, index, avail);
-			return 0;
+			/* Try to flush the pending messages first. A control
+			 * message queued for a sibling stream in this same
+			 * cycle (a playback stream's REQUEST) would otherwise
+			 * make us skip this cycle, and when one is queued
+			 * every cycle it starves this capture stream
+			 * persistently while the connection itself keeps
+			 * flowing. Only skip when the messages really cannot
+			 * be flushed (socket backed up). */
+			if (client_flush_messages(client) < 0 ||
+			    !spa_list_is_empty(&client->out_messages)) {
+				pw_log_debug("%p: [%s] pending read:%u avail:%d",
+						stream, client->name, index, avail);
+				return 0;
+			}
 		}
 
 		if (avail <= 0) {
@@ -3178,7 +3189,7 @@ static int do_set_port_latency_offset(struct client *client, uint32_t command, u
 		return -ENOMEM;
 	port_info = alloca(card_info.n_ports * sizeof(*port_info));
 	card_info.active_profile = SPA_ID_INVALID;
-	n_ports = collect_port_info(card, &card_info, NULL, port_info);
+	n_ports = collect_port_info(card, &card_info, NULL, port_info, NULL);
 
 	/* Set offset on all devices of the port */
 	res = -ENOENT;
@@ -3637,7 +3648,7 @@ static int fill_card_info(struct client *client, struct message *m,
 			return -ENOMEM;
 		port_info = alloca(card_info.n_ports * sizeof(*port_info));
 		card_info.active_profile = SPA_ID_INVALID;
-		n_ports = collect_port_info(o, &card_info, NULL, port_info);
+		n_ports = collect_port_info(o, &card_info, NULL, port_info, NULL);
 
 		message_put(m,
 			TAG_U32, n_ports,				/* n_ports */
@@ -3838,11 +3849,12 @@ static int fill_sink_info(struct client *client, struct message *m,
 	if (client->version >= 16) {
 		uint32_t n_ports, n;
 		struct port_info *port_info, *pi;
+		const char *active_port_name = NULL;
 
 		if (card_info.n_ports > MAX_ALLOCA_SIZE / sizeof(*port_info))
 			return -ENOMEM;
 		port_info = alloca(card_info.n_ports * sizeof(*port_info));
-		n_ports = collect_port_info(card, &card_info, &dev_info, port_info);
+		n_ports = collect_port_info(card, &card_info, &dev_info, port_info, &active_port_name);
 
 		message_put(m,
 			TAG_U32, n_ports,			/* n_ports */
@@ -3867,7 +3879,7 @@ static int fill_sink_info(struct client *client, struct message *m,
 			}
 		}
 		message_put(m,
-			TAG_STRING, dev_info.active_port_name,		/* active port name */
+			TAG_STRING, active_port_name,		/* active port name */
 			TAG_INVALID);
 	}
 	if (client->version >= 21) {
@@ -4036,11 +4048,12 @@ static int fill_source_info(struct client *client, struct message *m,
 	if (client->version >= 16) {
 		uint32_t n_ports, n;
 		struct port_info *port_info, *pi;
+		const char *active_port_name = NULL;
 
 		if (card_info.n_ports > MAX_ALLOCA_SIZE / sizeof(*port_info))
 			return -ENOMEM;
 		port_info = alloca(card_info.n_ports * sizeof(*port_info));
-		n_ports = collect_port_info(card, &card_info, &dev_info, port_info);
+		n_ports = collect_port_info(card, &card_info, &dev_info, port_info, &active_port_name);
 
 		message_put(m,
 			TAG_U32, n_ports,			/* n_ports */
@@ -4065,7 +4078,7 @@ static int fill_source_info(struct client *client, struct message *m,
 			}
 		}
 		message_put(m,
-			TAG_STRING, dev_info.active_port_name,		/* active port name */
+			TAG_STRING, active_port_name,		/* active port name */
 			TAG_INVALID);
 	}
 	if (client->version >= 21) {

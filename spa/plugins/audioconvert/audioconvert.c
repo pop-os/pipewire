@@ -952,7 +952,7 @@ static int impl_node_enum_params(void *object, int seq,
 {
 	struct impl *this = object;
 	struct spa_pod *param;
-	struct spa_pod_builder b = { 0 };
+	struct spa_pod_dynamic_builder b;
 	uint8_t buffer[4096];
 	struct spa_result_node_params result;
 	uint32_t count = 0;
@@ -966,37 +966,45 @@ static int impl_node_enum_params(void *object, int seq,
       next:
 	result.index = result.next++;
 
-	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+	spa_pod_dynamic_builder_init(&b, buffer, sizeof(buffer), 4096);
 
 	param = NULL;
 	switch (id) {
 	case SPA_PARAM_EnumPortConfig:
-		res = node_param_enum_port_config(this, id, result.index, &param, &b);
+		res = node_param_enum_port_config(this, id, result.index, &param, &b.b);
 		break;
 	case SPA_PARAM_PortConfig:
-		res = node_param_port_config(this, id, result.index, &param, &b);
+		res = node_param_port_config(this, id, result.index, &param, &b.b);
 		break;
 	case SPA_PARAM_PropInfo:
-		res = node_param_prop_info(this, id, result.index, &param, &b);
+		res = node_param_prop_info(this, id, result.index, &param, &b.b);
 		break;
 	case SPA_PARAM_Props:
-		res = node_param_props(this, id, result.index, &param, &b);
+		res = node_param_props(this, id, result.index, &param, &b.b);
 		break;
 	default:
-		return 0;
+		res = 0;
+		break;
 	}
 	if (res <= 0)
-		return res;
+		goto done;
 
-	if (param == NULL || spa_pod_filter(&b, &result.param, param, filter) < 0)
+	if (param == NULL || spa_pod_filter(&b.b, &result.param, param, filter) < 0) {
+		spa_pod_dynamic_builder_clean(&b);
 		goto next;
+	}
 
 	spa_node_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_NODE_PARAMS, &result);
+
+	spa_pod_dynamic_builder_clean(&b);
 
 	if (++count != num)
 		goto next;
 
 	return 0;
+done:
+	spa_pod_dynamic_builder_clean(&b);
+	return res;
 }
 
 static int impl_node_set_io(void *object, uint32_t id, void *data, size_t size)
@@ -1313,6 +1321,27 @@ static void sync_filter_graph(struct impl *impl)
 		do_sync_filter_graph(NULL, false, 0, NULL, 0, impl);
 }
 
+/* Pull graphs that the data-loop must not run anymore out of its view (under
+ * the loop lock, via sync_filter_graph). A forced unpublish also drops graphs
+ * that are about to be deactivated and re-instantiated, which frees and
+ * recreates the underlying plugin handles, so the RT thread cannot run a graph
+ * while its handles are NULL. They are republished by the sync_filter_graph()
+ * that follows setup. */
+static void unpublish_filter_graphs(struct impl *impl, bool force)
+{
+	struct filter_graph *g;
+	bool sync = false;
+
+	spa_list_for_each(g, &impl->active_graphs, link) {
+		if (force && !g->removing)
+			g->setup = false;
+		if (g->removing || !g->setup)
+			sync = true;
+	}
+	if (sync)
+		sync_filter_graph(impl);
+}
+
 static int setup_filter_graphs(struct impl *impl, bool force)
 {
 	int res;
@@ -1327,19 +1356,12 @@ static int setup_filter_graphs(struct impl *impl, bool force)
 	position = in->format.info.raw.position;
 	impl->maxports = SPA_MAX(in->format.info.raw.channels, out->format.info.raw.channels);
 
-	if (force) {
-		/* A forced setup deactivates and re-instantiates each graph below,
-		 * which frees and recreates the underlying plugin handles. Pull the
-		 * graphs out of the data-loop's view first (under the loop lock, via
-		 * sync_filter_graph) so the RT thread cannot run a graph while its
-		 * handles are NULL during the rebuild. They are republished by the
-		 * sync_filter_graph() that follows setup. */
-		spa_list_for_each(g, &impl->active_graphs, link) {
-			if (!g->removing)
-				g->setup = false;
-		}
-		sync_filter_graph(impl);
-	}
+	/* Only a forced setup rebuilds the graphs. Without it the currently
+	 * published graphs stay valid and must keep running until the new ones
+	 * are activated, so that the sync_filter_graph() after setup swaps them
+	 * in without a gap. */
+	if (force)
+		unpublish_filter_graphs(impl, true);
 
 	spa_list_for_each_safe(g, t, &impl->active_graphs, link) {
 		if (g->removing)
@@ -1366,8 +1388,10 @@ static void clean_filter_handles(struct impl *impl, bool force)
 {
 	struct filter_graph *g, *t;
 
+	unpublish_filter_graphs(impl, force);
+
 	spa_list_for_each_safe(g, t, &impl->active_graphs, link) {
-		if (!g->removing)
+		if (!g->removing && !force)
 			continue;
 		spa_list_remove(&g->link);
 		if (g->graph)
@@ -1547,9 +1571,9 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 		return 0;
 
 	while (true) {
-		const char *name;
+		const char *name, *value;
 		struct spa_pod *pod;
-		char value[4096];
+		char buffer[64];
 
 		if (spa_pod_parser_get_string(&prs, &name) < 0)
 			break;
@@ -1558,25 +1582,28 @@ static int parse_prop_params(struct impl *this, struct spa_pod *params)
 			break;
 
 		if (spa_pod_is_string(pod)) {
-			spa_pod_copy_string(pod, sizeof(value), value);
+			if (spa_pod_get_string(pod, &value) < 0)
+				continue;
 		} else if (spa_pod_is_float(pod)) {
-			spa_dtoa(value, sizeof(value),
+			spa_dtoa(buffer, sizeof(buffer),
 					SPA_POD_VALUE(struct spa_pod_float, pod));
+			value = buffer;
 		} else if (spa_pod_is_double(pod)) {
-			spa_dtoa(value, sizeof(value),
+			spa_dtoa(buffer, sizeof(buffer),
 					SPA_POD_VALUE(struct spa_pod_double, pod));
+			value = buffer;
 		} else if (spa_pod_is_int(pod)) {
-			snprintf(value, sizeof(value), "%d",
+			snprintf(buffer, sizeof(buffer), "%d",
 					SPA_POD_VALUE(struct spa_pod_int, pod));
+			value = buffer;
 		} else if (spa_pod_is_long(pod)) {
-			snprintf(value, sizeof(value), "%"PRIi64,
+			snprintf(buffer, sizeof(buffer), "%"PRIi64,
 					SPA_POD_VALUE(struct spa_pod_long, pod));
+			value = buffer;
 		} else if (spa_pod_is_bool(pod)) {
-			snprintf(value, sizeof(value), "%s",
-					SPA_POD_VALUE(struct spa_pod_bool, pod) ?
-					"true" : "false");
+			value = SPA_POD_VALUE(struct spa_pod_bool, pod) ? "true" : "false";
 		} else if (spa_pod_is_none(pod)) {
-			spa_zero(value);
+			value = "";
 		} else
 			continue;
 
@@ -2572,6 +2599,10 @@ static int setup_convert(struct impl *this)
 static void reset_node(struct impl *this)
 {
 	struct filter_graph *g;
+
+	/* deactivating a graph tears down its plugin instances, so take the
+	 * graphs out of the data-loop's view first */
+	unpublish_filter_graphs(this, true);
 
 	spa_list_for_each(g, &this->active_graphs, link) {
 		if (g->graph)
