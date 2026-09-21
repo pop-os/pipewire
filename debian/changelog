@@ -1,6 +1,10 @@
 pipewire (1.6.9-2) UNRELEASED; urgency=medium
 
+  [ Agathe Porte ]
   * Import+rebase upstream patch for CVE-2026-14330 (Closes: #1141309)
+
+  [ Dylan Aïssi ]
+  * Bump minimum libcamera to 0.6.0
 
  -- Agathe Porte <agathe.porte@oss.qualcomm.com>  Fri, 18 Sep 2026 15:03:32 +0200
 
