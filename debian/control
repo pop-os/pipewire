@@ -174,8 +174,8 @@ Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
-Breaks: pipewire (<< 0.3.5)
-Replaces: pipewire (<< 0.3.5)
+Breaks: pipewire (<< 0.3.5), libspa-0.2-modules-extra
+Replaces: pipewire (<< 0.3.5), libspa-0.2-modules-extra
 Description: libraries for the PipeWire multimedia server Simple Plugin API - modules
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
