@@ -1,3 +1,9 @@
+pipewire (1.6.9-2pop1) resolute; urgency=medium
+
+  * Backport from debian
+
+ -- Michael Murphy <michael@mmurphy.dev>  Wed, 23 Sep 2026 16:36:08 +0200
+
 pipewire (1.6.9-2) unstable; urgency=medium
 
   [ Agathe Porte ]
