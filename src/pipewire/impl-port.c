@@ -376,10 +376,12 @@ static int schedule_mix_input(void *object)
 		return SPA_STATUS_HAVE_DATA | SPA_STATUS_NEED_DATA;
 
 	spa_list_for_each(mix, &impl->rt.mix_list, rt.link) {
+		uint32_t buffer_id = io->buffer_id;
 		pw_log_trace_fp("%p: mix input %d %p->%p status:%d id:%d cycle:%d", this,
 				mix->port.port_id, mix->io[cycle], io,
 				mix->io[cycle]->status, mix->io[cycle]->buffer_id, cycle);
 		*io = *mix->io[cycle];
+		mix->io[cycle]->buffer_id = buffer_id;
 		mix->io[cycle]->status = SPA_STATUS_NEED_DATA;
 		break;
 	}
@@ -1505,9 +1507,14 @@ static int do_destroy_link(void *data, struct pw_impl_link *link)
 	return 0;
 }
 
-void pw_impl_port_unlink(struct pw_impl_port *port)
+static void pw_impl_port_unlink(struct pw_impl_port *port)
 {
-	struct pw_context *context = port->node->context;
+	struct pw_context *context;
+
+	if (port->node == NULL)
+		return;
+
+	context = port->node->context;
 	pw_context_freeze_recalc_graph(context);
 	pw_impl_port_for_each_link(port, do_destroy_link, port);
 	pw_context_thaw_recalc_graph(context, "port unlink");

@@ -628,7 +628,7 @@ static void emit_node(struct impl *this, struct spa_bt_transport *t,
 	else
 		in_device_set = this->device_set.source_enabled;
 
-	snprintf(transport, sizeof(transport), "pointer:%p", t);
+	snprintf(transport, sizeof(transport), "%u", t->serial);
 	items[0] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_TRANSPORT, transport);
 	items[1] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_PROFILE, spa_bt_profile_name(t->profile));
 	items[2] = SPA_DICT_ITEM_INIT(SPA_KEY_API_BLUEZ5_CODEC, get_codec_name(t, a2dp_duplex));
@@ -791,6 +791,7 @@ static void dynamic_node_transport_state_changed(void *data,
 		if (SPA_FLAG_IS_SET(this->id, DYNAMIC_NODE_ID_FLAG)) {
 			SPA_FLAG_CLEAR(this->id, DYNAMIC_NODE_ID_FLAG);
 			spa_bt_transport_keepalive(t, false);
+			spa_bt_transport_emit_remove_node(t);
 			spa_device_emit_object_info(&impl->hooks, this->id, NULL);
 		}
 	}
@@ -1209,6 +1210,9 @@ static int emit_nodes(struct impl *this)
 {
 	struct spa_bt_transport *t;
 
+	if (!this->bt_dev)
+		return 0;
+
 	switch (this->profile) {
 	case DEVICE_PROFILE_BAP:
 	case DEVICE_PROFILE_BAP_SINK:
@@ -1413,6 +1417,8 @@ static void emit_remove_nodes(struct impl *this)
 		struct node * node = &this->nodes[i];
 		node_offload_set_active(node, false);
 		if (node->transport) {
+			if (node->active)
+				spa_bt_transport_emit_remove_node(node->transport);
 			spa_hook_remove(&node->transport_listener);
 			node->transport = NULL;
 		}
@@ -1746,6 +1752,15 @@ static void device_switch_profile(void *userdata)
 	set_profile(this, profile, 0, false);
 }
 
+static void device_destroy(void *userdata)
+{
+	struct impl *this = userdata;
+
+	/* The device is being freed; it must not be dereferenced anymore. */
+	spa_hook_remove(&this->bt_dev_listener);
+	this->bt_dev = NULL;
+}
+
 static const struct spa_bt_device_events bt_dev_events = {
 	SPA_VERSION_BT_DEVICE_EVENTS,
 	.connected = device_connected,
@@ -1754,6 +1769,7 @@ static const struct spa_bt_device_events bt_dev_events = {
 	.profiles_changed = profiles_changed,
 	.device_set_changed = device_set_changed,
 	.switch_profile = device_switch_profile,
+	.destroy = device_destroy,
 };
 
 static int impl_add_listener(void *object,
@@ -2761,6 +2777,9 @@ static int impl_enum_params(void *object, int seq,
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(num != 0, -EINVAL);
 
+	if (!this->bt_dev)
+		return -ENODEV;
+
 	result.id = id;
 	result.next = start;
       next:
@@ -3146,6 +3165,9 @@ static int impl_set_param(void *object,
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
+	if (!this->bt_dev)
+		return -ENODEV;
+
 	switch (id) {
 	case SPA_PARAM_Profile:
 	{
@@ -3323,8 +3345,15 @@ filter_bluez_device_setting(struct impl *this, const struct spa_dict *dict)
 	{
 		const struct spa_dict_item *it = &dict->items[i];
 		if (it->key != NULL && strncmp(it->key, "bluez", 5) == 0 && it->value != NULL) {
+			char *key = strdup(it->key);
+			char *value = strdup(it->value);
+			if (key == NULL || value == NULL) {
+				free(key);
+				free(value);
+				continue;
+			}
 			this->setting_items[n_items++] =
-				SPA_DICT_ITEM_INIT(strdup(it->key), strdup(it->value));
+				SPA_DICT_ITEM_INIT(key, value);
 		}
 	}
 	this->setting_dict = SPA_DICT_INIT(this->setting_items, n_items);
@@ -3340,6 +3369,7 @@ impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	const char *str;
+	uint32_t serial;
 	unsigned int i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
@@ -3355,12 +3385,13 @@ impl_init(const struct spa_handle_factory *factory,
 
 	spa_log_topic_init(this->log, &log_topic);
 
-	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_DEVICE)))
-		sscanf(str, "pointer:%p", &this->bt_dev);
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_DEVICE)) &&
+	    spa_atou32(str, &serial, 10))
+		this->bt_dev = spa_bt_device_find_by_serial(serial);
 
 	if (this->bt_dev == NULL) {
-		spa_log_error(this->log, "a device is needed");
-		return -EINVAL;
+		spa_log_debug(this->log, "could not find device by serial");
+		return -ESTALE;
 	}
 
 	if (info) {

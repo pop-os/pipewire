@@ -43,7 +43,8 @@ struct impl {
 
 	char *hsphfpd_service_id;
 
-	bool acquire_in_progress;
+	DBusPendingCall *pending_acquire;
+	DBusPendingCall *pending_get_managed_objects;
 
 	unsigned int filters_added:1;
 	unsigned int msbc_supported:1;
@@ -675,6 +676,8 @@ static DBusHandlerResult hsphfpd_new_audio_connection(DBusConnection *conn, DBus
 
 	transport_data = transport->user_data;
 	transport_data->transport_path = strdup(transport_path);
+	if (transport_data->transport_path == NULL)
+		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 	transport_data->rx_soft_volume = (rx_volume_control != HSPHFPD_VOLUME_CONTROL_REMOTE);
 	transport_data->tx_soft_volume = (tx_volume_control != HSPHFPD_VOLUME_CONTROL_REMOTE);
 	transport_data->rx_volume_gain = rx_volume_gain;
@@ -820,9 +823,8 @@ static void hsphfpd_audio_acquire_reply(DBusPendingCall *pending, void *user_dat
 	spa_auto(DBusError) error = DBUS_ERROR_INIT;
 	int ret = 0;
 
-	backend->acquire_in_progress = false;
-
-	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&pending);
+	spa_assert(backend->pending_acquire == pending);
+	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&backend->pending_acquire);
 	if (r == NULL)
 		return;
 
@@ -881,7 +883,7 @@ static int hsphfpd_audio_acquire(void *data, bool optional)
 	spa_log_debug(backend->log, "transport %p: Acquire %s",
 			transport, transport->path);
 
-	if (backend->acquire_in_progress)
+	if (backend->pending_acquire)
 		return -EINPROGRESS;
 
 	if (transport->media_codec->codec_id == HFP_AUDIO_CODEC_MSBC) {
@@ -897,10 +899,9 @@ static int hsphfpd_audio_acquire(void *data, bool optional)
 		return -ENOMEM;
 	dbus_message_append_args(m, DBUS_TYPE_STRING, &air_codec, DBUS_TYPE_STRING, &agent_codec, DBUS_TYPE_INVALID);
 
-	if (!send_with_reply(backend->conn, m, hsphfpd_audio_acquire_reply, transport))
+	backend->pending_acquire = send_with_reply(backend->conn, m, hsphfpd_audio_acquire_reply, transport);
+	if (!backend->pending_acquire)
 		return -EIO;
-
-	backend->acquire_in_progress = true;
 
 	return 0;
 }
@@ -974,11 +975,15 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct impl *backend,
 				{
 					const char *value;
 					dbus_message_iter_get_basic(&value_i, &value);
-					if (spa_streq(key, "RemoteAddress"))
+					if (spa_streq(key, "RemoteAddress")) {
 						endpoint->remote_address = strdup(value);
-					else if (spa_streq(key, "LocalAddress"))
+						if (endpoint->remote_address == NULL)
+							return DBUS_HANDLER_RESULT_NEED_MEMORY;
+					} else if (spa_streq(key, "LocalAddress")) {
 						endpoint->local_address = strdup(value);
-					else if (spa_streq(key, "Profile")) {
+						if (endpoint->local_address == NULL)
+							return DBUS_HANDLER_RESULT_NEED_MEMORY;
+					} else if (spa_streq(key, "Profile")) {
 						if (endpoint->profile)
 							spa_log_warn(backend->log, "Endpoint %s received a duplicate '%s' property, ignoring", endpoint->path, key);
 						else if (spa_streq(value, "headset"))
@@ -1076,6 +1081,8 @@ static DBusHandlerResult hsphfpd_parse_endpoint_properties(struct impl *backend,
 	}
 
 	char *t_path = strdup(endpoint->path);
+	if (t_path == NULL)
+		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 	t = spa_bt_transport_create(backend->monitor, t_path, sizeof(struct hsphfpd_transport_data));
 	if (t == NULL) {
 		spa_log_warn(backend->log, "can't create transport: %m");
@@ -1138,7 +1145,13 @@ static DBusHandlerResult hsphfpd_parse_interfaces(struct impl *backend, DBusMess
 			endpoint = endpoint_find(backend, path);
 			if (!endpoint) {
 				endpoint = calloc(1, sizeof(struct hsphfpd_endpoint));
+				if (endpoint == NULL)
+					return DBUS_HANDLER_RESULT_NEED_MEMORY;
 				endpoint->path = strdup(path);
+				if (endpoint->path == NULL) {
+					free(endpoint);
+					return DBUS_HANDLER_RESULT_NEED_MEMORY;
+				}
 				spa_list_append(&backend->endpoint_list, &endpoint->link);
 				spa_log_debug(backend->log, "Found endpoint %s", path);
 			}
@@ -1157,7 +1170,8 @@ static void hsphfpd_get_endpoints_reply(DBusPendingCall *pending, void *user_dat
 	struct impl *backend = user_data;
 	DBusMessageIter i, array_i;
 
-	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&pending);
+	spa_assert(backend->pending_get_managed_objects == pending);
+	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&backend->pending_get_managed_objects);
 	if (r == NULL)
 		return;
 
@@ -1224,6 +1238,8 @@ static int hsphfpd_register(struct impl *backend)
 	}
 
 	backend->hsphfpd_service_id = strdup(dbus_message_get_sender(r));
+	if (backend->hsphfpd_service_id == NULL)
+		return -ENOMEM;
 
 	spa_log_debug(backend->log, "Registered to hsphfpd");
 
@@ -1234,12 +1250,16 @@ static int hsphfpd_get_endpoints(struct impl *backend)
 {
 	spa_autoptr(DBusMessage) m = NULL;
 
+	if (backend->pending_get_managed_objects)
+		return -EBUSY;
+
 	m = dbus_message_new_method_call(HSPHFPD_SERVICE, "/",
 			DBUS_INTERFACE_OBJECTMANAGER, "GetManagedObjects");
 	if (m == NULL)
 		return -ENOMEM;
 
-	if (!send_with_reply(backend->conn, m, hsphfpd_get_endpoints_reply, backend))
+	backend->pending_get_managed_objects = send_with_reply(backend->conn, m, hsphfpd_get_endpoints_reply, backend);
+	if (!backend->pending_get_managed_objects)
 		return -EIO;
 
 	return 0;
@@ -1262,6 +1282,9 @@ static int backend_hsphfpd_unregistered(void *data)
 {
 	struct impl *backend = data;
 	struct hsphfpd_endpoint *endpoint;
+
+	cancel_and_unref(&backend->pending_get_managed_objects);
+	cancel_and_unref(&backend->pending_acquire);
 
 	if (backend->hsphfpd_service_id) {
 		free(backend->hsphfpd_service_id);
@@ -1414,6 +1437,9 @@ static int backend_hsphfpd_free(void *data)
 {
 	struct impl *backend = data;
 	struct hsphfpd_endpoint *endpoint;
+
+	cancel_and_unref(&backend->pending_get_managed_objects);
+	cancel_and_unref(&backend->pending_acquire);
 
 	if (backend->filters_added) {
 		dbus_connection_remove_filter(backend->conn, hsphfpd_filter_cb, backend);

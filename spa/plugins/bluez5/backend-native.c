@@ -106,6 +106,8 @@ struct impl {
 	struct spa_dbus *dbus;
 	DBusConnection *conn;
 
+	DBusPendingCall *pending_register_profile[4];
+
 	const struct media_codec * const * codecs;
 
 #define DEFAULT_ENABLED_PROFILES (SPA_BT_PROFILE_HFP_HF | SPA_BT_PROFILE_HFP_AG)
@@ -330,6 +332,11 @@ static void sco_offload_btcodec(struct impl *backend, int sock, bool msbc)
 
 static DBusHandlerResult profile_release(DBusConnection *conn, DBusMessage *m, void *userdata)
 {
+	/* BlueZ calls Release() without expecting a reply; an unrequested reply
+	 * is rejected by the system bus and logged by dbus-daemon. */
+	if (dbus_message_get_no_reply(m))
+		return DBUS_HANDLER_RESULT_HANDLED;
+
 	if (!reply_with_error(conn, m, BLUEZ_PROFILE_INTERFACE ".Error.NotImplemented", "Method not implemented"))
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
@@ -584,6 +591,8 @@ static ssize_t rfcomm_send_cmd(struct rfcomm *rfcomm, int next_state, DBusMessag
 	va_list args;
 
 	cmd = calloc(1, sizeof(struct rfcomm_cmd));
+	if (cmd == NULL)
+		return -ENOMEM;
 
 	va_start(args, format);
 	len = vsnprintf(cmd->cmd, RFCOMM_MESSAGE_MAX_LENGTH + 1, format, args);
@@ -2342,6 +2351,8 @@ static bool rfcomm_hfp_hf(struct rfcomm *rfcomm, char* token)
 		if (SPA_LIKELY (parsed)) {
 			struct updated_call *updated_call;
 			updated_call = calloc(1, sizeof(struct updated_call));
+			if (updated_call == NULL)
+				return false;
 			updated_call->id = idx;
 			spa_list_append(&rfcomm->updated_call_list, &updated_call->link);
 
@@ -3330,13 +3341,17 @@ static int codec_switch_start_timer(struct rfcomm *rfcomm, int timeout_msec)
 {
 	struct impl *backend = rfcomm->backend;
 	struct itimerspec ts;
+	int res;
 
 	spa_log_debug(backend->log, "rfcomm %p: start timer", rfcomm);
 	if (rfcomm->timer.data == NULL) {
+		res = spa_system_timerfd_create(backend->main_system,
+				CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+		if (res < 0)
+			return res;
+		rfcomm->timer.fd  = res;
 		rfcomm->timer.data = rfcomm;
 		rfcomm->timer.func = codec_switch_timer_event;
-		rfcomm->timer.fd = spa_system_timerfd_create(backend->main_system,
-				CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
 		rfcomm->timer.mask = SPA_IO_IN;
 		rfcomm->timer.rmask = 0;
 		spa_loop_add_source(backend->main_loop, &rfcomm->timer);
@@ -3501,6 +3516,10 @@ static DBusHandlerResult profile_new_connection(DBusConnection *conn, DBusMessag
 	rfcomm->profile = profile;
 	rfcomm->device = d;
 	rfcomm->path = strdup(path);
+	if (rfcomm->path == NULL) {
+		free(rfcomm);
+		return DBUS_HANDLER_RESULT_NEED_MEMORY;
+	}
 	rfcomm->source.func = rfcomm_event;
 	rfcomm->source.data = rfcomm;
 	rfcomm->source.fd = spa_steal_fd(fd);
@@ -3669,11 +3688,40 @@ static DBusHandlerResult profile_handler(DBusConnection *c, DBusMessage *m, void
 	return res;
 }
 
+static bool pending_register_profile_push(struct impl *backend, DBusPendingCall *pending)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(backend->pending_register_profile, p) {
+		if (!*p) {
+			*p = pending;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static DBusMessage *pending_register_profile_pop(struct impl *backend, DBusPendingCall *pending)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(backend->pending_register_profile, p) {
+		if (*p == pending)
+			return steal_reply_and_unref(p);
+	}
+
+	spa_assert_not_reached();
+	return NULL;
+}
+
+static void pending_register_profile_clear(struct impl *backend)
+{
+	SPA_FOR_EACH_ELEMENT_VAR(backend->pending_register_profile, p)
+		cancel_and_unref(p);
+}
+
 static void register_profile_reply(DBusPendingCall *pending, void *user_data)
 {
 	struct impl *backend = user_data;
 
-	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&pending);
+	spa_autoptr(DBusMessage) r = pending_register_profile_pop(backend, pending);
 	if (r == NULL)
 		return;
 
@@ -3690,6 +3738,8 @@ static void register_profile_reply(DBusPendingCall *pending, void *user_data)
 				dbus_message_get_error_name(r));
 		return;
 	}
+
+	spa_log_debug(backend->log, "RegisterProfile() complete");
 }
 
 static int register_profile(struct impl *backend, const char *profile, const char *uuid)
@@ -3698,6 +3748,7 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 	DBusMessageIter it[4];
 	dbus_bool_t autoconnect;
 	dbus_uint16_t version, chan, features;
+	DBusPendingCall *pending;
 	const char *str;
 
 	if (!(backend->enabled_profiles & spa_bt_profile_from_uuid(uuid)))
@@ -3801,8 +3852,12 @@ static int register_profile(struct impl *backend, const char *profile, const cha
 	}
 	dbus_message_iter_close_container(&it[0], &it[1]);
 
-	if (!send_with_reply(backend->conn, m, register_profile_reply, backend))
+	pending = send_with_reply(backend->conn, m, register_profile_reply, backend);
+	if (!pending || !pending_register_profile_push(backend, pending)) {
+		spa_log_error(backend->log, "Failed to start RegisterProfile() %s", profile);
+		cancel_and_unref(&pending);
 		return -EIO;
+	}
 
 	return 0;
 }
@@ -3867,6 +3922,8 @@ static void sco_close(struct impl *backend)
 static int backend_native_unregister_profiles(void *data)
 {
 	struct impl *backend = data;
+
+	pending_register_profile_clear(backend);
 
 	sco_close(backend);
 
@@ -4047,6 +4104,8 @@ static int backend_native_free(void *data)
 	struct impl *backend = data;
 
 	struct rfcomm *rfcomm;
+
+	pending_register_profile_clear(backend);
 
 	sco_close(backend);
 

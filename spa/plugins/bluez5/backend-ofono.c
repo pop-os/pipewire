@@ -44,6 +44,7 @@ struct impl {
 	struct spa_dbus *dbus;
 	struct spa_loop_utils *loop_utils;
 	DBusConnection *conn;
+	DBusPendingCall *pending_get_cards;
 
 	const struct spa_bt_quirks *quirks;
 
@@ -469,6 +470,11 @@ static DBusHandlerResult ofono_release(DBusConnection *conn, DBusMessage *m, voi
 
 	spa_log_warn(backend->log, "release");
 
+	/* oFono calls Release() without expecting a reply; an unrequested reply
+	 * is rejected by the system bus and logged by dbus-daemon. */
+	if (dbus_message_get_no_reply(m))
+		return DBUS_HANDLER_RESULT_HANDLED;
+
 	if (!reply_with_error(conn, m, OFONO_HF_AUDIO_AGENT_INTERFACE ".Error.NotImplemented", "Method not implemented"))
 		return DBUS_HANDLER_RESULT_NEED_MEMORY;
 
@@ -637,7 +643,8 @@ static void ofono_getcards_reply(DBusPendingCall *pending, void *user_data)
 	struct impl *backend = user_data;
 	DBusMessageIter i, array_i, struct_i, props_i;
 
-	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&pending);
+	spa_assert(backend->pending_get_cards == pending);
+	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&backend->pending_get_cards);
 	if (r == NULL)
 		return;
 
@@ -736,12 +743,16 @@ static int ofono_getcards(struct impl *backend)
 {
 	spa_autoptr(DBusMessage) m = NULL;
 
+	if (backend->pending_get_cards)
+		return -EBUSY;
+
 	m = dbus_message_new_method_call(OFONO_SERVICE, "/",
 			OFONO_HF_AUDIO_MANAGER_INTERFACE, "GetCards");
 	if (m == NULL)
 		return -ENOMEM;
 
-	if (!send_with_reply(backend->conn, m, ofono_getcards_reply, backend))
+	backend->pending_get_cards = send_with_reply(backend->conn, m, ofono_getcards_reply, backend);
+	if (!backend->pending_get_cards)
 		return -EIO;
 
 	return 0;
@@ -824,6 +835,8 @@ static int add_filters(struct impl *backend)
 static int backend_ofono_free(void *data)
 {
 	struct impl *backend = data;
+
+	cancel_and_unref(&backend->pending_get_cards);
 
 	if (backend->filters_added) {
 		dbus_connection_remove_filter(backend->conn, ofono_filter_cb, backend);

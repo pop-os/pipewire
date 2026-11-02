@@ -24,6 +24,7 @@
 #define OFONO_MANAGER_IFACE "org.ofono.Manager"
 #define OFONO_VOICE_CALL_MANAGER_IFACE "org.ofono.VoiceCallManager"
 #define OFONO_VOICE_CALL_IFACE "org.ofono.VoiceCall"
+#define OFONO_CALL_VOLUME_IFACE "org.ofono.CallVolume"
 
 #define DBUS_OBJECT_MANAGER_IFACE_INTROSPECT_XML				\
 	" <interface name='" DBUS_INTERFACE_OBJECT_MANAGER "'>"			\
@@ -75,7 +76,7 @@
 	"<node>"		 						\
 	" <interface name='" OFONO_MANAGER_IFACE "'>"				\
 	"  <method name='GetModems'>"		 				\
-	"   <arg name='objects' direction='out' type='a{oa{sv}}'/>"		\
+	"   <arg name='objects' direction='out' type='a(oa{sv})'/>"		\
 	"  </method>"								\
 	"  <signal name='ModemAdded'>"						\
 	"   <arg name='path' type='o'/>"					\
@@ -89,10 +90,7 @@
 	DBUS_INTROSPECTABLE_IFACE_INTROSPECT_XML				\
 	"</node>"
 
-#define PW_TELEPHONY_AG_COMMON_INTROSPECT_XML					\
-	"  <method name='Dial'>"						\
-	"   <arg name='number' direction='in' type='s'/>"			\
-	"  </method>"								\
+#define PW_TELEPHONY_AG_COMMON_INTROSPECT_XML_BASE				\
 	"  <method name='SwapCalls'>"						\
 	"  </method>"								\
 	"  <method name='ReleaseAndAnswer'>"					\
@@ -108,6 +106,12 @@
 	"  <method name='SendTones'>"						\
 	"   <arg name='tones' direction='in' type='s'/>"			\
 	"  </method>"
+
+#define PW_TELEPHONY_AG_COMMON_INTROSPECT_XML					\
+	"  <method name='Dial'>"						\
+	"   <arg name='number' direction='in' type='s'/>"			\
+	"  </method>"								\
+	PW_TELEPHONY_AG_COMMON_INTROSPECT_XML_BASE
 
 #define PW_TELEPHONY_AG_INTROSPECT_XML \
 	DBUS_INTROSPECT_1_0_XML_DOCTYPE_DECL_NODE				\
@@ -127,9 +131,13 @@
 	"  <method name='Activate'/>"						\
 	" </interface>"								\
 	" <interface name='" OFONO_VOICE_CALL_MANAGER_IFACE "'>"		\
-	PW_TELEPHONY_AG_COMMON_INTROSPECT_XML					\
+	"  <method name='Dial'>"						\
+	"   <arg name='number' direction='in' type='s'/>"			\
+	"   <arg name='hide_callerid' direction='in' type='s'/>"		\
+	"  </method>"								\
+	PW_TELEPHONY_AG_COMMON_INTROSPECT_XML_BASE				\
 	"  <method name='GetCalls'>"		 				\
-	"   <arg name='objects' direction='out' type='a{oa{sv}}'/>"		\
+	"   <arg name='objects' direction='out' type='a(oa{sv})'/>"		\
 	"  </method>"								\
 	"  <signal name='CallAdded'>"						\
 	"   <arg name='path' type='o'/>"					\
@@ -137,6 +145,19 @@
 	"  </signal>"								\
 	"  <signal name='CallRemoved'>"						\
 	"   <arg name='path' type='o'/>"					\
+	"  </signal>"								\
+	" </interface>"								\
+	" <interface name='" OFONO_CALL_VOLUME_IFACE "'>"			\
+	"  <method name='GetProperties'>"					\
+	"   <arg name='properties' type='a{sv}' direction='out'/>"		\
+	"  </method>"								\
+	"  <method name='SetProperty'>"					\
+	"   <arg name='property' type='s' direction='in'/>"			\
+	"   <arg name='value' type='v' direction='in'/>"			\
+	"  </method>"								\
+	"  <signal name='PropertyChanged'>"					\
+	"   <arg name='property' type='s'/>"					\
+	"   <arg name='value' type='v'/>"					\
 	"  </signal>"								\
 	" </interface>"								\
 	DBUS_OBJECT_MANAGER_IFACE_INTROSPECT_XML				\
@@ -350,14 +371,33 @@ static DBusMessage *manager_get_managed_objects(struct impl *impl, DBusMessage *
 
 	dbus_message_iter_init_append(r, &iter);
 	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
-		ofono_compat ? "{oa{sv}}" : "{oa{sa{sv}}}", &array1);
+		ofono_compat ? "(oa{sv})" : "{oa{sa{sv}}}", &array1);
 
 	spa_list_for_each (agimpl, &impl->ag_list, link) {
 		if (agimpl->path) {
-			dbus_message_iter_open_container(&array1, DBUS_TYPE_DICT_ENTRY, NULL, &entry1);
+			dbus_message_iter_open_container(&array1,
+				ofono_compat ? DBUS_TYPE_STRUCT : DBUS_TYPE_DICT_ENTRY,
+				NULL, &entry1);
 			if (ofono_compat) {
+				/* ofono GetModems() returns properties dict with Interfaces field,
+				 * so that scripts can check if VoiceCallManager is available. */
+				const char *iface = OFONO_VOICE_CALL_MANAGER_IFACE;
+				DBusMessageIter prop_entry, prop_val, iface_array;
+				const char *interfaces_key = "Interfaces";
+
 				dbus_message_iter_append_basic(&entry1, DBUS_TYPE_OBJECT_PATH, &agimpl->path);
 				dbus_message_iter_open_container(&entry1, DBUS_TYPE_ARRAY, "{sv}", &props_dict);
+
+				/* Interfaces: ["org.ofono.VoiceCallManager"] */
+				dbus_message_iter_open_container(&props_dict, DBUS_TYPE_DICT_ENTRY, NULL, &prop_entry);
+				dbus_message_iter_append_basic(&prop_entry, DBUS_TYPE_STRING, &interfaces_key);
+				dbus_message_iter_open_container(&prop_entry, DBUS_TYPE_VARIANT, "as", &prop_val);
+				dbus_message_iter_open_container(&prop_val, DBUS_TYPE_ARRAY, "s", &iface_array);
+				dbus_message_iter_append_basic(&iface_array, DBUS_TYPE_STRING, &iface);
+				dbus_message_iter_close_container(&prop_val, &iface_array);
+				dbus_message_iter_close_container(&prop_entry, &prop_val);
+				dbus_message_iter_close_container(&props_dict, &prop_entry);
+
 				dbus_message_iter_close_container(&entry1, &props_dict);
 			} else {
 				dbus_iter_append_ag_interfaces(&entry1, &agimpl->this);
@@ -715,10 +755,12 @@ static DBusMessage *ag_get_managed_objects(struct agimpl *agimpl, DBusMessage *m
 
 	dbus_message_iter_init_append(r, &iter);
 	dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY,
-		ofono_compat ? "{oa{sv}}" : "{oa{sa{sv}}}", &array1);
+		ofono_compat ? "(oa{sv})" : "{oa{sa{sv}}}", &array1);
 
 	spa_list_for_each (callimpl, &agimpl->this.call_list, this.link) {
-		dbus_message_iter_open_container(&array1, DBUS_TYPE_DICT_ENTRY, NULL, &entry1);
+		dbus_message_iter_open_container(&array1,
+			ofono_compat ? DBUS_TYPE_STRUCT : DBUS_TYPE_DICT_ENTRY,
+			NULL, &entry1);
 		dbus_message_iter_append_basic(&entry1, DBUS_TYPE_OBJECT_PATH, &callimpl->path);
 		if (ofono_compat) {
 			dbus_iter_append_call_properties(&entry1, &callimpl->this, true);
@@ -908,6 +950,90 @@ static DBusMessage *ag_properties_set(struct agimpl *agimpl, DBusMessage *m)
 			"Property not writable");
 }
 
+/* ofono compat: org.ofono.CallVolume uses a 0-100 percentage scale for
+ * SpeakerVolume/MicrophoneVolume, while the native AudioGateway1 interface
+ * uses a 0-15 scale. Convert between the two. */
+static inline uint8_t native_volume_to_ofono_pct(int native_volume)
+{
+	return (uint8_t)((native_volume * 100 + 7) / 15);
+}
+
+static inline int ofono_pct_to_native_volume(uint8_t pct)
+{
+	if (pct > 100)
+		pct = 100;
+	return (pct * 15 + 50) / 100;
+}
+
+static DBusMessage *ag_call_volume_get_properties(struct agimpl *agimpl, DBusMessage *m)
+{
+	DBusMessage *r;
+	DBusMessageIter i, dict, entry, variant;
+	const char *speaker_key = "SpeakerVolume";
+	const char *mic_key = "MicrophoneVolume";
+	uint8_t speaker_pct = native_volume_to_ofono_pct(agimpl->this.volume[SPA_BT_VOLUME_ID_RX]);
+	uint8_t mic_pct = native_volume_to_ofono_pct(agimpl->this.volume[SPA_BT_VOLUME_ID_TX]);
+
+	if ((r = dbus_message_new_method_return(m)) == NULL)
+		return NULL;
+
+	dbus_message_iter_init_append(r, &i);
+	dbus_message_iter_open_container(&i, DBUS_TYPE_ARRAY, "{sv}", &dict);
+
+	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &speaker_key);
+	dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "y", &variant);
+	dbus_message_iter_append_basic(&variant, DBUS_TYPE_BYTE, &speaker_pct);
+	dbus_message_iter_close_container(&entry, &variant);
+	dbus_message_iter_close_container(&dict, &entry);
+
+	dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+	dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &mic_key);
+	dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "y", &variant);
+	dbus_message_iter_append_basic(&variant, DBUS_TYPE_BYTE, &mic_pct);
+	dbus_message_iter_close_container(&entry, &variant);
+	dbus_message_iter_close_container(&dict, &entry);
+
+	dbus_message_iter_close_container(&i, &dict);
+
+	return r;
+}
+
+static DBusMessage *ag_call_volume_set_property(struct agimpl *agimpl, DBusMessage *m)
+{
+	const char *name;
+	DBusMessageIter i, variant;
+	uint8_t pct;
+
+	if (!dbus_message_get_args(m, NULL,
+				DBUS_TYPE_STRING, &name,
+				DBUS_TYPE_INVALID))
+		return NULL;
+
+	dbus_message_iter_init(m, &i);
+	dbus_message_iter_next(&i); /* skip name */
+	dbus_message_iter_recurse(&i, &variant); /* value */
+	if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_BYTE)
+		return dbus_message_new_error(m, DBUS_ERROR_INVALID_ARGS,
+				"Expected byte value");
+	dbus_message_iter_get_basic(&variant, &pct);
+
+	if (spa_streq(name, "SpeakerVolume")) {
+		agimpl->this.volume[SPA_BT_VOLUME_ID_RX] = ofono_pct_to_native_volume(pct);
+		return ag_emit_set_speaker_volume(agimpl, agimpl->this.volume[SPA_BT_VOLUME_ID_RX], m) ? NULL :
+			dbus_message_new_error(m, telephony_error_to_dbus (BT_TELEPHONY_ERROR_FAILED),
+				telephony_error_to_description (BT_TELEPHONY_ERROR_FAILED, 0));
+	} else if (spa_streq(name, "MicrophoneVolume")) {
+		agimpl->this.volume[SPA_BT_VOLUME_ID_TX] = ofono_pct_to_native_volume(pct);
+		return ag_emit_set_microphone_volume(agimpl, agimpl->this.volume[SPA_BT_VOLUME_ID_TX], m) ? NULL :
+			dbus_message_new_error(m, telephony_error_to_dbus (BT_TELEPHONY_ERROR_FAILED),
+				telephony_error_to_description (BT_TELEPHONY_ERROR_FAILED, 0));
+	}
+
+	return dbus_message_new_error(m, DBUS_ERROR_PROPERTY_READ_ONLY,
+			"Property not writable");
+}
+
 static bool validate_phone_number(const char *number)
 {
 	const char *c;
@@ -942,12 +1068,25 @@ static bool validate_tones(const char *tones)
 static DBusMessage *ag_dial(struct agimpl *agimpl, DBusMessage *m)
 {
 	const char *number = NULL;
+	const char *hide_callerid = NULL;
 	enum spa_bt_telephony_error err = BT_TELEPHONY_ERROR_FAILED;
 
-	if (!dbus_message_get_args(m, NULL,
-				DBUS_TYPE_STRING, &number,
-				DBUS_TYPE_INVALID))
-		return NULL;
+	if (spa_streq(dbus_message_get_signature(m), "ss")) {
+		/* ofono compat: Dial(number, hide_callerid)
+		 * hide_callerid ("default"/"enabled"/"disabled") maps to AT+CLIR,
+		 * but is currently ignored — AT+CLIR support is a future improvement. */
+		if (!dbus_message_get_args(m, NULL,
+					DBUS_TYPE_STRING, &number,
+					DBUS_TYPE_STRING, &hide_callerid,
+					DBUS_TYPE_INVALID))
+			return NULL;
+	} else {
+		/* native: Dial(number) */
+		if (!dbus_message_get_args(m, NULL,
+					DBUS_TYPE_STRING, &number,
+					DBUS_TYPE_INVALID))
+			return NULL;
+	}
 
 	if (!validate_phone_number(number)) {
 		err = BT_TELEPHONY_ERROR_INVALID_FORMAT;
@@ -1084,6 +1223,10 @@ static DBusHandlerResult ag_handler(DBusConnection *c, DBusMessage *m, void *use
 		r = ag_send_tones(agimpl, m);
 	} else if (dbus_message_is_method_call(m, OFONO_VOICE_CALL_MANAGER_IFACE, "GetCalls")) {
 		r = ag_get_managed_objects(agimpl, m, true);
+	} else if (dbus_message_is_method_call(m, OFONO_CALL_VOLUME_IFACE, "GetProperties")) {
+		r = ag_call_volume_get_properties(agimpl, m);
+	} else if (dbus_message_is_method_call(m, OFONO_CALL_VOLUME_IFACE, "SetProperty")) {
+		r = ag_call_volume_set_property(agimpl, m);
 	} else if (dbus_message_is_method_call(m, PW_TELEPHONY_AG_TRANSPORT_IFACE, "Activate")) {
 		r = ag_transport_activate(agimpl, m);
 	} else {
@@ -1512,7 +1655,7 @@ static DBusMessage *call_properties_get(struct callimpl *callimpl, DBusMessage *
 				DBUS_TYPE_INVALID))
 		return NULL;
 
-	if (spa_streq(iface, PW_TELEPHONY_CALL_IFACE))
+	if (!spa_streq(iface, PW_TELEPHONY_CALL_IFACE))
 		return dbus_message_new_error(m, DBUS_ERROR_INVALID_ARGS,
 				"No such interface");
 

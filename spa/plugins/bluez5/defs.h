@@ -350,6 +350,12 @@ struct spa_bt_monitor;
 struct spa_bt_backend;
 struct spa_bt_player;
 
+enum bluez_app_id {
+	BLUEZ_APP_A2DP,
+	BLUEZ_APP_BAP,
+	BLUEZ_APP_LAST
+};
+
 struct spa_bt_adapter {
 	struct spa_list link;
 	struct spa_bt_monitor *monitor;
@@ -366,11 +372,14 @@ struct spa_bt_adapter {
 	uint32_t bluetooth_class;
 	uint32_t profiles;
 	int powered;
+
+	struct bluez_app {
+		DBusPendingCall *register_call;
+		bool registered;
+	} apps[BLUEZ_APP_LAST];
+
 	unsigned int has_msbc:1;
 	unsigned int msbc_probed:1;
-	unsigned int legacy_endpoints_registered:1;
-	unsigned int a2dp_application_registered:1;
-	unsigned int bap_application_registered:1;
 	unsigned int player_registered:1;
 	unsigned int has_battery_provider:1;
 	unsigned int battery_provider_unavailable:1;
@@ -528,6 +537,7 @@ struct spa_bt_device {
 	struct spa_bt_monitor *monitor;
 	struct spa_bt_adapter *adapter;
 	uint32_t id;
+	uint32_t serial;
 	char *path;
 	char *alias;
 	char *address;
@@ -579,6 +589,7 @@ struct spa_bt_device {
 	bool disable_dummy_call;
 };
 
+struct spa_bt_device *spa_bt_device_find_by_serial(uint32_t serial);
 struct spa_bt_device *spa_bt_device_find(struct spa_bt_monitor *monitor, const char *path);
 struct spa_bt_device *spa_bt_device_find_by_address(struct spa_bt_monitor *monitor, const char *remote_address, const char *local_address);
 int spa_bt_device_add_profile(struct spa_bt_device *device, enum spa_bt_profile profile);
@@ -635,7 +646,7 @@ enum spa_bt_transport_state {
 };
 
 struct spa_bt_transport_events {
-#define SPA_VERSION_BT_TRANSPORT_EVENTS	0
+#define SPA_VERSION_BT_TRANSPORT_EVENTS	1
 	uint32_t version;
 
 	void (*destroy) (void *data);
@@ -643,6 +654,8 @@ struct spa_bt_transport_events {
 	void (*state_changed) (void *data, enum spa_bt_transport_state old,
 			enum spa_bt_transport_state state);
 	void (*volume_changed) (void *data);
+	/** The node using the transport will be removed */
+	void (*remove_node) (void *data);
 };
 
 struct spa_bt_transport_implementation {
@@ -668,6 +681,7 @@ struct spa_bt_transport_volume {
 
 struct spa_bt_transport {
 	struct spa_list link;
+	uint32_t serial;
 	struct spa_bt_monitor *monitor;
 	struct spa_bt_backend *backend;
 	char *path;
@@ -725,6 +739,7 @@ struct spa_bt_transport {
 struct spa_bt_transport *spa_bt_transport_create(struct spa_bt_monitor *monitor, char *path, size_t extra);
 void spa_bt_transport_free(struct spa_bt_transport *transport);
 void spa_bt_transport_set_state(struct spa_bt_transport *transport, enum spa_bt_transport_state state);
+struct spa_bt_transport *spa_bt_transport_find_by_serial(uint32_t serial);
 struct spa_bt_transport *spa_bt_transport_find(struct spa_bt_monitor *monitor, const char *path);
 struct spa_bt_transport *spa_bt_transport_find_full(struct spa_bt_monitor *monitor,
                                                     bool (*callback) (struct spa_bt_transport *t, const void *data),
@@ -744,6 +759,7 @@ int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *
 #define spa_bt_transport_emit_delay_changed(t)		spa_bt_transport_emit(t, delay_changed, 0)
 #define spa_bt_transport_emit_state_changed(t,...)	spa_bt_transport_emit(t, state_changed, 0, __VA_ARGS__)
 #define spa_bt_transport_emit_volume_changed(t)		spa_bt_transport_emit(t, volume_changed, 0)
+#define spa_bt_transport_emit_remove_node(t)		spa_bt_transport_emit(t, remove_node, 1)
 
 #define spa_bt_transport_add_listener(t,listener,events,data) \
         spa_hook_list_append(&(t)->listener_list, listener, events, data)

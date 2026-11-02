@@ -2441,6 +2441,9 @@ static int do_transport_destroy(struct spa_loop *loop,
 				void *user_data)
 {
 	struct impl *this = user_data;
+
+	if (this->transport)
+		spa_hook_remove(&this->transport_listener);
 	this->transport = NULL;
 	return 0;
 }
@@ -2449,6 +2452,15 @@ static void transport_destroy(void *data)
 {
 	struct impl *this = data;
 	spa_log_debug(this->log, "transport %p destroy", this->transport);
+	spa_loop_locked(this->data_loop, do_transport_destroy, 0, NULL, 0, this);
+}
+
+static void transport_remove_node(void *data)
+{
+	struct impl *this = data;
+
+	spa_log_debug(this->log, "transport %p remove node", this->transport);
+	do_stop(this);
 	spa_loop_locked(this->data_loop, do_transport_destroy, 0, NULL, 0, this);
 }
 
@@ -2499,6 +2511,7 @@ static const struct spa_bt_transport_events transport_events = {
 	.delay_changed = transport_delay_changed,
 	.state_changed = transport_state_changed,
 	.destroy = transport_destroy,
+	.remove_node = transport_remove_node,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
@@ -2553,6 +2566,8 @@ impl_init(const struct spa_handle_factory *factory,
 	struct impl *this;
 	struct port *port;
 	const char *str;
+	uint32_t serial;
+	int res;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -2634,12 +2649,13 @@ impl_init(const struct spa_handle_factory *factory,
 	if (info && (str = spa_dict_lookup(info, "bluez5.debug.iso-mono")) != NULL)
 		this->iso_debug_mono = spa_atob(str);
 
-	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)))
-		sscanf(str, "pointer:%p", &this->transport);
+	if (info && (str = spa_dict_lookup(info, SPA_KEY_API_BLUEZ5_TRANSPORT)) &&
+	    spa_atou32(str, &serial, 10))
+		this->transport = spa_bt_transport_find_by_serial(serial);
 
 	if (this->transport == NULL) {
-		spa_log_error(this->log, "a transport is needed");
-		return -EINVAL;
+		spa_log_debug(this->log, "could not find transport by serial");
+		return -ESTALE;
 	}
 	if (this->transport->media_codec == NULL) {
 		spa_log_error(this->log, "a transport codec is needed");
@@ -2675,22 +2691,41 @@ impl_init(const struct spa_handle_factory *factory,
 	spa_bt_transport_add_listener(this->transport,
 			&this->transport_listener, &transport_events, this);
 
-	this->timerfd = spa_system_timerfd_create(this->data_system,
-			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	if ((res = spa_system_timerfd_create(this->data_system,
+			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
+		goto error_remove_listener;
+	this->timerfd = res;
 
-	this->flush_timerfd = spa_system_timerfd_create(this->data_system,
-			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	if ((res = spa_system_timerfd_create(this->data_system,
+			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
+		goto error_close_timerfd;
+	this->flush_timerfd = res;
 
 	if (this->codec->kind == MEDIA_CODEC_ASHA) {
 		this->asha = calloc(1, sizeof(struct spa_bt_asha));
-		if (this->asha == NULL)
-			return -ENOMEM;
-
-		this->asha->timerfd = spa_system_timerfd_create(this->data_system,
-				CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+		if (this->asha == NULL) {
+			res = -errno;
+			goto error_close_flush_timerfd;
+		}
+		if ((res = spa_system_timerfd_create(this->data_system,
+				CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK)) < 0)
+			goto error_free_asha;
+		this->asha->timerfd = res;
 	}
-
 	return 0;
+
+error_free_asha:
+	free(this->asha);
+	this->asha = NULL;
+error_close_flush_timerfd:
+	spa_system_close(this->data_system, this->flush_timerfd);
+error_close_timerfd:
+	spa_system_close(this->data_system, this->timerfd);
+error_remove_listener:
+	spa_hook_remove(&this->transport_listener);
+	if (this->codec_props && this->codec->clear_props)
+		this->codec->clear_props(this->codec_props);
+	return res;
 }
 
 static const struct spa_interface_info impl_interfaces[] = {
