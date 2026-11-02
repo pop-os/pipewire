@@ -710,9 +710,11 @@ static struct mix *create_mix(struct client *c, struct port *port,
 	spa_list_remove(&mix->link);
 	spa_list_append(&c->mix, &mix->link);
 
-	spa_list_append(&port->mix, &mix->port_link);
-
 	init_mix(mix, mix_id, port, peer_id);
+
+	pw_loop_lock(c->loop->loop);
+	spa_list_append(&port->mix, &mix->port_link);
+	pw_loop_unlock(c->loop->loop);
 
 	return mix;
 }
@@ -796,7 +798,9 @@ static struct port * alloc_port(struct client *c, enum spa_direction direction)
 
 	p->direction = direction;
 	p->emptyptr = SPA_PTR_ALIGN(p->empty, c->max_align, float);
+	pw_loop_lock(c->loop->loop);
 	p->port_id = pw_map_insert_new(&c->ports[direction], p);
+	pw_loop_unlock(c->loop->loop);
 	c->n_ports++;
 
 	pthread_mutex_lock(&c->context.lock);
@@ -1761,7 +1765,7 @@ static inline void *get_buffer_output(struct port *p, uint32_t frames, uint32_t 
 		SPA_ATOMIC_STORE(io->status, SPA_STATUS_HAVE_DATA);
 		SPA_ATOMIC_STORE(mix->io_busy, 0);
 	} else {
-		while (SPA_ATOMIC_LOAD(io->status) != SPA_STATUS_HAVE_DATA)
+		while (SPA_ATOMIC_LOAD(mix->io_busy) != 0)
 			;
 		if (SPA_UNLIKELY(io->buffer_id >= mix->n_buffers))
 			return NULL;
@@ -4643,6 +4647,16 @@ int jack_client_close (jack_client_t *client)
 		pw_thread_loop_stop(c->context.notify);
 	}
 
+	pw_array_for_each(item, &c->ports[SPA_DIRECTION_OUTPUT].items) {
+                if (pw_map_item_is_free(item))
+			continue;
+		free_port(c, item->data, false);
+	}
+	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
+                if (pw_map_item_is_free(item))
+			continue;
+		free_port(c, item->data, false);
+	}
 	if (c->registry) {
 		spa_hook_remove(&c->registry_listener);
 		pw_proxy_destroy((struct pw_proxy*)c->registry);
@@ -4675,16 +4689,6 @@ int jack_client_close (jack_client_t *client)
 
 	pw_log_debug("%p: free", client);
 
-	pw_array_for_each(item, &c->ports[SPA_DIRECTION_OUTPUT].items) {
-                if (pw_map_item_is_free(item))
-			continue;
-		free_port(c, item->data, false);
-	}
-	pw_array_for_each(item, &c->ports[SPA_DIRECTION_INPUT].items) {
-                if (pw_map_item_is_free(item))
-			continue;
-		free_port(c, item->data, false);
-	}
 	pthread_mutex_lock(&globals.lock);
 	spa_list_consume(o, &c->context.objects, link) {
 		bool to_free = o->to_free;

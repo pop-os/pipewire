@@ -1,5 +1,5 @@
 project('pipewire', ['c' ],
-  version : '1.6.9',
+  version : '1.6.11',
   license : [ 'MIT', 'LGPL-2.1-or-later', 'GPL-2.0-only' ],
   meson_version : '>= 0.61.1',
   default_options : [ 'warning_level=3',
@@ -412,7 +412,7 @@ gst_deps_def = {
   'gio-unix-2.0': {},
   'gstreamer-1.0': {'version': '>= 1.10.0'},
   'gstreamer-base-1.0': {},
-  'gstreamer-video-1.0': {},
+  'gstreamer-video-1.0': {'version': '>= 1.22.0'},
   'gstreamer-audio-1.0': {},
   'gstreamer-allocators-1.0': {},
 }

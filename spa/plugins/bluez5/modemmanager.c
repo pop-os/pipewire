@@ -46,6 +46,8 @@ struct dbus_cmd_data {
 	void *user_data;
 };
 
+static void call_free(struct call *call);
+
 static int mm_state_to_clcc(struct impl *this, MMCallState state)
 {
 	switch (state) {
@@ -99,6 +101,8 @@ static void mm_get_call_properties_reply(DBusPendingCall *pending, void *user_da
 	DBusMessageIter arg_i, element_i;
 	MMCallDirection direction;
 	MMCallState state;
+	bool terminated = false;
+	bool state_changed = false;
 
 	spa_assert(call->pending == pending);
 	spa_autoptr(DBusMessage) r = steal_reply_and_unref(&call->pending);
@@ -141,24 +145,37 @@ static void mm_get_call_properties_reply(DBusPendingCall *pending, void *user_da
 
 			dbus_message_iter_get_basic(&value_i, &number);
 			spa_log_debug(this->log, "Call number: %s", number);
-			if (call->number)
-				free(call->number);
+			free(call->number);
 			call->number = strdup(number);
+			if (call->number == NULL)
+				return;
 		} else if (spa_streq(key, MM_CALL_PROPERTY_STATE)) {
 			int clcc_state;
 
 			dbus_message_iter_get_basic(&value_i, &state);
 			spa_log_debug(this->log, "Call state: %u", state);
-			clcc_state = mm_state_to_clcc(this, state);
-			if (clcc_state < 0) {
-				spa_log_debug(this->log, "Unsupported modem state: %s, state=%d", call->path, call->state);
+			if (state == MM_CALL_STATE_TERMINATED) {
+				terminated = true;
 			} else {
-				call->state = clcc_state;
-				mm_call_state_changed(this);
+				clcc_state = mm_state_to_clcc(this, state);
+				if (clcc_state < 0) {
+					spa_log_debug(this->log, "Unsupported modem state: %s, state=%d", call->path, call->state);
+				} else {
+					call->state = clcc_state;
+					state_changed = true;
+				}
 			}
 		}
 
 		dbus_message_iter_next(&element_i);
+	}
+
+	if (terminated) {
+		spa_log_debug(this->log, "Call %s is already terminated, dropping it", call->path);
+		call_free(call);
+		mm_call_state_changed(this);
+	} else if (state_changed) {
+		mm_call_state_changed(this);
 	}
 }
 
@@ -363,6 +380,8 @@ static DBusHandlerResult mm_parse_interfaces(struct impl *this, DBusMessageIter 
 					}
 				}
 				this->modem.path = strdup(path);
+				if (this->modem.path == NULL)
+					goto next;
 			} else if (!spa_streq(this->modem.path, path)) {
 				spa_log_debug(this->log, "A modem is already registered");
 				goto next;
@@ -618,6 +637,10 @@ static DBusHandlerResult mm_filter_cb(DBusConnection *bus, DBusMessage *m, void 
 			return DBUS_HANDLER_RESULT_NEED_MEMORY;
 		call_object->this = this;
 		call_object->path = strdup(path);
+		if (call_object->path == NULL) {
+			free(call_object);
+			return DBUS_HANDLER_RESULT_NEED_MEMORY;
+		}
 		spa_list_append(&this->call_list, &call_object->link);
 
 		m2 = dbus_message_new_method_call(MM_DBUS_SERVICE, path, DBUS_INTERFACE_PROPERTIES, "GetAll");
@@ -683,6 +706,13 @@ static DBusHandlerResult mm_filter_cb(DBusConnection *bus, DBusMessage *m, void 
 
 		if (call == NULL) {
 			spa_log_warn(this->log, "No call reference for %s", path);
+			goto finish;
+		}
+
+		if (new == MM_CALL_STATE_TERMINATED) {
+			spa_log_debug(this->log, "Call %s terminated, dropping it", call->path);
+			call_free(call);
+			mm_call_state_changed(this);
 			goto finish;
 		}
 
@@ -1113,8 +1143,11 @@ void *mm_register(struct spa_log *log, void *dbus_connection, const struct spa_d
 	this->conn = dbus_connection;
 	this->ops = ops;
 	this->user_data = user_data;
-	if (modem_device_str && !spa_streq(modem_device_str, "any"))
+	if (modem_device_str && !spa_streq(modem_device_str, "any")) {
 		this->allowed_modem_device = strdup(modem_device_str);
+		if (this->allowed_modem_device == NULL)
+			return NULL;
+	}
 	spa_list_init(&this->call_list);
 	this->pts = pts;
 

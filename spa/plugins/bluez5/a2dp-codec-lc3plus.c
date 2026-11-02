@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <limits.h>
 
 #include <spa/param/audio/format.h>
 #include <spa/param/audio/format-utils.h>
@@ -413,9 +414,14 @@ static void *codec_init(const struct media_codec *codec, uint32_t flags,
 	}
 
 	this->e.samples = lc3plus_enc_get_input_samples(this->enc);
-	this->e.codesize = this->e.samples * this->channels * sizeof(int32_t);
 
 	spa_assert(this->e.samples <= LC3PLUS_MAX_SAMPLES);
+
+	if (this->e.samples > INT_MAX / (int)sizeof(int32_t) / SPA_MAX(this->channels, 1)) {
+		res = -EINVAL;
+		goto error;
+	}
+	this->e.codesize = this->e.samples * this->channels * sizeof(int32_t);
 
 	this->e.bitrate = this->bitrate;
 	this->e.next_bitrate = this->bitrate;
