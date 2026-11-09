@@ -1,5 +1,6 @@
 pipewire (1.6.11-1) UNRELEASED; urgency=medium
 
+  * New upstream release
   * Move some modules into optional packages (Closes: #1130264)
     - libpipewire-0.3-modules-extra:
       * libpipewire-module-ffado-driver
@@ -9,7 +10,6 @@ pipewire (1.6.11-1) UNRELEASED; urgency=medium
       * libspa-filter-graph-plugin-lv2
       * libspa-filter-graph-plugin-sofa
   * Disable onnxruntime on i386
-  * New upstream release
 
  -- Dylan Aïssi <daissi@debian.org>  Mon, 02 Nov 2026 18:05:12 +0100
 

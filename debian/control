@@ -140,8 +140,8 @@ Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
-Breaks: libpipewire-0.3-modules (<< 1.6.9-3~)
-Replaces: libpipewire-0.3-modules (<< 1.6.9-3~)
+Breaks: libpipewire-0.3-modules (<< 1.6.11-1~)
+Replaces: libpipewire-0.3-modules (<< 1.6.11-1~)
 Description: libraries for the PipeWire multimedia server - extra modules
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
@@ -216,8 +216,8 @@ Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
-Breaks: libspa-0.2-modules (<< 1.6.9-3~)
-Replaces: libspa-0.2-modules (<< 1.6.9-3~)
+Breaks: libspa-0.2-modules (<< 1.6.11-1~)
+Replaces: libspa-0.2-modules (<< 1.6.11-1~)
 Description: libraries for the PipeWire multimedia server Simple Plugin API - extra modules
  PipeWire is a server and user space API to deal with multimedia
  pipelines. This includes:
