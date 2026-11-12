@@ -23,6 +23,17 @@ Copyright: 2009 Lennart Poettering
            2021 Sanchayan Maity
            2021 Pauli Virtanen
            2021 Florian Hülsmann
+           2022 Asymptotic Inc
+           2022 Canonical Ltd
+           2023-2025 Carlos Rafael Giani
+           2022-2024 columbarius
+           2024 Dmitry Sharshakov
+           2023 The wlroots contributors
+           2023 ISCAS
+           2025-2026 Kebag-Logic
+           2025-2026 Alexandre/Alex Malki <alexandre.malki@kebag-logic.com>
+           2025 Simon Gapp <simon.gapp@kebag-logic.com>
+           2016 Nicolas Seriot
 License: Expat
 
 Files: include/valgrind/*
@@ -74,6 +85,21 @@ Files: spa/plugins/alsa/acp/acp.c
 Copyright: 2018-2020 Wim Taymans
 License: Expat
 
+Files: spa/plugins/audioconvert/biquad.c
+       spa/plugins/audioconvert/biquad.h
+       spa/plugins/audioconvert/crossover.c
+       spa/plugins/audioconvert/crossover.h
+       spa/plugins/filter-graph/biquad.h
+Copyright: 2013 The Chromium OS Authors
+           2010 Google Inc
+License: BSD-2-Clause
+
+Files: spa/plugins/audioconvert/dbesi0.c
+Copyright: 1996 Takuya Ooura
+License: Ooura
+ You may use, copy, modify this code for any purpose and
+ without fee.
+
 Files: spa/plugins/bluez5/*
 Copyright: 2004-2010 Marcel Holtmann
            2006-2010 Nokia Corporation
@@ -91,6 +117,21 @@ Copyright: 2006-2010 Nokia Corporation
            2004-2010 Marcel Holtmann <marcel@holtmann.org>
            2018 Pali Rohár <pali.rohar@gmail.com>
 License: LGPL-2.1+
+
+Files: spa/plugins/bluez5/g722/*
+Copyright: 2005 Steve Underwood <steveu@coppice.org>
+           1993 CMU
+           Computer Science, Speech Group
+           Chengxiang Lu and Alex Hauptmann
+License: public-domain
+ Despite my general liking of the GPL, I place my own contributions
+ to this code in the public domain for the benefit of all mankind -
+ even the slimy ones who might try to proprietize my work and use it
+ to my detriment.
+ .
+ Based on a single channel G.722 codec which is:
+ Computer Science, Speech Group
+ Chengxiang Lu and Alex Hauptmann
 
 Files: spa/plugins/filter-graph/ladspa.h
 Copyright: 2000-2002 Richard W.E. Furse, Paul Barton-Davis
@@ -215,3 +256,28 @@ License: GPL-2
  .
  On Debian systems you can find the full text of the GNU General Public
  License version 2 at /usr/share/common-licenses/GPL-2.
+
+License: BSD-2-clause
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are
+ met:
+ .
+    Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+ .
+    Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+ .
+ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
