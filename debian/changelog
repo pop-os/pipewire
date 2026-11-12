@@ -1,3 +1,9 @@
+pipewire (1.6.11-2) unstable; urgency=medium
+
+  * Update debian/copyright
+
+ -- Dylan Aïssi <daissi@debian.org>  Thu, 12 Nov 2026 23:15:49 +0100
+
 pipewire (1.6.11-1) unstable; urgency=medium
 
   * New upstream release
