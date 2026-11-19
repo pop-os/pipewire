@@ -194,7 +194,7 @@ Architecture: amd64 arm64 armhf i386
 Multi-Arch: same
 Depends: ${misc:Depends},
          ${shlibs:Depends}
-Suggests: libspa-0.2-modules-extra
+Recommends: libspa-0.2-libcamera, libspa-0.2-modules-extra
 Breaks: pipewire (<< 0.3.5)
 Replaces: pipewire (<< 0.3.5)
 Description: libraries for the PipeWire multimedia server Simple Plugin API - modules
